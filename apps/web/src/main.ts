@@ -19,7 +19,7 @@ import './styles/calendar-source-palette.css'
 // approval/workflow surface set so the no-static-style= gate has a home.
 import './styles/form-layout-utilities.css'
 import App from './App.vue'
-import { probeDeleteTransport } from './utils/delete-fallback'
+import { probeDeleteTransport, probeWriteTransport } from './utils/delete-fallback'
 import { installPermissionSnapshotRefresh, useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
@@ -34,13 +34,21 @@ import { apiFetch } from './utils/api'
  * Once per page session, right after the first authenticated session bootstrap succeeds (login
  * lands here through the post-login redirect; a reload lands here on its first guarded route):
  * learn whether HTTP DELETE reaches the server, and — only if it does not — whether the POST+override
- * tunnel is actually honoured here (utils/delete-fallback.ts exercises BOTH legs). Fire-and-forget: the
- * probe never throws and navigation must not wait on it. `bypassDeleteFallback` keeps the probe's
- * native leg a literal DELETE (otherwise apiFetch's own fallback would mask the very failure being
- * measured); the tunnel leg is already a POST, which that flag does not touch.
+ * tunnel is actually honoured here (utils/delete-fallback.ts exercises BOTH legs). The same call also
+ * probes PUT, which is the attendance shift-edit verb: a client path that drops PUT/PATCH learns the
+ * write tunnel without changing the DELETE slot. Fire-and-forget: the probes never throw and
+ * navigation must not wait on them. `bypassDeleteFallback` keeps each probe's native leg a literal
+ * verb (otherwise apiFetch's own fallback would mask the very failure being measured); the tunnel
+ * leg is already a POST, which that flag does not touch.
  */
 function scheduleDeleteTransportProbe(): void {
-  void probeDeleteTransport((url, init) => apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
+  const probeFetch = (url: string, init: RequestInit) => apiFetch(url, {
+    ...init,
+    suppressUnauthorizedRedirect: true,
+    bypassDeleteFallback: true,
+  })
+  void probeDeleteTransport(probeFetch)
+  void probeWriteTransport(probeFetch)
 }
 
 const router = createRouter({

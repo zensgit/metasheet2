@@ -47,6 +47,8 @@ function buildApp(): Express {
   app.use(attendanceAuditMiddleware())
   app.use(methodOverrideMiddleware)
   app.delete('/api/attendance/shifts/:id', (_req, res) => { res.json({ ok: true }) })
+  app.put('/api/attendance/shifts/:id', (_req, res) => { res.json({ ok: true }) })
+  app.patch('/api/attendance/report-fields/:code/formula', (_req, res) => { res.json({ ok: true }) })
   app.post(PUNCH_PATH, (_req, res) => { res.json({ ok: true }) })
   app.delete(PUNCH_PATH, (_req, res) => { res.json({ ok: true }) })
   return app
@@ -117,5 +119,35 @@ describe('attendance audit row for a tunnelled DELETE', () => {
     expect(meta.request.methodOverride).toBe('DELETE')
     // One row, one verb: the label agrees with `action` and `meta.request.method`.
     expect(meta.operation).toBe('punch')
+  })
+
+  it('records a tunnelled shift PUT as POST on the wire and PUT in methodOverride', async () => {
+    const res = await request(pinned.url())
+      .post(SHIFT_PATH)
+      .set('Authorization', GOOD)
+      .set('X-HTTP-Method-Override', 'PUT')
+      .send({ name: 'Day shift' })
+    expect(res.status).toBe(200)
+
+    const { action, meta } = await auditMeta() as { action: string; meta: Record<string, any> }
+    expect(action).toBe('attendance_http:POST:/api/attendance/shifts/sh_1')
+    expect(meta.request.method).toBe('POST')
+    expect(meta.request.methodOverride).toBe('PUT')
+    expect(JSON.stringify(meta)).not.toContain('good-token')
+    expect(JSON.stringify(meta)).not.toContain('Day shift')
+  })
+
+  it('records a tunnelled attendance PATCH the same way', async () => {
+    const res = await request(pinned.url())
+      .post('/api/attendance/report-fields/late_minutes/formula')
+      .set('Authorization', GOOD)
+      .set('X-HTTP-Method-Override', 'PATCH')
+      .send({ formulaExpression: '1' })
+    expect(res.status).toBe(200)
+
+    const { action, meta } = await auditMeta() as { action: string; meta: Record<string, any> }
+    expect(action).toBe('attendance_http:POST:/api/attendance/report-fields/late_minutes/formula')
+    expect(meta.request.method).toBe('POST')
+    expect(meta.request.methodOverride).toBe('PATCH')
   })
 })

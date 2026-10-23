@@ -6,7 +6,7 @@ import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './au
 import { explicitSessionOrg } from '../composables/authPrincipal'
 import { clearExplicitSessionOrg } from './explicitSessionOrg'
 import { createNetworkUnavailableError } from './networkErrors'
-import { sendDelete } from './delete-fallback'
+import { sendDelete, sendWrite } from './delete-fallback'
 
 // Vite environment type declaration
 declare global {
@@ -39,8 +39,9 @@ export interface ApiFetchOptions extends RequestInit {
    */
   omitHeaders?: readonly string[]
   /**
-   * Send a DELETE as a literal DELETE with no POST+override fallback. Reserved for the transport
-   * probe (utils/delete-fallback.ts `probeDeleteTransport`), which must observe the native verb.
+   * Send the verb as a literal verb with no POST+override fallback. Reserved for the transport
+   * probes (utils/delete-fallback.ts), which must observe the native verb. Applies to DELETE and
+   * to attendance PUT/PATCH.
    */
   bypassDeleteFallback?: boolean
 }
@@ -258,6 +259,13 @@ function handlePasswordChangeRequired(path: string): void {
  *    replay is safe; an HTTP status is never retried. The backoff retry loop below
  *    still does not apply to DELETE.
  *
+ * 4. ATTENDANCE PUT/PATCH FALLBACK (same module, separate session slot). A QA client
+ *    path drops PUT and PATCH (2026-10-23): shift edit never reached the server while
+ *    GET and POST from the same browser did. Attendance PUT/PATCH (`/api/attendance`
+ *    and `/api/attendance-admin`) go through `sendWrite` with the same one-retry rule.
+ *    The body is the same JSON the native PUT would have sent, so a replay sets the
+ *    same state. Create stays POST. Non-attendance PUT/PATCH stay a single attempt.
+ *
  * Backoff waits are abortable: a caller that aborts during the pause gets an
  * AbortError immediately, not the copy above (an abort is not an outage).
  */
@@ -314,8 +322,35 @@ function waitUnlessAborted(ms: number, signal: AbortSignal | null | undefined): 
 
 const rawFetch: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init)
 
+/** Pathname of an absolute or relative request URL, query and hash stripped. */
+function requestPathname(url: string): string {
+  const hash = url.indexOf('#')
+  const query = url.indexOf('?')
+  let end = url.length
+  if (hash >= 0) end = Math.min(end, hash)
+  if (query >= 0) end = Math.min(end, query)
+  const bare = url.slice(0, end)
+  if (bare.startsWith('/')) return bare
+  try {
+    return new URL(bare).pathname
+  } catch {
+    return bare
+  }
+}
+
+/**
+ * Attendance writes share the gateway that dropped PUT/PATCH. Match the API prefix even when the
+ * app is mounted under a sub-path (`/metasheet/api/attendance/...`).
+ */
+function isAttendanceWriteUrl(url: string): boolean {
+  return /\/api\/attendance(?:-admin)?(?:\/|$)/.test(requestPathname(url))
+}
+
 function dispatch(url: string, init: RequestInit, bypassDeleteFallback: boolean): Promise<Response> {
   const method = String(init.method || 'GET').toUpperCase()
+  if (!bypassDeleteFallback && (method === 'PUT' || method === 'PATCH') && isAttendanceWriteUrl(url)) {
+    return sendWrite(rawFetch, url, init, method)
+  }
   if (method === 'DELETE' && !bypassDeleteFallback) return sendDelete(rawFetch, url, init)
   return rawFetch(url, init)
 }

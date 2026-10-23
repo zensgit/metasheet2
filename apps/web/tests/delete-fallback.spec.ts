@@ -17,13 +17,19 @@ import {
   METHOD_OVERRIDDEN_HEADER,
   METHOD_OVERRIDE_HEADER,
   METHOD_PROBE_PATH,
+  WRITE_TRANSPORT_STORAGE_KEY,
+  WRITE_TRANSPORT_UNCONFIRMED,
   getDeleteTransport,
+  getWriteTransport,
   isDeleteTransportError,
   isNetworkLevelFailure,
   probeDeleteTransport,
+  probeWriteTransport,
   resetDeleteTransportForTests,
   sendDelete,
+  sendWrite,
   setDeleteTransport,
+  setWriteTransport,
 } from '../src/utils/delete-fallback'
 
 function transportFailure(): TypeError {
@@ -34,9 +40,9 @@ function transportFailure(): TypeError {
  * `receipt` = the server stamped `X-Method-Overridden: DELETE`, i.e. THIS server rewrote the POST.
  * Its absence on a 2xx is the inversion hazard the module exists to refuse.
  */
-function response(status: number, opts: { receipt?: boolean; body?: unknown } = {}): Response {
+function response(status: number, opts: { receipt?: boolean | 'DELETE' | 'PUT' | 'PATCH'; body?: unknown } = {}): Response {
   const headers = new Headers()
-  if (opts.receipt) headers.set(METHOD_OVERRIDDEN_HEADER, 'DELETE')
+  if (opts.receipt) headers.set(METHOD_OVERRIDDEN_HEADER, opts.receipt === true ? 'DELETE' : opts.receipt)
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -571,6 +577,84 @@ describe('delete-fallback', () => {
  * friends) do not match `/src/multitable/api/client.ts`. The earlier "api dir" heuristic needed prose
  * to excuse them; matching the actual stub against the actual module URL does not.
  */
+describe('write-transport fallback (PUT/PATCH, separate from DELETE)', () => {
+  beforeEach(() => {
+    sessionStorage.clear()
+    resetDeleteTransportForTests()
+  })
+
+  it('probes PUT, and a receipt latches the write slot without touching DELETE', async () => {
+    const baseFetch = vi.fn()
+      .mockRejectedValueOnce(transportFailure())
+      .mockResolvedValueOnce(response(200, { receipt: 'PUT' }))
+    expect(await probeWriteTransport(baseFetch)).toBe('override')
+    expect(getWriteTransport()).toBe('override')
+    expect(getDeleteTransport()).toBe('native')
+    expect(sessionStorage.getItem(WRITE_TRANSPORT_STORAGE_KEY)).toBe('override')
+    expect(sessionStorage.getItem(DELETE_TRANSPORT_STORAGE_KEY)).toBeNull()
+    const tunnel = baseFetch.mock.calls[1]
+    expect(tunnel[0]).toBe(METHOD_PROBE_PATH)
+    expect(tunnel[1].method).toBe('POST')
+    expect(headerOf(tunnel[1], METHOD_OVERRIDE_HEADER)).toBe('PUT')
+    expect(baseFetch.mock.calls[0][1].method).toBe('PUT')
+  })
+
+  it('a PUT receipt does not confirm a PATCH, and a PATCH receipt latches the shared write slot', async () => {
+    const mismatched = vi.fn()
+      .mockRejectedValueOnce(transportFailure())
+      .mockResolvedValueOnce(response(200, { receipt: 'DELETE' }))
+    await expect(sendWrite(mismatched, '/api/attendance/shifts/s1', {}, 'PUT')).rejects.toMatchObject({
+      code: WRITE_TRANSPORT_UNCONFIRMED,
+    })
+    expect(getWriteTransport()).toBe('override-unavailable')
+
+    resetDeleteTransportForTests()
+    sessionStorage.clear()
+    const matched = vi.fn()
+      .mockRejectedValueOnce(transportFailure())
+      .mockResolvedValueOnce(response(200, { receipt: 'PATCH' }))
+    const res = await sendWrite(matched, '/api/attendance/report-fields/late/formula', {}, 'PATCH')
+    expect(res.status).toBe(200)
+    expect(matched.mock.calls[1][1].method).toBe('POST')
+    expect(headerOf(matched.mock.calls[1][1], METHOD_OVERRIDE_HEADER)).toBe('PATCH')
+    expect(getWriteTransport()).toBe('override')
+    expect(getDeleteTransport()).toBe('native')
+  })
+
+  it('override mode sends POST + the verb from the start, and a later PATCH shares it', async () => {
+    setWriteTransport('override')
+    const putFetch = vi.fn().mockResolvedValue(response(200, { receipt: 'PUT' }))
+    await sendWrite(putFetch, '/api/attendance/shifts/s1', { headers: { 'x-tenant-id': 't1' } }, 'PUT')
+    expect(putFetch).toHaveBeenCalledTimes(1)
+    expect(putFetch.mock.calls[0][1].method).toBe('POST')
+    expect(headerOf(putFetch.mock.calls[0][1], METHOD_OVERRIDE_HEADER)).toBe('PUT')
+    expect(headerOf(putFetch.mock.calls[0][1], 'x-tenant-id')).toBe('t1')
+
+    const patchFetch = vi.fn().mockResolvedValue(response(200, { receipt: 'PATCH' }))
+    await sendWrite(patchFetch, '/api/attendance/report-fields/late/formula', {}, 'PATCH')
+    expect(patchFetch.mock.calls[0][1].method).toBe('POST')
+    expect(headerOf(patchFetch.mock.calls[0][1], METHOD_OVERRIDE_HEADER)).toBe('PATCH')
+  })
+
+  it('a native PUT that gets an HTTP response is not retried', async () => {
+    const baseFetch = vi.fn().mockResolvedValue(response(400))
+    const res = await sendWrite(baseFetch, '/api/attendance/shifts/s1', {}, 'PUT')
+    expect(res.status).toBe(400)
+    expect(baseFetch).toHaveBeenCalledTimes(1)
+    expect(baseFetch.mock.calls[0][1].method).toBe('PUT')
+    expect(getWriteTransport()).toBe('native')
+  })
+
+  it('DELETE override mode does not force attendance PUT through the tunnel', async () => {
+    setDeleteTransport('override')
+    const baseFetch = vi.fn().mockResolvedValue(response(200))
+    await sendWrite(baseFetch, '/api/attendance/shifts/s1', {}, 'PUT')
+    expect(baseFetch.mock.calls[0][1].method).toBe('PUT')
+    expect(getWriteTransport()).toBe('native')
+    expect(getDeleteTransport()).toBe('override')
+  })
+})
+
 describe('browser-lane module-path hazard: a lane\'s own route stubs must not match its own modules', () => {
   const WEB = resolve(__dirname, '..')
   const VERIFICATION = join(WEB, 'verification')

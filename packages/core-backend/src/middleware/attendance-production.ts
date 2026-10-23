@@ -331,11 +331,13 @@ export function attendanceAuditMiddleware(): RequestHandler {
         const op = resolveAttendanceOperation(method, normalizedRoute)
         // Set by middleware/method-override.ts, which is mounted BELOW this middleware so the
         // limiter sees the wire verb. Consequence: `method`/`action` above name the POST that
-        // arrived, and WITHOUT this marker a tunnelled delete is indistinguishable from an ordinary
-        // POST in operation_audit_logs — an investigator querying for deletes of attendance data
-        // would find none. Values-free: the verb name only, and only the literal 'DELETE' is ever
-        // accepted by that middleware.
-        const methodOverride = req.methodOverride === 'DELETE' ? 'DELETE' : null
+        // arrived, and WITHOUT this marker a tunnelled delete or update is indistinguishable from
+        // an ordinary POST in operation_audit_logs — an investigator querying for deletes or shift
+        // updates of attendance data would find none. Values-free: the verb name only, and only
+        // DELETE, PUT, or PATCH is ever accepted by that middleware.
+        const methodOverride = req.methodOverride === 'DELETE' || req.methodOverride === 'PUT' || req.methodOverride === 'PATCH'
+          ? req.methodOverride
+          : null
         const requestResult = (statusCode >= 400 || responseOk === false) ? 'error' : 'ok'
 
         attendanceOperationRequestsTotal.inc({ operation: op, result: requestResult })

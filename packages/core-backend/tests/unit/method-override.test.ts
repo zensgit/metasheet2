@@ -70,6 +70,19 @@ function buildApp(): Express {
   app.use((req, _res, next) => { seenMethods.push(req.method); next() })
   app.post(WHITELISTED, (_req, res) => { twinExecuted += 1; res.status(201).json({ ok: true, twin: 'POST' }) })
   app.use(methodProbeRouter())
+  // Stand-in for the attendance shift update/patch handlers. The real plugin routes are registered
+  // the same way (Express method + path); this pins that a rewritten POST lands on THAT handler and
+  // runs its validation, and that a raw PUT still does.
+  const shiftUpdate = (verb: 'PUT' | 'PATCH') => (req: Request, res: Response) => {
+    const name = (req.body as { name?: unknown } | undefined)?.name
+    if (typeof name !== 'string' || name.trim().length === 0) {
+      res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'name is required' } })
+      return
+    }
+    res.json({ ok: true, method: verb, id: req.params.id, name })
+  }
+  app.put('/api/attendance/shifts/:id', shiftUpdate('PUT'))
+  app.patch('/api/attendance/shifts/:id', shiftUpdate('PATCH'))
   return app
 }
 
@@ -110,25 +123,46 @@ describe('method-override middleware + /api/method-probe', () => {
     expect(probeHits).toBe(0)
   })
 
-  it('(c) POST + X-HTTP-Method-Override: PUT is treated as a plain POST (probe has no POST handler)', async () => {
+  it('(c) POST + X-HTTP-Method-Override: PUT with valid auth behaves as PUT', async () => {
     const res = await request(pinned.url())
       .post(METHOD_PROBE_PATH)
       .set('Authorization', GOOD)
-      .set('X-HTTP-Method-Override', 'PUT')
-    expect(res.status).toBe(404)
-    expect(seenMethods).toEqual(['POST'])
-    expect(probeHits).toBe(0)
+      .set('X-HTTP-Method-Override', 'put')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, method: 'PUT', overridden: true })
+    expect(res.headers['x-method-overridden']).toBe('PUT')
+    expect(seenMethods).toEqual(['PUT'])
+    expect(probeHits).toBe(1)
   })
 
-  it('(c2) only the literal DELETE is accepted — every other value is ignored', () => {
+  it('(c-patch) POST + X-HTTP-Method-Override: PATCH with valid auth behaves as PATCH', async () => {
+    const res = await request(pinned.url())
+      .post(METHOD_PROBE_PATH)
+      .set('Authorization', GOOD)
+      .set('X-HTTP-Method-Override', 'Patch')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, method: 'PATCH', overridden: true })
+    expect(res.headers['x-method-overridden']).toBe('PATCH')
+    expect(seenMethods).toEqual(['PATCH'])
+    expect(probeHits).toBe(1)
+  })
+
+  it('(c2) DELETE, PUT, and PATCH are accepted — every other value is not a rewrite', () => {
     const base = { method: 'POST', user: { id: 'u1' } }
     expect(resolveMethodOverride({ ...base, headers: { 'x-http-method-override': 'DELETE' } } as Request)).toBe('DELETE')
     expect(resolveMethodOverride({ ...base, headers: { 'x-http-method-override': ' Delete ' } } as Request)).toBe('DELETE')
-    for (const v of ['PUT', 'PATCH', 'GET', 'POST', 'DELETE;x', 'DELETEX', '', 'REMOVE']) {
+    expect(resolveMethodOverride({ ...base, headers: { 'x-http-method-override': 'PUT' } } as Request)).toBe('PUT')
+    expect(resolveMethodOverride({ ...base, headers: { 'x-http-method-override': ' put ' } } as Request)).toBe('PUT')
+    expect(resolveMethodOverride({ ...base, headers: { 'x-http-method-override': 'PATCH' } } as Request)).toBe('PATCH')
+    for (const v of ['GET', 'POST', 'OPTIONS', 'DELETE;x', 'DELETEX', '', 'REMOVE']) {
       expect(resolveMethodOverride({ ...base, headers: { 'x-http-method-override': v } } as Request), v).toBeNull()
     }
     // No req.user (whitelisted path / OAPI mst_ allowlist pass-through): never rewritten.
     expect(resolveMethodOverride({ method: 'POST', user: undefined, headers: { 'x-http-method-override': 'DELETE' } } as Request)).toBeNull()
+    expect(resolveMethodOverride({ method: 'POST', user: undefined, headers: { 'x-http-method-override': 'PUT' } } as Request)).toBeNull()
+    expect(resolveMethodOverride({ method: 'POST', user: undefined, headers: { 'x-http-method-override': 'PATCH' } } as Request)).toBeNull()
+    // A native PUT is not rewritten into something else, even with the header.
+    expect(resolveMethodOverride({ method: 'PUT', user: { id: 'u1' }, headers: { 'x-http-method-override': 'PATCH' } } as Request)).toBeNull()
   })
 
   it('a rewritten request carries the X-Method-Overridden: DELETE receipt', async () => {
@@ -139,12 +173,16 @@ describe('method-override middleware + /api/method-probe', () => {
     expect(res.headers['x-method-overridden']).toBe('DELETE')
   })
 
-  it('a REFUSED override (wrong value) carries no receipt — the client must not read it as honoured', async () => {
+  it('a REFUSED override (unsupported value) is 405 and carries no receipt', async () => {
     const res = await request(pinned.url())
       .post(METHOD_PROBE_PATH)
       .set('Authorization', GOOD)
-      .set('X-HTTP-Method-Override', 'PUT')
+      .set('X-HTTP-Method-Override', 'GET')
+    expect(res.status).toBe(405)
+    expect(res.body?.error?.code).toBe('METHOD_OVERRIDE_NOT_HONORED')
     expect(res.headers['x-method-overridden']).toBeUndefined()
+    expect(seenMethods).toEqual([])
+    expect(probeHits).toBe(0)
   })
 
   it('a plain DELETE carries no receipt (nothing was rewritten)', async () => {
@@ -154,7 +192,9 @@ describe('method-override middleware + /api/method-probe', () => {
 
   it('readMethodOverrideHeader reports the CLAIM only — no method, no auth involved', () => {
     expect(readMethodOverrideHeader({ headers: { 'x-http-method-override': 'delete' } } as unknown as Request)).toBe('DELETE')
-    expect(readMethodOverrideHeader({ headers: { 'x-http-method-override': 'PUT' } } as unknown as Request)).toBeNull()
+    expect(readMethodOverrideHeader({ headers: { 'x-http-method-override': 'PUT' } } as unknown as Request)).toBe('PUT')
+    expect(readMethodOverrideHeader({ headers: { 'x-http-method-override': 'patch' } } as unknown as Request)).toBe('PATCH')
+    expect(readMethodOverrideHeader({ headers: { 'x-http-method-override': 'GET' } } as unknown as Request)).toBeNull()
     expect(readMethodOverrideHeader({ headers: {} } as unknown as Request)).toBeNull()
   })
 
@@ -195,11 +235,107 @@ describe('method-override middleware + /api/method-probe', () => {
     expect(seenMethods).toEqual(['POST'])
   })
 
+  it('(f-put) POST + PUT override on a gate-exception path is REFUSED, and the POST twin never runs', async () => {
+    const res = await request(pinned.url())
+      .post(WHITELISTED)
+      .set('X-HTTP-Method-Override', 'PUT')
+      .send({ name: 'Day' })
+    expect(res.status).toBe(405)
+    expect(res.body?.error?.code).toBe('METHOD_OVERRIDE_NOT_HONORED')
+    expect(twinExecuted).toBe(0)
+    expect(seenMethods).toEqual([])
+    expect(res.headers['x-method-overridden']).toBeUndefined()
+  })
+
   it('(f3) the refusal is scoped to POST — a GET carrying the header still just proceeds as a GET', async () => {
     // A GET cannot be turned into a wrong write by a POST twin, so it is ignored, not refused.
     const res = await request(pinned.url()).get(WHITELISTED).set('X-HTTP-Method-Override', 'DELETE')
     expect(res.status).toBe(404)
     expect(seenMethods).toEqual(['GET'])
+  })
+
+  const SHIFT_PATH = '/api/attendance/shifts/11111111-1111-1111-1111-111111111111'
+
+  it('POST + override PUT runs the shift PUT handler and its validation', async () => {
+    const ok = await request(pinned.url())
+      .post(SHIFT_PATH)
+      .set('Authorization', GOOD)
+      .set('X-HTTP-Method-Override', 'PUT')
+      .send({ name: 'Day shift' })
+    expect(ok.status).toBe(200)
+    expect(ok.body).toEqual({
+      ok: true,
+      method: 'PUT',
+      id: '11111111-1111-1111-1111-111111111111',
+      name: 'Day shift',
+    })
+    expect(ok.headers['x-method-overridden']).toBe('PUT')
+    expect(seenMethods).toEqual(['PUT'])
+
+    const invalid = await request(pinned.url())
+      .post(SHIFT_PATH)
+      .set('Authorization', GOOD)
+      .set('X-HTTP-Method-Override', 'PUT')
+      .send({})
+    expect(invalid.status).toBe(400)
+    expect(invalid.body?.error?.code).toBe('VALIDATION_ERROR')
+    // The rewrite happened; validation ran inside the PUT handler. The receipt is already set.
+    expect(invalid.headers['x-method-overridden']).toBe('PUT')
+  })
+
+  it('a raw PUT still runs the same shift handler, with no receipt', async () => {
+    const ok = await request(pinned.url())
+      .put(SHIFT_PATH)
+      .set('Authorization', GOOD)
+      .send({ name: 'Day shift' })
+    expect(ok.status).toBe(200)
+    expect(ok.body.method).toBe('PUT')
+    expect(ok.headers['x-method-overridden']).toBeUndefined()
+    expect(seenMethods).toEqual(['PUT'])
+
+    const invalid = await request(pinned.url())
+      .put(SHIFT_PATH)
+      .set('Authorization', GOOD)
+      .send({ name: '   ' })
+    expect(invalid.status).toBe(400)
+    expect(invalid.body?.error?.code).toBe('VALIDATION_ERROR')
+    expect(invalid.headers['x-method-overridden']).toBeUndefined()
+  })
+
+  it('POST + override PATCH runs the shift PATCH handler', async () => {
+    const ok = await request(pinned.url())
+      .post(SHIFT_PATH)
+      .set('Authorization', GOOD)
+      .set('X-HTTP-Method-Override', 'PATCH')
+      .send({ name: 'Evening' })
+    expect(ok.status).toBe(200)
+    expect(ok.body).toMatchObject({ ok: true, method: 'PATCH', name: 'Evening' })
+    expect(ok.headers['x-method-overridden']).toBe('PATCH')
+    expect(seenMethods).toEqual(['PATCH'])
+  })
+
+  it('an unsupported override verb is rejected and the shift handler does not run', async () => {
+    for (const verb of ['GET', 'POST', 'OPTIONS', 'REMOVE']) {
+      const res = await request(pinned.url())
+        .post(SHIFT_PATH)
+        .set('Authorization', GOOD)
+        .set('X-HTTP-Method-Override', verb)
+        .send({ name: 'Day shift' })
+      expect(res.status, verb).toBe(405)
+      expect(res.body?.error?.code).toBe('METHOD_OVERRIDE_NOT_HONORED')
+      expect(res.headers['x-method-overridden']).toBeUndefined()
+    }
+    expect(seenMethods).toEqual([])
+  })
+
+  it('PUT override without auth is 401 and the shift handler never executes', async () => {
+    const res = await request(pinned.url())
+      .post(SHIFT_PATH)
+      .set('X-HTTP-Method-Override', 'PUT')
+      .send({ name: 'Day shift' })
+    expect(res.status).toBe(401)
+    expect(seenMethods).toEqual([])
+    expect(res.headers['x-method-overridden']).toBeUndefined()
   })
 
   it('(e) GET + override header is ignored', async () => {
@@ -625,6 +761,34 @@ describe('real JWT gate -> real override -> real probe, over a socket', () => {
     expect(res.body).toEqual({ ok: true, method: 'DELETE', overridden: false })
     expect(res.headers['x-method-overridden']).toBeUndefined()
   })
+
+  it('POST /api/method-probe + X-HTTP-Method-Override: PUT + a valid session -> 200 with the PUT receipt', async () => {
+    const res = await request(realPinned.url())
+      .post(METHOD_PROBE_PATH)
+      .set('Authorization', SESSION)
+      .set('X-HTTP-Method-Override', 'PUT')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, method: 'PUT', overridden: true })
+    expect(res.headers['x-method-overridden']).toBe('PUT')
+    expect(authServiceMock.verifyToken).toHaveBeenCalledWith('session-token')
+  })
+
+  it('a native PUT through the same real gate answers 200 with no receipt', async () => {
+    const res = await request(realPinned.url()).put(METHOD_PROBE_PATH).set('Authorization', SESSION)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, method: 'PUT', overridden: false })
+    expect(res.headers['x-method-overridden']).toBeUndefined()
+  })
+
+  it('POST + an unsupported override through the real gate is 405 and carries no receipt', async () => {
+    const res = await request(realPinned.url())
+      .post(METHOD_PROBE_PATH)
+      .set('Authorization', SESSION)
+      .set('X-HTTP-Method-Override', 'NOPE')
+    expect(res.status).toBe(405)
+    expect(res.body?.error?.code).toBe('METHOD_OVERRIDE_NOT_HONORED')
+    expect(res.headers['x-method-overridden']).toBeUndefined()
+  })
 })
 
 /**
@@ -679,6 +843,33 @@ describe('method-override claim logging', () => {
       }
     } finally {
       info.mockRestore()
+      warn.mockRestore()
+    }
+  })
+
+  it('an unsupported override is refused without logging the raw header', () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
+    try {
+      const json = vi.fn()
+      methodOverrideMiddleware(
+        {
+          method: 'POST',
+          path: '/api/attendance/shifts/sh_1',
+          headers: { 'x-http-method-override': 'not-a-verb-and-not-a-secret' },
+          user: { id: 'u-1' },
+        } as unknown as Request,
+        { status: vi.fn().mockReturnValue({ json }), setHeader: vi.fn() } as unknown as Response,
+        vi.fn(),
+      )
+      const refused = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('method-override'))
+      expect(refused).toEqual([
+        'method-override REFUSED (claim not a supported verb): POST /api/attendance/shifts/sh_1',
+      ])
+      expect(refused[0]).not.toContain('not-a-verb-and-not-a-secret')
+      expect(json).toHaveBeenCalledWith(expect.objectContaining({
+        error: expect.objectContaining({ code: 'METHOD_OVERRIDE_NOT_HONORED' }),
+      }))
+    } finally {
       warn.mockRestore()
     }
   })
