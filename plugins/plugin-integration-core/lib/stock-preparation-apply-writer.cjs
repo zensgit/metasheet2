@@ -581,7 +581,10 @@ async function fenceBeforeWrite(writeFence, meta) {
 // re-checks it itself, so no caller can skip it.
 function assertHostFencedWriteSupported(recordsApi, writeFence) {
   if (!writeFence) return
+  // `withHostWrite` (review round 6, N6): the guard must be told while a host write is in flight, so its
+  // heartbeat never queues behind the holder's own write transaction — required, like the host-fence half.
   if (typeof writeFence.hostWriteFence !== 'function' || typeof writeFence.hostFenceRefused !== 'function'
+    || typeof writeFence.withHostWrite !== 'function'
     || !recordsApi || recordsApi.supportsWriteFence !== true) {
     throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the records host does not support fenced writes; nothing is written without them', { reason: 'host_fence_unsupported' })
   }
@@ -591,9 +594,12 @@ function hostFenceInput(writeFence) {
   return writeFence ? { writeFence: writeFence.hostWriteFence() } : {}
 }
 
+// A fenced host call runs INSIDE the guard's host-write bracket (`withHostWrite`): while the host's
+// transaction holds the lease row FOR SHARE, the guard skips its heartbeat tick instead of queueing a CAS
+// behind the holder's own write (review round 6, N6). An unfenced call runs exactly as before.
 async function callFencedRecordsApi(operation, writeFence, callback) {
   try {
-    return await callback()
+    return await (writeFence ? writeFence.withHostWrite(callback) : callback())
   } catch (error) {
     if (writeFence && isHostWriteFenceError(error)) throw await writeFence.hostFenceRefused(error)
     throw wrapTargetWriteError(error, operation)

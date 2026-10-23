@@ -7446,7 +7446,9 @@ function requireStockPreparationAudit() {
         }
         if (previewWriteScope) {
           try {
-            await stockPreparationProjectWriteLock.assertNoLiveWriter(previewWriteScope)
+            // Round 6 (N4): through the require helper, like the apply route — a partially wired lock service
+            // is the same 501 everywhere, never a 500 from a missing method.
+            await requireStockPreparationProjectWriteLock().assertNoLiveWriter(previewWriteScope)
           } catch (error) {
             await stampWriteLockRefusal(action, dryRunTenantId, error)
             throw error
@@ -7520,7 +7522,7 @@ function requireStockPreparationAudit() {
             // mint a token; refused 409 while a live writer holds the sheet (no token is minted then). A
             // read-tier caller gets no binder: an unbound token that supersedes nothing (review round 1).
             projectWriteGenerationBinder: previewWriteScope && previewMayBind
-              ? async () => writeBindingFromGeneration(await stockPreparationProjectWriteLock.bumpGeneration(previewWriteScope, { reason: 'small_preview', tenantId: dryRunTenantId }))
+              ? async () => writeBindingFromGeneration(await requireStockPreparationProjectWriteLock().bumpGeneration(previewWriteScope, { reason: 'small_preview', tenantId: dryRunTenantId }))
               : undefined,
           })
         } catch (error) {
@@ -8108,7 +8110,9 @@ function requireStockPreparationAudit() {
       const parameters = normalizeActionParameters(body.parameters)
       // P1-b (Codex review): the expansion records the target sheet's write generation it starts under
       // (refused 409 WRITE_LOCKED while a live writer holds the sheet — then no job exists). Plan and
-      // approval require it unchanged. Read-only: a read-tier caller observes, it never writes the lock.
+      // approval require it unchanged. The observation never bumps or binds; the ONE lock write a read-tier
+      // caller can cause here is the clear of an ABANDONED lease (expiry + grace passed; review round 5),
+      // which only takes a dead holder's ability to resume — the same clear any preview or approval performs.
       // No lock service wired -> an unobserved job, exactly as the approval below creates an unbound one.
       const expansionWriteScope = stockPreparationProjectWriteLock ? sheetWriteScopeKey(action.target.sheetId) : null
       const job = await createLargeBomBackgroundExpansionJob({
@@ -8390,8 +8394,10 @@ function requireStockPreparationAudit() {
         expansionJob.parameters && expansionJob.parameters.projectNo,
       )
       // Batch-refresh phase 0 step 1 — PLAN GENERATION: approving supersedes every earlier plan of this
-      // write scope (the snapshot's target sheet, R-52); refused 409 while a live writer
-      // holds the sheet. No lock service wired -> the job is created UNBOUND, and no chunk runs it.
+      // write scope (the snapshot's target sheet, R-52). The bump expects the row exactly as the expansion
+      // observed it (token AND epoch), so a live writer — whose acquire moved the epoch — is answered 409
+      // PLAN_SUPERSEDED `expansion_stale` first, not WRITE_LOCKED. No lock service wired -> the job is
+      // created UNBOUND, and no chunk runs it.
       const approvalWriteScope = stockPreparationProjectWriteLock
         ? sheetWriteScopeKey(snapshotAction.target.sheetId)
         : null
@@ -8411,7 +8417,7 @@ function requireStockPreparationAudit() {
             if (!expect || expect.writeScope !== approvalWriteScope) {
               throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the expansion observed a different sheet than it approves for; expand again', { reason: 'scope_changed', partial: false })
             }
-            return writeBindingFromGeneration(await stockPreparationProjectWriteLock.bumpGeneration(approvalWriteScope, {
+            return writeBindingFromGeneration(await requireStockPreparationProjectWriteLock().bumpGeneration(approvalWriteScope, {
               reason: 'large_approval',
               tenantId: routeScope.tenantId,
               // token + epoch, and the expired lease's id + seq when the expansion recorded one (round 4)

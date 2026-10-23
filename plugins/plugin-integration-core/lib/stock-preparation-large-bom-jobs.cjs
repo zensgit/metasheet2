@@ -1223,8 +1223,9 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   // PLAN GENERATION (batch-refresh phase 0 step 1): approving a checkpoint job SUPERSEDES every earlier
   // plan of this write scope (small tokens and earlier approved jobs alike). The route's binder bumps
-  // (refused 409 while a live writer holds the sheet — then no job is created) and the job records
-  // the generation it was approved under, ALONGSIDE planRevision / targetRevision, never inside them.
+  // (a live writer's acquire moved the epoch, so with the expectation below it is refused 409
+  // PLAN_SUPERSEDED `expansion_stale` — then no job is created) and the job records the generation it was
+  // approved under, ALONGSIDE planRevision / targetRevision, never inside them.
   // No binder (the lock service is not wired) creates an UNBOUND job, which no chunk will run.
   //
   // P1-b: the bump is CONDITIONAL on the generation the expansion observed and the plan re-checked (token
@@ -1416,7 +1417,10 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     // this chunk. Required (501), and BEFORE any job write the job's approval binding must be the
     // generation the lease grant observed — a newer preview or approval of this project since then
     // refuses 409 PLAN_SUPERSEDED and leaves the job exactly as it was; a job approved before bindings
-    // existed is refused `job_unbound` (re-approve it).
+    // existed is refused `job_unbound`. Its remedy is a NEW expansion (start -> run -> plan -> approve):
+    // re-approving the old expansion is refused `expansion_unbound`, since that expansion carries no
+    // write observation either. The orphaned job's landed rows are re-planned as existing rows by their
+    // idempotency keys (UPDATE / SKIP, never a second ADD), so nothing is written twice.
     const projectWriteGuard = requireLargeBomProjectWriteGuard(input.projectWriteGuard)
     assertWriteBindingMatchesGuard(job, projectWriteGuard, { unboundReason: 'job_unbound' })
     // P1-a: the chunk's writes are host-fenced; a host that cannot honour the fence refuses here, before

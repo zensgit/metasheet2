@@ -124,6 +124,24 @@ function createFakeLockDb({ primaryKey = 'scope_key' } = {}) {
       }
       return out
     },
+    // The scoped helper's `transaction` (lib/db.cjs): the handle carries the same CRUD methods (so faults,
+    // pauses and the log apply unchanged) plus the handle-only `setLocalLockTimeout`, which the lock's
+    // bounded statements call FIRST (review round 6, S1). Logged as ['setLocalLockTimeout', { ms }]; a
+    // fault keyed 'setLocalLockTimeout' is honoured like any other. The fake has no row locks, so a bound
+    // never fires by itself: a test that wants 55P03 injects it on `updateRow` (faults).
+    async transaction(callback) {
+      await enter('transaction', {})
+      return callback({
+        async setLocalLockTimeout(ms) {
+          await enter('setLocalLockTimeout', { ms })
+          if (!Number.isInteger(ms) || ms <= 0 || ms > 30000) throw new Error('setLocalLockTimeout: integer 1..30000 required')
+        },
+        selectOne: db.selectOne,
+        insertOne: db.insertOne,
+        updateRow: db.updateRow,
+        deleteRows: db.deleteRows,
+      })
+    },
     // The fake host's fence read: synchronous, so check + write are one step (the real host holds the
     // row FOR SHARE until COMMIT; a takeover/bump can then only land before or after the whole write).
     fenceRowExists(fence) {

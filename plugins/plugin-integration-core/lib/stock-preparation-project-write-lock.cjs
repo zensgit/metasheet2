@@ -60,7 +60,8 @@
 //       So a holder suspended across a takeover can no longer land its in-flight write. After the last
 //       write the guard re-asserts once more (guard.reassert): a loss there is LEASE_LOST with the
 //       partial counts, never "succeeded". A records host that does not declare `supportsWriteFence`
-//       is refused (501) before any write.
+//       is refused (501) before any write. The writer runs each host write inside guard.withHostWrite,
+//       so a heartbeat tick never queues behind the holder's own in-flight write (round 6, N6).
 //
 // NOT IN THE LEASE (named, follow-ups): the carry-confirm / confirm writes
 // (stock-preparation-confirm-writes.cjs) write the same sheet without this lease or fence; print and
@@ -72,6 +73,24 @@
 // Every operation is ONE statement through the scoped db helper (lib/db.cjs) — no transaction is held
 // open across host writes (that would pin one of the host pool's connections for a whole apply and a
 // killed backend would take the server down, see the design notes).
+//
+// BOUNDED ROW-LOCK WAIT (review round 6, S1). Four of those statements can QUEUE behind a fenced host
+// write still in flight: the takeover (acquire), the abandoned-lease clear (bump and observe) and the
+// release are non-key UPDATEs of the row whose FOR SHARE that write's open transaction holds (I5). A holder
+// frozen INSIDE such a transaction would otherwise make every contender block for the pool's
+// statement_timeout (30 s), pin one of its 20 connections meanwhile, and then answer STORE_FAILED ("ask the
+// platform admin") for what is really "a holder is writing". So each of those four runs inside one short
+// db transaction that first bounds its wait — `setLocalLockTimeout(PROJECT_WRITE_ROW_LOCK_WAIT_MS)`,
+// SET LOCAL semantics, nothing leaks to the next user of the pooled connection — and SQLSTATE 55P03
+// (lock_not_available) is answered 409 WRITE_LOCKED with details.reason 'holder_in_write' (release:
+// logged, the lease expires). The wait holds one pool client for at most that bound. The free-row CASes
+// (`lease_id IS NULL`) need no bound: a fence FOR SHARE is only ever held on a row whose committed
+// lease_id matches the fence, so a `lease_id IS NULL` WHERE never matches that tuple and never waits for
+// it; the holder's own CAS (before_write / final) runs only between its own writes. The bound must stay
+// below the pool's statement_timeout (db.cjs refuses above 30 s). OPERATOR ESCAPE HATCH for a holder
+// process frozen inside its write transaction: restarting that process closes its sockets, PostgreSQL
+// aborts the transaction, the FOR SHARE is gone and the next takeover proceeds. pg_terminate_backend is
+// NOT used: a backend killed under a checked-out host pool client has no error listener (design F15).
 //
 // KNOWN LIMITS (documented, not fixed here):
 //   * CLOCKS. Lease times come from each PROCESS's clock (the scoped db helper takes parameter values,
@@ -104,6 +123,9 @@ const PROJECT_WRITE_LEASE_TTL_MS = 120_000
 const PROJECT_WRITE_LEASE_HEARTBEAT_MS = 30_000
 const PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS = 120_000
 const PROJECT_WRITE_BUMP_MAX_ATTEMPTS = 5
+// How long a takeover / abandoned-lease clear / release may wait for the lease row (module header,
+// BOUNDED ROW-LOCK WAIT). Below the pool's 30 s statement_timeout; one pool client is held that long at most.
+const PROJECT_WRITE_ROW_LOCK_WAIT_MS = 5_000
 // Backoff between bump attempts: attempt n (1-based) waits n * this before retrying (10+20+30+40 ms max).
 const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 
@@ -169,6 +191,12 @@ function rowsOf(result) {
 
 function isUniqueViolation(error) {
   return Boolean(error && error.code === '23505')
+}
+
+// SQLSTATE 55P03 lock_not_available: the bounded wait (setLocalLockTimeout) ran out while the statement
+// queued behind a row lock — here, a fenced host write's FOR SHARE on the lease row (module header).
+function isLockNotAvailable(error) {
+  return Boolean(error && error.code === '55P03')
 }
 
 function timeMs(value) {
@@ -351,19 +379,24 @@ function createStockPreparationProjectWriteLock({
   takeoverGraceMs,
   bumpMaxAttempts,
   bumpBackoffMs,
+  rowLockWaitMs,
   sleep,
   idGenerator,
   timers,
   logger,
 } = {}) {
-  if (!db || typeof db.selectOne !== 'function' || typeof db.insertOne !== 'function' || typeof db.updateRow !== 'function') {
-    throw new Error('createStockPreparationProjectWriteLock: scoped db helper (selectOne/insertOne/updateRow) is required')
+  // `transaction` is required too (review round 6, S1): the four statements that can queue behind a fenced
+  // write run inside a short transaction whose wait is bounded — fail closed rather than run them unbounded.
+  if (!db || typeof db.selectOne !== 'function' || typeof db.insertOne !== 'function' || typeof db.updateRow !== 'function'
+    || typeof db.transaction !== 'function') {
+    throw new Error('createStockPreparationProjectWriteLock: scoped db helper (selectOne/insertOne/updateRow/transaction) is required')
   }
   const ttl = Number.isInteger(ttlMs) && ttlMs > 0 ? ttlMs : PROJECT_WRITE_LEASE_TTL_MS
   const heartbeatEvery = Number.isInteger(heartbeatMs) && heartbeatMs > 0 ? heartbeatMs : PROJECT_WRITE_LEASE_HEARTBEAT_MS
   const grace = Number.isInteger(takeoverGraceMs) && takeoverGraceMs >= 0 ? takeoverGraceMs : PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS
   const maxBumpAttempts = Number.isInteger(bumpMaxAttempts) && bumpMaxAttempts > 0 ? bumpMaxAttempts : PROJECT_WRITE_BUMP_MAX_ATTEMPTS
   const backoffMs = Number.isInteger(bumpBackoffMs) && bumpBackoffMs >= 0 ? bumpBackoffMs : PROJECT_WRITE_BUMP_BACKOFF_MS
+  const rowLockWait = Number.isInteger(rowLockWaitMs) && rowLockWaitMs > 0 ? rowLockWaitMs : PROJECT_WRITE_ROW_LOCK_WAIT_MS
   const pause = typeof sleep === 'function' ? sleep : (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   const clock = typeof now === 'function' ? now : () => new Date()
   const newId = typeof idGenerator === 'function' ? idGenerator : () => crypto.randomUUID()
@@ -390,6 +423,28 @@ function createStockPreparationProjectWriteLock({
     } catch (error) {
       throw storeFailed(operation, error, { fence })
     }
+  }
+
+  // The four statements that can queue behind an in-flight fenced write (module header, BOUNDED ROW-LOCK
+  // WAIT): one short transaction, the wait bounded FIRST, then the UPDATE. 55P03 -> the caller's own
+  // "a holder is writing" answer (`holderInWrite`), never STORE_FAILED; any other failure -> STORE_FAILED.
+  async function updateBounded(set, where, operation, { row, atMs }) {
+    try {
+      return rowsOf(await db.transaction(async (trx) => {
+        await trx.setLocalLockTimeout(rowLockWait)
+        return trx.updateRow(PROJECT_WRITE_LOCK_TABLE, set, where)
+      }))
+    } catch (error) {
+      if (isLockNotAvailable(error)) throw holderInWrite(row, atMs)
+      throw storeFailed(operation, error)
+    }
+  }
+
+  // The bounded wait ran out: the holder named by the row has a host write IN FLIGHT (its transaction
+  // holds the lease row FOR SHARE). Busy (409 WRITE_LOCKED), the holder named from the row, its own
+  // reason; `retryAfterMs` is the bound itself, since the row's expiry says nothing about that transaction.
+  function holderInWrite(row, atMs) {
+    return writeLocked(row, atMs, { reason: 'holder_in_write', retryAfterMs: rowLockWait })
   }
 
   // A lease is LIVE until its expiry plus the takeover grace. Within that window it is busy to
@@ -497,8 +552,9 @@ function createStockPreparationProjectWriteLock({
       if (row.lease_id) {
         if (leaseIsLive(row, atMs)) throw writeLocked(row, atMs)
         // TAKEOVER of a lapsed lease: pinned to the exact holder, epoch AND seq observed, so a holder
-        // that renewed in between (seq moved) keeps its lease and this CAS matches nothing.
-        const updated = await update({
+        // that renewed in between (seq moved) keeps its lease and this CAS matches nothing. Bounded wait:
+        // the lapsed holder's write may still be in flight (holder_in_write).
+        const updated = await updateBounded({
           ...leaseColumns({ leaseId, purpose, runId, atMs }),
           fencing_epoch: epoch + 1,
           last_interrupted_run_id: row.lease_run_id || null,
@@ -511,7 +567,7 @@ function createStockPreparationProjectWriteLock({
           lease_id: row.lease_id,
           fencing_epoch: epoch,
           lease_seq: integerOf(row.lease_seq) || 0,
-        }, 'acquire')
+        }, 'acquire', { row, atMs })
         if (updated.length === 1) return grantFrom(updated[0], { leaseId, priorFencingEpoch: epoch, takeover: true })
       } else {
         const updated = await update({
@@ -601,9 +657,9 @@ function createStockPreparationProjectWriteLock({
         // I2: never while a live holder holds the lease (grace included).
         if (leaseIsLive(row, atMs)) throw writeLocked(row, atMs)
         // An ABANDONED lease (lapsed beyond grace): clear it, record the interruption, advance the
-        // epoch and bump — one CAS pinned to everything observed.
+        // epoch and bump — one CAS pinned to everything observed. Bounded wait (holder_in_write).
         const epoch = integerOf(row.fencing_epoch) || 0
-        updated = await update({
+        updated = await updateBounded({
           ...bumped,
           lease_id: null,
           lease_purpose: null,
@@ -621,7 +677,7 @@ function createStockPreparationProjectWriteLock({
           fencing_epoch: epoch,
           lease_seq: integerOf(row.lease_seq) || 0,
           generation_token: row.generation_token,
-        }, 'bump')
+        }, 'bump', { row, atMs })
       } else {
         updated = await update(bumped, {
           scope_key: scopeKey,
@@ -673,7 +729,8 @@ function createStockPreparationProjectWriteLock({
   // stalled holder still had after its pre-write CAS:
   //   * its host write is IN FLIGHT (its transaction holds FOR SHARE on this row): the clear is a non-key
   //     UPDATE, so it waits for that write to COMMIT — the expansion (and the plan, which reads existing
-  //     rows after this) then sees the row;
+  //     rows after this) then sees the row. The wait is BOUNDED (round 6): past PROJECT_WRITE_ROW_LOCK_WAIT_MS
+  //     the observation is refused WRITE_LOCKED `holder_in_write` and nothing is cleared;
   //   * its host write has NOT STARTED: after the clear its fenced write finds lease_id NULL / epoch + 1
   //     and is refused (nothing written; LEASE_LOST), and its next CAS fails too.
   // So every successful observation is of a row with NO lease. A clear that matches nothing (someone
@@ -686,7 +743,8 @@ function createStockPreparationProjectWriteLock({
     if (!row || !row.lease_id) return currentGeneration(scopeKey, row)
     const at = new Date(atMs).toISOString()
     const epoch = integerOf(row.fencing_epoch) || 0
-    const cleared = await update({
+    // Bounded wait: a write of the abandoned holder still in flight answers holder_in_write (round 6).
+    const cleared = await updateBounded({
       lease_id: null,
       lease_purpose: null,
       lease_run_id: null,
@@ -704,7 +762,7 @@ function createStockPreparationProjectWriteLock({
       fencing_epoch: epoch,
       lease_seq: integerOf(row.lease_seq) || 0,
       generation_token: row.generation_token,
-    }, 'observe')
+    }, 'observe', { row, atMs })
     if (cleared.length === 1) return currentGeneration(scopeKey, cleared[0])
     const again = await readRow(scopeKey, 'observe')
     const againAtMs = nowMs()
@@ -741,6 +799,7 @@ function createStockPreparationProjectWriteLock({
     let seq = grant.leaseSeq || 0
     let chain = Promise.resolve()
     let inFlight = 0
+    let hostWritesInFlight = 0
     let lost = null
     let released = false
     let timer = null
@@ -848,8 +907,23 @@ function createStockPreparationProjectWriteLock({
       }
     }
 
+    // THE HOST WRITE BRACKET (review round 6, N6). The writer runs every host createRecord / patchRecord
+    // inside this, so the guard knows while the write's transaction holds the lease row FOR SHARE. A
+    // heartbeat tick then is SKIPPED: its CAS would queue behind that very write (the holder's own
+    // transaction), and past the pool's statement_timeout it would mark this guard lost with the lease
+    // intact. The pre-write CAS that preceded the write already renewed the lease; the next tick, or the
+    // next pre-write CAS, renews it again once the write has committed.
+    async function withHostWrite(fn) {
+      hostWritesInFlight += 1
+      try {
+        return await fn()
+      } finally {
+        hostWritesInFlight -= 1
+      }
+    }
+
     function heartbeat() {
-      if (released || lost || inFlight > 0) return Promise.resolve()
+      if (released || lost || inFlight > 0 || hostWritesInFlight > 0) return Promise.resolve()
       return serialized(() => holderCas('heartbeat')).catch((error) => {
         lost = error
         if (log) log.warn('[plugin-integration-core] stock-prep sheet write lease heartbeat failed', { code: error && error.code })
@@ -876,23 +950,35 @@ function createStockPreparationProjectWriteLock({
       } catch {
         // chain never rejects (see serialized); kept for safety
       }
+      // Best-effort, bounded (module header): a release that queues behind a host write of this very
+      // lease still in flight (a write promise the caller abandoned) gives up after the row-lock wait
+      // instead of pinning a pool client for statement_timeout; the lease then expires (TTL + GRACE).
+      const atMs = nowMs()
       try {
-        await db.updateRow(PROJECT_WRITE_LOCK_TABLE, {
-          lease_id: null,
-          lease_purpose: null,
-          lease_run_id: null,
-          lease_acquired_at: null,
-          lease_expires_at: null,
-          lease_heartbeat_at: null,
-          updated_at: new Date(nowMs()).toISOString(),
-        }, {
-          scope_key: grant.scopeKey,
-          lease_id: grant.leaseId,
-          fencing_epoch: grant.fencingEpoch,
+        await db.transaction(async (trx) => {
+          await trx.setLocalLockTimeout(rowLockWait)
+          return trx.updateRow(PROJECT_WRITE_LOCK_TABLE, {
+            lease_id: null,
+            lease_purpose: null,
+            lease_run_id: null,
+            lease_acquired_at: null,
+            lease_expires_at: null,
+            lease_heartbeat_at: null,
+            updated_at: new Date(atMs).toISOString(),
+          }, {
+            scope_key: grant.scopeKey,
+            lease_id: grant.leaseId,
+            fencing_epoch: grant.fencingEpoch,
+          })
         })
       } catch (error) {
-        // Best-effort: an unreleased lease expires (TTL + GRACE) and is taken over.
-        if (log) log.warn('[plugin-integration-core] stock-prep sheet write lease release failed; it will expire', { sqlState: sqlStateOf(error) })
+        // An unreleased lease expires (TTL + GRACE) and is taken over.
+        if (log) {
+          log.warn('[plugin-integration-core] stock-prep sheet write lease release failed; it will expire', {
+            sqlState: sqlStateOf(error),
+            ...(isLockNotAvailable(error) ? { reason: 'holder_in_write' } : {}),
+          })
+        }
       }
     }
 
@@ -907,6 +993,7 @@ function createStockPreparationProjectWriteLock({
       beforeWrite,
       hostWriteFence,
       hostFenceRefused,
+      withHostWrite,
       reassert,
       heartbeat,
       startHeartbeat,
@@ -953,6 +1040,7 @@ module.exports = {
   PROJECT_WRITE_LEASE_TTL_MS,
   PROJECT_WRITE_LOCK_TABLE,
   PROJECT_WRITE_PURPOSES,
+  PROJECT_WRITE_ROW_LOCK_WAIT_MS,
   PROJECT_WRITE_SCOPE_NAMESPACE,
   StockPreparationProjectWriteLockError,
   assertWriteBindingMatchesGuard,

@@ -49,7 +49,9 @@ const READER = Object.freeze({ id: 'u_swl_reader', tenantId: TENANT, permissions
 // The project-sheet mount with (a) an inspectable lock (or none) and (b) counters on the two
 // identity-bearing source steps, so "before the adapter load" is observable.
 function mount({ lock = 'memory', switchOn = true } = {}) {
-  const env = lock === 'memory' ? kit.createInMemoryProjectWriteLock({ timers: 'real' }) : null
+  // `lock`: 'memory' (the kit's in-memory lock), null (no service), or an env `{ db, lock }` built by the
+  // test (R3b mounts a PARTIALLY wired service).
+  const env = lock === 'memory' ? kit.createInMemoryProjectWriteLock({ timers: 'real' }) : (lock && typeof lock === 'object' ? lock : null)
   const loads = []
   const system = (input = {}) => ({
     id: input.id,
@@ -187,6 +189,30 @@ test('R3 no lock service: apply 501 with zero IO; the dry-run still answers, wit
     assert.equal(h.loads.length, loads, 'zero adapter loads')
     assert.equal(writes(h).length, 0)
   } finally { h.restore() }
+})
+
+// ── R3b (review round 6, N4) ───────────────────────────────────────────────────────────────────────
+// A PARTIALLY wired lock service (present, but missing a method) is the same 501 UNAVAILABLE on every
+// path — the dry-run precheck and its generation bump go through requireStockPreparationProjectWriteLock()
+// like the apply route, never a 500 from calling a missing method on the service object directly.
+test('R3b a partially wired lock service: dry-run (precheck / bump) and apply answer 501 UNAVAILABLE, never 500; zero source reads, nothing written', async () => {
+  const full = kit.createInMemoryProjectWriteLock({ timers: 'real' })
+  for (const missing of ['bumpGeneration', 'assertNoLiveWriter']) {
+    const h = mount({ lock: { ...full, lock: { ...full.lock, [missing]: undefined } } })
+    try {
+      seeded(h)
+      const dry = await dryRun(h)
+      assert.equal(dry.statusCode, 501, `${missing}: ${JSON.stringify(dry.body)}`)
+      assert.equal(errorOf(dry).code, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, missing)
+      assert.equal(h.source.calls.length, 0, `${missing}: zero PLM reads`)
+      assert.equal(registryRow(h).last_pull_outcome, 'refused', `${missing}: a pre-work 501 is stamped refused`)
+      const refused = await apply(h, 'tok-syn-never-minted')
+      assert.equal(refused.statusCode, 501, `${missing}: ${JSON.stringify(refused.body)}`)
+      assert.equal(errorOf(refused).code, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, missing)
+      assert.deepEqual(h.loads, [], `${missing}: zero adapter loads`)
+      assert.equal(writes(h).length, 0, missing)
+    } finally { h.restore() }
+  }
 })
 
 // ── R4 / R5 ───────────────────────────────────────────────────────────────────────────────────────

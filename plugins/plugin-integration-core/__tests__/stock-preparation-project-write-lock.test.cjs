@@ -16,6 +16,13 @@
 //   L9  acquire vs bump: no bump ever commits while the lease is live
 //   L10 the heartbeat keeps a long run's lease alive, and never overlaps the pre-write CAS
 //   L11 the constants are pinned
+//   L12–L16 (review rounds 3–5): expansion-time generation, host-fence half, lease-carrying expectations,
+//       the observation's abandoned-lease clear
+//   L17 (review round 6, S1): the BOUNDED row-lock wait — 55P03 on the takeover / abandoned clears is 409
+//       WRITE_LOCKED holder_in_write (release: logged); those four statements run in one short transaction
+//       that sets the bound first; the free-row CASes and the holder CAS stay single statements
+//   L18 (round 6, N6): a heartbeat tick during a host write (guard.withHostWrite) is skipped, not a CAS
+//   L19 (round 6, N7): the approval bump's INSERT losing to an acquire's INSERT -> re-read -> expansion_stale
 //
 // Every value is synthetic.
 
@@ -517,6 +524,9 @@ test('L11 constants and vocabularies are pinned', () => {
   assert.equal(PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS, 120000)
   assert.equal(PROJECT_WRITE_BUMP_MAX_ATTEMPTS, 5)
   assert.equal(PROJECT_WRITE_BUMP_BACKOFF_MS, 10)
+  // Round 6 (S1): the bounded row-lock wait — below the pool's 30 s statement_timeout, above a record write.
+  assert.equal(lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS, 5000)
+  assert.ok(lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS < 30000, 'the row-lock wait stays below statement_timeout')
   assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk'])
   assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {
@@ -827,6 +837,163 @@ test('L16c a clear that loses its race is re-read once and REFUSED — never an 
     const retry = await lock.observeGeneration(scope)
     assert.equal(retry.fencingEpoch, grant.fencingEpoch + 1)
   }
+})
+
+// ── L17 (review round 6, S1): the BOUNDED row-lock wait ──────────────────────────────────────────────
+// A holder frozen INSIDE its fenced host write transaction holds the lease row FOR SHARE. The takeover, the
+// abandoned-lease clears and the release are non-key UPDATEs of that row: each runs in one short db
+// transaction that bounds its wait first; SQLSTATE 55P03 is "a holder is writing" (409 WRITE_LOCKED,
+// reason holder_in_write), never STORE_FAILED.
+function lockNotAvailable() {
+  const error = new Error('canceling statement due to lock timeout')
+  error.code = '55P03'
+  return error
+}
+
+// The fake has no row locks, so the bound never fires by itself: 55P03 is injected on the ONE update whose
+// SET clears or takes the lease (the bounded statement), leaving every other statement untouched.
+function failBoundedUpdateWith55P03(db, predicate) {
+  db.faults.updateRow = (args) => (args.set && predicate(args.set) ? lockNotAvailable() : null)
+}
+
+test('L17a 55P03 on the takeover / the abandoned clears -> 409 WRITE_LOCKED holder_in_write, the holder named, nothing moved; on release -> logged, the lease kept', async () => {
+  const warnings = []
+  const logger = { warn: (message, fields) => warnings.push([message, fields]) }
+  // (1)–(3) acquire (takeover), bump (abandoned clear), observe (abandoned clear): each queues behind the
+  // lapsed holder's in-flight write and gives up at the bound.
+  for (const [label, run] of [
+    ['acquire', async ({ lock, scope }) => lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l17-b' })],
+    ['bump', async ({ lock, scope }) => lock.bumpGeneration(scope, { reason: 'small_preview' })],
+    ['observe', async ({ lock, scope }) => lock.observeGeneration(scope)],
+  ]) {
+    const env = setup({ logger })
+    const { lock, scope, clock, row, db } = env
+    await lock.bumpGeneration(scope, { reason: 'small_preview' })
+    const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l17-holder' })
+    clock.advance(TTL + GRACE) // lapsed: the operation would take over / clear
+    const before = row()
+    failBoundedUpdateWith55P03(db, (set) => set.fencing_epoch === grant.fencingEpoch + 1)
+    await assert.rejects(() => run(env), (error) => {
+      assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, `${label}: code`)
+      assert.equal(error.status, 409, `${label}: status`)
+      assert.equal(error.details.reason, 'holder_in_write', `${label}: reason`)
+      assert.equal(error.details.holderPurpose, 'small_apply', `${label}: the holder is named from the row`)
+      assert.equal(error.details.retryAfterMs, lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS, `${label}: retry after the bound`)
+      assert.equal(error.details.partial, undefined, `${label}: no partial field on a busy refusal`)
+      return true
+    })
+    assert.deepEqual(row(), before, `${label}: nothing moved`)
+    delete db.faults.updateRow
+  }
+  // (4) release: best-effort — returns, warns with the reason, and the lease stays (it expires).
+  {
+    const { lock, scope, row, db } = setup({ logger })
+    const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l17-release' })
+    const guard = lock.createGuard(grant)
+    failBoundedUpdateWith55P03(db, (set) => set.lease_id === null)
+    warnings.length = 0
+    await guard.release()
+    assert.equal(row().lease_id, grant.leaseId, 'release did not land; the lease expires instead')
+    assert.equal(warnings.length, 1)
+    assert.deepEqual(warnings[0][1], { sqlState: '55P03', reason: 'holder_in_write' })
+    delete db.faults.updateRow
+  }
+})
+
+test('L17b the bounded statements run inside ONE transaction that sets the row-lock wait FIRST; the free-row CASes and the holder CAS stay single statements', async () => {
+  const { lock, scope, clock, db } = setup({ rowLockWaitMs: 1234 })
+  const log = () => db.log.map(([method, args]) => (method === 'setLocalLockTimeout' ? `setLocalLockTimeout:${args.ms}` : method))
+  // free-row CAS (acquire on a free row) and the bump on a free row: no transaction, no bound
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l17b' })
+  const guard = lock.createGuard(grant)
+  await guard.beforeWrite({ index: 0, operation: 'createRecord' })
+  await guard.reassert()
+  assert.deepEqual(log().filter((m) => m === 'transaction' || m.startsWith('setLocalLockTimeout')), [], 'no bounded statement so far')
+  // release: transaction -> setLocalLockTimeout -> updateRow
+  db.log.length = 0
+  await guard.release()
+  assert.deepEqual(log(), ['transaction', 'setLocalLockTimeout:1234', 'updateRow'], 'release is bounded')
+  // takeover: read -> transaction -> bound -> update
+  await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l17b-2' })
+  clock.advance(TTL + GRACE)
+  db.log.length = 0
+  await lock.acquire(scope, { purpose: 'large_apply_chunk', runId: 'swl-l17b-3' })
+  assert.deepEqual(log(), ['selectOne', 'transaction', 'setLocalLockTimeout:1234', 'updateRow'], 'the takeover is bounded')
+  // abandoned clear by the bump
+  clock.advance(TTL + GRACE)
+  db.log.length = 0
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  assert.deepEqual(log(), ['selectOne', 'transaction', 'setLocalLockTimeout:1234', 'updateRow'], 'the bump clear is bounded')
+  // abandoned clear by the observation
+  await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l17b-4' })
+  clock.advance(TTL + GRACE)
+  db.log.length = 0
+  await lock.observeGeneration(scope)
+  assert.deepEqual(log(), ['selectOne', 'transaction', 'setLocalLockTimeout:1234', 'updateRow'], 'the observe clear is bounded')
+  // the default bound is the pinned constant; a db helper without `transaction` is refused at construction
+  const { db: db2, lock: lock2 } = setup()
+  await lock2.createGuard(await lock2.acquire(scope, { purpose: 'small_apply' })).release()
+  assert.ok(db2.log.some(([m, a]) => m === 'setLocalLockTimeout' && a.ms === lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS), 'the default bound is PROJECT_WRITE_ROW_LOCK_WAIT_MS')
+  const { transaction, ...withoutTransaction } = kit.createFakeLockDb()
+  void transaction
+  assert.throws(() => lockModule.createStockPreparationProjectWriteLock({ db: withoutTransaction }), /transaction/)
+})
+
+// ── L18 (review round 6, N6): the heartbeat never queues behind the holder's OWN host write ────────────
+test('L18 a heartbeat tick during a host write (guard.withHostWrite) is skipped — no CAS, the guard not lost; the next tick renews', async () => {
+  const { lock, scope, clock, timers, db } = setup()
+  await lock.withProjectWriteLease(scope, { purpose: 'small_apply', runId: 'swl-l18' }, async (guard) => {
+    await guard.beforeWrite({ index: 0, operation: 'createRecord' })
+    const gate = kit.deferred()
+    const entered = kit.deferred()
+    const write = guard.withHostWrite(async () => { entered.resolve(); await gate.promise; return 'written' })
+    await entered.promise
+    const updatesBefore = db.log.filter(([m]) => m === 'updateRow').length
+    clock.advance(PROJECT_WRITE_LEASE_HEARTBEAT_MS)
+    await timers.fireAll()
+    assert.equal(db.log.filter(([m]) => m === 'updateRow').length, updatesBefore, 'L18: no heartbeat CAS while the host write is in flight')
+    assert.equal(guard.isLost(), false)
+    gate.resolve()
+    assert.equal(await write, 'written', 'the bracket returns the host call\'s value')
+    clock.advance(PROJECT_WRITE_LEASE_HEARTBEAT_MS)
+    await timers.fireAll()
+    assert.equal(db.log.filter(([m]) => m === 'updateRow').length, updatesBefore + 1, 'L18: the next tick renews')
+    // a host call that throws leaves the bracket closed: the following tick renews
+    await assert.rejects(() => guard.withHostWrite(async () => { throw new Error('host refused') }), /host refused/)
+    clock.advance(PROJECT_WRITE_LEASE_HEARTBEAT_MS)
+    await timers.fireAll()
+    assert.equal(db.log.filter(([m]) => m === 'updateRow').length, updatesBefore + 2)
+    assert.equal(guard.isLost(), false)
+  })
+})
+
+// ── L19 (review round 6, N7): the approval bump on an ABSENT row loses its INSERT to an acquire ───────
+test('L19 bump with the absent-row expectation ({ null, 0 }): its INSERT loses to an acquire\'s INSERT (23505) -> re-read -> expansion_stale, nothing bumped', async () => {
+  const { lock, scope, row, db } = setup()
+  const other = kit.createInMemoryProjectWriteLock({ db }).lock
+  const observed = await lock.observeGeneration(scope)
+  assert.equal(observed.present, false)
+  const expectation = lockModule.writeObservationFromGeneration(observed)
+  assert.deepEqual({ ...expectation }, { writeScope: scope, generationToken: null, fencingEpoch: 0 })
+  // Freeze the bump's INSERT; an apply acquires the sheet meanwhile (its INSERT lands first).
+  let raced = false
+  db.pauses.insertOne = async (args) => {
+    if (!raced && args.row && args.row.generation_reason === 'large_approval') {
+      raced = true
+      delete db.pauses.insertOne
+      await other.acquire(scope, { purpose: 'small_apply', runId: 'swl-l19-apply' })
+    }
+  }
+  await assert.rejects(
+    () => lock.bumpGeneration(scope, { reason: 'large_approval', expect: { generationToken: expectation.generationToken, fencingEpoch: expectation.fencingEpoch } }),
+    (error) => error.code === PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED && error.status === 409 && error.details.reason === 'expansion_stale' && error.details.partial === false,
+  )
+  const inserts = db.log.filter(([m, a]) => m === 'insertOne' && a.row.generation_reason === 'large_approval')
+  assert.equal(inserts.length, 1, 'the bump inserted once and did not retry the INSERT')
+  assert.equal(row().generation, 0, 'nothing bumped: the row is the acquire\'s')
+  assert.equal(row().lease_run_id, 'swl-l19-apply')
+  assert.equal(row().generation_reason, null)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-write-lock.test.cjs', tests, { passLine: '✓ stock-preparation-project-write-lock' })

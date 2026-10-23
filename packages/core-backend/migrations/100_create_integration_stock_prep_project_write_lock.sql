@@ -30,7 +30,12 @@
 --
 -- FAIL CLOSED: while this table is missing the plugin refuses (503
 -- STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED) every preview with a valid project number, every small
--- apply, every large approval and every large chunk — run migrations before deploying the plugin.
+-- apply, every large expansion START and PLAN (they observe / re-read the generation), every large
+-- approval and every large chunk — run migrations before deploying the plugin.
+--
+-- ROW LOCKS: a fenced record write holds this row FOR SHARE until its COMMIT; the takeover, the
+-- abandoned-lease clear and the release wait for it with a bounded lock_timeout (set per transaction by
+-- the plugin, below the pool's statement_timeout) and answer "a holder is writing" past that bound.
 
 CREATE TABLE IF NOT EXISTS integration_stock_prep_project_write_lock (
   scope_key TEXT PRIMARY KEY,

@@ -47,6 +47,16 @@
  *       technique) when an expansion observes: the observation's clear WAITS for that transaction
  *       (pg_blocking_pids), the write commits first, the observation records epoch + 1, and the plan's
  *       existing-row read afterwards sees the committed row.
+ *   D15 (review round 6, S1) a holder frozen INSIDE its fenced write transaction (FOR SHARE held, never commits):
+ *       the takeover, the bump's and the observation's abandoned-lease clears each answer 409 WRITE_LOCKED
+ *       `holder_in_write` within the bounded row-lock wait plus slack — never the pool's 30 s statement_timeout,
+ *       never STORE_FAILED — the row is untouched, the host pool client comes back and no backend stays queued;
+ *       release returns within the bound and keeps the lease (warned, reason holder_in_write); after the frozen
+ *       transaction ends the takeover lands.
+ *   D16 (review round 6, S2) a `writeFence` on a surface that implements no fence (deleteRecord, the overview
+ *       port — through plugin-scope, and deleteRecord again through the unscoped `createCoreAPI()` SDK, i.e. the
+ *       host's own refusal) is refused by the real host 501 PLUGIN_WRITE_FENCE_UNSUPPORTED with nothing written
+ *       or deleted; the same delete without a fence runs.
  *   D10 a fence for another plugin, or for any table but the allow-listed lease table, is refused by the real
  *       host before any write.
  *   D11 (Codex review P1-b) the large lane through the real lock and host: an expansion planned and approved,
@@ -96,9 +106,37 @@ const {
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+// Round 6 (S1): cases that need a takeover / observation to KEEP WAITING behind an in-flight write while they
+// inspect the catalog (D9, D12, D14) raise the lock's bounded wait far above those checks' duration; D15 is the
+// case that drives the bound itself (SHORT_ROW_LOCK_WAIT_MS) and asserts the answer within it plus slack.
+const LONG_ROW_LOCK_WAIT_MS = 20000
+const SHORT_ROW_LOCK_WAIT_MS = 1000
+const ROW_LOCK_WAIT_SLACK_MS = 10000
 
+// The scoped db helper over ONE raw pool client. Round 6 (S1): the lock's takeover / abandoned clears /
+// release run inside `db.transaction` (a bounded row-lock wait), so the binding also offers a transaction —
+// BEGIN / COMMIT / ROLLBACK on that same client (production runs it on the host pool's transaction).
 function dbOn(client: PoolClient) {
-  return createDb({ database: { query: (sql: string, params?: unknown[]) => client.query(sql, params) } })
+  return createDb({
+    database: {
+      query: (sql: string, params?: unknown[]) => client.query(sql, params),
+      transaction: async <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        await client.query('BEGIN')
+        try {
+          const result = await callback({
+            query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows,
+            commit: async () => {},
+            rollback: async () => {},
+          })
+          await client.query('COMMIT')
+          return result
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      },
+    },
+  })
 }
 
 async function settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: any }> {
@@ -445,7 +483,22 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           `const { createStockPreparationProjectWriteLock } = require(${JSON.stringify(path.join(PLUGIN_LIB, 'stock-preparation-project-write-lock.cjs'))})`,
           'const [mode, scopeKey] = process.argv.slice(2)',
           'const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })',
-          'const db = createDb({ database: { query: (sql, params) => pool.query(sql, params) } })',
+          '// round 6 (S1): the takeover runs in a bounded transaction, so the binding offers one over a pool client',
+          'async function transaction(callback) {',
+          '  const client = await pool.connect()',
+          '  try {',
+          "    await client.query('BEGIN')",
+          '    const result = await callback({ query: async (sql, params) => (await client.query(sql, params)).rows, commit: async () => {}, rollback: async () => {} })',
+          "    await client.query('COMMIT')",
+          '    return result',
+          '  } catch (error) {',
+          "    await client.query('ROLLBACK').catch(() => {})",
+          '    throw error',
+          '  } finally {',
+          '    client.release()',
+          '  }',
+          '}',
+          'const db = createDb({ database: { query: (sql, params) => pool.query(sql, params), transaction } })',
           'const lock = createStockPreparationProjectWriteLock({ db, ttlMs: 1500, takeoverGraceMs: 1000, heartbeatMs: 300 })',
           ';(async () => {',
           '  try {',
@@ -737,7 +790,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       try {
         const base = Date.now()
         const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
-        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        // Round 6 (S1): this case needs the takeover to WAIT for the in-flight write (its own checks run meanwhile),
+        // so its bounded wait is set well above the checks' duration; D15 is the case that exercises the bound.
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS), rowLockWaitMs: LONG_ROW_LOCK_WAIT_MS })
         await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
         const grantA = await lockA.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d9-a' })
         const guardA = lockA.createGuard(grantA)
@@ -776,7 +831,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       try {
         const base = Date.now()
         const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
-        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        // Round 6 (S1): the takeover must still be WAITING while the catalog checks below run (see D9).
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS), rowLockWaitMs: LONG_ROW_LOCK_WAIT_MS })
         await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
         const guardA = lockA.createGuard(await lockA.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d12-a' }))
         const fenceA = guardA.hostWriteFence()
@@ -922,7 +978,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       try {
         const base = Date.now()
         const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
-        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        // Round 6 (S1): the observation must still be WAITING while the checks below run (see D9); D15 bounds it.
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS), rowLockWaitMs: LONG_ROW_LOCK_WAIT_MS })
         await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
         const grantA = await lockA.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d14-a' })
         const guardA = lockA.createGuard(grantA)
@@ -970,6 +1027,131 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         expect((again as any).error && (again as any).error.code).toBe('PLUGIN_WRITE_FENCE_REJECTED')
       } finally {
         try { await clientX.query('ROLLBACK') } catch { /* not in a transaction */ }
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
+
+    test('D15 (round 6, S1) a holder frozen INSIDE its fenced write transaction: takeover / bump / observe answer 409 WRITE_LOCKED holder_in_write within the bounded wait (never statement_timeout, never STORE_FAILED); release returns and keeps the lease; the pool client comes back; after COMMIT the takeover lands', async () => {
+      const key = scope('D15')
+      const base = Date.now()
+      const warnings: unknown[] = []
+      const logger = { warn: (_message: string, fields: unknown) => { warnings.push(fields) } }
+      const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base), rowLockWaitMs: SHORT_ROW_LOCK_WAIT_MS, logger })
+      // The contender runs over the HOST's database API (the production shape): its bounded transaction takes a
+      // client from the host pool, which must come back as soon as the bound fires.
+      const hostDatabase = createProductionPluginContext().api.database
+      const lockB = createStockPreparationProjectWriteLock({ db: createDb({ database: hostDatabase }), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS), rowLockWaitMs: SHORT_ROW_LOCK_WAIT_MS })
+      const pool = poolManager.get().getInternalPool()
+      const pidX = Number((await clientX.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      const bound = SHORT_ROW_LOCK_WAIT_MS + ROW_LOCK_WAIT_SLACK_MS
+      // The lib call races a timer at the bound: if the timer wins, the lib is still blocked (an unbounded wait would
+      // sit there until statement_timeout), and the case fails at once with that message — never a 30 s hang.
+      const raceAgainstBound = async <T>(label: string, promise: Promise<T>) => {
+        const marker = Symbol('bound')
+        const outcome = await Promise.race([settle(promise), new Promise<typeof marker>((resolve) => setTimeout(() => resolve(marker), bound).unref())])
+        if (outcome === marker) throw new Error(`${label}: still blocked ${bound} ms after it started (the bounded wait did not fire)`)
+        return outcome as Awaited<ReturnType<typeof settle<T>>>
+      }
+      try {
+        await lockA.bumpGeneration(key, { reason: 'small_preview' })
+        const grantA = await lockA.acquire(key, { purpose: 'small_apply', runId: 'swl-d15-a' })
+        const guardA = lockA.createGuard(grantA)
+        const fenceA = guardA.hostWriteFence()
+        // The frozen holder: its host write transaction holds the lease row FOR SHARE (the host's exact statement)
+        // and never commits on its own.
+        await clientX.query('BEGIN')
+        const held = await clientX.query(PLUGIN_WRITE_FENCE_ALLOW_LIST['plugin-integration-core'].sql, [fenceA.scopeKey, fenceA.leaseId, fenceA.fencingEpoch, fenceA.generationToken])
+        expect(held.rows.length).toBe(1)
+        const rowNow = async () => (await q(`SELECT lease_id, fencing_epoch, generation FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [key])).rows[0]
+        const before = await rowNow()
+        const waitingOnOurRow = async () => Number((await q(
+          `SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid <> $1 AND query LIKE '%' || $2 || '%'`,
+          [pidX, PROJECT_WRITE_LOCK_TABLE],
+        )).rows[0].n)
+        for (const [label, run] of [
+          ['takeover', () => lockB.acquire(key, { purpose: 'small_apply', runId: 'swl-d15-b' })],
+          ['bump', () => lockB.bumpGeneration(key, { reason: 'small_preview' })],
+          ['observe', () => lockB.observeGeneration(key)],
+        ] as const) {
+          const idleBefore = pool.idleCount
+          const started = Date.now()
+          const outcome = await raceAgainstBound(label, run())
+          const elapsed = Date.now() - started
+          expect(outcome.ok, `${label}: must be refused`).toBe(false)
+          const error = (outcome as { ok: false; error: any }).error
+          expect(error.code, label).toBe(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+          expect(error.status, label).toBe(409)
+          expect(error.details.reason, label).toBe('holder_in_write')
+          expect(error.details.holderPurpose, label).toBe('small_apply')
+          expect(error.details.retryAfterMs, label).toBe(SHORT_ROW_LOCK_WAIT_MS)
+          expect(elapsed, `${label}: waited for the bound`).toBeGreaterThanOrEqual(SHORT_ROW_LOCK_WAIT_MS / 2)
+          expect(elapsed, `${label}: answered within the bound plus slack, far below statement_timeout`).toBeLessThan(bound)
+          expect(await rowNow(), `${label}: nothing moved`).toEqual(before)
+          // the pool client is back and no backend is left queued on our row
+          await waitUntil(`${label}: the pool client to come back`, async () => pool.idleCount >= idleBefore && pool.waitingCount === 0)
+          await waitUntil(`${label}: no backend queued on the lease row`, async () => (await waitingOnOurRow()) === 0)
+        }
+        // release: best-effort — returns within the bound, warns with the reason, keeps the lease (it expires)
+        const releaseStarted = Date.now()
+        await raceAgainstBound('release', guardA.release())
+        expect(Date.now() - releaseStarted).toBeLessThan(bound)
+        expect((await rowNow()).lease_id, 'release did not land while the write is in flight').toBe(grantA.leaseId)
+        expect(warnings).toEqual([{ sqlState: '55P03', reason: 'holder_in_write' }])
+        // the frozen holder's transaction ends (the operator escape hatch is a process restart, which does the
+        // same): the takeover proceeds.
+        await clientX.query('COMMIT')
+        const granted = await raceAgainstBound('takeover after COMMIT', lockB.acquire(key, { purpose: 'small_apply', runId: 'swl-d15-c' }))
+        expect(granted.ok, JSON.stringify(granted.ok ? null : (granted as any).error.code)).toBe(true)
+        expect((granted as any).value.takeover).toBe(true)
+        expect((await rowNow()).fencing_epoch).toBe(grantA.fencingEpoch + 1)
+        await lockB.createGuard((granted as any).value).release()
+      } finally {
+        try { await clientX.query('ROLLBACK') } catch { /* not in a transaction */ }
+      }
+    }, 90000)
+
+    test('D16 (round 6, S2) a fence on a write surface that does not implement fencing is REFUSED by the real host (501 PLUGIN_WRITE_FENCE_UNSUPPORTED), never dropped: deleteRecord and the overview port; an unfenced delete still deletes', async () => {
+      const sb = await sandboxSheet('d16')
+      try {
+        const lock = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+        const grant = await lock.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d16' })
+        const guard = lock.createGuard(grant)
+        const fence = guard.hostWriteFence()
+        const records = sb.multitable.records as any
+        const created = await records.createRecord({ sheetId: sb.sheetId, data: {}, writeFence: fence })
+        const before = await countRows(sb.sheetId)
+        expect(before).toBeGreaterThanOrEqual(1)
+        const attempts: Array<[string, () => Promise<unknown>]> = [
+          ['records.deleteRecord', () => records.deleteRecord({ sheetId: sb.sheetId, recordId: created.id, writeFence: fence })],
+          ['records.stockPreparationOverview.createRecord', () => records.stockPreparationOverview.createRecord({ projectId: `tenant_swl_d16_${TOKEN}:integration-core`, data: {}, writeFence: fence })],
+          ['records.stockPreparationOverview.patchRecord', () => records.stockPreparationOverview.patchRecord({ projectId: `tenant_swl_d16_${TOKEN}:integration-core`, recordId: created.id, changes: {}, writeFence: fence })],
+          ['records.stockPreparationOverview.deleteRecord', () => records.stockPreparationOverview.deleteRecord({ projectId: `tenant_swl_d16_${TOKEN}:integration-core`, recordId: created.id, writeFence: fence })],
+        ]
+        const total = async () => Number((await q('SELECT COUNT(*)::int AS n FROM meta_records')).rows[0].n)
+        const totalBefore = await total()
+        for (const [surface, attempt] of attempts) {
+          const outcome = await settle(attempt())
+          expect(outcome.ok, surface).toBe(false)
+          expect((outcome as any).error.code, surface).toBe('PLUGIN_WRITE_FENCE_UNSUPPORTED')
+          expect((outcome as any).error.status, surface).toBe(501)
+          expect((outcome as any).error.details, surface).toEqual({ surface })
+        }
+        expect(await countRows(sb.sheetId), 'the fenced delete deleted nothing').toBe(before)
+        expect(await total(), 'no surface wrote or deleted anywhere').toBe(totalBefore)
+        // The HOST's own surface, below plugin-scope (the unscoped SDK `createCoreAPI()` hands out): its
+        // deleteRecord refuses the fence itself, so a caller that bypasses plugin-scope gets no unfenced delete.
+        const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+        const coreSdk = (server as unknown as { createCoreAPI: () => { multitable: { records: any } } }).createCoreAPI().multitable.records
+        const hostLevel = await settle(coreSdk.deleteRecord({ sheetId: sb.sheetId, recordId: created.id, writeFence: fence }))
+        expect(hostLevel.ok).toBe(false)
+        expect((hostLevel as any).error.code).toBe('PLUGIN_WRITE_FENCE_UNSUPPORTED')
+        expect((hostLevel as any).error.details).toEqual({ surface: 'records.deleteRecord' })
+        expect(await countRows(sb.sheetId), 'the host-level fenced delete deleted nothing').toBe(before)
+        // control: the same delete without a fence runs as before
+        await records.deleteRecord({ sheetId: sb.sheetId, recordId: created.id })
+        expect(await countRows(sb.sheetId)).toBe(before - 1)
+        await guard.release()
+      } finally {
         await dropSheet(sb.sheetId)
       }
     }, 60000)

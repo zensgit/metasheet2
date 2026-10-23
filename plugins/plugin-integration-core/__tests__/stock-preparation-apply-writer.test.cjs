@@ -1175,7 +1175,7 @@ const SYN_HOST_FENCE = Object.freeze({
   generationToken: 'gen-syn-swl-writer',
 })
 
-function recordingFence(calls, { throwAt = null, error = null, reassertError = null, refusal = null } = {}) {
+function recordingFence(calls, { throwAt = null, error = null, reassertError = null, refusal = null, withHostWrite = true } = {}) {
   let n = 0
   return {
     async beforeWrite(meta) {
@@ -1194,6 +1194,20 @@ function recordingFence(calls, { throwAt = null, error = null, reassertError = n
       calls.push(['reassert'])
       if (reassertError) throw reassertError
     },
+    // Review round 6 (N6): the host-write bracket, recorded around the host call (W10). `withHostWrite:
+    // false` builds the pre-round-6 guard shape, which the writer must refuse (W7c).
+    ...(withHostWrite
+      ? {
+          async withHostWrite(fn) {
+            calls.push(['hostWrite', 'enter'])
+            try {
+              return await fn()
+            } finally {
+              calls.push(['hostWrite', 'exit'])
+            }
+          },
+        }
+      : {}),
   }
 }
 
@@ -1256,11 +1270,14 @@ async function testWriteFenceRunsImmediatelyBeforeEveryHostWriteOnly() {
   const fences = api.calls.filter(([op]) => op === 'fence')
   assert.ok(writes.length >= 2, 'calibration: the plan writes')
   assert.equal(fences.length, writes.length, 'W2: one fence per host write, none for SKIP / MANUAL_CONFIRM')
-  api.calls.forEach(([op], i) => {
-    if (op === 'createRecord' || op === 'patchRecord') assert.equal(api.calls[i - 1][0], 'fence', `W2: ${op} at ${i} is immediately preceded by the fence`)
+  // Round 6 (N6): the guard's host-write bracket opens between the fence and the host call (W10 pins the
+  // bracket itself); it is the guard's own bookkeeping, so for THIS order check it is transparent.
+  const ordered = api.calls.filter(([op]) => op !== 'hostWrite')
+  ordered.forEach(([op], i) => {
+    if (op === 'createRecord' || op === 'patchRecord') assert.equal(ordered[i - 1][0], 'fence', `W2: ${op} at ${i} is immediately preceded by the fence`)
     if (op === 'fence') {
-      assert.ok(['createRecord', 'patchRecord'].includes(api.calls[i + 1][0]), 'W2: nothing between the fence and the write')
-      assert.equal(api.calls[i + 1][0], api.calls[i][1].operation, 'W2: the fence names the write it precedes')
+      assert.ok(['createRecord', 'patchRecord'].includes(ordered[i + 1][0]), 'W2: nothing between the fence and the write')
+      assert.equal(ordered[i + 1][0], ordered[i][1].operation, 'W2: the fence names the write it precedes')
     }
   })
   const skippedOrHeld = plan.decisions.filter((d) => d.decision === DECISIONS.SKIP || d.decision === DECISIONS.MANUAL_CONFIRM).length
@@ -1378,6 +1395,54 @@ async function testW7AHostWithoutFenceSupportFailsClosedBeforeAnyIo() {
   assert.deepEqual(api2.calls, [])
   assert.equal(typeof __writerExports.assertHostFencedWriteSupported, 'function')
   assert.doesNotThrow(() => __writerExports.assertHostFencedWriteSupported(api.recordsApi, null), 'W7: no fence -> nothing required')
+  // (c) review round 6 (N6): a guard without the host-write bracket is the pre-round-6 shape — refused the
+  // same way, before any IO (its heartbeat could queue behind the holder's own write).
+  const api3 = createRecordsApi({ existing: seededRowsFor(plan) })
+  await assert.rejects(
+    applyStockPreparationPlan({ permission: 'write', plan: buildPlan(), target: target(), recordsApi: fenceCapable(api3.recordsApi).api, writeFence: recordingFence(api3.calls, { withHostWrite: false }) }),
+    (error) => error.status === 501 && error.details.reason === 'host_fence_unsupported',
+  )
+  assert.deepEqual(api3.calls, [], 'W7c: refused before any IO')
+}
+
+// Review round 6 (N6): EVERY fenced host write runs inside the guard's host-write bracket — the guard
+// skips its heartbeat while the host's transaction holds the lease row FOR SHARE. Order in one log:
+// fence (pre-write CAS) -> hostWrite enter -> the host call -> hostWrite exit; never a host call outside.
+async function testW10EveryFencedHostWriteRunsInsideTheGuardsHostWriteBracket() {
+  const plan = buildPlan()
+  const api = createRecordsApi({ existing: seededRowsFor(plan) })
+  const result = await applyStockPreparationPlan({ permission: 'write', plan, target: target(), recordsApi: fenceCapable(api.recordsApi).api, writeFence: recordingFence(api.calls) })
+  assert.notEqual(result.status, 'aborted')
+  const writes = writesOf(api.calls)
+  assert.ok(writes.length >= 2, 'calibration: the plan writes')
+  let depth = 0
+  let bracketed = 0
+  let enters = 0
+  for (const [op, arg] of api.calls) {
+    if (op === 'hostWrite' && arg === 'enter') { depth += 1; enters += 1; assert.equal(depth, 1, 'W10: brackets never nest') ; continue }
+    if (op === 'hostWrite' && arg === 'exit') { depth -= 1; continue }
+    if (op === 'createRecord' || op === 'patchRecord') {
+      assert.equal(depth, 1, `W10: ${op} ran OUTSIDE the host-write bracket`)
+      bracketed += 1
+    }
+    if (op === 'fence') assert.equal(depth, 0, 'W10: the pre-write CAS runs before the bracket opens, never inside it')
+  }
+  assert.equal(depth, 0, 'W10: every bracket closed')
+  assert.equal(bracketed, writes.length, 'W10: every host write was bracketed')
+  assert.equal(enters, writes.length, 'W10: one bracket per host write (reads are not bracketed)')
+  // A refused host write still closes its bracket (the finally), then the guard's translation stops the run.
+  const api2 = createRecordsApi({ existing: seededRowsFor(plan) })
+  const refusing = fenceCapable(api2.recordsApi, { refuseAt: 1 })
+  const stopped = await applyStockPreparationPlan({ permission: 'write', plan: buildPlan(), target: target(), recordsApi: refusing.api, writeFence: recordingFence(api2.calls) })
+  assert.equal(stopped.status, 'aborted')
+  const opens = api2.calls.filter(([op, arg]) => op === 'hostWrite' && arg === 'enter').length
+  const closes = api2.calls.filter(([op, arg]) => op === 'hostWrite' && arg === 'exit').length
+  assert.equal(opens, 1)
+  assert.equal(closes, 1, 'W10: the bracket is closed on a refusal too')
+  // An unfenced run never touches a bracket.
+  const api3 = createRecordsApi({ existing: seededRowsFor(plan) })
+  await applyStockPreparationPlan({ permission: 'write', plan: buildPlan(), target: target(), recordsApi: fenceCapable(api3.recordsApi).api })
+  assert.equal(api3.calls.filter(([op]) => op === 'hostWrite').length, 0)
 }
 
 async function testW8ProductionCallersRequireAFence() {
@@ -1415,6 +1480,7 @@ async function main() {
   await testW7AHostWithoutFenceSupportFailsClosedBeforeAnyIo()
   await testW8ProductionCallersRequireAFence()
   await testW9TheFinalReassertTurnsALateLossIntoAStop()
+  await testW10EveryFencedHostWriteRunsInsideTheGuardsHostWriteBracket()
   await testWriteFenceAbsentOrPassingIsByteIdentical()
   await testWriteFenceRunsImmediatelyBeforeEveryHostWriteOnly()
   await testWriteFenceThrowStopsTheLoopBeforeTheNextWrite()
