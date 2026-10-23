@@ -27,6 +27,12 @@ vi.mock('../../src/routes/data-sources', () => ({
 import { isWhitelisted } from '../../src/auth/jwt-middleware'
 import plmEmbedRouter from '../../src/routes/plm-embed'
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
+import {
+  MANAGED_SESSION_COOKIE,
+  setManagedBindingReaderForTests,
+  type ManagedBindingRow,
+  type ManagedSourceClass,
+} from '../../src/services/plm-managed-companion'
 
 const KID = 'embed-1'
 const AUD = 'metasheet2.embed'
@@ -87,6 +93,22 @@ function buildApp() {
 
 const URL = '/api/plm-embed/bom-review/context'
 
+// Proven unbound without a database. Missing DATABASE_URL is unavailable in the product,
+// so these route tests pin the reader instead of treating a missing URL as legacy.
+const UNBOUND: ManagedSourceClass = { kind: 'unbound' }
+const BOUND_ROW = {
+  native_auth_user_id: 'native-subject',
+  native_tenant_id: 'native-tenant',
+  native_org_id: 'native-org',
+  root_part_id: 'P1',
+  frozen_root_part_id: 'P1',
+  client_origin: ORIGIN,
+  frozen_origin: ORIGIN,
+  meta_user_id: 'meta-user',
+  meta_tenant_id: 'meta-tenant',
+  meta_org_id: 'meta-org',
+} as ManagedBindingRow
+
 describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
   const pinned = usePinnedServer()
 
@@ -94,6 +116,8 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     dsMocks.getDataSource.mockReset()
     jtiMocks.consume.mockReset()
     jtiMocks.consume.mockResolvedValue(true) // default: first use; replay/unavailable overridden per test
+    setManagedBindingReaderForTests(async () => UNBOUND)
+    delete process.env.PLM_MANAGED_COMPANION_ENABLED
     process.env.YUANTUS_EMBED_PUBLIC_KEY = PUB_B64
     process.env.YUANTUS_EMBED_KEY_ID = KID
     process.env.PLM_EMBED_AUDIENCE = AUD
@@ -102,6 +126,8 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     pinned.setApp(buildApp())
   })
   afterEach(() => {
+    setManagedBindingReaderForTests(null)
+    delete process.env.PLM_MANAGED_COMPANION_ENABLED
     for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
   })
 
@@ -387,5 +413,113 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     expect(res.status).toBe(401)
     expect(jtiMocks.consume).not.toHaveBeenCalled()
     expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  // Managed success, native-vs-Meta identity, and real cookie verification are PostgreSQL tests.
+  // These cases stop before jwtAuthMiddleware, or they reach it only with a cookie that fails verify.
+
+  it.each([undefined, '', 'false', 'TRUE', '1', 'true'])(
+    'proven unbound token-only read stays on the adapter when the managed flag is %s',
+    async (flag) => {
+      if (flag === undefined) delete process.env.PLM_MANAGED_COMPANION_ENABLED
+      else process.env.PLM_MANAGED_COMPANION_ENABLED = flag
+      const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+      dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+      const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ jti: `legacy-${String(flag)}` }))
+      expect(res.status).toBe(200)
+      expect(res.body.data.context).toEqual(CONTEXT)
+      expect(res.body.data.part_id).toBe('P1')
+      expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+    },
+  )
+
+  it('proven unbound refuses Authorization and a managed cookie before the adapter and before jti consume', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+    const bearer = await request(pinned.url()).get(URL)
+      .set('X-PLM-Embed-Token', mint({ jti: 'unbound-bearer' }))
+      .set('Authorization', 'Bearer same-user')
+    expect(bearer.status).toBe(403)
+    expect(bearer.body.error.code).toBe('PLM_MANAGED_BEARER_REFUSED')
+    const cookie = await request(pinned.url()).get(URL)
+      .set('X-PLM-Embed-Token', mint({ jti: 'unbound-cookie' }))
+      .set('Cookie', `${MANAGED_SESSION_COOKIE}=present`)
+    expect(cookie.status).toBe(403)
+    expect(cookie.body.error.code).toBe('PLM_MANAGED_READ_REFUSED')
+    const mixed = await request(pinned.url()).get(URL)
+      .set('X-PLM-Embed-Token', mint({ jti: 'unbound-mixed' }))
+      .set('Authorization', 'Bearer same-user')
+      .set('Cookie', `${MANAGED_SESSION_COOKIE}=present`)
+    expect(mixed.status).toBe(403)
+    expect(mixed.body.error.code).toBe('PLM_MANAGED_BEARER_REFUSED')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+    expect(dsMocks.getDataSource).not.toHaveBeenCalled()
+  })
+
+  it('schema-missing and unavailable stay closed and never reach the adapter', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+    setManagedBindingReaderForTests(async () => ({ kind: 'schema-missing' }))
+    const missing = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ jti: 'schema' }))
+    expect(missing.status).toBe(403)
+    expect(missing.body.error.code).toBe('PLM_MANAGED_SCHEMA_MISSING')
+    setManagedBindingReaderForTests(async () => ({ kind: 'unavailable' }))
+    const unavailable = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ jti: 'unavailable' }))
+    expect(unavailable.status).toBe(403)
+    expect(unavailable.body.error.code).toBe('PLM_MANAGED_BINDING_UNAVAILABLE')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+    expect(dsMocks.getDataSource).not.toHaveBeenCalled()
+  })
+
+  it.each([undefined, '', 'false', 'TRUE', '1'])(
+    'a bound source with flag %s refuses before middleware and does not call the adapter',
+    async (flag) => {
+      if (flag === undefined) delete process.env.PLM_MANAGED_COMPANION_ENABLED
+      else process.env.PLM_MANAGED_COMPANION_ENABLED = flag
+      setManagedBindingReaderForTests(async () => ({ kind: 'bound', row: BOUND_ROW }))
+      const res = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ jti: `bound-flag-${String(flag)}` }))
+        .set('Cookie', `${MANAGED_SESSION_COOKIE}=not-a-jwt`)
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe('PLM_MANAGED_DISABLED')
+      expect(jtiMocks.consume).not.toHaveBeenCalled()
+      expect(dsMocks.getDataSource).not.toHaveBeenCalled()
+    },
+  )
+
+  it('a bound source refuses token-only, ordinary bearer, and mixed credentials before jti consume', async () => {
+    setManagedBindingReaderForTests(async () => ({ kind: 'bound', row: BOUND_ROW }))
+    process.env.PLM_MANAGED_COMPANION_ENABLED = 'true'
+    const tokenOnly = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ jti: 'bound-token-only' }))
+    expect(tokenOnly.status).toBe(403)
+    expect(tokenOnly.body.error.code).toBe('PLM_MANAGED_SESSION_REQUIRED')
+    const bearer = await request(pinned.url()).get(URL)
+      .set('X-PLM-Embed-Token', mint({ jti: 'bound-bearer' }))
+      .set('Authorization', 'Bearer same-user')
+    expect(bearer.status).toBe(403)
+    expect(bearer.body.error.code).toBe('PLM_MANAGED_BEARER_REFUSED')
+    const mixed = await request(pinned.url()).get(URL)
+      .set('X-PLM-Embed-Token', mint({ jti: 'bound-mixed' }))
+      .set('Authorization', 'Bearer same-user')
+      .set('Cookie', `${MANAGED_SESSION_COOKIE}=not-a-jwt`)
+    expect(mixed.status).toBe(403)
+    expect(mixed.body.error.code).toBe('PLM_MANAGED_BEARER_REFUSED')
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+    expect(dsMocks.getDataSource).not.toHaveBeenCalled()
+  })
+
+  it('a bound source with the flag on and an unverified cookie is 401 from jwtAuthMiddleware and does not consume jti', async () => {
+    setManagedBindingReaderForTests(async () => ({ kind: 'bound', row: BOUND_ROW }))
+    process.env.PLM_MANAGED_COMPANION_ENABLED = 'true'
+    const res = await request(pinned.url()).get(URL)
+      .set('X-PLM-Embed-Token', mint({ jti: 'bound-garbage-cookie' }))
+      .set('Cookie', `${MANAGED_SESSION_COOKIE}=not-a-jwt`)
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('UNAUTHORIZED')
+    expect(res.headers.location).toBeUndefined()
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+    expect(dsMocks.getDataSource).not.toHaveBeenCalled()
   })
 })
