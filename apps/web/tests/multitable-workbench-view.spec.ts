@@ -2308,6 +2308,65 @@ describe('MultitableWorkbench view wiring', () => {
       })
     }
 
+    // Review round 1, fix 3: switching from an OPEN sheet to a CLOSED one. Until the new sheet's /context lands the
+    // capabilities (and the closure marker) are still the open sheet's — the stale window. No export may start in it.
+    it('switch open → closed: in the stale window no export starts; once the closed context lands the reason shows', async () => {
+      workbenchMock.capabilitiesSheetId = ref('sheet_orders')
+      workbenchMock.sheets.value = [
+        { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null },
+        { id: 'sheet_pilot', baseId: 'base_ops', name: 'Pilot', description: null },
+      ]
+      await withDownloadSpies(async ({ createObjectURL, downloads }) => {
+        mountWorkbench()
+        await flushUi()
+        const toolbar = () => container!.querySelector<HTMLElement>('[data-toolbar-export-closed-reason]')!
+        expect(toolbar().getAttribute('data-toolbar-can-export')).toBe('true') // the open sheet, own capabilities
+
+        workbenchMock.selectSheet('sheet_pilot') // the switch; capabilities are still sheet_orders'
+        await flushUi()
+        expect(toolbar().getAttribute('data-toolbar-can-export')).toBe('false')
+        expect(toolbar().getAttribute('data-toolbar-export-closed-reason')).toBe('')
+        for (const selector of ['[data-export-csv="true"]', '[data-export-xlsx="true"]']) {
+          container!.querySelector<HTMLButtonElement>(selector)!.click()
+          await flushUi()
+          expect(document.body.querySelector('.meta-export__btn--primary'), selector).toBeNull()
+        }
+        expect(workbenchMock.client.exportSheet).not.toHaveBeenCalled()
+        expect(createObjectURL).not.toHaveBeenCalled()
+        expect(downloads).toEqual([])
+
+        // The closed sheet's context lands: its capabilities, now owned by the active sheet.
+        closeActiveSheet()
+        workbenchMock.capabilitiesSheetId.value = 'sheet_pilot'
+        await flushUi()
+        expect(toolbar().getAttribute('data-toolbar-export-closed-reason')).toBe(CLOSED_REASON_EN)
+        expect(toolbar().getAttribute('data-toolbar-can-export')).toBe('false')
+        container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+        await flushUi()
+        expect(document.body.querySelector('.meta-export__btn--primary')).toBeNull()
+        expect(showErrorSpy).toHaveBeenCalledWith(CLOSED_REASON_EN)
+      })
+    })
+
+    it('switch open → open: export works again once the new sheet’s own context lands (ordinary sheets unaffected after load)', async () => {
+      workbenchMock.capabilitiesSheetId = ref('sheet_orders')
+      workbenchMock.sheets.value = [
+        { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null },
+        { id: 'sheet_other', baseId: 'base_ops', name: 'Other', description: null },
+      ]
+      mountWorkbench()
+      await flushUi()
+      workbenchMock.selectSheet('sheet_other')
+      await flushUi()
+      workbenchMock.capabilitiesSheetId.value = 'sheet_other'
+      await flushUi()
+      const toolbar = container!.querySelector<HTMLElement>('[data-toolbar-export-closed-reason]')!
+      expect(toolbar.getAttribute('data-toolbar-can-export')).toBe('true')
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      expect(document.body.querySelector('.meta-export__btn--primary')).not.toBeNull()
+    })
+
     it('control: the same selected-rows csv export on an ordinary sheet still downloads', async () => {
       await withDownloadSpies(async ({ downloads }) => {
         mountWorkbench()

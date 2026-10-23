@@ -250,7 +250,7 @@
       :filter-groups="grid.filterGroups.value"
       :filter-conjunction="grid.filterConjunction.value"
       :sort-filter-dirty="grid.sortFilterDirty.value"
-      :can-create-record="canCreateRecordByHand" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :can-create-record="canCreateRecordByHand" :can-export="canExportNow" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
       :export-closed-reason="gridExportClosedReason"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
@@ -1084,6 +1084,16 @@ const gridExportClosed = computed(() => {
   return marker !== null && marker !== undefined && marker !== false
 })
 const gridExportClosedReason = computed(() => (gridExportClosed.value ? wb('notice.gridExportClosed', isZh.value) : null))
+// Review round 1, fix 3: `selectSheet` switches the active sheet at once, but the capabilities (and so the closure
+// marker) stay the PREVIOUS sheet's until its `/context` lands. In that window no generic export may start — a
+// switch from an open sheet to a closed one would otherwise pass the gate with the open sheet's capabilities. Fail
+// closed: the export entries are off until the capabilities belong to the active sheet (the same state a first
+// load is in before its context arrives). Only a string id can be stale: before any context it is null.
+const capabilitiesStale = computed(() => {
+  const owner = (workbench as { capabilitiesSheetId?: { value: string | null } }).capabilitiesSheetId?.value
+  return typeof owner === 'string' && owner !== workbench.activeSheetId.value
+})
+const canExportNow = computed(() => caps.canExport.value && !capabilitiesStale.value)
 const featureFlags = useFeatureFlags()
 // The workflow designer lives at a route gated by the global `workflow` product
 // feature (appRoutes.ts requiredFeature). On deployments without that feature the
@@ -5315,6 +5325,8 @@ async function onExportXlsx() { openExportDialog('xlsx') }
 // `gridExportClosure` marker. Refusing toasts the reason instead of failing silently. On an ordinary sheet it is
 // always true, so nothing there changes.
 function canRunGridExport(): boolean {
+  // Capabilities of another sheet (mid-switch): nothing is known about the active sheet yet — refuse quietly.
+  if (capabilitiesStale.value) return false
   if (!gridExportClosed.value) return true
   showError(wb('notice.gridExportClosed', isZh.value))
   return false
