@@ -50,12 +50,11 @@
 <script setup lang="ts">
 // PLM-COLLAB P3-D2 (frontend): the token-bound BOM-review embed page.
 //
-// Handshake (LISTEN-only): this page's OWN inbound handshake never posts to the parent. NOTE (owner
-// review P3 — sync with the discussion protocol): the discussion panel this page MOUNTS
-// (PlmEmbedDiscussionPanel) DOES post `plm-embed:token-request` to the parent via the child token
-// protocol (plmEmbedWriteToken.ts's write + read clients) for on-demand write/read tokens — but ALWAYS
-// with targetOrigin === the pinned parentOrigin, NEVER '*'. So "no outbound postMessage" holds for the
-// handshake below, not for the whole page; the pinned-origin (no-'*') invariant covers both paths.
+// Handshake (LISTEN-only for the initial token): this page's inbound handshake never posts to the
+// parent. A later authenticated successor (new session id, higher continuous generation, same
+// epoch and frozen user, tenant, and revision) requests one fresh `bom-read` embed token
+// through the existing child token client. The discussion panel this page mounts posts its own
+// discussion purposes. Every outbound post uses the pinned parent origin, never '*'.
 //   1. fetch /api/plm-embed/config for the parent-origin allowlist -- the SINGLE source of truth,
 //      never a URL parameter, and never containing '*'.
 //   2. wait for the parent to postMessage the PLM-minted embed token. Accept it ONLY from an origin
@@ -67,8 +66,22 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   getPlmEmbedBomContext,
   getPlmEmbedConfig,
+  getPlmEmbedManagedBomContext,
   type PlmEmbedBomResult,
 } from '../services/integration/plmEmbed'
+import {
+  createPlmEmbedBomReadTokenClient,
+  type PlmEmbedBomReadTokenClient,
+} from '../services/integration/plmEmbedWriteToken'
+import {
+  onAuthPrincipalChange,
+  readAuthSessionSignature,
+  readManagedDescriptor,
+  readManagedEpoch,
+  readManagedProbeMarker,
+  readStoredToken,
+} from '../composables/authPrincipal'
+import { useAuth } from '../composables/useAuth'
 import PlmBomReviewTable from '../components/plm/PlmBomReviewTable.vue'
 import PlmEmbedDiscussionPanel from '../components/plm/PlmEmbedDiscussionPanel.vue'
 import PlmEmbedVisualPreviewPanel from '../components/plm/PlmEmbedVisualPreviewPanel.vue'
@@ -107,6 +120,112 @@ const loading = ref(false)
 const result = ref<PlmEmbedBomResult | null>(null)
 // messages that arrive before the allowlist is known are buffered, then re-validated in order
 let pendingMessages: MessageEvent[] = []
+let bomReadClient: PlmEmbedBomReadTokenClient | null = null
+let pinnedSource: MessageEventSource | null = null
+let loadSerial = 0
+let disposed = false
+let baseline: ContinuityObserve | null = null
+let loadStart: ContinuityObserve | null = null
+let frozenPartId: string | null = null
+
+interface ContinuityObserve {
+  epoch: number
+  signature: string
+  userId: string
+  tenantId: string
+  sessionId: string
+  revision: number
+  mode: 'continuous' | 'other'
+  generation: number | null
+  parentOrigin: string | null
+  tokenAbsent: boolean
+}
+
+function observeContinuity(): ContinuityObserve {
+  const descriptor = readManagedDescriptor()
+  const generation = descriptor?.credentialGeneration
+  const continuous = descriptor?.continuityMode === 'continuous'
+    && typeof generation === 'number'
+  return {
+    epoch: readManagedEpoch(),
+    signature: readAuthSessionSignature(),
+    userId: descriptor?.userId ?? '',
+    tenantId: descriptor?.tenantId ?? '',
+    sessionId: descriptor?.sessionId ?? '',
+    revision: descriptor?.revision ?? 0,
+    mode: continuous ? 'continuous' : 'other',
+    generation: continuous ? generation : null,
+    parentOrigin: parentOrigin.value,
+    tokenAbsent: readStoredToken() === null,
+  }
+}
+
+function authorizedSuccessor(start: ContinuityObserve, next: ContinuityObserve): boolean {
+  // Renewal installs successorId as a new descriptor.sessionId. The session signature includes
+  // that id. Epoch stays put; resetSessionBootstrap is what bumps it. User, tenant, and link
+  // revision stay frozen. A same-session generation bump is not this successor.
+  return start.mode === 'continuous'
+    && next.mode === 'continuous'
+    && start.tokenAbsent
+    && next.tokenAbsent
+    && start.epoch === next.epoch
+    && start.userId !== ''
+    && start.userId === next.userId
+    && start.tenantId === next.tenantId
+    && start.revision === next.revision
+    && start.sessionId !== ''
+    && next.sessionId !== ''
+    && start.sessionId !== next.sessionId
+    && start.signature !== 'invalid'
+    && next.signature !== 'invalid'
+    && start.signature !== next.signature
+    && start.generation !== null
+    && next.generation !== null
+    && next.generation > start.generation
+    && start.parentOrigin !== null
+    && start.parentOrigin === next.parentOrigin
+    && window.parent === pinnedSource
+}
+
+function sameContinuityIdentity(left: ContinuityObserve, right: ContinuityObserve): boolean {
+  return left.epoch === right.epoch
+    && left.signature === right.signature
+    && left.userId === right.userId
+    && left.tenantId === right.tenantId
+    && left.sessionId === right.sessionId
+    && left.revision === right.revision
+    && left.parentOrigin === right.parentOrigin
+    && window.parent === pinnedSource
+}
+
+function partIdOf(value: PlmEmbedBomResult): string | null {
+  if (!value.available) return null
+  if (value.partId) return value.partId
+  return value.context?.part.part_id || null
+}
+
+function clearRows(): void {
+  loadSerial += 1
+  loadStart = null
+  loading.value = false
+  frozenPartId = null
+  result.value = { available: false, reason: 'unavailable' }
+}
+
+function refuseRead(serial: number): void {
+  if (disposed || serial !== loadSerial) return
+  loadStart = null
+  loading.value = false
+  result.value = { available: false, reason: 'unavailable' }
+}
+
+function replaceBomReadClient(): PlmEmbedBomReadTokenClient | null {
+  bomReadClient?.dispose()
+  bomReadClient = parentOrigin.value
+    ? createPlmEmbedBomReadTokenClient(() => parentOrigin.value)
+    : null
+  return bomReadClient
+}
 
 const context = computed(() => (result.value && result.value.available ? result.value.context : null))
 
@@ -158,17 +277,124 @@ function isOriginAllowed(origin: string): boolean {
   return allowedOrigins.value.length > 0 && allowedOrigins.value.includes(origin)
 }
 
+function acceptBomResult(serial: number, started: ContinuityObserve, fetched: PlmEmbedBomResult): void {
+  if (disposed || serial !== loadSerial) return
+  if (!sameContinuityIdentity(started, observeContinuity())) {
+    clearRows()
+    baseline = observeContinuity()
+    return
+  }
+  const partId = partIdOf(fetched)
+  if ((frozenPartId && partId && partId !== frozenPartId) || !fetched.available) {
+    refuseRead(serial)
+    baseline = observeContinuity()
+    return
+  }
+  result.value = fetched
+  if (partId) frozenPartId = partId
+  baseline = observeContinuity()
+  loadStart = null
+}
+
 async function consumeToken(origin: string, token: string): Promise<void> {
   parentOrigin.value = origin // pin the trusted parent origin
+  pinnedSource = window.parent
   tokenReceived.value = true
+  replaceBomReadClient()
+  const serial = ++loadSerial
+  const started = observeContinuity()
+  loadStart = started
+  loading.value = true
+  const managed = readManagedDescriptor() !== null
+  try {
+    const fetched = managed
+      ? await getPlmEmbedManagedBomContext(token)
+      : await getPlmEmbedBomContext(token)
+    acceptBomResult(serial, started, fetched)
+  } catch {
+    if (!disposed && serial === loadSerial) {
+      refuseRead(serial)
+      baseline = observeContinuity()
+    }
+  } finally {
+    if (!disposed && serial === loadSerial) loading.value = false
+  }
+}
+
+async function refreshBomForGeneration(expected: ContinuityObserve): Promise<void> {
+  const started = observeContinuity()
+  if (
+    !sameContinuityIdentity(expected, started)
+    || started.mode !== 'continuous'
+    || started.generation !== expected.generation
+    || started.sessionId !== expected.sessionId
+    || started.signature !== expected.signature
+    || window.parent !== pinnedSource
+  ) {
+    return
+  }
+  const client = replaceBomReadClient()
+  if (!client) return
+  const serial = ++loadSerial
+  loadStart = started
   loading.value = true
   try {
-    result.value = await getPlmEmbedBomContext(token)
+    const fresh = await client.requestBomReadToken()
+    if (disposed || serial !== loadSerial) return
+    // The stamp is this successor, not "any later session". A newer successor or an
+    // identity switch fails this equality and cannot reuse the body.
+    if (!sameContinuityIdentity(started, observeContinuity())) {
+      clearRows()
+      baseline = observeContinuity()
+      return
+    }
+    const current = readManagedDescriptor()
+    if (
+      !current
+      || current.continuityMode !== 'continuous'
+      || current.credentialGeneration !== expected.generation
+      || current.sessionId !== expected.sessionId
+      || current.userId !== expected.userId
+      || current.tenantId !== expected.tenantId
+      || current.revision !== expected.revision
+    ) {
+      clearRows()
+      baseline = observeContinuity()
+      return
+    }
+    const fetched = await getPlmEmbedManagedBomContext(fresh)
+    acceptBomResult(serial, started, fetched)
   } catch {
-    result.value = { available: false, reason: 'unavailable' }
+    if (!disposed && serial === loadSerial) {
+      refuseRead(serial)
+      baseline = observeContinuity()
+    }
   } finally {
-    loading.value = false
+    if (!disposed && serial === loadSerial) loading.value = false
   }
+}
+
+function onContinuitySignal(): void {
+  if (disposed || !tokenReceived.value || !pinnedSource) return
+  const next = observeContinuity()
+  const start = baseline ?? loadStart
+  if (!start) {
+    baseline = next
+    return
+  }
+  if (authorizedSuccessor(start, next)) {
+    baseline = next
+    void refreshBomForGeneration(next)
+    return
+  }
+  const leftContinuous = start.mode === 'continuous' && next.mode !== 'continuous'
+  const generationMoved = start.generation !== next.generation
+  if (!sameContinuityIdentity(start, next) || leftContinuous || generationMoved) {
+    clearRows()
+    baseline = observeContinuity()
+    return
+  }
+  baseline = next
 }
 
 function processMessage(event: MessageEvent): void {
@@ -194,9 +420,20 @@ function onMessage(event: MessageEvent): void {
   processMessage(event)
 }
 
+const unsubscribeContinuity = onAuthPrincipalChange(onContinuitySignal)
+
 onMounted(async () => {
   // Attach the listener FIRST so a token posted while /config is in flight is not missed.
   window.addEventListener('message', onMessage)
+  // One existing session read when this document already holds the managed probe.
+  // Renewal stays inside bootstrap; this view does not start its own timer.
+  if (readManagedProbeMarker() || readManagedDescriptor()) {
+    try {
+      await useAuth().bootstrapSession()
+    } catch {
+      // The handshake still fail-closes. A missed current session is not a BOM success.
+    }
+  }
   const config = await getPlmEmbedConfig()
   allowedOrigins.value = config.allowedOrigins
   visualPreviewEnabled.value = config.visualPreviewEnabled
@@ -207,7 +444,12 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  loadSerial += 1
   window.removeEventListener('message', onMessage)
+  bomReadClient?.dispose()
+  bomReadClient = null
+  unsubscribeContinuity()
 })
 </script>
 
