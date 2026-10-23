@@ -16,6 +16,7 @@ import {
   PlmManagedCompanionError,
   continuousRenewalDue,
   continuousRenewalEligible,
+  MANAGED_RENEWAL_LEAD_MS,
   postManagedLogoutUnlocked,
   renewManagedContinuousSessionUnlocked,
   type ManagedRenewalOutcome,
@@ -35,6 +36,7 @@ import {
   installManagedDescriptor,
   isManagedEntryActive,
   notifyAuthPrincipalChange,
+  onAuthPrincipalChange,
   parseJwtPayload,
   readAuthRequestStamp,
   readAuthSessionSignature,
@@ -628,6 +630,9 @@ export function useAuth() {
         if (!installed || !userId || installed.userId !== userId) {
           clearManagedDescriptor()
           sessionCache = { ok: false, status: 401, payload }
+          // HTTP 200 with no usable managed principal already dropped the row. The iframe
+          // clears only on this signal. A silent clear lets rearm cancel the expiry wake.
+          notifyAuthPrincipalChange()
           return sessionCache
         }
         if (readManagedEpoch() !== startedEpoch || readStoredToken() !== startedToken) {
@@ -910,6 +915,7 @@ const PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS = 60_000
 let permissionSnapshotRefreshBound = false
 let lastPermissionSnapshotRefreshAt = Number.NEGATIVE_INFINITY
 let permissionSnapshotRefreshInFlight = false
+let continuousRenewalTimer: ReturnType<typeof setTimeout> | null = null
 
 function readUserSnapshotEntries(): Record<string, string | null> {
   const entries: Record<string, string | null> = {}
@@ -990,12 +996,155 @@ async function refreshUserSnapshotOnFocus(): Promise<void> {
   }
 }
 
+function clearContinuousRenewalTimer(): void {
+  if (continuousRenewalTimer !== null) {
+    clearTimeout(continuousRenewalTimer)
+    continuousRenewalTimer = null
+  }
+}
+
+function scheduleContinuousRenewal(delayMs: number, fire: () => void): void {
+  clearContinuousRenewalTimer()
+  continuousRenewalTimer = setTimeout(() => {
+    continuousRenewalTimer = null
+    fire()
+  }, Math.max(0, delayMs))
+}
+
+function documentIsHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+}
+
+interface ContinuousRenewalStamp {
+  epoch: number
+  signature: string
+  token: string | null
+  sessionId: string
+  expiresAt: string
+  generation: number | null
+}
+
+function stampStillOwnsRow(stamp: ContinuousRenewalStamp): boolean {
+  if (readManagedEpoch() !== stamp.epoch) return false
+  if (readStoredToken() !== stamp.token) return false
+  const current = readManagedDescriptor()
+  // A lazy read already dropped this expired row. Epoch and token still match, so publish.
+  if (!current) return Date.now() >= Date.parse(stamp.expiresAt)
+  // A still-present row must be this deadline. Signature omits generation and expiry, so a
+  // same-session replacement with a later deadline must not be cleared by the old stamp.
+  return current.sessionId === stamp.sessionId
+    && current.expiresAt === stamp.expiresAt
+    && (current.credentialGeneration ?? null) === stamp.generation
+    && readAuthSessionSignature() === stamp.signature
+}
+
+/**
+ * Known absolute expiry has already dropped the in-memory row inside the descriptor read.
+ * The original iframe clears visible rows only from onAuthPrincipalChange. A signature read
+ * does not notify, and the bootstrap fetch may stay pending, so publish the existing signal
+ * here. This is not a renewal attempt and does not move the attempt throttle.
+ */
+function publishKnownAbsoluteExpiry(stamp: ContinuousRenewalStamp, expiresAtMs: number): boolean {
+  if (Date.now() < expiresAtMs || !stampStillOwnsRow(stamp)) return false
+  notifyAuthPrincipalChange()
+  return true
+}
+
+function rearmUnlessSameIneligibleRow(stamp: ContinuousRenewalStamp): void {
+  // Network completion can run after expiry and before the expiry timer task. Arm clears
+  // that timer before it reads the descriptor, and the lazy getter may already have dropped
+  // the row without a signal. Publish the known deadline first. Before expiry this is a no-op.
+  const expiresAtMs = Date.parse(stamp.expiresAt)
+  if (Number.isFinite(expiresAtMs)) publishKnownAbsoluteExpiry(stamp, expiresAtMs)
+  const after = readManagedDescriptor()
+  if (
+    after
+    && after.sessionId === stamp.sessionId
+    && after.expiresAt === stamp.expiresAt
+    && (after.credentialGeneration ?? null) === stamp.generation
+    && !continuousRenewalEligible(after)
+  ) {
+    return
+  }
+  armContinuousRenewalSchedule()
+}
+
+function watchContinuousRenewal(stamp: ContinuousRenewalStamp, expiresAtMs: number): void {
+  if (readManagedEpoch() !== stamp.epoch || readStoredToken() !== stamp.token) return
+  if (Date.now() >= expiresAtMs) {
+    if (!publishKnownAbsoluteExpiry(stamp, expiresAtMs)) return
+    // Hidden and in-flight documents still drop the visible row. They do not start
+    // another attempt. An attempt already in flight keeps the existing recovery.
+    if (documentIsHidden() || permissionSnapshotRefreshInFlight) return
+    void refreshUserSnapshotOnFocus().finally(() => {
+      rearmUnlessSameIneligibleRow(stamp)
+    })
+    return
+  }
+  if (!stampStillOwnsRow(stamp)) return
+  if (documentIsHidden() || permissionSnapshotRefreshInFlight) {
+    const wait = Math.min(PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS, expiresAtMs - Date.now())
+    scheduleContinuousRenewal(wait, () => {
+      watchContinuousRenewal(stamp, expiresAtMs)
+    })
+    return
+  }
+  void refreshUserSnapshotOnFocus().finally(() => {
+    rearmUnlessSameIneligibleRow(stamp)
+  })
+  // The attempt timer must not be the only clock. A hung bootstrap fetch never reaches
+  // its finally, so keep one wake that can still publish absolute expiry.
+  if (permissionSnapshotRefreshInFlight && Date.now() < expiresAtMs) {
+    const wait = Math.min(PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS, expiresAtMs - Date.now())
+    scheduleContinuousRenewal(wait, () => {
+      watchContinuousRenewal(stamp, expiresAtMs)
+    })
+  }
+}
+
+/**
+ * A document that stays focused never receives the focus listener, so a continuous session
+ * would miss the existing lead-window bootstrap. This arms one timer from the authenticated
+ * descriptor expiry. The timer calls the same refresh as focus. It does not renew by itself.
+ * Ordinary, snapshot, bearer, and cap sessions do not get a renewal timer. Generation above the
+ * existing eligible range waits until absolute expiry and then uses bootstrap's refusal path.
+ * Absolute expiry publishes the existing principal signal even when that refresh is still
+ * pending or the document is hidden.
+ */
+function armContinuousRenewalSchedule(): void {
+  clearContinuousRenewalTimer()
+  if (typeof window === 'undefined' || readStoredToken() !== null) return
+  const descriptor = readManagedDescriptor()
+  if (!descriptor || descriptor.continuityMode !== 'continuous') return
+  const expiresAtMs = Date.parse(descriptor.expiresAt)
+  if (!Number.isFinite(expiresAtMs)) return
+  const eligible = continuousRenewalEligible(descriptor)
+  const dueAt = expiresAtMs - MANAGED_RENEWAL_LEAD_MS
+  const throttleReadyAt = lastPermissionSnapshotRefreshAt + PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS
+  // The 60s gap remains an attempt throttle inside refreshUserSnapshotOnFocus. The wake
+  // itself cannot be later than absolute expiry, or a hot throttle leaves the mounted row up.
+  const attemptAt = eligible ? Math.max(dueAt, throttleReadyAt) : expiresAtMs
+  const target = Math.min(attemptAt, expiresAtMs)
+  const stamp: ContinuousRenewalStamp = {
+    epoch: readManagedEpoch(),
+    signature: readAuthSessionSignature(),
+    token: readStoredToken(),
+    sessionId: descriptor.sessionId,
+    expiresAt: descriptor.expiresAt,
+    generation: descriptor.credentialGeneration ?? null,
+  }
+  scheduleContinuousRenewal(target - Date.now(), () => {
+    watchContinuousRenewal(stamp, expiresAtMs)
+  })
+}
+
 /**
  * Bind the focus refresh once per document. Module-level flag, same idiom as
  * `bindApprovalAccessRefresh` in `src/approvals/permissions.ts`: calling this from several places
  * (or from a component that mounts many times) still installs exactly one listener and therefore
  * still produces at most one refresh per interval. Called once from the app entry point; there is
  * deliberately no uninstall, because the listener lives as long as the document does.
+ * The continuous timer is the same document lifetime: one handle, replaced when identity changes.
  */
 export function installPermissionSnapshotRefresh(): void {
   if (permissionSnapshotRefreshBound || typeof window === 'undefined') return
@@ -1003,4 +1152,8 @@ export function installPermissionSnapshotRefresh(): void {
   window.addEventListener('focus', () => {
     void refreshUserSnapshotOnFocus()
   })
+  onAuthPrincipalChange(() => {
+    armContinuousRenewalSchedule()
+  })
+  armContinuousRenewalSchedule()
 }

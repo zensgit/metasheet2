@@ -205,8 +205,10 @@ jobs:
             tests/sessionCenterView.spec.ts \
             tests/App.spec.ts \
             tests/dingtalk-auth-callback.spec.ts \
-            tests/plmSnapshotShare.spec.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 198
+            tests/plmSnapshotShare.spec.ts \
+            tests/plmContinuousScheduling.spec.ts \
+            tests/plmContinuousExpiry.spec.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 222
 
       - name: Backend types
         run: pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false --incremental false
