@@ -21,6 +21,7 @@ import {
   loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from './stock-preparation-overview-contract'
+import { loadGridExportClosedSheetIds, restrictGridExportCapabilities } from './sheet-grid-export-closure'
 import { deriveCanSubmitApproval } from './submit-approval-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
@@ -268,6 +269,8 @@ export async function resolveSheetCapabilitiesForUser(
   sheetScope?: SheetPermissionScope
   isAdminRole: boolean
   permissions: string[]
+  /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
+  gridExportClosed?: true
 }> {
   const isAdminRole = await isAdmin(userId)
   const permissions = await listUserPermissions(userId)
@@ -348,8 +351,16 @@ export async function resolveSheetCapabilitiesForUser(
   if ((await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
+  // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the REST resolver's. This resolver
+  // fronts the collab rooms and API-token capability checks, so it must not report an export the REST resolver
+  // refuses. Every person, admins included; only `canExport` changes.
+  const gridExportClosed = (await loadGridExportClosedSheetIds(query, [sheetId])).has(sheetId)
+  if (gridExportClosed) {
+    capabilities = restrictGridExportCapabilities(capabilities, true)
+  }
   return {
     capabilities,
+    ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
     ...(sheetScope ? { sheetScope } : {}),
     isAdminRole,
     permissions,

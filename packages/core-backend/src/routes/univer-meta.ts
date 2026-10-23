@@ -138,6 +138,10 @@ import {
   loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from '../multitable/stock-preparation-overview-contract'
+import {
+  GRID_EXPORT_CLOSED_REFUSAL,
+  GRID_EXPORT_CLOSURE_CONTEXT_MARKER,
+} from '../multitable/sheet-grid-export-closure'
 // #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
 // bound, never a grant: every call site below sits AFTER the unchanged canRead/liveness gate.
 import {
@@ -9590,6 +9594,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             ...(capabilities.canCreateRecord === true && hasHumanWriteLockedRequiredField(activeFields)
               ? { recordCreateBlockedByLock: true }
               : {}),
+            // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): the effective sheet is stamped
+            // closed for generic grid export — `canExport` above is already false (the shared resolver's clamp).
+            // Sent ONLY on such a sheet, so every other sheet's capabilities object is byte-identical; the
+            // workbench renders its export buttons disabled with the reason and re-checks before it builds a
+            // selected-rows file in the browser. Display only: the export route refuses on its own.
+            ...(effectiveSheetResolution?.gridExportClosed === true
+              ? { gridExportClosure: GRID_EXPORT_CLOSURE_CONTEXT_MARKER }
+              : {}),
           },
           capabilityOrigin,
           fieldPermissions,
@@ -16820,11 +16832,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // not a page, not the unfiltered sheet), in the view's sort order.
       let view: SharedMultitableViewConfig | null = null
 
-      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness, gridExportClosed } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
+      if (!capabilities.canRead) return sendForbidden(res)
+      // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): the resolver already turned
+      // `canExport` off on a sheet stamped closed for generic grid export (xlsx AND csv — the format branch is far
+      // below). A READER of such a sheet is told why (values-free, fixed copy); a non-reader got the plain 403 one
+      // line above and learns nothing. Every other `canExport: false` keeps the plain 403.
+      if (!capabilities.canExport) return gridExportClosed ? res.status(403).json(GRID_EXPORT_CLOSED_REFUSAL) : sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       // #5807 — an export of the People system sheet is the whole roster in one file, and a TRUNCATED
       // export is worse than none (the file claims to be the sheet). Refuse instead, with the shared
