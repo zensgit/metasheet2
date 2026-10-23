@@ -719,6 +719,10 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
    * so even a caller that bypassed the read could not move a row that is not active-and-unmarked. All
    * three columns land in the same statement (migration 101's CHECK ties the stamp to its version).
    * There is NO unset counterpart (R-53 ②).
+   *
+   * Pre-enable hardening F-4(c) (step-4 design §23.4): `onMarked(trx, { pilot })`, when given, runs INSIDE
+   * this transaction right after the compare-and-set landed — and ONLY then (never on alreadyEnabled) — so
+   * the caller's audit row commits or rolls back with the mark itself. A throw from it rolls the mark back.
    */
   async function markPilotEnabled(input = {}) {
     const { tenantId, projectNo } = scope(input)
@@ -726,6 +730,10 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     const readinessVersion = input.readinessVersion
     if (!Number.isInteger(readinessVersion) || readinessVersion < 1) {
       throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'readinessVersion must be a positive integer', { field: 'readinessVersion' })
+    }
+    const onMarked = input.onMarked === undefined ? null : input.onMarked
+    if (onMarked !== null && typeof onMarked !== 'function') {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'onMarked must be a function', { field: 'onMarked' })
     }
     const at = now()
     return db.transaction(async (trx) => {
@@ -751,7 +759,9 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
       if (!updated) {
         throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_PILOT_STATE_MOVED_CODE, 'the project row moved while the pilot was being enabled; read it again', { field: 'projectNo' })
       }
-      return { enabled: true, alreadyEnabled: false, pilot: rowToPilotState(updated) }
+      const pilot = rowToPilotState(updated)
+      if (onMarked) await onMarked(trx, { pilot })
+      return { enabled: true, alreadyEnabled: false, pilot }
     })
   }
 

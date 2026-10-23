@@ -64,6 +64,7 @@ const {
   PROJECT_WRITE_ERROR_CODES,
   StockPreparationProjectWriteLockError,
   isHostWriteFenceError,
+  sheetWriteScopeKey,
 } = require('./stock-preparation-project-write-lock.cjs')
 const {
   generateMaterialMappingCandidates,
@@ -1062,6 +1063,15 @@ async function applyCarryViaConfirm(input = {}) {
   // structural property rather than a convention. Still zero host IO at this point — an invalid or
   // incompletely-bound target refuses before a single read.
   const target = await resolveScopedCarryTarget(api, input.target, decision.carryFields)
+  // Pre-enable hardening F-1 (step-4 design §23.4): the guard handed in must cover exactly THIS target
+  // sheet — the same rule as the apply lib's `assertProjectWriteGuardScope` (table-actions), restated
+  // over the carry's own normalized target because this executor has no table action to hand it. A
+  // guard of another sheet (or one with no scope key at all) would let the holder CAS and the host fence
+  // vouch for a lease that does not cover the sheet being patched. A programming error in the caller,
+  // never a client error: 500, still before the first read (zero IO).
+  if (writeFence && writeFence.scopeKey !== sheetWriteScopeKey(target.sheetId)) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the sheet write guard does not cover this carry target sheet')
+  }
   // A fenced carry is ALSO host-fenced on its patch: the records surface must declare that it honours
   // a fence (the logical view copies the declaration up from the scoped api and the host), else the
   // fence would be sent to a host that ignores it and the carry would look protected and not be.
