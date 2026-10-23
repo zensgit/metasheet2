@@ -763,9 +763,26 @@ function applyStatus(counts, written, aborted) {
 // callers BEFORE the write: applyStockPreparationAction (small-BOM, in-function) and the
 // tableActionLargeBomApplyJobRun route (large-BOM, at the route). ANY new caller of this function MUST
 // apply the same gate, or consolidate the gate here. Production apply = separate FOS-4b-3-prod owner gate.
+// Batch-refresh phase 2 step 4 (PR-0; design §7.2 (a)): a plan the planner SUSPENDED as a whole
+// (`plan.suspended === true` — a continuation candidate, a dropped order head, an unreadable governance
+// store, …) is refused by the writer itself with ZERO IO, so a caller that skipped its own lane-level
+// check still writes nothing. Additive: nothing sets the key yet (the planner projection that does is a
+// later increment), `normalizePlan` keeps accepting unknown keys, and a plan without the key — every
+// plan today — runs byte-identically. Only the literal `true` suspends: a truthy string or object is not
+// a verdict the planner emits and must not be mistaken for one.
+function assertPlanNotSuspended(plan) {
+  if (plan.suspended === true) {
+    throw new StockPreparationApplyWriterError('the plan is suspended; nothing was written', {
+      code: 'plan_suspended',
+      field: 'plan.suspended',
+    })
+  }
+  return plan
+}
+
 async function applyStockPreparationPlan(input = {}) {
   const permission = requireApplyPermission(input.permission)
-  const plan = normalizePlan(input.plan)
+  const plan = assertPlanNotSuspended(normalizePlan(input.plan))
   const target = normalizeTarget(input.target)
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const recordsApi = getRecordsApi(input.recordsApi)

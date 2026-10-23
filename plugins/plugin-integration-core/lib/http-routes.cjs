@@ -9899,32 +9899,73 @@ function requireStockPreparationAudit() {
         targetProjectId,
         target: carryAction.target,
       })
-      // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
-      // `inputFingerprint` arrive as three independent client fields; until they are proven to be
-      // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
-      // carried row written with no approval record — the same defect wearing a different mask.
-      if (decisionId) {
-        await assertCarryConfirmDecisionBinding({
-          recordsApi: getMultitableRecordsApi(),
-          provisioning: getMultitableProvisioning(),
-          targetProjectId,
+      // Batch-refresh phase 2 step 4, PR-0 (plan §5.1 / G5): THE SHEET WRITE LEASE around the carry.
+      // The carry patches HUMAN cells of the canonical sheet — a machine write of the sheet every
+      // other structural writer serialises on — so it holds the same per-sheet lease (R-52) as the
+      // small apply and the large chunk, purpose `carry_confirm`: acquired HERE, after the tenant
+      // wall (provisioning only, zero records IO) and BEFORE the ledger pre-flight, so a busy
+      // refusal (409 STOCK_PREP_PROJECT_WRITE_LOCKED) costs no ledger read; no lock service is 501
+      // and a lock store that cannot be read is 503, both before any records IO. Inside the lease the
+      // executor takes the guard as its write fence (one holder CAS before the patch, the host fence
+      // on the patch), so a lease lost to a takeover writes nothing. Released right after the patch;
+      // the ledger close and the audit below run unleased (they write the ledger sheet, not this one).
+      const projectWriteLock = requireStockPreparationProjectWriteLock()
+      const carryWriteScope = sheetWriteScopeKey(carryAction.target.sheetId)
+      let result
+      await projectWriteLock.withProjectWriteLease(carryWriteScope, { purpose: 'carry_confirm', runId: b2aRunId('stock-preparation-carry-confirm'), tenantId }, async (projectWriteGuard) => {
+        // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
+        // `inputFingerprint` arrive as three independent client fields; until they are proven to be
+        // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
+        // carried row written with no approval record — the same defect wearing a different mask.
+        if (decisionId) {
+          await assertCarryConfirmDecisionBinding({
+            recordsApi: getMultitableRecordsApi(),
+            provisioning: getMultitableProvisioning(),
+            targetProjectId,
+            permission: 'admin',
+            decisionId,
+            inputFingerprint,
+            decision: input.decision,
+          })
+        }
+        // No provisioning and no targetProjectId: the executor has no way to resolve a sheet of its
+        // own, and the bound target is the only thing that tells it where to write.
+        result = await applyCarryViaConfirm({
           permission: 'admin',
-          decisionId,
-          inputFingerprint,
+          recordsApi: getMultitableRecordsApi(),
+          target: carryAction.target,
           decision: input.decision,
+          // The SAME principal handle the scope was resolved under, so the row stamp, the audit actor
+          // and the tenant wall all name one identity rather than three independently-derived ones.
+          confirmedBy: scope.actorId,
+          // I1 / I5: the guard of the lease held around this call — the holder CAS before the patch and
+          // the host fence on it; required, so a carry can never run unfenced from this route.
+          writeFence: projectWriteGuard,
+          writeFenceRequired: true,
         })
-      }
-      // No provisioning and no targetProjectId: the executor has no way to resolve a sheet of its
-      // own, and the bound target is the only thing that tells it where to write.
-      const result = await applyCarryViaConfirm({
-        permission: 'admin',
-        recordsApi: getMultitableRecordsApi(),
-        target: carryAction.target,
-        decision: input.decision,
-        // The SAME principal handle the scope was resolved under, so the row stamp, the audit actor
-        // and the tenant wall all name one identity rather than three independently-derived ones.
-        confirmedBy: scope.actorId,
       })
+      // AFTER RELEASE: the plan generation moves (reason `carry_confirm`), so a dry-run token minted
+      // before the carry is refused PLAN_SUPERSEDED at its apply (the token's `existingRows` revision
+      // refuses it as well; this is the lease-level statement of the same fact, E01). Only a carry
+      // that WROTE bumps: a `skipped_already_carried` replay changed no row, and superseding a
+      // puller's pending token for nothing is a cost without a protection. The bump is best effort
+      // HERE and only here — the carry already landed, so a bump refused by the lock (a writer took the
+      // sheet meanwhile: WRITE_LOCKED; a store fault: STORE_FAILED) is logged values-free and never
+      // masks the carry's own result; the revision chain still refuses the stale token.
+      let generationBumped = false
+      if (result.persisted === true) {
+        try {
+          await projectWriteLock.bumpGeneration(carryWriteScope, { reason: 'carry_confirm', tenantId })
+          generationBumped = true
+        } catch (error) {
+          if (routeLogger) {
+            routeLogger.warn('[plugin-integration-core] stock-prep carry confirm: the generation bump after release was refused; the carry stands', {
+              code: error && error.code,
+              ...(error && error.details && error.details.reason ? { reason: error.details.reason } : {}),
+            })
+          }
+        }
+      }
       // Ledger close, AFTER the apply: the carry is the substantive act; the ledger row is its
       // bookkeeping. A typed ledger refusal (e.g. the row was superseded by a newer reconcile)
       // travels beside the applied result as a closed code — never silently swallowed, never
@@ -9972,6 +10013,8 @@ function requireStockPreparationAudit() {
           carriedFieldCount: result.carriedFields.length,
           alreadyCarriedFieldCount: result.alreadyCarriedFields.length,
           ...(ledger ? { ledgerConfirmed: ledger.ok === true } : {}),
+          // PR-0: whether the post-release generation bump landed (a written carry only; boolean).
+          ...(result.persisted === true ? { generationBumped } : {}),
         },
       })
       return sendOk(res, { ...result, ...(ledger ? { ledger } : {}) })
