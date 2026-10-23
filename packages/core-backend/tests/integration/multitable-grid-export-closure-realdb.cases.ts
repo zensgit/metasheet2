@@ -35,11 +35,14 @@ import {
   up as closureUp,
 } from '../../src/db/migrations/zzzz20261022150000_add_meta_sheets_grid_export_closure'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { resolveSheetCapabilitiesForAccess } from '../../src/multitable/permission-service'
 import { getObjectSheetId } from '../../src/multitable/provisioning'
+import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capabilities'
 import { GRID_EXPORT_CLOSED_REFUSAL } from '../../src/multitable/sheet-grid-export-closure'
 import { invalidateUserPerms } from '../../src/rbac/service'
 import { createMultitableCopySheetRoutes } from '../../src/routes/multitable-copy-sheet'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { resolveSheetCapabilitiesForUserOnQuery } from '../../src/services/approval-record-link-txn-auth'
 import { closeSheetGridExport } from '../../src/services/sheet-grid-export-closure-service'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -54,6 +57,7 @@ export function defineGridExportClosureRealDbCases(): void {
   const TS = `${Date.now().toString(36)}${randomUUID().slice(0, 4)}`
   const ADMIN = `u_gec_admin_${TS}`
   const READER = `u_gec_reader_${TS}`
+  const WRITER = `u_gec_writer_${TS}` // GX7: global read + write, so the overview clamp is visible
   const BASE = `base_gec_${TS}`
   const PROJECT = `tenant_gec${TS}:integration-core`
   const CLOSED = getObjectSheetId(PROJECT, 'plm_stock_preparation_sandbox_p_0123456789abcdef01234567')
@@ -96,7 +100,7 @@ export function defineGridExportClosureRealDbCases(): void {
       app.use('/api/multitable', createMultitableCopySheetRoutes())
 
       await q(`INSERT INTO permissions (code, name, description) VALUES ('multitable:read', 'multitable:read', 'GEC test') ON CONFLICT (code) DO NOTHING`)
-      for (const id of [ADMIN, READER]) {
+      for (const id of [ADMIN, READER, WRITER]) {
         await q(
           `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
            VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
@@ -105,7 +109,12 @@ export function defineGridExportClosureRealDbCases(): void {
         )
       }
       await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [READER, 'multitable:read'])
+      await q(`INSERT INTO permissions (code, name, description) VALUES ('multitable:write', 'multitable:write', 'GEC test') ON CONFLICT (code) DO NOTHING`)
+      for (const code of ['multitable:read', 'multitable:write']) {
+        await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [WRITER, code])
+      }
       invalidateUserPerms(READER)
+      invalidateUserPerms(WRITER)
 
       await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1, $2, $3)', [BASE, 'GEC Base', ADMIN])
       for (const [sheetId, name] of [[CLOSED, '试点项目表'], [OPEN, '普通项目表']] as const) {
@@ -120,11 +129,11 @@ export function defineGridExportClosureRealDbCases(): void {
       for (const [table, col] of [['meta_record_revisions', 'sheet_id'], ['meta_config_revisions', 'sheet_id'], ['operation_audit_logs', 'resource_id'], ['spreadsheet_permissions', 'sheet_id'], ['field_permissions', 'sheet_id']] as const) {
         await q(`DELETE FROM ${table} WHERE ${col} = ANY($1::text[])`, [ids]).catch(() => {})
       }
-      await q('DELETE FROM meta_multitable_template_installs WHERE actor_id = ANY($1::text[])', [[ADMIN, READER]]).catch(() => {})
+      await q('DELETE FROM meta_multitable_template_installs WHERE actor_id = ANY($1::text[])', [[ADMIN, READER, WRITER]]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE base_id = $1', [BASE]).catch(() => {}) // cascades fields / records / views
       await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
-      await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[ADMIN, READER]]).catch(() => {})
-      await q('DELETE FROM users WHERE id = ANY($1::text[])', [[ADMIN, READER]]).catch(() => {})
+      await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[ADMIN, READER, WRITER]]).catch(() => {})
+      await q('DELETE FROM users WHERE id = ANY($1::text[])', [[ADMIN, READER, WRITER]]).catch(() => {})
     })
 
     test('GX1 columns and both CHECKs exist; a foreign reason and a reason without a time are refused', async () => {
@@ -187,6 +196,50 @@ export function defineGridExportClosureRealDbCases(): void {
       const copies = (await q('SELECT id FROM meta_sheets WHERE copied_from_sheet_id = $1', [CLOSED])).rows as Array<{ id: string }>
       expect(copies).toHaveLength(1)
       expect((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id = $1', [copies[0].id])).rows[0]).toEqual({ n: 0 })
+    })
+
+    // Review round 2: a PRE-MIGRATION install (no closure column) — the three resolvers' folded stamp statement names
+    // both keys only through to_jsonb, so it must still find the stock-prep OVERVIEW and clamp it, and report nothing
+    // closed. Run inside an always-rolled-back transaction that drops the closure columns first (DDL is
+    // transactional), so the shared database is untouched.
+    test('GX7 pre-migration (no closure column): every resolver still clamps the overview and reports nothing closed', async () => {
+      const OVERVIEW = getObjectSheetId(PROJECT, 'plm_stock_preparation_project_overview')
+      const ROLLBACK = new Error('GX7_ALWAYS_ROLL_BACK')
+      const seen: Record<string, unknown> = {}
+      await poolManager.get().transaction(async ({ query }) => {
+        const txQuery = async (sql: string, params?: unknown[]) => {
+          const result = await query(sql, params)
+          return { rows: (result as { rows?: unknown[] }).rows ?? [], rowCount: (result as { rowCount?: number | null }).rowCount ?? null }
+        }
+        await txQuery('ALTER TABLE meta_sheets DROP COLUMN grid_export_closure, DROP COLUMN grid_export_closed_at, DROP COLUMN grid_export_closed_by')
+        await txQuery(`INSERT INTO meta_sheets (id, base_id, name, system_kind) VALUES ($1, $2, $3, 'stock_prep_overview')`, [OVERVIEW, BASE, '项目总览'])
+        const perms = ['multitable:read', 'multitable:write']
+        const access = { userId: WRITER, permissions: perms, isAdminRole: false }
+        const rest = await resolveSheetCapabilitiesForAccess(txQuery as never, OVERVIEW, access)
+        const collab = await resolveSheetCapabilitiesForUser(txQuery as never, OVERVIEW, WRITER)
+        const onQuery = await resolveSheetCapabilitiesForUserOnQuery(txQuery as never, OVERVIEW, WRITER, undefined, { isAdminRole: false, permissions: perms })
+        const closedSheet = await resolveSheetCapabilitiesForAccess(txQuery as never, CLOSED, access)
+        const ordinary = await resolveSheetCapabilitiesForAccess(txQuery as never, OPEN, access)
+        Object.assign(seen, { rest, collab, onQuery, closedSheet, ordinary })
+        throw ROLLBACK
+      }).catch((caught: unknown) => {
+        if (caught !== ROLLBACK) throw caught
+      })
+      for (const lane of ['rest', 'collab', 'onQuery'] as const) {
+        const caps = (seen[lane] as { capabilities: Record<string, boolean> }).capabilities
+        expect(caps.canRead, lane).toBe(true)
+        expect(caps.canExport, lane).toBe(true) // overview keeps export; nothing is closed without the column
+        expect(caps.canEditRecord, lane).toBe(false) // the overview clamp held
+        expect(seen[lane], lane).not.toHaveProperty('gridExportClosed')
+      }
+      expect((seen.rest as { stockPrepOverview?: true }).stockPrepOverview).toBe(true)
+      // Control: the same writer on an ordinary sheet CAN edit — it is the overview clamp that took the edit away.
+      expect((seen.ordinary as { capabilities: { canEditRecord: boolean } }).capabilities.canEditRecord).toBe(true)
+      // The stamped pilot sheet reads as not closed while the column is gone (fail-open only because no stamp can exist).
+      expect((seen.closedSheet as { capabilities: { canExport: boolean } }).capabilities.canExport).toBe(true)
+      // And the rollback left the real columns in place.
+      const columns = (await q(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'meta_sheets' AND column_name LIKE 'grid_export_%'`)).rows[0]
+      expect(columns).toEqual({ n: 3 })
     })
 
     // CI HYGIENE (review round 1, fix 1): this runs the REAL down() against the SHARED real-DB database. Had GX2 not
