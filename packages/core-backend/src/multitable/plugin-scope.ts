@@ -5,6 +5,7 @@ import type {
   StockPreparationPersistUnitOfWorkInput,
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
+import { refusePluginWriteFenceOnUnfencedSurface, resolvePluginWriteFence } from './plugin-write-fence'
 import {
   StockPreparationProjectSheetGrantError,
   isStockPreparationProjectSheetObjectId,
@@ -1062,6 +1063,10 @@ export function createPluginScopedMultitableApi(
       ...(multitable.records?.supportsFilterValueLists === true
         ? { supportsFilterValueLists: true }
         : {}),
+      // PR #6501: forward the host's fenced-write declaration; never assert it (same rule as above).
+      ...(multitable.records?.supportsWriteFence === true
+        ? { supportsWriteFence: true }
+        : {}),
       // S3 follow-ups 2, fix round 1 (read-once): the generic READS read `sheetId` ONCE, like the writes below — the
       // sheet whose scope was asserted is the sheet the host reads (a getter cannot pass the check with an own sheet
       // and have the host read another).
@@ -1078,11 +1083,15 @@ export function createPluginScopedMultitableApi(
       // S3 fix round 2 (F3): the three generic WRITES read `sheetId` ONCE, assert scope on it, refuse the
       // stock-preparation overview on it, and forward exactly that value (a getter cannot show the checks one
       // sheet and the host another).
+      // PR #6501: a `writeFence` is resolved HERE, for THIS plugin, against the host allow-list (refused
+      // otherwise, before any scope work) and forwarded only in its host-resolved form — the core write path
+      // honours nothing else. Absent -> the write is exactly what it was.
       createRecord: async (input) => {
+        const writeFence = resolvePluginWriteFence(pluginName, (input as { writeFence?: unknown }).writeFence)
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
-        return multitable.records.createRecord({ ...input, sheetId })
+        return multitable.records.createRecord({ ...copyInputValuesExcept(input, ['sheetId', 'writeFence']), sheetId, ...(writeFence ? { writeFence } : {}) } as unknown as typeof input)
       },
       getRecord: async (input) => {
         const sheetId = input.sheetId
@@ -1090,12 +1099,15 @@ export function createPluginScopedMultitableApi(
         return multitable.records.getRecord({ ...copyInputValuesExcept(input, ['sheetId']), sheetId } as typeof input)
       },
       patchRecord: async (input) => {
+        const writeFence = resolvePluginWriteFence(pluginName, (input as { writeFence?: unknown }).writeFence)
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
-        return multitable.records.patchRecord({ ...input, sheetId })
+        return multitable.records.patchRecord({ ...copyInputValuesExcept(input, ['sheetId', 'writeFence']), sheetId, ...(writeFence ? { writeFence } : {}) } as unknown as typeof input)
       },
       deleteRecord: async (input) => {
+        // PR #6501 round 6 (S2): delete implements no fence — a `writeFence` here is refused, never dropped.
+        refusePluginWriteFenceOnUnfencedSurface(input, 'records.deleteRecord')
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
@@ -1115,12 +1127,16 @@ export function createPluginScopedMultitableApi(
       // sheet is derived and re-checked (ownership + stamp) on every write by `resolveOverviewRecordsSheet`.
       ...(pluginName === STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN
         ? {
+            // PR #6501 round 6 (S2): the overview port implements no fence — a `writeFence` on any of its
+            // three writes is refused before the sheet is even derived, never dropped.
             stockPreparationOverview: {
               createRecord: async (input: { projectId: string; data: Record<string, unknown> }) => {
+                refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.createRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.createRecord({ sheetId, data: input.data })
               },
               patchRecord: async (input: { projectId: string; recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
+                refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.patchRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.patchRecord({
                   sheetId,
@@ -1130,6 +1146,7 @@ export function createPluginScopedMultitableApi(
                 })
               },
               deleteRecord: async (input: { projectId: string; recordId: string }) => {
+                refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.deleteRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.deleteRecord({ sheetId, recordId: input.recordId })
               },
@@ -1168,12 +1185,16 @@ export function createPluginScopedMultitableApi(
                 assertAllowed(sheetId)
                 return records.queryRecords({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)
               },
+              // PR #6501 round 6 (S2): the unit of work's writes implement no fence (one host transaction
+              // for the whole unit) — a `writeFence` is refused before the sheet check, never dropped.
               createRecord: async (recordInput) => {
+                refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.createRecord')
                 const sheetId = recordInput.sheetId
                 assertAllowed(sheetId)
                 return records.createRecord({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)
               },
               patchRecord: async (recordInput) => {
+                refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.patchRecord')
                 const sheetId = recordInput.sheetId
                 assertAllowed(sheetId)
                 return records.patchRecord({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)

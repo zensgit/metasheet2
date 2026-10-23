@@ -1049,8 +1049,11 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     }
 
     // The wiring window in index.ts: from the plugin-SDK patchRecord method head to the records.ts call.
+    // PR #6501: the head also takes the plugin's optional `writeFence` (the host fenced write — a LEASE
+    // check, not a per-subject column gate; tests/unit/multitable-plugin-write-fence.test.ts pins the
+    // same head shape, so the two needles must stay identical).
     const indexTs = read('index.ts')
-    const head = indexTs.indexOf('patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {')
+    const head = indexTs.indexOf('patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence }) => {')
     expect(head, 'index.ts no longer wires the plugin-SDK patchRecord in the shape this characterization reads').toBeGreaterThan(-1)
     const call = indexTs.indexOf('return patchMultitableRecord({', head)
     expect(call, 'index.ts plugin-SDK patchRecord no longer reaches records.ts patchRecord').toBeGreaterThan(head)
@@ -1064,6 +1067,12 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     }
     // …and the window really is the wiring (not an empty slice that would make the loop vacuous).
     expect(window).toContain('poolManager.get().transaction(')
+    // PR #6501: the host write fence (a lease row share-lock, NOT a column gate) is checked INSIDE that
+    // transaction window — after the transaction opens, before the records.ts call. Ordering by index, so
+    // the assertion is line-ending-neutral (this file reads index.ts without stripping CR).
+    const txOpen = window.indexOf('poolManager.get().transaction(')
+    const fenceCheck = window.indexOf('await assertPluginWriteFence(txQuery, writeFence)')
+    expect(fenceCheck, 'the plugin-SDK patchRecord no longer checks the write fence inside its transaction').toBeGreaterThan(txOpen)
   })
 
   /**

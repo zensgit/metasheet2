@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./consumable-storage.cjs')
+
 // 一个项目一张备料表 — ONE in-memory substrate for the project-sheet route suites (S2, R-36).
 //
 // Shared by `stock-preparation-project-target-pack-reinstall.test.cjs` and the permission matrix's
@@ -379,6 +383,8 @@ function baseServices(sourceAdapter) {
     config: { dataSourceId: 'ds_synthetic', object: 'DN_PDM_PathExAttrInfo' },
   })
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },
@@ -442,9 +448,10 @@ function mountProjectSheetRoutes({
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning, records },
+      // P1-a: the fake host declares + enforces the write fence, as the real host does.
+      multitable: { provisioning, records: require('./stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records) },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [{
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
@@ -502,6 +509,8 @@ function mountProjectSheetRoutes({
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
     // S3 fix round 1: the REAL registry store the routes use, for suites that drive the overview module directly.
     projectTargetStore: services.stockPreparationProjectTargetStore,
+    // Codex review P1-b: the lock the routes use, so a suite can seed what an expansion observed.
+    projectWriteLock: services.stockPreparationProjectWriteLock || null,
     projectObjectId: (no = projectNo) => deriveProjectSheetObjectId(tenantId, no),
     registryRows: () => db.rowsOf(PROJECT_TARGET_TABLE),
     /**

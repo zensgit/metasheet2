@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // #6475 — WHY 批次存档 (mvp-persist) DOES NOT REUSE THE DRY-RUN'S RESOLVED DUPLICATE GROUPS.
 // THROUGH THE REAL ROUTE TABLE, PLUS THE ONE LIB-LEVEL FACT THAT MAKES IT LOAD-BEARING.
 //
@@ -269,6 +273,8 @@ function services(sourceAdapter, bindingStore) {
     config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
   })
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },
@@ -322,9 +328,9 @@ function mount() {
           routes.set(`${method.toUpperCase()} ${routePath}`, handler)
         },
       },
-      multitable: { provisioning: createProvisioning(), records: records.api },
+      multitable: { provisioning: createProvisioning(), records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records.api) },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig()],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [CANONICAL_OBJECT_ID] },
