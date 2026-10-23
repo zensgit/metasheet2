@@ -189,11 +189,25 @@ export function defineGridExportClosureRealDbCases(): void {
       expect((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id = $1', [copies[0].id])).rows[0]).toEqual({ n: 0 })
     })
 
-    test('GX6 down() refuses while a stamp exists, and the columns stay', async () => {
-      const error = await closureDown(db as never).then(() => null, (caught: unknown) => caught as Error & { code?: string })
-      expect(error?.code).toBe(GRID_EXPORT_CLOSURE_DOWN_REFUSED_CODE)
+    // CI HYGIENE (review round 1, fix 1): this runs the REAL down() against the SHARED real-DB database. Had GX2 not
+    // stamped, down() would find no closure and DROP the columns while kysely_migration still records the migration
+    // as applied — poisoning every later test of the run. So down() runs inside a transaction that is ALWAYS rolled
+    // back (DDL is transactional in PostgreSQL): whatever down() does, nothing of it survives, and the columns are
+    // asserted present afterwards. The stamped-count precondition then says WHY a refusal was expected.
+    test('GX6 down() refuses while a stamp exists, and the columns stay (run in an always-rolled-back transaction)', async () => {
+      const stamped = Number(((await q('SELECT count(*)::int AS n FROM meta_sheets WHERE grid_export_closure IS NOT NULL')).rows[0] as { n: number }).n)
+      const ROLLBACK = new Error('GX6_ALWAYS_ROLL_BACK')
+      let outcome: unknown = 'not-run'
+      await db.transaction().execute(async (trx) => {
+        outcome = await closureDown(trx as never).then(() => 'dropped', (caught: unknown) => caught)
+        throw ROLLBACK
+      }).catch((caught: unknown) => {
+        if (caught !== ROLLBACK) throw caught
+      })
       const columns = (await q(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'meta_sheets' AND column_name LIKE 'grid_export_%'`)).rows[0]
       expect(columns).toEqual({ n: 3 })
+      expect(stamped, 'GX6 needs at least one stamped sheet (GX2)').toBeGreaterThan(0)
+      expect((outcome as { code?: string })?.code).toBe(GRID_EXPORT_CLOSURE_DOWN_REFUSED_CODE)
       expect(((await q('SELECT grid_export_closure FROM meta_sheets WHERE id = $1', [CLOSED])).rows[0] as { grid_export_closure: unknown }).grid_export_closure).toBe('stock_prep_pilot')
     })
   })
