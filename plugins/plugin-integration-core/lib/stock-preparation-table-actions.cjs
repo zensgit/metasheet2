@@ -56,6 +56,7 @@ const {
 const {
   DECISIONS,
   EXISTING_ROW_CREATED_BY,
+  EXISTING_ROW_RECORD_REF,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
@@ -1097,6 +1098,19 @@ function unmapRecordFields(record, fieldIdMap = {}) {
   return out
 }
 
+// Batch-refresh step 4 (PR-1, design §6.5): the record id + version the project-scoped read used to
+// drop, on the planner's Symbol key — hash-neutral exactly like EXISTING_ROW_CREATED_BY above (pinned
+// by stock-preparation-continuation-golden.test.cjs). ENVELOPE records only (`data` present, read from
+// the envelope, never from `data`), and only for a non-blank string id; otherwise the key is ABSENT.
+// Nothing outside the continuation pairing module reads it.
+function withExistingRowRecordRef(row, record) {
+  const id = isPlainObject(record) && isPlainObject(record.data) ? record.id : undefined
+  if (typeof id !== 'string' || id.trim() === '') return row
+  const version = Number.isInteger(record.version) ? record.version : null
+  row[EXISTING_ROW_RECORD_REF] = Object.freeze({ id, version })
+  return row
+}
+
 async function readExistingStockPreparationRows(recordsApi, target, projectNo, options = {}) {
   const api = ensureRecordsApi(recordsApi)
   const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
@@ -1116,7 +1130,7 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
     if (!Array.isArray(pageRows)) {
       throw new StockPreparationTableActionError(500, 'TABLE_ACTION_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
-    rows.push(...pageRows.map((row) => unmapRecordFields(row, target.fieldIdMap)))
+    rows.push(...pageRows.map((row) => withExistingRowRecordRef(unmapRecordFields(row, target.fieldIdMap), row)))
     if (pageRows.length < limit) return rows
   }
   throw new StockPreparationTableActionError(422, 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE', 'existing stock-preparation rows exceeded maxPages', {

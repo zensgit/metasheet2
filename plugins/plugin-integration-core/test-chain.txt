@@ -91,6 +91,11 @@ node __tests__/stock-preparation-demand-evidence.test.cjs
 node __tests__/stock-preparation-project-subtree-bridge.test.cjs
 node __tests__/stock-preparation-large-bom-jobs.test.cjs
 node __tests__/stock-preparation-conflict-planner.test.cjs
+node __tests__/stock-preparation-continuation-golden.test.cjs
+node __tests__/stock-preparation-continuation-pairing.test.cjs
+node __tests__/stock-preparation-continuation-planner.test.cjs
+node __tests__/stock-preparation-refresh-state.test.cjs
+node __tests__/stock-preparation-existing-row-record-ref.test.cjs
 node __tests__/stock-preparation-foreign-existing-rows-readside.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs
 node __tests__/stock-preparation-confirmation-decisions.test.cjs
