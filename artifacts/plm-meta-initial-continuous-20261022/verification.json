@@ -1,0 +1,48 @@
+{
+  "at": "2026-10-22T09:52:43.203319+00:00",
+  "status": "LOCAL_SOURCE_VERIFIED_PUBLICATION_HELD",
+  "source_sha": "f5f82d62b6d4c2e92d4bec6ee34494885e628726",
+  "base_sha": "ed7b2945542346f52a1fc25b265b3f064b657aba",
+  "native_readonly_head": "dc31958b0eea29bd9fb00bfbcc5e77002f2d9bdd",
+  "implementer": "actual Grok4.7(xhigh), same persistent session9e",
+  "independent_reviewer": "Codex root",
+  "checks": {
+    "package_typecheck": {
+      "exit": 0,
+      "commands": [
+        "tsc --noEmit",
+        "tsc -p scripts/tsconfig.recovery-archive-acceptance.json"
+      ]
+    },
+    "unit": {
+      "passed": 37,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 1.33
+    },
+    "postgresql": {
+      "passed": 62,
+      "failed": 0,
+      "skipped": 0,
+      "encoding": "UTF8",
+      "owned_cleanup": true
+    },
+    "diff_check": {
+      "exit": 0
+    }
+  },
+  "preserved_failures": [
+    "Pre-correction migration lost concurrent committed evidence during downgrade; independent real two-connection red/green proof retained in w10-meta-root-downgrade-race-20261022.",
+    "Root initial TypeScript gate failed with four new narrowing errors; corrected source passes full package gate.",
+    "Initial worker SQL_ASCII59 and60 results are historical, not final UTF8 evidence."
+  ],
+  "downgrade_proof_manifest_sha256": "af7a4de258842569354b927480c2f5103630e12bdd145b9a4a0956ac772e8fb5",
+  "limits": [
+    "Native HTTP is process-local stub in these PG tests. Concurrent callback requests share one process; separate PG connections prove downgrade locking.",
+    "Renewal endpoint and original iframe/hour continuity not implemented by slice A.",
+    "No new image build, installation, backup/restore, CI, PR, publication, merge or deployment acceptance.",
+    "Source remains local behind useful parent368 jobs at f18551347663737c229dda764907119950c7c9df. Entire master goal remains incomplete."
+  ],
+  "evidence_bundle": "private-acceptance-evidence-20261020/w10-meta-initial-final-20261022",
+  "manifest_sha256": "bdfa68f33f4b24078a48a2c9346e3f57efa284ac5558b67078f410c01218d470"
+}

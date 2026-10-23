@@ -215,6 +215,7 @@ export function buildManagedLoginNavigation(registration: ManagedClientRegistrat
   rootPartId: string
   state: string
   codeChallenge: string
+  continuityHint?: 'hour'
 }): string {
   const url = new URL('/managed-login', registration.nativeBaseUrl)
   const fields: Record<(typeof PUBLIC_QUERY_KEYS)[number], string> = {
@@ -230,6 +231,7 @@ export function buildManagedLoginNavigation(registration: ManagedClientRegistrat
     code_challenge_method: 'S256',
   }
   for (const key of PUBLIC_QUERY_KEYS) url.searchParams.append(key, fields[key])
+  if (input.continuityHint === 'hour') url.searchParams.append('continuity_hint', 'hour')
   return url.toString()
 }
 

@@ -4,7 +4,8 @@
  * and native revoke stay on the server. Personal write and approval are not called.
  */
 import type { Request, Response } from 'express'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import jwt from 'jsonwebtoken'
 import { query, transaction } from '../db/pg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { encryptStoredSecretValue, decryptStoredSecretValue } from '../security/encrypted-secrets'
@@ -21,13 +22,20 @@ import { resolvePersistedPlmSource } from './plm-personal-bom-write-wire'
 import { currentManagedRequest } from './plm-managed-request-context'
 import { queueSnapshotShareCancellationOnQuery, drainSnapshotShareCancellation, pendingSnapshotShareCancellations } from './plm-managed-snapshot-share-flow'
 import {
+  decodeBoundYurClaims,
   nativeExchange,
+  nativeExchangeContinuous,
   nativeManagedContext,
+  nativeRenew,
   nativeRevoke,
   nativeStatus,
+  ManagedNativeCallRefusal,
+  type NativeContinuousExchange,
   type NativeExchange,
+  type NativeRenewal,
 } from './plm-managed-native-http'
 import {
+  MANAGED_COMPANION_PURPOSE,
   MANAGED_COMPANION_SCOPE,
   MANAGED_FIXED_RETURN_PATH,
   MANAGED_INTENT_COOKIE,
@@ -279,13 +287,29 @@ function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
 }
 
+const PROVISION_KEYS = [
+  'issuer', 'nativeAuthUserId', 'nativeTenantId', 'nativeOrgId', 'metaUserId', 'metaTenantId',
+  'metaOrgId', 'dataSourceId', 'rootPartId', 'ownerOptIn',
+] as const
+
+function provisionRecord(body: unknown): { record: Record<string, unknown>; continuityMode: 'ordinary' | 'continuous' } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
+  }
+  const record = body as Record<string, unknown>
+  const keys = Object.keys(record).sort().join()
+  if (keys === [...PROVISION_KEYS].sort().join()) return { record, continuityMode: 'ordinary' }
+  if (keys === [...PROVISION_KEYS, 'continuityMode'].sort().join()) {
+    if (record.continuityMode !== 'hour') throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
+    return { record, continuityMode: 'continuous' }
+  }
+  throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
+}
+
 export async function provisionManagedLink(actor: ManagedActor, body: unknown): Promise<{ ok: true; linkId: string; generation: number }> {
   if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
   await requireTables()
-  const record = exactBody(body, [
-    'issuer', 'nativeAuthUserId', 'nativeTenantId', 'nativeOrgId', 'metaUserId', 'metaTenantId',
-    'metaOrgId', 'dataSourceId', 'rootPartId', 'ownerOptIn',
-  ])
+  const { record, continuityMode } = provisionRecord(body)
   if (record.ownerOptIn !== true) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_OWNER_OPT_IN_REQUIRED')
   const issuer = exactString(record.issuer)
   const nativeAuthUserId = exactString(record.nativeAuthUserId)
@@ -342,14 +366,14 @@ export async function provisionManagedLink(actor: ManagedActor, body: unknown): 
         `INSERT INTO plm_managed_identity_links (
            id, installation_issuer, native_auth_user_id, native_tenant_id, native_org_id, client_id, callback,
            meta_user_id, meta_tenant_id, meta_org_id, data_source_id, root_part_id, client_origin, generation,
-           status, owner_user_id, created_by, source_fingerprint
+           status, owner_user_id, created_by, source_fingerprint, continuity_mode
          ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',$8,$15,$16
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',$8,$15,$16,$17
          )`,
         [
           linkId, registration.issuer, nativeAuthUserId, nativeTenantId, nativeOrgId, registration.clientId,
           registration.callback, metaUserId, metaTenantId, metaOrgId, dataSourceId, rootPartId,
-          registration.origin, generation, actor.id, fingerprint,
+          registration.origin, generation, actor.id, fingerprint, continuityMode,
         ],
       )
     } catch (error) {
@@ -398,6 +422,7 @@ type PreparedIntent = {
   challenge: string
   intentId: string
   rootPartId: string
+  requestMode: 'ordinary' | 'continuous'
 }
 
 function headerValue(req: Request, name: string): string {
@@ -406,7 +431,7 @@ function headerValue(req: Request, name: string): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-export function assertManagedBridge(req: Request, action: 'browser-start' | 'complete' | 'logout'): void {
+export function assertManagedBridge(req: Request, action: 'browser-start' | 'complete' | 'logout' | 'renew-recovery'): void {
   if (headerValue(req, 'x-metasheet-managed-bridge') !== action) {
     throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_BRIDGE_REFUSED')
   }
@@ -428,6 +453,7 @@ function navigationFor(prepared: PreparedIntent): string {
     rootPartId: prepared.rootPartId,
     state: prepared.state,
     codeChallenge: prepared.challenge,
+    continuityHint: prepared.requestMode === 'continuous' ? 'hour' : undefined,
   })
 }
 
@@ -459,6 +485,12 @@ async function prepareManagedIntent(
   await requireMembership(client, actor.id, text(link.meta_org_id))
   const fingerprint = await loadSource(client, text(link.data_source_id), actor.id, registeredPlmOrigin(registration), rootPartId)
   if (fingerprint !== text(link.source_fingerprint)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+  const requestMode = text(link.continuity_mode) === 'continuous'
+    ? 'continuous'
+    : text(link.continuity_mode) === 'ordinary' ? 'ordinary' : ''
+  if (requestMode !== 'ordinary' && requestMode !== 'continuous') {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
   const verifier = randomUrlToken(32)
   const state = randomUrlToken(32)
   const nonce = randomUrlToken(32)
@@ -469,18 +501,19 @@ async function prepareManagedIntent(
     `INSERT INTO plm_managed_browser_intents (
        id, link_id, generation, meta_user_id, meta_tenant_id, meta_org_id, data_source_id, root_part_id,
        client_origin, installation_issuer, native_tenant_id, native_org_id, callback, client_id, state_hash,
-       nonce_hash, code_challenge, code_verifier_ciphertext, return_path, status, expires_at, created_at
+       nonce_hash, code_challenge, code_verifier_ciphertext, return_path, status, expires_at, created_at,
+       request_mode
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'pending',$20,$21
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'pending',$20,$21,$22
      )`,
     [
       intentId, text(link.id), Number(link.generation), actor.id, text(link.meta_tenant_id), text(link.meta_org_id),
       text(link.data_source_id), rootPartId, registration.origin, registration.issuer, registration.nativeTenantId,
       registration.nativeOrgId, registration.callback, registration.clientId, sha256Hex(state), sha256Hex(nonce),
-      challenge, sealVerifier(verifier), MANAGED_FIXED_RETURN_PATH, expires, new Date(),
+      challenge, sealVerifier(verifier), MANAGED_FIXED_RETURN_PATH, expires, new Date(), requestMode,
     ],
   )
-  return { registration, state, nonce, challenge, intentId, rootPartId }
+  return { registration, state, nonce, challenge, intentId, rootPartId, requestMode }
 }
 
 async function assertBrowserIdentity(req: Request, userId: string, tenantId: string): Promise<void> {
@@ -624,20 +657,84 @@ function exchangeMatches(intent: LinkRow, issued: NativeExchange): boolean {
     && issued.delegation_id.length > 0
 }
 
-async function enqueueObservedRevoke(intent: LinkRow, delegationId: string): Promise<void> {
+async function enqueueObservedRevoke(
+  intent: LinkRow,
+  delegationId: string,
+  options?: { stampTracked?: boolean },
+): Promise<'tracked' | 'queued'> {
   const retryIdentity = sha256Hex(`${text(intent.generation)}:${delegationId}:${text(intent.client_id)}`)
-  await query(
-    `INSERT INTO plm_managed_revoke_outbox (
-       id, link_id, generation, delegation_id, client_id, installation_issuer, native_tenant_id, native_org_id,
-       callback, retry_identity, status, intent_id
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11)
-     ON CONFLICT (generation, delegation_id) DO NOTHING`,
-    [
-      randomUUID(), text(intent.link_id), Number(intent.generation), delegationId, text(intent.client_id),
-      text(intent.installation_issuer), text(intent.native_tenant_id), text(intent.native_org_id),
-      text(intent.callback), retryIdentity, text(intent.id),
-    ],
-  )
+  return transaction(async (client) => {
+    await lockRenewalDelegation(client, delegationId)
+    // Separate statement from the lock wait so a winner that committed while
+    // this transaction was queued is visible. Do not revoke that winner.
+    const live = await client.query(
+      `SELECT 1 FROM plm_managed_sessions WHERE delegation_id = $1 AND revoked_at IS NULL LIMIT 1`,
+      [delegationId],
+    )
+    if (live.rows.length > 0) {
+      if (options?.stampTracked) {
+        await client.query(
+          `UPDATE plm_managed_browser_intents
+           SET delegation_id = $2
+           WHERE id = $1 AND status = 'consumed' AND delegation_id IS NULL`,
+          [text(intent.id), delegationId],
+        )
+      }
+      return 'tracked' as const
+    }
+    await client.query(
+      `INSERT INTO plm_managed_revoke_outbox (
+         id, link_id, generation, delegation_id, client_id, installation_issuer, native_tenant_id, native_org_id,
+         callback, retry_identity, status, intent_id
+       )
+       SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11
+       WHERE NOT EXISTS (
+         SELECT 1 FROM plm_managed_sessions WHERE delegation_id = $4 AND revoked_at IS NULL
+       )
+       ON CONFLICT (generation, delegation_id) DO NOTHING`,
+      [
+        randomUUID(), text(intent.link_id), Number(intent.generation), delegationId, text(intent.client_id),
+        text(intent.installation_issuer), text(intent.native_tenant_id), text(intent.native_org_id),
+        text(intent.callback), retryIdentity, text(intent.id),
+      ],
+    )
+    return 'queued' as const
+  })
+}
+
+/**
+ * Classify under the delegation publication lock, then drain only our pending row.
+ * The publisher that already holds the lock commits first and stays tracked.
+ * Compensation that wins the lock leaves pending or acked evidence, which blocks
+ * a later publication. Native revoke stays in the drainer, after that lock.
+ */
+async function compensateOrdinaryObservation(intent: LinkRow, delegationId: string): Promise<void> {
+  if (!delegationId) return
+  let outcome: 'tracked' | 'queued' = 'queued'
+  try {
+    outcome = await enqueueObservedRevoke(intent, delegationId, { stampTracked: true })
+  } catch {
+    try {
+      outcome = await enqueueObservedRevoke(intent, delegationId, { stampTracked: true })
+    } catch {
+      return
+    }
+  }
+  if (outcome === 'tracked') return
+  const pending = await query<{ id: string }>(
+    `SELECT id FROM plm_managed_revoke_outbox
+     WHERE delegation_id = $1 AND generation = $2 AND link_id = $3
+       AND status = 'pending' AND intent_id = $4`,
+    [delegationId, Number(intent.generation), text(intent.link_id), text(intent.id)],
+  ).catch(() => null)
+  if (!pending) return
+  for (const row of pending.rows) {
+    try {
+      await sendFrozenRevoke(text(row.id))
+    } catch {
+      // The pending row remains for retryManagedRevoke.
+    }
+  }
 }
 
 type CompletionDelivery = 'redirect' | 'json'
@@ -674,6 +771,512 @@ export function handoffManagedCallback(req: Request, res: Response): void {
   res.set('Referrer-Policy', 'no-referrer')
   const params = new URLSearchParams({ code: presented.code, state: presented.state })
   res.redirect(302, `${MANAGED_RETURN_PATH}?${params.toString()}`)
+}
+
+type ContinuousLock = {
+  intent: LinkRow
+  link: LinkRow
+  binding: LinkRow | null
+  session: LinkRow | null
+}
+
+type ContinuousStop = {
+  kind: 'stop' | 'refused'
+  code: string
+  status: number
+  clearCookies: boolean
+}
+
+type ContinuousCommit =
+  | { action: 'cookie'; sessionId: string; expiresAt: Date; email: string; role: string }
+  | {
+    action: 'closed'
+    code: string
+    status: number
+    clearCookies: boolean
+    enqueue: boolean
+    delegationId: string | null
+    storedDelegationId: string | null
+  }
+
+function instantSeconds(value: unknown): number | null {
+  const date = value instanceof Date ? value : new Date(String(value ?? ''))
+  if (Number.isNaN(date.getTime())) return null
+  return Math.floor(date.getTime() / 1000)
+}
+
+function registrationMatches(registration: ManagedClientRegistration, row: LinkRow): boolean {
+  return registration.clientId === text(row.client_id)
+    && registration.callback === text(row.callback)
+    && registration.origin === text(row.client_origin)
+    && registration.issuer === text(row.installation_issuer)
+}
+
+function continuousSessionMatches(session: LinkRow, issued: NativeContinuousExchange): boolean {
+  if (session.credential_generation === null || session.credential_generation === undefined) return false
+  if (Number(session.credential_generation) !== 0 || issued.generation_index !== 0) return false
+  if (session.revoked_at) return false
+  if (text(session.delegation_id) !== issued.delegation_id) return false
+  if (text(session.native_subject) !== issued.subject) return false
+  if (text(session.native_tenant_id) !== issued.tenant_id) return false
+  if (text(session.native_org_id) !== issued.org_id) return false
+  if (text(session.root_part_id) !== issued.root_part_id) return false
+  if (text(session.client_origin) !== issued.client_origin) return false
+  if (text(session.scope) !== issued.scope) return false
+  if (instantSeconds(session.expires_at) !== issued.absolute_exp) return false
+  try {
+    const claims = decodeBoundYurClaims(openCredential(text(session.credential_ciphertext)))
+    return !!claims
+      && claims.jti === issued.credential_jti
+      && claims.delegation_id === issued.delegation_id
+      && claims.exp === issued.absolute_exp
+  } catch {
+    return false
+  }
+}
+
+async function lockContinuous(client: SqlClient, intentId: string): Promise<ContinuousLock | null> {
+  const peek = await client.query(
+    'SELECT link_id, data_source_id FROM plm_managed_browser_intents WHERE id = $1',
+    [intentId],
+  )
+  const linkId = text(peek.rows[0]?.link_id)
+  const sourceId = text(peek.rows[0]?.data_source_id)
+  if (!linkId || !sourceId) return null
+  // Link, then binding, then intent, then session. stopLink locks the link first.
+  await client.query('SELECT id FROM plm_managed_identity_links WHERE id = $1 FOR UPDATE', [linkId])
+  await client.query('SELECT data_source_id FROM plm_managed_source_bindings WHERE data_source_id = $1 FOR UPDATE', [sourceId])
+  const intent = (await client.query('SELECT * FROM plm_managed_browser_intents WHERE id = $1 FOR UPDATE', [intentId])).rows[0]
+  const link = (await client.query('SELECT * FROM plm_managed_identity_links WHERE id = $1', [linkId])).rows[0]
+  const binding = (await client.query('SELECT * FROM plm_managed_source_bindings WHERE data_source_id = $1', [sourceId])).rows[0] ?? null
+  const session = (await client.query('SELECT * FROM plm_managed_sessions WHERE intent_id = $1 FOR UPDATE', [intentId])).rows[0] ?? null
+  if (!intent || !link) return null
+  return { intent, link, binding, session }
+}
+
+function linkStillActive(locked: ContinuousLock): boolean {
+  return text(locked.link.status) === 'active'
+    && Number(locked.link.generation) === Number(locked.intent.generation)
+    && !!locked.binding
+    && text(locked.binding.status) === 'active'
+    && text(locked.binding.link_id) === text(locked.link.id)
+    && Number(locked.binding.generation) === Number(locked.link.generation)
+}
+
+async function markContinuousRefused(client: SqlClient, intentId: string): Promise<void> {
+  await client.query(
+    `UPDATE plm_managed_browser_intents
+     SET status = 'refused'
+     WHERE id = $1 AND status = 'pending' AND request_mode = 'continuous'
+       AND delegation_id IS NULL AND credential_ciphertext IS NULL AND consumed_at IS NULL`,
+    [intentId],
+  )
+}
+
+async function freezeContinuousCode(intentId: string, codeHash: string): Promise<ContinuousStop | { kind: 'exchange' }> {
+  return transaction(async (client) => {
+    const locked = await lockContinuous(client, intentId)
+    if (!locked) return { kind: 'stop', code: 'PLM_MANAGED_BROWSER_REQUIRED', status: 401, clearCookies: true }
+    if (text(locked.intent.request_mode) !== 'continuous' || text(locked.link.continuity_mode) !== 'continuous') {
+      return { kind: 'stop', code: 'PLM_MANAGED_EXCHANGE_WRONG_MODE', status: 403, clearCookies: true }
+    }
+    const status = text(locked.intent.status)
+    if (status === 'revoked' || !linkStillActive(locked)) {
+      return { kind: 'stop', code: 'PLM_MANAGED_LINK_STOPPED', status: 403, clearCookies: true }
+    }
+    if (status === 'refused') {
+      return { kind: 'stop', code: 'PLM_MANAGED_INTENT_CONSUMED', status: 409, clearCookies: true }
+    }
+    const storedHash = text(locked.intent.completion_code_hash)
+    if (status === 'consumed') {
+      if (!storedHash || !hashesEqual(storedHash, codeHash)) {
+        return { kind: 'stop', code: 'PLM_MANAGED_CALLBACK_REFUSED', status: 401, clearCookies: true }
+      }
+      return { kind: 'exchange' }
+    }
+    if (status !== 'pending') {
+      return { kind: 'stop', code: 'PLM_MANAGED_INTENT_CONSUMED', status: 409, clearCookies: true }
+    }
+    const expiresAt = instantSeconds(locked.intent.expires_at)
+    if (expiresAt === null || expiresAt * 1000 <= Date.now()) {
+      return { kind: 'stop', code: 'PLM_MANAGED_INTENT_EXPIRED', status: 409, clearCookies: true }
+    }
+    try {
+      await loadUser(client, text(locked.intent.meta_user_id))
+      await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_tenant_id))
+      await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_org_id))
+      const registration = registrationFor({
+        issuer: text(locked.intent.installation_issuer),
+        nativeTenantId: text(locked.intent.native_tenant_id),
+        nativeOrgId: text(locked.intent.native_org_id),
+      })
+      if (!registrationMatches(registration, locked.intent)) {
+        return { kind: 'stop', code: 'PLM_MANAGED_REGISTRATION_MISMATCH', status: 403, clearCookies: false }
+      }
+      const fingerprint = await loadSource(
+        client,
+        text(locked.intent.data_source_id),
+        text(locked.intent.meta_user_id),
+        registeredPlmOrigin(registration),
+        text(locked.intent.root_part_id),
+      )
+      if (fingerprint !== text(locked.link.source_fingerprint)) {
+        return { kind: 'stop', code: 'PLM_MANAGED_SOURCE_CHANGED', status: 403, clearCookies: false }
+      }
+    } catch (error) {
+      if (error instanceof ManagedCompanionRefusal) {
+        return { kind: 'stop', code: error.code, status: error.status, clearCookies: false }
+      }
+      throw error
+    }
+    if (storedHash) {
+      if (!hashesEqual(storedHash, codeHash)) {
+        await client.query(
+          `UPDATE plm_managed_browser_intents
+           SET status = 'refused'
+           WHERE id = $1 AND status = 'pending' AND request_mode = 'continuous'
+             AND completion_code_hash = $2 AND delegation_id IS NULL AND credential_ciphertext IS NULL`,
+          [intentId, storedHash],
+        )
+        return { kind: 'refused', code: 'PLM_MANAGED_CALLBACK_REFUSED', status: 401, clearCookies: true }
+      }
+      return { kind: 'exchange' }
+    }
+    const updated = await client.query(
+      `UPDATE plm_managed_browser_intents
+       SET completion_code_hash = $2
+       WHERE id = $1 AND status = 'pending' AND completion_code_hash IS NULL AND request_mode = 'continuous'
+       RETURNING id`,
+      [intentId, codeHash],
+    )
+    if (updated.rows.length === 1) return { kind: 'exchange' }
+    const again = await client.query(
+      'SELECT status, completion_code_hash FROM plm_managed_browser_intents WHERE id = $1',
+      [intentId],
+    )
+    const nextHash = text(again.rows[0]?.completion_code_hash)
+    if (text(again.rows[0]?.status) === 'pending' && nextHash && hashesEqual(nextHash, codeHash)) {
+      return { kind: 'exchange' }
+    }
+    if (text(again.rows[0]?.status) === 'pending' && nextHash) {
+      await client.query(
+        `UPDATE plm_managed_browser_intents
+         SET status = 'refused'
+         WHERE id = $1 AND status = 'pending' AND completion_code_hash = $2
+           AND delegation_id IS NULL AND credential_ciphertext IS NULL`,
+        [intentId, nextHash],
+      )
+      return { kind: 'refused', code: 'PLM_MANAGED_CALLBACK_REFUSED', status: 401, clearCookies: true }
+    }
+    return { kind: 'stop', code: 'PLM_MANAGED_INTENT_CONSUMED', status: 409, clearCookies: true }
+  })
+}
+
+function closedResult(
+  locked: ContinuousLock,
+  issued: NativeContinuousExchange,
+  code: string,
+  status: number,
+  clearCookies: boolean,
+  enqueueObserved: boolean,
+): ContinuousCommit {
+  const storedDelegationId = locked.session ? text(locked.session.delegation_id) : ''
+  const observed = issued.delegation_id
+  return {
+    action: 'closed',
+    code,
+    status,
+    clearCookies,
+    enqueue: enqueueObserved && observed.length > 0 && observed !== storedDelegationId,
+    delegationId: observed || null,
+    storedDelegationId: storedDelegationId || null,
+  }
+}
+
+async function actorForSession(client: SqlClient, intent: LinkRow): Promise<{ email: string; role: string }> {
+  const user = await loadUser(client, text(intent.meta_user_id))
+  return {
+    email: text(user.email) || `${text(intent.meta_user_id)}@managed.local`,
+    role: text(user.role) || 'user',
+  }
+}
+
+async function commitContinuousExchange(
+  intentId: string,
+  codeHash: string,
+  issued: NativeContinuousExchange,
+): Promise<ContinuousCommit> {
+  return transaction(async (client) => {
+    const locked = await lockContinuous(client, intentId)
+    if (!locked) {
+      return {
+        action: 'closed',
+        code: 'PLM_MANAGED_BROWSER_REQUIRED',
+        status: 401,
+        clearCookies: true,
+        enqueue: issued.delegation_id.length > 0,
+        delegationId: issued.delegation_id,
+        storedDelegationId: null,
+      }
+    }
+    if (!linkStillActive(locked) || text(locked.intent.status) === 'revoked') {
+      return closedResult(locked, issued, 'PLM_MANAGED_LINK_STOPPED', 403, true, true)
+    }
+    await loadUser(client, text(locked.intent.meta_user_id))
+    await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_tenant_id))
+    await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_org_id))
+    const registration = registrationFor({
+      issuer: text(locked.intent.installation_issuer),
+      nativeTenantId: text(locked.intent.native_tenant_id),
+      nativeOrgId: text(locked.intent.native_org_id),
+    })
+    if (!registrationMatches(registration, locked.intent)) {
+      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+    }
+    const fingerprint = await loadSource(
+      client,
+      text(locked.intent.data_source_id),
+      text(locked.intent.meta_user_id),
+      registeredPlmOrigin(registration),
+      text(locked.intent.root_part_id),
+    )
+    if (fingerprint !== text(locked.link.source_fingerprint)) {
+      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+    }
+    if (text(locked.link.native_auth_user_id) !== issued.subject || text(locked.link.meta_user_id) !== text(locked.intent.meta_user_id)) {
+      if (!locked.session && text(locked.intent.status) === 'pending') await markContinuousRefused(client, intentId)
+      return closedResult(locked, issued, 'PLM_MANAGED_IDENTITY_REFUSED', 403, true, true)
+    }
+    const snapshot = { ...locked.intent, native_auth_user_id: locked.link.native_auth_user_id }
+    if (!exchangeMatches(snapshot, issued) || issued.generation_index !== 0) {
+      if (!locked.session && text(locked.intent.status) === 'pending') await markContinuousRefused(client, intentId)
+      return closedResult(locked, issued, 'PLM_MANAGED_EXCHANGE_MISMATCH', 403, true, true)
+    }
+    if (locked.session) {
+      if (!continuousSessionMatches(locked.session, issued)) {
+        return closedResult(locked, issued, 'PLM_MANAGED_EXCHANGE_MISMATCH', 409, false, true)
+      }
+      const actor = await actorForSession(client, locked.intent)
+      const expiresAt = locked.session.expires_at instanceof Date
+        ? locked.session.expires_at
+        : new Date(String(locked.session.expires_at))
+      return { action: 'cookie', sessionId: text(locked.session.id), expiresAt, email: actor.email, role: actor.role }
+    }
+    if (text(locked.intent.status) !== 'pending') {
+      return closedResult(locked, issued, 'PLM_MANAGED_INTENT_CONSUMED', 409, true, true)
+    }
+    if (!publicationWindow(issued.absolute_exp)) {
+      await markContinuousRefused(client, intentId)
+      return closedResult(locked, issued, 'PLM_MANAGED_SESSION_EXPIRY_REFUSED', 503, true, true)
+    }
+    if (await renewalPublicationBlocked(client, issued.delegation_id)) {
+      return closedResult(locked, issued, 'PLM_MANAGED_EXCHANGE_MISMATCH', 409, true, false)
+    }
+    const window = publicationWindow(issued.absolute_exp)
+    if (!window) {
+      await markContinuousRefused(client, intentId)
+      return closedResult(locked, issued, 'PLM_MANAGED_SESSION_EXPIRY_REFUSED', 503, true, true)
+    }
+    const createdAt = window.createdAt
+    const expiresAt = window.expiresAt
+    if (failSessionInsert) throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_SESSION_COMMIT_FAILED')
+    const sealed = sealCredential(issued.credential)
+    const stamped = await client.query(
+      `UPDATE plm_managed_browser_intents
+       SET status = 'consumed', consumed_at = now(), delegation_id = $2, credential_ciphertext = $3
+       WHERE id = $1 AND status = 'pending' AND request_mode = 'continuous'
+         AND completion_code_hash = $4 AND delegation_id IS NULL AND credential_ciphertext IS NULL
+       RETURNING id`,
+      [intentId, issued.delegation_id, sealed, codeHash],
+    )
+    if (stamped.rows.length !== 1) {
+      const winner = (await client.query(
+        'SELECT * FROM plm_managed_sessions WHERE intent_id = $1 FOR UPDATE',
+        [intentId],
+      )).rows[0] ?? null
+      if (winner && continuousSessionMatches(winner, issued)) {
+        const actor = await actorForSession(client, locked.intent)
+        const storedExpiry = winner.expires_at instanceof Date ? winner.expires_at : new Date(String(winner.expires_at))
+        return { action: 'cookie', sessionId: text(winner.id), expiresAt: storedExpiry, email: actor.email, role: actor.role }
+      }
+      return closedResult(
+        { ...locked, session: winner },
+        issued,
+        'PLM_MANAGED_INTENT_CONSUMED',
+        409,
+        false,
+        true,
+      )
+    }
+    const sessionId = randomUUID()
+    await client.query(
+      `INSERT INTO plm_managed_sessions (
+         id, intent_id, link_id, data_source_id, generation, delegation_id, credential_ciphertext, expires_at,
+         scope, native_subject, native_tenant_id, native_org_id, meta_user_id, meta_tenant_id, meta_org_id,
+         root_part_id, client_origin, installation_issuer, client_id, created_at, credential_generation
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,0
+       )`,
+      [
+        sessionId, intentId, text(locked.link.id), text(locked.intent.data_source_id), Number(locked.intent.generation),
+        issued.delegation_id, sealed, expiresAt, MANAGED_COMPANION_SCOPE, issued.subject, issued.tenant_id,
+        issued.org_id, text(locked.intent.meta_user_id), text(locked.intent.meta_tenant_id), text(locked.intent.meta_org_id),
+        issued.root_part_id, issued.client_origin, text(locked.intent.installation_issuer), text(locked.intent.client_id),
+        createdAt,
+      ],
+    )
+    const actor = await actorForSession(client, locked.intent)
+    return { action: 'cookie', sessionId, expiresAt, email: actor.email, role: actor.role }
+  })
+}
+
+async function runContinuousCompletion(
+  res: Response,
+  presented: { code: string; state: string },
+  delivery: CompletionDelivery,
+  intent: LinkRow,
+  callback: string,
+  intentId: string,
+): Promise<void> {
+  const codeHash = sha256Hex(presented.code)
+  const deliverFailure = (status: number, code: string, clearCookies: boolean): void => {
+    if (clearCookies) clearIntentCookies(res, callback)
+    deliverCompletion(res, delivery, fixedDestination(intent, 'refused', code), { status, code })
+  }
+  const publishCookie = (sessionId: string, expiresAt: Date, email: string, role: string): void => {
+    const token = signManagedSessionToken({
+      userId: text(intent.meta_user_id),
+      email,
+      role,
+      tenantId: text(intent.meta_tenant_id),
+      sessionId,
+      expiresAt,
+    })
+    clearIntentCookies(res, callback)
+    res.cookie(MANAGED_SESSION_COOKIE, token, { ...cookieBase(callback), maxAge: Math.max(0, expiresAt.getTime() - Date.now()) })
+    deliverCompletion(res, delivery, fixedDestination(intent, 'ready'))
+  }
+  const enqueueUntracked = async (delegationId: string | null, storedDelegationId: string | null): Promise<void> => {
+    if (!delegationId || delegationId === storedDelegationId) return
+    await enqueueObservedRevoke(intent, delegationId)
+  }
+  let frozen: ContinuousStop | { kind: 'exchange' }
+  try {
+    frozen = await freezeContinuousCode(intentId, codeHash)
+  } catch {
+    deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+    return
+  }
+  if (frozen.kind !== 'exchange') {
+    deliverFailure(frozen.status, frozen.code, frozen.clearCookies)
+    return
+  }
+  let issued: NativeContinuousExchange
+  try {
+    const registration = registrationFor({
+      issuer: text(intent.installation_issuer),
+      nativeTenantId: text(intent.native_tenant_id),
+      nativeOrgId: text(intent.native_org_id),
+    })
+    if (!registrationMatches(registration, intent)) {
+      deliverFailure(403, 'PLM_MANAGED_REGISTRATION_MISMATCH', false)
+      return
+    }
+    issued = await nativeExchangeContinuous(registration, {
+      code: presented.code,
+      codeVerifier: openVerifier(text(intent.code_verifier_ciphertext)),
+    })
+    if (loseExchangeResponse) {
+      throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', null, true)
+    }
+  } catch (error) {
+    if (error instanceof ManagedNativeCallRefusal && error.unavailable) {
+      deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+      return
+    }
+    const observed = error instanceof ManagedNativeCallRefusal ? error.observedDelegationId : null
+    const code = error instanceof ManagedCompanionRefusal ? error.code : 'PLM_MANAGED_EXCHANGE_UNAVAILABLE'
+    const status = error instanceof ManagedCompanionRefusal ? error.status : 503
+    const terminal = error instanceof ManagedNativeCallRefusal && !error.unavailable
+    if (!terminal) {
+      deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+      return
+    }
+    const decision = await transaction(async (client) => {
+      const locked = await lockContinuous(client, intentId)
+      const stored = locked?.session ? text(locked.session.delegation_id) : ''
+      if (locked && !locked.session && text(locked.intent.status) === 'pending') {
+        await markContinuousRefused(client, intentId)
+      }
+      return {
+        clearCookies: !locked?.session,
+        enqueue: !!observed && observed !== stored,
+        stored,
+      }
+    })
+    if (decision.enqueue && observed) await enqueueObservedRevoke(intent, observed)
+    deliverFailure(status, code, decision.clearCookies)
+    return
+  }
+  let committed: ContinuousCommit
+  try {
+    committed = await commitContinuousExchange(intentId, codeHash, issued)
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      try {
+        committed = await commitContinuousExchange(intentId, codeHash, issued)
+      } catch (retryError) {
+        if (retryError instanceof ManagedCompanionRefusal
+          && (retryError.code === 'PLM_MANAGED_SESSION_COMMIT_FAILED'
+            || retryError.code === 'PLM_MANAGED_SOURCE_CHANGED'
+            || retryError.code === 'PLM_MANAGED_META_MEMBERSHIP_REFUSED'
+            || retryError.code === 'PLM_MANAGED_META_USER_REFUSED'
+            || retryError.code === 'PLM_MANAGED_REGISTRATION_MISMATCH')) {
+          deliverFailure(retryError.status, retryError.code, false)
+          return
+        }
+        deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+        return
+      }
+    } else if (error instanceof ManagedCompanionRefusal
+      && (error.code === 'PLM_MANAGED_SESSION_COMMIT_FAILED'
+        || error.code === 'PLM_MANAGED_SOURCE_CHANGED'
+        || error.code === 'PLM_MANAGED_META_MEMBERSHIP_REFUSED'
+        || error.code === 'PLM_MANAGED_META_USER_REFUSED'
+        || error.code === 'PLM_MANAGED_REGISTRATION_MISMATCH')) {
+      deliverFailure(error.status, error.code, false)
+      return
+    } else {
+      deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+      return
+    }
+  }
+  if (committed.action === 'closed') {
+    if (committed.enqueue) await enqueueUntracked(committed.delegationId, committed.storedDelegationId)
+    deliverFailure(committed.status, committed.code, committed.clearCookies)
+    return
+  }
+  const fresh = await query(
+    `SELECT s.revoked_at, l.status AS link_status
+     FROM plm_managed_sessions s
+     JOIN plm_managed_identity_links l ON l.id = s.link_id
+     WHERE s.id = $1`,
+    [committed.sessionId],
+  )
+  const row = fresh.rows[0]
+  if (!row || row.revoked_at || text(row.link_status) !== 'active') {
+    deliverFailure(403, 'PLM_MANAGED_LINK_STOPPED', true)
+    return
+  }
+  try {
+    publishCookie(committed.sessionId, committed.expiresAt, committed.email, committed.role)
+  } catch (error) {
+    if (error instanceof ManagedCompanionRefusal && error.code === 'PLM_MANAGED_SESSION_EXPIRY_REFUSED') {
+      deliverFailure(error.status, error.code, false)
+      return
+    }
+    deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+  }
 }
 
 async function runManagedCompletion(
@@ -716,6 +1319,19 @@ async function runManagedCompletion(
     }
     throw error
   }
+  if (text(intent.request_mode) === 'continuous' || text(link.continuity_mode) === 'continuous') {
+    if (text(intent.request_mode) !== 'continuous' || text(link.continuity_mode) !== 'continuous') {
+      clearIntentCookies(res, callback)
+      deliverCompletion(res, delivery, fixedDestination(intent, 'refused', 'PLM_MANAGED_EXCHANGE_WRONG_MODE'), {
+        status: 403,
+        code: 'PLM_MANAGED_EXCHANGE_WRONG_MODE',
+      })
+      return
+    }
+    await runContinuousCompletion(res, presented, delivery, intent, callback, intentId)
+    return
+  }
+  const ordinaryExpiryAnchorMs = Date.now()
   const consumed = await consumeIntent(intentId, text(intent.state_hash), text(intent.nonce_hash))
   if (!consumed) {
     clearIntentCookies(res, callback)
@@ -737,7 +1353,7 @@ async function runManagedCompletion(
     observed = issued
     const snapshot = { ...intent, native_auth_user_id: link.native_auth_user_id }
     if (!exchangeMatches(snapshot, issued)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_EXCHANGE_MISMATCH')
-    const session = await transaction(async (client) => {
+    const published = await transaction(async (client) => {
       const locked = await client.query(
         'SELECT * FROM plm_managed_identity_links WHERE id = $1 FOR UPDATE',
         [text(intent.link_id)],
@@ -760,6 +1376,12 @@ async function runManagedCompletion(
         text(intent.root_part_id),
       )
       if (fingerprint !== text(currentLink.source_fingerprint)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+      if (await renewalPublicationBlocked(client, issued.delegation_id)) {
+        return { kind: 'blocked' as const }
+      }
+      if (!ordinaryExpiryDeadline(ordinaryExpiryAnchorMs, issued.expires_in)) {
+        throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_SESSION_EXPIRY_REFUSED')
+      }
       const sealed = sealCredential(issued.credential)
       const stamped = await client.query(
         `UPDATE plm_managed_browser_intents
@@ -770,9 +1392,11 @@ async function runManagedCompletion(
       )
       if (stamped.rows.length !== 1) throw new ManagedCompanionRefusal(409, 'PLM_MANAGED_INTENT_CONSUMED')
       if (failSessionInsert) throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_SESSION_COMMIT_FAILED')
+      const expiryWindow = ordinaryExpiryDeadline(ordinaryExpiryAnchorMs, issued.expires_in)
+      if (!expiryWindow) throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_SESSION_EXPIRY_REFUSED')
       const sessionId = randomUUID()
-      const createdAt = new Date()
-      const expiresAt = new Date(createdAt.getTime() + issued.expires_in * 1000)
+      const createdAt = expiryWindow.createdAt
+      const expiresAt = expiryWindow.expiresAt
       await client.query(
         `INSERT INTO plm_managed_sessions (
            id, intent_id, link_id, data_source_id, generation, delegation_id, credential_ciphertext, expires_at,
@@ -789,41 +1413,67 @@ async function runManagedCompletion(
         ],
       )
       const user = await loadUser(client, text(intent.meta_user_id))
-      return { sessionId, expiresAt, email: text(user.email) || `${text(intent.meta_user_id)}@managed.local`, role: text(user.role) || 'user' }
+      return {
+        kind: 'session' as const,
+        sessionId,
+        expiresAt,
+        email: text(user.email) || `${text(intent.meta_user_id)}@managed.local`,
+        role: text(user.role) || 'user',
+      }
     })
-    const token = signManagedSessionToken({
-      userId: text(intent.meta_user_id),
-      email: session.email,
-      role: session.role,
-      tenantId: text(intent.meta_tenant_id),
-      sessionId: session.sessionId,
-      expiresAt: session.expiresAt,
-    })
+    if (published.kind === 'blocked') {
+      clearIntentCookies(res, callback)
+      deliverCompletion(res, delivery, fixedDestination(intent, 'refused', 'PLM_MANAGED_EXCHANGE_MISMATCH'), {
+        status: 409,
+        code: 'PLM_MANAGED_EXCHANGE_MISMATCH',
+      })
+      return
+    }
+    const live = ordinaryExpiryDeadline(ordinaryExpiryAnchorMs, issued.expires_in)
+    if (!live || live.expiresAt.getTime() !== published.expiresAt.getTime()) {
+      clearIntentCookies(res, callback)
+      deliverCompletion(res, delivery, fixedDestination(intent, 'refused', 'PLM_MANAGED_SESSION_EXPIRY_REFUSED'), {
+        status: 503,
+        code: 'PLM_MANAGED_SESSION_EXPIRY_REFUSED',
+      })
+      return
+    }
+    let token: string
+    try {
+      token = signManagedSessionToken({
+        userId: text(intent.meta_user_id),
+        email: published.email,
+        role: published.role,
+        tenantId: text(intent.meta_tenant_id),
+        sessionId: published.sessionId,
+        expiresAt: live.expiresAt,
+      })
+    } catch (error) {
+      if (error instanceof ManagedCompanionRefusal && error.code === 'PLM_MANAGED_SESSION_EXPIRY_REFUSED') {
+        clearIntentCookies(res, callback)
+        deliverCompletion(res, delivery, fixedDestination(intent, 'refused', 'PLM_MANAGED_SESSION_EXPIRY_REFUSED'), {
+          status: 503,
+          code: 'PLM_MANAGED_SESSION_EXPIRY_REFUSED',
+        })
+        return
+      }
+      throw error
+    }
+    const maxAge = live.expiresAt.getTime() - Date.now()
+    if (maxAge <= 0) {
+      clearIntentCookies(res, callback)
+      deliverCompletion(res, delivery, fixedDestination(intent, 'refused', 'PLM_MANAGED_SESSION_EXPIRY_REFUSED'), {
+        status: 503,
+        code: 'PLM_MANAGED_SESSION_EXPIRY_REFUSED',
+      })
+      return
+    }
     clearIntentCookies(res, callback)
-    res.cookie(MANAGED_SESSION_COOKIE, token, { ...cookieBase(callback), maxAge: issued.expires_in * 1000 })
+    res.cookie(MANAGED_SESSION_COOKIE, token, { ...cookieBase(callback), maxAge })
     deliverCompletion(res, delivery, fixedDestination(intent, 'ready'))
   } catch (error) {
-    if (observed) {
-      try {
-        const registration = registrationFor({
-          issuer: text(intent.installation_issuer),
-          nativeTenantId: text(intent.native_tenant_id),
-          nativeOrgId: text(intent.native_org_id),
-        })
-        const revoked = await nativeRevoke(registration, observed.delegation_id)
-        if (revoked) {
-          await query(
-            `UPDATE plm_managed_browser_intents
-             SET delegation_id = $2
-             WHERE id = $1 AND status = 'consumed' AND delegation_id IS NULL`,
-            [intentId, observed.delegation_id],
-          )
-        } else {
-          await enqueueObservedRevoke(intent, observed.delegation_id)
-        }
-      } catch {
-        await enqueueObservedRevoke(intent, observed.delegation_id).catch(() => undefined)
-      }
+    if (observed?.delegation_id) {
+      await compensateOrdinaryObservation(intent, observed.delegation_id)
     }
     clearIntentCookies(res, callback)
     const refusal = error instanceof ManagedCompanionRefusal ? error : null
@@ -974,6 +1624,19 @@ async function sendFrozenRevoke(outboxId: string): Promise<{ state: 'pending' | 
       )
       return { state: 'pending' as const, delegationId: text(row.delegation_id) }
     }
+    await lockRenewalDelegation(client, text(row.delegation_id))
+    const tracked = await client.query(
+      `SELECT 1 FROM plm_managed_sessions
+       WHERE delegation_id = $1 AND revoked_at IS NULL
+       LIMIT 1`,
+      [text(row.delegation_id)],
+    )
+    if (tracked.rows.length > 0) {
+      return { state: 'pending' as const, delegationId: text(row.delegation_id) }
+    }
+    // The only native revoke in this file. The lock above is already held, and
+    // the tracked read is a later statement, so a winner that committed while
+    // this drain waited is visible and is not revoked.
     let acked = false
     try {
       acked = await nativeRevoke(registration, text(row.delegation_id))
@@ -1150,6 +1813,133 @@ type ManagedBomReadInput = {
   partId: string
 }
 
+type FrozenBomRead = {
+  sessionId: string
+  userId: string
+  dataSourceId: string
+  partId: string
+  delegationId: string
+  generation: number
+  nativeSubject: string
+  nativeTenantId: string
+  nativeOrgId: string
+  clientOrigin: string
+  issuer: string
+  clientId: string
+  linkId: string
+}
+
+/**
+ * Publish only after the native response. Lock order matches renewal:
+ * link, binding, frozen session, renewal operation, then the delegation
+ * advisory. The classified link id is locked before any session read so a
+ * waiter does not hold a session lock while blocked on the link. The source
+ * row is locked after those so provision's link-then-source order stays
+ * intact. Membership and expiry are read again after that source lock.
+ * Expiry uses clock_timestamp, the wall clock, because now() stays at
+ * transaction start during the waits. Source owner, config origin, and
+ * scope fingerprint go through loadSource. Network stays outside this
+ * transaction. A native revocation that has not been written to the frozen
+ * session, link, or revoke outbox can still arrive after nativeStatus; this
+ * path does not open a second native read under the lock. A missing link id
+ * refuses in every environment. This function does not publish when the
+ * transaction callback does not run.
+ */
+async function admitManagedBomRead(client: SqlClient, frozen: FrozenBomRead): Promise<void> {
+  if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
+  const store = currentManagedRequest()
+  if (!store || store.conflict || store.sessionId !== frozen.sessionId || store.userId !== frozen.userId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SESSION_REQUIRED')
+  }
+  const linkId = frozen.linkId
+  if (!linkId) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  const locked = await lockRenewal(client, linkId, frozen.dataSourceId, frozen.sessionId)
+  if (!locked) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  if (text(locked.session.id) !== frozen.sessionId || text(locked.session.delegation_id) !== frozen.delegationId
+    || text(locked.session.data_source_id) !== frozen.dataSourceId || text(locked.session.link_id) !== linkId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  }
+  await lockRenewalDelegation(client, frozen.delegationId)
+  if (text(locked.link.status) !== 'active' || Number(locked.link.generation) !== frozen.generation
+    || Number(locked.session.generation) !== frozen.generation) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (text(locked.binding.status) !== 'active' || text(locked.binding.link_id) !== text(locked.link.id)
+    || Number(locked.binding.generation) !== Number(locked.link.generation)
+    || text(locked.binding.source_fingerprint) !== text(locked.link.source_fingerprint)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (locked.session.revoked_at) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SESSION_REQUIRED')
+  if (text(locked.link.meta_user_id) !== frozen.userId || text(locked.link.owner_user_id) !== frozen.userId
+    || text(locked.session.meta_user_id) !== frozen.userId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  if (store.metaTenantId && store.metaTenantId !== text(locked.session.meta_tenant_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  if (text(locked.session.scope) !== MANAGED_COMPANION_SCOPE
+    || text(locked.session.native_subject) !== frozen.nativeSubject
+    || text(locked.session.native_tenant_id) !== frozen.nativeTenantId
+    || text(locked.session.native_org_id) !== frozen.nativeOrgId
+    || text(locked.session.root_part_id) !== frozen.partId
+    || text(locked.session.client_origin) !== frozen.clientOrigin
+    || text(locked.session.installation_issuer) !== frozen.issuer
+    || text(locked.session.client_id) !== frozen.clientId
+    || text(locked.session.meta_tenant_id) !== text(locked.link.meta_tenant_id)
+    || text(locked.session.meta_org_id) !== text(locked.link.meta_org_id)
+    || text(locked.link.native_auth_user_id) !== frozen.nativeSubject
+    || text(locked.link.native_tenant_id) !== frozen.nativeTenantId
+    || text(locked.link.native_org_id) !== frozen.nativeOrgId
+    || text(locked.link.root_part_id) !== frozen.partId
+    || text(locked.link.client_origin) !== frozen.clientOrigin
+    || text(locked.link.client_id) !== frozen.clientId
+    || text(locked.link.installation_issuer) !== frozen.issuer) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  const registration = registrationFor({
+    issuer: text(locked.link.installation_issuer),
+    nativeTenantId: text(locked.link.native_tenant_id),
+    nativeOrgId: text(locked.link.native_org_id),
+  })
+  if (!registrationMatches(registration, locked.link) || registration.clientId !== text(locked.session.client_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+  }
+  const origin = registeredPlmOrigin(registration)
+  if (text(locked.binding.frozen_origin) !== origin || text(locked.binding.frozen_root_part_id) !== frozen.partId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_REFUSED')
+  }
+  await client.query('SELECT id FROM data_sources WHERE id = $1 FOR UPDATE', [frozen.dataSourceId])
+  const fingerprint = await loadSource(client, frozen.dataSourceId, frozen.userId, origin, frozen.partId)
+  if (fingerprint !== text(locked.link.source_fingerprint) || fingerprint !== text(locked.binding.source_fingerprint)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+  }
+  const sourceTenant = persistentScopeValue((await client.query(
+    'SELECT tenant_id FROM data_sources WHERE id = $1',
+    [frozen.dataSourceId],
+  )).rows[0]?.tenant_id)
+  if (sourceTenant !== null && sourceTenant !== text(locked.session.meta_tenant_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  }
+  await loadUser(client, frozen.userId)
+  await requireMembership(client, frozen.userId, text(locked.session.meta_tenant_id))
+  await requireMembership(client, frozen.userId, text(locked.session.meta_org_id))
+  const fresh = await client.query(
+    `SELECT id FROM plm_managed_sessions
+     WHERE id = $1 AND revoked_at IS NULL AND expires_at > clock_timestamp()`,
+    [frozen.sessionId],
+  )
+  if (!fresh.rows[0]) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SESSION_REQUIRED')
+}
+
+async function publishManagedBomRead(frozen: FrozenBomRead): Promise<void> {
+  let published = false
+  await transaction(async (client) => {
+    await admitManagedBomRead(client, frozen)
+    published = true
+  })
+  if (!published) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+}
+
 // Server-only projection envelope; it carries no persistent-sharing authority.
 export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promise<
   | { kind: 'legacy' }
@@ -1211,6 +2001,26 @@ export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promi
       org_id: text(session.native_org_id),
       auth_user_id: text(session.native_subject),
     })
+    const generation = integerOf(row.generation)
+    const seenGeneration = integerOf(session.generation)
+    if (generation === null || seenGeneration === null || seenGeneration !== generation) {
+      return { kind: 'refusal', status: 403, code: 'PLM_MANAGED_READ_REFUSED' }
+    }
+    await publishManagedBomRead({
+      sessionId: store.sessionId,
+      userId: input.userId,
+      dataSourceId: input.dataSourceId,
+      partId: input.partId,
+      delegationId: text(session.delegation_id),
+      generation,
+      nativeSubject: text(session.native_subject),
+      nativeTenantId: text(session.native_tenant_id),
+      nativeOrgId: text(session.native_org_id),
+      clientOrigin: text(session.client_origin),
+      issuer: text(session.installation_issuer),
+      clientId: text(session.client_id),
+      linkId: text(row.link_id),
+    })
     return { kind: 'ok', entitled: true, snapshot,
       advisoryCapabilities: (payload as Record<string, unknown>).integration_capabilities }
   } catch (error) {
@@ -1227,4 +2037,729 @@ export async function relayManagedBomContext(input: ManagedBomReadInput): Promis
   const result = await relayManagedBomSnapshot(input)
   if (result.kind !== 'ok') return result
   return { kind: 'ok', entitled: true, context: result.snapshot.context }
+}
+
+const RENEWAL_LEAD_SECONDS = 120
+const RENEWAL_KEY = /^[A-Za-z0-9_-]{36,64}$/
+/** Salt so this lock does not collide with the source-id advisory lock. */
+export const RENEWAL_DELEGATION_LOCK_PREFIX = 'plm-renewal-delegation:'
+
+type RenewalStop = { kind: 'stop'; status: number; code: string }
+type RenewalReady = {
+  kind: 'ready'
+  operationId: string
+  idempotencyKey: string
+  predecessorCredential: string
+}
+type RenewalOutcome =
+  | { kind: 'issued'; issued: NativeRenewal }
+  | { kind: 'denied'; status: number; code: string; observed: string | null }
+type RenewalCookie = {
+  action: 'cookie'
+  sessionId: string
+  expiresAt: Date
+  email: string
+  role: string
+  tenantId: string
+  userId: string
+  secureOrigin: string
+  predecessorSessionId: string
+}
+type RenewalClosed = {
+  action: 'closed'
+  status: number
+  code: string
+  enqueue: boolean
+  delegationId: string | null
+  linkId: string
+  generation: number
+  clientId: string
+  installationIssuer: string
+  nativeTenantId: string
+  nativeOrgId: string
+  callback: string
+}
+type RenewalFinish = RenewalCookie | RenewalClosed
+type RenewalLock = { link: LinkRow; binding: LinkRow; session: LinkRow; operation: LinkRow | null }
+
+function renewalStop(status: number, code: string): RenewalStop {
+  return { kind: 'stop', status, code }
+}
+
+function integerOf(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && Number.isSafeInteger(value)) return value
+  if (typeof value === 'string' && /^-?\d+$/.test(value)) {
+    const parsed = Number(value)
+    if (Number.isSafeInteger(parsed)) return parsed
+  }
+  return null
+}
+
+function epochOf(value: unknown): number | null {
+  const date = value instanceof Date ? value : new Date(String(value ?? ''))
+  if (Number.isNaN(date.getTime())) return null
+  return Math.floor(date.getTime() / 1000)
+}
+
+function headerRaw(req: Request, name: string): string {
+  const raw = req.headers[name]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' ? value : ''
+}
+
+function rejectRenewalAuthorization(req: Request): void {
+  const header = req.headers.authorization
+  if (Array.isArray(header) ? header.length > 0 : typeof header === 'string' && header.trim() !== '') {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_BEARER_REFUSED')
+  }
+}
+
+function decodedManagedClaims(token: string): { userId: string; tenantId: string; sid: string; exp: number } | null {
+  const decoded = jwt.decode(token)
+  if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return null
+  const payload = decoded as Record<string, unknown>
+  if (payload.purpose !== MANAGED_COMPANION_PURPOSE) return null
+  if (typeof payload.userId !== 'string' || payload.userId.length === 0 || payload.userId !== payload.userId.trim()) return null
+  if (typeof payload.tenantId !== 'string' || payload.tenantId.length === 0) return null
+  if (typeof payload.sid !== 'string' || payload.sid.length === 0) return null
+  if (typeof payload.exp !== 'number' || !Number.isSafeInteger(payload.exp)) return null
+  return { userId: payload.userId, tenantId: payload.tenantId, sid: payload.sid, exp: payload.exp }
+}
+
+function renewalKey(): string {
+  const key = randomBytes(32).toString('base64url')
+  if (!RENEWAL_KEY.test(key)) throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE')
+  return key
+}
+
+function openedPredecessor(session: LinkRow): { jti: string; exp: number; delegation_id: string } | null {
+  try {
+    return decodeBoundYurClaims(openCredential(text(session.credential_ciphertext)))
+  } catch {
+    return null
+  }
+}
+
+async function lockRenewal(client: SqlClient, linkId: string, dataSourceId: string, sessionId: string): Promise<RenewalLock | null> {
+  // Link, then binding, then session, then operation. stopLink locks the link first.
+  // The native call stays outside this transaction.
+  await client.query('SELECT id FROM plm_managed_identity_links WHERE id = $1 FOR UPDATE', [linkId])
+  await client.query('SELECT data_source_id FROM plm_managed_source_bindings WHERE data_source_id = $1 FOR UPDATE', [dataSourceId])
+  await client.query('SELECT id FROM plm_managed_sessions WHERE id = $1 FOR UPDATE', [sessionId])
+  const operation = (await client.query(
+    'SELECT * FROM plm_managed_renewal_operations WHERE predecessor_session_id = $1 FOR UPDATE',
+    [sessionId],
+  )).rows[0] ?? null
+  const link = (await client.query('SELECT * FROM plm_managed_identity_links WHERE id = $1', [linkId])).rows[0]
+  const binding = (await client.query('SELECT * FROM plm_managed_source_bindings WHERE data_source_id = $1', [dataSourceId])).rows[0]
+  const session = (await client.query('SELECT * FROM plm_managed_sessions WHERE id = $1', [sessionId])).rows[0]
+  if (!link || !binding || !session) return null
+  return { link, binding, session, operation }
+}
+
+async function lockRenewalDelegation(client: SqlClient, delegationId: string): Promise<void> {
+  // Renewal publication and initial completion take this after their row locks
+  // and before the session insert. Classification takes it alone before reading
+  // tracked rows, so it waits out an in-flight publisher without inverting the
+  // row-lock order. Native renew and exchange stay outside this transaction.
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+    `${RENEWAL_DELEGATION_LOCK_PREFIX}${delegationId}`,
+  ])
+}
+
+async function renewalPublicationBlocked(client: SqlClient, delegationId: string): Promise<boolean> {
+  await lockRenewalDelegation(client, delegationId)
+  const blocked = await client.query(
+    `SELECT 1 FROM plm_managed_revoke_outbox WHERE delegation_id = $1
+     UNION ALL
+     SELECT 1 FROM plm_managed_sessions WHERE delegation_id = $1
+     LIMIT 1`,
+    [delegationId],
+  )
+  return blocked.rows.length > 0
+}
+
+function publicationWindow(absoluteExp: number, now = new Date()): { createdAt: Date; expiresAt: Date } | null {
+  const expiresAt = new Date(absoluteExp * 1000)
+  const remaining = absoluteExp - Math.floor(now.getTime() / 1000)
+  const span = expiresAt.getTime() - now.getTime()
+  if (remaining < 1 || remaining > 600 || span <= 0 || span > 600_000) return null
+  return { createdAt: now, expiresAt }
+}
+
+/**
+ * Ordinary completion has a relative expires_in, not an absolute credential exp.
+ * Freeze that window at anchorMs, before exchange or SQL waits, and do not read the yur payload.
+ */
+function ordinaryExpiryDeadline(anchorMs: number, expiresIn: number, nowMs = Date.now()): { createdAt: Date; expiresAt: Date } | null {
+  if (!Number.isSafeInteger(anchorMs) || anchorMs <= 0) return null
+  if (typeof expiresIn !== 'number' || !Number.isInteger(expiresIn) || expiresIn < 1 || expiresIn > 600) return null
+  const createdAt = new Date(Math.floor(anchorMs / 1000) * 1000)
+  const expiresAt = new Date(createdAt.getTime() + expiresIn * 1000)
+  const remaining = Math.floor(expiresAt.getTime() / 1000) - Math.floor(nowMs / 1000)
+  const span = expiresAt.getTime() - nowMs
+  if (remaining < 1 || remaining > 600 || span <= 0 || span > 600_000) return null
+  return { createdAt, expiresAt }
+}
+
+function frozenRenewalMatches(locked: RenewalLock): boolean {
+  const operation = locked.operation
+  if (!operation) return true
+  return text(operation.link_id) === text(locked.link.id)
+    && integerOf(operation.link_generation) === Number(locked.link.generation)
+    && integerOf(operation.binding_generation) === Number(locked.binding.generation)
+    && text(operation.source_fingerprint) === text(locked.link.source_fingerprint)
+    && text(operation.meta_user_id) === text(locked.session.meta_user_id)
+    && text(operation.meta_tenant_id) === text(locked.session.meta_tenant_id)
+    && text(operation.meta_org_id) === text(locked.session.meta_org_id)
+    && text(operation.native_subject) === text(locked.session.native_subject)
+    && text(operation.native_tenant_id) === text(locked.session.native_tenant_id)
+    && text(operation.native_org_id) === text(locked.session.native_org_id)
+    && text(operation.root_part_id) === text(locked.session.root_part_id)
+    && text(operation.client_origin) === text(locked.session.client_origin)
+    && text(operation.client_id) === text(locked.session.client_id)
+    && text(operation.installation_issuer) === text(locked.session.installation_issuer)
+    && text(operation.scope) === text(locked.session.scope)
+    && text(operation.predecessor_session_id) === text(locked.session.id)
+    && text(operation.predecessor_delegation_id) === text(locked.session.delegation_id)
+}
+
+async function assertRenewalAdmission(client: SqlClient, locked: RenewalLock): Promise<void> {
+  if (locked.session.revoked_at) throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  if (text(locked.link.status) !== 'active') throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  if (text(locked.link.continuity_mode) !== 'continuous') throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_RENEW_NOT_CONTINUOUS')
+  if (Number(locked.link.generation) !== Number(locked.session.generation)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (text(locked.link.meta_user_id) !== text(locked.session.meta_user_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  if (text(locked.link.owner_user_id) !== text(locked.session.meta_user_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  if (text(locked.binding.status) !== 'active' || text(locked.binding.link_id) !== text(locked.link.id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (Number(locked.binding.generation) !== Number(locked.link.generation)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (text(locked.binding.source_fingerprint) !== text(locked.link.source_fingerprint)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+  }
+  if (text(locked.session.scope) !== MANAGED_COMPANION_SCOPE) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_RENEW_MISMATCH')
+  if (text(locked.link.native_auth_user_id) !== text(locked.session.native_subject)
+    || text(locked.link.native_tenant_id) !== text(locked.session.native_tenant_id)
+    || text(locked.link.native_org_id) !== text(locked.session.native_org_id)
+    || text(locked.link.root_part_id) !== text(locked.session.root_part_id)
+    || text(locked.link.client_origin) !== text(locked.session.client_origin)
+    || text(locked.link.client_id) !== text(locked.session.client_id)
+    || text(locked.link.installation_issuer) !== text(locked.session.installation_issuer)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  if (!frozenRenewalMatches(locked)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_RENEW_MISMATCH')
+  await loadUser(client, text(locked.session.meta_user_id))
+  await requireMembership(client, text(locked.session.meta_user_id), text(locked.session.meta_tenant_id))
+  await requireMembership(client, text(locked.session.meta_user_id), text(locked.session.meta_org_id))
+  const registration = registrationFor({
+    issuer: text(locked.link.installation_issuer),
+    nativeTenantId: text(locked.link.native_tenant_id),
+    nativeOrgId: text(locked.link.native_org_id),
+  })
+  if (!registrationMatches(registration, locked.link)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+  const fingerprint = await loadSource(
+    client,
+    text(locked.session.data_source_id),
+    text(locked.session.meta_user_id),
+    registeredPlmOrigin(registration),
+    text(locked.session.root_part_id),
+  )
+  if (fingerprint !== text(locked.link.source_fingerprint)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+}
+
+function renewalClosed(
+  locked: RenewalLock,
+  status: number,
+  code: string,
+  observed: string | null,
+  enqueueObserved: boolean,
+): RenewalClosed {
+  const stored = locked.operation ? text(locked.operation.successor_delegation_id) : ''
+  const delegationId = observed && observed !== stored ? observed : null
+  return {
+    action: 'closed',
+    status,
+    code,
+    enqueue: enqueueObserved && !!delegationId,
+    delegationId,
+    linkId: text(locked.link.id),
+    generation: Number(locked.link.generation),
+    clientId: text(locked.link.client_id),
+    installationIssuer: text(locked.link.installation_issuer),
+    nativeTenantId: text(locked.link.native_tenant_id),
+    nativeOrgId: text(locked.link.native_org_id),
+    callback: text(locked.link.callback),
+  }
+}
+
+async function markRenewalRefused(client: SqlClient, operationId: string): Promise<void> {
+  await client.query(
+    `UPDATE plm_managed_renewal_operations
+     SET status = 'refused', updated_at = now()
+     WHERE id = $1 AND status = 'pending'
+       AND successor_session_id IS NULL AND successor_delegation_id IS NULL
+       AND successor_jti IS NULL AND successor_exp IS NULL
+       AND successor_credential_generation IS NULL AND credential_ciphertext IS NULL`,
+    [operationId],
+  )
+}
+
+function issuedMatchesFrozen(operation: LinkRow, issued: NativeRenewal): boolean {
+  return issued.generation_index === integerOf(operation.expected_successor_index)
+    && issued.subject === text(operation.native_subject)
+    && issued.tenant_id === text(operation.native_tenant_id)
+    && issued.org_id === text(operation.native_org_id)
+    && issued.client_id === text(operation.client_id)
+    && issued.issuer === text(operation.installation_issuer)
+    && issued.scope === text(operation.scope)
+    && issued.root_part_id === text(operation.root_part_id)
+    && issued.client_origin === text(operation.client_origin)
+    && issued.credential_jti.length > 0
+    && issued.delegation_id.length > 0
+    && issued.absolute_exp === decodeBoundYurClaims(issued.credential)?.exp
+    && issued.credential_jti === decodeBoundYurClaims(issued.credential)?.jti
+    && issued.delegation_id === decodeBoundYurClaims(issued.credential)?.delegation_id
+}
+
+function storedSuccessorMatches(operation: LinkRow, issued: NativeRenewal): boolean {
+  if (!issuedMatchesFrozen(operation, issued)) return false
+  if (text(operation.status) !== 'committed') return false
+  if (text(operation.successor_delegation_id) !== issued.delegation_id) return false
+  if (text(operation.successor_jti) !== issued.credential_jti) return false
+  if (integerOf(operation.successor_exp) !== issued.absolute_exp) return false
+  if (integerOf(operation.successor_credential_generation) !== issued.generation_index) return false
+  try {
+    const claims = decodeBoundYurClaims(openCredential(text(operation.credential_ciphertext)))
+    return !!claims
+      && claims.jti === issued.credential_jti
+      && claims.exp === issued.absolute_exp
+      && claims.delegation_id === issued.delegation_id
+  } catch {
+    return false
+  }
+}
+
+async function renewalCookie(client: SqlClient, locked: RenewalLock, sessionId: string, expiresAt: Date): Promise<RenewalCookie> {
+  const user = await loadUser(client, text(locked.session.meta_user_id))
+  return {
+    action: 'cookie',
+    sessionId,
+    expiresAt,
+    email: text(user.email) || `${text(locked.session.meta_user_id)}@managed.local`,
+    role: text(user.role) || 'user',
+    tenantId: text(locked.session.meta_tenant_id),
+    userId: text(locked.session.meta_user_id),
+    secureOrigin: text(locked.link.callback),
+    predecessorSessionId: text(locked.session.id),
+  }
+}
+
+async function allocateRenewal(client: SqlClient, sessionId: string): Promise<RenewalReady | RenewalStop> {
+  const peek = await client.query(
+    'SELECT link_id, data_source_id FROM plm_managed_sessions WHERE id = $1',
+    [sessionId],
+  )
+  const linkId = text(peek.rows[0]?.link_id)
+  const sourceId = text(peek.rows[0]?.data_source_id)
+  if (!linkId || !sourceId) return renewalStop(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  const locked = await lockRenewal(client, linkId, sourceId, sessionId)
+  if (!locked) return renewalStop(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  try {
+    await assertRenewalAdmission(client, locked)
+  } catch (error) {
+    if (error instanceof ManagedCompanionRefusal) return renewalStop(error.status, error.code)
+    throw error
+  }
+  const exp = epochOf(locked.session.expires_at)
+  const claims = openedPredecessor(locked.session)
+  const index = integerOf(locked.session.credential_generation)
+  if (exp === null || !claims || claims.exp !== exp || claims.delegation_id !== text(locked.session.delegation_id)) {
+    return renewalStop(403, 'PLM_MANAGED_RENEW_MISMATCH')
+  }
+  if (index === null || index < 0 || index > 6) return renewalStop(403, 'PLM_MANAGED_RENEW_NOT_CONTINUOUS')
+  if (exp * 1000 <= Date.now()) return renewalStop(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  const credential = openCredential(text(locked.session.credential_ciphertext))
+  if (locked.operation) {
+    if (text(locked.operation.status) === 'refused') return renewalStop(401, 'PLM_MANAGED_RENEW_REFUSED')
+    if (text(locked.operation.predecessor_jti) !== claims.jti || integerOf(locked.operation.predecessor_exp) !== exp) {
+      return renewalStop(403, 'PLM_MANAGED_RENEW_MISMATCH')
+    }
+    if (integerOf(locked.operation.expected_successor_index) !== index + 1) {
+      return renewalStop(403, 'PLM_MANAGED_RENEW_MISMATCH')
+    }
+    if (!RENEWAL_KEY.test(text(locked.operation.idempotency_key))) return renewalStop(403, 'PLM_MANAGED_RENEW_MISMATCH')
+    return {
+      kind: 'ready',
+      operationId: text(locked.operation.id),
+      idempotencyKey: text(locked.operation.idempotency_key),
+      predecessorCredential: credential,
+    }
+  }
+  const remaining = exp - Math.floor(Date.now() / 1000)
+  if (remaining > RENEWAL_LEAD_SECONDS) return renewalStop(409, 'PLM_MANAGED_RENEW_NOT_DUE')
+  if (remaining <= 0) return renewalStop(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  const key = renewalKey()
+  const operationId = randomUUID()
+  await client.query(
+    `INSERT INTO plm_managed_renewal_operations (
+       id, predecessor_session_id, predecessor_delegation_id, idempotency_key, predecessor_jti, predecessor_exp,
+       link_id, link_generation, binding_generation, source_fingerprint, meta_user_id, meta_tenant_id, meta_org_id,
+       native_subject, native_tenant_id, native_org_id, root_part_id, client_origin, client_id, installation_issuer,
+       scope, expected_successor_index, status
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,'pending'
+     )`,
+    [
+      operationId, text(locked.session.id), text(locked.session.delegation_id), key, claims.jti, exp,
+      text(locked.link.id), Number(locked.link.generation), Number(locked.binding.generation),
+      text(locked.link.source_fingerprint), text(locked.session.meta_user_id), text(locked.session.meta_tenant_id),
+      text(locked.session.meta_org_id), text(locked.session.native_subject), text(locked.session.native_tenant_id),
+      text(locked.session.native_org_id), text(locked.session.root_part_id), text(locked.session.client_origin),
+      text(locked.session.client_id), text(locked.session.installation_issuer), MANAGED_COMPANION_SCOPE, index + 1,
+    ],
+  )
+  return { kind: 'ready', operationId, idempotencyKey: key, predecessorCredential: credential }
+}
+
+async function finishRenewal(client: SqlClient, operationId: string, outcome: RenewalOutcome): Promise<RenewalFinish> {
+  const peek = await client.query(
+    `SELECT o.predecessor_session_id, s.link_id, s.data_source_id
+     FROM plm_managed_renewal_operations o
+     JOIN plm_managed_sessions s ON s.id = o.predecessor_session_id
+     WHERE o.id = $1`,
+    [operationId],
+  )
+  const sessionId = text(peek.rows[0]?.predecessor_session_id)
+  const linkId = text(peek.rows[0]?.link_id)
+  const sourceId = text(peek.rows[0]?.data_source_id)
+  if (!sessionId || !linkId || !sourceId) {
+    return {
+      action: 'closed', status: 401, code: 'PLM_MANAGED_SESSION_REQUIRED', enqueue: false, delegationId: null,
+      linkId: '', generation: 0, clientId: '', installationIssuer: '', nativeTenantId: '', nativeOrgId: '', callback: '',
+    }
+  }
+  const locked = await lockRenewal(client, linkId, sourceId, sessionId)
+  if (!locked?.operation || text(locked.operation.id) !== operationId) {
+    return {
+      action: 'closed', status: 401, code: 'PLM_MANAGED_SESSION_REQUIRED', enqueue: false, delegationId: null,
+      linkId, generation: 0, clientId: '', installationIssuer: '', nativeTenantId: '', nativeOrgId: '', callback: '',
+    }
+  }
+  const observed = outcome.kind === 'issued' ? outcome.issued.delegation_id : outcome.observed
+  const exp = epochOf(locked.session.expires_at)
+  let admission: ManagedCompanionRefusal | null = null
+  try {
+    await assertRenewalAdmission(client, locked)
+    if (exp === null || exp * 1000 <= Date.now()) throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  } catch (error) {
+    if (!(error instanceof ManagedCompanionRefusal)) throw error
+    admission = error
+  }
+  if (admission) {
+    if (text(locked.operation.status) === 'pending') await markRenewalRefused(client, operationId)
+    const current = (await client.query('SELECT * FROM plm_managed_renewal_operations WHERE id = $1', [operationId])).rows[0] ?? locked.operation
+    return renewalClosed({ ...locked, operation: current }, admission.status, admission.code, observed, true)
+  }
+  if (outcome.kind === 'denied') {
+    if (text(locked.operation.status) === 'pending') await markRenewalRefused(client, operationId)
+    const current = (await client.query('SELECT * FROM plm_managed_renewal_operations WHERE id = $1', [operationId])).rows[0] ?? locked.operation
+    return renewalClosed({ ...locked, operation: current }, outcome.status, outcome.code, observed, true)
+  }
+  const issued = outcome.issued
+  if (!issuedMatchesFrozen(locked.operation, issued)) {
+    if (text(locked.operation.status) === 'pending') await markRenewalRefused(client, operationId)
+    const current = (await client.query('SELECT * FROM plm_managed_renewal_operations WHERE id = $1', [operationId])).rows[0] ?? locked.operation
+    return renewalClosed({ ...locked, operation: current }, 403, 'PLM_MANAGED_RENEW_MISMATCH', issued.delegation_id, true)
+  }
+  if (text(locked.operation.status) === 'committed') {
+    if (!storedSuccessorMatches(locked.operation, issued)) {
+      return renewalClosed(locked, 409, 'PLM_MANAGED_RENEW_MISMATCH', issued.delegation_id, true)
+    }
+    const expiresAt = new Date(Number(integerOf(locked.operation.successor_exp)) * 1000)
+    return renewalCookie(client, locked, text(locked.operation.successor_session_id), expiresAt)
+  }
+  if (text(locked.operation.status) === 'refused') {
+    return renewalClosed(locked, 401, 'PLM_MANAGED_RENEW_REFUSED', issued.delegation_id, true)
+  }
+  if (!publicationWindow(issued.absolute_exp)) {
+    await markRenewalRefused(client, operationId)
+    return renewalClosed(locked, 503, 'PLM_MANAGED_SESSION_EXPIRY_REFUSED', issued.delegation_id, true)
+  }
+  if (await renewalPublicationBlocked(client, issued.delegation_id)) {
+    if (text(locked.operation.status) === 'pending') await markRenewalRefused(client, operationId)
+    const current = (await client.query('SELECT * FROM plm_managed_renewal_operations WHERE id = $1', [operationId])).rows[0] ?? locked.operation
+    return renewalClosed({ ...locked, operation: current }, 409, 'PLM_MANAGED_RENEW_MISMATCH', issued.delegation_id, false)
+  }
+  const predecessorExp = epochOf(locked.session.expires_at)
+  if (predecessorExp === null || predecessorExp * 1000 <= Date.now()) {
+    if (text(locked.operation.status) === 'pending') await markRenewalRefused(client, operationId)
+    const current = (await client.query('SELECT * FROM plm_managed_renewal_operations WHERE id = $1', [operationId])).rows[0] ?? locked.operation
+    return renewalClosed({ ...locked, operation: current }, 401, 'PLM_MANAGED_SESSION_REQUIRED', issued.delegation_id, true)
+  }
+  const window = publicationWindow(issued.absolute_exp)
+  if (!window) {
+    if (text(locked.operation.status) === 'pending') await markRenewalRefused(client, operationId)
+    const current = (await client.query('SELECT * FROM plm_managed_renewal_operations WHERE id = $1', [operationId])).rows[0] ?? locked.operation
+    return renewalClosed({ ...locked, operation: current }, 503, 'PLM_MANAGED_SESSION_EXPIRY_REFUSED', issued.delegation_id, true)
+  }
+  const createdAt = window.createdAt
+  const expiresAt = window.expiresAt
+  if (failSessionInsert) throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_SESSION_COMMIT_FAILED')
+  const sealed = sealCredential(issued.credential)
+  const successorId = randomUUID()
+  await client.query(
+    `INSERT INTO plm_managed_sessions (
+       id, intent_id, link_id, data_source_id, generation, delegation_id, credential_ciphertext, expires_at,
+       scope, native_subject, native_tenant_id, native_org_id, meta_user_id, meta_tenant_id, meta_org_id,
+       root_part_id, client_origin, installation_issuer, client_id, created_at, credential_generation
+     ) VALUES (
+       $1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
+     )`,
+    [
+      successorId, text(locked.link.id), text(locked.session.data_source_id), Number(locked.link.generation),
+      issued.delegation_id, sealed, expiresAt, MANAGED_COMPANION_SCOPE, issued.subject, issued.tenant_id,
+      issued.org_id, text(locked.session.meta_user_id), text(locked.session.meta_tenant_id), text(locked.session.meta_org_id),
+      issued.root_part_id, issued.client_origin, text(locked.session.installation_issuer), text(locked.session.client_id),
+      createdAt, issued.generation_index,
+    ],
+  )
+  const committed = await client.query(
+    `UPDATE plm_managed_renewal_operations
+     SET status = 'committed', successor_session_id = $2, successor_delegation_id = $3, successor_jti = $4,
+         successor_exp = $5, successor_credential_generation = $6, credential_ciphertext = $7, updated_at = now()
+     WHERE id = $1 AND status = 'pending'
+       AND successor_session_id IS NULL AND successor_delegation_id IS NULL
+       AND successor_jti IS NULL AND successor_exp IS NULL
+       AND successor_credential_generation IS NULL AND credential_ciphertext IS NULL
+       AND expected_successor_index = $6
+     RETURNING id`,
+    [operationId, successorId, issued.delegation_id, issued.credential_jti, issued.absolute_exp, issued.generation_index, sealed],
+  )
+  if (committed.rows.length !== 1) {
+    const winner = (await client.query('SELECT * FROM plm_managed_renewal_operations WHERE id = $1 FOR UPDATE', [operationId])).rows[0]
+    if (winner && storedSuccessorMatches(winner, issued)) {
+      return renewalCookie(client, { ...locked, operation: winner }, text(winner.successor_session_id), new Date(Number(integerOf(winner.successor_exp)) * 1000))
+    }
+    return renewalClosed({ ...locked, operation: winner ?? locked.operation }, 409, 'PLM_MANAGED_RENEW_MISMATCH', issued.delegation_id, true)
+  }
+  return renewalCookie(client, locked, successorId, expiresAt)
+}
+
+async function reloadRenewalWinner(client: SqlClient, operationId: string, outcome: RenewalOutcome): Promise<RenewalFinish> {
+  const peek = await client.query(
+    `SELECT o.predecessor_session_id, s.link_id, s.data_source_id
+     FROM plm_managed_renewal_operations o
+     JOIN plm_managed_sessions s ON s.id = o.predecessor_session_id
+     WHERE o.id = $1`,
+    [operationId],
+  )
+  const locked = await lockRenewal(
+    client,
+    text(peek.rows[0]?.link_id),
+    text(peek.rows[0]?.data_source_id),
+    text(peek.rows[0]?.predecessor_session_id),
+  )
+  if (!locked?.operation || outcome.kind !== 'issued') {
+    return {
+      action: 'closed', status: 503, code: 'PLM_MANAGED_RENEW_UNAVAILABLE', enqueue: false, delegationId: null,
+      linkId: text(locked?.link.id), generation: Number(locked?.link.generation ?? 0), clientId: '',
+      installationIssuer: '', nativeTenantId: '', nativeOrgId: '', callback: '',
+    }
+  }
+  if (text(locked.operation.status) === 'committed' && storedSuccessorMatches(locked.operation, outcome.issued)) {
+    const exp = epochOf(locked.session.expires_at)
+    if (exp === null || exp * 1000 <= Date.now()) {
+      return renewalClosed(locked, 401, 'PLM_MANAGED_SESSION_REQUIRED', outcome.issued.delegation_id, true)
+    }
+    try {
+      await assertRenewalAdmission(client, locked)
+    } catch (error) {
+      if (error instanceof ManagedCompanionRefusal) {
+        return renewalClosed(locked, error.status, error.code, outcome.issued.delegation_id, true)
+      }
+      throw error
+    }
+    return renewalCookie(
+      client,
+      locked,
+      text(locked.operation.successor_session_id),
+      new Date(Number(integerOf(locked.operation.successor_exp)) * 1000),
+    )
+  }
+  const observed = text(locked.operation.successor_delegation_id)
+  return renewalClosed(
+    locked,
+    409,
+    'PLM_MANAGED_RENEW_MISMATCH',
+    outcome.issued.delegation_id === observed ? null : outcome.issued.delegation_id,
+    outcome.issued.delegation_id !== observed,
+  )
+}
+
+async function settleRenewal(operationId: string, outcome: RenewalOutcome): Promise<RenewalFinish> {
+  try {
+    return await transaction((client) => finishRenewal(client, operationId, outcome))
+  } catch (error) {
+    if (error instanceof ManagedCompanionRefusal && error.code === 'PLM_MANAGED_SESSION_COMMIT_FAILED') throw error
+    if (!isUniqueViolation(error)) {
+      if (error instanceof ManagedCompanionRefusal) throw error
+      throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE')
+    }
+  }
+  return transaction((client) => reloadRenewalWinner(client, operationId, outcome))
+}
+
+async function enqueueRenewalRevoke(closed: RenewalClosed): Promise<void> {
+  if (!closed.enqueue || !closed.delegationId || !closed.linkId || closed.generation < 1) return
+  const delegationId = closed.delegationId
+  // The existence check is its own statement after the lock. One statement would
+  // keep the snapshot from before the wait and could miss a successor that
+  // committed while this transaction was queued.
+  await transaction(async (client) => {
+    await lockRenewalDelegation(client, delegationId)
+    await client.query(
+      `INSERT INTO plm_managed_revoke_outbox (
+         id, link_id, generation, delegation_id, client_id, installation_issuer, native_tenant_id, native_org_id,
+         callback, retry_identity, status, intent_id
+       )
+       SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',NULL
+       WHERE NOT EXISTS (
+         SELECT 1 FROM plm_managed_sessions WHERE delegation_id = $4
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM plm_managed_renewal_operations
+         WHERE predecessor_delegation_id = $4 OR successor_delegation_id = $4
+       )
+       ON CONFLICT (generation, delegation_id) DO NOTHING`,
+      [
+        randomUUID(), closed.linkId, closed.generation, delegationId, closed.clientId,
+        closed.installationIssuer, closed.nativeTenantId, closed.nativeOrgId, closed.callback,
+        sha256Hex(`${closed.generation}:${delegationId}:${closed.clientId}`),
+      ],
+    )
+  })
+}
+
+/**
+ * Exact POST /api/plm/managed-login/renew-recovery.
+ * Proves the signed purpose cookie itself. Does not assign req.user or call next.
+ * A committed replay calls native /renew again; the stored seal alone grants nothing.
+ */
+export async function recoverManagedContinuousSession(req: Request, res: Response): Promise<void> {
+  if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
+  await requireTables()
+  rejectRenewalAuthorization(req)
+  exactBody(req.body === undefined || req.body === null ? {} : req.body, [])
+  if (headerRaw(req, 'x-metasheet-managed-bridge') !== 'renew-recovery') {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_BRIDGE_REFUSED')
+  }
+  const cookie = readRequestCookie(req.headers.cookie, MANAGED_SESSION_COOKIE)
+  if (!cookie) throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  const live = await readLiveManagedCookieIdentity(cookie)
+  if (!live) throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  const decoded = decodedManagedClaims(cookie)
+  if (!decoded || decoded.userId !== live.userId || decoded.sid !== live.sessionId) {
+    throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  }
+  const loaded = await query('SELECT * FROM plm_managed_sessions WHERE id = $1', [live.sessionId])
+  const session = loaded.rows[0]
+  const expiresAt = epochOf(session?.expires_at)
+  if (!session || text(session.id) !== decoded.sid || text(session.meta_user_id) !== decoded.userId) {
+    throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  }
+  if (text(session.meta_tenant_id) !== decoded.tenantId || expiresAt === null || expiresAt !== decoded.exp) {
+    throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  }
+  if (headerRaw(req, 'origin') !== text(session.client_origin)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_ORIGIN_REFUSED')
+  }
+  const predecessorIndex = integerOf(session.credential_generation)
+  if (predecessorIndex === null || predecessorIndex < 0 || predecessorIndex > 6) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_RENEW_NOT_CONTINUOUS')
+  }
+  const link = (await query('SELECT continuity_mode FROM plm_managed_identity_links WHERE id = $1', [text(session.link_id)])).rows[0]
+  if (text(link?.continuity_mode) !== 'continuous') throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_RENEW_NOT_CONTINUOUS')
+  const existing = await query(
+    'SELECT id FROM plm_managed_renewal_operations WHERE predecessor_session_id = $1',
+    [text(session.id)],
+  )
+  const remaining = decoded.exp - Math.floor(Date.now() / 1000)
+  if (existing.rows.length === 0 && remaining > RENEWAL_LEAD_SECONDS) {
+    throw new ManagedCompanionRefusal(409, 'PLM_MANAGED_RENEW_NOT_DUE')
+  }
+  const allocated = await transaction((client) => allocateRenewal(client, text(session.id)))
+  if (allocated.kind === 'stop') throw new ManagedCompanionRefusal(allocated.status, allocated.code)
+  let outcome: RenewalOutcome
+  try {
+    const registration = registrationFor({
+      issuer: text(session.installation_issuer),
+      nativeTenantId: text(session.native_tenant_id),
+      nativeOrgId: text(session.native_org_id),
+    })
+    const issued = await nativeRenew(registration, {
+      credential: allocated.predecessorCredential,
+      idempotencyKey: allocated.idempotencyKey,
+    })
+    if (loseExchangeResponse) throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+    outcome = { kind: 'issued', issued }
+  } catch (error) {
+    if (error instanceof ManagedNativeCallRefusal && error.unavailable) {
+      throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE')
+    }
+    if (error instanceof ManagedNativeCallRefusal) {
+      outcome = { kind: 'denied', status: error.status, code: error.code, observed: error.observedDelegationId }
+    } else if (error instanceof ManagedCompanionRefusal) {
+      throw error
+    } else {
+      throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE')
+    }
+  }
+  const finished = await settleRenewal(allocated.operationId, outcome)
+  if (finished.action === 'closed') {
+    await enqueueRenewalRevoke(finished)
+    throw new ManagedCompanionRefusal(finished.status, finished.code)
+  }
+  const fresh = await query(
+    `SELECT predecessor.revoked_at AS predecessor_revoked, predecessor.expires_at AS predecessor_expires,
+            successor.revoked_at AS successor_revoked, successor.expires_at AS successor_expires,
+            successor.credential_ciphertext, link.status AS link_status
+     FROM plm_managed_sessions predecessor
+     JOIN plm_managed_identity_links link ON link.id = predecessor.link_id
+     JOIN plm_managed_sessions successor ON successor.id = $2
+     WHERE predecessor.id = $1`,
+    [finished.predecessorSessionId, finished.sessionId],
+  )
+  const row = fresh.rows[0]
+  const predecessorExp = epochOf(row?.predecessor_expires)
+  const successorExp = epochOf(row?.successor_expires)
+  if (!row || row.predecessor_revoked || row.successor_revoked || text(row.link_status) !== 'active') {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (predecessorExp === null || predecessorExp * 1000 <= Date.now() || successorExp !== epochOf(finished.expiresAt)) {
+    throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_SESSION_REQUIRED')
+  }
+  const token = signManagedSessionToken({
+    userId: finished.userId,
+    email: finished.email,
+    role: finished.role,
+    tenantId: finished.tenantId,
+    sessionId: finished.sessionId,
+    expiresAt: finished.expiresAt,
+  })
+  res.cookie(MANAGED_SESSION_COOKIE, token, {
+    ...cookieBase(finished.secureOrigin),
+    maxAge: finished.expiresAt.getTime() - Date.now(),
+  })
+  res.set('Cache-Control', 'no-store')
+  res.set('Referrer-Policy', 'no-referrer')
+  res.status(200).json({ ok: true })
 }

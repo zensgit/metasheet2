@@ -8,6 +8,7 @@ import {
   createDataSourceWritePluginFacade,
 } from '../../src/data-adapters/data-source-plugin-facade'
 import { authService } from '../../src/auth/AuthService'
+import { persistedManagedContinuity } from '../../src/auth/plm-managed-session'
 import { isGateException } from '../../src/auth/api-path-policy'
 import { resolveRuntimeJwtSecret } from '../../src/security/auth-runtime-config'
 import { secretManager } from '../../src/security/SecretManager'
@@ -162,6 +163,25 @@ describe('managed companion registration and navigation', () => {
     expect(url.searchParams.has('clientSecret')).toBe(false)
     expect(url.searchParams.has('code_verifier')).toBe(false)
     expect([...url.searchParams.keys()]).toHaveLength(10)
+  })
+
+  it('appends continuity_hint=hour beside the ten public fields and nowhere else', () => {
+    const ordinary = new URL(buildManagedLoginNavigation(registration, {
+      rootPartId,
+      state: 'synthetic-browser-state',
+      codeChallenge: pkceS256('a'.repeat(43)),
+    }))
+    const hour = new URL(buildManagedLoginNavigation(registration, {
+      rootPartId,
+      state: 'synthetic-browser-state',
+      codeChallenge: pkceS256('a'.repeat(43)),
+      continuityHint: 'hour',
+    }))
+    expect([...ordinary.searchParams.keys()]).toHaveLength(10)
+    expect(ordinary.searchParams.has('continuity_hint')).toBe(false)
+    expect([...hour.searchParams.keys()]).toEqual([...ordinary.searchParams.keys(), 'continuity_hint'])
+    expect(hour.searchParams.getAll('continuity_hint')).toEqual(['hour'])
+    expect(hour.search).not.toMatch(/clientSecret|code_verifier|continuityMode/)
   })
 
   it('keeps start, unlink, and revoke-retry behind the session gate', () => {
@@ -543,5 +563,55 @@ describe('managed capability discovery', () => {
     expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
     expect(fetched).not.toHaveBeenCalled()
     expect(readSharedTransportAudit().calls).toBe(0)
+  })
+})
+
+describe('persisted managed continuity', () => {
+  const row = {
+    generation: 4,
+    linkGeneration: 4,
+    continuityMode: 'continuous' as const,
+    credentialGeneration: 2,
+    intentId: null,
+  }
+
+  it('keeps the Meta link revision distinct from the native credential generation', () => {
+    expect(persistedManagedContinuity(row)).toEqual({
+      revision: 4,
+      continuityMode: 'continuous',
+      credentialGeneration: 2,
+    })
+    expect(persistedManagedContinuity({
+      ...row,
+      generation: '4',
+      linkGeneration: '4',
+      credentialGeneration: '0',
+      intentId: 'intent-1',
+    })).toEqual({ revision: 4, continuityMode: 'continuous', credentialGeneration: 0 })
+    expect(persistedManagedContinuity({
+      generation: 1,
+      linkGeneration: 1,
+      continuityMode: 'ordinary',
+      credentialGeneration: null,
+      intentId: 'intent-ordinary',
+    })).toEqual({ revision: 1, continuityMode: 'ordinary', credentialGeneration: null })
+  })
+
+  it('fails closed on inconsistent persisted continuity', () => {
+    expect(persistedManagedContinuity({ ...row, continuityMode: 'ordinary', credentialGeneration: 0, intentId: 'intent-1' })).toBeNull()
+    expect(persistedManagedContinuity({ ...row, credentialGeneration: null, intentId: 'intent-1' })).toBeNull()
+    expect(persistedManagedContinuity({ ...row, credentialGeneration: 0, intentId: null })).toBeNull()
+    expect(persistedManagedContinuity({ ...row, credentialGeneration: 2, intentId: 'intent-1' })).toBeNull()
+    expect(persistedManagedContinuity({ ...row, linkGeneration: 5 })).toBeNull()
+    expect(persistedManagedContinuity({ ...row, credentialGeneration: 8 })).toBeNull()
+    expect(persistedManagedContinuity({ ...row, continuityMode: 'snapshot' })).toBeNull()
+    expect(persistedManagedContinuity({ ...row, generation: 0 })).toBeNull()
+    expect(persistedManagedContinuity({
+      generation: 1,
+      linkGeneration: 1,
+      continuityMode: 'ordinary',
+      credentialGeneration: null,
+      intentId: null,
+    })).toBeNull()
   })
 })

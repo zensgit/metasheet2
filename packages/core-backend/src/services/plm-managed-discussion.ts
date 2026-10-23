@@ -142,7 +142,7 @@ export async function relayManagedDiscussion(req: Request, sourceId?: string): P
         'PLM_MANAGED_DISCUSSION_REJECTED')
       try {
         const data = await response.json()
-        return path.startsWith('/api/v1/discussions') ? projectVisualMarkups(data, visual, claims.part_id) : data
+        return bearer === undefined ? data : projectVisualMarkups(data, visual, claims.part_id)
       }
       catch { throw new Refusal(502, 'PLM_MANAGED_DISCUSSION_UNAVAILABLE') }
     }

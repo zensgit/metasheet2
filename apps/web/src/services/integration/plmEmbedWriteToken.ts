@@ -61,6 +61,7 @@ const TOKEN_ERROR_TYPE = 'plm-embed:token-error' as const
 const WRITE_TOKEN_PURPOSE = 'discussion-write' as const
 const READ_TOKEN_PURPOSE = 'discussion-read' as const
 const VISUAL_PREVIEW_TOKEN_PURPOSE = 'visual-preview' as const
+const BOM_READ_TOKEN_PURPOSE = 'bom-read' as const
 
 const TOKEN_REQUEST_TIMEOUT_MS = 5000
 
@@ -93,6 +94,20 @@ export class PlmEmbedReadTokenError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'PlmEmbedReadTokenError'
+  }
+}
+
+export class PlmEmbedBomReadTokenTimeoutError extends Error {
+  constructor() {
+    super('timed out waiting for a fresh PLM embed BOM read token')
+    this.name = 'PlmEmbedBomReadTokenTimeoutError'
+  }
+}
+
+export class PlmEmbedBomReadTokenError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PlmEmbedBomReadTokenError'
   }
 }
 
@@ -129,6 +144,15 @@ export interface PlmEmbedReadTokenClient {
 
 export interface PlmEmbedVisualPreviewTokenClient {
   requestToken(): Promise<string>
+  dispose(): void
+}
+
+export interface PlmEmbedBomReadTokenClient {
+  /**
+   * Requests ONE fresh embed token for a managed BOM refresh (`purpose: 'bom-read'`).
+   * Memory-only, nonce-correlated, and never a discussion or approval grant.
+   */
+  requestBomReadToken(): Promise<string>
   dispose(): void
 }
 
@@ -173,8 +197,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 function createTokenClient(
   getParentOrigin: () => string | null,
-  purpose: typeof WRITE_TOKEN_PURPOSE | typeof READ_TOKEN_PURPOSE | typeof VISUAL_PREVIEW_TOKEN_PURPOSE,
-  tokenLabel: 'write' | 'read' | 'visual preview',
+  purpose: typeof WRITE_TOKEN_PURPOSE | typeof READ_TOKEN_PURPOSE | typeof VISUAL_PREVIEW_TOKEN_PURPOSE | typeof BOM_READ_TOKEN_PURPOSE,
+  tokenLabel: 'write' | 'read' | 'visual preview' | 'bom read',
   errors: TokenErrorFactory,
 ): { request(): Promise<string>; dispose(): void } {
   let inFlight: InFlightRequest | null = null
@@ -279,6 +303,11 @@ const readTokenErrors: TokenErrorFactory = {
   generic: (message: string) => new PlmEmbedReadTokenError(message),
 }
 
+const bomReadTokenErrors: TokenErrorFactory = {
+  timeout: () => new PlmEmbedBomReadTokenTimeoutError(),
+  generic: (message: string) => new PlmEmbedBomReadTokenError(message),
+}
+
 /**
  * Creates the child-side write-token channel (`purpose: 'discussion-write'`). Thin wrapper over
  * {@link createTokenClient} -- see that function's docstring for the shared protocol contract.
@@ -309,4 +338,13 @@ export function createPlmEmbedReadTokenClient(getParentOrigin: () => string | nu
 export function createPlmEmbedVisualPreviewTokenClient(getParentOrigin: () => string | null): PlmEmbedVisualPreviewTokenClient {
   const client = createTokenClient(getParentOrigin, VISUAL_PREVIEW_TOKEN_PURPOSE, 'visual preview', readTokenErrors)
   return { requestToken: () => client.request(), dispose: () => client.dispose() }
+}
+
+/** Fresh part-bound embed token for a managed BOM refresh. Not a discussion or approval client. */
+export function createPlmEmbedBomReadTokenClient(getParentOrigin: () => string | null): PlmEmbedBomReadTokenClient {
+  const client = createTokenClient(getParentOrigin, BOM_READ_TOKEN_PURPOSE, 'bom read', bomReadTokenErrors)
+  return {
+    requestBomReadToken: () => client.request(),
+    dispose: () => client.dispose(),
+  }
 }

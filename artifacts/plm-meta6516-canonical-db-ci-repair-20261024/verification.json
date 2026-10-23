@@ -1,0 +1,260 @@
+{
+  "schema": "plm.meta6516.canonical-db-ci-repair.verification.v1",
+  "at_utc": "2026-10-23T20:25:34Z",
+  "tree": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+  "branch": "codex/plm-meta-integrated-window-20261024",
+  "base": "469bd5c8c09bfd589937d84d5095c5c644c6f61d",
+  "head": "469bd5c8c09bfd589937d84d5095c5c644c6f61d",
+  "committed": false,
+  "owner_nonce": "c3d4c317e0864f6999b182dc89b850a8",
+  "design": "docs/development/PLM_META6516_CANONICAL_DB_CI_REPAIR_DESIGN_VALIDATION_20261024.md",
+  "allowlist": [
+    "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts",
+    "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts",
+    "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts",
+    "scripts/verification/plm-managed-companion-pg/owned-socket.mjs",
+    "docs/development/PLM_META6516_CANONICAL_DB_CI_REPAIR_DESIGN_VALIDATION_20261024.md",
+    "artifacts/plm-meta6516-canonical-db-ci-repair-20261024/verification.json"
+  ],
+  "before_sha256": {
+    "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts": "dd55d2364baca595deaf3692ca99d75df9fb68a3f561a4083c4d197c5bacf3a4",
+    "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts": "a1cb4bb9d5017a63189f2bfbf157e7196dada4b56a91b23347ffe5cd6b0a7cf9",
+    "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts": "6fd0f3dbf0b0c14fada9bd9f7b3537d474c0dc06b62a318ac0751a773f5c682b",
+    "scripts/verification/plm-managed-companion-pg/owned-socket.mjs": "cfb1a26724103f291407affba6d918c86dd896c8a57cd4ea38c7c117ad5a1d6f"
+  },
+  "after_sha256": {
+    "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts": "0fde297de630f2c8819d4cb8b07cf70ab64eb121938ce93043eff5e5bfc0c855",
+    "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts": "be33af5b327b14dec8bf12b9561abf8e7d8855ccdaf11436902bb26a026744a9",
+    "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts": "e8889c0af759889c3ef4aba286fdc93cd537f4ce610a42250bdd7609e6b6cde7",
+    "scripts/verification/plm-managed-companion-pg/owned-socket.mjs": "c21f8767d372c66b0cf160d74ab6ecfff83560f32881617248c6180276a69c09"
+  },
+  "unchanged_sha256": {
+    "packages/core-backend/vitest.plm-collaboration-snapshot.config.ts": "7d3523917852fb99fa069a6b47fe057c07b5b480a927dbc758cec4c1d41cbdc2",
+    "packages/core-backend/vitest.config.ts": "7ca3bbdc14657543e5d54f04c26180eeb8d453c2d07d38fae566065c241dbbdb",
+    "packages/core-backend/tests/plm-bom-review/base-bootstrap.ts": "50624ae5f8347a6031f67d77e26c85d5667eb3635743a31dfa44ad08ac8cdf64",
+    "packages/core-backend/src/db/migrations/zzzz20260715210000_create_meta_record_history_operations.ts": "7ec8ec81e5430d3932dcf9029c16e859f22c431ee2c2c2710b71bcb7003eff13",
+    ".github/workflows/plm-managed-companion-consumer.yml": "6d52717ef80744ff0551d77747dd437d0c1fbbc261bdfc4aee369b3f5a6ff740",
+    ".github/workflows/plm-bom-listener.yml": "73e9c26f274926ac1ae580941d635fa414e7ce5f602181e2bf9c3188603a282f"
+  },
+  "preserved_assert_report": {
+    "unit": 197,
+    "discussion": 61,
+    "postgresql": 133,
+    "web": 222,
+    "rerun": false
+  },
+  "causes": [
+    {
+      "id": "meta_views_deleted_at",
+      "change": "Removed fictional meta_views.deleted_at from REQUIRED_COLUMNS and the two view guard references. Fixture meta_views matches the canonical column list. Bound DELETE, id change, and sheet move stay. Base and sheet deleted_at stay."
+    },
+    {
+      "id": "owned_deferred_operation_fk",
+      "change": "W23 bootstrap ensures serving-schema fk_mrr_operation and fk_mrvm_operation after shared bootstrap. Production preflight fail-closes with 23514 when those keys are missing or the wrong shape, and it does not create them. Old history migration is unchanged."
+    },
+    {
+      "id": "owned_socket_utf8",
+      "change": "Existing initdb argv adds --encoding=UTF8 --locale=C. Start and boot require SHOW server_encoding UTF8 and emit serverEncoding. Self-check asserts the field and a second SHOW before stop and after boot."
+    }
+  ],
+  "evidence": {
+    "packet_manifest_sha256": "864fa6fe00ae7759f4bd1be5df4c86953c2980f969657f2f06ac9af2e0053e20",
+    "utf8_counterexample": "/tmp/plm-meta6516-w23-root-two-utf8-red-20261024.json",
+    "utf8_counterexample_exit": 1,
+    "utf8_counterexample_counts": {
+      "registered": 2,
+      "failed": 2,
+      "skipped": 0
+    },
+    "generic_job": 120620555112,
+    "generic_run": 40013793157,
+    "generic_where": "inline_code_block line 44",
+    "generic_encoding": "UNKNOWN",
+    "listener_job": 120620553249,
+    "listener_run": 40013792805,
+    "listener_failure": "operation_and_commit_atomicity third COMMIT succeeded; expected 23503 fk_mrr_operation",
+    "active_root_pg_nonce_not_touched": "471516ab0908eae7"
+  },
+  "validation": {
+    "node_check": {
+      "argv": [
+        "node",
+        "--check",
+        "scripts/verification/plm-managed-companion-pg/owned-socket.mjs"
+      ],
+      "exit": 0
+    },
+    "git_diff_tracked_before_docs": [
+      "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts",
+      "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts",
+      "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts",
+      "scripts/verification/plm-managed-companion-pg/owned-socket.mjs"
+    ],
+    "diff_stat": "4 files changed, 330 insertions(+), 21 deletions(-)",
+    "test_function_count_static": 17,
+    "tests_executed": false,
+    "tsc": "NOT_RUN",
+    "postgresql": "NOT_RUN",
+    "docker": "NOT_RUN",
+    "self_check": "NOT_RUN",
+    "disk_free_bytes_before_docs": 15696678912,
+    "disk_floor_bytes": 4563402752
+  },
+  "limitations": [
+    "Does not claim CI green, whole-goal closeout, or install.",
+    "Generic approval job server encoding remains UNKNOWN.",
+    "Companion origin conflict was not changed.",
+    "Root still runs the two new controls, the failed operation node, renewal 29, and the real socket self-check.",
+    "PostgreSQL 133, unit 197, discussion 61, and web 222 were not rerun.",
+    "The earlier backend typecheck RED is outside this allowlist and was not rerun."
+  ],
+  "round2": {
+    "schema": "plm.meta6516.canonical-db-ci-repair.round2.v1",
+    "owner_nonce": "da4aed58af714d5589a120d8caae2e9f",
+    "phase_before_release": "ROOT_ACTUAL_NONCANONICAL_FK3_VARIANT_REPAIR",
+    "committed": false,
+    "allowlist": [
+      "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts",
+      "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts",
+      "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts",
+      "docs/development/PLM_META6516_CANONICAL_DB_CI_REPAIR_DESIGN_VALIDATION_20261024.md",
+      "artifacts/plm-meta6516-canonical-db-ci-repair-20261024/verification.json"
+    ],
+    "inherited_dirty_sha256": {
+      "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts": "0fde297de630f2c8819d4cb8b07cf70ab64eb121938ce93043eff5e5bfc0c855",
+      "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts": "be33af5b327b14dec8bf12b9561abf8e7d8855ccdaf11436902bb26a026744a9",
+      "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts": "e8889c0af759889c3ef4aba286fdc93cd537f4ce610a42250bdd7609e6b6cde7",
+      "scripts/verification/plm-managed-companion-pg/owned-socket.mjs": "c21f8767d372c66b0cf160d74ab6ecfff83560f32881617248c6180276a69c09",
+      "docs/development/PLM_META6516_CANONICAL_DB_CI_REPAIR_DESIGN_VALIDATION_20261024.md": "3783a4e5c8ea3643cd1568e7c73cffac68fffce0a263a1edf41d145de8a049a1",
+      "artifacts/plm-meta6516-canonical-db-ci-repair-20261024/verification.json": "58ba647f3b7fcd66bc396a0e4ac586ad08470d29859ab5f0e11cfa48d8aaf8c2"
+    },
+    "after_sha256": {
+      "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts": "df125b0fa4dd3eb652507d116b0005b1afe5a66a038699f7747ee5dc8fc20714",
+      "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts": "80e85370e80dc500c3b2f77f8a36e40ee1e3a7a72d8046679ed6bace87a59f3f",
+      "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts": "1f1cb6bc7a4742712eaf61a104f4cfbdfcbf26b8b4224d403400ffe70734d59b",
+      "docs/development/PLM_META6516_CANONICAL_DB_CI_REPAIR_DESIGN_VALIDATION_20261024.md": "0053eab60c288cfc774f30ea76abd1763eec275d3ed849f776636d6cfe1f2856",
+      "scripts/verification/plm-managed-companion-pg/owned-socket.mjs": "c21f8767d372c66b0cf160d74ab6ecfff83560f32881617248c6180276a69c09"
+    },
+    "predicates_added": [
+      "confmatchtype='s'",
+      "confupdtype='a'",
+      "confdeltype='a'"
+    ],
+    "predicate_sites": [
+      "preflightSql operation foreign-key count",
+      "ensureOwnedOperationForeignKeys shape_ok",
+      "OWNED_OPERATION_FK_SQL"
+    ],
+    "top_level_db_test_functions": 17,
+    "focused_subcases_static": [
+      "canonical_missing",
+      "match_full",
+      "update_cascade",
+      "delete_set_null"
+    ],
+    "focused_subcases_executed": false,
+    "root_red": {
+      "path": "/tmp/plm-meta6516-ci-repair-malformed-fk-root-red-20261024.json",
+      "actual_exit": 1,
+      "registered": 1,
+      "failed": 1,
+      "error": "ROOT_MALFORMED_OPERATION_FK_ACCEPTED_3",
+      "variants_admitted": [
+        "match_full",
+        "update_cascade",
+        "delete_set_null"
+      ],
+      "packet_manifest_sha256": "e029c8f1317580a83d80769b914bf668fa833a6954f6544a65a5ebce0cdaf855",
+      "source_pins_stable": true
+    },
+    "root_reported_not_rerun": {
+      "owned_socket_self_check": "PASS UTF8 start/boot, wrong nonce, decoy, status retention, cleanup",
+      "selected_companion_outage": "1 PASS fresh UTF8, postmaster PID changed",
+      "renewal_29": "running on nonce 471901d1f994f3fc; not contacted"
+    },
+    "selected_postgresql_proof": "PENDING",
+    "tests_executed_by_worker": false,
+    "postgresql_contacted": false,
+    "limitations": [
+      "Round 1 historical fields above are unchanged in meaning.",
+      "Selected PostgreSQL proof of the s/a/a predicates is pending root execution.",
+      "The four subcases were not run.",
+      "CI green, whole-goal closeout, and install are not claimed.",
+      "Generic job encoding remains UNKNOWN.",
+      "Prior RED and HOLD records stay."
+    ]
+  },
+  "root_verification": {
+    "at": "2026-10-23T20:43:01.348044+00:00",
+    "status": "BOUNDED_LOCAL_GREEN_REMOTE_CI_PENDING",
+    "source4pins": {
+      "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts": "df125b0fa4dd3eb652507d116b0005b1afe5a66a038699f7747ee5dc8fc20714",
+      "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts": "80e85370e80dc500c3b2f77f8a36e40ee1e3a7a72d8046679ed6bace87a59f3f",
+      "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts": "1f1cb6bc7a4742712eaf61a104f4cfbdfcbf26b8b4224d403400ffe70734d59b",
+      "scripts/verification/plm-managed-companion-pg/owned-socket.mjs": "c21f8767d372c66b0cf160d74ab6ecfff83560f32881617248c6180276a69c09"
+    },
+    "root_db_packet": {
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta6516-canonical-db-ci-root-green-and-cleanup-20261024",
+      "manifest_sha256": "b429b93e975305baac54bf31e1a4bc73adae0ef7e015938c4fe17eb54f937f81",
+      "files": 41
+    },
+    "helper_managed_packet": {
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta6516-UTF8-owned-helper-and-focused-managed-green-20261024",
+      "manifest_sha256": "db3b5af0a9298fafd71bab37672837772617b07d5a39928b12099f11769a2a57",
+      "files": 13
+    },
+    "checks": {
+      "owned_helper_selfcheck": "PASS",
+      "outage": {
+        "passed": 1,
+        "unselected": 79
+      },
+      "renewal_previously_unexecuted": {
+        "passed": 29,
+        "skipped": 0
+      },
+      "changed_failed_new_db": {
+        "passed": 4,
+        "unselected": 13,
+        "last_node_fresh_variants": 4
+      },
+      "independent_original_counterexamples": {
+        "passed": 2,
+        "skipped": 0
+      },
+      "independent_malformed": {
+        "passed": 1,
+        "variants": 3,
+        "skipped": 0
+      }
+    },
+    "cleanup": {
+      "at": "2026-10-23T20:41:34.397801+00:00",
+      "nonce": "471901d1f994f3fc",
+      "former_pid": 38473,
+      "own_database_dropped": true,
+      "own_fixture_schema_residue": 0,
+      "only_own_marker_shadow_present_before_drop": true,
+      "fresh_catalog_restored": [
+        "postgres",
+        "template0",
+        "template1"
+      ],
+      "pgctl_status": 3,
+      "pid_absent": true,
+      "no_open_files": true,
+      "owned_root_removed": true,
+      "known_runtime_pins_unchanged": true,
+      "archive": "/tmp/plm-meta6516-ci-repaired-owned-pg-lifecycle-20261024-471901d1f994f3fc",
+      "no_Docker_MinIO_recovery_claim": true
+    },
+    "not_claimed": [
+      "full17or133singlecohort",
+      "allpriorCIfailuresclassified",
+      "currentheadCIgreen",
+      "DockerMinIOrecovered",
+      "installed",
+      "wholemastercomplete"
+    ]
+  }
+}

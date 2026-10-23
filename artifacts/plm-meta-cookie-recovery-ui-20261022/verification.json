@@ -1,0 +1,62 @@
+{
+  "at": "2026-10-22T20:34:33.206174+00:00",
+  "source_sha": "089887032375e714c016c0cf7cb750b4c22abacb",
+  "parent_sha": "fac8847a156735ba50c36c232b1841b468d5fc8a",
+  "source_hashes": {
+    "apps/web/vite.config.ts": "a24a6b438b70daf4e4ba23eadfca78fe92ca7ff46aa44bd0a91ad4783b0c6312",
+    "apps/web/src/composables/authIdentityLock.ts": "415aa424b4369798d696dffb773437223aae41467cda414095b5ceb30827d044",
+    "apps/web/src/composables/authPrincipal.ts": "ab3669a9ce6d0adae68995cf0168fed9bad0e30a7c458dcb35f690f1c8570daf",
+    "apps/web/src/composables/useAuth.ts": "f7cbfe1c8b4005976d018682719ebe38fea14f0521d14a7d3afd85ac5eec472d",
+    "apps/web/src/services/plm/plmManagedCompanion.ts": "524f6d0874ef63f37afdf3a247aaf1ff33e7b6f46ef992ce610996c489c0082b",
+    "apps/web/tests/authIdentityLock.spec.ts": "c504e1c9fd6b939364846f753029ae27573d581c3069a4ee2fa270eb6b82e5ce",
+    "apps/web/tests/plmManagedRenewalRecovery.spec.ts": "fee73fb33f23baa4237a4ab3dfc41cbac004ce5e226f29f4fffc120b43b2c0a9",
+    "packages/core-backend/src/auth/plm-managed-session.ts": "5792936cf11cc03397fa816555280c9a426c16e19ceced1562eaabb4bd2362ff",
+    "packages/core-backend/src/routes/plm-managed-companion.ts": "45f1987c4541d7f87c6e655d4b66e9b9c64511fa585bd8a04d197ac0ac84c6fb",
+    "packages/core-backend/tests/unit/plm-managed-companion.test.ts": "ba6b88ee2fdecd2197170cd5154ceb4abf23df9bdb138c0fe4add60d4613733a",
+    "packages/core-backend/tests/integration/plm-managed-companion-pg.realdb.ts": "69c34fc3b3ea595bb26b70f2230730d70d2adcc071d7bc3e8a209d62f5f3a3e9",
+    "packages/core-backend/tests/integration/plm-managed-renewal-recovery-pg.realdb.ts": "2e776596d430d16b5f56fef3e4b91104cf60518792f5ca92fe3761f205bf112d"
+  },
+  "root": {
+    "web": {
+      "files": 8,
+      "passed": 100,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 1.22
+    },
+    "independent_lost_response_probe": {
+      "passed": 1
+    },
+    "independent_marker_credential_probe": {
+      "passed": 1
+    },
+    "web_typecheck_exit": 0,
+    "backend_typecheck_exit": 0,
+    "backend_unit_passed": 39,
+    "backend_pg_passed": 91,
+    "backend_pg_seconds": 48.89,
+    "backend_pg_encoding": "UTF8",
+    "backend_hashes_reverified": true
+  },
+  "toolchain": {
+    "node": "20.20.2",
+    "pnpm": "10.33.0",
+    "note": "Task-only pnpm symlink precedes Node20 PATH. Node20 corepack otherwise selects cached pnpm12.6.0 and triggers dependency resolution on run. Full unchanged npm run type-check exits0; no dependency install or gate change. CI commonly pins pnpm10.16.1; this local runtime is not that exact version."
+  },
+  "backend_evidence_manifest": "22bcb4cf6450ac3f26af9d2aeff066ce2c29e04630efdbb19d14e9735010da15",
+  "cleanup_nonce": "6974c5cb78cceaf7",
+  "cleanup_marker_matched": true,
+  "postgres_stopped": true,
+  "owned_directory_removed": true,
+  "scope": "C1 descriptor/cookie-only helper/auth bootstrap, local synthetic validation only",
+  "not_claimed": [
+    "current-head PR CI",
+    "original iframe continuity",
+    "independent native/Meta process browser acceptance",
+    "actual one-hour run",
+    "current images or installation",
+    "whole-goal acceptance"
+  ],
+  "evidence_manifest": "162efdc57f1f36a227032875832f43bc96310f6e5f3c707fa1b7eb80a2b82b29",
+  "evidence_bundle": "w10-meta-c1-final-root-green-20261022"
+}

@@ -1,0 +1,9 @@
+# W23 ECO source wire — local source closeout
+
+Source `1e98a499459b2cd95655351ed1e8f3d74c74d309`, parent `18acca1ec49920592644dbfb1eb994b12eac141f`. This is the one separate closeout document commit. Source pins, commands, retained failures and limitations are in [design and validation](PLM_W23_ECO_SOURCE_WIRE_DESIGN_VALIDATION_20261023.md) and [verification receipt](../../artifacts/plm-w23-eco-source-wire-20261023/verification.json).
+
+Private final packet `w23-meta-eco-wire-final-local-20261023`, manifest SHA-256 `8a1840fd14255fdfde0b1eb5294252e1636cf097b1fdfa2301acf3800fb3de64`, contains 22 files. Original delayed-body and Unicode/date red packets remain immutable. Historical first 33, selected transport 15, root body 2, selected wire 6 and root wire 3 are separate, overlapping evidence groups; selected runs include deselected tests and are not a full current-head suite. Root's two body and three compatibility reruns each have zero failures/errors/skips.
+
+Actual Grok session `gbt-d5a9-1a169354874-b9` reported idle/done with its own writer nonce absent before final root checks. Its close command exited 1; the subsequent actual session observation was stopped/done, process ID absent, exit 1. No successful close-command claim replaces that record. All four source pins matched the final report and remained stable through the root compatibility rerun; the adapter and transport test matched the preceding body-green source. `git diff --check` passed.
+
+The slice has no mounted route, persistent collaboration, readiness service or installed runtime. Real PostgreSQL ownership/guard tests, package typecheck, browser/build/install and exact remote-head CI remain open. The Native source dependency and Meta parent are held in the serial publication queue. This local closeout does not authorize merge, deployment, production enablement, real notifications or whole-goal completion. Later publication must remain Draft.

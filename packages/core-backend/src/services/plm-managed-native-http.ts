@@ -121,6 +121,256 @@ export async function nativeExchange(
   }
 }
 
+export type BoundCredentialClaims = {
+  jti: string
+  exp: number
+  delegation_id: string
+}
+
+export type NativeContinuousExchange = NativeExchange & {
+  generation_index: 0
+  credential_jti: string
+  absolute_exp: number
+}
+
+/** Authenticated continuous exchange failed, or the transport never produced a terminal 401. */
+export class ManagedNativeCallRefusal extends ManagedCompanionRefusal {
+  readonly observedDelegationId: string | null
+  readonly unavailable: boolean
+  constructor(status: number, code: string, observedDelegationId: string | null, unavailable: boolean) {
+    super(status, code)
+    this.name = 'ManagedNativeCallRefusal'
+    this.observedDelegationId = observedDelegationId
+    this.unavailable = unavailable
+  }
+}
+
+function unavailableExchange(): ManagedNativeCallRefusal {
+  return new ManagedNativeCallRefusal(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', null, true)
+}
+
+function nonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  return value
+}
+
+function yurCredential(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith('yur_')) return null
+  return value
+}
+
+function exactString(value: unknown, expected: string): string | null {
+  if (typeof value !== 'string' || value !== expected) return null
+  return value
+}
+
+function demandString(value: string | null, reject: () => never): string {
+  if (value === null) reject()
+  return value
+}
+
+function successorIndex(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 7) return null
+  return value
+}
+
+function demandIndex(value: number | null, reject: () => never): number {
+  if (value === null) reject()
+  return value
+}
+
+export function decodeBoundYurClaims(credential: string): BoundCredentialClaims | null {
+  if (!credential.startsWith('yur_')) return null
+  const token = credential.slice(4)
+  const parts = token.split('.')
+  if (parts.length !== 3 || parts.some((part) => part.length === 0)) return null
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const payload = parsed as Record<string, unknown>
+    const jti = payload.jti
+    const exp = payload.exp
+    const delegationId = payload.delegation_id
+    if (typeof jti !== 'string' || jti.length === 0 || jti !== jti.trim() || /[\s\u0000-\u001f\u007f]/.test(jti)) return null
+    if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) return null
+    if (typeof delegationId !== 'string' || delegationId.length === 0 || delegationId !== delegationId.trim()) return null
+    return { jti, exp, delegation_id: delegationId }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Same-code continuous exchange. HTTP 401 stays 401. Timeouts, resets, and
+ * other non-401 responses stay unavailable so the caller can retry the same code.
+ * generation_index is taken from the authenticated JSON. The decoded yur_ payload
+ * is bound to that JSON and is not a separate authority.
+ */
+export async function nativeExchangeContinuous(
+  registration: ManagedClientRegistration,
+  input: { code: string; codeVerifier: string },
+): Promise<NativeContinuousExchange> {
+  let response: Response
+  try {
+    response = await postJson(
+      `${registration.nativeBaseUrl}/api/v1/auth/managed-login/exchange-continuous`,
+      {
+        client_id: registration.clientId,
+        client_secret: registration.clientSecret,
+        code: input.code,
+        code_verifier: input.codeVerifier,
+        callback: registration.callback,
+      },
+      headersFor(registration),
+    )
+  } catch {
+    throw unavailableExchange()
+  }
+  if (response.status === 401) {
+    let observedDelegationId: string | null = null
+    try {
+      const body = asRecord(await response.json())
+      if (body && typeof body.delegation_id === 'string' && body.delegation_id.trim() !== '') {
+        observedDelegationId = body.delegation_id
+      }
+    } catch {
+      observedDelegationId = null
+    }
+    throw new ManagedNativeCallRefusal(401, 'PLM_MANAGED_EXCHANGE_UNAUTHORIZED', observedDelegationId, false)
+  }
+  if (!response.ok) throw unavailableExchange()
+  let body: Record<string, unknown> | null
+  try {
+    body = asRecord(await response.json())
+  } catch {
+    throw unavailableExchange()
+  }
+  if (!body) throw unavailableExchange()
+  const record = body
+  const delegationId = nonEmptyString(record.delegation_id)
+  const mismatch = (code = 'PLM_MANAGED_EXCHANGE_MISMATCH'): never => {
+    throw new ManagedNativeCallRefusal(403, code, delegationId, false)
+  }
+  if (delegationId === null) mismatch()
+  const credential = yurCredential(record.credential)
+  if (credential === null) mismatch()
+  const claims = decodeBoundYurClaims(credential)
+  if (!claims || claims.delegation_id !== delegationId) mismatch()
+  if (record.generation_index !== 0) mismatch('PLM_MANAGED_EXCHANGE_WRONG_MODE')
+  const credentialJti = exactString(record.credential_jti, claims.jti)
+  if (credentialJti === null) mismatch()
+  const expiresIn = record.expires_in
+  const reportedExpires = typeof expiresIn === 'number' && Number.isInteger(expiresIn) ? expiresIn : 0
+  const field = (key: string): string => demandString(nonEmptyString(record[key]), mismatch)
+  return {
+    subject: field('subject'),
+    tenant_id: field('tenant_id'),
+    org_id: field('org_id'),
+    client_id: field('client_id'),
+    issuer: field('issuer'),
+    scope: field('scope'),
+    delegation_id: delegationId,
+    expires_in: reportedExpires,
+    credential,
+    root_part_id: field('root_part_id'),
+    client_origin: field('client_origin'),
+    generation_index: 0,
+    credential_jti: credentialJti,
+    absolute_exp: claims.exp,
+  }
+}
+
+export type NativeRenewal = NativeExchange & {
+  generation_index: number
+  credential_jti: string
+  absolute_exp: number
+}
+
+const RENEWAL_KEY = /^[A-Za-z0-9_-]{36,64}$/
+
+/**
+ * Same-key renewal. The body is the native RenewBody: client_id, client_secret,
+ * credential, idempotency_key. HTTP 401 stays a terminal refusal. Timeouts,
+ * resets, and other non-401 responses stay unavailable. generation_index comes
+ * from the authenticated JSON. The decoded yur_ payload is bound to that JSON
+ * and is not a separate authority. expires_in is not the stored absolute exp.
+ */
+export async function nativeRenew(
+  registration: ManagedClientRegistration,
+  input: { credential: string; idempotencyKey: string },
+): Promise<NativeRenewal> {
+  if (!RENEWAL_KEY.test(input.idempotencyKey) || !input.credential.startsWith('yur_')) {
+    throw new ManagedNativeCallRefusal(403, 'PLM_MANAGED_RENEW_MISMATCH', null, false)
+  }
+  let response: Response
+  try {
+    response = await postJson(
+      `${registration.nativeBaseUrl}/api/v1/auth/managed-login/renew`,
+      {
+        client_id: registration.clientId,
+        client_secret: registration.clientSecret,
+        credential: input.credential,
+        idempotency_key: input.idempotencyKey,
+      },
+      headersFor(registration),
+    )
+  } catch {
+    throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  }
+  if (response.status === 401) {
+    let observedDelegationId: string | null = null
+    try {
+      const body = asRecord(await response.json())
+      if (body && typeof body.delegation_id === 'string' && body.delegation_id.trim() !== '') {
+        observedDelegationId = body.delegation_id
+      }
+    } catch {
+      observedDelegationId = null
+    }
+    throw new ManagedNativeCallRefusal(401, 'PLM_MANAGED_RENEW_UNAUTHORIZED', observedDelegationId, false)
+  }
+  if (!response.ok) throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  let body: Record<string, unknown> | null
+  try {
+    body = asRecord(await response.json())
+  } catch {
+    throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  }
+  if (!body) throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  const record = body
+  const delegationId = nonEmptyString(record.delegation_id)
+  const mismatch = (): never => {
+    throw new ManagedNativeCallRefusal(403, 'PLM_MANAGED_RENEW_MISMATCH', delegationId, false)
+  }
+  if (delegationId === null) mismatch()
+  const credential = yurCredential(record.credential)
+  if (credential === null) mismatch()
+  const claims = decodeBoundYurClaims(credential)
+  if (!claims || claims.delegation_id !== delegationId) mismatch()
+  const generation = demandIndex(successorIndex(record.generation_index), mismatch)
+  const credentialJti = exactString(record.credential_jti, claims.jti)
+  if (credentialJti === null) mismatch()
+  const expiresIn = record.expires_in
+  const reportedExpires = typeof expiresIn === 'number' && Number.isInteger(expiresIn) ? expiresIn : 0
+  const field = (key: string): string => demandString(nonEmptyString(record[key]), mismatch)
+  return {
+    subject: field('subject'),
+    tenant_id: field('tenant_id'),
+    org_id: field('org_id'),
+    client_id: field('client_id'),
+    issuer: field('issuer'),
+    scope: field('scope'),
+    delegation_id: delegationId,
+    expires_in: reportedExpires,
+    credential,
+    root_part_id: field('root_part_id'),
+    client_origin: field('client_origin'),
+    generation_index: generation,
+    credential_jti: credentialJti,
+    absolute_exp: claims.exp,
+  }
+}
+
 export async function nativeStatus(
   registration: ManagedClientRegistration,
   delegationId: string,

@@ -1,0 +1,62 @@
+{
+  "source_sha": "e5e7a0bc112d18662514831520f2f59469e06a51",
+  "base_sha": "f9ea64e1f00d4a0c4a99357a0b0ea6d5ec2410b8",
+  "source_sha256": {
+    "apps/web/src/composables/useAuth.ts": "6492827647448c1e48c18cc753111af818120beed1686925893a3afbf3755608",
+    "apps/web/tests/plmContinuousScheduling.spec.ts": "cb47e241ce0938c57104aa0167d5e7a805e313394472680334dcc11f2c364ff9",
+    "apps/web/tests/plmContinuousExpiry.spec.ts": "00f1467959f3051f2b507d552f386663aa8576e71f270289d24e6a4ccb2cad06",
+    ".github/workflows/plm-managed-companion-consumer.yml": "438a309295b046e294e218f91f592e04a0cace2068cc66fdef537f1bf3427a3a"
+  },
+  "implementation": "VerifiedpersistentGrok4.7xhigh; Codexindependentstaticreviewandmountedcounterexamples; Sol6.1highsecondreview",
+  "workflow_cohort": {
+    "actual_exit": 0,
+    "files": 17,
+    "assertions": 222,
+    "statuses": {
+      "passed": 222
+    },
+    "exact_workflow_file_match": true,
+    "previous15test_files_byte_identical_to_base": true,
+    "previous15_actual_assertions": 199,
+    "new_schedule_assertions": 13,
+    "new_expiry_assertions": 10,
+    "assert_report_script_unchanged": true,
+    "assert_exit": 0
+  },
+  "typecheck": {
+    "exit": 0,
+    "start": "2026-10-23T02:02:10Z",
+    "end": "2026-10-23T02:02:38Z",
+    "commands": [
+      "vue-tsc -b",
+      "verification-approval",
+      "verification-stock-prep"
+    ]
+  },
+  "renewal_recovery_regression": {
+    "exit": 0,
+    "passed": 11
+  },
+  "red_evidence": [
+    {
+      "scope": "no scheduler focused lead window",
+      "result": "1actualfailed no renew call"
+    },
+    {
+      "scope": "corrected8 mounted expiry baselinecd42",
+      "result": "5passed3failed; correctedrequest-isolation positivecontrols"
+    },
+    {
+      "scope": "resolved malformed current200 baselinea821",
+      "result": "2failed8skipped; aggregateVitestpassed8 was not executedpasses"
+    }
+  ],
+  "review_disposition": "W10-STATIC-1 resolved at6492827; removingnewnotifyandtwo comments exactlyreconstructsa821; nootherauthority/lifecyclechanges",
+  "private_evidence_manifest_sha256": "6198d2fcb8ae2e4f20f8e9b279ed682052cf09d864be24a4b492f551309966ce",
+  "limitations": [
+    "Fake-timer mountedVueDOM only; not actualoriginalbrowserFrame or elapsedhour",
+    "No full SPArebuild/image/install/realbusinessacceptance",
+    "Native370 exacthead CIstillactive; Meta candidate localonly,push/DraftPRheld until dependencyterminal",
+    "Historicalfixture-confoundedresultsandpre-fix220cohortretainedseparately; no reclassification as currentpass"
+  ]
+}

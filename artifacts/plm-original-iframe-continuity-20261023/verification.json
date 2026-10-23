@@ -1,0 +1,35 @@
+{
+  "at": "2026-10-23T00:52:29.539624+00:00",
+  "classification": "local-source-component-acceptance-only",
+  "native_source": "8c1466b93076dbe3da2c04ce229e3be89a9de165",
+  "meta_source": "469dde3954758ee9a9be244d6fa779403d4bd4a8",
+  "native_tests": {
+    "passed": 70,
+    "failed": 0,
+    "skipped": 0
+  },
+  "web_materialized_tests": {
+    "passed": 112,
+    "failed": 0,
+    "skipped": 0
+  },
+  "web_existing_guard_plus_new": {
+    "passed": 92,
+    "failed": 0,
+    "skipped": 0
+  },
+  "count_note": "Web cohorts overlap12; do not sum.112 is materialized auth/recovery/embed cohort, not all repository web tests.",
+  "web_typecheck_exit": 0,
+  "actionlint_exit": 0,
+  "evidence_dir": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/w10-original-iframe-local-20261023",
+  "manifest_sha256": "7255d28b2b9d8e64407259e438aab59023818552317448eb51db1c6ba403abe9",
+  "red_preserved": "Native40pass2fail before exact3 continuous route projection repair; frozen1012 unchanged. Initial same-session generation mock was replaced by actual successor-session/signature semantics.",
+  "not_qualified": [
+    "automatic no-focus renewal scheduling",
+    "independent live-process original browser Frame",
+    "elapsed one hour",
+    "current source fixed images/install/upgrade/restore",
+    "remote exact-head CI"
+  ],
+  "publication": "local commits only; serial parent369 usefulCI preserved"
+}

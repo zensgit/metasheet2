@@ -1,5 +1,4 @@
-import { defineConfig } from 'vitest/config'
-import { loadEnv } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 

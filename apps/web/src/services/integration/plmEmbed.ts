@@ -12,7 +12,7 @@
 // Both responses use the bare {ok,data} envelope. Any non-200 / malformed response degrades to an
 // "unavailable" result for the read-only viewer (the specific 401/403/503 codes are deliberately
 // not surfaced to the embedded reader -- it is a viewer, not an auth console).
-import { apiFetch } from '../../utils/api'
+import { apiFetch, getApiBase } from '../../utils/api'
 import { isPlmBomMultitableContext, type PlmBomMultitableContext } from './workbench'
 
 export interface PlmEmbedConfig {
@@ -66,6 +66,40 @@ export async function getPlmEmbedBomContext(token: string): Promise<PlmEmbedBomR
     })
     const body = await response.json().catch(() => null)
     if (!response.ok || !body || body.ok !== true || !body.data || typeof body.data !== 'object') {
+      return { available: false, reason: 'unavailable' }
+    }
+    return parsePlmEmbedBomData(body.data as Record<string, unknown>)
+  } catch {
+    return { available: false, reason: 'unavailable' }
+  }
+}
+
+/**
+ * Managed BOM refresh. Sends the single-use embed token and the purpose cookie only.
+ * An ordinary stored bearer or tenant hint is not attached. A 401 stays in the embed.
+ * 409 is not a successful read.
+ */
+export async function getPlmEmbedManagedBomContext(token: string): Promise<PlmEmbedBomResult> {
+  if (typeof token !== 'string' || token.length === 0) return { available: false, reason: 'unavailable' }
+  try {
+    const page = typeof window !== 'undefined' ? window.location.origin : ''
+    let apiOrigin = ''
+    try {
+      apiOrigin = new URL(getApiBase(), page || undefined).origin
+    } catch {
+      apiOrigin = ''
+    }
+    if (!page || page === 'null' || apiOrigin !== page) return { available: false, reason: 'unavailable' }
+    const response = await fetch(new URL('/api/plm-embed/bom-review/context', page).toString(), {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      headers: { accept: 'application/json', 'X-PLM-Embed-Token': token },
+    })
+    if (response.status === 409 || !response.ok) return { available: false, reason: 'unavailable' }
+    const body = await response.json().catch(() => null)
+    if (!body || body.ok !== true || !body.data || typeof body.data !== 'object') {
       return { available: false, reason: 'unavailable' }
     }
     return parsePlmEmbedBomData(body.data as Record<string, unknown>)

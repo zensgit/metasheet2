@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   MANAGED_COMPLETE_PENDING_KEY,
+  MANAGED_RENEWAL_PENDING_KEY,
   syncMutationOpen,
   withAuthIdentityLock,
 } from '../src/composables/authIdentityLock'
@@ -477,6 +478,29 @@ describe('auth identity lock', () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain('/logout')
     expect(localStorage.getItem(MANAGED_COMPLETE_PENDING_KEY)).toBeNull()
     expect(localStorage.getItem('auth_token')).toBe('ordinary-b')
+  })
+
+  it('revokes before ordinary publish while a lost renewal is pending', async () => {
+    localStorage.setItem(MANAGED_RENEWAL_PENDING_KEY, JSON.stringify({
+      userId: 'person-a',
+      tenantId: 'tenant-a',
+      sessionId: 'session-a',
+      revision: 4,
+      epoch: 1,
+      token: null,
+    }))
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes('/logout')) return new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 })
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await useAuth().commitOrdinaryAuthTransition(() => {
+      useAuth().setToken('ordinary-c')
+    })
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/logout')
+    expect(localStorage.getItem(MANAGED_RENEWAL_PENDING_KEY)).toBeNull()
+    expect(localStorage.getItem(MANAGED_COMPLETE_PENDING_KEY)).toBeNull()
+    expect(localStorage.getItem('auth_token')).toBe('ordinary-c')
   })
 
   it('does not probe a managed cookie while a pending complete is still unmarked', async () => {

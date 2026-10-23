@@ -11,6 +11,21 @@ export const AUTH_IDENTITY_LOCK_NAME = 'metasheet-auth-identity-v1'
 /** Crash marker for a complete POST that may already have stored a session cookie. Not a credential. */
 export const MANAGED_COMPLETE_PENDING_KEY = 'metasheet_managed_complete_pending'
 
+/**
+ * Crash marker for a renew-recovery POST whose response was lost.
+ * Distinct from an initial complete. The value is the descriptor identity and epoch.
+ * It is not a bearer and not a session signature. A stored bearer makes the marker unreadable.
+ */
+export const MANAGED_RENEWAL_PENDING_KEY = 'metasheet_managed_renewal_pending'
+
+export type ManagedRenewalPendingOwner = {
+  userId: string
+  tenantId: string
+  sessionId: string
+  revision: number
+  epoch: number
+}
+
 export class AuthIdentityLockError extends Error {
   readonly code: string
 
@@ -89,10 +104,102 @@ export function readManagedCompletePending(): boolean {
   }
 }
 
-/** Marker, in-memory descriptor, or pending complete. The entry URL is not residue: it stays after logout. */
+function renewalOwner(value: unknown): ManagedRenewalPendingOwner | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (typeof record.userId !== 'string' || record.userId.length === 0) return null
+  if (typeof record.tenantId !== 'string' || record.tenantId.length === 0) return null
+  if (typeof record.sessionId !== 'string' || record.sessionId.length === 0) return null
+  if (typeof record.revision !== 'number' || !Number.isInteger(record.revision) || record.revision < 1) return null
+  if (typeof record.epoch !== 'number' || !Number.isInteger(record.epoch) || record.epoch < 0) return null
+  // A bearer, or a signature that embeds one, is not an owner. Null is the absent ordinary token.
+  if ('token' in record && record.token !== null) return null
+  if ('signature' in record && record.signature != null) return null
+  return {
+    userId: record.userId,
+    tenantId: record.tenantId,
+    sessionId: record.sessionId,
+    revision: record.revision,
+    epoch: record.epoch,
+  }
+}
+
+/** Parsed same-session owner. A present but unreadable value is not a recoverable owner. */
+export function readManagedRenewalPending(): ManagedRenewalPendingOwner | null {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    const raw = localStorage.getItem(MANAGED_RENEWAL_PENDING_KEY)
+    if (raw === null) return null
+    return renewalOwner(JSON.parse(raw))
+  } catch {
+    return null
+  }
+}
+
+/** Any stored renewal marker, including one this document cannot parse. */
+export function managedRenewalPendingPresent(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return false
+    return localStorage.getItem(MANAGED_RENEWAL_PENDING_KEY) !== null
+  } catch {
+    return true
+  }
+}
+
+export function sameManagedRenewalSession(
+  owner: ManagedRenewalPendingOwner | null,
+  descriptor: { userId: string, tenantId: string, sessionId: string, revision: number } | null,
+  epoch: number,
+  token: string | null,
+): boolean {
+  if (!owner || !descriptor) return false
+  // An ordinary bearer is a different session. The marker does not carry that secret.
+  if (token !== null) return false
+  return owner.userId === descriptor.userId
+    && owner.tenantId === descriptor.tenantId
+    && owner.sessionId === descriptor.sessionId
+    && owner.revision === descriptor.revision
+    && owner.epoch === epoch
+}
+
+export function markManagedRenewalPending(owner: ManagedRenewalPendingOwner): void {
+  if (typeof localStorage === 'undefined') throw new AuthIdentityLockError('AUTH_IDENTITY_PENDING_STORAGE')
+  const encoded = JSON.stringify({
+    userId: owner.userId,
+    tenantId: owner.tenantId,
+    sessionId: owner.sessionId,
+    revision: owner.revision,
+    epoch: owner.epoch,
+  })
+  try {
+    localStorage.setItem(MANAGED_RENEWAL_PENDING_KEY, encoded)
+    if (localStorage.getItem(MANAGED_RENEWAL_PENDING_KEY) !== encoded) {
+      throw new AuthIdentityLockError('AUTH_IDENTITY_PENDING_STORAGE')
+    }
+  } catch (error) {
+    if (error instanceof AuthIdentityLockError) throw error
+    throw new AuthIdentityLockError('AUTH_IDENTITY_PENDING_STORAGE')
+  }
+}
+
+export function clearManagedRenewalPending(): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.removeItem(MANAGED_RENEWAL_PENDING_KEY)
+    if (localStorage.getItem(MANAGED_RENEWAL_PENDING_KEY) !== null) {
+      throw new AuthIdentityLockError('AUTH_IDENTITY_PENDING_STORAGE')
+    }
+  } catch (error) {
+    if (error instanceof AuthIdentityLockError) throw error
+    throw new AuthIdentityLockError('AUTH_IDENTITY_PENDING_STORAGE')
+  }
+}
+
+/** Marker, in-memory descriptor, pending complete, or lost renewal. The entry URL is not residue. */
 export function managedResidueRemains(): boolean {
   if (readManagedProbeMarker()) return true
   if (readManagedDescriptor()) return true
+  if (managedRenewalPendingPresent()) return true
   return readManagedCompletePending()
 }
 

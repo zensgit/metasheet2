@@ -188,6 +188,13 @@ export const GLOBAL_GATE_EXCEPTIONS: readonly GateException[] = [
       'It does not mint an ordinary session.',
   },
   {
+    path: '/api/plm/managed-login/renew-recovery',
+    kind: 'exact',
+    reason:
+      'Same-origin bridge POST that recovers one live managed companion cookie. The handler proves the signed ' +
+      'purpose cookie itself. It does not assign req.user or call next. POST only. Suffix paths stay gated.',
+  },
+  {
     path: '/api/plm-embed',
     kind: 'prefix',
     reason:

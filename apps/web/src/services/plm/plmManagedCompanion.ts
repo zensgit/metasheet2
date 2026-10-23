@@ -1,8 +1,10 @@
 import {
   AuthIdentityLockError,
   clearManagedCompletePending,
+  clearManagedRenewalPending,
   managedResidueRemains,
   markManagedCompletePending,
+  markManagedRenewalPending,
   withAuthIdentityLock,
   writeManagedProbeMarkerOrThrow,
 } from '../../composables/authIdentityLock'
@@ -10,10 +12,12 @@ import {
   clearManagedDescriptor,
   clearManagedProbeMarker,
   readAuthSessionSignature,
+  readManagedDescriptor,
   readManagedEpoch,
   readStoredToken,
   sha256Hex,
   TOKEN_KEYS,
+  type ManagedSessionDescriptor,
 } from '../../composables/authPrincipal'
 import { apiFetch, getApiBase } from '../../utils/api'
 
@@ -338,12 +342,143 @@ export async function completeManagedBrowserBridge(code: string, state: string):
   }, { failClosed: true })
 }
 
+/** Same lead as the renewal route. Scheduling uses the authenticated descriptor expiry only. */
+export const MANAGED_RENEWAL_LEAD_MS = 120_000
+
+export type ManagedRenewalOutcome =
+  | { ok: true }
+  | { ok: false; reason: 'transport' | 'stale' | 'malformed' | 'refused' | 'unavailable' }
+
+export function continuousRenewalEligible(
+  descriptor: ManagedSessionDescriptor | null,
+): descriptor is ManagedSessionDescriptor & { continuityMode: 'continuous'; credentialGeneration: number } {
+  if (!descriptor || descriptor.continuityMode !== 'continuous') return false
+  const generation = descriptor.credentialGeneration
+  if (typeof generation !== 'number' || !Number.isInteger(generation) || generation < 0 || generation > 6) return false
+  const expiresAt = Date.parse(descriptor.expiresAt)
+  return Number.isFinite(expiresAt) && expiresAt > Date.now()
+}
+
+export function continuousRenewalDue(descriptor: ManagedSessionDescriptor | null): boolean {
+  if (!continuousRenewalEligible(descriptor)) return false
+  return Date.parse(descriptor.expiresAt) - Date.now() <= MANAGED_RENEWAL_LEAD_MS
+}
+
+function renewalIdentityMoved(started: {
+  epoch: number
+  signature: string
+  token: string | null
+  descriptor: ManagedSessionDescriptor | null
+}): boolean {
+  if (readManagedEpoch() !== started.epoch) return true
+  if (readStoredToken() !== started.token) return true
+  if (readAuthSessionSignature() !== started.signature) return true
+  const current = readManagedDescriptor()
+  const previous = started.descriptor
+  if (!previous) return false
+  if (!current) return Date.now() < Date.parse(previous.expiresAt)
+  return current.userId !== previous.userId
+    || current.tenantId !== previous.tenantId
+    || current.sessionId !== previous.sessionId
+    || current.revision !== previous.revision
+}
+
+async function renewRecoveryFetch(): Promise<Response> {
+  const headers: Record<string, string> = {
+    accept: 'application/json',
+    'content-type': 'application/json',
+    'x-metasheet-managed-bridge': 'renew-recovery',
+  }
+  return await fetch(new URL('/api/plm/managed-login/renew-recovery', window.location.origin).toString(), {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: JSON.stringify({}),
+    referrerPolicy: 'no-referrer',
+  })
+}
+
+function exactRenewalSuccess(record: Record<string, unknown>): boolean {
+  return Object.keys(record).length === 1
+    && Object.prototype.hasOwnProperty.call(record, 'ok')
+    && record.ok === true
+}
+
+/**
+ * Cookie-only POST for a caller that already holds the identity lock.
+ * Does not send a bearer, call apiFetch, or install a descriptor.
+ */
+export async function renewManagedContinuousSessionUnlocked(): Promise<ManagedRenewalOutcome> {
+  assertPageOrigin()
+  const started = {
+    epoch: readManagedEpoch(),
+    signature: readAuthSessionSignature(),
+    token: readStoredToken(),
+    descriptor: readManagedDescriptor(),
+  }
+  const ownerDescriptor = started.descriptor
+  markManagedRenewalPending({
+    userId: ownerDescriptor?.userId ?? '',
+    tenantId: ownerDescriptor?.tenantId ?? '',
+    sessionId: ownerDescriptor?.sessionId ?? '',
+    revision: ownerDescriptor?.revision ?? 0,
+    epoch: started.epoch,
+  })
+  let response: Response
+  try {
+    response = await renewRecoveryFetch()
+  } catch {
+    if (renewalIdentityMoved(started)) {
+      await compensateInstalledCookie()
+      return { ok: false, reason: 'stale' }
+    }
+    return { ok: false, reason: 'transport' }
+  }
+  let record: Record<string, unknown> | null = null
+  try {
+    record = await readRecord(response)
+  } catch {
+    record = null
+  }
+  const success = response.status === 200 && response.ok && record !== null && exactRenewalSuccess(record)
+  if (!success) {
+    if (response.ok || renewalIdentityMoved(started)) {
+      await compensateInstalledCookie()
+      return { ok: false, reason: response.ok ? 'malformed' : 'stale' }
+    }
+    try {
+      clearManagedRenewalPending()
+    } catch {
+      await compensateInstalledCookie()
+      return { ok: false, reason: 'stale' }
+    }
+    return { ok: false, reason: 'refused' }
+  }
+  if (renewalIdentityMoved(started)) {
+    await compensateInstalledCookie()
+    return { ok: false, reason: 'stale' }
+  }
+  try {
+    clearManagedRenewalPending()
+  } catch {
+    await compensateInstalledCookie()
+    return { ok: false, reason: 'stale' }
+  }
+  return { ok: true }
+}
+
+/** Acquires the identity lock. Callers that already hold it must use the unlocked helper. */
+export async function renewManagedContinuousSession(): Promise<ManagedRenewalOutcome> {
+  return await withAuthIdentityLock(() => renewManagedContinuousSessionUnlocked(), { failClosed: true })
+}
+
 /** Logout POST for a caller that already holds the identity lock. Does not request the lock again. */
 export async function postManagedLogoutUnlocked(): Promise<void> {
   await bridgePost('/api/plm/managed-login/logout', 'logout', {})
   clearManagedDescriptor()
   clearManagedProbeMarker()
   clearManagedCompletePending()
+  clearManagedRenewalPending()
 }
 
 export async function logoutManagedBrowserBridge(): Promise<void> {

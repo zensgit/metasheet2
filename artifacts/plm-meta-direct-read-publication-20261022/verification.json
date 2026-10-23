@@ -1,0 +1,67 @@
+{
+  "source_hashes": {
+    "packages/core-backend/src/services/plm-managed-companion-flow.ts": "168626504550ec27cab915d57bfca693ce7c65f72b98989af55127b45a1217b3",
+    "packages/core-backend/tests/integration/plm-managed-companion-pg.realdb.ts": "d91d400be67dc7826304f1053f973bbc7aaaed3804b5c9508b4360916075cb73",
+    "packages/core-backend/tests/unit/plm-managed-projection-envelope.test.ts": "5915c2b10d5515540f950f069a57d9e0039023ef88f44ee2babf1d4999ceca88"
+  },
+  "source_unchanged": true,
+  "at": "2026-10-22T21:44:23.403248+00:00",
+  "results": [
+    {
+      "check": "typecheck",
+      "exit": 0,
+      "log": "/tmp/plm-meta-root-c2-backend-final-typecheck-20261022.log"
+    },
+    {
+      "check": "unit",
+      "exit": 0,
+      "log": "/tmp/plm-meta-root-c2-backend-final-unit-20261022.log"
+    },
+    {
+      "check": "pg",
+      "exit": 0,
+      "encoding": "UTF8",
+      "log": "/tmp/plm-meta-root-c2-backend-final-pg-20261022.log"
+    }
+  ],
+  "cleanup": {
+    "ok": true,
+    "command": "cleanup",
+    "nonce": "414bf9ea6f3b27d6",
+    "root": "/tmp/plm-managed-consumer-pg-414bf9ea6f3b27d6",
+    "data": "/tmp/plm-managed-consumer-pg-414bf9ea6f3b27d6/data",
+    "socket": "/tmp/plm-managed-consumer-pg-414bf9ea6f3b27d6/s",
+    "postgresStopped": true,
+    "postgresRunning": false,
+    "directoryRemoved": true,
+    "locale": "C",
+    "markerMatched": true,
+    "pgBin": "/tmp/plm-w10-meta-cookie-recovery-pg16-prefix/bin"
+  },
+  "source_sha": "57f9af221118bf8483dbb9605f3f3bd64e6a99ee",
+  "parent_sha": "884a8cb0e5358c03889848fea56c949262be6e57",
+  "root_probes": {
+    "exit": 0,
+    "before": "168626504550ec27cab915d57bfca693ce7c65f72b98989af55127b45a1217b3",
+    "after": "168626504550ec27cab915d57bfca693ce7c65f72b98989af55127b45a1217b3",
+    "source_unchanged": true,
+    "cleanup": {
+      "ok": true,
+      "command": "cleanup",
+      "nonce": "ec6026907f0ed952",
+      "root": "/tmp/plm-managed-consumer-pg-ec6026907f0ed952",
+      "data": "/tmp/plm-managed-consumer-pg-ec6026907f0ed952/data",
+      "socket": "/tmp/plm-managed-consumer-pg-ec6026907f0ed952/s",
+      "postgresStopped": true,
+      "postgresRunning": false,
+      "directoryRemoved": true,
+      "locale": "C",
+      "markerMatched": true,
+      "pgBin": "/tmp/plm-w10-meta-cookie-recovery-pg16-prefix/bin"
+    },
+    "log": "/tmp/plm-root-c2-publication-final-214256-20261022.log"
+  },
+  "root_evidence_manifest": "1291735c8c4e374f5e965c6c179c56f5d07c961dc4051f0dc4a29b9139f7bd32",
+  "worker_report_sha256": "9bacfdf970dc0a53f360c2b684391c99912cfa8ea38e006a6a2b4b0ca795d13d",
+  "acceptance_scope": "Local backend only; iframe/cross-process/hour/installed images/current head CI remain open"
+}
