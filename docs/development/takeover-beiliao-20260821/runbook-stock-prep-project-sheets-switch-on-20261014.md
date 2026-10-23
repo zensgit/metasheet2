@@ -646,7 +646,7 @@ END $$;
 
 **处置顺序**（全部在启用**之前**做）：
 
-1. 在大 BOM 面板把这张表上每个没结束的作业**续跑到结束**（反复「运行下一块」直到 `succeeded` 或 `partial`）。`failed` 的从断点续跑。
+1. 在大 BOM 面板把这张表上每个 `queued` / `paused` / `failed` 的作业**续跑到结束**（反复「运行下一块」直到 `succeeded` 或 `partial`）。`failed` 的从断点续跑。**存的状态是 `running` 的作业不要续跑**：分块执行函数 `runLargeBomCheckpointApplyJobChunk` 对存为 `running` 的作业一律拒 409 `LARGE_BOM_APPLY_RUN_IN_PROGRESS`，进程没了之后永远续不上——直接走第 2 步里 owner 批准的 `cancelled` 改状态（模板的状态条件已含 `running`），不必先跑新作业。
 2. 续跑被拒 409 `PLAN_SUPERSEDED`（`newer_plan` / `job_unbound`）的旧作业已经不能再跑：先对同一项目**重新展开 → 规划 → 批准 → 跑完**一个新作业（旧作业已落的行按幂等键重新规划为更新 / 跳过，不会重复新增）。之后旧作业仍是未结束状态，就绪依然不过——这一步只能由 **owner 批准一次手册数据库操作**，把那一个旧作业的状态改为 `cancelled`：
    - 先只读找出作业（确认没有在途租约：GET 的 `write_lock_free` 为真）：
      ```sql
@@ -674,8 +674,9 @@ END $$;
 
 - 顺序：就绪全过 → 推进计划代次（`pilot_enable`）→ 在写入租约里再扫一次未结束的大作业 → **宿主盖章**（这张表的通用网格导出关闭）→ **一个事务**里写登记行的试点标记**和**审计行 `project_pilot_enable`。
 - **答 500**：盖章之后、标记事务提交之前出了错（进程崩溃、审计写失败、数据库断开）。这时表**已关闭网格导出、但还不是试点**：登记行的三列为空、**没有**审计行（标记和审计行同生共死，不会出现「是试点却没有审计行」）。这个中间态下通用网格导出被拒（403 `MULTITABLE_GRID_EXPORT_CLOSED`），大车道照常（还不是试点）。
+- **唯一例外：500 的信息是 `the pilot mark landed without its in-transaction audit row`（码 `AUDIT_STORE_UNAVAILABLE`，试点启用路由 `stockPreparationProjectPilotEnable` 在标记之后发现审计钩子没被调用时抛出）**。这时试点**已经启用**、审计行为 **0 条**；再 POST 只会回答 `alreadyEnabled: true`，永远补不上审计行。这只在接线缺陷时出现（登记表的 store 与路由不是同一构建）。**不要再 POST**：停下，报开发机。
 - **处置：原样再 POST 一次**。先 GET 确认 `pilot.enabled` 为假、就绪全过；再 POST。回答 200、`enabled: true`、`exportClosure.alreadyClosed: true`；审计里**恰好一条** `project_pilot_enable`（`detail.exportClosureAlreadyClosed` 为真）。
 - 已经是试点时再 POST：回答 `alreadyEnabled: true`，只补宿主盖章，不写第二条审计。
 - 再 POST 被就绪拒（409 `STOCK_PREP_PILOT_NOT_READY`）：按 `failing` 里的 id 处置后再 POST；这期间表保持「关导出、非试点」。
-- 每次 POST 都推进计划代次：之前做的小车道预览要重做（`PLAN_SUPERSEDED`）。
+- 每次 POST 都推进计划代次：之前做的小车道预览要重做（`PLAN_SUPERSEDED`）。在租约里因 `no_open_large_job` 被拒（409 `STOCK_PREP_PILOT_NOT_READY`）的那次 POST 也已推进代次，拉取人员手上未执行的预览同样要重跑；只有在推进之前就被就绪清单拒掉的 POST 不推进。
 - **不要**：手工改登记表的试点三列来「补完」启用（那样没有审计行）；不要重开网格导出（R-53 ②）。
