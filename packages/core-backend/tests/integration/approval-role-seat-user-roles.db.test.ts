@@ -337,39 +337,46 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
     return { instanceA, instanceB }
   }
 
-  it('(a)(b)(c) a non-admin holding R ONLY via user_roles sees, counts, and decides the role-seated instances', async () => {
-    const role = await seedRole('row')
-    const { instanceA, instanceB } = await fixture('row', role.id)
-    // users.role is NOT R — the only source of R is the user_roles row.
-    const holder = await seedViewer('row-holder', { role: 'user', roleIds: [role.id] })
+  /** R held ONLY through a `user_roles` row (`users.role` is something else). */
+  async function userRolesOnlyHolder(label: string) {
+    const role = await seedRole(label)
+    const { instanceA, instanceB } = await fixture(label, role.id)
+    const holder = await seedViewer(`${label}-holder`, { role: 'user', roleIds: [role.id] })
+    return { instanceA, instanceB, holder }
+  }
 
+  it('(a) a non-admin holding R ONLY via user_roles sees the role-seated instances in the pending tab', async () => {
+    const { instanceA, instanceB, holder } = await userRolesOnlyHolder('row-a')
     await withoutTokenClaimTrust(async () => {
       // Pre-existing discriminator: the legacy feed already resolves roles from the DB.
       expect(await legacyPendingIds(holder.token)).toEqual(expect.arrayContaining([instanceA, instanceB]))
-
-      // (a) pending tab
       expect(await pendingTabIds(holder.token)).toEqual(expect.arrayContaining([instanceA, instanceB]))
+    })
+  })
 
-      // (b) badge + todo count + todo items + detail marker
+  it('(b) ... is counted in pending-count and the todo count, and the todo items and detail offer the decision', async () => {
+    const { instanceA, instanceB, holder } = await userRolesOnlyHolder('row-b')
+    await withoutTokenClaimTrust(async () => {
       expect(await pendingCount(holder.token)).toBe(2)
       expect(await todoCount(holder.token)).toBe(2)
-      const items = await todoItems(holder.token)
-      expect(items.filter((item) => item.id === instanceA || item.id === instanceB)).toHaveLength(2)
-      for (const item of items.filter((entry) => entry.id === instanceA || entry.id === instanceB)) {
-        expect(item.actionable).toBe(true)
-      }
+      const ours = (await todoItems(holder.token)).filter((item) => item.id === instanceA || item.id === instanceB)
+      expect(ours).toHaveLength(2)
+      for (const item of ours) expect(item.actionable).toBe(true)
       const read = await detail(holder.token, instanceA)
       expect(read.status, await read.clone().text()).toBe(200)
       expect(((await read.json()) as { canDecideCurrentNode?: boolean }).canDecideCurrentNode).toBe(true)
+    })
+  })
 
-      // (c) approve one, reject the other — both accepted by the door
+  it('(c) ... can approve and reject through the decision door', async () => {
+    const { instanceA, instanceB, holder } = await userRolesOnlyHolder('row-c')
+    await withoutTokenClaimTrust(async () => {
       const approved = await act(holder.token, instanceA, 'approve')
       expect(approved.status, await approved.clone().text()).toBe(200)
       expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_b' })
       const rejected = await act(holder.token, instanceB, 'reject')
       expect(rejected.status, await rejected.clone().text()).toBe(200)
       expect((await instanceStatus(instanceB)).status).toBe('rejected')
-
       // Both decided: nothing pending for this holder any more.
       expect(await pendingCount(holder.token)).toBe(0)
       expect(await todoCount(holder.token)).toBe(0)
