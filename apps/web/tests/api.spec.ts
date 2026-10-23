@@ -4,12 +4,12 @@ import { useAuth } from '../src/composables/useAuth'
 import { getAuthPrincipalKey } from '../src/composables/authPrincipal'
 import { createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { NETWORK_UNAVAILABLE, networkUnavailableMessage } from '../src/utils/networkErrors'
-import { getDeleteTransport, getWriteTransport, probeDeleteTransport, probeWriteTransport, resetDeleteTransportForTests, setWriteTransport } from '../src/utils/delete-fallback'
+import { getDeleteTransport, probeDeleteTransport, resetDeleteTransportForTests } from '../src/utils/delete-fallback'
 
 /** A fetch-mock response that carries (or omits) the server's override receipt header. */
-function httpResponse(status: number, opts: { receipt?: boolean | 'DELETE' | 'PUT' | 'PATCH' } = {}): Response {
+function httpResponse(status: number, opts: { receipt?: boolean } = {}): Response {
   const headers = new Headers()
-  if (opts.receipt) headers.set('X-Method-Overridden', opts.receipt === true ? 'DELETE' : opts.receipt)
+  if (opts.receipt) headers.set('X-Method-Overridden', 'DELETE')
   return { ok: status >= 200 && status < 300, status, statusText: String(status), headers } as unknown as Response
 }
 
@@ -533,87 +533,6 @@ describe('apiFetch', () => {
     expect(sent.get('X-Custom')).toBe('kept')
     // Caller-wins precedence is preserved (the object spread had it too).
     expect(sent.get('Authorization')).toBe('Bearer caller-wins')
-  })
-
-  it('attendance PUT that gets no response is re-sent ONCE as POST + X-HTTP-Method-Override: PUT', async () => {
-    const fetchMock = vi.fn()
-      .mockRejectedValueOnce(transportFailure())
-      .mockResolvedValueOnce(httpResponse(200, { receipt: 'PUT' }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    const response = await apiFetch('/api/attendance/shifts/shift-1', {
-      method: 'PUT',
-      body: JSON.stringify({ name: 'Day shift' }),
-      suppressUnauthorizedRedirect: true,
-    })
-
-    expect(response.status).toBe(200)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(fetchMock.mock.calls[0][1].method).toBe('PUT')
-    expect((fetchMock.mock.calls[0][1].headers as Headers).get('X-HTTP-Method-Override')).toBeNull()
-    expect(fetchMock.mock.calls[1][1].method).toBe('POST')
-    expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('PUT')
-    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/attendance/shifts/shift-1')
-    expect(getWriteTransport()).toBe('override')
-    // The DELETE slot is a different network fact and must stay native.
-    expect(getDeleteTransport()).toBe('native')
-  })
-
-  it('once the write probe says override, attendance edit and other attendance PUT/PATCH start as POST+override; create stays POST', async () => {
-    setWriteTransport('override')
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(httpResponse(200, { receipt: 'PUT' }))
-      .mockResolvedValueOnce(httpResponse(200, { receipt: 'PATCH' }))
-      .mockResolvedValueOnce(httpResponse(201))
-      .mockResolvedValueOnce(httpResponse(200))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await apiFetch('/api/attendance/shifts/shift-1', {
-      method: 'PUT',
-      body: JSON.stringify({ name: 'Day shift' }),
-      suppressUnauthorizedRedirect: true,
-    })
-    await apiFetch('/api/attendance/report-fields/late/formula?orgId=o1', {
-      method: 'PATCH',
-      body: JSON.stringify({ formulaExpression: '1' }),
-      suppressUnauthorizedRedirect: true,
-    })
-    await apiFetch('/api/attendance/shifts', {
-      method: 'POST',
-      body: JSON.stringify({ name: 'New' }),
-      suppressUnauthorizedRedirect: true,
-    })
-    await apiFetch('/api/multitable/records/rec_1', {
-      method: 'PUT',
-      body: JSON.stringify({ fields: {} }),
-      suppressUnauthorizedRedirect: true,
-    })
-
-    expect(fetchMock.mock.calls[0][1].method).toBe('POST')
-    expect((fetchMock.mock.calls[0][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('PUT')
-    expect(fetchMock.mock.calls[1][1].method).toBe('POST')
-    expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('PATCH')
-    expect(fetchMock.mock.calls[2][1].method).toBe('POST')
-    expect((fetchMock.mock.calls[2][1].headers as Headers).get('X-HTTP-Method-Override')).toBeNull()
-    expect(fetchMock.mock.calls[3][1].method).toBe('PUT')
-    expect((fetchMock.mock.calls[3][1].headers as Headers).get('X-HTTP-Method-Override')).toBeNull()
-  })
-
-  it('the write probe keeps a literal PUT, then POST+override, through apiFetch', async () => {
-    const fetchMock = vi.fn()
-      .mockRejectedValueOnce(transportFailure())
-      .mockResolvedValueOnce(httpResponse(200, { receipt: 'PUT' }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    const mode = await probeWriteTransport((url, init) =>
-      apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
-
-    expect(mode).toBe('override')
-    expect(fetchMock.mock.calls[0][1].method).toBe('PUT')
-    expect((fetchMock.mock.calls[0][1].headers as Headers).get('X-HTTP-Method-Override')).toBeNull()
-    expect(fetchMock.mock.calls[1][1].method).toBe('POST')
-    expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('PUT')
-    expect(getDeleteTransport()).toBe('native')
   })
 
   it.each(['POST', 'PUT', 'PATCH'])('F4-B: a %s is NOT retried either', async method => {

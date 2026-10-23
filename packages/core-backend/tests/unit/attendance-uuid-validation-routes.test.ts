@@ -1865,6 +1865,32 @@ describe('attendance UUID route validation', () => {
     expect(db.transaction).not.toHaveBeenCalled()
   })
 
+  it('registers POST /:id/update as the same handler as each attendance PUT /:id', async () => {
+    const { routes } = await createHarness()
+    const putIdRoutes = [...routes.keys()].filter((key) => key.startsWith('PUT ') && key.endsWith('/:id'))
+    expect(putIdRoutes).toContain('PUT /api/attendance/shifts/:id')
+    expect(putIdRoutes.length).toBeGreaterThan(10)
+    for (const key of putIdRoutes) {
+      const path = key.slice('PUT '.length)
+      const updateKey = `POST ${path}/update`
+      expect(routes.get(updateKey), updateKey).toBe(routes.get(key))
+    }
+    // Collection writes are a different path shape and stay PUT/POST without an /update alias.
+    expect(routes.has('POST /api/attendance/settings/update')).toBe(false)
+    expect(routes.has('POST /api/attendance/shifts/update')).toBe(false)
+    expect(routes.has('POST /api/attendance/rules/default/update')).toBe(false)
+  })
+
+  it('POST /api/attendance/shifts/:id/update answers the same validation failure as PUT', async () => {
+    const { routes } = await createHarness()
+    const input = { params: { id: 'not-a-uuid' }, body: { name: 'Day shift' } }
+    const put = await invokeRoute(routes, 'PUT /api/attendance/shifts/:id', input)
+    const post = await invokeRoute(routes, 'POST /api/attendance/shifts/:id/update', input)
+    expect(post.statusCode).toBe(put.statusCode)
+    expect(post.statusCode).toBeGreaterThanOrEqual(400)
+    expect(post.body).toEqual(put.body)
+  })
+
   it('rejects malformed attendance group manager ids before hitting the database', async () => {
     const { db, routes } = await createHarness()
     const groupId = '00000000-0000-4000-8000-000000000101'
@@ -5253,6 +5279,7 @@ describe('attendance UUID route validation', () => {
       { key: 'DELETE /api/attendance/rule-sets/:id' },
       { key: 'POST /api/attendance/shifts', body: { name: 'Day shift' } },
       { key: 'PUT /api/attendance/shifts/:id', body: { name: 'Day shift' } },
+      { key: 'POST /api/attendance/shifts/:id/update', body: { name: 'Day shift' } },
       { key: 'DELETE /api/attendance/shifts/:id' },
       { key: 'POST /api/attendance/assignments', body: { userId: 'worker-1', shiftId, startDate: '2026-06-01' } },
       { key: 'PUT /api/attendance/assignments/:id', body: { isActive: true } },
@@ -5372,6 +5399,7 @@ describe('attendance UUID route validation', () => {
       { key: 'DELETE /api/attendance/rule-sets/:id' },
       { key: 'POST /api/attendance/shifts', body: { name: 'Day shift' } },
       { key: 'PUT /api/attendance/shifts/:id', body: { name: 'Day shift' } },
+      { key: 'POST /api/attendance/shifts/:id/update', body: { name: 'Day shift' } },
       { key: 'DELETE /api/attendance/shifts/:id' },
       { key: 'POST /api/attendance/assignments', body: { userId: 'worker-1', shiftId, startDate: '2026-06-01' } },
       { key: 'PUT /api/attendance/assignments/:id', body: { isActive: true } },

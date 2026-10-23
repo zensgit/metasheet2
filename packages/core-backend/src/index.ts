@@ -1729,7 +1729,7 @@ export class MetaSheetServer {
 
     // CORS
     // `exposedHeaders` is an EXPLICIT list, so a header a cross-origin browser client must be able
-    // to read has to be named here. `X-Method-Overridden` is the receipt the method-override
+    // to read has to be named here. `X-Method-Overridden` is the receipt the DELETE method-override
     // stamps on a rewritten request (middleware/method-override.ts); without it a client cannot tell
     // "the server honoured my override" from "a hop stripped the header and a same-path POST twin
     // ran instead". Same-origin fetches could read it regardless; cross-origin ones cannot.
@@ -1889,20 +1889,20 @@ export class MetaSheetServer {
     this.app.use(attendanceAuditMiddleware())
     this.app.use(attendanceSecurityMiddleware())
 
-    // Method-override (POST + X-HTTP-Method-Override: DELETE|PUT|PATCH -> that verb).
+    // DELETE method-override (POST + X-HTTP-Method-Override: DELETE -> DELETE).
     //
     // POSITION IS LOAD-BEARING, and it is pinned by tests/unit/method-override.test.ts:
     //   - AFTER the global JWT gate above, so an unauthenticated override is just an unauthenticated
     //     request (401, handler never runs). The middleware ALSO re-checks `req.user` itself, because
     //     the gate lets whitelisted paths and the OAPI `mst_` method-bound allowlist through WITHOUT
-    //     setting `req.user`, and neither may be turned into DELETE/PUT/PATCH by a header.
+    //     setting `req.user`, and neither may be turned into a DELETE by a header.
     //   - AFTER `attendanceSecurityMiddleware()`, so the rewrite cannot be used to dodge a
     //     method-keyed guard. `pickLimiter` (middleware/attendance-production.ts) selects the import
     //     prepare/preview/upload/commit buckets on `req.method === 'POST'`; rewriting to DELETE before
     //     it ran would have made `POST /api/attendance/import/commit` + override consume NO limiter
     //     token while the 50 MB import JSON parser still ran. The attendance audit record likewise
     //     keeps the verb that actually arrived on the wire, and carries `meta.request.methodOverride`
-    //     so a tunnelled delete or update is still findable as that verb.
+    //     so a tunnelled delete is still findable as a delete.
     // WHO READS `req.method` IN THIS WINDOW — stated exactly, because "nothing does" was false:
     // `attendanceAuditMiddleware` and `attendanceSecurityMiddleware` BOTH do, deliberately (the
     // limiter is the whole reason for this mount position). Their reads are allow-listed line by
@@ -1941,7 +1941,7 @@ export class MetaSheetServer {
     }
     this.app.get('/health', healthHandler)
     this.app.get('/api/health', healthHandler)
-    // DELETE/PUT/PATCH transport probe (authenticated by the global gate above; see routes/method-probe.ts).
+    // DELETE transport probe (authenticated by the global gate above; see routes/method-probe.ts).
     this.app.use(methodProbeRouter())
 
     // 路由：认证（登录/注册/token管理）
