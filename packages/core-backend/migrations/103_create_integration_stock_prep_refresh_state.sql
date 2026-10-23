@@ -7,7 +7,9 @@
 --   * integration_stock_prep_refresh_state — ONE row per (sheet, project), created by the first governed
 --     computation and never deleted. `decision_version` moves ONLY when a puller decides (confirm / re-confirm /
 --     end / change-plan confirm / review complete); every hold reconciliation is a compare-and-set on it, so a
---     computation that straddled a decision never persists a stale hold set (409 STOCK_PREP_PULL_STATE_MOVED).
+--     computation that straddled a decision never persists a stale hold set (409 STOCK_PREP_PULL_STATE_MOVED) —
+--     provided the value it observed and the rows it planned from are ONE snapshot, which the store's consult
+--     read guarantees (one REPEATABLE READ transaction, #6514 review X-1).
 --     `version` moves on every write (diagnostic). The settled_* columns record the last SETTLED computation —
 --     zero pending decisions, no holds — which is what the formal export re-checks (design §9.2, §11).
 --   * integration_stock_prep_refresh_hold — what the puller's page shows and what a confirmation binds to.

@@ -34,7 +34,9 @@
 -- `claim_active` continuation, open hold, unfinished execution or pending review exists — the G10 handbook
 -- check is `SELECT count(*) FROM integration_stock_prep_continuation WHERE claim_active` (and its siblings in
 -- migration 103) with the stop condition "do not run pulls on governed projects under a pre-step-4 build".
--- Tables and rows always stay.
+-- Tables and rows always stay. A rolled-back build CANNOT run `db:migrate` while 102 / 103 are recorded (the
+-- migrator refuses with "corrupted migrations: previously executed migration ... is missing"): a rollback is
+-- "deploy the old build with RunMigrations 0", after which that stop condition is the ONLY protection.
 --
 -- OWNER GATE (Q-B): persisting business values in the PRIVATE columns on the customer host, and their
 -- retention, needs the owner's approval before this migration is DEPLOYED there. Development and CI are

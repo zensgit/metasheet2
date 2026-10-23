@@ -714,6 +714,29 @@ function reconfirmHoldFor(continuationId, { confirmable = true, reason = 'reconf
   return hold
 }
 
+/**
+ * A `relationship_content_change` hold about `continuationId`, as the pure core emits it for an ACTIVE continuation
+ * whose verdict is `content_changed` (pairing.cjs verificationHold): not confirmable (`needs_step5`), and the
+ * continuation stays ACTIVE — the one shape where an open hold names a relationship that does not need
+ * reconfirmation (review X-2: an end must still refuse it by its status).
+ */
+function contentChangeHoldFor(continuationId) {
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const hold = {
+    kind: 'relationship_content_change',
+    confirmable: false,
+    notConfirmableReason: 'needs_step5',
+    continuationId,
+    subject: { continuationId, newRootKeyDigest: 'e'.repeat(64) },
+    evidenceFingerprint: `content-evidence-${'4'.repeat(40)}`,
+    comparisonFingerprint: `content-comparison-${'5'.repeat(40)}`,
+    pairingFingerprint: `content-pairing-${'6'.repeat(40)}`,
+    detail: { verdict: 'content_changed', steps: {}, pairs: null, comparison: null, demand: null },
+  }
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  return hold
+}
+
 /** A registry row (087 + 101 columns) as PR B's store writes it; `pilot` stamps the three 101 columns. */
 function registryRow({ id, tenantId, projectNo, sheetId, objectId, status = 'active', pilot = false, at = new Date('2026-10-24T00:00:00.000Z') }) {
   return {
@@ -739,6 +762,7 @@ module.exports = {
   candidateHoldFixture,
   clone,
   competingCandidateHold,
+  contentChangeHoldFor,
   createClock,
   createFakeBumpWithin,
   createFakeRefreshDb,

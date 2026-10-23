@@ -1872,11 +1872,17 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     //    here: the partial unique claims arbitrate two SESSIONS (A08), the state-row FOR UPDATE serialises the
     //    decision / reconciliation races, a missing table is 503 (never zero rows), a header-steered tenant is
     //    refused (never "not governed"), and a project resolved to another sheet is refused (never matched).
-    //    Cases are prefixed S2- (PR-0 / PR B own D17-D21). Every value is synthetic and per-run.
+    //    Review round 1 of #6514 adds: S2-07 / S2-08 / S2-09 (X-1) the consult is ONE REPEATABLE READ snapshot —
+    //    frozen at every step-4 read boundary (and after the registry reads) while another session decides, it
+    //    answers one instant, and a bounded natural race loop never persists a stale hold nor derives a torn
+    //    complete; S2-10 (X-2) the end admissibility; S2-11 (X-3) the supersede relatedness.
+    //    Cases are prefixed S2- (PR-0 / PR B own D17-D21, the pre-enable hardening H-01 / H-02). Every value is
+    //    synthetic and per-run.
     describe('S2 continuation / refresh-state stores + governance reader (real Postgres, migrations 102 / 103)', () => {
       const nodeCrypto = require('node:crypto') as typeof import('node:crypto')
       const continuationStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-store.cjs')) as any
       const governanceModule = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-governance.cjs')) as any
+      const refreshStateModule = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-state.cjs')) as any
       const refreshKit = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-refresh-store-kit.cjs')) as any
       const { REFRESH_STORE_TABLES: RT, REFRESH_STORE_ERROR_CODES: RC } = continuationStoreModule
       const { REFRESH_GOVERNANCE_ERROR_CODES: GC } = governanceModule
@@ -1891,15 +1897,108 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       }
       const storeOn = (client: PoolClient) => continuationStoreModule.createStockPreparationContinuationStore({ db: dbOn(client) })
       const computation = (overrides: Record<string, unknown> = {}) => ({ lane: 'small_preview', suspended: true, generationToken: 'g_s2', sourceContentDigest: 'src_s2', ...overrides })
-      // No registry row for any S2 project: the registry's pilot reads (PR B, #6510) are a test double answering
-      // "absent" — the registry-row legs (pilot governs; registry retarget) are the hermetic suite's and the real
-      // pilot leg waits for #6510's migration 101.
+      // S2-01..S2-06 and S2-10 have no registry row: the registry's pilot reads (PR B, #6510) are a test double
+      // answering "absent". S2-07..S2-09 use PR B's PRODUCTION registry store over real migration-101 rows
+      // (`pilotReaderOn`), whose pilot reads run on the consult's snapshot handle.
       const absentRegistry = { getPilotState: async () => null, getPilotStateBySheetId: async () => null }
       const readerOn = (client: PoolClient) => governanceModule.createStockPreparationRefreshGovernance({
         continuationStore: storeOn(client),
         projectTargetStore: absentRegistry,
         projectWriteLock: createStockPreparationProjectWriteLock({ db: dbOn(client) }),
       })
+      // The scoped db over the HOST's plugin database binding shape (src/index.ts `database`: `query` runs on a POOLED
+      // connection in autocommit, `transaction` checks out its OWN client — BEGIN, the callback, COMMIT / ROLLBACK),
+      // with an optional `hook` awaited before every statement (and before the COMMIT): used to FREEZE a session at a
+      // chosen statement inside its transaction (the consult's snapshot), or to SIGNAL that a session is about to run
+      // one (the natural race loop). Faithful on purpose: a read that is NOT handed the transaction lands on another
+      // connection, exactly as in production — so a registry read outside the snapshot is visible here as one.
+      type StatementEvent = { sql: string; inTransaction: boolean }
+      function hostLikeDb(hook: (event: StatementEvent) => Promise<void> | void = () => {}) {
+        return createDb({
+          database: {
+            query: async (sql: string, params?: unknown[]) => {
+              await hook({ sql, inTransaction: false })
+              return (await q(sql, params)).rows
+            },
+            transaction: async <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+              const client = await poolManager.get().getInternalPool().connect()
+              try {
+                await client.query('BEGIN')
+                const result = await callback({
+                  query: async (sql: string, params?: unknown[]) => {
+                    await hook({ sql, inTransaction: true })
+                    return (await client.query(sql, params)).rows
+                  },
+                  commit: async () => {},
+                  rollback: async () => {},
+                })
+                await hook({ sql: 'COMMIT', inTransaction: true })
+                await client.query('COMMIT')
+                return result
+              } catch (error) {
+                await client.query('ROLLBACK').catch(() => {})
+                throw error
+              } finally {
+                client.release()
+              }
+            },
+          },
+        })
+      }
+      // The PRODUCTION reader wiring over host-shaped bindings: the continuation store on `consultDb` (its snapshot
+      // transaction may be hooked), PR B's registry store and the lock on their own bindings (autocommit reads go to
+      // the pool; the registry reads reach the snapshot only through `{ executor }`).
+      const pilotReaderOn = (consultDb: any = hostLikeDb()) => governanceModule.createStockPreparationRefreshGovernance({
+        continuationStore: continuationStoreModule.createStockPreparationContinuationStore({ db: consultDb }),
+        projectTargetStore: projectTargetStoreModule.createStockPreparationProjectTargetStore({ db: hostLikeDb() }),
+        projectWriteLock: createStockPreparationProjectWriteLock({ db: hostLikeDb() }),
+      })
+      const derive = (consult: any) => refreshStateModule.readProjectRefreshState(consult)
+      function gate() {
+        let open: () => void = () => {}
+        const promise = new Promise<void>((resolve) => { open = resolve })
+        return { promise, open: () => open() }
+      }
+
+      // A registry row on real migration-087 / 101 columns (the pilot stamp all three columns, or none).
+      async function registerProject(scope: Record<string, string>, { pilot = true } = {}) {
+        await q(
+          pilot
+            ? `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status, pilot_enabled_at, pilot_enabled_by, pilot_readiness_version)
+               VALUES ($1, $2, $3, $4, $5, 'active', now(), 'u_scs_admin', 1)`
+            : `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status)
+               VALUES ($1, $2, $3, $4, $5, 'active')`,
+          [`pt_${scope.sheetId}`, scope.tenantId, scope.projectNo, scope.sheetId, `obj_${scope.sheetId}`],
+        )
+      }
+
+      // ONE governed computation as PR-3 will run it: the REAL planner over the consult's projection (pilot from the
+      // consult, the canonical second-pull expansion against the first-pull sheet), then the hold reconciliation
+      // keyed on the decision_version the consult observed. Values-free outcome tokens only.
+      async function computeAndReconcile(store: any, scope: Record<string, string>, consult: any, fixture: any) {
+        const F = fixture.fixtures
+        const slice = governanceModule.plannerSlice(consult)
+        let planned: any
+        try {
+          planned = F.plan(fixture.expansion, fixture.sheet, {
+            continuation: F.continuationInput({ pilot: consult.pilot ? consult.pilot.enabled === true : false, demandEvidence: fixture.expansion.demandEvidence, continuations: slice.continuations, members: slice.members, projectNo: scope.projectNo }),
+          })
+        } catch (error: any) {
+          return { planner: `threw ${error && error.code}`, reconcile: null as string | null }
+        }
+        const reconciled = await settle(store.reconcileHolds({ ...scope, decisionVersionObserved: consult.decisionVersionObserved, holds: planned.holds || [], computation: computation({ suspended: planned.suspended === true }) }))
+        return { planner: null as string | null, reconcile: reconciled.ok ? `ok opened=${(reconciled as any).value.holds.opened}` : String((reconciled as any).error.code) }
+      }
+
+      // Every row of the step-4 tables on one sheet plus its lock row: the "nothing persisted" fingerprint.
+      async function sheetFingerprint(sheetId: string) {
+        const out: unknown[] = []
+        for (const table of [RT.continuation, RT.member, RT.hold, RT.state, RT.execution]) {
+          out.push((await q(`SELECT * FROM ${table} WHERE sheet_id = $1 ORDER BY id`, [sheetId])).rows)
+        }
+        out.push((await q(`SELECT generation, generation_token, fencing_epoch, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sheetWriteScopeKey(sheetId)])).rows)
+        return JSON.stringify(out)
+      }
 
       // The test's stand-in for PR-4's `bumpGenerationWithin` (design §8.1): the FREE-ROW branch on the caller's
       // TRANSACTION handle — insert generation 1 when the lock row is absent, else generation + 1 under
@@ -1918,8 +2017,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         return { generation: Number(row.generation) + 1, generationToken: token, fencingEpoch: Number(row.fencing_epoch) }
       }
 
-      async function seedOpenHolds(store: any, scope: Record<string, string>, holds: any[], observed = 0) {
-        await store.reconcileHolds({ ...scope, decisionVersionObserved: observed, holds, computation: computation() })
+      async function seedOpenHolds(store: any, scope: Record<string, string>, holds: any[], observed = 0, verdicts: Record<string, string> = {}) {
+        await store.reconcileHolds({ ...scope, decisionVersionObserved: observed, holds, verdicts, computation: computation() })
         const rows = (await q(`SELECT id, fingerprint FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 AND status = 'open'`, [scope.sheetId, scope.projectNo])).rows
         return (hold: any) => {
           const row = rows.find((entry: any) => entry.fingerprint === hold.fingerprint)
@@ -1938,7 +2037,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
 
       afterAll(async () => {
         const like = `${S2_TENANT_PREFIX}%`
-        for (const table of [RT.member, RT.continuation, RT.hold, RT.execution, RT.state]) {
+        for (const table of [RT.member, RT.continuation, RT.hold, RT.execution, RT.state, 'integration_stock_prep_project_target']) {
           await q(`DELETE FROM ${table} WHERE tenant_id LIKE $1`, [like]).catch(() => {})
         }
       })
@@ -2069,12 +2168,16 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           expect((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0].decision_version).toBe(1)
         }
         // (b) confirm (superseding A) vs end (A): exactly one decision lands; A is ended exactly once; at most one live.
+        //     Review X-2 / X-3: A must NEED RECONFIRMATION with its hold open (only then may it be ended) and the rival
+        //     must claim A's old rows (only then may it supersede) — ONE computation raises both holds and the verdict.
         {
           const scope = { tenantId: tenantFor('s2_03b'), sheetId: sheetFor('s2_03b'), projectNo: fixture.projectNo }
           const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
           const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
           const rival = refreshKit.competingCandidateHold(fixture.hold)
-          const idOf2 = await seedOpenHolds(storeA, scope, [rival], 1)
+          const reconfirm = refreshKit.reconfirmHoldFor(first.continuationId, { confirmable: false, verdict: 'structure_changed' })
+          const idOf2 = await seedOpenHolds(storeA, scope, [rival, reconfirm], 1, { [first.continuationId]: 'structure_changed' })
+          expect((await q(`SELECT status FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0].status).toBe('needs_reconfirmation')
           const [confirm, end] = await Promise.all([
             settle(storeB.confirmContinuation(confirmInput(scope, idOf2(rival), rival, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin })),
             settle(storeA.endContinuation({ ...scope, continuationId: first.continuationId, revision: 1, endedBy: 'u_scs_puller', outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin })),
@@ -2088,6 +2191,11 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           expect(ended.ended_outcome).toBe(confirm.ok ? 'superseded_by_new_confirmation' : 'escalate_special_repair')
           expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(confirm.ok ? 1 : 0)
           expect((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0].decision_version).toBe(2)
+          // A's hold stays open either way: escalated -> runbook-only (the project stays suspended); superseded -> as
+          // it was, until the next computation (it no longer names a live relationship).
+          const reconfirmRow = (await q(`SELECT status, runbook_only FROM ${RT.hold} WHERE sheet_id = $1 AND fingerprint = $2`, [scope.sheetId, reconfirm.fingerprint])).rows[0]
+          expect(reconfirmRow.status).toBe('open')
+          expect(reconfirmRow.runbook_only).toBe(!confirm.ok)
         }
         // (c) reconcile vs confirm: a reconciliation that straddles a decision is STATE_MOVED and persists nothing.
         {
@@ -2209,6 +2317,256 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const own = await reader.consult(home)
         expect(own.governed).toBe(true)
         expect(governanceModule.plannerSlice(own).continuations.length).toBe(1)
+      }, 30000)
+
+      // Review X-1: the freeze points of the consult's snapshot reads (statement text from lib/db.cjs `select`).
+      const STEP4_FREEZE_POINTS: Array<[string, RegExp]> = [
+        ['T0 after the registry reads, before the first step-4 read', /FROM "integration_stock_prep_continuation" WHERE "tenant_id"/],
+        ['T1 between the continuation reads and the member reads', /FROM "integration_stock_prep_continuation_member" WHERE/],
+        ['T2 between the member reads and the hold reads', /FROM "integration_stock_prep_refresh_hold" WHERE/],
+        ['T3 between the hold reads and the state read', /FROM "integration_stock_prep_refresh_state" WHERE/],
+        ['T4 between the state read and the execution reads', /FROM "integration_stock_prep_refresh_execution" WHERE/],
+      ]
+
+      test('S2-07 (review X-1) the consult is ONE snapshot: frozen at each read boundary (T3 = between the hold reads and the state read) while another session CONFIRMS, it answers the pre-confirm instant whole; the computation keyed on it is 409 STATE_MOVED; no stale hold persisted, no torn complete, no projection 500', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeB = storeOn(clientB)
+        // Every freeze point is run and recorded; ONE assertion at the end compares the whole table, so a regression
+        // reports which boundaries tore and how (stale hold, torn complete, projection 500) — not only the first.
+        const observed: Array<Record<string, unknown>> = []
+        for (const [index, [label, pattern]] of STEP4_FREEZE_POINTS.entries()) {
+          const scope = { tenantId: tenantFor(`s2_07_${index}`), sheetId: sheetFor(`s2_07_${index}`), projectNo: fixture.projectNo }
+          await registerProject(scope, { pilot: true })
+          const idOf = await seedOpenHolds(storeB, scope, [fixture.hold])
+          const reached = gate()
+          const frozen = gate()
+          let hit = false
+          // The freeze matches the step-4 read whether it runs in the snapshot transaction (the design) or not (a
+          // regression): either way the case answers with an assertion, never a hang.
+          const consultDb = hostLikeDb(async ({ sql }) => {
+            if (!hit && pattern.test(sql)) {
+              hit = true
+              reached.open()
+              await frozen.promise
+            }
+          })
+          const consultP = settle(pilotReaderOn(consultDb).consult(scope))
+          await reached.promise
+          // Another session decides while the consult is frozen inside its snapshot.
+          const confirmed = await storeB.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+          frozen.open()
+          const consult = await consultP
+          const row: Record<string, unknown> = { point: label.slice(0, 2), confirmDecisionVersion: confirmed.decisionVersion }
+          if (!consult.ok) {
+            row.consult = String((consult as any).error && (consult as any).error.code)
+          } else {
+            const answer = (consult as any).value
+            row.consult = `c${answer.continuations.length}m${answer.members.length}h${answer.holds.length}dv${answer.decisionVersionObserved}`
+            row.pilot = Boolean(answer.pilot && answer.pilot.enabled)
+            const derived = derive(answer)
+            row.derived = derived.status
+            row.exportAllowed = derived.exportAllowed
+            // The computation built on it (the real planner, pilot from the consult) and its CAS-keyed reconciliation.
+            const outcome = await computeAndReconcile(storeB, scope, answer, fixture)
+            row.planner = outcome.planner
+            row.reconcile = outcome.reconcile
+          }
+          row.staleOpenHolds = await countWhere(RT.hold, 'sheet_id = $1 AND fingerprint = $2 AND status = $3', [scope.sheetId, fixture.hold.fingerprint, 'open'])
+          const after = await pilotReaderOn().consult(scope)
+          row.after = `c${after.continuations.length}m${after.members.length}h${after.holds.length}dv${after.decisionVersionObserved}:${derive(after).status}`
+          observed.push(row)
+        }
+        // At EVERY boundary: the pre-confirm instant, whole (the snapshot was taken at the registry read, before the
+        // freeze) — pending confirmation, export refused, the computation refused 409 STATE_MOVED at the CAS, no stale
+        // open hold; the next consult sees the decision whole.
+        expect(observed).toEqual(STEP4_FREEZE_POINTS.map(([label]) => ({
+          point: label.slice(0, 2),
+          confirmDecisionVersion: 1,
+          consult: 'c0m0h1dv0',
+          pilot: true,
+          derived: 'pending_confirmation',
+          exportAllowed: false,
+          planner: null,
+          reconcile: RC.STATE_MOVED,
+          staleOpenHolds: 0,
+          after: 'c1m4h0dv1:confirmed_pending_execution',
+        })))
+      }, 60000)
+
+      test('S2-08 (review X-1) the registry reads are IN the snapshot: frozen right after them while another session enables the pilot and a pilot computation raises a hold, the consult answers the registry and the step-4 rows of ONE instant (not pilot, no rows) — never "not pilot" beside the rows the pilot raised', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeB = storeOn(clientB)
+        {
+          const scope = { tenantId: tenantFor('s2_08'), sheetId: sheetFor('s2_08'), projectNo: fixture.projectNo }
+          await registerProject(scope, { pilot: false })
+          const reached = gate()
+          const frozen = gate()
+          let hit = false
+          const consultDb = hostLikeDb(async ({ sql }) => {
+            if (!hit && STEP4_FREEZE_POINTS[0][1].test(sql)) {
+              hit = true
+              reached.open()
+              await frozen.promise
+            }
+          })
+          const consultP = settle(pilotReaderOn(consultDb).consult(scope))
+          await reached.promise
+          // Another session: the pilot marker is set and the first pilot computation raises the candidate hold.
+          await q(`UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = 'u_scs_admin', pilot_readiness_version = 1 WHERE id = $1`, [`pt_${scope.sheetId}`])
+          await storeB.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [fixture.hold], computation: computation() })
+          frozen.open()
+          const consult = await consultP
+          expect(consult.ok).toBe(true)
+          const answer = (consult as any).value
+          expect(answer.pilot.enabled, 'the registry as of the snapshot').toBe(false)
+          expect({ governed: answer.governed, state: answer.state, holds: answer.holds.length }, 'the step-4 rows as of the SAME snapshot').toEqual({ governed: false, state: null, holds: 0 })
+          expect(derive(answer).status).toBe('not_governed')
+          // A consult after both commits sees both: pilot, the hold, pending confirmation.
+          const after = await pilotReaderOn().consult(scope)
+          expect(after.pilot.enabled).toBe(true)
+          expect(after.holds.length).toBe(1)
+          expect(derive(after).status).toBe('pending_confirmation')
+        }
+      }, 30000)
+
+      test('S2-09 (review X-1) natural races, no freezing: a consult starts as another session is about to run one of its confirm statements (lock read, bump, header, members, hold, state, COMMIT); bounded rounds — every consult is one of the two consistent instants, no stale hold, no torn complete, no projection 500', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const triggers = [
+          /^SELECT \* FROM "integration_stock_prep_project_write_lock"/,
+          /^(UPDATE "integration_stock_prep_project_write_lock"|INSERT INTO "integration_stock_prep_project_write_lock")/,
+          /^INSERT INTO "integration_stock_prep_continuation" /,
+          /^INSERT INTO "integration_stock_prep_continuation_member"/,
+          /^UPDATE "integration_stock_prep_refresh_hold"/,
+          /^UPDATE "integration_stock_prep_refresh_state"/,
+          /^COMMIT$/,
+        ]
+        // 15 rounds per trigger point, capped by time so a slow runner stays within the step's budget.
+        const MAX_ROUNDS = 105
+        const BUDGET_MS = 8000
+        const CONSISTENT = ['c0m0h1dv0', 'c1m4h0dv1']
+        const tally: Record<string, number> = {}
+        // Counted over every round and asserted once at the end, so a regression reports the whole tally.
+        const counts = { torn: 0, tornComplete: 0, projection500: 0, staleOpenHolds: 0, confirmFailed: 0, consultFailed: 0 }
+        let rounds = 0
+        const started = Date.now()
+        while (rounds < MAX_ROUNDS && Date.now() - started < BUDGET_MS) {
+          const scope = { tenantId: tenantFor(`s2_09_${rounds}`), sheetId: sheetFor(`s2_09_${rounds}`), projectNo: fixture.projectNo }
+          await registerProject(scope, { pilot: true })
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const trigger = triggers[rounds % triggers.length]
+          const aboutTo = gate()
+          const confirmDb = hostLikeDb(({ sql, inTransaction }) => { if (inTransaction && trigger.test(sql)) aboutTo.open() })
+          const confirmStore = continuationStoreModule.createStockPreparationContinuationStore({ db: confirmDb })
+          const confirmP = settle(confirmStore.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin }))
+          await Promise.race([aboutTo.promise, confirmP])
+          const offset = Math.floor(rounds / triggers.length) % 3
+          if (offset > 0) await new Promise((resolve) => setTimeout(resolve, offset - 1))
+          const [consult, confirm] = await Promise.all([settle(pilotReaderOn().consult(scope)), confirmP])
+          rounds += 1
+          if (!confirm.ok) { counts.confirmFailed += 1; continue }
+          if (!consult.ok) { counts.consultFailed += 1; continue }
+          const answer = (consult as any).value
+          const shape = `c${answer.continuations.length}m${answer.members.length}h${answer.holds.length}dv${answer.decisionVersionObserved}`
+          if (!CONSISTENT.includes(shape)) counts.torn += 1
+          if (derive(answer).status === 'complete') counts.tornComplete += 1
+          const outcome = await computeAndReconcile(storeA, scope, answer, fixture)
+          if (outcome.planner) counts.projection500 += 1
+          counts.staleOpenHolds += await countWhere(RT.hold, 'sheet_id = $1 AND fingerprint = $2 AND status = $3', [scope.sheetId, fixture.hold.fingerprint, 'open'])
+          const key = `${shape}:${outcome.planner || outcome.reconcile}`
+          tally[key] = (tally[key] || 0) + 1
+        }
+        // Values-free evidence in the CI log: how many rounds ran and which instants the consults answered.
+        console.log(`[S2-09] rounds=${rounds} in ${Date.now() - started} ms counts=${JSON.stringify(counts)} tally=${JSON.stringify(tally)}`)
+        expect(rounds, `rounds run within ${BUDGET_MS} ms`).toBeGreaterThanOrEqual(14)
+        // Every consult one consistent instant: no torn view, no torn complete, no projection 500, no stale hold.
+        expect({ counts, tally: Object.keys(tally).filter((key) => !['c0m0h1dv0:STOCK_PREP_PULL_STATE_MOVED', 'c1m4h0dv1:ok opened=0'].includes(key)) })
+          .toEqual({ counts: { torn: 0, tornComplete: 0, projection500: 0, staleOpenHolds: 0, confirmFailed: 0, consultFailed: 0 }, tally: [] })
+      }, 60000)
+
+      test('S2-10 (review X-2) end admissibility on PostgreSQL: an ACTIVE continuation cannot be ended (409 status), an escalation with no open hold naming it cannot (409 no_open_hold) — both leave every table and the lock row untouched; an admitted escalation keeps the hold open runbook-only and the project pending, never complete, even after a clean settling computation', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const scope = { tenantId: tenantFor('s2_10'), sheetId: sheetFor('s2_10'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+        const confirmed = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const id = confirmed.continuationId
+        const endBase = { ...scope, continuationId: id, revision: 1, endedBy: 'u_scs_puller' }
+        // ACTIVE with an OPEN hold naming it (a content_changed verdict keeps it active): only the status check refuses.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [refreshKit.contentChangeHoldFor(id)], verdicts: { [id]: 'content_changed' }, computation: computation() })
+        {
+          const before = await sheetFingerprint(scope.sheetId)
+          const refused = await settle(storeA.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin }))
+          expect(refused.ok, 'an ACTIVE relationship with an open hold is still not ended').toBe(false)
+          expect((refused as any).error.details).toEqual({ reason: 'status', outcome: 'escalate_special_repair', status: 'active' })
+          expect(await sheetFingerprint(scope.sheetId), 'nothing persisted, no bump').toBe(before)
+        }
+        // ACTIVE with no hold (the next computation verifies it valid and supersedes the content hold): both outcomes refused.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'valid' }, computation: computation({ suspended: false }) })
+        for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }]) {
+          const before = await sheetFingerprint(scope.sheetId)
+          const refused = await settle(storeA.endContinuation({ ...endBase, ...extra }, { bumpWithin: testBumpWithin }))
+          expect(refused.ok, extra.outcome).toBe(false)
+          expect((refused as any).error.code, extra.outcome).toBe(RC.END_OUTCOME_NOT_ADMISSIBLE)
+          expect((refused as any).error.details, extra.outcome).toEqual({ reason: 'status', outcome: extra.outcome, status: 'active' })
+          expect(await sheetFingerprint(scope.sheetId), `${extra.outcome}: nothing persisted, no bump`).toBe(before)
+        }
+        // needs_reconfirmation, but no open hold names it: an escalation would release the claims with nothing left
+        // to suspend the project.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'structure_changed' }, computation: computation({ suspended: false }) })
+        {
+          const before = await sheetFingerprint(scope.sheetId)
+          const refused = await settle(storeA.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin }))
+          expect(refused.ok, 'an escalation with no open hold is not admitted').toBe(false)
+          expect((refused as any).error.code).toBe(RC.END_OUTCOME_NOT_ADMISSIBLE)
+          expect((refused as any).error.details).toEqual({ reason: 'no_open_hold', outcome: 'escalate_special_repair' })
+          expect(await sheetFingerprint(scope.sheetId), 'nothing persisted, no bump').toBe(before)
+        }
+        // The computation raises the hold: the escalation is admitted and the hold stays open, runbook-only.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [refreshKit.reconfirmHoldFor(id, { confirmable: false, verdict: 'structure_changed' })], verdicts: { [id]: 'structure_changed' }, computation: computation() })
+        const escalated = await storeA.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin })
+        expect(escalated.holdsEscalated).toBe(1)
+        const kept = (await q(`SELECT kind, status, runbook_only, confirmable FROM ${RT.hold} WHERE sheet_id = $1 AND continuation_id = $2 AND status = 'open'`, [scope.sheetId, id])).rows
+        expect(kept).toEqual([{ kind: 'relationship_reconfirm', status: 'open', runbook_only: true, confirmable: false }])
+        const reader = readerOn(clientA)
+        expect((await reader.readRefreshState(scope)).state.status).toBe('pending_confirmation')
+        const clean = await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 2, holds: [], computation: computation({ suspended: false, lane: 'small_apply' }), settlement: { executionId: null, generationToken: 'g_s2_10', sourceContentDigest: 'src_s2', sheetMachineDigest: 'm_s2_10' } })
+        expect(clean.settled).toBe(false)
+        expect(clean.holds.open).toBe(1)
+        const state = (await reader.readRefreshState(scope)).state
+        expect(state.status).toBe('pending_confirmation')
+        expect(state.exportAllowed).toBe(false)
+      }, 30000)
+
+      test('S2-11 (review X-3) supersede relatedness on PostgreSQL: a candidate sharing no claim cannot supersede (409 supersedes_unrelated, every table and the lock row untouched) and commits on its own; a candidate claiming the same old rows supersedes in one transaction', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const scope = { tenantId: tenantFor('s2_11'), sheetId: sheetFor('s2_11'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const disjoint = refreshKit.disjointCandidateHold(fixture.hold)
+        const related = refreshKit.competingCandidateHold(fixture.hold)
+        const idOf2 = await seedOpenHolds(storeA, scope, [disjoint, related], 1)
+        const supersedes = { supersedes: { continuationId: first.continuationId, revision: 1 } }
+        const before = await sheetFingerprint(scope.sheetId)
+        const refused = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture, supersedes), { bumpWithin: testBumpWithin }))
+        expect(refused.ok).toBe(false)
+        expect((refused as any).error.code).toBe(RC.END_OUTCOME_NOT_ADMISSIBLE)
+        expect((refused as any).error.status).toBe(409)
+        expect((refused as any).error.details).toEqual({ reason: 'supersedes_unrelated', outcome: 'superseded_by_new_confirmation' })
+        expect(await sheetFingerprint(scope.sheetId), 'nothing persisted: the relationship keeps its claims, no bump').toBe(before)
+        // Control: the same candidate commits on its own — the refusal was the relatedness rule alone.
+        const alone = await storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture), { bumpWithin: testBumpWithin })
+        expect(alone.supersededContinuationId).toBeNull()
+        expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(2)
+        // Related: the claims collide without `supersedes`; with it the old relationship ends and the new one claims.
+        const conflict = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture), { bumpWithin: testBumpWithin }))
+        expect((conflict as any).error.code).toBe(RC.CONFIRM_CONFLICT)
+        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture, supersedes), { bumpWithin: testBumpWithin })
+        expect(replaced.supersededContinuationId).toBe(first.continuationId)
+        expect((await q(`SELECT status, ended_outcome, claim_active FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0])
+          .toEqual({ status: 'ended', ended_outcome: 'superseded_by_new_confirmation', claim_active: false })
+        expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(2)
       }, 30000)
     })
   })

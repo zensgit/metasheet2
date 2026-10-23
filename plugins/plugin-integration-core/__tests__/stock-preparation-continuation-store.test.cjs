@@ -246,6 +246,9 @@ test('ST-01 migrations 102 / 103: tables, vocabularies set-equal to the pure cor
   // The rollback note is honest: tables stay; the plugin build may not be rolled back while claims exist (G10); Q-B.
   assert.match(sql102, /FORBIDDEN while any/)
   assert.match(sql102, /Tables and rows always stay/)
+  // O-20 (review): a rolled-back build cannot db:migrate over recorded 102 / 103; the rollback is RunMigrations 0.
+  assert.match(sql102, /CANNOT run `db:migrate` while 102 \/ 103 are recorded/)
+  assert.match(sql102, /RunMigrations 0/)
   assert.match(sql102, /Q-B/)
   assert.match(sql103, /Q-B/)
   // INTEGER, never BIGINT (node-postgres returns int8 as strings) — judged on the statements, not the comments.
@@ -950,7 +953,24 @@ test('ST-15 end admissibility (review X-2, design §9.3 / §8.4): an ACTIVE cont
   const id = confirmed.continuationId
   const hooks = { bumpWithin: bump.bumpWithin }
   const endBase = { ...scope, continuationId: id, revision: 1, endedBy: PULLER }
-  // (a) ACTIVE: refused for both outcomes the end transaction takes (supersede is confirm-only, ST-08).
+  // (a) ACTIVE with an OPEN hold naming it: a content_changed verdict keeps the relationship active and raises a
+  //     relationship_content_change hold. Only the status check stands between an escalation and ending an ACTIVE
+  //     relationship here (the hold is present, so `no_open_hold` would not refuse it) — checked first.
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [kit.contentChangeHoldFor(id)], verdicts: { [id]: 'content_changed' }, computation: computation() })
+  assert.equal(db.rows(T.continuation)[0].status, 'active')
+  assert.ok(db.rows(T.hold).some((row) => row.continuation_id === id && row.status === 'open'), 'an open hold names the active relationship')
+  {
+    const before = tablesSnapshot(db)
+    const bumpsBefore = bump.calls.length
+    const refused = await expectError(store.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'status' })
+    assert.equal(refused.details.status, 'active')
+    assert.equal(bump.calls.length, bumpsBefore, 'no bump')
+    assert.equal(tablesSnapshot(db), before, 'nothing persisted: the active relationship keeps its claims')
+  }
+  // (a') ACTIVE with no hold (the next computation verifies it valid and supersedes the content hold): refused for
+  //      both outcomes the end transaction takes (supersede is confirm-only, ST-08), right after the continuation lock.
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'valid' }, computation: computation({ suspended: false }) })
+  assert.equal(db.rows(T.hold).filter((row) => row.status === 'open').length, 0)
   for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }]) {
     const before = tablesSnapshot(db)
     const bumpsBefore = bump.calls.length
