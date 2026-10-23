@@ -4436,7 +4436,10 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (error instanceof AttendanceGroupMembershipPolicyError) {
-        return jsonError(res, error.status, error.code, error.code)
+        if (error.code === 'ATTENDANCE_MULTIPLE_GROUPS_DISABLED') {
+          return jsonError(res, 409, 'ATTENDANCE_MULTIPLE_GROUPS_DISABLED', 'Attendance group membership policy could not be applied')
+        }
+        return jsonError(res, 503, 'ATTENDANCE_GROUP_MEMBERSHIP_POLICY_UNAVAILABLE', 'Attendance group membership policy could not be applied')
       }
       if (error instanceof AttendanceShiftReferenceUnavailableError) {
         return jsonError(res, error.status, error.code, error.message, error.details)

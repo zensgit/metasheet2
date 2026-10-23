@@ -1513,7 +1513,6 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
-  attendance-group-membership-policy.spec.ts \
   adminPageContentSearch.spec.ts \
   amountAutoSum \
   approval-amount-in-words \
@@ -1610,6 +1609,7 @@ exec npx vitest run \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
   attendance-daily-calendar-copy \
+  attendance-group-membership-policy.spec.ts \
   attendance-record-timeline \
   attendance-report-calendar-view.spec.ts \
   attendance-report-date-range-view.spec.ts \

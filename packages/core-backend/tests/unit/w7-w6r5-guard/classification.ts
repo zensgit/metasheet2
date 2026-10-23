@@ -68,6 +68,9 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
+  // Membership admission protects frozen import preconditions; both aggregate bans apply.
+  'packages/core-backend/src/attendance/attendance-group-membership-policy.ts',
+  'plugins/plugin-attendance/lib/attendance-group-membership-policy.cjs',
   // Trip, request and timezone modules supply or protect the frozen calculation context.
   // Apply both aggregate bans to every new module; no exclusion is introduced.
   'packages/core-backend/src/attendance/attendance-business-trip-locks.ts',
