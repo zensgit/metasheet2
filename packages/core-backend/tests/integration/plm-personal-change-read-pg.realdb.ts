@@ -215,7 +215,7 @@ it('rejects a retired replay while permitting a distinct fresh credential',async
 
 async function personalListenerFixture(sessionSeconds=300){
  if (!(await pool.query("SELECT to_regprocedure('meta_plm_change_read_link_stopped()') IS NOT NULL AS ready")).rows[0].ready) await workerUp(db)
- const f=await fixture(sessionSeconds);await f.bind()
+ const f=await fixture(sessionSeconds),yue=grant();await f.bind(yue)
  const event={schema:'yuantus.plm-change-event.v1',event_type:'bom.plm_change.applied',event_id:randomUUID(),
   binding_id:f.binding.id,binding_version:f.binding.version,source:{connection_id:f.source,tenant_id:'t',org_id:'o',part_id:'P'},
   change:{kind:'bom_line_writeback',audit_id:randomUUID(),bom_line_id:'RA1'},occurred_at:'2026-10-20T00:00:00.000000Z'}
@@ -226,7 +226,7 @@ async function personalListenerFixture(sessionSeconds=300){
   return{schema:'yuantus.plm-change-page.v1',source:event.source,head_sequence:head,next_sequence:head,
    events:call.afterSequence===undefined||!include?[]:[{sequence:6,event}]}
  }
- return{...f,event,setRead:(options:{head?:number;include?:boolean;awaitRead?:()=>Promise<void>})=>{head=options.head??head;include=options.include??include;awaitRead=options.awaitRead},
+ return{...f,yue,event,setRead:(options:{head?:number;include?:boolean;awaitRead?:()=>Promise<void>})=>{head=options.head??head;include=options.include??include;awaitRead=options.awaitRead},
   start:()=>service.changeListener(f.actor,f.binding.id,{expectedVersion:f.binding.version},'meta-tenant')}
 }
 it('personal listener uses standing consent after browser expiry and skips all historical events',async()=>{
@@ -426,4 +426,99 @@ it('personal listener active start retry is idempotent and cannot skip newly unr
  expect(calls.length).toBe(before)
  expect(await service.pollChanges(f.binding.id)).toEqual({state:'active',cursor:6})
  expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+})
+// Controlled provider only. This is not end-to-end Native enrollment or listening proof.
+it.each(['empty','nonempty'])('personal listener late %s page from a different process cannot commit after owner ABA before same-grant readmission',async shape=>{
+ const f=await personalListenerFixture();await f.start()
+ const epoch=async()=>(await pool.query('SELECT plm_bom_listener_authority_version AS v FROM data_sources WHERE id=$1',[f.source])).rows[0].v as string
+ const ownerEpoch=(await pool.query('SELECT plm_bom_listener_authority_version AS v FROM users WHERE id=$1',[f.actor])).rows[0].v as string
+ const opened=await epoch()
+ const listener=async()=>(await pool.query('SELECT generation,cursor,status,stop_reason,personal_read_grant_id,personal_read_authority,encrypted_personal_read_grant FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0]
+ const before=await listener()
+ const records=async()=>(await pool.query('SELECT id,version,data FROM meta_records WHERE sheet_id=$1 ORDER BY id',[f.binding.sheetId])).rows
+ const anchored=await records();expect(anchored.length).toBeGreaterThan(0)
+ const target=async()=>(await pool.query('SELECT version,snapshot_hash FROM meta_plm_bom_review_bindings WHERE id=$1',[f.binding.id])).rows[0]
+ const anchoredTarget=await target()
+ const page=shape==='nonempty'
+  ?{schema:'yuantus.plm-change-page.v1',source:f.event.source,head_sequence:6,next_sequence:6,events:[{sequence:6,event:f.event}]}
+  :{schema:'yuantus.plm-change-page.v1',source:f.event.source,head_sequence:5,next_sequence:5,events:[]}
+ const worker=child({poll:true,barrier:true,id:f.binding.id,event:f.event,page})
+ const other='aba-'+randomUUID()
+ try{
+  await worker.ready
+  await pool.query('UPDATE data_sources SET owner_id=$2 WHERE id=$1',[f.source,other])
+  const transferred=await epoch();expect(transferred).not.toBe(opened)
+  expect(await listener()).toMatchObject({generation:before.generation,cursor:'5',status:'stopped',stop_reason:'SOURCE_CHANGED'})
+  await pool.query('UPDATE data_sources SET owner_id=$2 WHERE id=$1',[f.source,f.actor])
+  const restored=await epoch();expect(restored).not.toBe(opened);expect(restored).not.toBe(transferred)
+  expect((await pool.query('SELECT plm_bom_listener_authority_version AS v FROM users WHERE id=$1',[f.actor])).rows[0].v).toBe(ownerEpoch)
+  worker.release();const result=await worker.done
+  expect(result.pid).not.toBe(process.pid);expect(result).toMatchObject({status:200,state:'stopped',operations:['page']});expect(JSON.stringify(result)).not.toContain(f.yue)
+  const stopped=await listener()
+  expect(stopped).toMatchObject({generation:before.generation,cursor:'5',status:'stopped',stop_reason:'SOURCE_CHANGED',personal_read_grant_id:f.yue.split('_')[1]})
+  expect(stopped.personal_read_authority.provenance.sourceAuthority).toBe(opened)
+  expect(stopped.personal_read_authority.provenance.ownerAuthority).toBe(ownerEpoch)
+  expect(stopped.encrypted_personal_read_grant).toMatch(/^enc:/);expect(JSON.stringify(stopped)).not.toContain(f.yue)
+  expect((await pool.query('SELECT event_id FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toEqual([])
+  expect((await pool.query('SELECT plm_event_id FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows).toEqual([])
+  expect(await records()).toEqual(anchored);expect(await target()).toEqual(anchoredTarget)
+  const marked=calls.length
+  expect(await service.pollChanges(f.binding.id)).toEqual({state:'inactive'})
+  f.headers['x-plm-change-read']='start'
+  await expect(f.run(()=>service.startPersonalChangeRead(f.req,f.binding.id,{expectedVersion:f.binding.version}))).rejects.toMatchObject({status:403,code:'PLM_CHANGE_READ_AUTHORITY_CHANGED'})
+  expect(calls.length).toBe(marked);expect(await listener()).toMatchObject({generation:before.generation,cursor:'5',status:'stopped'})
+  f.headers['x-plm-change-read']='bind'
+  expect(await f.bind(f.yue)).toMatchObject({bound:true})
+  const enrolled=await listener()
+  expect(enrolled.generation).not.toBe(before.generation)
+  expect(enrolled).toMatchObject({cursor:'5',status:'stopped',stop_reason:'GRANT_ENROLLED',personal_read_grant_id:f.yue.split('_')[1]})
+  expect(enrolled.personal_read_authority.provenance.sourceAuthority).toBe(restored)
+  expect(enrolled.personal_read_authority.provenance.ownerAuthority).toBe(ownerEpoch)
+  expect(enrolled.encrypted_personal_read_grant).toMatch(/^enc:/);expect(JSON.stringify(enrolled)).not.toContain(f.yue)
+  expect((await pool.query('SELECT id FROM meta_plm_bom_change_read_retired_grants WHERE binding_id=$1',[f.binding.id])).rows).toEqual([])
+  f.setRead({head:8,include:true});f.headers['x-plm-change-read']='start';const atStart=calls.length
+  const started:any=await f.run(()=>service.startPersonalChangeRead(f.req,f.binding.id,{expectedVersion:f.binding.version}))
+  expect(calls.slice(atStart).map(call=>call.operation)).toEqual(['page'])
+  expect(calls.at(-1)?.authority.authUserId).toBe('42');expect(calls.at(-1)?.authority.target.user_id).toBe(f.actor)
+  expect(started).toMatchObject({status:'active',cursor:8,bindingVersion:f.binding.version})
+  expect(started.generation).not.toBe(enrolled.generation)
+  expect(await listener()).toMatchObject({generation:started.generation,cursor:'8',status:'active',stop_reason:null})
+  expect((await pool.query('SELECT event_id FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toEqual([])
+  const later={...f.event,event_id:randomUUID(),change:{...f.event.change,audit_id:randomUUID()}}
+  const fact=child({poll:true,id:f.binding.id,event:later,page:{schema:'yuantus.plm-change-page.v1',source:f.event.source,head_sequence:9,next_sequence:9,events:[{sequence:9,event:later}]}})
+  try{
+   const committed=await fact.done
+   expect(committed.pid).not.toBe(process.pid);expect(committed.pid).not.toBe(result.pid)
+   expect(committed).toMatchObject({status:200,state:'active',cursor:9,operations:['page','fact']});expect(JSON.stringify(committed)).not.toContain(f.yue)
+  }finally{fact.dispose()}
+  expect((await pool.query('SELECT event_id FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toEqual([{event_id:later.event_id}])
+  expect((await pool.query('SELECT plm_event_id FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows).toEqual([{plm_event_id:later.event_id}])
+  expect(await listener()).toMatchObject({generation:started.generation,cursor:'9',status:'active'})
+  expect(await epoch()).toBe(restored);expect((await pool.query('SELECT plm_bom_listener_authority_version AS v FROM users WHERE id=$1',[f.actor])).rows[0].v).toBe(ownerEpoch)
+  expect(await records()).toEqual(anchored);expect(await target()).toEqual(anchoredTarget)
+ }finally{worker.dispose()}
+})
+it('personal listener current owner with a mismatched immutable Native and Meta link cannot reuse the prior authority',async()=>{
+ const f=await personalListenerFixture();await f.start()
+ const other='aba-'+randomUUID(),opened=(await pool.query('SELECT plm_bom_listener_authority_version AS v FROM data_sources WHERE id=$1',[f.source])).rows[0].v
+ await pool.query("INSERT INTO users(id,is_active,role,activation_status,local_password_set,permissions)VALUES($1,true,'user','activated',true,'{}')",[other])
+ await pool.query("INSERT INTO user_orgs VALUES($1,'meta-tenant',true),($1,'meta-org',true)",[other])
+ await pool.query("INSERT INTO spreadsheet_permissions(sheet_id,subject_type,subject_id,perm_code)VALUES($1,'user',$2,'spreadsheet:admin')",[f.binding.sheetId,other])
+ await pool.query('UPDATE data_sources SET owner_id=$2 WHERE id=$1',[f.source,other])
+ const moved=(await pool.query('SELECT owner_id,plm_bom_listener_authority_version AS v FROM data_sources WHERE id=$1',[f.source])).rows[0]
+ expect(moved).toMatchObject({owner_id:other});expect(moved.v).not.toBe(opened)
+ await expect(pool.query('UPDATE plm_managed_identity_links SET meta_user_id=$2 WHERE id=$1',[f.link,other])).rejects.toThrow('plm_managed_link_immutable')
+ await expect(pool.query("UPDATE plm_managed_identity_links SET native_auth_user_id='777' WHERE id=$1",[f.link])).rejects.toThrow('plm_managed_link_immutable')
+ expect((await pool.query('SELECT meta_user_id,native_auth_user_id,status FROM plm_managed_identity_links WHERE id=$1',[f.link])).rows[0]).toEqual({meta_user_id:f.actor,native_auth_user_id:'42',status:'active'})
+ const marked=calls.length
+ await expect(service.changeListener(other,f.binding.id,{expectedVersion:f.binding.version},'meta-tenant')).rejects.toMatchObject({status:403,code:'PLM_CHANGE_READ_IDENTITY_CHANGED'})
+ expect(calls.length).toBe(marked)
+ const row=(await pool.query('SELECT generation,cursor,status,stop_reason,encrypted_personal_read_grant,personal_read_authority FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0]
+ expect(row).toMatchObject({cursor:'5',status:'stopped',stop_reason:'SOURCE_CHANGED'})
+ expect(row.encrypted_personal_read_grant).toMatch(/^enc:/)
+ expect(row.personal_read_authority.authority.authUserId).toBe('42')
+ expect(row.personal_read_authority.authority.target.user_id).toBe(f.actor)
+ expect(JSON.stringify(row)).not.toContain(f.yue)
+ expect((await pool.query('SELECT event_id FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toEqual([])
+ expect((await pool.query('SELECT plm_event_id FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows).toEqual([])
 })

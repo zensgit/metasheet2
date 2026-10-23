@@ -1,0 +1,36 @@
+{
+  "schema": "plm-meta-integrated-window-20261024",
+  "at": "2026-10-23T19:14:48.569141+00:00",
+  "status": "LOCAL_NOFF_MERGE_PREPARED_COUNTS_DERIVED_ROOT_CLOSEOUT_PENDING",
+  "branch": "codex/plm-meta-integrated-window-20261024",
+  "original_db_branch_preserved": "codex/plm-w23-snapshot-db-20261024",
+  "first_parent": "1da1786ba297f34999434dd7dd873a457f568cf7",
+  "second_parent": "a7710a4a71c4caa0fe47794963d3cf48660915a7",
+  "merge_base": "ed7b2945542346f52a1fc25b265b3f064b657aba",
+  "strategy": "merge --no-ff",
+  "conflict": "none",
+  "resolution": "auto-merge; unit assert-report 194 from a771 replaced by derived 197",
+  "counts": {
+    "unit": 197,
+    "unit_basis": "parent CI 194 at bf1e708 plus 3 new plain it() in plm-managed-companion.test.ts; it.each arguments unchanged; envelope registration unchanged; cohort not rerun",
+    "discussion": 61,
+    "discussion_basis": "five spec blobs identical on ed7b294, 1da1786, and a7710a4; parent proof carried; not rerun",
+    "web": 222,
+    "web_basis": "1da1786 seventeen-file list kept, including plmContinuousScheduling.spec.ts and plmContinuousExpiry.spec.ts; not rerun",
+    "postgresql": 52,
+    "postgresql_basis": "unchanged integer; not rerun",
+    "visual_spec": "NOT_RUN",
+    "visual_spec_basis": "exact a771 bytes retained; panel 968505506e643af918d145f0acc1028544efd66f and plmEmbedVisualPreview.ts 95f067e7ab714fc3610b05bfc2ebe683782573ae identical ed7b294 to 1da1786; apps/web/node_modules absent; install forbidden; parent focused proof was 12 passed"
+  },
+  "junit": null,
+  "db_pins_expected_sha256": {
+    "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts": "dd55d2364baca595deaf3692ca99d75df9fb68a3f561a4083c4d197c5bacf3a4",
+    "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts": "6fd0f3dbf0b0c14fada9bd9f7b3537d474c0dc06b62a318ac0751a773f5c682b",
+    "packages/core-backend/vitest.plm-collaboration-snapshot.config.ts": "7d3523917852fb99fa069a6b47fe057c07b5b480a927dbc758cec4c1d41cbdc2",
+    "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts": "a1cb4bb9d5017a63189f2bfbf157e7196dada4b56a91b23347ffe5cd6b0a7cf9",
+    ".github/workflows/plm-bom-listener.yml": "73e9c26f274926ac1ae580941d635fa414e7ce5f602181e2bf9c3188603a282f",
+    "packages/core-backend/vitest.config.ts": "7ca3bbdc14657543e5d54f04c26180eeb8d453c2d07d38fae566065c241dbbdb"
+  },
+  "writes_outside_scope": false,
+  "not_run": ["postgresql", "discussion_blanket", "web_222_blanket", "unit_10_file_cohort", "visual_spec", "install", "tsc", "docker", "new_junit"]
+}

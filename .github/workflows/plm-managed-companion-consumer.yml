@@ -98,7 +98,7 @@ jobs:
             tests/unit/plm-managed-capability-read-transport.test.ts \
             tests/unit/plm-managed-adapter-startup.test.ts \
             tests/unit/plm-managed-discussion.test.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 175
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 197
 
       - name: Managed Discussion frame and existing token client regressions
         run: |
@@ -107,7 +107,7 @@ jobs:
             tests/plm-managed-discussion.spec.ts tests/plm-managed-discussion-view.spec.ts \
             tests/plm-embed-discussion-panel.spec.ts tests/plm-embed-read-token.spec.ts tests/plm-embed-write-token.spec.ts \
             --reporter=json --outputFile=/tmp/plm-managed-discussion-web.json
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-discussion-web.json 55
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-discussion-web.json 61
 
       - name: Start owned socket PostgreSQL 16
         run: |

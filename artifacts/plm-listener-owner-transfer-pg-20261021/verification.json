@@ -1,0 +1,141 @@
+{
+  "schema": "plm.listener-owner-transfer-pg.verification.v1",
+  "at": "2026-10-20T19:13:32.104686+00:00",
+  "test_source_commit": "1cee59fd63721c90ac2fd6cf480441d2798333bc",
+  "unchanged_product_source_commit": "ed7b2945542346f52a1fc25b265b3f064b657aba",
+  "validated_source_files_sha256": {
+    "packages/core-backend/tests/integration/plm-personal-change-read-pg.realdb.ts": "1d73c1b5004276f06eedc91bff21aac47e8465009f4cd99ec1760e6f60a8b871",
+    "packages/core-backend/tests/plm-bom-review/change-read-enroll-worker.ts": "2ae6592669c432f3737f0c2d8a998cc16691cc8bc46ef0c546290d86d50ce7c5",
+    "packages/core-backend/src/multitable/plm-bom-review-service.ts": "eadfddbe4c88eb153c32d37becf2c40774455903cfb03388f7eb48dfe75b91ec",
+    "packages/core-backend/src/db/migrations/zzzz20261015020000_add_plm_listener_authority_version.ts": "616fc843caed885c4351b897939efa952d64f68a4b756eed8a275b3e41f9b777"
+  },
+  "scope": "Actual PostgreSQL 16.15 and independent Node20.20.2 service processes, controlled Native adapter; not installed Native/Meta HTTP or browser acceptance.",
+  "implementation": "Actual Grok4.7(xhigh); independent Codex source review, fresh PG execution and report-count audit.",
+  "runs": {
+    "focused": {
+      "status": "failed",
+      "assertion_counts": {},
+      "reported_top_level_counts": {
+        "numTotalTests": 0,
+        "numPassedTests": 0,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "success": false
+      },
+      "test_process_pid": 92349,
+      "test_duration_ms": 0,
+      "owned_process_group_absent": true,
+      "owned_postmaster_stopped": true,
+      "owned_socket_removed": true,
+      "case_names": []
+    },
+    "focused-valid-url": {
+      "status": "passed",
+      "assertion_counts": {
+        "skipped": 48,
+        "passed": 3
+      },
+      "reported_top_level_counts": {
+        "numTotalTests": 51,
+        "numPassedTests": 51,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "success": true
+      },
+      "test_process_pid": 93774,
+      "test_duration_ms": 1792,
+      "owned_process_group_absent": true,
+      "owned_postmaster_stopped": true,
+      "owned_socket_removed": true,
+      "case_names": [
+        "personal listener late empty page from a different process cannot commit after owner ABA before same-grant readmission",
+        "personal listener late nonempty page from a different process cannot commit after owner ABA before same-grant readmission",
+        "personal listener current owner with a mismatched immutable Native and Meta link cannot reuse the prior authority"
+      ]
+    },
+    "full": {
+      "status": "passed",
+      "assertion_counts": {
+        "passed": 51
+      },
+      "reported_top_level_counts": {
+        "numTotalTests": 51,
+        "numPassedTests": 51,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "success": true
+      },
+      "test_process_pid": 95046,
+      "test_duration_ms": 8930,
+      "owned_process_group_absent": true,
+      "owned_postmaster_stopped": true,
+      "owned_socket_removed": true,
+      "case_names": [
+        "reverses empty new migration without losing legacy listener columns",
+        "binds real target-owner ACL, encrypts independently and replays without resetting listener",
+        "refuses real target permission loss before network and after Native verification",
+        "checks separate current Meta organization meta-tenant",
+        "checks separate current Meta organization meta-org",
+        "refuses another Native subject and API-key enrollment without persisting",
+        "serializes concurrent enrollment and keeps one consented credential",
+        "freezes retired identity and clears local access even with remote revoke unavailable",
+        "does not decrypt or fall back to an unusable stored shared credential",
+        "uses two independent Node processes for enrollment CAS",
+        "refuses downgrade while a separate process holds a retired-evidence reader",
+        "keeps uncertain revoke keys until the exact revoke acknowledgement and pins management URL",
+        "refuses structurally valid but wrong Native identity fields {\"auth_user_id\":\"43\"}",
+        "refuses structurally valid but wrong Native identity fields {\"tenant_id\":\"meta-tenant\"}",
+        "refuses structurally valid but wrong Native identity fields {\"org_id\":\"meta-org\"}",
+        "refuses structurally valid but wrong Native identity fields {\"connection_id\":\"meta-source-id\"}",
+        "does not treat the Native tenant as an authenticated Meta tenant",
+        "retains the frozen key after a local403 instead of declaring a remote rejection",
+        "reports a received hard refusal as rejected without claiming remote revocation",
+        "does not retire the current credential when only authority provenance changes",
+        "rejects a retired replay while permitting a distinct fresh credential",
+        "personal listener uses standing consent after browser expiry and skips all historical events",
+        "personal listener read flag false has no shared transport fallback",
+        "personal listener read flag TRUE has no shared transport fallback",
+        "personal listener read flag 1 has no shared transport fallback",
+        "personal listener read flag  has no shared transport fallback",
+        "personal listener checks target permission after an empty page await",
+        "personal listener refuses a revoked immutable Native identity link before any read",
+        "personal listener checks membership loss after fact verification without advancing inbox or cursor",
+        "personal listener start refuses source epoch change during fresh baseline",
+        "personal listener refuses an expired standing grant before transport",
+        "personal stopped listener refuses a direct intake before any Native fact read",
+        "personal listener unlink archives and clears credentials atomically before any worker tick",
+        "personal listener concurrent starts preserve one fresh baseline generation",
+        "personal listener old empty-page completion cannot revive a replaced grant generation",
+        "personal listener in another Node process commits inbox cursor and existing completion event together",
+        "personal listener concurrent independent poll processes commit one fact and one completion",
+        "personal listener rolls back inbox completion and cursor together after a cursor commit failure",
+        "personal listener stops after a received Native-revocation response without shared retry",
+        "personal listener prepares existing completion delivery without a cached shared adapter",
+        "personal listener late page from a different process cannot commit after unlink",
+        "personal listener requires the unlink retirement migration before admitting a read",
+        "personal listener activation refuses the wrong authenticated Meta tenant before Native baseline",
+        "personal listener browser start requires explicit Origin action and current target tenant",
+        "personal listener drains the durable retired queue through the existing worker service with reads off",
+        "personal read UI discovery uses current Meta target ACL without granting Native access",
+        "personal read UI discovery does not decrypt shared credentials or bypass separate Meta memberships",
+        "personal listener active start retry is idempotent and cannot skip newly unread changes",
+        "personal listener late empty page from a different process cannot commit after owner ABA before same-grant readmission",
+        "personal listener late nonempty page from a different process cannot commit after owner ABA before same-grant readmission",
+        "personal listener current owner with a mismatched immutable Native and Meta link cannot reuse the prior authority"
+      ]
+    }
+  },
+  "harness_correction": "First run failed before test collection: WHATWG-invalid empty-host PostgreSQL URL. Explicit localhost URL plus private Unix-socket query fixed the QA driver; production and test source were unchanged. Raw failure retained.",
+  "counting": "The focused Vitest JSON top-level count reports51 passed despite48 skipped assertions. Canonical focused result is3 passed/48 skipped; full suite51 passed/0 skipped. Final driver checks assertion statuses and refuses zero-selected or skipped full runs.",
+  "owned_cleanup": "All3 owned PG postmasters, Unix sockets and test process groups absent. Data directories retained privately; no unknown Docker resource/data/cache cleanup.",
+  "frozen_bundle": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/listener-owner-transfer-pg-20261021",
+  "frozen_manifest_sha256": "55247b67ca3e576f37811b288dd1844e5fd30b848ecc2cd987c365dc96127135",
+  "frozen_files": 29,
+  "publication": "Local only; held behind valuable queued Yuantus366 perf job118588819008. No push, new PR or CI qualification claimed.",
+  "remaining": [
+    "Paired installed Native/Meta HTTP and browser owner-transfer/readmission acceptance.",
+    "Fresh Metaed7 web image build, then final paired-image installation/HTTPS/backup restore.",
+    "Required exact-head CI and serial Draft publication after parent valuable jobs terminate.",
+    "Full WINDOW_MASTER_GOAL engineering acceptance and separately gated real customer/production/device evidence."
+  ]
+}
