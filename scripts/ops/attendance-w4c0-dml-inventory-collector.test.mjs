@@ -122,6 +122,19 @@ test('timezone configuration tables have explicit buckets without a prefix-wide 
   )
 })
 
+test('management-group policy is explicit reference configuration without a prefix-wide exception', () => {
+  assert.equal(TABLE_BUCKETS.attendance_management_group_policies, 'reference')
+  const relPath = 'plugins/plugin-attendance/lib/attendance-group-membership-policy.cjs'
+  const sites = scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
+  assert.equal(sites.length, 2)
+  assert.deepEqual(classifyCensus(sites).bucketAllowlistedSites.map(site => site.bucket), ['reference', 'reference'])
+  const future = scanFileForDmlSites(relPath,
+    'async function unreviewedWriter(db) { await db.query("INSERT INTO attendance_management_group_unreviewed (org_id) VALUES ($1)") }')
+  assert.equal(future.length, 1)
+  assert.deepEqual(classifyCensus(future).unclassifiedTableSites.map(site => site.table),
+    ['attendance_management_group_unreviewed'])
+})
+
 test('reviewed canonical grants bind exact site identity and multiplicity, never a path-wide exception', () => {
   const relPath = 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts'
   const original = scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
