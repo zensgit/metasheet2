@@ -587,6 +587,14 @@ export interface MetaCapabilities {
    * Display only: every create route keeps its own refusal.
    */
   recordCreateBlockedByLock?: boolean
+  /**
+   * 备料分批拉取第一期 step 3: set by /context ONLY on a sheet the host stamped closed for generic grid export
+   * (a stock-preparation pilot project sheet; `canExport` is then already false for everyone). The workbench
+   * keeps its export buttons visible but DISABLED with the reason, and re-checks before it builds a
+   * selected-rows CSV / XLSX in the browser. Absent ⇒ unchanged. Display only: the export route refuses itself
+   * (403 MULTITABLE_GRID_EXPORT_CLOSED) and copy-with-data refuses too. Print and copy-selection stay open.
+   */
+  gridExportClosure?: { reason: string }
 }
 
 export interface YjsPresenceUser {

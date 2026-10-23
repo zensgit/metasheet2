@@ -251,6 +251,7 @@
       :filter-conjunction="grid.filterConjunction.value"
       :sort-filter-dirty="grid.sortFilterDirty.value"
       :can-create-record="canCreateRecordByHand" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :export-closed-reason="gridExportClosedReason"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
@@ -1074,6 +1075,15 @@ const caps = useMultitableCapabilities(capabilitySource)
 // canDeleteSheet (`=== true` off the /context object): absent ⇒ exactly the old `caps.canCreateRecord`.
 const recordCreateBlockedByLock = computed(() => capabilitySource.value?.recordCreateBlockedByLock === true)
 const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value)
+// 备料分批拉取第一期 step 3: /context sends `gridExportClosure` ONLY on a sheet the host stamped closed for generic
+// grid export (canExport is then already false). The toolbar keeps its export buttons visible but disabled with
+// this reason, and every client-side export entry below re-checks `canRunGridExport()` before it builds a file.
+// Same fail-closed read as recordCreateBlockedByLock: absent ⇒ exactly the old behaviour.
+const gridExportClosed = computed(() => {
+  const marker = (capabilitySource.value as { gridExportClosure?: unknown } | null | undefined)?.gridExportClosure
+  return marker !== null && marker !== undefined && marker !== false
+})
+const gridExportClosedReason = computed(() => (gridExportClosed.value ? wb('notice.gridExportClosed', isZh.value) : null))
 const featureFlags = useFeatureFlags()
 // The workflow designer lives at a route gated by the global `workflow` product
 // feature (appRoutes.ts requiredFeature). On deployments without that feature the
@@ -5298,7 +5308,20 @@ const activeSheetExportName = computed(() => {
 function onExportCsv() { openExportDialog('csv') }
 async function onExportXlsx() { openExportDialog('xlsx') }
 
+// 备料分批拉取第一期 step 3: the ONE client-side gate of generic grid export, run where a file can be started —
+// when the dialog opens AND again at confirm (the only caller of doExportCsv / doExportXlsx / exportAllRowsViaRoute),
+// because the sheet may be closed while the dialog is open. "Selected rows" are built in the browser from rows
+// already loaded, so the server's 403 cannot stop them — this re-check does, driven by the server-set
+// `gridExportClosure` marker. Refusing toasts the reason instead of failing silently. On an ordinary sheet it is
+// always true, so nothing there changes.
+function canRunGridExport(): boolean {
+  if (!gridExportClosed.value) return true
+  showError(wb('notice.gridExportClosed', isZh.value))
+  return false
+}
+
 function openExportDialog(initialFormat: 'csv' | 'xlsx') {
+  if (!canRunGridExport()) return
   if (!scopedGridFields.value.length) return
   exportInitialFormat.value = initialFormat
   exportDialogVisible.value = true
@@ -5306,6 +5329,8 @@ function openExportDialog(initialFormat: 'csv' | 'xlsx') {
 
 function onExportDialogConfirm(payload: ExportConfirmPayload) {
   exportDialogVisible.value = false
+  // Re-checked at confirm time: the sheet may have been closed (context reloaded) while the dialog was open.
+  if (!canRunGridExport()) return
   const selectedFieldIds = new Set(payload.fieldIds)
   // Preserve the on-screen column order; ignore unknown ids defensively.
   const fields = scopedGridFields.value.filter((f) => selectedFieldIds.has(f.id))
