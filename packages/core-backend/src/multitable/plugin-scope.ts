@@ -5,7 +5,7 @@ import type {
   StockPreparationPersistUnitOfWorkInput,
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
-import { resolvePluginWriteFence } from './plugin-write-fence'
+import { refusePluginWriteFenceOnUnfencedSurface, resolvePluginWriteFence } from './plugin-write-fence'
 import {
   StockPreparationProjectSheetGrantError,
   isStockPreparationProjectSheetObjectId,
@@ -1017,6 +1017,8 @@ export function createPluginScopedMultitableApi(
         return multitable.records.patchRecord({ ...copyInputValuesExcept(input, ['sheetId', 'writeFence']), sheetId, ...(writeFence ? { writeFence } : {}) } as unknown as typeof input)
       },
       deleteRecord: async (input) => {
+        // PR #6501 round 6 (S2): delete implements no fence — a `writeFence` here is refused, never dropped.
+        refusePluginWriteFenceOnUnfencedSurface(input, 'records.deleteRecord')
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
@@ -1036,12 +1038,16 @@ export function createPluginScopedMultitableApi(
       // sheet is derived and re-checked (ownership + stamp) on every write by `resolveOverviewRecordsSheet`.
       ...(pluginName === STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN
         ? {
+            // PR #6501 round 6 (S2): the overview port implements no fence — a `writeFence` on any of its
+            // three writes is refused before the sheet is even derived, never dropped.
             stockPreparationOverview: {
               createRecord: async (input: { projectId: string; data: Record<string, unknown> }) => {
+                refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.createRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.createRecord({ sheetId, data: input.data })
               },
               patchRecord: async (input: { projectId: string; recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
+                refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.patchRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.patchRecord({
                   sheetId,
@@ -1051,6 +1057,7 @@ export function createPluginScopedMultitableApi(
                 })
               },
               deleteRecord: async (input: { projectId: string; recordId: string }) => {
+                refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.deleteRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.deleteRecord({ sheetId, recordId: input.recordId })
               },
@@ -1089,12 +1096,16 @@ export function createPluginScopedMultitableApi(
                 assertAllowed(sheetId)
                 return records.queryRecords({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)
               },
+              // PR #6501 round 6 (S2): the unit of work's writes implement no fence (one host transaction
+              // for the whole unit) — a `writeFence` is refused before the sheet check, never dropped.
               createRecord: async (recordInput) => {
+                refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.createRecord')
                 const sheetId = recordInput.sheetId
                 assertAllowed(sheetId)
                 return records.createRecord({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)
               },
               patchRecord: async (recordInput) => {
+                refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.patchRecord')
                 const sheetId = recordInput.sheetId
                 assertAllowed(sheetId)
                 return records.patchRecord({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)

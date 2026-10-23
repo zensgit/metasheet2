@@ -36,6 +36,15 @@
  * are parameters. Any other plugin, any other lock, any extra or missing key -> PLUGIN_WRITE_FENCE_NOT_ALLOWED.
  * Only fences RESOLVED here (by plugin-scope, for the calling plugin) are honoured by the core write path;
  * an unresolved object handed to the core API directly is refused, never ignored.
+ *
+ * A FENCE IS NEVER SILENTLY IGNORED (review round 6, S2). Only `createRecord` / `patchRecord` implement the
+ * fence. Every other plugin-facing write surface — `deleteRecord`, the stock-preparation overview port, the
+ * persist unit of work's create / patch — REFUSES an input that carries `writeFence` (501
+ * PLUGIN_WRITE_FENCE_UNSUPPORTED, nothing written) instead of dropping it: a caller that asked for a fenced
+ * write must never get an unfenced one. Fencing on those surfaces is a later slice, not this one.
+ *
+ * NOT BOUND HERE (defence in depth for the next slice): the host does not check that the fence's `scopeKey`
+ * names the sheet being written; the plugin binds them (assertProjectWriteGuardScope / chunkWriteScope).
  */
 
 export type PluginWriteFenceInput = {
@@ -66,6 +75,8 @@ export const PLUGIN_WRITE_FENCE_CODES = Object.freeze({
   NOT_ALLOWED: 'PLUGIN_WRITE_FENCE_NOT_ALLOWED',
   REJECTED: 'PLUGIN_WRITE_FENCE_REJECTED',
   UNAVAILABLE: 'PLUGIN_WRITE_FENCE_UNAVAILABLE',
+  /** A fence handed to a write surface that does not implement fencing (review round 6, S2). */
+  UNSUPPORTED: 'PLUGIN_WRITE_FENCE_UNSUPPORTED',
 })
 
 const FENCE_KEYS = Object.freeze(['lock', 'scopeKey', 'leaseId', 'fencingEpoch', 'generationToken'])
@@ -109,21 +120,41 @@ export function resolvePluginWriteFence(pluginName: string, fence: unknown): Res
   const record = fence as Record<string, unknown>
   const keys = Object.keys(record)
   if (keys.length !== FENCE_KEYS.length || !FENCE_KEYS.every((key) => keys.includes(key))) throw notAllowed('fence_shape')
-  if (record.lock !== entry.lock) throw notAllowed('lock_not_allowed')
-  if (!boundedString(record.scopeKey) || !boundedString(record.leaseId) || !boundedString(record.generationToken)) {
+  // READ ONCE (review round 6, N5; the rule plugin-scope applies to `sheetId`): each field is read exactly
+  // once, validated, and that same value is what the resolved fence carries — a getter cannot show the
+  // validation one value and the host another.
+  const lock = record.lock
+  const scopeKey = record.scopeKey
+  const leaseId = record.leaseId
+  const fencingEpoch = record.fencingEpoch
+  const generationToken = record.generationToken
+  if (lock !== entry.lock) throw notAllowed('lock_not_allowed')
+  if (!boundedString(scopeKey) || !boundedString(leaseId) || !boundedString(generationToken)) {
     throw notAllowed('fence_shape')
   }
-  if (!Number.isInteger(record.fencingEpoch) || (record.fencingEpoch as number) < 0) throw notAllowed('fence_shape')
+  if (!Number.isInteger(fencingEpoch) || (fencingEpoch as number) < 0) throw notAllowed('fence_shape')
   const resolved = Object.freeze({
     pluginName,
     lock: entry.lock,
-    scopeKey: record.scopeKey as string,
-    leaseId: record.leaseId as string,
-    fencingEpoch: record.fencingEpoch as number,
-    generationToken: record.generationToken as string,
+    scopeKey,
+    leaseId,
+    fencingEpoch: fencingEpoch as number,
+    generationToken,
   })
   resolvedFences.add(resolved)
   return resolved
+}
+
+/**
+ * The unfenced surfaces' half (review round 6, S2): a write surface that does NOT implement the fence
+ * refuses an input that carries one — `writeFence` present with any value but `undefined` — before any
+ * scope or host work, so the caller never gets a silently unfenced write. `surface` names the refusing
+ * method (values-free). Read once off the raw input.
+ */
+export function refusePluginWriteFenceOnUnfencedSurface(input: unknown, surface: string): void {
+  const fence = input && typeof input === 'object' ? (input as { writeFence?: unknown }).writeFence : undefined
+  if (fence === undefined) return
+  throw new PluginWriteFenceError(501, PLUGIN_WRITE_FENCE_CODES.UNSUPPORTED, 'this write surface does not implement the host write fence; nothing was written', { surface })
 }
 
 /**

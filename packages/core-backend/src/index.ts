@@ -120,7 +120,7 @@ import {
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
-import { assertPluginWriteFence } from './multitable/plugin-write-fence'
+import { assertPluginWriteFence, refusePluginWriteFenceOnUnfencedSurface } from './multitable/plugin-write-fence'
 import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
@@ -1289,7 +1289,10 @@ export class MetaSheetServer {
               })
             })
           },
-          deleteRecord: async ({ sheetId, recordId }) => {
+          deleteRecord: async (input) => {
+            // PR #6501 round 6 (S2): delete implements no fence — a `writeFence` is refused, never dropped.
+            refusePluginWriteFenceOnUnfencedSurface(input, 'records.deleteRecord')
+            const { sheetId, recordId } = input
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -2527,16 +2530,24 @@ export class MetaSheetServer {
                       limit,
                       offset,
                     }),
-                  createRecord: ({ sheetId, data }) =>
-                    createMultitableRecord({ query: txQuery, sheetId, data }),
-                  patchRecord: ({ sheetId, recordId, changes, expectedVersion }) =>
-                    patchMultitableRecord({
+                  // PR #6501 round 6 (S2): the unit of work implements no fence — a `writeFence` on either
+                  // write is refused (the transaction rolls back), never dropped.
+                  createRecord: (recordInput) => {
+                    refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.createRecord')
+                    const { sheetId, data } = recordInput
+                    return createMultitableRecord({ query: txQuery, sheetId, data })
+                  },
+                  patchRecord: (recordInput) => {
+                    refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.patchRecord')
+                    const { sheetId, recordId, changes, expectedVersion } = recordInput
+                    return patchMultitableRecord({
                       query: txQuery,
                       sheetId,
                       recordId,
                       changes,
                       expectedVersion,
-                    }),
+                    })
+                  },
                 })
               })
             },

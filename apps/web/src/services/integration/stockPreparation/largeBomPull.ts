@@ -106,6 +106,12 @@ export interface StockPreparationLargeBomPullState {
   manualConfirmCount: number
   /** Clamped server error code, for `stockPrepErrorPlain` — never a raw message. */
   errorCode: string | null
+  /**
+   * The server's clamped `details.reason` beside the code (PR #6501 round 6, N1): the large lane reads a
+   * few codes differently per reason (a superseded plan that is a STALE expansion vs. one left over from
+   * an OLD version). `null` when the refusal carried none.
+   */
+  errorReason: string | null
   /** True once the checkpoint apply reaches `succeeded` or `partial` — rows are in the sheet. */
   imported: boolean
 }
@@ -121,6 +127,7 @@ function initialState(): StockPreparationLargeBomPullState {
     applyCounts: null,
     manualConfirmCount: 0,
     errorCode: null,
+    errorReason: null,
     imported: false,
   }
 }
@@ -197,6 +204,11 @@ function codeOfLargeBomError(error: unknown): string | null {
   return error instanceof StockPreparationProjectSyncCallError ? error.code : null
 }
 
+/** The clamped `details.reason` the call error carried (round 6, N1) — `null` when none. */
+function reasonOfLargeBomError(error: unknown): string | null {
+  return error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null
+}
+
 // ---------------------------------------------------------------------------
 // the run
 // ---------------------------------------------------------------------------
@@ -244,7 +256,7 @@ export async function runStockPreparationLargeBomPull(
     return state
   }
   function fail(error: unknown): StockPreparationLargeBomPullState {
-    return emit({ phase: 'failed', errorCode: codeOfLargeBomError(error) })
+    return emit({ phase: 'failed', errorCode: codeOfLargeBomError(error), errorReason: reasonOfLargeBomError(error) })
   }
 
   // ---- start the expansion job ---------------------------------------------------------------

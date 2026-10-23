@@ -1028,8 +1028,28 @@ export const STOCK_PREP_LARGE_BOM_ERROR_PLAIN: Record<string, StockPrepPlainEntr
   }),
 })
 
-export function stockPrepLargeBomErrorPlain(code: string): StockPrepPlainEntry {
-  return lookup(STOCK_PREP_LARGE_BOM_ERROR_PLAIN, code) ?? stockPrepErrorPlain(code)
+/**
+ * PR #6501 round 6 (N1): the large lane's per-REASON readings of a code, keyed `<code>/<details.reason>`.
+ * `expansion_unbound` / `job_unbound` are not "a newer preview or write exists" — nothing newer happened;
+ * the expansion or job was made before the sheet write lock existed (or without it) and cannot be bound
+ * now. The remedy is the same (expand again), the sentence must not claim a newer write (same rule as the
+ * small lane's WRITE_TOKEN_UNBOUND, review round 2 F6).
+ */
+export const STOCK_PREP_LARGE_BOM_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  'STOCK_PREP_PROJECT_PLAN_SUPERSEDED/expansion_unbound': Object.freeze({
+    zh: '这个作业是旧版本留下的，需要重新展开后再规划。',
+    en: 'This job was left over by an older version; expand again before planning.',
+  }),
+  'STOCK_PREP_PROJECT_PLAN_SUPERSEDED/job_unbound': Object.freeze({
+    zh: '这个作业是旧版本留下的，需要重新展开后再规划。',
+    en: 'This job was left over by an older version; expand again before planning.',
+  }),
+})
+
+export function stockPrepLargeBomErrorPlain(code: string, reason?: string | null): StockPrepPlainEntry {
+  return (reason ? lookup(STOCK_PREP_LARGE_BOM_ERROR_REASON_PLAIN, `${code}/${reason}`) : undefined)
+    ?? lookup(STOCK_PREP_LARGE_BOM_ERROR_PLAIN, code)
+    ?? stockPrepErrorPlain(code)
 }
 
 /**

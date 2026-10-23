@@ -150,6 +150,7 @@ const state = reactive<StockPreparationLargeBomPullState>({
   applyCounts: null,
   manualConfirmCount: 0,
   errorCode: null,
+  errorReason: null,
   imported: false,
 })
 
@@ -162,8 +163,9 @@ let cancelled = false
 // the six-entry table above.
 const statusText = computed<string>(() => {
   if (state.phase === 'failed') {
-    // PR #6501 (P1-b): the large lane's own reading first (a superseded plan means 「重新展开」 here).
-    const reason = stockPrepLargeBomErrorPlain(state.errorCode ?? '')
+    // PR #6501 (P1-b): the large lane's own reading first (a superseded plan means 「重新展开」 here); round 6
+    // (N1): per reason, so an expansion / job left over by an older version is not called "a newer write".
+    const reason = stockPrepLargeBomErrorPlain(state.errorCode ?? '', state.errorReason)
     return bi(reason.zh, reason.en)
   }
   const plain = stockPrepLargeBomPhasePlain(state.phase)
