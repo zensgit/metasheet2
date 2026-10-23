@@ -123,6 +123,17 @@ const ANONYMOUS_HOLD_IDENTITY_PREFIX = 'anon-hold:v1:'
 // counts. Both rows are still `manual_confirm` holds, nothing is written, nothing is deactivated,
 // and `canApply` does not consult holds. `counts` (hashed) gains no key.
 const EXISTING_ROW_CREATED_BY = Symbol.for('metasheet.stock-preparation.existingRow.createdBy')
+
+// Batch-refresh step 4 (PR-1, design §6.5): the meta_records `id` and `version` of an existing row,
+// which `unmapRecordFields` drops (it projects a record down to its `data`). Attached by the
+// project-scoped reader (stock-preparation-table-actions.cjs `readExistingStockPreparationRows`) on
+// the SAME terms as EXISTING_ROW_CREATED_BY above: a Symbol key, so stableStringify / JSON.stringify /
+// Object.keys never see it and buildRevision, the archive revision, the ledger revision and every
+// golden digest stay byte-identical (pinned by stock-preparation-continuation-golden.test.cjs); copied
+// by `normalizeRows`' spread; read from the record ENVELOPE only, so a cell named `id` cannot forge it.
+// Read ONLY by the continuation pairing module (through `recordRefOf`) to bind a continuation's members
+// to concrete record ids and to name hold subjects. Value: frozen `{ id: string, version: number|null }`.
+const EXISTING_ROW_RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
 const EXISTING_MISSING_KEY_CONFLICT_TYPES = Object.freeze({
   pluginOrLegacy: 'missing_existing_idempotency_key',
   foreign: 'foreign_existing_row_missing_idempotency_key',
@@ -1353,6 +1364,23 @@ function carryPolicyModule() {
   return lazyCarryPolicyModule
 }
 
+// Batch-refresh step 4 (PR-1): the continuation pairing module imports THIS module at its top (for the
+// field bands, `changedFields`, the record-ref Symbol), so it is required LAZILY here — the same
+// arrangement as the carry-policy module above. Reached only when a caller passes `continuation`.
+let lazyContinuationModule = null
+function continuationModule() {
+  if (!lazyContinuationModule) lazyContinuationModule = require('./stock-preparation-continuation-pairing.cjs')
+  return lazyContinuationModule
+}
+
+function makeContinuationSkipDecision(key, type, details) {
+  return {
+    decision: DECISIONS.SKIP,
+    idempotencyKey: key,
+    conflictSummary: makeConflictSummary(type, details),
+  }
+}
+
 // Map ONE planCarry outcome for an ADD row into plan artifacts. The write
 // semantics are deliberately layered, never rewritten (adjudication §3.1: 接线
 // + 存在性判定, not new decision logic):
@@ -1439,6 +1467,15 @@ function planStockPreparationConflicts(input = {}) {
   const carryPolicy = input.carryPolicy === undefined || input.carryPolicy === null
     ? null
     : carryPolicyModule().normalizeCarryPolicy(input.carryPolicy)
+  // Batch-refresh step 4 (PR-1) — the GOVERNED-PROJECT input (design §6.1). Server-held, never
+  // request-supplied; in PR-1 no caller passes it. ONLY `undefined` means "not governed": the plan
+  // below is then BYTE-IDENTICAL to the pre-step-4 planner (invariant (i), pinned on a second-pull sheet
+  // by stock-preparation-continuation-golden.test.cjs). Anything else is validated through the pairing
+  // module's closed key set; a store state other than 'ok' — or `null` — refuses rather than planning
+  // "without continuations" (invariant (ii)).
+  const continuationInput = input.continuation === undefined
+    ? null
+    : continuationModule().normalizeContinuationInput(input.continuation)
 
   const templateHumanFields = fieldIdsByOwnership(template, 'human_preserved')
   if (!sameStringSet(HUMAN_PRESERVED_FIELD_IDS.slice(), templateHumanFields)) {
@@ -1546,6 +1583,26 @@ function planStockPreparationConflicts(input = {}) {
     }
   }
 
+  // Batch-refresh step 4 (PR-1) — governed planning, computed ONCE from the same grouped maps: the
+  // continuation projection (design §6.2), the verification of every continuation (§6.3, pilot or
+  // not), and on pilot projects the candidate / dropped-head detection (§6.6). `null` for an
+  // ungoverned plan, and then nothing below reads it.
+  const governed = continuationInput
+    ? continuationModule().prepareGovernedPlanning({
+        input: continuationInput,
+        template,
+        installedFieldProperties: input.installedFieldProperties,
+        expandedRows,
+        existingRows,
+        expanded,
+        existing,
+        duplicateExistingKeys,
+        parentIndex,
+        declaredExtensionFieldIds,
+        humanFields,
+      })
+    : null
+
   // W4 carry: the pool of carry SOURCES is exactly the prior-batch rows this
   // plan's missing-from-PLM sweep treats as inactive — the already-inactive ones
   // (SKIP already_inactive below) as they stand, and the ones the sweep is ABOUT
@@ -1564,6 +1621,9 @@ function planStockPreparationConflicts(input = {}) {
     }
     for (const [key, rows] of existing.keyed.entries()) {
       if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
+      // Step 4: a row a continuation protects (or a suspended candidate's old row) is NOT swept, so it
+      // is not a predecessor either (design §6.2, third consumer).
+      if (governed && (governed.continuedRefFor(key) || governed.candidateProtectKeys.has(key))) continue
       const existingRow = rows[0]
       carrySources.push(existingRow.active === false ? existingRow : { ...existingRow, active: false })
     }
@@ -1579,6 +1639,20 @@ function planStockPreparationConflicts(input = {}) {
     const row = withDenormalizedPlmFields(rows[0], parentIndex, declaredExtensionFieldIds)
     const existingGroup = existing.keyed.get(key)
     const existingRow = existingGroup && existingGroup[0]
+    if (governed) {
+      // Step 4, design §6.2 consumer 1 (the ADD branch) — and stricter: a key a continuation claims, from
+      // EITHER end, receives no write decision on ANY branch it can reach (an occupied new position would
+      // otherwise UPDATE / revive a copy; a protected old row would otherwise be patched).
+      const continued = governed.continuedRefFor(key)
+      if (continued) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
+        continue
+      }
+      if (!existingRow && governed.candidateSuppressAddKeys.has(key)) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: governed.candidateSuppressAddKeys.get(key) }))
+        continue
+      }
+    }
     if (!existingRow) {
       if (strategy.addMissing) {
         addDecision(decisions, counts, makeAddDecision(row, runId, plannedAt, plmFields, humanFields))
@@ -1613,6 +1687,9 @@ function planStockPreparationConflicts(input = {}) {
         changedFields: lineageChanges,
         details: { changedFieldCount: lineageChanges.length },
       })
+      // Step 4, D-4: on a governed project the legacy hold is ALSO a step-4 structure hold (suspends;
+      // never acknowledgeable, never the content path — C07).
+      if (governed) governed.noteStructureChange(existingRow, lineageChanges)
       continue
     }
 
@@ -1625,10 +1702,18 @@ function planStockPreparationConflicts(input = {}) {
         changedFields: identityChanges,
         details: { changedFieldCount: identityChanges.length },
       })
+      // Step 4, D-4: governed => a step-4 content hold (identity fields are content triggers; a changed
+      // part id would be structure, and never reaches here — the key carries it).
+      if (governed) governed.noteContentChange(row, existingRow, { reason: 'component_identity_conflict' })
       continue
     }
 
     const refreshChanges = strategy.refreshPlmSystemFields ? changedFields(row, existingRow, plmFields, templateFields) : []
+    // Step 4, design §6.7 (pilot projects only): a change in a content-trigger field suspends the whole
+    // pull; the decision itself stays what the planner computed (the suspension dominates).
+    if (governed && governed.pilot && refreshChanges.length > 0 && existingRow.active !== false) {
+      governed.noteContentChange(row, existingRow, { reason: 'plm_system_refresh' })
+    }
     if (refreshChanges.length === 0) {
       addDecision(decisions, counts, makeSkipDecision(row))
       continue
@@ -1638,6 +1723,19 @@ function planStockPreparationConflicts(input = {}) {
 
   for (const [key, rows] of existing.keyed.entries()) {
     if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
+    if (governed) {
+      // Step 4, design §6.2 consumer 2 (the sweep), placed BEFORE `already_inactive`: an inactive old
+      // row under a continuation is a verification failure (old_record_inactive), not a silent skip.
+      const continued = governed.continuedRefFor(key)
+      if (continued) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
+        continue
+      }
+      if (governed.candidateProtectKeys.has(key)) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: governed.candidateProtectKeys.get(key) }))
+        continue
+      }
+    }
     const existingRow = rows[0]
     if (existingRow.active === false) {
       addDecision(decisions, counts, {
@@ -1666,8 +1764,18 @@ function planStockPreparationConflicts(input = {}) {
       }
     : undefined
 
+  // Step 4 — invariant (iii) over the EMITTED decisions (fail closed), then the hold set. A governed
+  // plan with any hold is SUSPENDED as a whole (design D4): never a manual_confirm hold, so nothing that
+  // acknowledges manual_confirm can push it, and `valid` is false (invariant (iv)).
+  let continuationOutcome = null
+  if (governed) {
+    continuationModule().assertContinuationPostCondition(decisions, governed)
+    continuationOutcome = governed.finalize(decisions)
+  }
+  const suspended = continuationOutcome ? continuationOutcome.suspended : false
+
   return {
-    valid: counts[DECISIONS.MANUAL_CONFIRM] === 0,
+    valid: counts[DECISIONS.MANUAL_CONFIRM] === 0 && !suspended,
     runId,
     plannedAt,
     decisions,
@@ -1691,7 +1799,18 @@ function planStockPreparationConflicts(input = {}) {
       duplicateExpandedKeyResolution: resolvedExpanded.resolution,
       ...(packAwareOwnership ? { packAwareOwnership } : {}),
       ...(carrySummary ? { carry: carrySummary } : {}),
+      // Step 4 — values-free (counts, closed tokens, continuation ids); spread ONLY for a governed plan.
+      ...(continuationOutcome ? { continuation: { ...continuationOutcome.summary } } : {}),
     },
+    // Step 4 — ONLY for a governed plan (design §6.8). `holds` are PRIVATE (values-bearing): they never
+    // enter `summary`, `summarizeConflictPlanForEvidence`, dry-run evidence or any revision.
+    ...(continuationOutcome
+      ? {
+          suspended,
+          holds: continuationOutcome.holds,
+          continuation: { ...continuationOutcome.summary },
+        }
+      : {}),
   }
 }
 
@@ -1730,6 +1849,8 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     // W4 carry: values-free stanza, passed through ONLY when present so
     // no-config evidence stays byte-identical.
     ...(isPlainObject(summary.carry) ? { carry: JSON.parse(JSON.stringify(summary.carry)) } : {}),
+    // Step 4: the values-free continuation stanza, ONLY when present. `plan.holds` is never read here.
+    ...(isPlainObject(summary.continuation) ? { continuation: JSON.parse(JSON.stringify(summary.continuation)) } : {}),
   }
 }
 
@@ -1741,6 +1862,7 @@ module.exports = {
   DENORMALIZED_PLM_FIELD_IDS,
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
   EXISTING_ROW_CREATED_BY,
+  EXISTING_ROW_RECORD_REF,
   EXISTING_MISSING_KEY_CONFLICT_TYPES,
   CARRY_PROPOSAL_CONFLICT_TYPE,
   CARRY_PROPOSAL_CONFLICT_SUMMARY,
