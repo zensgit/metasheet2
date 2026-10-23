@@ -83,6 +83,7 @@ import {
   changeStockPreparationProjectTargetLifecycle,
   clampStockPrepProjectTargetLifecycle,
   createStockPreparationProjectTargetApi,
+  enableStockPreparationProjectPilot,
   stockPrepProjectNumbersMatch,
   type StockPrepProjectTargetState,
   type StockPreparationProjectTargetApi,
@@ -92,6 +93,7 @@ import {
   STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_PROJECT_TARGET_PLAIN,
   STOCK_PREP_SYNC_REASON_PLAIN,
+  stockPrepErrorPlain,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 import {
   STOCK_PREP_WORKBENCH_CAPABILITIES,
@@ -717,5 +719,244 @@ describe('PA-ALIGN — rendered archive / restore controls equal granted capabil
     }
     // Anti-vacuity: puller, stock-prep:admin and the platform admin see both — 3 × 2.
     expect(anyRendered).toBe(6)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------
+// 备料分批拉取第一期 step 3 PR B (register R-53 / R-54) — the pilot line and the typed-confirmation enable on
+// 项目备料页. ADMIN only; set-once (no disable control exists anywhere). Rides this spec because the lifecycle
+// scaffolding above (the gated target double, the board mount) is exactly what the pilot line needs.
+// ---------------------------------------------------------------------------------------------------
+
+describe('PB-ALIGN — the pilot status line and 「启用分批拉取试点」 render iff the SERVER grants them', () => {
+  const ACTORS: Array<{ name: string; roles: string[]; permissions: string[] }> = [
+    { name: 'reader', roles: [], permissions: ['stock-prep:read'] },
+    { name: 'floor', roles: [], permissions: [...FLOOR] },
+    { name: 'puller', roles: [], permissions: [...PULLER] },
+    { name: 'workbench-admin', roles: [], permissions: ['stock-prep:admin'] },
+    { name: 'platform-admin', roles: ['admin'], permissions: ['integration:admin'] },
+    { name: 'pull-orphan', roles: [], permissions: ['stock-prep:pull'] },
+    { name: 'operate-orphan', roles: [], permissions: ['stock-prep:operate'] },
+  ]
+  const PILOT_CAPABILITIES = ['projectTarget.pilotRead', 'projectTarget.pilotEnable']
+
+  function serverGranted(roles: readonly string[], permissions: readonly string[]): string[] {
+    return backendAccess.grantedStockPrepCapabilities([...permissions, ...roles.map((role) => `role:${role}`)])
+  }
+
+  const readyPilotState = (enabled = false) => ({
+    status: 'active' as const,
+    pilot: { enabled, enabledAt: enabled ? '2026-10-23T00:00:00.000Z' : null, enabledBy: enabled ? 'u_admin' : null, readinessVersion: enabled ? 1 : null },
+    readiness: { version: 1, ready: true, checks: [{ id: 'registry_row_active', ok: true }], failing: [] as string[] },
+    may: { enable: !enabled },
+  })
+
+  /** The pilot read answers as the server would for THIS actor: ADMIN only (403 otherwise), `may.enable` by grant. */
+  function pilotGatedTargetApi(state: StockPrepProjectTargetState, pilot = readyPilotState()): StockPreparationProjectTargetApi {
+    const granted = () => serverGranted(h.roles, h.permissions)
+    return {
+      get: vi.fn(async () => {
+        if (!granted().includes('projectTarget.read')) throw new StockPreparationProjectTargetCallError(403, 'gate', { code: 'FORBIDDEN' })
+        return { ...state, may: { create: false, archive: false, restore: false } }
+      }),
+      create: vi.fn(async () => { throw new Error('unexpected create') }),
+      list: vi.fn(async () => ({ count: 0, limit: 200, items: [] })),
+      getPilot: vi.fn(async () => {
+        if (!granted().includes('projectTarget.pilotRead')) throw new StockPreparationProjectTargetCallError(403, 'gate', { code: 'FORBIDDEN' })
+        return { ...pilot, may: { enable: pilot.may.enable && granted().includes('projectTarget.pilotEnable') } }
+      }),
+      enablePilot: vi.fn(async () => { throw new Error('unexpected enable') }),
+    }
+  }
+
+  it('the client rows for the pilot read / enable are BYTE-EQUAL to the plugin module rows (F-01 for these rows)', () => {
+    const pick = (rows: readonly { capability: string }[]) => rows.filter((row) => PILOT_CAPABILITIES.includes(row.capability))
+    const server = pick(backendAccess.STOCK_PREP_WORKBENCH_CAPABILITIES)
+    expect(server.map((row: { capability: string }) => row.capability)).toEqual(PILOT_CAPABILITIES)
+    expect(JSON.stringify(pick(STOCK_PREP_WORKBENCH_CAPABILITIES))).toBe(JSON.stringify(server))
+    expect(server.map((row: { code: string; control: string }) => [row.code, row.control])).toEqual([
+      ['stock-prep:admin', 'stock-prep-project-pilot-status'],
+      ['stock-prep:admin', 'stock-prep-project-pilot-enable'],
+    ])
+  })
+
+  it('the status line and the enable button render iff the SERVER grants them, for every actor; both vanish once enabled', async () => {
+    let anyRendered = 0
+    for (const actor of ACTORS) {
+      h.roles = actor.roles
+      h.permissions = actor.permissions
+      const granted = serverGranted(actor.roles, actor.permissions)
+      expect(grantedStockPrepCapabilities({ roles: actor.roles, permissions: actor.permissions }).filter((id) => PILOT_CAPABILITIES.includes(id)))
+        .toEqual(granted.filter((id: string) => PILOT_CAPABILITIES.includes(id)))
+      routeBoardApi()
+      const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: pilotGatedTargetApi(targetState()) })
+      await flush()
+      const statusRendered = testid(root, 'stock-prep-project-pilot-status') !== null
+      const enableRendered = testid(root, 'stock-prep-project-pilot-enable') !== null
+      expect(statusRendered, `${actor.name}: status line`).toBe(granted.includes('projectTarget.pilotRead'))
+      expect(enableRendered, `${actor.name}: enable button`).toBe(granted.includes('projectTarget.pilotEnable'))
+      if (statusRendered) anyRendered += 1
+      if (enableRendered) anyRendered += 1
+      unmountAll()
+    }
+    // Anti-vacuity: stock-prep:admin and the platform admin see both — 2 × 2.
+    expect(anyRendered).toBe(4)
+    // Enabled: the line says so and offers no button — there is no disable.
+    h.roles = ['admin']
+    h.permissions = ['integration:admin']
+    routeBoardApi()
+    const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: pilotGatedTargetApi(targetState(), readyPilotState(true)) })
+    await flush()
+    const line = testid(root, 'stock-prep-project-pilot-status')
+    expect(line).not.toBeNull()
+    expect(line!.dataset.pilotEnabled).toBe('true')
+    expect(line!.textContent).toContain(STOCK_PREP_PROJECT_TARGET_PLAIN.pilot_status_enabled.zh)
+    expect(testid(root, 'stock-prep-project-pilot-enable')).toBeNull()
+    expect(root.querySelector('[data-testid*="pilot-disable"]')).toBeNull()
+    unmountAll()
+  })
+
+  it('not ready: the failing check ids render as closed tokens, the button is absent; an absent sheet asks no pilot read', async () => {
+    h.roles = ['admin']
+    h.permissions = ['integration:admin']
+    routeBoardApi()
+    const notReady = {
+      ...readyPilotState(),
+      readiness: { version: 1, ready: false, checks: [{ id: 'continuation_support_version', ok: false }, { id: 'export_closure_port', ok: false }], failing: ['continuation_support_version', 'export_closure_port'] },
+      may: { enable: false },
+    }
+    const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: pilotGatedTargetApi(targetState(), notReady) })
+    await flush()
+    const line = testid(root, 'stock-prep-project-pilot-status')!
+    expect(line.dataset.pilotEnabled).toBe('false')
+    expect(line.dataset.pilotReady).toBe('false')
+    expect(Array.from(root.querySelectorAll('[data-testid="stock-prep-project-pilot-failing"]')).map((node) => node.textContent)).toEqual(['continuation_support_version', 'export_closure_port'])
+    expect(testid(root, 'stock-prep-project-pilot-enable')).toBeNull()
+    unmountAll()
+    routeBoardApi()
+    const api = pilotGatedTargetApi({ ...targetState(), status: 'absent', sheetId: null, viewId: null, todoViewId: null, may: { create: true, archive: false, restore: false } })
+    const absentRoot = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: api })
+    await flush()
+    expect(testid(absentRoot, 'stock-prep-project-pilot-status')).toBeNull()
+    expect(api.getPilot).not.toHaveBeenCalled()
+    unmountAll()
+  })
+})
+
+describe('PB-FLOW — 「启用分批拉取试点」: typed confirmation, the route, the re-read; a refusal shows its code and failing ids', () => {
+  function flowApi(enable: () => Promise<unknown>): StockPreparationProjectTargetApi & { enableCalls: Array<[string, string]> } {
+    const enableCalls: Array<[string, string]> = []
+    let enabled = false
+    return {
+      enableCalls,
+      get: vi.fn(async () => ({ ...targetState(), may: { create: false, archive: false, restore: false } })),
+      create: vi.fn(async () => { throw new Error('unexpected create') }),
+      list: vi.fn(async () => ({ count: 0, limit: 200, items: [] })),
+      getPilot: vi.fn(async () => ({
+        status: 'active' as const,
+        pilot: { enabled, enabledAt: enabled ? '2026-10-23T00:00:00.000Z' : null, enabledBy: enabled ? 'u_admin' : null, readinessVersion: enabled ? 1 : null },
+        readiness: { version: 1, ready: true, checks: [], failing: [] as string[] },
+        may: { enable: !enabled },
+      })),
+      enablePilot: vi.fn(async (projectNo: string, confirmProjectNo: string) => {
+        enableCalls.push([projectNo, confirmProjectNo])
+        const result = await enable()
+        enabled = true
+        return result as never
+      }),
+    }
+  }
+  const enabledResult = () => ({
+    status: 'active',
+    enabled: true,
+    alreadyEnabled: false,
+    pilot: { enabled: true, enabledAt: '2026-10-23T00:00:00.000Z', enabledBy: 'u_admin', readinessVersion: 1 },
+    exportClosure: { closed: true, alreadyClosed: false },
+    readiness: { version: 1, ready: true, checks: [], failing: [] as string[] },
+  })
+
+  it('admin: the button, the typed prompt (disabled until the number matches), the POST with the typed number, the line follows, no button left', async () => {
+    h.roles = ['admin']
+    h.permissions = ['integration:admin']
+    routeBoardApi()
+    const api = flowApi(async () => enabledResult())
+    const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: api })
+    await flush()
+    await press(root, 'stock-prep-project-pilot-enable')
+    expect(testid(root, 'stock-prep-project-pilot-prompt')).not.toBeNull()
+    const confirm = testid(root, 'stock-prep-project-pilot-confirm') as HTMLButtonElement
+    expect(confirm.disabled).toBe(true)
+    const input = testid(root, 'stock-prep-project-pilot-input') as HTMLInputElement
+    input.value = PROJECT.toLowerCase()
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    expect(confirm.disabled, 'folded case never matches').toBe(true)
+    input.value = ` ${PROJECT} `
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    expect(confirm.disabled).toBe(false)
+    await press(root, 'stock-prep-project-pilot-confirm')
+    expect(api.enableCalls).toEqual([[PROJECT, PROJECT]])
+    const result = testid(root, 'stock-prep-project-pilot-result')!
+    expect(result.dataset.result).toBe('done')
+    expect(result.textContent).toContain(STOCK_PREP_PROJECT_TARGET_PLAIN.pilot_enabled_done.zh)
+    expect(testid(root, 'stock-prep-project-pilot-status')!.dataset.pilotEnabled).toBe('true')
+    expect(testid(root, 'stock-prep-project-pilot-enable')).toBeNull()
+    expect(testid(root, 'stock-prep-project-pilot-prompt')).toBeNull()
+    unmountAll()
+  })
+
+  it('a refusal shows its own sentence, its code and the failing check ids; cancel sends nothing', async () => {
+    h.roles = ['admin']
+    h.permissions = ['integration:admin']
+    routeBoardApi()
+    const api = flowApi(async () => { throw new StockPreparationProjectTargetCallError(409, 'POST pilot', { code: 'STOCK_PREP_PILOT_NOT_READY', failing: ['continuation_support_version'] }) })
+    const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: api })
+    await flush()
+    await press(root, 'stock-prep-project-pilot-enable')
+    await press(root, 'stock-prep-project-pilot-cancel')
+    expect(api.enableCalls).toEqual([])
+    expect(testid(root, 'stock-prep-project-pilot-prompt')).toBeNull()
+    await press(root, 'stock-prep-project-pilot-enable')
+    const input = testid(root, 'stock-prep-project-pilot-input') as HTMLInputElement
+    input.value = PROJECT
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    await press(root, 'stock-prep-project-pilot-confirm')
+    expect(api.enableCalls).toEqual([[PROJECT, PROJECT]])
+    const result = testid(root, 'stock-prep-project-pilot-result')!
+    expect(result.dataset.result).toBe('refused')
+    expect(result.textContent).toContain(stockPrepErrorPlain('STOCK_PREP_PILOT_NOT_READY').zh)
+    expect(result.textContent).toContain('STOCK_PREP_PILOT_NOT_READY')
+    expect(Array.from(root.querySelectorAll('[data-testid="stock-prep-project-pilot-refused-failing"]')).map((node) => node.textContent)).toEqual(['continuation_support_version'])
+    expect(testid(root, 'stock-prep-project-pilot-status')!.dataset.pilotEnabled).toBe('false')
+    unmountAll()
+  })
+
+  it('the client: POST a body of exactly { confirmProjectNo } and no query; GET carries the scope query; the answers are clamped; the flow stops a mismatch and a missing right locally', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      if (init && init.method === 'POST') return new Response(JSON.stringify({ ok: true, data: enabledResult() }), { status: 200 })
+      return new Response(JSON.stringify({ ok: true, data: { status: 'active', pilot: { enabled: false, enabledAt: null, enabledBy: null, readinessVersion: null }, readiness: { version: 1, ready: false, checks: [{ id: 'export_closure_port', ok: false }, { id: 'bad id!', ok: false }], failing: ['export_closure_port', 'BAD'] }, may: { enable: false } } }), { status: 200 })
+    })
+    const api = createStockPreparationProjectTargetApi(SCOPE)
+    const state = await api.getPilot!(PROJECT)
+    expect(calls[0].url).toBe(`/api/integration/stock-preparation/projects/${encodeURIComponent(PROJECT)}/target/pilot?tenantId=${SCOPE.tenantId}&workspaceId=${SCOPE.workspaceId}`)
+    expect(state.readiness!.failing, 'non-token ids are dropped').toEqual(['export_closure_port'])
+    expect(state.readiness!.checks.map((check) => check.id)).toEqual(['export_closure_port'])
+    const enabled = await api.enablePilot!(PROJECT, PROJECT)
+    expect(calls[1].url).toBe(`/api/integration/stock-preparation/projects/${encodeURIComponent(PROJECT)}/target/pilot`)
+    expect(calls[1].init!.method).toBe('POST')
+    expect(JSON.parse(String(calls[1].init!.body))).toEqual({ confirmProjectNo: PROJECT })
+    expect(enabled.enabled).toBe(true)
+    expect(enabled.exportClosure).toEqual({ closed: true, alreadyClosed: false })
+    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({ ok: false, error: { code: 'STOCK_PREP_PILOT_NOT_READY', details: { version: 1, failing: ['write_lock_free', 'not a token'], partial: false } } }), { status: 409 }))
+    const outcome = await enableStockPreparationProjectPilot({ targetApi: api, canEnable: true }, PROJECT, PROJECT)
+    expect(outcome).toEqual({ kind: 'refused', status: 409, code: 'STOCK_PREP_PILOT_NOT_READY', failing: ['write_lock_free'] })
+    h.apiFetch.mockClear()
+    expect(await enableStockPreparationProjectPilot({ targetApi: api, canEnable: true }, PROJECT, `${PROJECT}-X`)).toEqual({ kind: 'mismatch' })
+    expect(await enableStockPreparationProjectPilot({ targetApi: api, canEnable: false }, PROJECT, PROJECT)).toEqual({ kind: 'not_permitted' })
+    expect(h.apiFetch).not.toHaveBeenCalled()
   })
 })

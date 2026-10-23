@@ -99,6 +99,13 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   'project_target_grant',
   'project_fields_update',
   'project_overview_refresh',
+  // 备料分批拉取第一期 step 3 PR B (migration 101): an administrator (stock-prep:admin) ENABLED THE
+  // PILOT of one project sheet — from then on the large-BOM lane refuses the project, an over-cap
+  // preview refuses instead of falling to the large lane, and the host keeps the sheet's generic grid
+  // export closed. Written ONCE per project (a re-POST that only repairs a missing host stamp writes no
+  // second row). Values-free: `project_id` the project NUMBER, `subject_id` the sheet id, `mode` the
+  // enum `enabled`, `detail` the readiness version, the objectId handle and booleans about the stamp.
+  'project_pilot_enable',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

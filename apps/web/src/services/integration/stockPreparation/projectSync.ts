@@ -110,6 +110,12 @@ export type StockPreparationProjectSyncReason =
   // Review round 1: lost a race for the lock with no writer holding it ("system busy", never "someone
   // else is writing").
   | 'PLAN_WRITE_LOCK_BUSY'
+  // 备料分批拉取第一期 step 3 PR B (plan §5.1 / §9.4 L03): a PILOT project's BOM exceeded a small-lane cap.
+  // The server refused the pull (409) instead of handing it to the large lane — a FAILURE, never a skip: the
+  // large lane is refused for pilot projects, so the panel must not auto-start it, and the owner decides.
+  // Its sibling: the server could not READ the pilot marker (503) — also a failure, fail closed.
+  | 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT'
+  | 'PLAN_PILOT_STATE_UNREADABLE'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -641,6 +647,14 @@ export const STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES: readonly string[] 
 /** The server's `details.reason` on a WRITE_LOCKED that lost a lock race with no writer holding it. */
 export const STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON = 'contention'
 
+/**
+ * 备料分批拉取第一期 step 3 PR B — the server's pilot lane codes (plugin stock-preparation-pilot-gate.cjs
+ * PILOT_ERROR_CODES). The dry run meets the first two; the large-lane refusal belongs to the large lane's
+ * own copy (plainLanguage STOCK_PREP_LARGE_BOM_ERROR_PLAIN).
+ */
+export const STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED_CODE = 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED'
+export const STOCK_PREP_PILOT_STATE_UNREADABLE_CODE = 'STOCK_PREP_PILOT_STATE_UNREADABLE'
+
 /** The server's `details.reason` when a dry-run token was minted UNBOUND (review round 2, F6). */
 export const STOCK_PREP_PROJECT_TOKEN_UNBOUND_REASON = 'token_unbound'
 /** The lock-not-wired code: it is refused before any lock IO, so it never follows a write. */
@@ -692,6 +706,11 @@ export function classifyPlanReadFailureReason(
     return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
   }
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  // PR B: BY CODE, ahead of the status rules, and a FAILURE on both (classifyPlanStep marks every reason of a
+  // refused dry run `fail`): the panel never auto-starts the large lane on a pilot project's over-cap refusal
+  // (that happens only on the `large_bom_bounded` SKIP), and an unreadable marker never reads as transient.
+  if (errorCode === STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED_CODE) return 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT'
+  if (errorCode === STOCK_PREP_PILOT_STATE_UNREADABLE_CODE) return 'PLAN_PILOT_STATE_UNREADABLE'
   // Batch-refresh phase 0 step 1: BY CODE, ahead of the status rules — the 503 store failure must not
   // read as the transient PLAN_READ_FAILED, and the 409 must not read as an unknown refusal.
   if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCKED_CODE) {

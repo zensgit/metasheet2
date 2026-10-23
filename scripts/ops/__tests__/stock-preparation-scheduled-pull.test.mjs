@@ -841,3 +841,25 @@ test('any OTHER 409 on the dry-run is still a failure (the skip is keyed on the 
   assert.equal(lines[0].failed, true)
   assert.match(lines[0].error, /TARGET_SHEET_FOREIGN_PROJECT/)
 })
+
+// 备料分批拉取第一期 step 3 PR B (plan §5.1 / §9.4 L03): a PILOT project over the small-lane cap is refused by the
+// server (409) instead of being handed to the large lane, and this script classifies it as a NAMED FAILURE — exit
+// non-zero, never a skip, never a retry of the background channel; the 503 "marker unreadable" sibling likewise.
+test('409 STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED and 503 STOCK_PREP_PILOT_STATE_UNREADABLE are named failures, never skips, and apply is never called', async () => {
+  for (const [status, code] of [[409, 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED'], [503, 'STOCK_PREP_PILOT_STATE_UNREADABLE']]) {
+    const { result, requests } = await withMockFetch(
+      () => ({ status, json: { ok: false, error: { code } } }),
+      () => runMain(['--apply'], BASE_ENV),
+    )
+    assert.notEqual(result.code, 0, `${code}: the run exits non-zero`)
+    const lines = jsonLines(result.stdout)
+    assert.equal(lines[0].action, 'error', code)
+    assert.equal(lines[0].failed, true, code)
+    assert.equal(lines[0].error, code)
+    assert.match(lines[0].note, /pilot/i)
+    assert.equal(lines[1].summary.failed, 1, code)
+    assert.equal(lines[1].summary.skippedLargeBomBounded, 0, `${code}: never counted as the large-lane skip`)
+    assert.equal(requests.filter((request) => /\/apply(\?|$)/.test(request.url)).length, 0, `${code}: apply is never POSTed`)
+    assert.equal(requests.length, 1, `${code}: exactly the dry-run call was made`)
+  }
+})

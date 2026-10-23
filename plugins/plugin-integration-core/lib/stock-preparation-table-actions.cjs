@@ -2530,6 +2530,15 @@ async function dryRunStockPreparationAction(input = {}) {
     b2aSourceObjects,
     b2aNow: input.now,
   })
+  // 备料分批拉取第一期 step 3 PR B (plan §5.1 「超过小车道上限时明确拒绝,不自动转大车道」): when the
+  // expansion hit a small-lane cap, the route's pilot guard runs HERE — after the expansion (that is when
+  // the cap is known), before the token block and before the response that would tell the panel to start
+  // the large lane. A pilot project is refused 409 STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED by the guard
+  // (an unreadable pilot state is its 503); a non-pilot project returns through the guard and keeps its
+  // `large_bom_bounded` answer byte for byte. Absent guard (a direct lib caller) = the pre-PR-B path.
+  if (isLargeBomBoundedExpansion(dryRun.expansion) && typeof input.pilotLaneGuard === 'function') {
+    await input.pilotLaneGuard()
+  }
   let dryRunToken = null
   if (dryRun.canApply) {
     // PLAN GENERATION (batch-refresh phase 0 step 1): an applicable preview SUPERSEDES every earlier

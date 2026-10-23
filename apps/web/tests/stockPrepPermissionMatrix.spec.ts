@@ -302,6 +302,12 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   // on that line in apps/web/tests/StockPreparationProjectArchive.spec.ts (PA-ALIGN).
   'stock-prep-project-target-archive',
   'stock-prep-project-target-restore',
+  // PR B (R-53 / R-54): the pilot status line and the 「启用试点」 button live on 项目备料页's sheet-state
+  // line, ADMIN tier, rendered only once the server's pilot read answered for an active sheet. Their
+  // alignment, both directions, per actor, is asserted on that line in
+  // apps/web/tests/StockPreparationProjectArchive.spec.ts (PB-ALIGN).
+  'stock-prep-project-pilot-status',
+  'stock-prep-project-pilot-enable',
   // S3 (R-37): the project-level fields form and its 「保存」 live on 项目备料页's sheet-state line, the
   // 「刷新项目总览」 button on 今天要处理's project-sheets line — OPERATE, each rendered only once the
   // server answered with the switch on. Their alignment, both directions, per actor, is asserted on

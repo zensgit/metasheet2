@@ -369,7 +369,10 @@ test('R-14 (R1) a large-BOM job planned against the env sheet BEFORE the flip is
     const approved = await applyStart(h.routes, jobId)
     assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
     const applyJobId = approved.body.data.jobId
-    assert.deepEqual(h.db.calls, [], 'the registry was never consulted before the flip')
+    // PR B: the pilot lane gate reads the registry's pilot marker on every large route REGARDLESS of the
+    // switch (step-4 design D3 / B-B3: switching the switch off must not bypass the refusal) — read-only
+    // `selectOne` consults, never a write. Apart from them the registry was never consulted before the flip.
+    assert.deepEqual(h.db.calls.filter((call) => call !== 'selectOne'), [], 'the registry was never consulted before the flip (pilot marker reads aside)')
     // THE FLIP: the switch goes on and the project gets its own registered sheet.
     process.env[PROJECT_SHEETS_ENABLED_ENV] = 'true'
     registerActive(h)
@@ -429,7 +432,9 @@ test('R-16 (R1) switch OFF: the three routes answer byte-identically for the sam
       const approved = await applyStart(h.routes, jobId)
       const applyJobId = approved.body && approved.body.data ? approved.body.data.jobId : null
       const ran = await applyRun(h.routes, jobId, applyJobId)
-      assert.deepEqual(h.db.calls, [], 'the registry is never consulted while the switch is off')
+      // PR B: the pilot marker is read on every large route regardless of the switch (read-only selectOne
+      // consults; D3 / B-B3); nothing else of the registry is consulted while the switch is off.
+      assert.deepEqual(h.db.calls.filter((call) => call !== 'selectOne'), [], 'the registry is never consulted while the switch is off (pilot marker reads aside)')
       // Clocks and the minted apply-job id are the only things that may differ between two runs.
       const canon = (res) => JSON.parse(JSON.stringify([res.statusCode, res.body])
         .split(applyJobId).join('<applyJobId>')

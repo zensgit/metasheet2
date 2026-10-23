@@ -1413,6 +1413,15 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     }
     const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
     const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
+    // PILOT LANE CHECK (batch-refresh step 3 PR B; plan §5.1 / §9.4 L02): the route's pilot gate runs
+    // AGAIN here, inside the sheet write lease, BEFORE the generation binding is compared and BEFORE the
+    // job turns `running` — so a job approved before its project became a pilot is refused with the pilot
+    // code (never PLAN_SUPERSEDED, never a write), and the job is left exactly as it was (status, checkpoint,
+    // counts untouched; this request advanced nothing). The route always passes it; a direct lib caller
+    // without one keeps the pre-PR-B path.
+    if (typeof input.largeLanePilotCheck === 'function') {
+      await input.largeLanePilotCheck({ target: cloneJson(job.target), applyJobId: job.jobId })
+    }
     // PROJECT WRITE GUARD (batch-refresh phase 0 step 1): the route holds the sheet write lease around
     // this chunk. Required (501), and BEFORE any job write the job's approval binding must be the
     // generation the lease grant observed — a newer preview or approval of this project since then

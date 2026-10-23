@@ -135,6 +135,8 @@ node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs
 node __tests__/stock-preparation-project-write-lock.test.cjs
+node __tests__/stock-preparation-pilot-gate.test.cjs
+node __tests__/stock-preparation-pilot-routes.test.cjs
 node __tests__/stock-preparation-project-write-guard-apply.test.cjs
 node __tests__/stock-preparation-project-write-guard-routes.test.cjs
 node __tests__/stock-preparation-carry-confirm-write-lease.test.cjs
@@ -266,11 +268,9 @@ node __tests__/stock-preparation-mvp-repair-routes.test.cjs
 node __tests__/stock-preparation-managed-table-relabel.test.cjs
 node __tests__/stock-preparation-write-scope-reconcile-bounds.test.cjs
 node __tests__/route-failure-log-closed-code.test.cjs
-
 # G4/M2 (#5553): adapter-load hard dependency + no credential-stripped fallback.
 # Mutation probe: scripts/g4-m2-mutation-probe.cjs
 node __tests__/integration-g4-m2-adapter-load-hard-dependency.test.cjs
-
 node __tests__/stock-preparation-yida-allocation.test.cjs
 node __tests__/yida-approved-target-store.test.cjs
 node __tests__/yida-credential-material-store.test.cjs
@@ -289,7 +289,6 @@ node __tests__/yida-send-authority-primitives.test.cjs
 node __tests__/yida-static-plan.test.cjs
 node __tests__/yida-token-client.test.cjs
 node __tests__/yida-token-exchange.test.cjs
-
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---

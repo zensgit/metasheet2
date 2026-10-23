@@ -1334,3 +1334,40 @@ describe('batch-refresh phase 0 step 1 — project write lock codes', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------------------------------
+// 备料分批拉取第一期 step 3 PR B (plan §5.1 / §9.4 L03): a PILOT project over the small-lane cap is a
+// FAILURE with its own sentence — never the `large_bom_bounded` SKIP that auto-starts the large lane.
+// ---------------------------------------------------------------------------------------------------
+describe('PR B — the pilot refusals of the dry run', () => {
+  it('409 STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED is a FAIL with PLAN_PILOT_OVER_SMALL_LANE_LIMIT, never a skip; 503 STATE_UNREADABLE likewise', async () => {
+    for (const [status, code, reason] of [
+      [409, 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED', 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT'],
+      [503, 'STOCK_PREP_PILOT_STATE_UNREADABLE', 'PLAN_PILOT_STATE_UNREADABLE'],
+    ] as const) {
+      const api = makeApi({ dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/dry-run', { code })) })
+      const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+      const step = stepOf(report, 'dry-run')
+      expect(step).toMatchObject({ status: 'fail', reason })
+      expect(step.reason).not.toBe('PLAN_LARGE_BOM_BOUNDED')
+      expect(report.pass).toBe(false)
+      expect(api.apply).not.toHaveBeenCalled()
+      expect(classifyPlanReadFailureReason(status, code)).toBe(reason)
+      const plain = STOCK_PREP_SYNC_REASON_PLAIN[reason]
+      expect(plain).toBeDefined()
+      expect(plain.zh.length * plain.en.length * (plain.zhNext ?? '').length * (plain.enNext ?? '').length).toBeGreaterThan(0)
+      // Never a promise of the background channel, never a bare retry.
+      expect(`${plain.zh}${plain.zhNext}`).not.toContain('后台通道处理')
+      expect(`${plain.zh}${plain.zhNext}`).not.toContain('稍后再试一次')
+      expect(`${plain.en} ${plain.enNext}`.toLowerCase()).not.toContain('switched to the background channel')
+      assertValuesFree(report)
+    }
+    // The over-cap refusal names the owner's decision; the unreadable one names the platform admin.
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_PILOT_OVER_SMALL_LANE_LIMIT.zhNext).toContain('负责人')
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_PILOT_STATE_UNREADABLE.zhNext).toContain('管理员')
+    // The code-keyed error copy exists for every pilot code the server can answer.
+    for (const code of ['STOCK_PREP_PILOT_LARGE_LANE_REFUSED', 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED', 'STOCK_PREP_PILOT_STATE_UNREADABLE', 'STOCK_PREP_PILOT_NOT_READY']) {
+      expect(stockPrepErrorPlain(code).zh).not.toBe(stockPrepErrorPlain('NO_SUCH_CODE').zh)
+    }
+  })
+})
