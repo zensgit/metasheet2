@@ -618,6 +618,17 @@ export interface MetaSheetPermissionEntry {
   isActive: boolean
 }
 
+/**
+ * 客户反馈 2026-10-21 item 1: whether the DingTalk person-message sender would reach a local user id
+ * (POST …/automations/dingtalk-person-recipient-status). Booleans only — the server sends no name.
+ */
+export interface DingTalkPersonRecipientStatus {
+  userId: string
+  exists: boolean
+  active: boolean
+  dingtalkLinked: boolean
+}
+
 export interface MetaSheetPermissionCandidate {
   subjectType: MetaSheetPermissionSubjectType
   subjectId: string
@@ -1759,7 +1770,12 @@ export interface DingTalkPersonDelivery {
   deliveredAt?: string
   localUserLabel?: string
   localUserSubtitle?: string
-  localUserIsActive: boolean
+  /** Review round 2: false when no user has this id (a mistyped id) — the viewer says 未找到该用户. */
+  localUserExists?: boolean
+  /** null when the user does not exist (unknown, not "inactive"). */
+  localUserIsActive: boolean | null
+  /** Codex review P2: linked to DingTalk NOW (a current fact, never the cause of a past skip); null if no user. */
+  localUserDingTalkLinked?: boolean | null
 }
 
 // --- Field Validation ---
