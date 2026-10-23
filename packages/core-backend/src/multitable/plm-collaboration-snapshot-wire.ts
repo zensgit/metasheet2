@@ -184,7 +184,11 @@ const inputSchema = z.object({
 export function parseEcoCollaborationSourceInput(value: unknown): EcoCollaborationSourceInput {
   const parsed = inputSchema.safeParse(value)
   if (!parsed.success) throw new EcoCollaborationSourceError(422, 'ECO_SOURCE_INPUT_INVALID')
-  return parsed.data
+  return {
+    itemId: parsed.data.itemId,
+    ecoId: parsed.data.ecoId,
+    currentVersionId: parsed.data.currentVersionId,
+  }
 }
 
 function entitledFalse(value: unknown): boolean {

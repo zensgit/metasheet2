@@ -148,7 +148,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
             --config vitest.plm-managed-companion.config.ts \
             --reporter=json --outputFile=/tmp/plm-managed-pg.json
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-pg.json 52
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-pg.json 133
 
       - name: Remove owned socket PostgreSQL
         if: always()
