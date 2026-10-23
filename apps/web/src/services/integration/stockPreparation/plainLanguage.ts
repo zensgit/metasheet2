@@ -600,8 +600,8 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
   STOCK_PREP_PROJECT_PLAN_SUPERSEDED: Object.freeze({
     zh: '已有更新的试算或批准,这份计划不再有效。',
     en: 'A newer preview or approval exists, so this plan is no longer valid.',
-    zhNext: '请重新试算(大BOM请重新批准)后再写入。',
-    enNext: 'Preview again (re-approve, for a large BOM) before writing.',
+    zhNext: '请重新试算(大BOM请重新展开)后再写入。',
+    enNext: 'Preview again (expand again, for a large BOM) before writing.',
   }),
   STOCK_PREP_PROJECT_WRITE_LEASE_LOST: Object.freeze({
     zh: '写入被另一次同步接管,这次已停止。',
@@ -1013,6 +1013,23 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
 
 export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+}
+
+/**
+ * The large-BOM pull panel's few lane-specific readings of a server code (PR #6501, Codex review P1-b).
+ * In the large lane a superseded plan can only be fixed by EXPANDING AGAIN: the generation is bound when
+ * the expansion reads its source, so neither re-planning nor re-approving the old expansion is accepted.
+ * Every other code reads exactly as `stockPrepErrorPlain`.
+ */
+export const STOCK_PREP_LARGE_BOM_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  STOCK_PREP_PROJECT_PLAN_SUPERSEDED: Object.freeze({
+    zh: 'BOM 已有更新的试算或写入，请重新展开后再规划。',
+    en: 'This BOM has a newer preview or write; expand it again before planning.',
+  }),
+})
+
+export function stockPrepLargeBomErrorPlain(code: string): StockPrepPlainEntry {
+  return lookup(STOCK_PREP_LARGE_BOM_ERROR_PLAIN, code) ?? stockPrepErrorPlain(code)
 }
 
 /**

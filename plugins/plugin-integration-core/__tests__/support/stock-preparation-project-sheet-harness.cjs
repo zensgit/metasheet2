@@ -448,7 +448,8 @@ function mountProjectSheetRoutes({
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning, records },
+      // P1-a: the fake host declares + enforces the write fence, as the real host does.
+      multitable: { provisioning, records: require('./stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records) },
     },
     storage: consumableMap(),
     config: {
@@ -508,6 +509,8 @@ function mountProjectSheetRoutes({
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
     // S3 fix round 1: the REAL registry store the routes use, for suites that drive the overview module directly.
     projectTargetStore: services.stockPreparationProjectTargetStore,
+    // Codex review P1-b: the lock the routes use, so a suite can seed what an expansion observed.
+    projectWriteLock: services.stockPreparationProjectWriteLock || null,
     projectObjectId: (no = projectNo) => deriveProjectSheetObjectId(tenantId, no),
     registryRows: () => db.rowsOf(PROJECT_TARGET_TABLE),
     /**

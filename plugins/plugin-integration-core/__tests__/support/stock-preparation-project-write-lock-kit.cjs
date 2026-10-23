@@ -21,9 +21,12 @@ const {
   normalizeActionParameters,
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const {
+  HOST_WRITE_FENCE_CODES,
+  PROJECT_WRITE_LOCK_TABLE,
   createStockPreparationProjectWriteLock,
   sheetWriteScopeKey,
   writeBindingFromGeneration,
+  writeObservationFromGeneration,
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
 
 function clone(value) {
@@ -51,6 +54,10 @@ function matches(row, where) {
 // throw (kept until the test removes it). `pauses[method]` = an async function(args) awaited BEFORE
 // the statement takes effect — the statement is atomic from the moment the pause resolves, which is
 // what a single PostgreSQL statement is.
+// Every fake lock db made in this process, so a fake records host can answer a fence without being told
+// which db holds the lease (lease ids are random UUIDs, so a fence matches at most one db's row).
+const FAKE_LOCK_DBS = new Set()
+
 function createFakeLockDb({ primaryKey = 'scope_key' } = {}) {
   const tables = new Map()
   const faults = {}
@@ -73,7 +80,7 @@ function createFakeLockDb({ primaryKey = 'scope_key' } = {}) {
       if (error) throw error
     }
   }
-  return {
+  const db = {
     tables,
     faults,
     pauses,
@@ -117,7 +124,67 @@ function createFakeLockDb({ primaryKey = 'scope_key' } = {}) {
       }
       return out
     },
+    // The fake host's fence read: synchronous, so check + write are one step (the real host holds the
+    // row FOR SHARE until COMMIT; a takeover/bump can then only land before or after the whole write).
+    fenceRowExists(fence) {
+      for (const row of table(PROJECT_WRITE_LOCK_TABLE).values()) {
+        if (row.scope_key === fence.scopeKey && row.lease_id === fence.leaseId
+          && Number(row.fencing_epoch) === Number(fence.fencingEpoch) && row.generation_token === fence.generationToken) return true
+      }
+      return false
+    },
   }
+  FAKE_LOCK_DBS.add(db)
+  return db
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 1b. The fake host's half of a fenced write (mirrors packages/core-backend/src/multitable/
+//     plugin-write-fence.ts: exact five keys, the one allow-listed lock, the row must still match).
+// ---------------------------------------------------------------------------------------------------
+
+function hostFenceError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  error.status = code === HOST_WRITE_FENCE_CODES.REJECTED ? 409 : 403
+  return error
+}
+
+const FENCE_KEYS = ['lock', 'scopeKey', 'leaseId', 'fencingEpoch', 'generationToken']
+
+// `lockDb` pins the lookup to one fake db; otherwise every fake db in the process is searched.
+function assertFakeHostWriteFence(fence, { lockDb } = {}) {
+  if (fence === undefined) return
+  if (!fence || typeof fence !== 'object' || Array.isArray(fence)) throw hostFenceError(HOST_WRITE_FENCE_CODES.NOT_ALLOWED, 'fence shape')
+  const keys = Object.keys(fence)
+  if (keys.length !== FENCE_KEYS.length || !FENCE_KEYS.every((key) => keys.includes(key))) throw hostFenceError(HOST_WRITE_FENCE_CODES.NOT_ALLOWED, 'fence shape')
+  if (fence.lock !== PROJECT_WRITE_LOCK_TABLE) throw hostFenceError(HOST_WRITE_FENCE_CODES.NOT_ALLOWED, 'lock not allowed')
+  const dbs = lockDb ? [lockDb] : Array.from(FAKE_LOCK_DBS)
+  if (!dbs.some((db) => db.fenceRowExists(fence))) throw hostFenceError(HOST_WRITE_FENCE_CODES.REJECTED, 'the write fence no longer holds')
+}
+
+// Wrap ANY records fake so it declares and enforces the host fence: `writeFence` is checked right before
+// the delegated write and stripped from what the wrapped fake sees (its own call logs stay as they were).
+// A transparent Proxy: every other read / write goes to the wrapped fake, so a test that swaps one of its
+// methods later still reaches it. An api that already declares `supportsWriteFence` is returned as is.
+function withFakeHostWriteFence(recordsApi, options = {}) {
+  if (!recordsApi || recordsApi.supportsWriteFence === true) return recordsApi
+  const fences = []
+  const fencedMethod = (method) => async (input = {}) => {
+    if (!input || !Object.prototype.hasOwnProperty.call(input, 'writeFence')) return recordsApi[method](input)
+    const { writeFence, ...rest } = input
+    fences.push([method, clone(writeFence)])
+    assertFakeHostWriteFence(writeFence, options)
+    return recordsApi[method](rest)
+  }
+  return new Proxy(recordsApi, {
+    get(target, key, receiver) {
+      if (key === 'supportsWriteFence') return true
+      if (key === 'fakeHostFences') return fences
+      if ((key === 'createRecord' || key === 'patchRecord') && typeof target[key] === 'function') return fencedMethod(key)
+      return Reflect.get(target, key, receiver)
+    },
+  })
 }
 
 // A controllable clock. `now()` answers a Date, the shape the lock module asks for.
@@ -223,8 +290,11 @@ function createSourceAdapter(data) {
 }
 
 // `beforeWrite` (optional) is awaited inside createRecord / patchRecord BEFORE the row changes — the
-// hook a test uses to hold a writer mid-run.
-function createRecordsApi({ existing = [], beforeWrite } = {}) {
+// hook a test uses to hold a writer mid-run. The fake HOST FENCE (P1-a) is checked AFTER that hook and
+// atomically with the row change, the way the real host checks it inside the write transaction;
+// `hostFence: false` builds a host without fence support (no `supportsWriteFence`; a fence is ignored).
+// Calls are logged WITHOUT the fence; `fences` logs the fences seen.
+function createRecordsApi({ existing = [], beforeWrite, hostFence = true, lockDb } = {}) {
   const rows = existing.map((entry, index) => ({
     id: entry.id || `rec_${index + 1}`,
     sheetId: entry.sheetId,
@@ -232,12 +302,23 @@ function createRecordsApi({ existing = [], beforeWrite } = {}) {
     data: { ...(entry.data || {}) },
   }))
   const calls = []
+  const fences = []
   let created = 0
+  function logWrite(method, input) {
+    const { writeFence, ...rest } = input
+    calls.push([method, clone(rest)])
+    if (writeFence !== undefined) fences.push([method, clone(writeFence)])
+  }
+  function checkFence(input) {
+    if (hostFence) assertFakeHostWriteFence(input.writeFence, { lockDb })
+  }
   return {
     rows,
     calls,
+    fences,
     writes: () => calls.filter(([method]) => method === 'createRecord' || method === 'patchRecord'),
     recordsApi: {
+      ...(hostFence ? { supportsWriteFence: true } : {}),
       async queryRecords(input = {}) {
         calls.push(['queryRecords', clone(input)])
         return rows
@@ -247,16 +328,18 @@ function createRecordsApi({ existing = [], beforeWrite } = {}) {
           .map(clone)
       },
       async createRecord(input = {}) {
-        calls.push(['createRecord', clone(input)])
+        logWrite('createRecord', input)
         if (typeof beforeWrite === 'function') await beforeWrite('createRecord', input)
+        checkFence(input)
         created += 1
         const record = { id: `rec_new_${created}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }
         rows.push(record)
         return clone(record)
       },
       async patchRecord(input = {}) {
-        calls.push(['patchRecord', clone(input)])
+        logWrite('patchRecord', input)
         if (typeof beforeWrite === 'function') await beforeWrite('patchRecord', input)
+        checkFence(input)
         const record = rows.find((row) => row.sheetId === input.sheetId && row.id === input.recordId)
         if (!record) throw new Error('record not found')
         record.version += 1
@@ -321,12 +404,33 @@ function createLibWriteLockHarness(options = {}) {
       if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGuard')) return apply(input)
       const scope = writeScopeOfInput(input)
       if (!scope) return apply(input)
-      return env.lock.withProjectWriteLease(scope, { purpose: 'small_apply', runId: 'swl-test-run', tenantId: input.tenantId }, (guard) => apply({ ...input, projectWriteGuard: guard }))
+      // A records fake that predates the host fence gets the fake host's fence (declared + enforced).
+      const recordsApi = withFakeHostWriteFence(input.recordsApi)
+      return env.lock.withProjectWriteLease(scope, { purpose: 'small_apply', runId: 'swl-test-run', tenantId: input.tenantId }, (guard) => apply({ ...input, recordsApi, projectWriteGuard: guard }))
     }
   }
-  // The large lane, the way the routes drive it: approval through the generation binder (scope = the
-  // expansion snapshot's sheet + the job's project number), every chunk inside the lease with the guard
-  // (scope = the job's own binding). Same opt-out rule as above.
+  // The large lane, the way the routes drive it: the expansion start through the generation OBSERVER and
+  // the plan through the generation READER (P1-b; scope = the action's target sheet), approval through the
+  // generation binder (scope = the expansion snapshot's sheet; the bump is conditional on what the
+  // expansion observed), every chunk inside the lease with the guard (scope = the job's own binding).
+  // Same opt-out rule as above.
+  function wrapLargeExpansionStart(createJob) {
+    return async (input = {}) => {
+      if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationObserver')) return createJob(input)
+      const sheetId = input.action && input.action.target && input.action.target.sheetId
+      const scope = typeof sheetId === 'string' && sheetId ? sheetWriteScopeKey(sheetId) : null
+      return createJob({
+        ...input,
+        writeGenerationObserver: scope ? async () => writeObservationFromGeneration(await env.lock.observeGeneration(scope)) : undefined,
+      })
+    }
+  }
+  function wrapLargePlan(planJob) {
+    return async (input = {}) => {
+      if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationReader')) return planJob(input)
+      return planJob({ ...input, writeGenerationReader: (scope) => env.lock.readGeneration(scope) })
+    }
+  }
   function wrapLargeApprove(createJob) {
     return async (input = {}) => {
       if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationBinder')) return createJob(input)
@@ -343,7 +447,7 @@ function createLibWriteLockHarness(options = {}) {
       return createJob({
         ...input,
         writeGenerationBinder: scope
-          ? async () => writeBindingFromGeneration(await env.lock.bumpGeneration(scope, { reason: 'large_approval', tenantId: input.tenantId }))
+          ? async (expect) => writeBindingFromGeneration(await env.lock.bumpGeneration(scope, { reason: 'large_approval', tenantId: input.tenantId, expect }))
           : undefined,
       })
     }
@@ -360,10 +464,11 @@ function createLibWriteLockHarness(options = {}) {
       }
       const scope = job && typeof job.writeScope === 'string' ? job.writeScope : null
       if (!scope) return runChunk(input)
-      return env.lock.withProjectWriteLease(scope, { purpose: 'large_apply_chunk', runId: 'swl-test-chunk', tenantId: input.tenantId }, (guard) => runChunk({ ...input, projectWriteGuard: guard }))
+      const recordsApi = withFakeHostWriteFence(input.recordsApi)
+      return env.lock.withProjectWriteLease(scope, { purpose: 'large_apply_chunk', runId: 'swl-test-chunk', tenantId: input.tenantId }, (guard) => runChunk({ ...input, recordsApi, projectWriteGuard: guard }))
     }
   }
-  return { ...env, wrapDryRun, wrapApply, wrapLargeApprove, wrapLargeChunk, scopeOf: writeScopeOfInput }
+  return { ...env, wrapDryRun, wrapApply, wrapLargeExpansionStart, wrapLargePlan, wrapLargeApprove, wrapLargeChunk, scopeOf: writeScopeOfInput }
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -410,6 +515,7 @@ module.exports = {
   GOLDEN_RUN_ID,
   GOLDEN_SHEET_ID,
   SANDBOX_POLICY,
+  assertFakeHostWriteFence,
   clone,
   createClock,
   createConsumableStorage,
@@ -424,5 +530,6 @@ module.exports = {
   goldenPlmData,
   hashJsonForGolden,
   uniqueViolation,
+  withFakeHostWriteFence,
   writeScopeOfInput,
 }

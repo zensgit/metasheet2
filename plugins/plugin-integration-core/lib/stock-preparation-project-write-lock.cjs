@@ -16,13 +16,15 @@
 //     (a small dry-run token, a large checkpoint job) is BOUND to the generation it was planned or
 //     approved under; a run compares its binding with the generation it observes AFTER it holds the
 //     lease, and re-asserts both in the same single-statement CAS before every write.
-//     LARGE LANE LIMIT (R4, deferred): the large plan is built UNBOUND before approval and every chunk
-//     writes that frozen plan, so for the large lane the generation only orders APPROVALS against
-//     previews — a plan computed before a newer preview but approved after it is approved as the
-//     newest. "Even sequentially" holds for the small lane only. Pilot projects are to be kept off the
-//     large lane, and today that is CONFIGURATION (the production policy's allowedRoute, see
-//     stock-preparation-table-actions.cjs assertStockPrepApplyAllowed), not code: the pilot-marker
-//     change must refuse the large lane for pilot projects in code.
+//     LARGE LANE (Codex review P1-b): the generation is bound at EXPANSION time, because that is when
+//     the large lane reads its source. The expansion start records the sheet's generation token and
+//     fencing epoch (observeGeneration — refused while a live writer holds the sheet); the plan is made
+//     only while the token is unchanged (readGeneration) and records what it checked; the approval
+//     bumps only while token AND epoch are still exactly that (bumpGeneration `expect`, pinned in the
+//     CAS). A newer preview, approval or ANY lease taken on the sheet since the expansion read its
+//     source makes it stale: 409 PLAN_SUPERSEDED `expansion_stale`; a job carrying no observation
+//     (expanded or planned before this, or without the lock) is `expansion_unbound`. So "even
+//     sequentially" holds for both lanes: an approval can never revive a plan read before a newer write.
 //
 // Both live in ONE row per scope in integration_stock_prep_project_write_lock (migration 100), so one
 // UPDATE checks lease and generation together and a bump conflicts with a holder's CAS on the same
@@ -45,14 +47,22 @@
 //   I3  the executor takes generation_token from the statement that GRANTED the lease and compares it
 //       with the artifact's binding before any sheet read or write;
 //   I4  the single-use token is consumed only after the lease is held, so a busy refusal never burns it.
+//   I5  (Codex review P1-a) every machine record write is HOST FENCED: the writer hands the host this
+//       guard's lease + generation (`writeFence` on createRecord / patchRecord — guard.hostWriteFence),
+//       and the host re-checks them INSIDE the record write transaction with
+//       SELECT 1 ... WHERE scope_key, lease_id, fencing_epoch, generation_token ... FOR SHARE
+//       (packages/core-backend/src/multitable/plugin-write-fence.ts, hard-coded allow-list keyed by the
+//       calling plugin). Zero rows -> the host refuses the write (nothing written) and the run stops
+//       LEASE_LOST / PLAN_SUPERSEDED (guard.hostFenceRefused). A takeover or bump UPDATE waits for an
+//       in-flight fenced write to commit; a write that starts after it sees the new row and is refused.
+//       So a holder suspended across a takeover can no longer land its in-flight write. After the last
+//       write the guard re-asserts once more (guard.reassert): a loss there is LEASE_LOST with the
+//       partial counts, never "succeeded". A records host that does not declare `supportsWriteFence`
+//       is refused (501) before any write.
 //
-// ACCEPTED RESIDUAL (R1, phase 1). The multitable records API offers no write that is conditional on a
-// plugin-table row, so TRUE storage-side fencing is impossible from here (the same ceiling the 077
-// reconcile lease documents). A holder suspended for at least TTL + GRACE (4 minutes) can have ONE host
-// write already in flight across the suspension; that write may commit after a takeover. It is bounded
-// to one write (the next CAS fails LEASE_LOST) and is recorded (last_interrupted_*) for G6 recovery.
-// Closing it needs host fenced writes (a `writeFence` option on plugin createRecord/patchRecord that
-// locks this row FOR SHARE inside the write transaction) — a follow-up, not this module.
+// NOT IN THE LEASE (named, follow-ups): the carry-confirm / confirm writes
+// (stock-preparation-confirm-writes.cjs) write the same sheet without this lease or fence; print and
+// copy are out of scope (they do not write the canonical sheet through this path).
 //
 // FAIL CLOSED. No env flag. Any failure to read or write the row is STORE_FAILED (503), never busy and
 // never "proceed without a lock"; a missing table (deploy without the migration) is a STORE_FAILED.
@@ -65,8 +75,8 @@
 //   * CLOCKS. Lease times come from each PROCESS's clock (the scoped db helper takes parameter values,
 //     not SQL expressions). GRACE (120 s) absorbs ordinary skew; an instance whose clock runs more than
 //     TTL + GRACE ahead of the holder's can take over a live lease early. That is still bounded: the
-//     holder's next CAS fails LEASE_LOST, so at most the accepted residual write (R1) lands. There is a
-//     single host today.
+//     holder's next host-fenced write is refused and its next CAS fails LEASE_LOST, so the two runs never
+//     both write after the takeover. There is a single host today.
 //   * `interrupted` (WRITE_LOCKED details) is STICKY: it reports that last_interrupted_at was ever set
 //     for this sheet, not that the CURRENT holder took over from someone. It is an audit hint only.
 //   * `retryAfterMs` is the time until the CURRENT lease could be taken over if its holder stopped
@@ -109,7 +119,19 @@ const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   GUARD_SCOPE_MISMATCH: 'STOCK_PREP_PROJECT_WRITE_GUARD_SCOPE_MISMATCH',
 })
 
-const PLAN_SUPERSEDED_REASONS = Object.freeze(['newer_plan', 'token_unbound', 'scope_changed', 'job_unbound'])
+const PLAN_SUPERSEDED_REASONS = Object.freeze(['newer_plan', 'token_unbound', 'scope_changed', 'job_unbound', 'expansion_stale', 'expansion_unbound'])
+
+// What the host answers a fenced write with (packages/core-backend/src/multitable/plugin-write-fence.ts).
+const HOST_WRITE_FENCE_CODES = Object.freeze({
+  NOT_ALLOWED: 'PLUGIN_WRITE_FENCE_NOT_ALLOWED',
+  REJECTED: 'PLUGIN_WRITE_FENCE_REJECTED',
+  UNAVAILABLE: 'PLUGIN_WRITE_FENCE_UNAVAILABLE',
+})
+
+function isHostWriteFenceError(error) {
+  const code = error && error.code
+  return code === HOST_WRITE_FENCE_CODES.NOT_ALLOWED || code === HOST_WRITE_FENCE_CODES.REJECTED || code === HOST_WRITE_FENCE_CODES.UNAVAILABLE
+}
 
 class StockPreparationProjectWriteLockError extends Error {
   // `fence` marks an error raised by a pre-write CAS: the apply writer stops its loop on it instead of
@@ -174,7 +196,7 @@ function sqlStateOf(error) {
 // failure in one of them positively means nothing was written: `partial: false`. A failure of the
 // holder CAS (before_write / heartbeat) happens mid-run; the writer's stop then reports `partial` from
 // what it actually attempted (review round 2).
-const PRE_WRITE_STORE_OPERATIONS = Object.freeze(['acquire', 'precheck', 'bump', 'read'])
+const PRE_WRITE_STORE_OPERATIONS = Object.freeze(['acquire', 'precheck', 'bump', 'read', 'observe'])
 
 function storeFailed(operation, error, { fence = false, extra = {} } = {}) {
   const sqlState = sqlStateOf(error)
@@ -213,6 +235,34 @@ function writeBindingFromGeneration(generation) {
     writeGeneration: generation.generation,
     writeGenerationToken: generation.generationToken,
   }
+}
+
+// EXPANSION-TIME GENERATION (Codex review P1-b). What a large-BOM expansion observed of its write scope
+// when it started: the generation token and the fencing epoch, or that no row existed yet (token null,
+// epoch 0). The large lane plans and approves ONLY while both are still exactly that — a newer preview /
+// approval (token) or ANY lease taken on the sheet (epoch: every write run acquires) since the expansion
+// read its source makes that expansion stale.
+function writeObservationFromGeneration(observed) {
+  return {
+    writeScope: observed.scopeKey,
+    generationToken: observed.generationToken,
+    fencingEpoch: observed.fencingEpoch,
+  }
+}
+
+function normalizeGenerationExpectation(expect) {
+  const tokenOk = expect && (expect.generationToken === null || (typeof expect.generationToken === 'string' && expect.generationToken.length > 0))
+  const epochOk = expect && Number.isInteger(expect.fencingEpoch) && expect.fencingEpoch >= 0
+  if (!tokenOk || !epochOk || (expect.generationToken === null && expect.fencingEpoch !== 0)) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the expected sheet write generation is malformed', { reason: 'expectation_malformed' })
+  }
+  return { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch }
+}
+
+// Does the row (or its absence) still show exactly what the expansion observed?
+function rowMatchesExpectation(row, expectation) {
+  if (expectation.generationToken === null) return !row
+  return Boolean(row) && row.generation_token === expectation.generationToken && integerOf(row.fencing_epoch) === expectation.fencingEpoch
 }
 
 function planSuperseded(reason, details = {}, { fence = false } = {}) {
@@ -441,12 +491,21 @@ function createStockPreparationProjectWriteLock({
     throw contentionRefusal()
   }
 
-  async function bumpGeneration(scopeKey, { reason, tenantId } = {}) {
+  // `expect` (P1-b, large approval): bump ONLY while the row still shows exactly what the expansion
+  // observed (generation token AND fencing epoch, or still no row). Checked on every read of the retry loop
+  // and PINNED in the CAS itself (token + epoch in the WHERE; the absent case rides the PRIMARY KEY), so a
+  // preview, approval or lease that lands between the read and the CAS makes the CAS match nothing and the
+  // next read refuses: 409 PLAN_SUPERSEDED `expansion_stale`, nothing bumped.
+  async function bumpGeneration(scopeKey, { reason, tenantId, expect } = {}) {
     assertReason(reason)
+    const expectation = expect === undefined ? null : normalizeGenerationExpectation(expect)
     let insertConflicted = false
     for (let attempt = 0; attempt < maxBumpAttempts; attempt += 1) {
       if (attempt > 0 && backoffMs > 0) await pause(attempt * backoffMs)
       const row = await readRow(scopeKey, 'bump')
+      if (expectation && !rowMatchesExpectation(row, expectation)) {
+        throw planSuperseded('expansion_stale', { currentGeneration: row ? integerOf(row.generation) : 0, partial: false })
+      }
       if (!row && insertConflicted) {
         // A PRIMARY KEY conflict says the row exists; a read that then finds none is a store fault —
         // the same answer acquire gives, never a busy refusal.
@@ -524,6 +583,8 @@ function createStockPreparationProjectWriteLock({
           scope_key: scopeKey,
           lease_id: null,
           generation_token: row.generation_token,
+          // P1-b: an acquire + release in between leaves the token but moves the epoch.
+          ...(expectation ? { fencing_epoch: expectation.fencingEpoch } : {}),
         }, 'bump')
       }
       if (updated.length === 1) {
@@ -555,6 +616,31 @@ function createStockPreparationProjectWriteLock({
       leaseExpiresAt: isoOrNull(row.lease_expires_at),
       lastInterruptedPurpose: PROJECT_WRITE_PURPOSES.includes(row.last_interrupted_purpose) ? row.last_interrupted_purpose : null,
       lastInterruptedAt: isoOrNull(row.last_interrupted_at),
+    })
+  }
+
+  // P1-b: the generation a large-BOM expansion starts under (read-only; an absent row is observed as
+  // such). Refused 409 WRITE_LOCKED while a live writer holds the sheet — an expansion must not read its
+  // source against a sheet a write is changing.
+  async function observeGeneration(scopeKey) {
+    const row = await readRow(scopeKey, 'observe')
+    const atMs = nowMs()
+    if (leaseIsLive(row, atMs)) throw writeLocked(row, atMs)
+    return currentGeneration(scopeKey, row)
+  }
+
+  // P1-b: the current generation (plan-time check; read-only, no lease refusal).
+  async function readGeneration(scopeKey) {
+    return currentGeneration(scopeKey, await readRow(scopeKey, 'read'))
+  }
+
+  function currentGeneration(scopeKey, row) {
+    return Object.freeze({
+      scopeKey,
+      present: Boolean(row),
+      generation: row ? integerOf(row.generation) : 0,
+      generationToken: row ? row.generation_token : null,
+      fencingEpoch: row ? integerOf(row.fencing_epoch) : 0,
     })
   }
 
@@ -596,17 +682,65 @@ function createStockPreparationProjectWriteLock({
         seq += 1
         return
       }
+      throw await explainLoss(operation)
+    }
+
+    // Why this guard may no longer write, read from the row (one statement): the lease is still ours but
+    // the plan moved -> PLAN_SUPERSEDED; anything else -> LEASE_LOST; the read fails -> STORE_FAILED.
+    async function explainLoss(operation) {
       const row = await readRow(grant.scopeKey, operation, { fence: true })
       if (row && row.lease_id === grant.leaseId && integerOf(row.fencing_epoch) === grant.fencingEpoch && row.generation_token !== grant.generationToken) {
-        throw planSuperseded('newer_plan', { currentGeneration: integerOf(row.generation) }, { fence: true })
+        return planSuperseded('newer_plan', { currentGeneration: integerOf(row.generation) }, { fence: true })
       }
-      throw new StockPreparationProjectWriteLockError(
+      return new StockPreparationProjectWriteLockError(
         409,
         PROJECT_WRITE_ERROR_CODES.LEASE_LOST,
         'this run lost its write lease on the sheet (it lapsed and was taken over); it stopped before the next write',
         {},
         { fence: true },
       )
+    }
+
+    // HOST FENCED WRITE (Codex review P1-a): what the host checks INSIDE each record write transaction
+    // (multitable/plugin-write-fence.ts): this lease (scope, lease id, epoch) and this plan (generation
+    // token), share-locked until COMMIT. No seq, no expiry — see the host module for why.
+    function hostWriteFence() {
+      return {
+        lock: PROJECT_WRITE_LOCK_TABLE,
+        scopeKey: grant.scopeKey,
+        leaseId: grant.leaseId,
+        fencingEpoch: grant.fencingEpoch,
+        generationToken: grant.generationToken,
+      }
+    }
+
+    // The host refused a fenced write (nothing was written). Translate its answer into this module's
+    // vocabulary and mark the guard lost: REJECTED -> LEASE_LOST / PLAN_SUPERSEDED from the row; the
+    // fence could not be checked -> STORE_FAILED; the fence was not allowed -> UNAVAILABLE (501).
+    async function hostFenceRefused(hostError) {
+      const code = hostError && hostError.code
+      let error
+      if (code === HOST_WRITE_FENCE_CODES.REJECTED) {
+        error = await explainLoss('host_fence').catch((readError) => readError)
+      } else if (code === HOST_WRITE_FENCE_CODES.UNAVAILABLE) {
+        error = storeFailed('host_fence', hostError, { fence: true })
+      } else {
+        error = new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the host refused the write fence; nothing is written without it', { reason: 'host_fence_not_allowed' }, { fence: true })
+      }
+      lost = error
+      return error
+    }
+
+    // After the last write: one more holder CAS, so a run whose lease was lost after its last write
+    // reports that (LEASE_LOST / PLAN_SUPERSEDED with the partial counts) instead of "succeeded".
+    async function reassert() {
+      if (lost) throw lost
+      try {
+        await serialized(() => holderCas('final'))
+      } catch (error) {
+        lost = error
+        throw error
+      }
     }
 
     function serialized(fn) {
@@ -686,6 +820,9 @@ function createStockPreparationProjectWriteLock({
       generationReason: grant.generationReason,
       takeover: grant.takeover,
       beforeWrite,
+      hostWriteFence,
+      hostFenceRefused,
+      reassert,
       heartbeat,
       startHeartbeat,
       release,
@@ -710,6 +847,8 @@ function createStockPreparationProjectWriteLock({
     readState,
     assertNoLiveWriter,
     bumpGeneration,
+    observeGeneration,
+    readGeneration,
     acquire,
     createGuard,
     withProjectWriteLease,
@@ -717,6 +856,8 @@ function createStockPreparationProjectWriteLock({
 }
 
 module.exports = {
+  HOST_WRITE_FENCE_CODES,
+  isHostWriteFenceError,
   PLAN_SUPERSEDED_REASONS,
   PROJECT_WRITE_BUMP_BACKOFF_MS,
   PROJECT_WRITE_BUMP_MAX_ATTEMPTS,
@@ -731,6 +872,8 @@ module.exports = {
   StockPreparationProjectWriteLockError,
   assertWriteBindingMatchesGuard,
   createStockPreparationProjectWriteLock,
+  normalizeGenerationExpectation,
   sheetWriteScopeKey,
   writeBindingFromGeneration,
+  writeObservationFromGeneration,
 }

@@ -3,12 +3,14 @@
 --
 -- WHY THIS TABLE EXISTS (batch-refresh phase 0 step 1; plan §5.1, §7 G5, §9.2 E01–E04/E07/E08)
 -- Two different runs must never write the SAME canonical 备料 sheet at the same time, across processes —
--- and a small-lane run planned BEFORE a newer plan was made must never write afterwards, even sequentially
--- (the large lane only orders approvals against previews; see the module header, R4). The multitable records API offers neither a uniqueness constraint a plugin could
--- lean on nor a write conditional on a plugin row, so both guarantees live HERE, in one row per write
--- scope. The WRITE SCOPE IS THE TARGET SHEET (decision register R-52): the foreign-project guard keeps
--- every sheet to one active project, so a per-sheet row costs no parallelism and closes the race in
--- which two project numbers applied at once to one empty sheet both pass that guard:
+-- and a run planned BEFORE a newer plan was made must never write afterwards, even sequentially (the
+-- large lane binds its generation when the expansion reads its source; see the module header). The
+-- multitable records API offers no uniqueness constraint a plugin could lean on, so both guarantees live
+-- HERE, in one row per write scope, and every record write re-checks this row inside its own transaction
+-- (the host's fenced write, SELECT ... FOR SHARE; packages/core-backend/src/multitable/plugin-write-fence.ts).
+-- The WRITE SCOPE IS THE TARGET SHEET (decision register R-52): the foreign-project guard keeps every
+-- sheet to one active project, so a per-sheet row costs no parallelism and closes the race in which two
+-- project numbers applied at once to one empty sheet both pass that guard:
 --   * the LEASE (lease_id + lease_seq + fencing_epoch + lease_expires_at): acquired by INSERT or by a
 --     single-statement CAS, renewed by a CAS immediately before EVERY canonical-sheet write, released by
 --     a CAS; a lease that lapsed (expiry + takeover grace) is taken over by a CAS pinned to the exact
@@ -18,8 +20,7 @@
 --     holder holds the lease. Every token / approved job stores the generation_token it was planned
 --     under; a run compares it AFTER acquiring the lease and re-asserts it in every per-write CAS.
 --     `generation` is a diagnostic counter only; bindings compare the token, never the integer.
--- See plugins/plugin-integration-core/lib/stock-preparation-project-write-lock.cjs for the protocol and
--- its accepted residual (one host write in flight across a >= TTL+GRACE suspension).
+-- See plugins/plugin-integration-core/lib/stock-preparation-project-write-lock.cjs for the protocol.
 --
 -- Rows are NEVER deleted (release clears the lease columns), so a generation can only move forward.
 -- Values-free by construction: scope_key is 'spw2:' + sha256 of (namespace, target sheet id);

@@ -28,6 +28,22 @@
  *   D7  (R-52) two project numbers applied at the same moment to one EMPTY sheet: exactly one project lands; the
  *       other is refused (WRITE_LOCKED / PLAN_SUPERSEDED / the foreign-project 409) — never both, which the
  *       per-(sheet, project) scope allowed through the foreign-project check-then-write race.
+ *   D8  (Codex review P1-a) through the REAL host fenced write: A is held inside its second create (past its
+ *       pre-write CAS); the lease lapses; B previews and applies to completion; A's create resumes and the host
+ *       refuses it (FOR SHARE finds no matching row) — no duplicate idempotency key, A is LEASE_LOST, B succeeded.
+ *   D9  the fence's lock order (pg_blocking_pids): an in-flight fenced write (the host's exact allow-listed
+ *       SELECT ... FOR SHARE, transaction open) blocks a takeover UPDATE until it commits; once the takeover has
+ *       committed, a real host write carrying the old fence is refused and writes nothing.
+ *   D12 SAME TRANSACTION, observed on a REAL host write: the host's createRecord (fence + insert) is held at its
+ *       INSERT (another session holds SHARE on meta_records). While it waits, the host backend's own xid is the
+ *       lease row's xmax (its FOR SHARE), that backend holds its transactionid lock, a takeover queues behind
+ *       THAT backend; after it commits, the inserted record's xmin is the SAME xid. Then the takeover lands and
+ *       the old fence is refused.
+ *   D10 a fence for another plugin, or for any table but the allow-listed lease table, is refused by the real
+ *       host before any write.
+ *   D11 (Codex review P1-b) the large lane through the real lock and host: an expansion planned and approved,
+ *       then a small preview + apply writes quantities 5 / 15; re-approving the OLD expansion is refused
+ *       `expansion_stale` (nothing bumped, no job) and the old approval's job is refused — quantities stay 5 / 15.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -41,6 +57,7 @@ import type { PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { MetaSheetServer } from '../../src/index'
+import { PLUGIN_WRITE_FENCE_ALLOW_LIST } from '../../src/multitable/plugin-write-fence'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { createPluginDurableStorage } from '../../src/plugins/plugin-durable-storage'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
@@ -56,6 +73,7 @@ const { createDb } = require(path.join(PLUGIN_LIB, 'db.cjs')) as any
 const tableActions = require(path.join(PLUGIN_LIB, 'stock-preparation-table-actions.cjs')) as any
 const { ensureStockPreparationSandboxTarget } = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
 const { syncStockPreparationContractOptionsForObject } = require(path.join(PLUGIN_LIB, 'stock-preparation-option-sync.cjs')) as any
+const largeBomJobs = require(path.join(PLUGIN_LIB, 'stock-preparation-large-bom-jobs.cjs')) as any
 
 const {
   PROJECT_WRITE_ERROR_CODES,
@@ -65,6 +83,7 @@ const {
   createStockPreparationProjectWriteLock,
   sheetWriteScopeKey,
   writeBindingFromGeneration,
+  writeObservationFromGeneration,
 } = lockModule
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -97,10 +116,10 @@ async function isBlockedBy(waiterPid: number, holderPid: number) {
   return pids.map(Number).includes(holderPid)
 }
 
-function createProductionPluginContext(): PluginContext {
+function createProductionPluginContext(pluginName = 'plugin-integration-core'): PluginContext {
   const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
   const loaded: LoadedPlugin = {
-    manifest: { name: 'plugin-integration-core', version: 'write-lock-realdb' },
+    manifest: { name: pluginName, version: 'write-lock-realdb' },
     plugin: { activate: async () => {} },
     path: 'realdb://stock-preparation-project-write-lock',
     loadedAt: new Date(),
@@ -584,6 +603,325 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await q('DELETE FROM meta_views WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
+      }
+    }, 60000)
+
+    // ── D8–D11: Codex review P1-a / P1-b ──────────────────────────────────────────────────────────────
+    function synthData(quantity = '2'): Record<string, Array<Record<string, unknown>>> {
+      return {
+        DN_PDM_PathExAttrInfo: [{ FileCode: 'PROJECTNO', Parent_OBJ_ID: 'SWL-PATH-1' }],
+        DN_PDM_PathInfo: [{ OBJ_ID: 'SWL-PATH-1' }],
+        DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'SWL-ORDER-1', path_id: 'SWL-PATH-1' }],
+        DN_PDM_OrderDetailInfo: [{ order_id: 'SWL-ORDER-1', part_id: 'SWL-PART-A', quantity }],
+        DN_PDM_PartLibraryInfo: [
+          { OBJ_ID: 'SWL-PART-A', IdentityNo: 'SWL-A-001', IdentityName: 'Synthetic assembly', Material: 'Synthetic', SysVer: 'V1' },
+          { OBJ_ID: 'SWL-PART-B', IdentityNo: 'SWL-B-001', IdentityName: 'Synthetic part', Material: 'Synthetic', SysVer: 'V1' },
+        ],
+        DN_PDM_BomHeadInfo: [{ part_id: 'SWL-PART-A', bom_id: 'SWL-BOM-A', SysVer: 'V1', bom_able: true }],
+        DN_PDM_BomDetailsInfo: [{ bom_pid: 'SWL-BOM-A', part_id: 'SWL-PART-B', Bom_ExAttr1: '3' }],
+      }
+    }
+    function sourceOf(projectNo: string, quantity = '2') {
+      const data = synthData(quantity)
+      data.DN_PDM_PathExAttrInfo[0].FileCode = projectNo
+      return {
+        async read(input: any = {}) {
+          const rows = Array.isArray(data[input.object]) ? data[input.object] : []
+          const found = rows.filter((row) => Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
+          return { records: found.map((row) => ({ ...row })), done: true, nextCursor: null }
+        },
+      }
+    }
+    async function sandboxSheet(label: string) {
+      const pluginContext = createProductionPluginContext()
+      const multitable = pluginContext.api.multitable
+      if (!multitable) throw new Error('production plugin context is missing multitable APIs')
+      const projectId = `tenant_swl_${label}_${TOKEN}:integration-core`
+      const objectId = `plm_stock_preparation_sandbox_swl_${label}_${TOKEN}`
+      const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId })
+      expect(ensured.ready).toBe(true)
+      await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
+      const sheetId: string = ensured.target.sheetId
+      const key = sheetWriteScopeKey(sheetId)
+      scopes.push(key)
+      const action = {
+        actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID,
+        source: { externalSystemId: `swl_source_rdb_${label}`, kind: 'data-source:sql-readonly' },
+        target: ensured.target,
+      }
+      return { pluginContext, multitable, objectId, sheetId, key, action, target: ensured.target }
+    }
+    async function dropSheet(sheetId: string) {
+      await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await q('DELETE FROM meta_views WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
+    }
+    const countRows = async (sheetId: string) => Number((await q('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0].n)
+
+    // THE FREEZE CASE (coordinator's spec): the plan is two ADDs; A is frozen between its LAST pre-write CAS and its
+    // LAST create (in the records wrapper, after fenceBeforeWrite, before the real host call); the lease lapses; B
+    // takes over and writes; A resumes into the real host records API.
+    test('D8 (Codex P1-a, freeze case) A frozen between its last CAS and its last create; takeover; B writes; A resumes: the REAL host refuses A\'s create — no duplicate key, A LEASE_LOST, B succeeded', async () => {
+      const sb = await sandboxSheet('d8')
+      const projectNo = 'SYN-SWL-D8'
+      try {
+        const base = Date.now()
+        const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        expect(sb.multitable.records.supportsWriteFence, 'the production host declares fenced writes').toBe(true)
+        let creates = 0
+        let releaseA: () => void = () => {}
+        const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+        let enteredA: () => void = () => {}
+        const heldA = new Promise<void>((resolve) => { enteredA = resolve })
+        const fencesSeen: unknown[] = []
+        const recordsA: any = {
+          ...sb.multitable.records,
+          async createRecord(input: any) {
+            creates += 1
+            fencesSeen.push(input.writeFence)
+            if (creates === 2) { enteredA(); await gateA }
+            return (sb.multitable.records as any).createRecord(input)
+          },
+        }
+        const common = (records: any) => ({
+          action: sb.action, parameters: { projectNo }, sourceAdapter: sourceOf(projectNo), recordsApi: records,
+          tokenStore: sb.pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d8_${TOKEN}`,
+        })
+        const policy = { enabled: true, allowedTargetObjectIds: [sb.objectId] }
+        const dryA = await tableActions.dryRunStockPreparationAction({ ...common(recordsA), projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })) })
+        expect(dryA.counts.add).toBe(2)
+        const runningA = settle(lockA.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId: 'swl-d8-a' }, (guard: any) =>
+          tableActions.applyStockPreparationAction({ ...common(recordsA), dryRunToken: dryA.dryRunToken, permission: 'write', sandboxPolicy: policy, projectWriteGuard: guard })))
+        await heldA
+        expect(await countRows(sb.sheetId), 'calibration: A landed its first row').toBe(1)
+        expect(fencesSeen.every((fence) => fence && typeof fence === 'object'), 'every A create carried a fence').toBe(true)
+        // B: lease lapsed on B's clock; its preview clears A's lease and bumps; its apply runs to completion.
+        const dryB = await tableActions.dryRunStockPreparationAction({ ...common(sb.multitable.records), projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lockB.bumpGeneration(sb.key, { reason: 'small_preview' })) })
+        const appliedB = await lockB.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId: 'swl-d8-b' }, (guard: any) =>
+          tableActions.applyStockPreparationAction({ ...common(sb.multitable.records), dryRunToken: dryB.dryRunToken, permission: 'write', sandboxPolicy: policy, projectWriteGuard: guard }))
+        expect(appliedB.status).toBe('succeeded')
+        const rowsAfterB = await countRows(sb.sheetId)
+        releaseA()
+        const outcomeA = await runningA
+        expect(outcomeA.ok, 'A must not report success').toBe(false)
+        const errorA = (outcomeA as any).error
+        expect(errorA.code).toBe(PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+        expect(errorA.details.partial).toBe(true)
+        expect(errorA.details.written).toBe(1)
+        expect(errorA.details.abortedAtDecisionIndex).toBe(1)
+        expect(await countRows(sb.sheetId), 'the host wrote nothing for A\'s held create').toBe(rowsAfterB)
+        const keyField: string = (sb.target.fieldIdMap && sb.target.fieldIdMap.idempotencyKey) || 'idempotencyKey'
+        const dupes = await q(
+          `SELECT data->>$2 AS k, COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1 GROUP BY 1 HAVING COUNT(*) > 1`,
+          [sb.sheetId, keyField],
+        )
+        expect(dupes.rows, 'no duplicate idempotency key').toEqual([])
+      } finally {
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
+
+    test('D9 the fence\'s lock order (pg_blocking_pids): an in-flight fenced write blocks the takeover; after the takeover the old fence is refused by the real host', async () => {
+      const sb = await sandboxSheet('d9')
+      try {
+        const base = Date.now()
+        const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
+        const grantA = await lockA.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d9-a' })
+        const guardA = lockA.createGuard(grantA)
+        const fenceA = guardA.hostWriteFence()
+        const pidX = Number((await clientX.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        const pidB = Number((await clientB.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        // A fenced write in flight: the host's exact allow-listed statement, transaction open.
+        await clientX.query('BEGIN')
+        const held = await clientX.query(PLUGIN_WRITE_FENCE_ALLOW_LIST['plugin-integration-core'].sql, [fenceA.scopeKey, fenceA.leaseId, fenceA.fencingEpoch, fenceA.generationToken])
+        expect(held.rows.length).toBe(1)
+        const takeover = settle(lockB.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d9-b' }))
+        await waitUntil('the takeover to queue behind the in-flight fenced write', () => isBlockedBy(pidB, pidX))
+        await clientX.query('COMMIT')
+        const granted = await takeover
+        expect(granted.ok).toBe(true)
+        expect((granted as any).value.takeover).toBe(true)
+        // The reverse order: the takeover has committed, so a write carrying A's fence is refused by the host.
+        const before = await countRows(sb.sheetId)
+        const refused = await settle((sb.multitable.records as any).createRecord({ sheetId: sb.sheetId, data: {}, writeFence: fenceA }))
+        expect(refused.ok).toBe(false)
+        expect((refused as any).error.code).toBe('PLUGIN_WRITE_FENCE_REJECTED')
+        expect(await countRows(sb.sheetId)).toBe(before)
+        // …and the guard turns that answer into LEASE_LOST.
+        const mapped = await guardA.hostFenceRefused((refused as any).error)
+        expect(mapped.code).toBe(PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+        await lockB.createGuard((granted as any).value).release()
+      } finally {
+        try { await clientX.query('ROLLBACK') } catch { /* not in a transaction */ }
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
+
+    test('D12 SAME TRANSACTION: the host\'s fence FOR SHARE and its record INSERT carry one xid (pg_stat_activity / pg_locks / xmax / xmin)', async () => {
+      const sb = await sandboxSheet('d12')
+      const lockTable = PROJECT_WRITE_LOCK_TABLE
+      try {
+        const base = Date.now()
+        const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
+        const guardA = lockA.createGuard(await lockA.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d12-a' }))
+        const fenceA = guardA.hostWriteFence()
+        const pidX = Number((await clientX.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        const pidB = Number((await clientB.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        // Hold every INSERT/UPDATE on meta_records (reads still pass): the host write stops AT its insert.
+        await clientX.query('BEGIN')
+        await clientX.query('LOCK TABLE meta_records IN SHARE MODE')
+        const write = settle((sb.multitable.records as any).createRecord({ sheetId: sb.sheetId, data: {}, writeFence: fenceA }))
+        let hostPid = 0
+        await waitUntil('the host write to wait at its meta_records INSERT', async () => {
+          const waiting = await q(
+            `SELECT pid FROM pg_locks WHERE relation = 'meta_records'::regclass AND NOT granted AND pid <> $1`,
+            [pidX],
+          )
+          if (waiting.rows.length !== 1) return false
+          hostPid = Number(waiting.rows[0].pid)
+          return true
+        })
+        expect(await isBlockedBy(hostPid, pidX), 'the host backend waits on our SHARE lock').toBe(true)
+        const activity = (await q('SELECT backend_xid::text AS xid FROM pg_stat_activity WHERE pid = $1', [hostPid])).rows[0]
+        const hostXid = String(activity && activity.xid)
+        expect(hostXid, 'the host transaction already has an xid (its FOR SHARE locked a row)').toMatch(/^[0-9]+$/)
+        const leaseRow = (await q(`SELECT xmax::text AS xmax FROM ${lockTable} WHERE scope_key = $1`, [sb.key])).rows[0]
+        expect(leaseRow.xmax, 'the lease row is share-locked BY the waiting host transaction').toBe(hostXid)
+        const xidLock = await q(
+          `SELECT granted FROM pg_locks WHERE locktype = 'transactionid' AND transactionid::text = $1 AND pid = $2`,
+          [hostXid, hostPid],
+        )
+        expect(xidLock.rows.map((row: any) => row.granted)).toEqual([true])
+        // A takeover now queues behind THAT backend (the uncommitted write that holds the fence).
+        const takeover = settle(lockB.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d12-b' }))
+        await waitUntil('the takeover to queue behind the host write transaction', () => isBlockedBy(pidB, hostPid))
+        const takeoverWait = await q(
+          `SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted AND locktype IN ('transactionid', 'tuple')`,
+          [pidB],
+        )
+        expect(takeoverWait.rows.length).toBeGreaterThan(0)
+        await clientX.query('COMMIT')
+        const written = await write
+        expect(written.ok, JSON.stringify((written as any).error && (written as any).error.code)).toBe(true)
+        const recordId = (written as any).value.id
+        const inserted = (await q('SELECT xmin::text AS xmin FROM meta_records WHERE id = $1', [recordId])).rows[0]
+        expect(inserted.xmin, 'the INSERT committed in the SAME transaction as the fence FOR SHARE').toBe(hostXid)
+        const granted = await takeover
+        expect(granted.ok).toBe(true)
+        expect((granted as any).value.takeover).toBe(true)
+        const before = await countRows(sb.sheetId)
+        const refused = await settle((sb.multitable.records as any).createRecord({ sheetId: sb.sheetId, data: {}, writeFence: fenceA }))
+        expect((refused as any).error && (refused as any).error.code).toBe('PLUGIN_WRITE_FENCE_REJECTED')
+        expect(await countRows(sb.sheetId)).toBe(before)
+        // The same for a PATCH through the real host: the old fence is refused and the record is untouched.
+        const versionBefore = (await q('SELECT version FROM meta_records WHERE id = $1', [recordId])).rows[0].version
+        const patched = await settle((sb.multitable.records as any).patchRecord({ sheetId: sb.sheetId, recordId, changes: {}, writeFence: fenceA }))
+        expect((patched as any).error && (patched as any).error.code).toBe('PLUGIN_WRITE_FENCE_REJECTED')
+        expect((await q('SELECT version FROM meta_records WHERE id = $1', [recordId])).rows[0].version).toBe(versionBefore)
+        // …while the CURRENT holder's fence lets the patch through.
+        const guardB = lockB.createGuard((granted as any).value)
+        const patchedB = await settle((sb.multitable.records as any).patchRecord({ sheetId: sb.sheetId, recordId, changes: {}, writeFence: guardB.hostWriteFence() }))
+        expect(patchedB.ok, JSON.stringify((patchedB as any).error && (patchedB as any).error.code)).toBe(true)
+        await guardB.release()
+      } finally {
+        try { await clientX.query('ROLLBACK') } catch { /* not in a transaction */ }
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
+
+    test('D10 a fence for another plugin, or for any other table, is refused by the real host before any write', async () => {
+      const sb = await sandboxSheet('d10')
+      try {
+        const lock = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+        const grant = await lock.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d10' })
+        const fence = lock.createGuard(grant).hostWriteFence()
+        const before = await countRows(sb.sheetId)
+        const other = createProductionPluginContext('plugin-after-sales').api.multitable
+        if (!other) throw new Error('missing multitable APIs')
+        for (const attempt of [
+          () => (other.records as any).createRecord({ sheetId: sb.sheetId, data: {}, writeFence: fence }),
+          () => (other.records as any).patchRecord({ sheetId: sb.sheetId, recordId: 'rec_swl_none', changes: {}, writeFence: fence }),
+          () => (sb.multitable.records as any).createRecord({ sheetId: sb.sheetId, data: {}, writeFence: { ...fence, lock: 'meta_records' } }),
+          () => (sb.multitable.records as any).createRecord({ sheetId: sb.sheetId, data: {}, writeFence: { ...fence, extra: 'x' } }),
+        ]) {
+          const outcome = await settle(attempt())
+          expect(outcome.ok).toBe(false)
+          expect((outcome as any).error.code).toBe('PLUGIN_WRITE_FENCE_NOT_ALLOWED')
+        }
+        expect(await countRows(sb.sheetId)).toBe(before)
+        await lock.createGuard(grant).release()
+      } finally {
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
+
+    test('D11 (Codex P1-b) re-approving an expansion overtaken by a newer small write is refused expansion_stale; quantities stay 5 / 15', async () => {
+      const sb = await sandboxSheet('d11')
+      const projectNo = 'SYN-SWL-D11'
+      try {
+        const lock = createStockPreparationProjectWriteLock({ db: createDb({ database: sb.pluginContext.api.database }) })
+        const storage: any = sb.pluginContext.storage
+        expect(storage.durable).toBe(true)
+        const jobScope = { tenantId: `tenant_swl_d11_${TOKEN}`, workspaceId: `ws_swl_d11_${TOKEN}` }
+        const actionId = sb.action.actionId
+        const jobId = `swl_d11_old_${TOKEN}`
+        const records = sb.multitable.records as any
+        const scopedForChunk = () => tableActions.createTargetScopedRecordsApi(records, sb.target, { fieldIdTranslation: 'pre_mapped' })
+        // the OLD expansion, observed / planned / approved the way the routes do it
+        await largeBomJobs.createLargeBomBackgroundExpansionJob({
+          storage, ...jobScope, action: sb.action, parameters: { projectNo }, principal: 'swl-d11', createJobId: () => jobId,
+          writeGenerationObserver: async () => writeObservationFromGeneration(await lock.observeGeneration(sb.key)),
+        })
+        await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId, jobId, sourceAdapter: sourceOf(projectNo, '2') })
+        await largeBomJobs.planLargeBomBackgroundExpansionJob({
+          storage, ...jobScope, actionId, jobId,
+          existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+          writeGenerationReader: (observed: string) => lock.readGeneration(observed),
+        })
+        const approve = (applyJobId: string) => largeBomJobs.createLargeBomCheckpointApplyJob({
+          storage, ...jobScope, actionId, jobId, principal: 'swl-d11', permission: 'write', createApplyJobId: () => applyJobId,
+          writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'large_approval', expect: { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch } })),
+        })
+        const oldApproval = await approve(`swl_d11_apply_old_${TOKEN}`)
+        expect(oldApproval.writeGeneration).toBe(1)
+        // the NEWER small preview + apply: quantity 5
+        const policy = { enabled: true, allowedTargetObjectIds: [sb.objectId] }
+        const small = {
+          action: sb.action, parameters: { projectNo }, sourceAdapter: sourceOf(projectNo, '5'), recordsApi: records,
+          tokenStore: storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d11_small_${TOKEN}`,
+        }
+        const dry = await tableActions.dryRunStockPreparationAction({ ...small, projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'small_preview' })) })
+        const applied = await lock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId: 'swl-d11-small' }, (guard: any) =>
+          tableActions.applyStockPreparationAction({ ...small, dryRunToken: dry.dryRunToken, permission: 'write', sandboxPolicy: policy, projectWriteGuard: guard }))
+        expect(applied.status).toBe('succeeded')
+        const qtyRaw: string = (sb.target.fieldIdMap && sb.target.fieldIdMap.rawQuantity) || 'rawQuantity'
+        const qtyTotal: string = (sb.target.fieldIdMap && sb.target.fieldIdMap.totalQuantity) || 'totalQuantity'
+        const quantities = async () => (await q(
+          `SELECT (data->>$2)::numeric AS raw, (data->>$3)::numeric AS total FROM meta_records WHERE sheet_id = $1 ORDER BY 1, 2`,
+          [sb.sheetId, qtyRaw, qtyTotal],
+        )).rows.map((row: any) => [Number(row.raw), Number(row.total)])
+        expect(await quantities(), 'calibration: the newer write').toEqual([[3, 15], [5, 5]])
+        const generation = (await lock.readGeneration(sb.key)).generation
+        const reapproved = await settle(approve(`swl_d11_apply_revived_${TOKEN}`))
+        expect(reapproved.ok).toBe(false)
+        expect((reapproved as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+        expect((reapproved as any).error.details.reason).toBe('expansion_stale')
+        expect((await lock.readGeneration(sb.key)).generation, 'nothing bumped').toBe(generation)
+        // the old approval's own job cannot write either
+        const oldChunk = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d11-chunk' }, async (guard: any) =>
+          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId: `swl_d11_apply_old_${TOKEN}`, recordsApi: await scopedForChunk(), projectWriteGuard: guard })))
+        expect(oldChunk.ok).toBe(false)
+        expect((oldChunk as any).error.details.reason).toBe('newer_plan')
+        expect(await quantities(), 'the quantities stay 5 / 15').toEqual([[3, 15], [5, 5]])
+      } finally {
+        await dropSheet(sb.sheetId)
       }
     }, 60000)
   })

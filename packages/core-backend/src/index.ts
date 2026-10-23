@@ -120,6 +120,7 @@ import {
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
+import { assertPluginWriteFence } from './multitable/plugin-write-fence'
 import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
@@ -1181,6 +1182,9 @@ export class MetaSheetServer {
           // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
           // only when the surface underneath declares it.
           supportsFilterValueLists: true,
+          // PR #6501: create / patch honour a plugin-scope-resolved `writeFence` INSIDE the write transaction
+          // (multitable/plugin-write-fence.ts). An unresolved fence is refused, never ignored.
+          supportsWriteFence: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -1222,7 +1226,7 @@ export class MetaSheetServer {
               offset,
             })
           },
-          createRecord: async ({ sheetId, data }) => {
+          createRecord: async ({ sheetId, data, writeFence }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1235,6 +1239,8 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              // FIRST statement of the write transaction: the fence's FOR SHARE is held until COMMIT.
+              await assertPluginWriteFence(txQuery, writeFence)
               return createMultitableRecord({
                 query: txQuery,
                 sheetId,
@@ -1260,7 +1266,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1273,6 +1279,7 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              await assertPluginWriteFence(txQuery, writeFence)
               return patchMultitableRecord({
                 query: txQuery,
                 sheetId,

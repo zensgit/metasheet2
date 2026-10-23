@@ -495,8 +495,10 @@ const {
 // and the plan generation for one target sheet (R-52).
 const {
   PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
   sheetWriteScopeKey,
   writeBindingFromGeneration,
+  writeObservationFromGeneration,
 } = require('./stock-preparation-project-write-lock.cjs')
 // 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
 // stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
@@ -4567,7 +4569,9 @@ function requireStockPreparationAudit() {
     if (!stockPreparationProjectWriteLock
       || typeof stockPreparationProjectWriteLock.withProjectWriteLease !== 'function'
       || typeof stockPreparationProjectWriteLock.bumpGeneration !== 'function'
-      || typeof stockPreparationProjectWriteLock.assertNoLiveWriter !== 'function') {
+      || typeof stockPreparationProjectWriteLock.assertNoLiveWriter !== 'function'
+      || typeof stockPreparationProjectWriteLock.observeGeneration !== 'function'
+      || typeof stockPreparationProjectWriteLock.readGeneration !== 'function') {
       throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the stock-prep project write lock is not available; nothing is written without it')
     }
     return stockPreparationProjectWriteLock
@@ -8102,11 +8106,19 @@ function requireStockPreparationAudit() {
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, routeScope.tenantId)
       const parameters = normalizeActionParameters(body.parameters)
+      // P1-b (Codex review): the expansion records the target sheet's write generation it starts under
+      // (refused 409 WRITE_LOCKED while a live writer holds the sheet — then no job exists). Plan and
+      // approval require it unchanged. Read-only: a read-tier caller observes, it never writes the lock.
+      // No lock service wired -> an unobserved job, exactly as the approval below creates an unbound one.
+      const expansionWriteScope = stockPreparationProjectWriteLock ? sheetWriteScopeKey(action.target.sheetId) : null
       const job = await createLargeBomBackgroundExpansionJob({
         storage: context.storage,
         ...routeScope,
         action,
         parameters,
+        writeGenerationObserver: expansionWriteScope
+          ? async () => writeObservationFromGeneration(await requireStockPreparationProjectWriteLock().observeGeneration(expansionWriteScope))
+          : undefined,
         // The creator, recorded on both fields. The identity the READ runs under is NOT decided here
         // — it is resolved at run time from the action's bound source (see the run route), so this
         // route loads no external system and the durable-store check stays the first thing that can
@@ -8275,6 +8287,9 @@ function requireStockPreparationAudit() {
           policyStore: context.storage,
         }),
       })
+      // P1-b: plan only while the sheet's write generation is still the one the expansion observed, for
+      // exactly this snapshot's sheet (anything else is refused, never read).
+      const planWriteScope = stockPreparationProjectWriteLock ? sheetWriteScopeKey(action.target.sheetId) : null
       const planned = await planLargeBomBackgroundExpansionJob({
         storage: context.storage,
         ...routeScope,
@@ -8282,6 +8297,14 @@ function requireStockPreparationAudit() {
         jobId,
         existingRows,
         conflictPolicyReview,
+        writeGenerationReader: planWriteScope
+          ? async (observedScope) => {
+            if (observedScope !== planWriteScope) {
+              throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the expansion observed a different sheet than it plans for; expand again', { reason: 'scope_changed', partial: false })
+            }
+            return requireStockPreparationProjectWriteLock().readGeneration(planWriteScope)
+          }
+          : undefined,
         // The pack-aware ownership band, resolved against the STORED job's action snapshot
         // (`job.actionSnapshot.target.objectId` — the same sheet this plan will be applied to,
         // never the live binding, which may have been re-pointed since the expansion was sealed).
@@ -8381,8 +8404,19 @@ function requireStockPreparationAudit() {
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
         installedFieldProperties: await resolveInstalledFieldProperties(req, snapshotAction),
+        // P1-b: the bump is CONDITIONAL on what the expansion observed and the plan re-checked (token AND
+        // fencing epoch, pinned in the CAS): stale -> 409 PLAN_SUPERSEDED `expansion_stale`, no job.
         writeGenerationBinder: approvalWriteScope
-          ? async () => writeBindingFromGeneration(await stockPreparationProjectWriteLock.bumpGeneration(approvalWriteScope, { reason: 'large_approval', tenantId: routeScope.tenantId }))
+          ? async (expect) => {
+            if (!expect || expect.writeScope !== approvalWriteScope) {
+              throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the expansion observed a different sheet than it approves for; expand again', { reason: 'scope_changed', partial: false })
+            }
+            return writeBindingFromGeneration(await stockPreparationProjectWriteLock.bumpGeneration(approvalWriteScope, {
+              reason: 'large_approval',
+              tenantId: routeScope.tenantId,
+              expect: { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch },
+            }))
+          }
           : undefined,
       })
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)

@@ -346,7 +346,7 @@ function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProd
       },
       multitable: {
         provisioning: createProvisioning(),
-        records: recordsApi.api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(recordsApi.api),
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job.

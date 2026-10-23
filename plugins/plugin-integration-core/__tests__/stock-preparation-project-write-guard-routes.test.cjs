@@ -421,4 +421,28 @@ test('R9 (R-52) one sheet, two projects: while project 1 writes the env sheet, p
   } finally { h.restore() }
 })
 
+// ── R12 (Codex review P1-b) ────────────────────────────────────────────────────────────────────────
+const LARGE_EXPANSION_PATH = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
+test('R12 the large expansion START records the write generation of the sheet (read-only), and is refused 409 while a live writer holds the sheet', async () => {
+  const h = mount()
+  try {
+    const scope = seeded(h)
+    await h.env.lock.bumpGeneration(scope, { reason: 'small_preview' })
+    const before = lockRow(h, scope)
+    const started = await call(h, 'POST', LARGE_EXPANSION_PATH, { body: { parameters: { projectNo: PROJECT } } })
+    assert.equal(started.statusCode, 202, JSON.stringify(started.body))
+    const jobId = started.body.data.jobId
+    const stored = Array.from(h.context.storage.values()).find((value) => value && value.jobId === jobId)
+    assert.ok(stored, 'the expansion job is stored')
+    assert.deepEqual(stored.writeObservation, { writeScope: scope, generationToken: before.generation_token, fencingEpoch: before.fencing_epoch })
+    assert.equal(JSON.stringify(started.body).includes(before.generation_token), false, 'the observation is never answered')
+    assert.deepEqual(lockRow(h, scope), before, 'observing writes nothing to the lock row')
+    const holder = await h.env.lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-r12-holder' })
+    const busy = await call(h, 'POST', LARGE_EXPANSION_PATH, { body: { parameters: { projectNo: PROJECT } } })
+    assert.equal(busy.statusCode, 409, JSON.stringify(busy.body))
+    assert.equal(errorOf(busy).code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    await h.env.lock.createGuard(holder).release()
+  } finally { h.restore() }
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-write-guard-routes.test.cjs', tests, { passLine: '✓ stock-preparation-project-write-guard-routes' })

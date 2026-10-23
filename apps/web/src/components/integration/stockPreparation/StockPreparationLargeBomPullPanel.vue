@@ -73,7 +73,7 @@ import { STOCK_PREPARATION_PULL_BOM_ACTION_ID } from '../../../services/integrat
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 import {
-  stockPrepErrorPlain,
+  stockPrepLargeBomErrorPlain,
   stockPrepLargeBomPhasePlain,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
@@ -140,13 +140,15 @@ const state = reactive<StockPreparationLargeBomPullState>({
 
 let cancelled = false
 
-// FAILED renders through `stockPrepErrorPlain` — the SAME lookup every other failure on this
-// workbench uses (it already fails soft to the generic "did not save" sentence for a null or
-// unmapped code) — never a bespoke sentence and never the raw code itself. Every other phase
-// renders through the six-entry table above.
+// FAILED renders through `stockPrepLargeBomErrorPlain`: the SAME lookup every other failure on this
+// workbench uses (`stockPrepErrorPlain`, which fails soft to the generic "did not save" sentence for a
+// null or unmapped code), except for the few codes the large lane reads differently (PR #6501: a
+// superseded plan means 「重新展开」 here) — never the raw code itself. Every other phase renders through
+// the six-entry table above.
 const statusText = computed<string>(() => {
   if (state.phase === 'failed') {
-    const reason = stockPrepErrorPlain(state.errorCode ?? '')
+    // PR #6501 (P1-b): the large lane's own reading first (a superseded plan means 「重新展开」 here).
+    const reason = stockPrepLargeBomErrorPlain(state.errorCode ?? '')
     return bi(reason.zh, reason.en)
   }
   const plain = stockPrepLargeBomPhasePlain(state.phase)

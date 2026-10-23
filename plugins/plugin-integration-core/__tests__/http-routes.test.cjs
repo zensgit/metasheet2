@@ -198,7 +198,7 @@ function createMockContext(options = {}) {
         },
         multitable: {
           provisioning,
-          records,
+          records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records),
         },
         dataSourceWrites: options.dataSourceWrites || {
           async test() { throw new Error('dataSourceWrites.test not configured in test context') },

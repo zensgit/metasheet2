@@ -461,7 +461,7 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
       },
       multitable: {
         provisioning: { async findObjectSheet() { return { id: SHEET_ID, baseId: null, name: OBJECT_ID, description: null } } },
-        records: records ? records.api : createRecordsApi().api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records ? records.api : createRecordsApi().api),
       },
     },
     // `durable: true` is what the large-BOM job store demands; it is also where the values-free

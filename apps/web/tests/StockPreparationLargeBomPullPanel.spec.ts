@@ -191,6 +191,25 @@ describe('StockPreparationLargeBomPullPanel', () => {
     expect(errorCode.textContent).toBe('LARGE_BOM_APPLY_TARGET_REQUIRED')
   })
 
+  // PR #6501 (Codex review P1-b): in the large lane a superseded plan is fixed only by expanding again —
+  // the generation is bound at expansion time, so the panel says so (never "re-approve").
+  it('D-03b: a superseded plan (stale expansion) tells the operator to expand again before planning', async () => {
+    const api = doneApi({
+      planExpansion: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: 'expansion_stale', detailPartial: false }),
+      ),
+    })
+    const root = mountPanel({ api })
+    await flushUi()
+
+    expect(phaseOf(root)).toBe('failed')
+    const status = root.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement
+    expect(status.textContent).toContain('BOM 已有更新的试算或写入，请重新展开后再规划')
+    expect(status.textContent).not.toContain('重新批准')
+    expect(status.textContent).not.toContain('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+    expect(api.startApply).not.toHaveBeenCalled()
+  })
+
   // ---- D-04 --------------------------------------------------------------------------------
   it('D-04: a plan holding rows for a person renders confirm_required, honestly, with no deep link', async () => {
     const api = doneApi({

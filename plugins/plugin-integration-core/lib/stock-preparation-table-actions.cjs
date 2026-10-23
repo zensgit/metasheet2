@@ -87,6 +87,7 @@ const {
   // makes that agreement structural instead of a comment. It also means the
   // writer's refusal to fall back on an unmapped `ext_` id applies here too.
   __internals: { mapFieldName },
+  assertHostFencedWriteSupported,
 } = require('./stock-preparation-apply-writer.cjs')
 const {
   assertExtensionFieldIdValid,
@@ -1420,6 +1421,11 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   // ever copied from the surface underneath — this fence asserts nothing on its own.
   if (api.supportsFilterValueLists === true) {
     scopedApi.supportsFilterValueLists = true
+  }
+  // PR #6501 (P1-a): forward the host's fenced-write declaration the same way — copied, never asserted.
+  // The writer refuses to run a fenced plan when it is absent; `writeFence` itself rides `...input`.
+  if (api.supportsWriteFence === true) {
+    scopedApi.supportsWriteFence = true
   }
   if (readOnly) return scopedApi
 
@@ -2887,6 +2893,9 @@ async function applyStockPreparationAction(input = {}) {
   // the B2a claim, the reads and the token claim, so neither burns the token.
   const projectWriteGuard = requireProjectWriteGuard(input.projectWriteGuard)
   assertProjectWriteGuardScope(projectWriteGuard, action)
+  // P1-a: every record write of this run is host-fenced. A records host that cannot honour the fence
+  // refuses here (501), before the token is claimed; the writer re-checks on the scoped api it is handed.
+  assertHostFencedWriteSupported(input.recordsApi, projectWriteGuard)
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
   // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
   // outside their registered scope would also lose the artifact that proves what they planned.
@@ -2997,8 +3006,10 @@ async function applyStockPreparationAction(input = {}) {
     // C4 apply: the writer already maps every payload key through the operator-configured
     // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
     recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
-    // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write.
+    // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write, and the
+    // same lease + generation re-checked by the host inside every record write transaction (P1-a).
     writeFence: projectWriteGuard,
+    writeFenceRequired: true,
   })
   // The fence stopped the run (lease lost / plan superseded / lock store failed): an ERROR, carrying
   // the partial counts and the decision index it stopped at — never a plausible `partial` success.

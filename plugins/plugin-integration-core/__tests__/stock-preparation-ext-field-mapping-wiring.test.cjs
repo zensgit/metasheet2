@@ -320,7 +320,7 @@ function mount({ config = {}, sourceAdapter, records, provisioning } = {}) {
       },
       multitable: {
         provisioning: provisioning || createProvisioning(),
-        records: records ? records.api : createRecordsApi().api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records ? records.api : createRecordsApi().api),
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job; the

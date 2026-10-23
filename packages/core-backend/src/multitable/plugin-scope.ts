@@ -5,6 +5,7 @@ import type {
   StockPreparationPersistUnitOfWorkInput,
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
+import { resolvePluginWriteFence } from './plugin-write-fence'
 import {
   StockPreparationProjectSheetGrantError,
   isStockPreparationProjectSheetObjectId,
@@ -973,6 +974,10 @@ export function createPluginScopedMultitableApi(
       ...(multitable.records?.supportsFilterValueLists === true
         ? { supportsFilterValueLists: true }
         : {}),
+      // PR #6501: forward the host's fenced-write declaration; never assert it (same rule as above).
+      ...(multitable.records?.supportsWriteFence === true
+        ? { supportsWriteFence: true }
+        : {}),
       // S3 follow-ups 2, fix round 1 (read-once): the generic READS read `sheetId` ONCE, like the writes below — the
       // sheet whose scope was asserted is the sheet the host reads (a getter cannot pass the check with an own sheet
       // and have the host read another).
@@ -989,11 +994,15 @@ export function createPluginScopedMultitableApi(
       // S3 fix round 2 (F3): the three generic WRITES read `sheetId` ONCE, assert scope on it, refuse the
       // stock-preparation overview on it, and forward exactly that value (a getter cannot show the checks one
       // sheet and the host another).
+      // PR #6501: a `writeFence` is resolved HERE, for THIS plugin, against the host allow-list (refused
+      // otherwise, before any scope work) and forwarded only in its host-resolved form — the core write path
+      // honours nothing else. Absent -> the write is exactly what it was.
       createRecord: async (input) => {
+        const writeFence = resolvePluginWriteFence(pluginName, (input as { writeFence?: unknown }).writeFence)
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
-        return multitable.records.createRecord({ ...input, sheetId })
+        return multitable.records.createRecord({ ...copyInputValuesExcept(input, ['sheetId', 'writeFence']), sheetId, ...(writeFence ? { writeFence } : {}) } as unknown as typeof input)
       },
       getRecord: async (input) => {
         const sheetId = input.sheetId
@@ -1001,10 +1010,11 @@ export function createPluginScopedMultitableApi(
         return multitable.records.getRecord({ ...copyInputValuesExcept(input, ['sheetId']), sheetId } as typeof input)
       },
       patchRecord: async (input) => {
+        const writeFence = resolvePluginWriteFence(pluginName, (input as { writeFence?: unknown }).writeFence)
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
-        return multitable.records.patchRecord({ ...input, sheetId })
+        return multitable.records.patchRecord({ ...copyInputValuesExcept(input, ['sheetId', 'writeFence']), sheetId, ...(writeFence ? { writeFence } : {}) } as unknown as typeof input)
       },
       deleteRecord: async (input) => {
         const sheetId = input.sheetId

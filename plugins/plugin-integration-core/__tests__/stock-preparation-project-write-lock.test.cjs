@@ -537,4 +537,134 @@ test('L11 an unknown purpose / reason is refused before any IO', async () => {
   assert.equal(db.log.length, 0)
 })
 
+
+// ── L12–L14: Codex review P1-a / P1-b ─────────────────────────────────────────────────────────────────
+test('L11b the superseded-reason and host-fence vocabularies are pinned', () => {
+  assert.deepEqual(lockModule.PLAN_SUPERSEDED_REASONS, ['newer_plan', 'token_unbound', 'scope_changed', 'job_unbound', 'expansion_stale', 'expansion_unbound'])
+  assert.deepEqual(lockModule.HOST_WRITE_FENCE_CODES, {
+    NOT_ALLOWED: 'PLUGIN_WRITE_FENCE_NOT_ALLOWED',
+    REJECTED: 'PLUGIN_WRITE_FENCE_REJECTED',
+    UNAVAILABLE: 'PLUGIN_WRITE_FENCE_UNAVAILABLE',
+  })
+  for (const code of Object.values(lockModule.HOST_WRITE_FENCE_CODES)) assert.equal(lockModule.isHostWriteFenceError({ code }), true)
+  assert.equal(lockModule.isHostWriteFenceError({ code: 'VALIDATION_ERROR' }), false)
+  assert.equal(lockModule.isHostWriteFenceError(null), false)
+})
+
+test('L12 observeGeneration / readGeneration are read-only; observe refuses a LIVE writer only', async () => {
+  const { lock, scope, db, clock } = setup()
+  const absent = await lock.observeGeneration(scope)
+  assert.deepEqual({ ...absent }, { scopeKey: scope, present: false, generation: 0, generationToken: null, fencingEpoch: 0 })
+  assert.equal(db.rows(PROJECT_WRITE_LOCK_TABLE).length, 0, 'L12: observing writes nothing (a read-tier caller observes)')
+  assert.deepEqual({ ...lockModule.writeObservationFromGeneration(absent) }, { writeScope: scope, generationToken: null, fencingEpoch: 0 })
+  const bumped = await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const seen = await lock.observeGeneration(scope)
+  assert.equal(seen.generationToken, bumped.generationToken)
+  assert.equal(seen.fencingEpoch, 0)
+  const grant = await lock.acquire(scope, { purpose: 'small_apply' })
+  await assert.rejects(() => lock.observeGeneration(scope), rejectsWith(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 409))
+  const read = await lock.readGeneration(scope)
+  assert.equal(read.generationToken, bumped.generationToken, 'L12: readGeneration does not refuse a live lease')
+  assert.equal(read.fencingEpoch, grant.fencingEpoch)
+  clock.advance(TTL + GRACE)
+  const abandoned = await lock.observeGeneration(scope)
+  assert.equal(abandoned.fencingEpoch, grant.fencingEpoch, 'L12: an abandoned lease is observed, not refused')
+})
+
+test('L13 bumpGeneration(expect): bumps only while token AND epoch are what the expansion observed', async () => {
+  const { lock, scope, row } = setup()
+  // absent -> absent: the first bump of the sheet
+  const first = await lock.bumpGeneration(scope, { reason: 'large_approval', expect: { generationToken: null, fencingEpoch: 0 } })
+  assert.equal(first.generation, 1)
+  // absent expected, row present -> stale
+  await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'large_approval', expect: { generationToken: null, fencingEpoch: 0 } }), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+    assert.equal(error.details.reason, 'expansion_stale')
+    assert.equal(error.details.partial, false)
+    return true
+  })
+  // token moved -> stale, nothing bumped
+  const observed = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const g = row().generation
+  await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'large_approval', expect: observed }), (error) => error.details.reason === 'expansion_stale')
+  assert.equal(row().generation, g)
+  // epoch moved (a write run acquired + released; the token did not move) -> stale
+  const observed2 = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+  const grant = await lock.acquire(scope, { purpose: 'small_apply' })
+  await lock.createGuard(grant).release()
+  assert.equal(row().generation_token, observed2.generationToken, 'calibration: token unchanged')
+  await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'large_approval', expect: observed2 }), (error) => error.details.reason === 'expansion_stale')
+  // unchanged -> bumps and returns the new token
+  const observed3 = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+  const ok = await lock.bumpGeneration(scope, { reason: 'large_approval', expect: observed3 })
+  assert.equal(ok.generation, row().generation)
+  assert.notEqual(ok.generationToken, observed3.generationToken)
+  // malformed expectation -> 500 before any IO
+  for (const bad of [{}, { generationToken: '', fencingEpoch: 0 }, { generationToken: null, fencingEpoch: 2 }, { generationToken: 't', fencingEpoch: -1 }, { generationToken: 't', fencingEpoch: 1.5 }]) {
+    await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'large_approval', expect: bad }), (error) => error.status === 500 && error.details.reason === 'expectation_malformed')
+  }
+})
+
+test('L13b the epoch is PINNED in the CAS: an acquire + release between the bump\'s read and its CAS makes it stale', async () => {
+  const { lock, scope, db, row } = setup()
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const observed = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+  const gate = kit.deferred()
+  const entered = kit.deferred()
+  let paused = false
+  db.pauses.updateRow = async (args) => {
+    if (!paused && args.set && args.set.generation_reason === 'large_approval') { paused = true; entered.resolve(); await gate.promise }
+  }
+  const bump = lock.bumpGeneration(scope, { reason: 'large_approval', expect: observed })
+  await entered.promise
+  const grant = await lock.acquire(scope, { purpose: 'small_apply' })
+  await lock.createGuard(grant).release()
+  const generation = row().generation
+  gate.resolve()
+  await assert.rejects(() => bump, (error) => error.details.reason === 'expansion_stale')
+  assert.equal(row().generation, generation, 'L13b: the in-flight CAS matched nothing')
+})
+
+test('L14 the guard\'s host-fence half: the fence it hands the host, the refusal mapping, the final re-assert', async () => {
+  const { lock, scope, clock } = setup()
+  const grant = await lock.acquire(scope, { purpose: 'small_apply' })
+  const guard = lock.createGuard(grant)
+  assert.deepEqual(guard.hostWriteFence(), { lock: PROJECT_WRITE_LOCK_TABLE, scopeKey: scope, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generationToken: grant.generationToken })
+  await guard.reassert()
+  // NOT_ALLOWED -> 501, guard lost (no further write)
+  const notAllowed = await guard.hostFenceRefused({ code: 'PLUGIN_WRITE_FENCE_NOT_ALLOWED' })
+  assert.equal(notAllowed.status, 501)
+  assert.equal(notAllowed.details.reason, 'host_fence_not_allowed')
+  assert.equal(notAllowed.fence, true)
+  await assert.rejects(() => guard.beforeWrite({ index: 0, operation: 'createRecord' }), (error) => error === notAllowed)
+  await assert.rejects(() => guard.reassert(), (error) => error === notAllowed)
+  await guard.release()
+  // UNAVAILABLE -> STORE_FAILED (503)
+  const g2 = lock.createGuard(await lock.acquire(scope, { purpose: 'small_apply' }))
+  const unavailable = await g2.hostFenceRefused({ code: 'PLUGIN_WRITE_FENCE_UNAVAILABLE' })
+  assert.equal(unavailable.code, PROJECT_WRITE_ERROR_CODES.STORE_FAILED)
+  assert.equal(unavailable.status, 503)
+  await g2.release()
+  // REJECTED after a takeover -> LEASE_LOST; REJECTED after a bump under our own lease -> PLAN_SUPERSEDED
+  const g3 = lock.createGuard(await lock.acquire(scope, { purpose: 'small_apply' }))
+  clock.advance(TTL + GRACE)
+  await lock.acquire(scope, { purpose: 'large_apply_chunk' })
+  const rejected = await g3.hostFenceRefused({ code: 'PLUGIN_WRITE_FENCE_REJECTED' })
+  assert.equal(rejected.code, PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+  assert.equal(rejected.fence, true)
+  // the final re-assert sees a loss after the last write
+  const { lock: lock2, scope: scope2, clock: clock2, db: db2 } = setup()
+  const g4 = lock2.createGuard(await lock2.acquire(scope2, { purpose: 'small_apply' }))
+  const current = db2.rows(PROJECT_WRITE_LOCK_TABLE)[0]
+  await db2.updateRow(PROJECT_WRITE_LOCK_TABLE, { generation_token: 'tok-syn-moved' }, { scope_key: current.scope_key })
+  const superseded = await g4.hostFenceRefused({ code: 'PLUGIN_WRITE_FENCE_REJECTED' })
+  assert.equal(superseded.code, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+  assert.equal(superseded.details.reason, 'newer_plan')
+  const g5 = lock2.createGuard(await (async () => { clock2.advance(TTL + GRACE); return lock2.acquire(scope2, { purpose: 'small_apply' }) })())
+  clock2.advance(TTL + GRACE)
+  await lock2.bumpGeneration(scope2, { reason: 'small_preview' })
+  await assert.rejects(() => g5.reassert(), (error) => error.code === PROJECT_WRITE_ERROR_CODES.LEASE_LOST && error.fence === true)
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-write-lock.test.cjs', tests, { passLine: '✓ stock-preparation-project-write-lock' })

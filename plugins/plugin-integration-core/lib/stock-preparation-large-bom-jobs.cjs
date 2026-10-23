@@ -23,6 +23,7 @@ const {
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
   applyStockPreparationPlan,
+  assertHostFencedWriteSupported,
   countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
@@ -33,6 +34,7 @@ const {
   PROJECT_WRITE_ERROR_CODES,
   StockPreparationProjectWriteLockError,
   assertWriteBindingMatchesGuard,
+  normalizeGenerationExpectation,
 } = require('./stock-preparation-project-write-lock.cjs')
 
 const WRITE_BINDING_KEYS = Object.freeze(['writeScope', 'writeGeneration', 'writeGenerationToken'])
@@ -604,6 +606,14 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     )
   }
   const parameters = isPlainObject(input.parameters) ? cloneJson(input.parameters) : {}
+  // EXPANSION-TIME GENERATION (Codex review P1-b): the route's observer reads the target sheet's write
+  // generation BEFORE the job exists (refused 409 while a live writer holds the sheet — then no job is
+  // created). Plan and approval later require it unchanged. Stored ALONGSIDE the job's fields, never in a
+  // revision or the public projection. No observer (no lock service wired) -> an UNOBSERVED job, which a
+  // lock-wired plan / approval refuses `expansion_unbound`.
+  const writeObservation = typeof input.writeGenerationObserver === 'function'
+    ? normalizeExpansionWriteObservation(await input.writeGenerationObserver())
+    : null
   const jobId = safeEvidenceToken((typeof input.createJobId === 'function' ? input.createJobId() : '') || defaultJobId(), 'jobId')
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   const job = {
@@ -633,9 +643,39 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     },
     createdAt: now,
     updatedAt: now,
+    ...(writeObservation ? { writeObservation } : {}),
   }
   await storage.set(backgroundJobKey({ ...scope, actionId, jobId }), job)
   return cloneJson(job)
+}
+
+function normalizeExpansionWriteObservation(observation) {
+  if (!isPlainObject(observation) || typeof observation.writeScope !== 'string' || !observation.writeScope) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the expansion write generation observer returned no usable observation', { reason: 'observation_malformed' })
+  }
+  const expectation = normalizeGenerationExpectation(observation)
+  return { writeScope: observation.writeScope, ...expectation }
+}
+
+function expansionUnbound() {
+  return new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'this large-BOM expansion predates the sheet write generation; expand again before planning', { reason: 'expansion_unbound', partial: false })
+}
+
+function expansionStale(currentGeneration) {
+  return new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'a newer preview or write of this stock-prep sheet exists since this expansion; expand again before planning', {
+    reason: 'expansion_stale',
+    ...(Number.isInteger(currentGeneration) ? { currentGeneration } : {}),
+    partial: false,
+  })
+}
+
+// The observation a job carries, or null when it carries none (an unobserved / legacy job).
+function storedWriteObservation(value) {
+  try {
+    return isPlainObject(value) ? normalizeExpansionWriteObservation(value) : null
+  } catch {
+    return null
+  }
 }
 
 async function loadLargeBomBackgroundExpansionJob(input = {}) {
@@ -1185,9 +1225,30 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
   // (refused 409 while a live writer holds the sheet — then no job is created) and the job records
   // the generation it was approved under, ALONGSIDE planRevision / targetRevision, never inside them.
   // No binder (the lock service is not wired) creates an UNBOUND job, which no chunk will run.
-  const writeBinding = typeof input.writeGenerationBinder === 'function'
-    ? normalizeLargeBomWriteBinding(await input.writeGenerationBinder())
-    : null
+  //
+  // P1-b: the bump is CONDITIONAL on the generation the expansion observed and the plan re-checked (token
+  // AND fencing epoch unchanged — the binder passes it to the lock as `expect`, which pins it in the CAS).
+  // An expansion / plan carrying no observation is refused `expansion_unbound`; a stale one
+  // `expansion_stale` (from the lock). Both before any job exists.
+  let writeBinding = null
+  if (typeof input.writeGenerationBinder === 'function') {
+    const observed = storedWriteObservation(sourceJob.planWriteObservation)
+    const expansionObserved = storedWriteObservation(sourceJob.writeObservation)
+    if (!observed || !expansionObserved
+      || observed.writeScope !== expansionObserved.writeScope
+      || observed.generationToken !== expansionObserved.generationToken
+      || observed.fencingEpoch !== expansionObserved.fencingEpoch) {
+      throw expansionUnbound()
+    }
+    writeBinding = normalizeLargeBomWriteBinding(await input.writeGenerationBinder({
+      writeScope: observed.writeScope,
+      generationToken: observed.generationToken,
+      fencingEpoch: observed.fencingEpoch,
+    }))
+    if (writeBinding.writeScope !== observed.writeScope) {
+      throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the approval bound a different sheet than the expansion observed', { reason: 'scope_changed', partial: false })
+    }
+  }
   const job = {
     jobId: applyJobId,
     ...scope,
@@ -1362,6 +1423,9 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     // existed is refused `job_unbound` (re-approve it).
     const projectWriteGuard = requireLargeBomProjectWriteGuard(input.projectWriteGuard)
     assertWriteBindingMatchesGuard(job, projectWriteGuard, { unboundReason: 'job_unbound' })
+    // P1-a: the chunk's writes are host-fenced; a host that cannot honour the fence refuses here, before
+    // the job is touched (the writer re-checks).
+    assertHostFencedWriteSupported(recordsApi, projectWriteGuard)
     const start = nextDecisionIndex(job)
     const decisions = plan.decisions
     if (start >= decisions.length) {
@@ -1399,8 +1463,10 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
         ? job.installedFieldProperties
         : input.installedFieldProperties,
       recordsApi,
-      // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write.
+      // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write, and the
+      // same lease + generation re-checked by the host inside every record write transaction (P1-a).
       writeFence: projectWriteGuard,
+      writeFenceRequired: true,
     })
 
     job.counts = mergeCounts(job.counts, applyResult.counts)
@@ -1464,6 +1530,22 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     )
   }
   assertAuthoritativeLargeBomExpansion(job)
+  // P1-b: a plan is made only while the sheet's write generation is still the one the expansion
+  // observed (token compared; the epoch is compared at approval, inside the bump's CAS). Stale ->
+  // 409 PLAN_SUPERSEDED `expansion_stale`; an unobserved (legacy) expansion -> `expansion_unbound`.
+  // Both before the plan is computed or the job is touched. The checked observation is recorded with the
+  // plan; approval requires it. No reader (no lock service wired) -> the pre-lock behaviour.
+  let planWriteObservation = null
+  if (typeof input.writeGenerationReader === 'function') {
+    const observed = storedWriteObservation(job.writeObservation)
+    if (!observed) throw expansionUnbound()
+    const current = await input.writeGenerationReader(observed.writeScope)
+    const currentToken = current && (typeof current.generationToken === 'string' ? current.generationToken : null)
+    if (!current || currentToken !== observed.generationToken) {
+      throw expansionStale(current && Number.isInteger(current.generation) ? current.generation : undefined)
+    }
+    planWriteObservation = observed
+  }
   const artifact = isPlainObject(job.artifact) ? job.artifact : {}
   const expandedRows = Array.isArray(artifact.rows) ? artifact.rows.map(cloneJson) : []
   const existingRows = normalizeExistingRows(input.existingRows)
@@ -1508,6 +1590,10 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     plannedAt: plan.plannedAt,
   }
   job.planEvidence = summarizeConflictPlanForEvidence(plan)
+  // Replaced on every plan: a plan made without the reader carries none (and a lock-wired approval
+  // refuses it), never the observation an earlier plan recorded.
+  if (planWriteObservation) job.planWriteObservation = planWriteObservation
+  else delete job.planWriteObservation
   job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   await storage.set(key, job)
   return cloneJson(job)

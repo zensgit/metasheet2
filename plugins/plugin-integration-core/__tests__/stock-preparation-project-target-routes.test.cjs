@@ -231,7 +231,7 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning, records },
+      multitable: { provisioning, records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records) },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job (R-14..R-16).
     storage: consumableMap(),
@@ -269,6 +269,7 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   return {
     routes, auditAppends, provisioning, records, db, store, context,
+    projectWriteLock: services.stockPreparationProjectWriteLock || null,
     restore() { for (const [key, value] of Object.entries(previousEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value } },
   }
 }
@@ -312,9 +313,17 @@ function registerActive(harness, projectNo = PROJECT, { archived = false, tenant
  * with its snapshot bound to `target`. Rows and decisions are empty: these cases are about WHICH
  * sheet the job addresses, not what it writes.
  */
+const swlLockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+
 async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }) {
   const actionId = PLM_STOCK_PREPARATION_ACTION_ID
   const at = '2026-10-09T00:00:00.000Z'
+  // Codex review P1-b: a seeded expansion + plan carries what the routes record — the target sheet's write
+  // generation observed from the mounted lock (none when no lock service is wired).
+  const seedLock = h.projectWriteLock
+  const writeObservation = seedLock && target && typeof target.sheetId === 'string'
+    ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
+    : null
   const job = {
     jobId, ...JOB_SCOPE, actionId,
     status: 'completed', authoritative: true, projectNoPresent: true,
@@ -334,6 +343,7 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
     budgets: {},
     evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
     createdAt: at, updatedAt: at,
+    ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
   }
   await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId, jobId }), job)
   return job
@@ -894,10 +904,23 @@ test('R6 large lane: approval bumps + binds; the chunk route takes the project l
     assert.deepEqual(await storedJob(applyJobId), bound, 'job untouched by a superseded refusal')
     assert.equal(row().lease_id, null, 'the lease was released')
 
-    // Re-approve -> the new job runs.
-    const again = await applyStart(h.routes, jobId)
+    // P1-b: re-approving the SAME expansion after the newer preview is refused `expansion_stale` (nothing
+    // bumped, no job); re-planning it too. A FRESH expansion of the project plans, approves and runs.
+    const generationBefore = row().generation
+    const stale = await applyStart(h.routes, jobId)
+    assert.equal(stale.statusCode, 409, JSON.stringify(stale.body))
+    assert.equal(stale.body.error.code, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+    assert.equal(stale.body.error.details.reason, 'expansion_stale')
+    assert.equal(row().generation, generationBefore, 'a stale approval bumps nothing')
+    const stalePlan = await plan(h.routes, jobId)
+    assert.equal(stalePlan.statusCode, 409, JSON.stringify(stalePlan.body))
+    assert.equal(stalePlan.body.error.details.reason, 'expansion_stale')
+    const freshJobId = 'job-swl-r6-fresh'
+    await seedPlannedExpansionJob(h, { jobId: freshJobId, target: { sheetId, objectId, fieldIdMap: {} } })
+    assert.equal((await plan(h.routes, freshJobId)).statusCode, 200)
+    const again = await applyStart(h.routes, freshJobId)
     assert.equal(again.statusCode, 202, JSON.stringify(again.body))
-    const ran = await applyRun(h.routes, jobId, again.body.data.jobId)
+    const ran = await applyRun(h.routes, freshJobId, again.body.data.jobId)
     assert.equal(ran.statusCode, 200, JSON.stringify(ran.body))
     assert.notEqual((await storedJob(again.body.data.jobId)).status, 'queued')
   } finally { h.restore() }

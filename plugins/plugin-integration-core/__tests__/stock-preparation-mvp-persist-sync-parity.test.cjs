@@ -378,7 +378,7 @@ function mount({ parts = [PART.A1], hourRule = false, extMapping = false } = {})
           routes.set(`${method.toUpperCase()} ${routePath}`, handler)
         },
       },
-      multitable: { provisioning: createProvisioning(), records: records.api },
+      multitable: { provisioning: createProvisioning(), records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records.api) },
     },
     storage: consumableMap(),
     config: {

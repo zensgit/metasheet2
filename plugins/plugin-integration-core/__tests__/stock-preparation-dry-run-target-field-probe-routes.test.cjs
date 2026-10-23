@@ -257,7 +257,7 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [], derived
       },
       multitable: {
         provisioning: host.provisioning,
-        records: records.api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records.api),
       },
     },
     storage: consumableMap(),

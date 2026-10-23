@@ -765,6 +765,11 @@ export interface MultitableRecordsAPI {
   createRecord(input: {
     sheetId: string
     data: Record<string, unknown>
+    /**
+     * OPTIONAL host fenced write (see multitable/plugin-write-fence.ts). Honoured only when
+     * `supportsWriteFence` is true; allow-listed per calling plugin; refused otherwise.
+     */
+    writeFence?: PluginRecordWriteFence
   }): Promise<{
     id: string
     sheetId: string
@@ -785,6 +790,8 @@ export interface MultitableRecordsAPI {
     recordId: string
     changes: Record<string, unknown>
     expectedVersion?: number
+    /** OPTIONAL host fenced write — same contract as on `createRecord`. */
+    writeFence?: PluginRecordWriteFence
   }): Promise<{
     id: string
     sheetId: string
@@ -830,6 +837,13 @@ export interface MultitableRecordsAPI {
    * may only forward it when the surface underneath declares it, never assert it on its own.
    */
   supportsFilterValueLists?: boolean
+  /**
+   * Host fenced writes (PR #6501): `true` iff `createRecord` / `patchRecord` honour `writeFence` — the
+   * host checks the caller's allow-listed lease row with SELECT ... FOR SHARE INSIDE the write transaction
+   * and refuses the write when it no longer holds. Absent on an older host: a caller that REQUIRES fencing
+   * must then refuse to write (it must never send a fence a host would silently ignore).
+   */
+  supportsWriteFence?: boolean
   /**
    * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
    * receives only the records methods needed by the existing persist algorithm.
@@ -3133,3 +3147,15 @@ export interface UnionSchema<T = unknown> extends ValidationSchema<T> {
 }
 
 export interface OptionalSchema<T = unknown> extends ValidationSchema<T | undefined> {}
+/**
+ * A plugin's host fenced write: the lease the write must still hold at COMMIT. `lock` names the calling
+ * plugin's ALLOW-LISTED lease table (multitable/plugin-write-fence.ts); the host never takes a table or a
+ * column from the plugin beyond that identifier.
+ */
+export interface PluginRecordWriteFence {
+  lock: string
+  scopeKey: string
+  leaseId: string
+  fencingEpoch: number
+  generationToken: string
+}

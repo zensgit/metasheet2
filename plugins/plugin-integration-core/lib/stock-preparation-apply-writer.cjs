@@ -15,6 +15,11 @@ const {
   derivePackAwarePlmWritableFields,
 } = require('./stock-preparation-conflict-planner.cjs')
 const { isTenantExtensionField } = require('./stock-preparation-extension-namespace.cjs')
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
+  isHostWriteFenceError,
+} = require('./stock-preparation-project-write-lock.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
 const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
@@ -563,6 +568,38 @@ async function fenceBeforeWrite(writeFence, meta) {
   if (writeFence) await writeFence.beforeWrite(meta)
 }
 
+// HOST FENCED WRITE (Codex review P1-a). The pre-write CAS above detects a lost lease EARLY and renews it,
+// but it is a separate transaction from the host write. So every fenced create / patch also hands the host
+// the guard's lease + generation (`writeFence` on the records call); the host re-checks them with
+// SELECT ... FOR SHARE INSIDE the record write transaction and refuses the write when they no longer
+// hold. A host refusal (nothing written) becomes the guard's own fence error, which stops the loop.
+//
+// FAIL CLOSED: a fenced run (every production stock-prep write — both callers require the lease guard)
+// refuses before any IO when the guard cannot supply the host fence, or the records surface does not
+// declare that it honours one: a fence sent to a host that silently ignores it would look protected and
+// not be. Exported so both callers can refuse BEFORE they spend a token / touch a job; the writer
+// re-checks it itself, so no caller can skip it.
+function assertHostFencedWriteSupported(recordsApi, writeFence) {
+  if (!writeFence) return
+  if (typeof writeFence.hostWriteFence !== 'function' || typeof writeFence.hostFenceRefused !== 'function'
+    || !recordsApi || recordsApi.supportsWriteFence !== true) {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the records host does not support fenced writes; nothing is written without them', { reason: 'host_fence_unsupported' })
+  }
+}
+
+function hostFenceInput(writeFence) {
+  return writeFence ? { writeFence: writeFence.hostWriteFence() } : {}
+}
+
+async function callFencedRecordsApi(operation, writeFence, callback) {
+  try {
+    return await callback()
+  } catch (error) {
+    if (writeFence && isHostWriteFenceError(error)) throw await writeFence.hostFenceRefused(error)
+    throw wrapTargetWriteError(error, operation)
+  }
+}
+
 async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
   const key = decisionKey(decision, target)
   let record = copyPayload(decision.record, 'decision.record')
@@ -573,10 +610,11 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
   const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
   if (existing && existing.id) {
     await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'patchRecord' })
-    const updated = await callRecordsApi('patchRecord', () => recordsApi.patchRecord({
+    const updated = await callFencedRecordsApi('patchRecord', writeFence, () => recordsApi.patchRecord({
       sheetId: target.sheetId,
       recordId: existing.id,
       changes: mapRecordFields(record, target.fieldIdMap),
+      ...hostFenceInput(writeFence),
     }))
     const recordId = updated && updated.id ? updated.id : existing.id
     rememberWrittenRow(keyIndex, key, recordId)
@@ -584,9 +622,10 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
   }
 
   await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'createRecord' })
-  const created = await callRecordsApi('createRecord', () => recordsApi.createRecord({
+  const created = await callFencedRecordsApi('createRecord', writeFence, () => recordsApi.createRecord({
     sheetId: target.sheetId,
     data: mapRecordFields(record, target.fieldIdMap),
+    ...hostFenceInput(writeFence),
   }))
   const recordId = created && created.id
   rememberWrittenRow(keyIndex, key, recordId)
@@ -608,10 +647,11 @@ async function applyPatchDecision({ recordsApi, target, decision, humanFields, t
   }
 
   await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'patchRecord' })
-  const updated = await callRecordsApi('patchRecord', () => recordsApi.patchRecord({
+  const updated = await callFencedRecordsApi('patchRecord', writeFence, () => recordsApi.patchRecord({
     sheetId: target.sheetId,
     recordId: existing.id,
     changes: mapRecordFields(patch, target.fieldIdMap),
+    ...hostFenceInput(writeFence),
   }))
   const recordId = updated && updated.id ? updated.id : existing.id
   rememberWrittenRow(keyIndex, key, recordId)
@@ -747,6 +787,14 @@ async function applyStockPreparationPlan(input = {}) {
   // Optional project write fence (see fenceBeforeWrite). `abort` is set when it stops the loop.
   const writeFence = input.writeFence && typeof input.writeFence.beforeWrite === 'function' ? input.writeFence : null
   let abort = null
+  // PRODUCTION CALLERS (applyStockPreparationAction, the large-BOM chunk) set `writeFenceRequired`: a
+  // production stock-prep write without the lease fence is refused here (501), whatever the caller did
+  // before. Direct callers (writer tests, fakes) that pass neither keep the unfenced behaviour.
+  if (input.writeFenceRequired === true && !writeFence) {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep writes require the sheet write fence; nothing is written without it', { reason: 'write_fence_required' })
+  }
+  // A fenced run is ALSO host-fenced on every record write; fail closed before any IO otherwise.
+  assertHostFencedWriteSupported(recordsApi, writeFence)
 
   // W8-4 (L1): ONE apply run = ONE metadata scope. This function is called once per chunk (the
   // large-BOM route advances exactly one chunk per HTTP request) and once per small-BOM apply, so
@@ -852,6 +900,18 @@ async function applyStockPreparationPlan(input = {}) {
     await runDecisions()
   }
 
+  // FINAL RE-ASSERT (Codex review P1-a): a fenced run that got through its plan proves it still holds the
+  // lease and the plan one last time. A loss there is a fenced stop AFTER the last decision — the run
+  // reports LEASE_LOST / PLAN_SUPERSEDED with its partial counts, never "succeeded".
+  if (writeFence && !abort && typeof writeFence.reassert === 'function') {
+    try {
+      await writeFence.reassert()
+    } catch (error) {
+      if (!(error && error.fence === true)) throw error
+      abort = { index: plan.decisions.length, error }
+    }
+  }
+
   // The loop above now runs inside a HOST capability, so "it ran" is no longer visible from here.
   // A host whose `withMetadataCache` resolved without invoking the operation would produce
   // written=0 / errors=[] / status='succeeded', and the chunk runner would advance its checkpoint
@@ -923,6 +983,7 @@ module.exports = {
   APPLY_PERMISSIONS,
   StockPreparationApplyWriterError,
   applyStockPreparationPlan,
+  assertHostFencedWriteSupported,
   summarizeApplyResultForEvidence,
   countAttemptedHostWrites,
   __internals: {

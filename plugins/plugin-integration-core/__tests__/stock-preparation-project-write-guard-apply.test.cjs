@@ -13,8 +13,11 @@
 //   T4  an unbound token (minted without the lock) is refused token_unbound.
 //   T5  no guard -> 501, a guard for another scope -> 500; neither burns the token nor writes.
 //   T6  E04 / E08: a preview while a write is in flight is refused and moves nothing; after a lapse
-//       (>= TTL + GRACE) the preview supersedes, the stalled writer's one in-flight write is the
-//       accepted residual, and its next write is fenced (LEASE_LOST, partial counts).
+//       (>= TTL + GRACE) the preview supersedes and the stalled writer's in-flight write is REFUSED by
+//       the host fence (nothing lands; LEASE_LOST, partial false). T6-takeover is Codex's P1-a repro:
+//       B takes over and applies while A sits inside a create; A's create is refused, no duplicate key,
+//       A reports LEASE_LOST and B succeeded. T6-final: a loss after the last write is LEASE_LOST, not
+//       "succeeded" (the final re-assert).
 //   T7  a lock store failure mid-run stops the writer: 503 with the partial counts.
 //   T9  E02 / R-52: the scope is the SHEET. Another project on the same sheet is excluded (the race in
 //       which two projects both pass the foreign-row guard of one empty sheet); the same project on
@@ -270,6 +273,28 @@ test('T5 no guard -> 501, a guard for another scope -> 500; the token is NOT con
   assert.equal(applied.status, 'succeeded', 'and still applies once the guard is right')
 })
 
+// Codex review P1-a: a records host that does not declare fenced writes is refused (501) BEFORE the token is
+// claimed — the run never sends a fence a host would silently ignore, and the operator keeps the token.
+test('T5b a records host without fence support -> 501 host_fence_unsupported; the token is NOT consumed and nothing is written', async () => {
+  const harness = kit.createLibWriteLockHarness()
+  const s = scenario({ harness })
+  const dry = await s.dryRun()
+  const plain = kit.createRecordsApi({ hostFence: false })
+  assert.equal(plain.recordsApi.supportsWriteFence, undefined, 'calibration: this host declares nothing')
+  await harness.lock.withProjectWriteLease(s.scope, { purpose: 'small_apply' }, async (guard) => {
+    await assert.rejects(() => s.apply(dry.dryRunToken, { projectWriteGuard: guard, recordsApi: plain.recordsApi }), (error) => {
+      assert.equal(error.status, 501)
+      assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE)
+      assert.equal(error.details.reason, 'host_fence_unsupported')
+      return true
+    })
+  })
+  assert.equal(s.storage.map.size, 1, 'the token is still there')
+  assert.equal(plain.writes().length, 0)
+  const applied = await s.apply(dry.dryRunToken)
+  assert.equal(applied.status, 'succeeded', 'and still applies on a host that honours the fence')
+})
+
 // ── T6 ────────────────────────────────────────────────────────────────────────────────────────────
 test('T6 (E04) a preview while A is mid-write is refused (no token, generation unchanged); after A releases it supersedes', async () => {
   const harness = kit.createLibWriteLockHarness()
@@ -293,7 +318,7 @@ test('T6 (E04) a preview while A is mid-write is refused (no token, generation u
   assert.equal((await harness.lock.readState(a.scope)).generation, before.generation + 1)
 })
 
-test('T6-lapse (E08) A stalls past TTL + GRACE after its first fence: B supersedes; A\'s one in-flight write lands (accepted residual), its next write is fenced', async () => {
+test('T6-lapse (E08) A stalls past TTL + GRACE after its first fence: B supersedes; the host fence refuses A\'s in-flight write (nothing lands)', async () => {
   const clock = kit.createClock()
   const harness = kit.createLibWriteLockHarness({ clock })
   const gate = kit.deferred()
@@ -318,13 +343,88 @@ test('T6-lapse (E08) A stalls past TTL + GRACE after its first fence: B supersed
   await assert.rejects(() => running, (error) => {
     assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
     assert.equal(error.status, 409)
-    assert.equal(error.details.partial, true)
-    assert.equal(error.details.written, 1)
-    assert.equal(error.details.counts.created, 1)
-    assert.equal(error.details.abortedAtDecisionIndex, 1)
+    assert.equal(error.details.partial, false, 'the host refused the write inside its transaction: nothing landed')
+    assert.equal(error.details.written, 0)
+    assert.equal(error.details.attemptedWrites, 0)
+    assert.equal(error.details.counts.created, 0)
+    assert.equal(error.details.abortedAtDecisionIndex, 0)
     return true
   })
-  assert.equal(records.writes().length, 1, 'exactly the one write that was already in flight')
+  assert.equal(records.writes().length, 1, 'A reached the host exactly once')
+  assert.equal(records.rows.length, 0, 'and the host wrote nothing for it')
+  assert.equal(records.fences.length, 1, 'that one write carried the host fence')
+})
+
+// Codex review P1-a, end to end in the lib: A is held INSIDE its second create (past its pre-write CAS);
+// the lease lapses; B previews (clears A's lease, bumps) and applies the same plan to completion; then A's
+// held create resumes. The host fence refuses it, so there is no duplicate idempotency key, A reports
+// LEASE_LOST with its partial counts (1 row landed) and B succeeded.
+test('T6-takeover (Codex P1-a) A held inside a create, B takes over and applies: A\'s create is refused, no duplicate key, A LEASE_LOST, B succeeded', async () => {
+  const clock = kit.createClock()
+  const harness = kit.createLibWriteLockHarness({ clock })
+  const blocked = kit.deferred()
+  const release = kit.deferred()
+  let calls = 0
+  const records = kit.createRecordsApi({
+    beforeWrite: async () => {
+      calls += 1
+      if (calls === 2) { blocked.resolve(); await release.promise }
+    },
+  })
+  const a = scenario({ harness, records })
+  const b = scenario({ harness, records })
+  const tokenA = (await a.dryRun()).dryRunToken
+  const runningA = a.apply(tokenA)
+  const settledA = runningA.then(() => null, (error) => error)
+  await blocked.promise
+  assert.equal(records.rows.length, 1, 'calibration: A landed its first row and sits inside its second create')
+  clock.advance(PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS)
+  const tokenB = (await b.dryRun()).dryRunToken
+  const resultB = await b.apply(tokenB)
+  assert.equal(resultB.status, 'succeeded', 'B succeeded')
+  const rowsAfterB = records.rows.length
+  release.resolve()
+  const errorA = await settledA
+  assert.ok(errorA, 'A must not report success')
+  assert.equal(errorA.code, PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+  assert.equal(errorA.status, 409)
+  assert.equal(errorA.details.partial, true, 'A landed one row before the takeover')
+  assert.equal(errorA.details.written, 1)
+  assert.equal(errorA.details.abortedAtDecisionIndex, 1, 'A stopped AT the refused create')
+  assert.equal(records.rows.length, rowsAfterB, 'A\'s held create wrote nothing')
+  const keys = records.rows.map((row) => row.data.idempotencyKey)
+  assert.equal(keys.length, new Set(keys).size, 'no duplicate idempotency key')
+})
+
+test('T6-final a lease lost AFTER the last write is LEASE_LOST with the partial counts, never "succeeded" (final re-assert)', async () => {
+  const clock = kit.createClock()
+  const harness = kit.createLibWriteLockHarness({ clock })
+  const records = kit.createRecordsApi()
+  const s = scenario({ harness, records })
+  const token = (await s.dryRun()).dryRunToken
+  const plannedWrites = 2
+  // After the plan's LAST write has committed, the lease lapses and another plan bumps: nothing is left
+  // for the pre-write CAS or the host fence to see; only the final re-assert can.
+  const originalCreate = records.recordsApi.createRecord
+  let seen = 0
+  records.recordsApi.createRecord = async (input) => {
+    const out = await originalCreate(input)
+    seen += 1
+    if (seen === plannedWrites) {
+      clock.advance(PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS)
+      await harness.lock.bumpGeneration(s.scope, { reason: 'small_preview' })
+    }
+    return out
+  }
+  await assert.rejects(() => s.apply(token), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+    assert.equal(error.status, 409)
+    assert.equal(error.details.partial, true)
+    assert.equal(error.details.written, plannedWrites, 'every write landed and is reported')
+    assert.equal(error.details.abortedAtDecisionIndex, plannedWrites, 'the stop sits after the last decision (the golden plan is two adds)')
+    return true
+  })
+  assert.equal(records.rows.length, plannedWrites)
 })
 
 test('T6-bump-first a preview committed before A acquires: A is PLAN_SUPERSEDED before any source read or write; the token is burned', async () => {
