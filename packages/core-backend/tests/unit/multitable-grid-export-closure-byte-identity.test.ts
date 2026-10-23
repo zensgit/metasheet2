@@ -8,8 +8,8 @@
  * answers "not closed") — for an admin, a reader and a writer, and compares them, as canonical JSON, with
  * tests/fixtures/multitable-grid-export-closure-byte-identity.json.
  *
- * THE BASELINE WAS CAPTURED ON origin/main fae8946d1 (this file imports nothing the PR adds, so it runs unchanged
- * there): `GEC_CAPTURE_BASELINE=<path> vitest run tests/unit/multitable-grid-export-closure-byte-identity.test.ts`
+ * THE BASELINE WAS CAPTURED ON origin/main fae8946d1 and RE-CAPTURED, byte-identical, on origin/main cb22e18e1
+ * (this file imports nothing the PR adds, so it runs unchanged there):`GEC_CAPTURE_BASELINE=<path> vitest run tests/unit/multitable-grid-export-closure-byte-identity.test.ts`
  * writes the observed set instead of comparing. The PR head must reproduce it byte for byte.
  *
  * Mock pool, no DB, the real univer-meta router behind one pinned listener (`request(app)` is banned in
