@@ -159,6 +159,7 @@ describe('attendance import permission wiring', () => {
       'GET /api/attendance/integrations',
       'POST /api/attendance/integrations',
       'PUT /api/attendance/integrations/:id',
+      'POST /api/attendance/integrations/:id/update',
       'DELETE /api/attendance/integrations/:id',
       'GET /api/attendance/integrations/:id/runs',
       'POST /api/attendance/integrations/:id/sync',
@@ -168,23 +169,33 @@ describe('attendance import permission wiring', () => {
       'GET /api/attendance/import/batches/:id/export.csv',
       'POST /api/attendance/import/rollback/:id',
     ]
+    const helperStart = pluginSource.indexOf('function addAttendanceIdUpdateRoute')
+    const helperEnd = pluginSource.indexOf('\n}\n', helperStart)
+    const helper = pluginSource.slice(helperStart, helperEnd)
+    expect(helperStart).toBeGreaterThanOrEqual(0)
+    // Both mounts receive the same handler argument. A POST /update that grew its own
+    // handler would no longer be covered by the body checks below.
+    expect(helper).toContain('context.api.http.addRoute(method, path, handler)')
+    expect(helper).toContain("context.api.http.addRoute('POST', path + '/update', handler)")
+
     const found: string[] = []
-    // `addAttendanceIdUpdateRoute` registers PUT and the same handler at POST <path>/update.
-    // The twin is not a second source literal, so it is covered by scanning the PUT registration.
     const re = /(?:context\.api\.http\.addRoute|addAttendanceIdUpdateRoute)\(\s*(?:context\s*,\s*)?'([^']+)'\s*,\s*'([^']+)'/g
+    const orgBound = /withAttendanceImportPermission\(|resolveAuthenticatedAttendanceOrg\(|\baccess\.orgId\b|importAccess\.orgId/
     for (const match of pluginSource.matchAll(re)) {
       const method = match[1]
       const path = match[2]
       if (!path.startsWith('/api/attendance/import') && !path.startsWith('/api/attendance/integrations')) continue
       const next = nextRouteRegistration((match.index ?? 0) + 10)
       const body = pluginSource.slice(match.index ?? 0, next === -1 ? pluginSource.length : next)
-      const label = `${method} ${path}`
-      expect(body, label).not.toContain('getOrgId(req)')
-      expect(
-        /withAttendanceImportPermission\(|resolveAuthenticatedAttendanceOrg\(|\baccess\.orgId\b|importAccess\.orgId/.test(body),
-        label,
-      ).toBe(true)
-      found.push(label)
+      const labels = [`${method} ${path}`]
+      if (match[0].startsWith('addAttendanceIdUpdateRoute') && method === 'PUT' && path.endsWith('/:id')) {
+        labels.push(`POST ${path}/update`)
+      }
+      for (const label of labels) {
+        expect(body, label).not.toContain('getOrgId(req)')
+        expect(orgBound.test(body), label).toBe(true)
+        found.push(label)
+      }
     }
     expect(found).toEqual(expected)
   })
