@@ -407,7 +407,7 @@ import { createRecoveryArchiveWorkerRecordEvents, enqueueRecoveryMutationEvent }
 import type { RecoveryArchiveWorkerApplyCallbacks } from '../multitable/recovery-archive-async-restore'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
-import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
+import { listAutomationDingTalkPersonDeliveries, parseDingTalkPersonDeliveryStatusFilter } from '../multitable/dingtalk-person-delivery-service'
 import {
   publishMultitableSheetRealtime as publishMultitableSheetRealtimeShared,
   type MultitableSheetRealtimePayload as SharedRealtimePayload,
@@ -21535,7 +21535,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const limit = parseDingTalkAutomationDeliveryLimit(req.query.limit)
-      const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
+      // 客户反馈 2026-10-21 item 1 (review round 2): optional server-side status filter (fixed value set,
+      // parameterized), so the run log's link to skipped deliveries is not limited to the latest page.
+      const status = parseDingTalkPersonDeliveryStatusFilter(req.query.status)
+      if (status === null) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'status must be one of success, failed, skipped, outcome_unknown' } })
+      }
+      const deliveries = status
+        ? await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit, { status })
+        : await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
       return res.json({ ok: true, data: { deliveries } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)

@@ -2022,6 +2022,7 @@ exec npx vitest run \
   useAttendanceAdminUsers \
   useAttendanceRequestTimezone \
   useAutoSumTotal \
+  useDingTalkPersonRecipientStatus \
   usePlmExportActions \
   userManagementRoleMembership \
   userManagementView \
