@@ -148,6 +148,8 @@ attendance-import-preview-regression.spec.ts
 attendance-punch-outcome
 attendance-record-timeline
 attendance-records-route-redirect
+attendance-report-calendar-view.spec.ts
+attendance-reports-analytics
 attendance-scheduled-feature-status-wiring
 attendance-scheduled-feature-status.spec.ts
 attendance-selfservice-dashboard
@@ -171,6 +173,7 @@ attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
 attendancePayrollHelp.spec.ts
 attendanceRecordRequestPrefill
+attendanceReportCalendar.spec.ts
 attendanceRequestReviewEntitlement
 attendanceRequestTimezoneIntegration
 AttendanceScheduledFeatureStatus
