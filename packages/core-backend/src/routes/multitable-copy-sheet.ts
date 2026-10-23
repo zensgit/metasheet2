@@ -82,6 +82,7 @@ const FORMULA_RECOMPUTE_CHUNK_SIZE = 200
 const ERROR_MESSAGES: Record<string, string> = {
   [COPY_SHEET_ERROR_CODES.sourceNotFullyReadable]: 'You must be able to read every record and field of the source sheet to copy it.',
   [COPY_SHEET_ERROR_CODES.sourceSystemSheet]: 'System-managed sheets cannot be copied.',
+  [COPY_SHEET_ERROR_CODES.sourceGridExportClosed]: 'This sheet\'s generic export is closed; it can be copied without data (structure only).',
   [COPY_SHEET_ERROR_CODES.sourceChanged]: 'The source sheet changed while it was being copied; retry.',
   [COPY_SHEET_ERROR_CODES.tooLarge]: 'The source sheet has more rows than a synchronous copy allows.',
   [COPY_SHEET_ERROR_CODES.tooManyFields]: 'The source sheet has more fields than a copy allows.',

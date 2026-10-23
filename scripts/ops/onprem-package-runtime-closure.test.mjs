@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url'
 const repo = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const closures = {
   multitable: [
+    'packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js',
+    'packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js',
     'packages/core-backend/src/db/migrations/20250925_create_view_tables.sql',
     'packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql',
     'scripts/ops/attendance-onprem-publish-web-dist.sh',
@@ -71,4 +73,17 @@ test('runtime closure regression executes in the required Node 20 job', () => {
   const requiredJob = workflow.split('\n  test:\n')[1].split(/\n  [a-z][\w-]*:/)[0]
   assert.match(requiredJob, /node-version: \[20\.x\]/)
   assert.match(requiredJob, /run: node --test scripts\/ops\/attendance-onprem-package-verify-migrations\.test\.mjs scripts\/ops\/onprem-package-runtime-closure\.test\.mjs/)
+})
+
+test('compiled YiDa bootstrap CLI smoke runs after a core-backend build in the required Node 20 job', () => {
+  const workflow = fs.readFileSync(path.join(repo, '.github/workflows/plugin-tests.yml'), 'utf8')
+  const requiredJob = workflow.split('\n  test:\n')[1].split(/\n  [a-z][\w-]*:/)[0]
+  const steps = requiredJob.split('\n      - name: ').filter(step => step.includes('scripts/ops/yida-bootstrap-cli-compiled-smoke.test.mjs'))
+  assert.equal(steps.length, 1, 'exactly one required step runs the compiled CLI smoke')
+  const build = steps[0].indexOf('\n          pnpm --filter @metasheet/core-backend build\n')
+  const smoke = steps[0].indexOf('node --test --test-reporter=tap scripts/ops/yida-bootstrap-cli-compiled-smoke.test.mjs')
+  assert.ok(build > 0 && smoke > build, 'the smoke must run after the core-backend build in the same step')
+  assert.ok(steps[0].indexOf("[ \"$smoke_tests\" = '# tests 1' ]") > smoke, 'the smoke step must require exactly one subtest')
+  assert.ok(steps[0].indexOf("grep -Fxq 'ok 1 - compiled YiDa bootstrap CLI refuses an empty invocation as a program'") > smoke, 'the smoke step must require the named test, not just a passing file')
+  assert.doesNotMatch(steps[0], /continue-on-error/)
 })

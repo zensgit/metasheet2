@@ -1980,6 +1980,9 @@ exec npx vitest run \
   StockPreparationUnconfirmableHold \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
+  StockPreparationYidaInitialization \
+  StockPreparationYidaOwnerSend \
+  StockPreparationYidaPreview \
   stockPrepPermissionMatrix \
   tasks-api-m3.spec.ts \
   tasks-api-m4.spec.ts \
@@ -2022,6 +2025,7 @@ exec npx vitest run \
   useAttendanceAdminUsers \
   useAttendanceRequestTimezone \
   useAutoSumTotal \
+  useDingTalkPersonRecipientStatus \
   usePlmExportActions \
   userManagementRoleMembership \
   userManagementView \

@@ -40,6 +40,11 @@ function createMockPool(log: Log, opts: { liveSheets: string[]; overviews: strin
       const ids = (params[0] as string[]) ?? []
       return { rows: ids.filter((id) => opts.overviews.includes(id)).map((id) => ({ id })), rowCount: 0 }
     }
+    // The resolvers' combined stamp statement (grid-export closure, review round 1 fix 2): same overview answer.
+    if (q.startsWith('SELECT id, ((to_jsonb(meta_sheets) ->> \'system_kind\') = $2) AS stock_prep_overview,')) {
+      const ids = (params[0] as string[]) ?? []
+      return { rows: ids.filter((id) => opts.overviews.includes(id)).map((id) => ({ id, stock_prep_overview: true, grid_export_closed: false })), rowCount: 0 }
+    }
     // Every subject lookup misses: a 404 NOT_FOUND then PROVES the request got past the overview rule.
     if (q === 'SELECT id FROM roles WHERE id = $1' || q === 'SELECT id FROM users WHERE id = $1') return { rows: [], rowCount: 0 }
     return { rows: [], rowCount: 0 }

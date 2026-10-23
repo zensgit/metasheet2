@@ -26,6 +26,7 @@ const { createStockPreparationSourceBindingStore } = require('./lib/stock-prepar
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
+const { createStockPreparationProjectWriteLock } = require('./lib/stock-preparation-project-write-lock.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -90,6 +91,7 @@ let stockPreparationHandoffStore = null
 let stockPreparationProjectTargetStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
+let stockPreparationProjectWriteLock = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -104,6 +106,8 @@ let pipelineRunner = null
 let stagingInstaller = null
 let stockPreparationSqlServerRuntime = null
 let stockPreparationRuntimeDatabase = null
+let stopYidaOwnerRuntime = null
+let stopYidaInitializationRuntime = null
 
 function buildCapabilityStatus() {
   return {
@@ -355,6 +359,10 @@ module.exports = {
     // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077) for the
     // confirmation-decision ledger. The reconcile route fails closed without it.
     stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
+    // Batch-refresh phase 0 step 1 (migration 100): the cross-process project write lease + plan
+    // generation, one row per target sheet (R-52). Every small apply and large chunk takes it and
+    // fails closed (501) without it; a lock table that cannot be read or written refuses 503.
+    stockPreparationProjectWriteLock = createStockPreparationProjectWriteLock({ db, logger })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -542,6 +550,7 @@ module.exports = {
         stockPreparationProjectTargetStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
+        stockPreparationProjectWriteLock,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -561,11 +570,73 @@ module.exports = {
     context.communication.register(COMMUNICATION_NAMESPACE, buildCommunicationApi())
 
     logger.info(`[${PLUGIN_ID}] activated (${PLUGIN_PHASE}). routes=${registeredRoutes.length}`)
+    // Only the host receives these actual factories. Never publish them, their
+    // authority/permit, or complete material on buildCommunicationApi().
+    const yidaOwnerRuntime = context.services && context.services.yidaOwnerRuntime
+    if (yidaOwnerRuntime !== undefined) {
+      const security = context.services && context.services.security
+      if (!yidaOwnerRuntime || typeof yidaOwnerRuntime.activate !== 'function'
+        || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+        throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
+      }
+      const { createYidaOwnerRuntimeBinding } = await import('./lib/yida-owner-runtime-factory.mjs')
+      const binding = createYidaOwnerRuntimeBinding({ db, security: Object.freeze({
+        encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+      }) })
+      const handle = await yidaOwnerRuntime.activate(binding)
+      if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
+      stopYidaOwnerRuntime = handle.stop.bind(handle)
+    }
+    const yidaInitializationRuntime = context.services && context.services.yidaInitializationRuntime
+    if (yidaInitializationRuntime !== undefined) {
+      try {
+        const security = context.services && context.services.security
+        if (!yidaInitializationRuntime || typeof yidaInitializationRuntime.activate !== 'function'
+          || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+          throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE')
+        }
+        const { createYidaInitializationBinding } = await import('./lib/yida-initialization-producer.mjs')
+        const binding = createYidaInitializationBinding({ security: Object.freeze({
+          encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+        }) })
+        const handle = await yidaInitializationRuntime.activate(binding)
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE')
+        stopYidaInitializationRuntime = handle.stop.bind(handle)
+      } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE') }
+    }
   },
 
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
+    // Latch the private runtimes before the legacy read drain's first await. A stopped
+    // owner request retains actual pending work, so observe its rejection now
+    // but await the original drain before any plugin DB is closed below.
+    let yidaInitializationDrain, initializationStopFailed = false
+    if (stopYidaInitializationRuntime) {
+      const stop = stopYidaInitializationRuntime
+      stopYidaInitializationRuntime = null
+      try {
+        yidaInitializationDrain = stop()
+        void yidaInitializationDrain.catch(() => {})
+      } catch { initializationStopFailed = true }
+    }
+    let yidaOwnerDrain
+    if (stopYidaOwnerRuntime) {
+      const stop = stopYidaOwnerRuntime
+      stopYidaOwnerRuntime = null
+      try {
+        yidaOwnerDrain = stop()
+        void yidaOwnerDrain.catch(() => {})
+      } catch {
+        throw new Error('YIDA_OWNER_RUNTIME_STOP_UNAVAILABLE')
+      }
+    }
+    if (yidaOwnerDrain) await yidaOwnerDrain
+    if (initializationStopFailed) throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaInitializationDrain) {
+      try { await yidaInitializationDrain } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE') }
+    }
     if (stockPreparationRuntimeDatabase) {
       try {
         await stockPreparationRuntimeDatabase.close()

@@ -533,6 +533,9 @@ StockPreparationStageStepper
 StockPreparationUnconfirmableHold
 StockPreparationUnitConfirmView
 StockPreparationWorkspace
+StockPreparationYidaInitialization
+StockPreparationYidaOwnerSend
+StockPreparationYidaPreview
 stockPrepPermissionMatrix
 tasks-api-m3.spec.ts
 tasks-api-m4.spec.ts
@@ -616,6 +619,7 @@ useAttendanceAdminRailNavigation
 useAttendanceAdminUsers
 useAttendanceRequestTimezone
 useAutoSumTotal
+useDingTalkPersonRecipientStatus
 usePlmExportActions
 userManagementRoleMembership
 userManagementView

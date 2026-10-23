@@ -64,6 +64,7 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
 import { grantStockPreparationOverviewRoleRead } from './services/stock-preparation-overview-grants'
+import { closeSheetGridExport, readSheetGridExportClosure } from './services/sheet-grid-export-closure-service'
 import { loadStockPreparationOverviewSheetIds } from './multitable/stock-preparation-overview-contract'
 import { createStockPrepMembersHostPort } from './services/stock-preparation-members-host'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
@@ -120,6 +121,7 @@ import {
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
+import { assertPluginWriteFence, refusePluginWriteFenceOnUnfencedSurface } from './multitable/plugin-write-fence'
 import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
@@ -460,6 +462,12 @@ import { initObservability } from './observability/otel'
 import { isPlmEnabled } from './config/product-mode'
 import { resolvePluginRuntimeConfig } from './plugin-runtime-config'
 
+import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './integration/yida-owner-runtime'
+import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
+import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
+import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
+import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
+  yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
 type PluginRuntimeState = {
   status: 'active' | 'inactive' | 'failed'
   error?: string
@@ -571,6 +579,17 @@ export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicat
   })
 }
 
+// Host-owned RC transaction; never the plugin's row-only wrapper or request ALS.
+const yidaOwnerTransaction: YidaOwnerRuntimeDependencies['database']['transaction'] = work =>
+  poolManager.get().transaction(async ({ query }) => {
+    await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    const transaction: TransactionalQueryable = {
+      isTransaction: true,
+      query: (sql, params) => query(sql, params),
+    }
+    return work(transaction)
+  })
+
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
@@ -622,6 +641,21 @@ export class MetaSheetServer {
   private yjsSocketMetricsSource?: { getMetrics(): { activeRecordCount: number; activeSocketCount: number } }
   private afterSalesApprovalBridgeService: AfterSalesApprovalBridgeService
   private pluginRuntimeSecurityService = new PluginRuntimeSecurityService()
+  private yidaOwnerRuntime = createYidaOwnerRuntime({
+    database: { transaction: yidaOwnerTransaction },
+    security: this.pluginRuntimeSecurityService,
+    fetch: globalThis.fetch.bind(globalThis),
+    // Host-owned switch, not a request claim. The actual owner/admin, immutable
+    // grant and one-use admission still gate every external request.
+    readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
+  })
+  // Local initialization is an independent authority, not the send switch or
+  // an existing target owner check. The immutable server anchor and live ACL
+  // are enforced by this host runtime before any private plugin writer.
+  private yidaInitializationRuntime = createYidaInitializationRuntime({
+    database: { transaction: yidaOwnerTransaction },
+    security: this.pluginRuntimeSecurityService,
+  })
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -1172,6 +1206,37 @@ export class MetaSheetServer {
               return grantStockPreparationOverviewRoleRead(txQuery, { sheetId, roleIds, actorId })
             })
           },
+          // 备料分批拉取第一期 step 3 (PR A): stamp one project sheet closed for generic grid export. ONE
+          // transaction (canonical writer fence → row lock + liveness → set-once UPDATE); refusals propagate
+          // unwrapped. The scope wrapper (plugin-scope.ts) already refused everything about WHICH sheet and hands
+          // this port to plugin-integration-core only. There is no reopen / unset counterpart.
+          closeSheetGridExport: async ({ sheetId, actorId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery = async (sql: string, params?: unknown[]) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return closeSheetGridExport(txQuery, { sheetId, actorId })
+            })
+          },
+          // Read-only twin: no transaction, no lock; column-tolerant.
+          getSheetGridExportClosure: async ({ sheetId }) => {
+            const readQuery = async (sql: string, params?: unknown[]) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+              }
+            }
+            return readSheetGridExportClosure(readQuery, { sheetId })
+          },
         },
         records: {
           // W9: this records surface routes `queryRecords` straight to the multitable query
@@ -1181,6 +1246,9 @@ export class MetaSheetServer {
           // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
           // only when the surface underneath declares it.
           supportsFilterValueLists: true,
+          // PR #6501: create / patch honour a plugin-scope-resolved `writeFence` INSIDE the write transaction
+          // (multitable/plugin-write-fence.ts). An unresolved fence is refused, never ignored.
+          supportsWriteFence: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -1222,7 +1290,7 @@ export class MetaSheetServer {
               offset,
             })
           },
-          createRecord: async ({ sheetId, data }) => {
+          createRecord: async ({ sheetId, data, writeFence }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1235,6 +1303,8 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              // FIRST statement of the write transaction: the fence's FOR SHARE is held until COMMIT.
+              await assertPluginWriteFence(txQuery, writeFence)
               return createMultitableRecord({
                 query: txQuery,
                 sheetId,
@@ -1260,7 +1330,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1273,6 +1343,7 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              await assertPluginWriteFence(txQuery, writeFence)
               return patchMultitableRecord({
                 query: txQuery,
                 sheetId,
@@ -1282,7 +1353,10 @@ export class MetaSheetServer {
               })
             })
           },
-          deleteRecord: async ({ sheetId, recordId }) => {
+          deleteRecord: async (input) => {
+            // PR #6501 round 6 (S2): delete implements no fence — a `writeFence` is refused, never dropped.
+            refusePluginWriteFenceOnUnfencedSurface(input, 'records.deleteRecord')
+            const { sheetId, recordId } = input
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1745,7 +1819,9 @@ export class MetaSheetServer {
 
     // 请求上下文（requestId + trace bridge）
     this.app.use((req, _res, next) => {
-      const requestId = (req.headers['x-request-id'] as string) || crypto.randomUUID()
+      const requestId = isYidaOwnerHttpObservationPath(req.path)
+        ? (req.correlationId ?? crypto.randomUUID())
+        : (req.headers['x-request-id'] as string) || crypto.randomUUID()
       setLogContext({ requestId })
       next()
     })
@@ -1819,6 +1895,9 @@ export class MetaSheetServer {
     }
 
     // Body parsing
+    // Private owner responses, including parser/JWT refusals, must not be cached.
+    this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware, yidaOwnerJsonOnlyMiddleware,
+      express.json({ limit: '2mb', strict: true }))
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
 
@@ -2048,6 +2127,8 @@ export class MetaSheetServer {
     // Uses a lazy resolver because AutomationService is initialized later
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
+    this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime))
+    this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
     //   A1 readiness (GET /ai/readiness, admin-only) +
@@ -2520,16 +2601,24 @@ export class MetaSheetServer {
                       limit,
                       offset,
                     }),
-                  createRecord: ({ sheetId, data }) =>
-                    createMultitableRecord({ query: txQuery, sheetId, data }),
-                  patchRecord: ({ sheetId, recordId, changes, expectedVersion }) =>
-                    patchMultitableRecord({
+                  // PR #6501 round 6 (S2): the unit of work implements no fence — a `writeFence` on either
+                  // write is refused (the transaction rolls back), never dropped.
+                  createRecord: (recordInput) => {
+                    refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.createRecord')
+                    const { sheetId, data } = recordInput
+                    return createMultitableRecord({ query: txQuery, sheetId, data })
+                  },
+                  patchRecord: (recordInput) => {
+                    refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.patchRecord')
+                    const { sheetId, recordId, changes, expectedVersion } = recordInput
+                    return patchMultitableRecord({
                       query: txQuery,
                       sheetId,
                       recordId,
                       changes,
                       expectedVersion,
-                    }),
+                    })
+                  },
                 })
               })
             },
@@ -3519,6 +3608,14 @@ export class MetaSheetServer {
           manifest.name === 'plugin-integration-core'
             ? createDataSourceSealedSnapshotConnectionFacade(getDataSourceManager)
             : undefined,
+        // Registration only: actual user identity reaches this runtime through
+        // the host JWT router, never plugin communication or caller claims.
+        yidaOwnerRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaOwnerRuntime.createPluginCapability()
+          : undefined,
+        yidaInitializationRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaInitializationRuntime.createPluginCapability()
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -3554,9 +3651,15 @@ export class MetaSheetServer {
       return this.setPluginRuntimeState(name, 'inactive')
     }
 
+    if (name === 'plugin-integration-core') {
+      const yidaDrain = this.yidaOwnerRuntime.deactivate()
+      const initializationDrain = this.yidaInitializationRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
+    }
     this.cleanupPluginRuntimeRegistrations(name)
-    const context = this.createPluginContext(loaded)
     try {
+      const context = this.createPluginContext(loaded)
       await pluginInstance.activate(context)
       // plugin-elearning's activate() returns before registering any route, service or timer while
       // its master switch is off (plugins/plugin-elearning/index.cjs, same exact-'true' rule as
@@ -3566,6 +3669,12 @@ export class MetaSheetServer {
       }
       return this.setPluginRuntimeState(name, 'active')
     } catch (error) {
+      if (name === 'plugin-integration-core') {
+        const yidaDrain = this.yidaOwnerRuntime.deactivate()
+        const initializationDrain = this.yidaInitializationRuntime.deactivate()
+        const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+        if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
+      }
       const message = error instanceof Error ? error.message : String(error)
       this.logger.error(`Plugin activation failed: ${name}`, error as Error)
       this.cleanupPluginRuntimeRegistrations(name)
@@ -3583,6 +3692,12 @@ export class MetaSheetServer {
   }
 
   private async deactivatePluginByName(name: string): Promise<PluginRuntimeState> {
+    if (name === 'plugin-integration-core') {
+      const yidaDrain = this.yidaOwnerRuntime.deactivate()
+      const initializationDrain = this.yidaInitializationRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
+    }
     const loaded = this.pluginLoader.get(name)
     if (!loaded) {
       this.disabledPlugins.add(name)
@@ -3719,6 +3834,10 @@ export class MetaSheetServer {
   }
 
   private async stopOnce(signal: string): Promise<void> {
+    // Latch/abort synchronously, then await below before DB teardown. PluginLoader
+    // unloadAll does not await its hooks and is not an adequate draining barrier.
+    const yidaOwnerDrain = this.observeShutdownTask(this.yidaOwnerRuntime.stop())
+    const yidaInitializationDrain = this.observeShutdownTask(this.yidaInitializationRuntime.stop())
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     // Close every approval-completion producer admission synchronously. Their drains run while the
@@ -3806,7 +3925,7 @@ export class MetaSheetServer {
       this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
-    const shutdownTasks: Promise<void>[] = []
+    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain]
 
     // 0. Stop background tasks
     shutdownTasks.push(Promise.resolve().then(() => {

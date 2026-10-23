@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // O2 / R-11 — the `/stock-prep` confirmation-queue workbench PERMISSION MATRIX.
 //
 // R-11 (decision-register.md) approves the vocabulary `stock-prep:read | :operate | :admin` with a
@@ -150,6 +154,8 @@ function inertService(methods) {
 
 function baseServices() {
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -243,7 +249,7 @@ function mount({
       },
       multitable: { provisioning: countedProvisioning, records: countedRecords },
     },
-    storage: new Map(),
+    storage: consumableMap({ durable: false }),
     config: {},
   }
   const services = baseServices()

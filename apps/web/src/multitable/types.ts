@@ -587,6 +587,14 @@ export interface MetaCapabilities {
    * Display only: every create route keeps its own refusal.
    */
   recordCreateBlockedByLock?: boolean
+  /**
+   * 备料分批拉取第一期 step 3: set by /context ONLY on a sheet the host stamped closed for generic grid export
+   * (a stock-preparation pilot project sheet; `canExport` is then already false for everyone). The workbench
+   * keeps its export buttons visible but DISABLED with the reason, and re-checks before it builds a
+   * selected-rows CSV / XLSX in the browser. Absent ⇒ unchanged. Display only: the export route refuses itself
+   * (403 MULTITABLE_GRID_EXPORT_CLOSED) and copy-with-data refuses too. Print and copy-selection stay open.
+   */
+  gridExportClosure?: { reason: string }
 }
 
 export interface YjsPresenceUser {
@@ -616,6 +624,17 @@ export interface MetaSheetPermissionEntry {
   label: string
   subtitle?: string | null
   isActive: boolean
+}
+
+/**
+ * 客户反馈 2026-10-21 item 1: whether the DingTalk person-message sender would reach a local user id
+ * (POST …/automations/dingtalk-person-recipient-status). Booleans only — the server sends no name.
+ */
+export interface DingTalkPersonRecipientStatus {
+  userId: string
+  exists: boolean
+  active: boolean
+  dingtalkLinked: boolean
 }
 
 export interface MetaSheetPermissionCandidate {
@@ -1759,7 +1778,12 @@ export interface DingTalkPersonDelivery {
   deliveredAt?: string
   localUserLabel?: string
   localUserSubtitle?: string
-  localUserIsActive: boolean
+  /** Review round 2: false when no user has this id (a mistyped id) — the viewer says 未找到该用户. */
+  localUserExists?: boolean
+  /** null when the user does not exist (unknown, not "inactive"). */
+  localUserIsActive: boolean | null
+  /** Codex review P2: linked to DingTalk NOW (a current fact, never the cause of a past skip); null if no user. */
+  localUserDingTalkLinked?: boolean | null
 }
 
 // --- Field Validation ---

@@ -537,7 +537,9 @@
 
       <!-- ── 3. 四个动作 ────────────────────────────────────────────────────────────────────────
            从PLM拉取 / 通知下一步 / 导出Excel / 推送宜搭. Every control that renders is one the
-           server answers for this caller (R-11); the ones that do not render say why in words. -->
+           server answers for this caller (R-11); the ones that do not render say why in words.
+           The 宜搭 entries follow the browser's platform-admin view; the server still checks the
+           anchored owner, namespace admission and tenant membership on every action. -->
       <section class="sp-board__actions" data-testid="stock-prep-project-board-actions">
         <!-- 从PLM拉取 lives ABOVE, outside `v-if="board"` — see the section that renders it. It is
              ONE instance either way: mounting a second copy here would give the operator two panels
@@ -568,11 +570,30 @@
             {{ bi('导出物料清单(Excel)', 'Export materials (Excel)') }}
           </button>
 
-          <!-- 推送宜搭 — a PLACEHOLDER, and it says so in the words a factory uses. It is deliberately
-               present-and-disabled rather than absent: 宜搭 is on the customer's own roadmap, and an
-               operator who is looking for it deserves「还没接入」rather than silence that reads as
-               「这个系统不支持」. It is not a permission gate, so it is not an R-11 decoy. -->
+          <!-- 宜搭 — the two preparation entries render only for the literal platform admin the server's
+               live gate admits (`canOpenStockPrepYidaEntries`). Opening either screen approves and sends
+               nothing; the 单行 CREATE entry inside the preview appears only once the server reported its
+               send switch ON. Everyone else keeps main's PLACEHOLDER below, unchanged: it says「还没接入」
+               in a factory's words, and it is not a permission gate, so it is not an R-11 decoy. -->
+          <template v-if="yidaEntriesVisible">
+            <button
+              type="button"
+              class="sp-board__button"
+              data-testid="stock-prep-project-board-yida"
+              :title="bi('仅打开本地预演和准备界面；本入口不发送', 'Open local preview and preparation only; this entry does not send')"
+              @click="openYidaPreparation"
+            >
+              {{ bi('打开宜搭准备（不发送）', 'Open Yida preparation (no sending)') }}
+            </button>
+            <button
+              type="button"
+              class="sp-board__button"
+              data-testid="stock-prep-project-board-yida-preview-toggle"
+              @click="toggleYidaPreview"
+            >宜搭静态预演（不发送）</button>
+          </template>
           <button
+            v-else
             type="button"
             class="sp-board__button sp-board__button--placeholder"
             data-testid="stock-prep-project-board-yida"
@@ -582,6 +603,8 @@
             {{ bi('推送宜搭(暂未接入)', 'Push to Yida (not connected yet)') }}
           </button>
         </div>
+
+        <StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen && yidaEntriesVisible" />
 
         <p v-if="handoffNotice" class="sp-board__notice" data-testid="stock-prep-project-board-handoff-notice" role="status">
           {{ handoffNotice }}
@@ -666,11 +689,13 @@
 // multitable view model and ACL layers, and promising a filter we did not build would be worse than
 // the honest sentence.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onAuthSessionSwitch, readAuthSessionSignature } from '../../../composables/authPrincipal'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
+import StockPreparationYidaPreviewPanel from './StockPreparationYidaPreviewPanel.vue'
 import {
   advanceStockPreparationHandoff,
   exportStockPreparationPrepLines,
@@ -727,7 +752,11 @@ import {
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
-import { canRunStockPrepProjectSync, grantedStockPrepCapabilities } from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  canOpenStockPrepYidaEntries,
+  canRunStockPrepProjectSync,
+  grantedStockPrepCapabilities,
+} from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
 import {
   operatorNextStep,
@@ -824,6 +853,56 @@ const directoryLoaded = ref(false)
  * and every tab switch back to 项目备料.
  */
 const openedProjectNo = ref<string>((props.projectNo ?? '').trim())
+const yidaPreviewOpen = ref(false)
+
+watch([openedProjectNo, () => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], () => {
+  yidaPreviewOpen.value = false
+}, { flush: 'sync' })
+
+function yidaPreviewSessionSignature(): string {
+  try {
+    return JSON.stringify([
+      readAuthSessionSignature(),
+      localStorage.getItem('user_permissions'),
+      localStorage.getItem('user_roles'),
+    ])
+  } catch {
+    return 'invalid'
+  }
+}
+
+let yidaPreviewSession = yidaPreviewSessionSignature()
+/** R-11: the 宜搭 entries follow the same session snapshot, re-read whenever that snapshot changes. */
+const yidaEntriesVisible = ref<boolean>(canOpenStockPrepYidaEntries(auth.getAccessSnapshot()))
+function checkYidaPreviewSession(): boolean {
+  const current = yidaPreviewSessionSignature()
+  if (current === yidaPreviewSession) return false
+  yidaPreviewSession = current
+  yidaPreviewOpen.value = false
+  yidaEntriesVisible.value = canOpenStockPrepYidaEntries(auth.getAccessSnapshot())
+  return true
+}
+
+function toggleYidaPreview(): void {
+  // A missed cross-tab event must first unmount the old editor. Reopening in this same
+  // tick could let Vue batch false -> true and retain the previous account's inputs.
+  if (checkYidaPreviewSession() || !yidaEntriesVisible.value) return
+  yidaPreviewOpen.value = !yidaPreviewOpen.value
+}
+
+function openYidaPreparation(): void {
+  if (checkYidaPreviewSession() || !yidaEntriesVisible.value) return
+  yidaPreviewOpen.value = true
+}
+
+const stopYidaPreviewSessionSwitch = onAuthSessionSwitch(checkYidaPreviewSession)
+window.addEventListener('storage', checkYidaPreviewSession)
+window.addEventListener('focus', checkYidaPreviewSession)
+onBeforeUnmount(() => {
+  stopYidaPreviewSessionSwitch()
+  window.removeEventListener('storage', checkYidaPreviewSession)
+  window.removeEventListener('focus', checkYidaPreviewSession)
+})
 
 // ---------------------------------------------------------------------------
 // P0-2/P0-3/P0-6 — the task-oriented home page, the "下一步" bar, and the shared posture badge.

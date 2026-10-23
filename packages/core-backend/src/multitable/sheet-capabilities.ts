@@ -18,9 +18,9 @@ import {
 } from './elearning-projection-constants'
 import { deriveCanManageFields } from './manage-schema-permission'
 import {
-  loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from './stock-preparation-overview-contract'
+import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from './sheet-grid-export-closure'
 import { deriveCanSubmitApproval } from './submit-approval-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
@@ -268,6 +268,8 @@ export async function resolveSheetCapabilitiesForUser(
   sheetScope?: SheetPermissionScope
   isAdminRole: boolean
   permissions: string[]
+  /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
+  gridExportClosed?: true
 }> {
   const isAdminRole = await isAdmin(userId)
   const permissions = await listUserPermissions(userId)
@@ -345,11 +347,21 @@ export async function resolveSheetCapabilitiesForUser(
   // (permission-service.ts resolveSheetCapabilitiesForAccess). This resolver fronts the Yjs record-write
   // flush, the collab rooms, API-token capability checks and the FWB rule-save gates, so without it a
   // person could still WRITE the overview through the collab channel. Every person, admins included.
-  if ((await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)) {
+  // 备料分批拉取第一期 step 3 (review round 1, fix 2): both host stamps in ONE statement.
+  const stamps = await loadStockPreparationSheetStamps(query, [sheetId])
+  if (stamps.overviewSheetIds.has(sheetId)) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
+  }
+  // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the REST resolver's. This resolver
+  // fronts the collab rooms and API-token capability checks, so it must not report an export the REST resolver
+  // refuses. Every person, admins included; only `canExport` changes.
+  const gridExportClosed = stamps.gridExportClosedSheetIds.has(sheetId)
+  if (gridExportClosed) {
+    capabilities = restrictGridExportCapabilities(capabilities, true)
   }
   return {
     capabilities,
+    ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
     ...(sheetScope ? { sheetScope } : {}),
     isAdminRole,
     permissions,

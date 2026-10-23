@@ -79,6 +79,7 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const {
   applyStockPreparationPlan,
+  countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
   // ONE definition of logical->physical translation, not two. This file used to
   // carry its own byte-identical copy of `mapFieldName`, and the `pre_mapped`
@@ -86,6 +87,7 @@ const {
   // makes that agreement structural instead of a comment. It also means the
   // writer's refusal to fall back on an unmapped `ext_` id applies here too.
   __internals: { mapFieldName },
+  assertHostFencedWriteSupported,
 } = require('./stock-preparation-apply-writer.cjs')
 const {
   assertExtensionFieldIdValid,
@@ -122,6 +124,12 @@ const {
   readPlanSourceObjects,
   requireResolvedB2aSourceObjects,
 } = require('./b2a-trial-registry.cjs')
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
+  assertWriteBindingMatchesGuard,
+  sheetWriteScopeKey,
+} = require('./stock-preparation-project-write-lock.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -1414,6 +1422,11 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   if (api.supportsFilterValueLists === true) {
     scopedApi.supportsFilterValueLists = true
   }
+  // PR #6501 (P1-a): forward the host's fenced-write declaration the same way — copied, never asserted.
+  // The writer refuses to run a fenced plan when it is absent; `writeFence` itself rides `...input`.
+  if (api.supportsWriteFence === true) {
+    scopedApi.supportsWriteFence = true
+  }
   if (readOnly) return scopedApi
 
   scopedApi.createRecord = async function createRecord(input = {}) {
@@ -1915,15 +1928,91 @@ async function createDryRunToken(tokenStore, record) {
   return token
 }
 
-async function consumeDryRunToken(tokenStore, token, expected) {
+// THE CLAIM STORE MUST BE ABLE TO CLAIM. A single-use token is only single-use if taking it is ONE
+// atomic step: `get` then `delete` lets two concurrent applies both read the record before either
+// removes it, and both proceed to write. The host's plugin storage offers `consume` — one
+// `DELETE ... RETURNING` on the durable store (packages/core-backend/src/plugins/plugin-durable-storage.ts),
+// one synchronous Map step in memory — so of two concurrent claims exactly one answers the record.
+// A store without it is refused (501) rather than claimed non-atomically: there is deliberately no
+// get+delete fallback here.
+function requireConsumableTokenStore(tokenStore) {
   const store = requireTokenStore(tokenStore)
+  if (typeof store.consume !== 'function') {
+    throw new StockPreparationTableActionError(501, 'TABLE_ACTION_TOKEN_STORE_UNAVAILABLE', 'table action requires plugin storage with an atomic consume to claim dry-run tokens')
+  }
+  return store
+}
+
+// ── PROJECT WRITE GUARD (batch-refresh phase 0 step 1) ─────────────────────────────────────────────
+// See lib/stock-preparation-project-write-lock.cjs for the protocol. This module never acquires the
+// lease itself: the route holds it around the whole apply (so a busy refusal costs no B2a claim, no
+// adapter load and no token) and hands the guard in. What this module enforces is that the guard is
+// there, is for THIS write scope, and that the claimed token was planned under the generation the
+// lease grant observed.
+
+// The binding a dry-run token stores ALONGSIDE its existing fields. Exactly these three keys; never
+// hashed into a revision, never answered.
+const WRITE_BINDING_KEYS = Object.freeze(['writeScope', 'writeGeneration', 'writeGenerationToken'])
+
+function normalizeWriteBinding(binding) {
+  if (!isPlainObject(binding)
+    || typeof binding.writeScope !== 'string' || !binding.writeScope
+    || typeof binding.writeGenerationToken !== 'string' || !binding.writeGenerationToken
+    || !Number.isInteger(binding.writeGeneration) || binding.writeGeneration < 0) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the project write generation binder returned no usable binding', { reason: 'binding_malformed' })
+  }
+  return Object.fromEntries(WRITE_BINDING_KEYS.map((key) => [key, binding[key]]))
+}
+
+function requireProjectWriteGuard(guard) {
+  if (!guard || typeof guard.beforeWrite !== 'function' || typeof guard.scopeKey !== 'string' || typeof guard.generationToken !== 'string') {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep apply requires the sheet write lock; nothing is written without it')
+  }
+  return guard
+}
+
+// S5: the guard the route acquired must be for exactly this target sheet (the write scope, R-52; the project
+// number was validated just above). A mismatch is a programming error in the caller, never a client error.
+function assertProjectWriteGuardScope(guard, action) {
+  if (guard.scopeKey !== sheetWriteScopeKey(action.target.sheetId)) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the sheet write guard does not cover this target sheet')
+  }
+}
+
+// A fenced stop of the writer surfaces as the fence's own typed error, with the partial outcome
+// attached (values-free counts). `partial` means ROWS MAY HAVE LANDED: at least one host write was
+// attempted (a confirmed write, or a host call that raised and may have committed — review round 2). It
+// is `false` only when no host write was issued at all, and it tells the route to stamp `failed`, not
+// `refused`. `written` stays the confirmed count; `attemptedWrites` is the attempted one.
+function projectWriteAbortError(applyResult) {
+  const source = applyResult.abort && applyResult.abort.error
+  const counts = isPlainObject(applyResult.counts) ? { ...applyResult.counts } : {}
+  const written = Number(applyResult.written || 0)
+  const attemptedWrites = countAttemptedHostWrites(applyResult)
+  const details = {
+    ...(source && isPlainObject(source.details) ? source.details : {}),
+    partial: attemptedWrites > 0,
+    written,
+    attemptedWrites,
+    counts,
+    abortedAtDecisionIndex: applyResult.abort.index,
+  }
+  const status = source && Number.isInteger(source.status) ? source.status : 409
+  const code = source && typeof source.code === 'string' ? source.code : PROJECT_WRITE_ERROR_CODES.LEASE_LOST
+  const message = source && source.message ? source.message : 'the project write stopped before finishing its plan'
+  return new StockPreparationProjectWriteLockError(status, code, message, details)
+}
+
+async function consumeDryRunToken(tokenStore, token, expected) {
+  const store = requireConsumableTokenStore(tokenStore)
   const dryRunToken = optionalString(token)
   if (!dryRunToken) {
     throw new StockPreparationTableActionError(400, 'TABLE_ACTION_DRY_RUN_TOKEN_REQUIRED', 'dryRunToken is required for apply', { field: 'confirm.dryRunToken' })
   }
   const key = tokenStoreKey(dryRunToken)
-  const stored = await store.get(key)
-  if (typeof store.delete === 'function') await store.delete(key)
+  // ATOMIC CLAIM: read-and-remove in one store operation. Validation runs AFTER the claim, so a token
+  // refused below (expired / mismatched) stays burned — the same single-use semantics as before.
+  const stored = await store.consume(key)
   if (!isPlainObject(stored)) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID', 'dryRunToken is missing, expired, or already used')
   }
@@ -2429,11 +2518,21 @@ async function dryRunStockPreparationAction(input = {}) {
   })
   let dryRunToken = null
   if (dryRun.canApply) {
+    // PLAN GENERATION (batch-refresh phase 0 step 1): an applicable preview SUPERSEDES every earlier
+    // plan of this write scope. The route's binder bumps the generation (refused 409 while a live
+    // writer holds the sheet — then no token is minted) and the token records the generation it was
+    // planned under, ALONGSIDE its existing fields: never hashed, never answered, so the revision,
+    // the evidence and the response are byte-identical with or without it. No binder (the lock
+    // service is not wired) mints an UNBOUND token, which apply refuses (token_unbound).
+    const writeBinding = typeof input.projectWriteGenerationBinder === 'function'
+      ? normalizeWriteBinding(await input.projectWriteGenerationBinder())
+      : null
     dryRunToken = await createDryRunToken(input.tokenStore, {
       actionId: action.actionId,
       parametersHash: hashJson(parameters),
       revision: dryRun.revision,
       conflictPolicyReview: runOnlyReview,
+      ...(writeBinding || {}),
     })
   }
   // W3a. Computed ONLY when the caller explicitly asked and the route's operator-scope gate let the
@@ -2789,6 +2888,14 @@ async function applyStockPreparationAction(input = {}) {
     projectSheetGate: input.projectSheetGate,
   })
   const parameters = normalizeActionParameters(input.parameters)
+  // PROJECT WRITE GUARD (S5): held by the route around this whole call. Required — no guard, no write
+  // (501) — and for exactly this target sheet (500 otherwise). Both refusals come before
+  // the B2a claim, the reads and the token claim, so neither burns the token.
+  const projectWriteGuard = requireProjectWriteGuard(input.projectWriteGuard)
+  assertProjectWriteGuardScope(projectWriteGuard, action)
+  // P1-a: every record write of this run is host-fenced. A records host that cannot honour the fence
+  // refuses here (501), before the token is claimed; the writer re-checks on the scoped api it is handed.
+  assertHostFencedWriteSupported(input.recordsApi, projectWriteGuard)
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
   // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
   // outside their registered scope would also lose the artifact that proves what they planned.
@@ -2823,10 +2930,15 @@ async function applyStockPreparationAction(input = {}) {
   // other project) can still apply the plan they proved. The call inside `computeDryRun` runs once
   // more a moment later for the same reason the existence probe does.
   await assertTargetSheetHoldsNoForeignActiveRows(input.recordsApi, action.target, parameters.projectNo)
+  // I4: claimed only now — the lease is held, so a busy refusal never reached this line.
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
   })
+  // I3 (S8): the token must have been planned under the generation the lease GRANT observed. A newer
+  // applicable preview (or a large approval) of this project since then refuses here — before any
+  // re-read and before any write — 409 STOCK_PREP_PROJECT_PLAN_SUPERSEDED. The token stays burned.
+  assertWriteBindingMatchesGuard(tokenRecord, projectWriteGuard, { unboundReason: 'token_unbound' })
   // Stored boundary: consumeDryRunToken returns the record verbatim from the token store and merges
   // nothing from the request, so this content is server-minted and was already validated at
   // selection time. Re-validating it as a fresh selection would 422 an in-flight token issued before
@@ -2894,7 +3006,14 @@ async function applyStockPreparationAction(input = {}) {
     // C4 apply: the writer already maps every payload key through the operator-configured
     // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
     recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
+    // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write, and the
+    // same lease + generation re-checked by the host inside every record write transaction (P1-a).
+    writeFence: projectWriteGuard,
+    writeFenceRequired: true,
   })
+  // The fence stopped the run (lease lost / plan superseded / lock store failed): an ERROR, carrying
+  // the partial counts and the decision index it stopped at — never a plausible `partial` success.
+  if (applyResult.status === 'aborted') throw projectWriteAbortError(applyResult)
   return {
     action: publicActionMetadata(action),
     status: applyResult.status,
@@ -2972,6 +3091,12 @@ module.exports = {
     normalizeActionReadConcurrency,
     actionReadConcurrency,
     consumeDryRunToken,
+    requireConsumableTokenStore,
+    WRITE_BINDING_KEYS,
+    assertProjectWriteGuardScope,
+    normalizeWriteBinding,
+    projectWriteAbortError,
+    requireProjectWriteGuard,
     createDryRunToken,
     hashJson,
     normalizeActionExtensionFieldIds,
