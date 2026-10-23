@@ -208,6 +208,10 @@ describe('DingTalk OAuth state store', () => {
     vi.useRealTimers()
     vi.unstubAllEnvs()
     redisMockState.reset()
+    vi.mocked(readDingTalkOauthConfig).mockReturnValue({
+      clientId: 'client-id', clientSecret: 'client-secret',
+      redirectUri: 'https://example.com/login/dingtalk/callback', corpId: null,
+    })
     vi.mocked(query).mockReset()
     vi.mocked(transaction).mockReset()
     vi.mocked(exchangeCodeForUserAccessToken).mockReset()
@@ -334,6 +338,9 @@ describe('DingTalk OAuth state store', () => {
   })
 
   it('refuses auto-provision when a local account already exists with the same email', async () => {
+    vi.mocked(readDingTalkOauthConfig).mockReturnValue({
+      ...readDingTalkOauthConfig(), corpId: 'ding-corp-1',
+    })
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
     // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09); this
@@ -463,6 +470,9 @@ describe('DingTalk OAuth state store', () => {
   })
 
   it('writes a password hash when auto-provisioning a new DingTalk user', async () => {
+    vi.mocked(readDingTalkOauthConfig).mockReturnValue({
+      ...readDingTalkOauthConfig(), corpId: 'ding-corp-1',
+    })
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
     // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09).
     vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp-1')

@@ -365,6 +365,7 @@
         :large-bom-poll-wait="largeBomPollWait"
         :fill-target="composedFillTarget"
         :target-api="projectTargetApi"
+        no-link-hint-context="board"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
         @synced="onSyncReportChanged"
@@ -626,7 +627,7 @@
             data-testid="stock-prep-project-board-open-multitable-fallback"
             @click="openFillTarget"
           >
-            {{ bi('打开多维表', 'Open the multitable') }}
+            {{ bi('打开多维表首页', 'Open the multitable home') }}
           </button>
           <p class="sp-board__fill-hint" data-testid="stock-prep-project-board-no-fill-target">
             {{ bi(

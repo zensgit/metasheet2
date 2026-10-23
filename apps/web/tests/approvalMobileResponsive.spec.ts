@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import ApprovalCenterView from '../src/views/approval/ApprovalCenterView.vue'
 
 // ---------------------------------------------------------------------------
 // T3-1 v0 — mobile approval CENTER responsive adaptation (ballot Q10/Q11).
@@ -227,7 +228,6 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
   })
 
   async function mountView() {
-    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalCenterView as any) } })
     app = createApp(Host)
     app.component('ElTabs', ElTabs)

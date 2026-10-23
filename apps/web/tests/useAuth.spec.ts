@@ -299,11 +299,12 @@ describe('useAuth', () => {
   it('does not let an old bootstrap overwrite an explicit switch or its login hint', async () => {
     const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
     const auth = useAuth()
-    auth.setToken(jwt('org-a'))
+    const originalToken = jwt('org-a')
+    auth.setToken(originalToken)
     let resolve!: (value: unknown) => void
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => new Promise(done => { resolve = done })))
     const pending = auth.bootstrapSession(true)
-    auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', jwt('org-a'))
+    expect(auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', originalToken)).toBe(true)
     resolve({ ok: true, status: 200, json: async () => ({ data: { user: { id: 'actor', tenantId: 'org-a', roles: ['stale'] } } }) })
     expect((await pending).ok).toBe(false)
     expect(auth.getCurrentUser()).toBeNull()

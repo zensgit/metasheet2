@@ -319,6 +319,10 @@ describe('項目接入 — the four-step import run', () => {
     ['STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 404, 'fail', 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND'],
     ['STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', 409, 'fail', 'BATCH_ARCHIVE_PLAN_NOT_READY'],
     ['STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH', 409, 'fail', 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH'],
+    // 客户反馈 2026-10-21 9b: three more refusals that fell through to the generic re-sync promise.
+    ['STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED', 409, 'fail', 'BATCH_ARCHIVE_LARGE_BOM_BOUNDED'],
+    ['PERSIST_PROJECT_POINTER_STALE', 409, 'fail', 'BATCH_ARCHIVE_POINTER_STALE'],
+    ['PERSIST_VERSION_NOT_MONOTONIC', 422, 'fail', 'BATCH_ARCHIVE_VERSION_HISTORY'],
   ] as const)('G-2 #6475: archive refusal %s (%i) reports %s with its own reason, and the import still reads as done', async (code, status, expectedStatus, reason) => {
     const api = makeApi({
       archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/mvp-persist', { code })),
@@ -496,13 +500,154 @@ describe('項目接入 — the four-step import run', () => {
     expect(classifyArchiveFailure(403, BATCH_ARCHIVE_DISABLED_CODE)).toEqual({ status: 'skip', reason: 'BATCH_ARCHIVE_DISABLED' })
     expect(classifyArchiveFailure(403, 'PERSIST_TARGET_NOT_PROVISIONED')).toEqual({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' })
     expect(classifyArchiveFailure(401, null)).toEqual({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' })
-    // Not in the table: still the visible, non-fatal FAIL it always was.
-    expect(classifyArchiveFailure(409, 'PERSIST_PROJECT_POINTER_STALE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    // Not in the table: still the visible, non-fatal FAIL it always was. (PERSIST_PROJECT_POINTER_STALE
+    // stood here until 9b mapped it; PERSIST_EXISTING_BATCH_READ_UNPROVABLE is a real, still-unmapped one.)
+    expect(classifyArchiveFailure(409, 'PERSIST_EXISTING_BATCH_READ_UNPROVABLE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
     expect(classifyArchiveFailure(500, 'PERSIST_PLAN_TOO_LARGE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
     expect(classifyArchiveFailure(0, null)).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
     // Own-property lookup: an inherited key is not in the table (the wire clamp would never pass this
     // lowercase token, but the classifier must not depend on that).
     expect(classifyArchiveFailure(409, 'constructor')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+  })
+
+  // ---- 客户反馈 2026-10-21 9b: refusals classified by HTTP status, after the code table ----------
+  it('9b: a 404 with NO usable code is the archive not finding the PLM source, not the generic failure', async () => {
+    const api = makeApi({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(404, '/mvp-persist', {})),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    const step = stepOf(report, 'archive')
+    expect(step).toMatchObject({ status: 'fail', reason: 'BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND' })
+    // No code reached the client, so the HTTP status is the one token the technical detail carries.
+    expect(step.detail).toEqual({ status: 404 })
+    expect(report.imported).toBe(true)
+    expect(report.failCount).toBe(1)
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND
+    expect(plain.zh.startsWith('数据已经写进去了')).toBe(true)
+    expect(plain.zhNext).toContain('status=404')
+    expect(plain.enNext).toContain('status=404')
+    expect(plain.zhNext).toContain('平台管理员')
+    // Review round 1 (F7): a likely cause, never an assertion that the archive ignores every workspace.
+    expect(plain.zhNext).toContain('再同步一般不会改变')
+    expect(plain.zhNext).toContain('最常见的原因')
+    expect(plain.zhNext).not.toContain('只找得到租户级')
+    expect(plain.enNext).toContain('The most common cause')
+    expect(plain.enNext).not.toContain('only finds a tenant-wide one')
+    // A 404 that DID carry a code keeps that code's own reason; an unmapped coded 404 stays generic.
+    expect(classifyArchiveFailure(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND').reason).toBe('BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND')
+    expect(classifyArchiveFailure(404, 'SOME_OTHER_NOT_FOUND')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    assertValuesFree(report)
+  })
+
+  it('9b: on the wire, ExternalSystemNotFoundError (a class-name code the clamp drops) lands on the source-not-found reason', async () => {
+    wireFetch.mockReset()
+    wireFetch.mockImplementation(async () => new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'ExternalSystemNotFoundError', message: 'external system not found', details: { id: PLANTED_SECRET } },
+    }), { status: 404 }))
+    const error = await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).archive(PROJECT_NO).then(() => null, (caught: unknown) => caught)
+    expect(error).toBeInstanceOf(StockPreparationProjectSyncCallError)
+    expect(error).toMatchObject({ status: 404, code: null })
+    expect(JSON.stringify(error)).not.toContain(PLANTED_SECRET)
+    const failure = error as StockPreparationProjectSyncCallError
+    expect(classifyArchiveFailure(failure.status, failure.code)).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND' })
+  })
+
+  it.each([
+    [503, null],
+    [503, 'STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE'],
+    [503, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED'],
+    // Review round 1 (F4): a code-less gateway answer is the same "not answered normally".
+    [502, null],
+    [504, null],
+  ] as const)('9b: a %i (code %s) the table does not name is "server unavailable", not the generic failure', async (status, code) => {
+    const api = makeApi({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/mvp-persist', { code })),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    const step = stepOf(report, 'archive')
+    expect(step).toMatchObject({ status: 'fail', reason: 'BATCH_ARCHIVE_SERVICE_UNAVAILABLE' })
+    expect(step.detail).toEqual(code ? { status, code } : { status })
+    expect(report.imported).toBe(true)
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_SERVICE_UNAVAILABLE
+    expect(plain.zh.startsWith('数据已经写进去了')).toBe(true)
+    expect(plain.zhNext).toContain('平台管理员')
+    expect(plain.enNext).toContain('platform administrator')
+  })
+
+  it('round 1 (F4): a 502/504 that carries an unrecognised code stays the generic failure; the copy does not claim nothing was kept', () => {
+    expect(classifyArchiveFailure(502, 'SOME_UPSTREAM_CODE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    expect(classifyArchiveFailure(504, 'SOME_UPSTREAM_CODE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    expect(classifyArchiveFailure(500, null)).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    // A 504 may have kept the batch server-side: the sentence says "not confirmed", not "nothing was kept".
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_SERVICE_UNAVAILABLE
+    expect(plain.zh).toContain('没有确认完成')
+    expect(plain.zh).not.toContain('这次没有存档')
+    expect(plain.en).toContain('not confirmed')
+    expect(plain.en).not.toContain('nothing was kept')
+    expect(plain.zhNext).toContain(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ALREADY_ARCHIVED.zh.split(',')[0])
+  })
+
+  it('9b: a coded answer still wins over the status rules', () => {
+    // The schema read's own 503 keeps its own sentence.
+    expect(classifyArchiveFailure(503, 'TARGET_SCHEMA_UNAVAILABLE').reason).toBe('BATCH_ARCHIVE_SCHEMA_UNAVAILABLE')
+    // Flag-off and the tier refusals are still classified first.
+    expect(classifyArchiveFailure(403, null).reason).toBe('BATCH_ARCHIVE_NOT_PERMITTED')
+    expect(classifyArchiveFailure(503, BATCH_ARCHIVE_DISABLED_CODE).reason).toBe('BATCH_ARCHIVE_DISABLED')
+  })
+
+  it('9b: the generic archive failure no longer promises that a re-sync fixes it, and points at the status', () => {
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_FAILED
+    expect(plain.zhNext).not.toContain('通常就补上了')
+    expect(plain.enNext!.toLowerCase()).not.toContain('usually adds it')
+    expect(plain.zhNext).toContain('不一定能补上')
+    expect(plain.enNext).toContain('may not add it')
+    expect(plain.zhNext).toContain('HTTP 状态码')
+    expect(plain.enNext).toContain('HTTP status')
+    // The two halves P-03 renders on the panel stay.
+    expect(plain.zh).toContain('存档没成功')
+    expect(plain.zhNext).toContain('导入本身不受影响')
+  })
+
+  it('9b: the unprovisioned-tables copy names the admin action without implying a page button, and the off switch', () => {
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_TABLES_NOT_PROVISIONED
+    expect(plain.zhNext).not.toContain('「建快照表」')
+    expect(plain.zhNext).toContain('页面上没有建表按钮')
+    expect(plain.enNext).toContain('There is no button for this on the page')
+    // Review round 1 (F8): an authenticated API call, named for the administrator — not a server-shell step.
+    expect(plain.zhNext).toContain('给管理员看的接口名:mvp/ensure')
+    expect(plain.zhNext).not.toContain('在服务器上')
+    expect(plain.enNext).not.toContain('on the server')
+    expect(plain.zhNext).toContain('开关关掉')
+    expect(plain.enNext).toContain('flag off')
+    // ...and the sentence it says the step will then show is the real one.
+    expect(plain.zhNext).toContain(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_DISABLED.zh)
+    expect(plain.enNext).toContain(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_DISABLED.en)
+  })
+
+  it('round 1 (F5): the schema-repair copy no longer quotes a page button that does not exist', () => {
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_SCHEMA_INCOMPLETE
+    expect(plain.zhNext).not.toContain('「修复快照表」')
+    expect(plain.zhNext).toContain('页面上没有修复按钮')
+    expect(plain.zhNext).toContain('给管理员看的接口名:mvp/repair')
+    expect(plain.enNext).toContain('There is no repair button on the page')
+  })
+
+  it('9b: the pointer and version refusals name their detail reason and the administrator, never a self-heal', () => {
+    const pointer = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_POINTER_STALE
+    expect(pointer.zhNext).toContain('修复流程')
+    expect(pointer.enNext).toContain('repair procedure')
+    const version = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_VERSION_HISTORY
+    for (const token of ['history_unprovable', 'not_monotonic']) {
+      expect(version.zhNext).toContain(token)
+      expect(version.enNext).toContain(token)
+    }
+    const bounded = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_LARGE_BOM_BOUNDED
+    expect(bounded.zhNext).toContain('再同步还会停在这里')
+    for (const plain of [pointer, version, bounded]) {
+      expect(plain.zhNext).not.toMatch(/通常就补上了|稍后再同步/)
+      expect(plain.enNext!.toLowerCase()).not.toMatch(/usually adds it|sync again later/)
+    }
   })
 
   // ---- G-3 ---------------------------------------------------------------------------------

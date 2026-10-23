@@ -28,8 +28,16 @@
     >
       {{ fillTarget
         ? bi('打开备料多维表', 'Open the stock-preparation table')
-        : bi('打开多维表工作台', 'Open the multitable workbench') }}
+        : bi('打开多维表首页', 'Open the multitable home') }}
     </button>
+    <!-- 客户反馈 2026-10-21 9a: same sentence, same condition as the parent panel's no-handle button. -->
+    <p
+      v-if="state.phase === 'done' && !fillTarget"
+      class="sp-large-bom__no-link-hint"
+      data-testid="stock-prep-large-bom-no-sheet-link-hint"
+    >
+      {{ bi(noSheetLinkHint.zh, noSheetLinkHint.en) }}
+    </p>
 
     <StockPrepTechnicalDetails testid="stock-prep-large-bom-tech">
       <dl>
@@ -57,7 +65,7 @@
 // parent panel emits on a normal import — this component invents no destination and composes no
 // route. What it now DOES have is the parent's `fillTarget`: the operator directory hands out the
 // same tenant-gated `{ sheetId, viewId }` 项目备料页 has always returned, so the label can name the
-// 备料主表 when the shell really can land there, and say 「打开多维表工作台」 when it cannot. (Until
+// 备料主表 when the shell really can land there, and say 「打开多维表首页」 when it cannot. (Until
 // this pass the sheet id was never available to any of these surfaces — see
 // StockPreparationWorkspace.vue's `loadWorkspaceFillTarget`.)
 import { computed, onMounted, onUnmounted, reactive } from 'vue'
@@ -75,6 +83,8 @@ import type { StockPreparationFillTarget } from '../../../services/integration/s
 import {
   stockPrepLargeBomErrorPlain,
   stockPrepLargeBomPhasePlain,
+  stockPrepNoSheetLinkHint,
+  type StockPrepNoSheetLinkHintContext,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
@@ -89,6 +99,8 @@ const props = withDefaults(
     pollIntervalMs?: number
     /** The 备料主表 handle the parent holds, or null. Label only — this panel routes nothing. */
     fillTarget?: StockPreparationFillTarget | null
+    /** Where the parent panel is mounted — picks the no-link sentence's last clause only. */
+    noLinkHintContext?: StockPrepNoSheetLinkHintContext
   }>(),  {
     scope: () => ({}),
     actionId: STOCK_PREPARATION_PULL_BOM_ACTION_ID,
@@ -96,8 +108,11 @@ const props = withDefaults(
     wait: null,
     pollIntervalMs: 2000,
     fillTarget: null,
+    noLinkHintContext: 'workspace',
   },
 )
+
+const noSheetLinkHint = computed(() => stockPrepNoSheetLinkHint(props.noLinkHintContext))
 
 const emit = defineEmits<{
   /** Identical to the parent panel's own event — the shell owns the one navigation this surface has. */
@@ -234,7 +249,8 @@ onUnmounted(() => {
 }
 
 .sp-large-bom__percent,
-.sp-large-bom__counts {
+.sp-large-bom__counts,
+.sp-large-bom__no-link-hint {
   margin: 0;
   color: var(--ms-text-2);
   font-size: 13px;

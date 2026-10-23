@@ -91,6 +91,21 @@ describe('DingTalk identity write-boundary policy', () => {
     expect(writes).toEqual([])
   })
 
+  it('ambiguous lookup returns a values-free policy error without email fallback or writes', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'synthetic-corp')
+    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: null })
+    pgMocks.query.mockResolvedValue({ rows: [user, { ...user, id: 'synthetic-other', role: 'admin' }] })
+    const error = await exchangeCodeForUser('synthetic-code').catch(value => value)
+    expect({ statusCode: error.statusCode, code: error.code, message: error.message }).toEqual({
+      statusCode: 409, code: 'identity_ambiguous',
+      message: 'DingTalk identity matches multiple accounts; configure the intended enterprise',
+    })
+    expect(pgMocks.query).toHaveBeenCalledTimes(1)
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+    expect(writes).toEqual([])
+  })
+
   it('self-bind fails closed when its in-transaction grant read fails', async () => {
     failGrantRead = true
     await expect(bind()).rejects.toMatchObject({ statusCode: 503, code: 'grant_state_unavailable' })

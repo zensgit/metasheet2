@@ -177,6 +177,13 @@ export type StockPreparationProjectSyncReason =
   // #6475 round 2 — the archive is not what this sync wrote: the source changed after step ③, or the
   // sheet does not hold all of it. A FAIL, like the refusals above.
   | 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH'
+  // 客户反馈 2026-10-21 9b — the archive refusals that still fell through to BATCH_ARCHIVE_FAILED and
+  // its re-sync promise. FAILs, like the refusals above (classifyArchiveFailure).
+  | 'BATCH_ARCHIVE_LARGE_BOM_BOUNDED'
+  | 'BATCH_ARCHIVE_POINTER_STALE'
+  | 'BATCH_ARCHIVE_VERSION_HISTORY'
+  | 'BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND'
+  | 'BATCH_ARCHIVE_SERVICE_UNAVAILABLE'
   // #6475 round 2 — step ③ was partial, so step ④ is NOT attempted (a SKIP: nothing was asked of the
   // archive). Its own reason because BATCH_ARCHIVE_NOT_ATTEMPTED says nothing was written, and here
   // some rows were.
@@ -1044,8 +1051,36 @@ export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_P
  *       or a PLM cell edited by hand since). Nothing was stored. FAIL → sync again; a row ③ keeps
  *       failing is fixed first.
  *
- * Every other refusal keeps BATCH_ARCHIVE_FAILED. The flag-off code and 401/403 are classified by
- * the caller before this table is consulted, exactly as before.
+ * 客户反馈 2026-10-21 9b — the refusals that still fell through to BATCH_ARCHIVE_FAILED, whose copy
+ * promised 「再同步一次通常就补上了」 (each verified against plugin-integration-core/lib on the base):
+ *   STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED (409)  stock-preparation-table-actions.cjs: the
+ *       archive's own re-expansion reached the large-BOM bounds. The archive keeps only a BOM it can
+ *       expand on the spot; re-syncing the same BOM meets the same bound. FAIL.
+ *   PERSIST_PROJECT_POINTER_STALE (409)       stock-preparation-sync-run-persist.cjs: the project's
+ *       live pointer does not cover this batch (`stale_pointer` / `pointer_unresolvable`). The persist
+ *       fails closed and never moves the pointer on its own; the owner-controlled one-shot repair
+ *       (stock-preparation-sync-run-repair-once.cjs) is what advances a provably stale one. FAIL.
+ *   PERSIST_VERSION_NOT_MONOTONIC (422)       same file: the project's batch-version history could not
+ *       be proven (`history_unprovable`) or does not increase (`not_monotonic`). Fail closed; an
+ *       administrator reads the snapshot ledger. FAIL.
+ * and two classified by HTTP status, AFTER the code table (a coded answer always wins):
+ *   503 with no mapped code                   the server (or a host capability the archive needs, e.g.
+ *       STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE) answered "unavailable". FAIL →
+ *       BATCH_ARCHIVE_SERVICE_UNAVAILABLE. Review round 1: a CODE-LESS 502 or 504 (a gateway in front
+ *       of the server) lands there too. A 504 may still have kept the batch server-side, which is why
+ *       that copy says "not confirmed" and that the next sync reports an already-kept batch as such.
+ *   404 with NO usable code                   in practice `ExternalSystemNotFoundError`, whose class
+ *       name is the wire code and so fails `clampErrorCode`. The archive does not carry the page's
+ *       workspace hint (http-routes.cjs `tableActionMvpPersist` → `loadTableActionSourceAdapter`): it
+ *       uses the action's own workspace, or the binding's single matched workspace when exactly one
+ *       binding applies, and otherwise the tenant-wide row only (external-systems.cjs
+ *       `selectScopedRow` never widens a null workspace). So a source the trial found under the page's
+ *       workspace CAN be invisible to it — the copy says "most common cause", not "the cause". FAIL →
+ *       BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND. A 404 WITH a code (SOURCE_PROJECT_NOT_FOUND) is not this.
+ *
+ * Every other refusal keeps BATCH_ARCHIVE_FAILED, whose copy no longer promises a re-sync fixes it.
+ * The flag-off code and 401/403 are classified by the caller before this table is consulted, exactly
+ * as before.
  */
 export const STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES: Readonly<Record<string, {
   status: Exclude<StockPreparationProjectSyncStepStatus, 'pending' | 'ok'>
@@ -1062,11 +1097,15 @@ export const STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES: Readonly<Record<string, {
   STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND' as const }),
   STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_PLAN_NOT_READY' as const }),
   STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_LARGE_BOM_BOUNDED' as const }),
+  PERSIST_PROJECT_POINTER_STALE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_POINTER_STALE' as const }),
+  PERSIST_VERSION_NOT_MONOTONIC: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_VERSION_HISTORY' as const }),
 })
 
 /**
  * Step ④'s outcome for a refused archive call. Same precedence the run always had — the flag-off code
- * first, then 401/403 — and only then the per-code table above; anything else is the generic FAIL.
+ * first, then 401/403 — and only then the per-code table above; then (9b) a 503 the table did not
+ * name, then a 404 that carried no usable code; anything else is the generic FAIL.
  * Own-property lookup only, so a code that happens to name an Object.prototype key falls through.
  */
 export function classifyArchiveFailure(
@@ -1079,6 +1118,12 @@ export function classifyArchiveFailure(
     const outcome = STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES[code]
     return { status: outcome.status, reason: outcome.reason }
   }
+  // Review round 1: a gateway answer (502 / 504) with no code is the same "not answered normally" as
+  // a 503 — the plan-read classifier above already groups every 5xx as the transient bucket.
+  if (status === 503 || (!code && (status === 502 || status === 504))) {
+    return { status: 'fail', reason: 'BATCH_ARCHIVE_SERVICE_UNAVAILABLE' }
+  }
+  if (status === 404 && !code) return { status: 'fail', reason: 'BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND' }
   return { status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' }
 }
 
