@@ -174,6 +174,13 @@ export default defineConfig({
       // O2-S1 register() whole-transaction atomicity goldens: DATABASE_URL-gated; excluded here so
       // the no-DB job cannot skip-green it; wired whole-file into the auth real-DB step in plugin-tests.yml.
       'tests/integration/auth-register-atomicity.db.test.ts',
+      // Core pool connection-error listeners (real DB, child process per scenario): an idle pooled
+      // connection the server closes is discarded and the pool keeps serving; a connection that
+      // reports an error while the transaction wrapper holds it is destroyed on release, and a
+      // statement that fails on it still fails for the caller. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; wired as a WHOLE FILE into the same plugin-tests.yml real-DB
+      // step that carries auth-register-atomicity above (EXPECT_DB sentinel armed there).
+      'tests/integration/core-pool-connection-error-listener.db.test.ts',
       // P2-1 (post-#3972 review): proves the create-time email existence check is
       // case-insensitive and that batchAdmitDirectoryAccountUsers enforces server-side
       // eligibility (no duplicate `users` row for a differently-cased email; no silent
