@@ -637,17 +637,20 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // Class ③′ — `users.role='manager'` PLUS an admin `user_roles` row, holding a `('role',
   // 'manager')` seat of its own. `resolveRbacProfile`'s admin upgrade still REPLACES the request's
   // `role` with `'admin'` (`/me` reads 'admin'), but the shared approval role set now also reads the
-  // `users.role` column and the `user_roles` ids (gate-synchronized widening, the separate ruling the
-  // lock's §7-2′ reserved for it), so the manager-role seat matches again ⇒ 1. Under the former
-  // role source (a) this was 0 (§5 A0 ③′ golden value, superseded by that ruling).
+  // `users.role` column and the `user_roles` ids (F1: the decision gate and this query widen
+  // together), so the manager-role seat matches again ⇒ 1. The lock's §5 A0 ③′ value under role
+  // source (a) is 0; this expectation changes with F1 and, per the lock (§7-2′, judging row D),
+  // needs owner acknowledgement and a separate announcement.
   const v3b = viewer('c3prime-admin-upgrade-drops-role-seat', ROLE_NAME_CLASS_3B)
   // Class ④ — `users.role='employee'`, no seat at all ⇒ 0 (§5 A0 ④).
   const v4 = viewer('c4-employee-no-seat', 'employee')
   // Class ⑤ — `users.role='employee'`, `user_roles` holds a NON-admin `reviewer` role, holding a
   // `('role', 'reviewer')` seat on its own pending platform instance ⇒ 1: the shared approval role
   // set (decision gate and this query alike) includes `user_roles` role ids, so a role held solely
-  // via `user_roles` is visible and decidable. Under the former role source (a) this was 0 — the
-  // population §3.0 recorded as the widening that must move together with the gate (§7-2′).
+  // via `user_roles` is visible and decidable. The lock's §5 A0 ⑤ value under role source (a) is 0
+  // (the population §3.0 records as the widening that must move together with the gate); this
+  // expectation changes with F1 and, per the lock (§7-2′, judging row D), needs owner
+  // acknowledgement and a separate announcement.
   const v5 = viewer('c5-reviewer-role-seat', 'employee')
   // Class ⑥ — `users.role='employee'`, `user_roles` holds the migration-seeded, non-admin
   // `attendance_approver` role (granting `attendance:approve` via `role_permissions`, admitted

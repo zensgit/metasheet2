@@ -51,7 +51,12 @@ import {
   viewerActiveOrgIds,
   viewerRolesFailClosed,
 } from '../services/approval-instance-readability'
-import { resolveApprovalActorRoleClaims, resolveApprovalActorRoles } from '../services/approval-actor-roles'
+import {
+  isApprovalTemplateManager,
+  resolveApprovalActorRoleClaims,
+  resolveApprovalActorRoles,
+  resolveApprovalPushRecipientRoles,
+} from '../services/approval-actor-roles'
 import {
   isApprovalCcUnreadBadgeEnabled,
   isApprovalMineOutcomeBadgeEnabled,
@@ -657,11 +662,7 @@ export async function resolveApprovalTemplateVisibilityActor(req: Request): Prom
     roles,
     permissions,
     isTemplateManager: req.user?.role === 'admin'
-      || resolveApprovalActorRoleClaims(req).includes('admin')
-      || permissions.includes('*:*')
-      || permissions.includes('approvals:*')
-      || permissions.includes('approvals:admin-templates')
-      || permissions.includes('approval-templates:manage'),
+      || isApprovalTemplateManager(resolveApprovalActorRoleClaims(req), permissions),
   }
 }
 
@@ -1389,17 +1390,37 @@ export async function publishApprovalCountsForUsers(
   users: Array<{ userId: string; roles?: string[]; permissions?: string[] }>,
   reason: string,
 ): Promise<void> {
-  const uniqueUsers = new Map<string, { roles: string[]; permissions?: string[] }>()
+  const uniqueUsers = new Map<string, { roles?: string[]; permissions?: string[] }>()
   for (const user of users) {
     const userId = user.userId.trim()
     if (!userId || uniqueUsers.has(userId)) continue
     uniqueUsers.set(userId, {
-      roles: user.roles ?? [],
+      ...(Array.isArray(user.roles) ? { roles: user.roles } : {}),
       ...(Array.isArray(user.permissions) ? { permissions: user.permissions } : {}),
     })
   }
 
-  await Promise.all([...uniqueUsers.entries()].map(([userId, { roles, permissions }]) => Promise.all([
+  // A recipient handed over WITHOUT a role set (every other user an action touches — the next
+  // handlers, the requester, reminded assignees) gets the role set their own count read resolves
+  // (`resolveApprovalPushRecipientRoles`: `users.role` ∪ `user_roles` role ids), so a pending item
+  // seated on any of their roles is counted in the push as it is in GET. If that read fails, THAT
+  // recipient's push is skipped and logged — never sent with a narrower number.
+  const resolved = (await Promise.all([...uniqueUsers.entries()].map(
+    async ([userId, entry]): Promise<[string, { roles: string[]; permissions?: string[] }] | null> => {
+      if (entry.roles) return [userId, { ...entry, roles: entry.roles }]
+      try {
+        return [userId, { ...entry, roles: await resolveApprovalPushRecipientRoles(userId) }]
+      } catch (error) {
+        logger.error(
+          `Approval count push skipped for one recipient (${reason}): role read failed`,
+          error instanceof Error ? error : undefined,
+        )
+        return null
+      }
+    },
+  ))).filter((entry): entry is [string, { roles: string[]; permissions?: string[] }] => entry !== null)
+
+  await Promise.all(resolved.map(([userId, { roles, permissions }]) => Promise.all([
     publishApprovalCountsUpdate({
       injector: options?.injector,
       logger,
@@ -1886,6 +1907,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
           departmentIds: resolveApprovalActorDepartmentIds(req),
           roles: await resolveApprovalActorRoles(req),
+          // Template-manager status stays on the request's role claims (see isApprovalTemplateManager).
+          adminRoleClaims: resolveApprovalActorRoleClaims(req),
           permissions: resolveApprovalActorPermissions(req),
         },
         // The sample requester is identified by id only; org relations / directory roles / dept /
@@ -3032,6 +3055,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
           departmentIds: resolveApprovalActorDepartmentIds(req),
           roles: await resolveApprovalActorRoles(req),
+          // Template-manager status stays on the request's role claims (see isApprovalTemplateManager).
+          adminRoleClaims: resolveApprovalActorRoleClaims(req),
           permissions: resolveApprovalActorPermissions(req),
         },
       )
@@ -3085,6 +3110,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
           departmentIds: resolveApprovalActorDepartmentIds(req),
           roles: await resolveApprovalActorRoles(req),
+          // Template-manager status stays on the request's role claims (see isApprovalTemplateManager).
+          adminRoleClaims: resolveApprovalActorRoleClaims(req),
           permissions: resolveApprovalActorPermissions(req),
         },
       )

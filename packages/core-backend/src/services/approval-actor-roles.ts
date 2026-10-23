@@ -115,3 +115,36 @@ export function resolveApprovalActorRoles(req: Request): Promise<string[]> {
   perRequestRoles.set(req, pending)
   return pending
 }
+
+/**
+ * The role set a count PUSH computes a recipient's badge with, for a recipient who is not the
+ * requesting actor (no request claims are available for them). Without trusted token claims a
+ * user's own `resolveApprovalActorRoles` is exactly `users.role` ∪ `user_roles.role_id` (the
+ * `'admin'` upgrade on the request comes from a `user_roles` row that set already contains), so the
+ * pushed number matches that user's own `GET /api/todo/count` / `/pending-count`. THROWS on a read
+ * failure: the caller must skip that recipient's push rather than push a narrower number.
+ */
+export function resolveApprovalPushRecipientRoles(
+  userId: string,
+  db: ApprovalRoleQueryable = defaultQueryable,
+): Promise<string[]> {
+  return loadApprovalUserRoleIds(userId, db)
+}
+
+/**
+ * The ONE template-manager ("admin") determination for approval template visibility. It reads the
+ * request's role CLAIMS only (`resolveApprovalActorRoleClaims`, which already carries the
+ * `req.user.role` value) plus the permission codes — never the widened stored role set, so adding
+ * `user_roles` ids to role-seat matching cannot change who is treated as a template manager on any
+ * entry (list, detail, categories, create, preview, route-preview, attachment upload).
+ */
+export function isApprovalTemplateManager(
+  adminRoleClaims: readonly string[],
+  permissions: readonly string[],
+): boolean {
+  return adminRoleClaims.includes('admin')
+    || permissions.includes('*:*')
+    || permissions.includes('approvals:*')
+    || permissions.includes('approvals:admin-templates')
+    || permissions.includes('approval-templates:manage')
+}

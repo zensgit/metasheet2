@@ -5,7 +5,9 @@ const queryMock = vi.hoisted(() => vi.fn())
 vi.mock('../../src/db/pg', () => ({ query: queryMock, pool: null }))
 
 import {
+  isApprovalTemplateManager,
   loadApprovalUserRoleIds,
+  resolveApprovalPushRecipientRoles,
   resolveApprovalActorRoleClaims,
   resolveApprovalActorRoles,
 } from '../../src/services/approval-actor-roles'
@@ -81,5 +83,19 @@ describe('approval actor role set = claims ∪ users.role ∪ user_roles.role_id
   it('resolveApprovalActorRoleClaims stays a pure read of the request', () => {
     expect(resolveApprovalActorRoleClaims(req({ id: 'u6', role: ' a ', roles: ['a', 'b'] }))).toEqual(['a', 'b'])
     expect(queryMock).not.toHaveBeenCalled()
+  })
+
+  it('push recipients get users.role ∪ user_roles ids, and the read failure propagates (caller skips that push)', async () => {
+    answer('user', ['r1'])
+    expect((await resolveApprovalPushRecipientRoles('u7')).sort()).toEqual(['r1', 'user'])
+    queryMock.mockRejectedValue(new Error('down'))
+    await expect(resolveApprovalPushRecipientRoles('u7')).rejects.toThrow('down')
+  })
+
+  it('template-manager status reads only the role CLAIMS handed to it plus permissions', () => {
+    expect(isApprovalTemplateManager(['member'], [])).toBe(false)
+    expect(isApprovalTemplateManager(['admin'], [])).toBe(true)
+    expect(isApprovalTemplateManager(['member'], ['approval-templates:manage'])).toBe(true)
+    expect(isApprovalTemplateManager(['member'], ['approvals:read', 'approvals:write'])).toBe(false)
   })
 })

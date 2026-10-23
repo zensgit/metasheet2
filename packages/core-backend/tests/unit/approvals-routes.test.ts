@@ -33,6 +33,7 @@ vi.mock('../../src/services/approval-actor-roles', async (importOriginal) => {
     ...actual,
     resolveApprovalActorRoles: async (req: Parameters<typeof actual.resolveApprovalActorRoleClaims>[0]) =>
       actual.resolveApprovalActorRoleClaims(req),
+    resolveApprovalPushRecipientRoles: async () => [],
   }
 })
 

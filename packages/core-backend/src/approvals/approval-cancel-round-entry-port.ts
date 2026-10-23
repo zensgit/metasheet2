@@ -82,7 +82,7 @@ import {
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { Logger } from '../core/logger'
 import { listUserPermissions } from '../rbac/service'
-import { loadApprovalUserRoleIds } from '../services/approval-actor-roles'
+import { resolveApprovalPushRecipientRoles } from '../services/approval-actor-roles'
 
 const logger = new Logger('ApprovalCancelRoundEntryPort')
 
@@ -168,16 +168,22 @@ async function resolveAffectedUserPermissions(userId: string): Promise<string[]>
 
 /**
  * The role set of the same touched-but-not-acting user, as their own `GET /api/todo/count` resolves
- * it: `resolveApprovalActorRoles` = the request's role claim (in production the `users.role` column,
- * or `'admin'` when `user_roles` holds `admin`) ∪ the `users.role` column ∪ every `user_roles.role_id`.
- * Without trusted token claims that union is exactly `loadApprovalUserRoleIds` (the `'admin'` upgrade
- * comes from a `user_roles` row that set already contains), so a pending item seated on any of those
- * role ids is counted in the push as it is in the read. A failed read THROWS: the push is skipped and
- * logged by the caller rather than sent with a narrower count.
+ * it — the SAME shared helper the approval-side push uses for every recipient it is handed without
+ * roles (`resolveApprovalPushRecipientRoles`: `users.role` ∪ `user_roles` role ids). Returns `null`
+ * when that read fails: the caller then skips THAT recipient (logged as an error) rather than
+ * pushing them a narrower number.
  */
-async function resolveAffectedUserRoles(userId: string): Promise<string[]> {
-  if (!pool) return []
-  return loadApprovalUserRoleIds(userId, pool)
+async function resolveAffectedUserRoles(userId: string): Promise<string[] | null> {
+  try {
+    return await resolveApprovalPushRecipientRoles(userId)
+  } catch (error) {
+    try {
+      logger.error('cancel-round todo count push skipped for one recipient: role read failed', error instanceof Error ? error : undefined)
+    } catch {
+      // logging is diagnostic only
+    }
+    return null
+  }
 }
 
 /**
@@ -206,22 +212,19 @@ async function publishCancelRoundCounts(
     const others = [
       ...new Set(otherUserIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
     ].filter((id) => id !== actorId)
-    const otherEntries = await Promise.all(
-      others.map(async (userId) => ({
-        userId,
-        roles: await resolveAffectedUserRoles(userId),
-        permissions: await resolveAffectedUserPermissions(userId),
-      })),
-    )
+    const otherEntries = (await Promise.all(
+      others.map(async (userId) => {
+        const roles = await resolveAffectedUserRoles(userId)
+        return roles === null ? null : { userId, roles, permissions: await resolveAffectedUserPermissions(userId) }
+      }),
+    )).filter((entry): entry is { userId: string; roles: string[]; permissions: string[] } => entry !== null)
+    // The actor's claims ∪ their stored role ids — the same set their own count read resolves.
+    const actorStoredRoles = actorId ? await resolveAffectedUserRoles(actorId) : null
     const users: Array<{ userId: string; roles?: string[]; permissions?: string[] }> = [
-      ...(actorId
+      ...(actorId && actorStoredRoles !== null
         ? [{
             userId: actorId,
-            // The actor's claims ∪ their stored role ids — the same set their own count read resolves.
-            roles: [...new Set([
-              ...normalizeActorRoleClaims(actor.roles),
-              ...(pool ? await loadApprovalUserRoleIds(actorId, pool) : []),
-            ])],
+            roles: [...new Set([...normalizeActorRoleClaims(actor.roles), ...actorStoredRoles])],
             permissions: normalizeActorPermissionClaims(actor.permissions),
           }]
         : []),

@@ -3,6 +3,8 @@ import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { ICollabService } from '../../src/di/identifiers'
+import { buildAuthenticatedUserRoom } from '../../src/services/CollabService'
 
 /**
  * Role-typed approval seats match roles granted through `user_roles` rows — over real HTTP and a
@@ -66,6 +68,23 @@ function roleSeatGraph(roleSeatAssignee: string, nextUserId: string) {
       { key: 'start', type: 'start', config: {} },
       { key: 'approval_a', type: 'approval', config: { assigneeType: 'role', assigneeIds: [roleSeatAssignee], approvalMode: 'single' } },
       { key: 'approval_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: [nextUserId], approvalMode: 'single' } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e-s-a', source: 'start', target: 'approval_a' },
+      { key: 'e-a-b', source: 'approval_a', target: 'approval_b' },
+      { key: 'e-b-end', source: 'approval_b', target: 'end' },
+    ],
+  }
+}
+
+/** start -> approval_a(user seat) -> approval_b(user seat) -> end. */
+function userSeatGraph(firstUserId: string, secondUserId: string) {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'approval_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: [firstUserId], approvalMode: 'single' } },
+      { key: 'approval_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: [secondUserId], approvalMode: 'single' } },
       { key: 'end', type: 'end', config: {} },
     ],
     edges: [
@@ -215,11 +234,28 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
     }
   }
 
-  async function seedViewer(label: string, options: { role: string; roleIds?: string[] }): Promise<{ id: string; token: string }> {
+  async function seedViewer(
+    label: string,
+    options: { role: string; roleIds?: string[]; permissions?: string[] },
+  ): Promise<{ id: string; token: string }> {
     const id = freshId(label)
     await seedUser(id, options)
-    await grantPermissions(id, ['approvals:read', 'approvals:act'])
+    await grantPermissions(id, options.permissions ?? ['approvals:read', 'approvals:act'])
     return { id, token: await authToken(id) }
+  }
+
+  type Push = { room: string; event: string; payload: { count?: number } | undefined }
+  /** Records every realtime push the server's collab service makes, passing each one through. */
+  function recordPushes(): { pushes: Push[]; stop: () => void } {
+    const injector = (server as unknown as { injector: { get: (id: unknown) => any } }).injector
+    const collab = injector.get(ICollabService)
+    const original = collab.broadcastTo
+    const pushes: Push[] = []
+    collab.broadcastTo = (room: string, event: string, payload: unknown) => {
+      pushes.push({ room, event, payload: payload as Push['payload'] })
+      return original.call(collab, room, event, payload)
+    }
+    return { pushes, stop: () => { collab.broadcastTo = original } }
   }
 
   async function publishTemplate(adminToken: string, approvalGraph: object, label: string): Promise<string> {
@@ -227,7 +263,7 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
       method: 'POST',
       body: {
         key: freshId(`tpl-${label}`),
-        name: 'role seat via user_roles',
+        name: `role seat via user_roles ${label} ${TS}`,
         description: 'role seats match user_roles ids',
         formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
         approvalGraph,
@@ -428,6 +464,116 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
       const hidden = await jsonRequest(baseUrl, `/api/approval-templates/${templateId}`, outsider.token)
       expect(hidden.status, await hidden.clone().text()).toBe(404)
     })
+  })
+
+  it('(k) a user_roles holder of R WITHOUT approvals:act is refused (a seat match alone is not enough)', async () => {
+    const role = await seedRole('row-k')
+    const { instanceA } = await fixture('row-k', role.id)
+    const readOnly = await seedViewer('row-k-readonly', { role: 'user', roleIds: [role.id], permissions: ['approvals:read'] })
+    await withoutTokenClaimTrust(async () => {
+      // The seat matches (the item is theirs to see) ...
+      expect(await pendingTabIds(readOnly.token)).toContain(instanceA)
+      // ... but the door is guarded by approvals:act first.
+      const refused = await act(readOnly.token, instanceA, 'approve')
+      expect(refused.status, await refused.clone().text()).toBe(403)
+      const legacy = await jsonRequest(baseUrl, `/api/approvals/${instanceA}/approve`, readOnly.token, {
+        method: 'POST',
+        body: { version: await rawVersion(instanceA), metadata: { nodeKey: 'approval_a' } },
+      })
+      expect(legacy.status, await legacy.clone().text()).toBe(403)
+      expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_a' })
+    })
+  })
+
+  it('(i) admin semantics do not drift: with token-claim trust ON, claims without admin plus a DB-only admin user_roles row — list, detail, preview and create all treat the actor as a NON-manager', async () => {
+    // Token-claim trust stays ON here (the integration default): the request claims are `member`
+    // and the template permissions only; the admin row exists ONLY in user_roles.
+    expect(process.env.RBAC_TOKEN_TRUST).toBe('true')
+    const label = 'admin-drift'
+    const admin = freshId(`admin-${label}`)
+    const someoneElse = freshId(`other-${label}`)
+    const actorId = freshId(`actor-${label}`)
+    await seedUser(actorId, { role: 'user', roleIds: ['admin'] })
+    await grantApprovalWriteForIntegrationActor(actorId)
+    const adminToken = await authToken(admin, 'admin')
+    const templateId = await publishTemplate(adminToken, userSeatGraph(someoneElse, someoneElse), label)
+    // Positive control: a template visible to all, so a refusal below is the visibility filter and
+    // not an inability to create at all.
+    const openTemplateId = await publishTemplate(adminToken, userSeatGraph(someoneElse, someoneElse), `${label}-open`)
+    // Visible ONLY to someoneElse: a non-manager actor must not see or use it.
+    await pool().query(
+      `UPDATE approval_templates SET visibility_scope = $2::jsonb WHERE id = $1`,
+      [templateId, JSON.stringify({ type: 'user', ids: [someoneElse] })],
+    )
+    const tokenResponse = await fetch(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(actorId)}&roles=member&perms=${encodeURIComponent('approvals:read,approvals:write')}`,
+    )
+    expect(tokenResponse.status).toBe(200)
+    const actorToken = ((await tokenResponse.json()) as { token: string }).token
+
+    const list = await jsonRequest(baseUrl, `/api/approval-templates?search=${encodeURIComponent(`role seat via user_roles ${label} ${TS}`)}`, actorToken)
+    expect(list.status, await list.clone().text()).toBe(200)
+    expect(((await list.json()) as { data: Array<{ id: string }> }).data.map((row) => row.id)).not.toContain(templateId)
+
+    const read = await jsonRequest(baseUrl, `/api/approval-templates/${templateId}`, actorToken)
+    expect(read.status, await read.clone().text()).toBe(404)
+
+    const preview = await jsonRequest(baseUrl, '/api/approvals/preview', actorToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(preview.status, await preview.clone().text()).toBe(404)
+
+    const control = await jsonRequest(baseUrl, '/api/approvals', actorToken, {
+      method: 'POST',
+      body: { templateId: openTemplateId, formData: { reason: 'r' } },
+    })
+    expect(control.status, await control.clone().text()).toBe(201)
+    createdApprovalIds.add(((await control.json()) as { id: string }).id)
+
+    const create = await jsonRequest(baseUrl, '/api/approvals', actorToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    const createText = await create.clone().text()
+    if (create.status === 201) createdApprovalIds.add(((await create.json()) as { id: string }).id)
+    expect(create.status, createText).toBe(404)
+  })
+
+  it('(j) the live count push to OTHER affected users carries their stored role ids: a handler holding R via user_roles is pushed the same todo count their own GET answers', async () => {
+    const role = await seedRole('push-j')
+    // P: an unrelated pending item seated ONLY on role R.
+    const { instanceA: roleItem } = await fixture('push-j', role.id)
+    const handler = await seedViewer('push-j-handler', { role: 'user', roleIds: [role.id] })
+    const first = await seedViewer('push-j-first', { role: 'user' })
+    // Q: first (user seat) -> handler (user seat). When `first` approves, the push goes to `handler`
+    // as an affected user — handed over with a user id only.
+    const admin = freshId('admin-push-j')
+    const requester = freshId('req-push-j')
+    await grantApprovalWriteForIntegrationActor(requester)
+    seededUserIds.add(requester)
+    const templateId = await publishTemplate(await authToken(admin, 'admin'), userSeatGraph(first.id, handler.id), 'push-j-users')
+    const userItem = await createApproval(await authToken(requester), templateId)
+
+    const recorder = recordPushes()
+    try {
+      await withoutTokenClaimTrust(async () => {
+        expect(await pendingTabIds(handler.token)).toContain(roleItem)
+        recorder.pushes.length = 0
+        const approved = await act(first.token, userItem, 'approve')
+        expect(approved.status, await approved.clone().text()).toBe(200)
+        const handlerCount = await todoCount(handler.token)
+        // Both the role-seated item and the now-active user seat are the handler's.
+        expect(handlerCount).toBe(2)
+        const handlerPushes = recorder.pushes.filter(
+          (push) => push.room === buildAuthenticatedUserRoom(handler.id) && push.event === 'todo:counts-updated',
+        )
+        expect(handlerPushes).toHaveLength(1)
+        expect(handlerPushes[0].payload?.count).toBe(handlerCount)
+      })
+    } finally {
+      recorder.stop()
+    }
   })
 
   it('(d) a viewer who does NOT hold R sees none of it and is refused by the seat gate', async () => {
