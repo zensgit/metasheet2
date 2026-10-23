@@ -62,11 +62,11 @@
  *   D11 (Codex review P1-b) the large lane through the real lock and host: an expansion planned and approved,
  *       then a small preview + apply writes quantities 5 / 15; re-approving the OLD expansion is refused
  *       `expansion_stale` (nothing bumped, no job) and the old approval's job is refused — quantities stay 5 / 15.
- *   D17 (PR B) migration 101: the pilot columns, the both-or-neither CHECK, the audit vocabulary with project_pilot_enable.
- *   D18 (PR B) the enable ROUTE on the real host / lock / registry / audit store: readiness over the real sheet (the step-4
+ *   D19 (PR B) migration 101: the pilot columns, the both-or-neither CHECK, the audit vocabulary with project_pilot_enable.
+ *   D20 (PR B) the enable ROUTE on the real host / lock / registry / audit store: readiness over the real sheet (the step-4
  *       tables stubbed, the build marker flipped in memory), the bump, the host stamp through the #6507 port, the registry
  *       mark, one audit row; export-xlsx (xlsx + csv) 403 MULTITABLE_GRID_EXPORT_CLOSED (U09 with #6507); the re-POST.
- *   D19 (PR B, L02) a job approved before the enablement is refused inside the real lease with the pilot code, never
+ *   D21 (PR B, L02) a job approved before the enablement is refused inside the real lease with the pilot code, never
  *       PLAN_SUPERSEDED (the control run without the check proves the order); the job stays queued, zero meta_records writes.
  * Values-free: every id is synthetic and per-run.
  */
@@ -103,6 +103,8 @@ const tableActions = require(path.join(PLUGIN_LIB, 'stock-preparation-table-acti
 const { ensureStockPreparationSandboxTarget } = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
 const { syncStockPreparationContractOptionsForObject } = require(path.join(PLUGIN_LIB, 'stock-preparation-option-sync.cjs')) as any
 const largeBomJobs = require(path.join(PLUGIN_LIB, 'stock-preparation-large-bom-jobs.cjs')) as any
+// PR-0 (batch-refresh phase 2 step 4): the carry-confirm executor, driven under the real lease (D17, D18).
+const confirmWrites = require(path.join(PLUGIN_LIB, 'stock-preparation-confirm-writes.cjs')) as any
 
 const {
   PROJECT_WRITE_ERROR_CODES,
@@ -1256,16 +1258,193 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       }
     }, 60000)
 
+    // ── D17–D18: batch-refresh phase 2 step 4, PR-0 — the carry-confirm write under the lease ─────────
+    // The carry pair on a sandbox sheet: an INACTIVE predecessor holding a human note, and its re-keyed,
+    // blank, active successor — created through the REAL host with the target's physical ids.
+    const CARRY_COMPONENT = 'SWL-PART-X'
+    function carryKeys(projectNo: string) {
+      return {
+        oldKey: JSON.stringify({ projectNo, componentSourceId: CARRY_COMPONENT, parentSourceId: null, path: ['OLD', CARRY_COMPONENT] }),
+        newKey: JSON.stringify({ projectNo, componentSourceId: CARRY_COMPONENT, parentSourceId: null, path: ['NEW', CARRY_COMPONENT] }),
+      }
+    }
+    function carryDecision(projectNo: string) {
+      const { oldKey, newKey } = carryKeys(projectNo)
+      return {
+        decision: 'carry_via_confirm', idempotencyKey: newKey, sourceIdempotencyKey: oldKey, componentSourceId: CARRY_COMPONENT,
+        carryKey: 'component_source_id', manualRowReattach: 'propose_confirm', carryFields: ['notes'], writeVia: 'k2_confirm',
+        requiresConfirm: true, carry: true,
+      }
+    }
+    async function seedCarryPair(sb: any, projectNo: string) {
+      const physical = (logical: string) => (sb.target.fieldIdMap && sb.target.fieldIdMap[logical]) || logical
+      const toPhysical = (data: Record<string, unknown>) => Object.fromEntries(Object.entries(data).map(([key, value]) => [physical(key), value]))
+      const { oldKey, newKey } = carryKeys(projectNo)
+      const records = sb.multitable.records as any
+      await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: oldKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), active: false, notes: 'synthetic note' }) })
+      const target = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: newKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), active: true }) })
+      const readTarget = async () => {
+        const row = (await q('SELECT version, data->>$2 AS notes FROM meta_records WHERE id = $1', [target.id, physical('notes')])).rows[0]
+        return { version: Number(row.version), notes: row.notes as string | null }
+      }
+      return { physical, targetId: target.id as string, targetVersion: Number(target.version), readTarget }
+    }
+    // A records surface that holds the carry's ONE patch at the gate (after the executor's pre-write CAS, before the
+    // host is asked), the D8 technique on the patch side.
+    function heldPatchRecords(records: any) {
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      let entered: () => void = () => {}
+      const reached = new Promise<void>((resolve) => { entered = resolve })
+      const fences: unknown[] = []
+      const api: any = {
+        ...records,
+        async patchRecord(input: any) {
+          fences.push(input.writeFence)
+          entered()
+          await gate
+          return records.patchRecord(input)
+        },
+      }
+      return { api, reached, release, fences }
+    }
+    const carryUnder = (lock: any, key: string, records: any, target: any, projectNo: string, runId: string) =>
+      lock.withProjectWriteLease(key, { purpose: 'carry_confirm', runId }, (guard: any) =>
+        confirmWrites.applyCarryViaConfirm({ permission: 'admin', recordsApi: records, target, decision: carryDecision(projectNo), confirmedBy: 'swl-carry', writeFence: guard, writeFenceRequired: true }))
+
+    test('D17 (PR-0) a carry frozen between its pre-write CAS and its host patch; the lease lapses and another session takes over; the carry resumes: the REAL host refuses the fenced patch — the human cell stays blank, the version unchanged, LEASE_LOST, nothing bumped', async () => {
+      const sb = await sandboxSheet('d17')
+      const projectNo = 'SYN-SWL-D17'
+      try {
+        const base = Date.now()
+        const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        expect(sb.multitable.records.supportsWriteFence, 'the production host declares fenced writes').toBe(true)
+        const pair = await seedCarryPair(sb, projectNo)
+        expect((await pair.readTarget()).notes, 'calibration: the successor is blank').toBeNull()
+        const held = heldPatchRecords(sb.multitable.records)
+        const runningA = settle(carryUnder(lockA, sb.key, held.api, sb.target, projectNo, 'swl-d17-a'))
+        await held.reached
+        const fence: any = held.fences[0]
+        expect(fence && fence.lock, 'the patch carries the host fence').toBe(PROJECT_WRITE_LOCK_TABLE)
+        expect(fence.scopeKey).toBe(sb.key)
+        const duringA = (await q(`SELECT lease_id, lease_purpose, fencing_epoch, generation FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+        expect(duringA.lease_purpose).toBe('carry_confirm')
+        expect(duringA.lease_id).toBe(fence.leaseId)
+        // B: on its clock the carry's lease lapsed; a small apply takes the sheet over (epoch + 1, new lease id).
+        const grantB = await lockB.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d17-b' })
+        expect(grantB.takeover).toBe(true)
+        expect(grantB.fencingEpoch).toBe(Number(duringA.fencing_epoch) + 1)
+        held.release()
+        const outcome = await runningA
+        expect(outcome.ok, 'the carry must not report success').toBe(false)
+        const error = (outcome as any).error
+        expect(error.code).toBe(PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+        expect(error.fence).toBe(true)
+        const after = await pair.readTarget()
+        expect(after.notes, 'the REAL host wrote nothing for the resumed patch').toBeNull()
+        expect(after.version).toBe(pair.targetVersion)
+        const row = (await q(`SELECT lease_id, fencing_epoch, generation FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+        expect(row.lease_id, 'the taker-over still holds the sheet; the loser released nothing').toBe(grantB.leaseId)
+        expect(row.generation, 'nothing bumped').toBe(Number(duringA.generation))
+        await lockB.createGuard(grantB).release()
+      } finally {
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
+
+    test('D18 (PR-0, E01 cross-lane) carry vs apply interleaving through the real lock and host: a carry mid-patch refuses a preview bump and an apply acquire (holder carry_confirm); after it lands and bumps carry_confirm, the token minted before it is PLAN_SUPERSEDED with nothing written; an apply mid-write refuses a carry (holder small_apply) and the executor never runs; the carried note survives the apply', async () => {
+      const sb = await sandboxSheet('d18')
+      const projectNo = 'SYN-SWL-D18'
+      try {
+        const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB) })
+        const records = sb.multitable.records as any
+        const pair = await seedCarryPair(sb, projectNo)
+        const policy = { enabled: true, allowedTargetObjectIds: [sb.objectId] }
+        const common = (api: any) => ({
+          action: sb.action, parameters: { projectNo }, sourceAdapter: sourceOf(projectNo), recordsApi: api,
+          tokenStore: sb.pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d18_${TOKEN}`,
+        })
+        const preview = (lock: any) => tableActions.dryRunStockPreparationAction({ ...common(records), projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'small_preview' })) })
+        const applyWith = (lock: any, api: any, token: string, runId: string) => lock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId }, (guard: any) =>
+          tableActions.applyStockPreparationAction({ ...common(api), dryRunToken: token, permission: 'write', sandboxPolicy: policy, projectWriteGuard: guard }))
+        // 1. the puller previews BEFORE the carry: a token bound to this generation.
+        const dryBefore = await preview(lockA)
+        expect(dryBefore.canApply).toBe(true)
+        const rowsBeforeCarry = await countRows(sb.sheetId)
+        // 2. the carry, held at its patch (lease live): a preview bump and an apply acquire are both refused, naming it.
+        const held = heldPatchRecords(records)
+        const runningCarry = settle(carryUnder(lockA, sb.key, held.api, sb.target, projectNo, 'swl-d18-carry'))
+        await held.reached
+        const bumpDuring = await settle(lockB.bumpGeneration(sb.key, { reason: 'small_preview' }))
+        expect(bumpDuring.ok).toBe(false)
+        expect((bumpDuring as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+        expect((bumpDuring as any).error.details.holderPurpose).toBe('carry_confirm')
+        const acquireDuring = await settle(lockB.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d18-contender' }))
+        expect(acquireDuring.ok).toBe(false)
+        expect((acquireDuring as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+        expect((acquireDuring as any).error.details.holderPurpose).toBe('carry_confirm')
+        held.release()
+        const carried = await runningCarry
+        expect(carried.ok, JSON.stringify((carried as any).error && (carried as any).error.code)).toBe(true)
+        expect((carried as any).value.mode).toBe('carried')
+        expect((await pair.readTarget()).notes).toBe('synthetic note')
+        // 3. after release the route bumps `carry_confirm`: the token minted before the carry is superseded.
+        const bumped = await lockA.bumpGeneration(sb.key, { reason: 'carry_confirm' })
+        expect(bumped.generation).toBe(2)
+        const stale = await settle(applyWith(lockB, records, dryBefore.dryRunToken, 'swl-d18-stale'))
+        expect(stale.ok).toBe(false)
+        expect((stale as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+        expect((stale as any).error.details.reason).toBe('newer_plan')
+        expect((stale as any).error.details.currentReason).toBe('carry_confirm')
+        expect((stale as any).error.details.partial).toBe(false)
+        expect(await countRows(sb.sheetId), 'the stale plan wrote nothing').toBe(rowsBeforeCarry)
+        // 4. a fresh preview + apply, held at its first host write: a carry is refused, naming the apply, and the
+        //    executor is never entered; after release the apply lands and the carried note survives it.
+        const dryAfter = await preview(lockA)
+        expect(dryAfter.canApply).toBe(true)
+        let releaseCreate: () => void = () => {}
+        const createGate = new Promise<void>((resolve) => { releaseCreate = resolve })
+        let createEntered: () => void = () => {}
+        const createReached = new Promise<void>((resolve) => { createEntered = resolve })
+        let heldOnce = false
+        const heldApply: any = {
+          ...records,
+          async createRecord(input: any) {
+            if (!heldOnce) { heldOnce = true; createEntered(); await createGate }
+            return records.createRecord(input)
+          },
+        }
+        const runningApply = settle(applyWith(lockA, heldApply, dryAfter.dryRunToken, 'swl-d18-apply'))
+        await createReached
+        let executorEntered = false
+        const carryDuringApply = await settle(lockB.withProjectWriteLease(sb.key, { purpose: 'carry_confirm', runId: 'swl-d18-carry-2' }, async () => { executorEntered = true }))
+        expect(carryDuringApply.ok).toBe(false)
+        expect((carryDuringApply as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+        expect((carryDuringApply as any).error.details.holderPurpose).toBe('small_apply')
+        expect(executorEntered, 'a refused lease never enters the executor').toBe(false)
+        releaseCreate()
+        const applied = await runningApply
+        expect(applied.ok, JSON.stringify((applied as any).error && (applied as any).error.code)).toBe(true)
+        expect((applied as any).value.status).toBe('succeeded')
+        expect((await pair.readTarget()).notes, 'the apply never touches the human cell').toBe('synthetic note')
+        const row = (await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+        expect(row.lease_id).toBeNull()
+      } finally {
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
     // ── 备料分批拉取第一期 step 3 PR B: the pilot marker (migration 101), the enable route on the real stack, L02 ──
     //
-    // D17 migration 101: the three columns, the pilot CHECK (both-or-neither; version >= 1) and the audit vocabulary.
-    // D18 the enable ROUTE over the real host, lock, registry and audit store: readiness passes on a really prepared
+    // D19 migration 101: the three columns, the pilot CHECK (both-or-neither; version >= 1) and the audit vocabulary.
+    // D20 the enable ROUTE over the real host, lock, registry and audit store: readiness passes on a really prepared
     //     sheet (the step-4 tables are STUBS created here — the later migrations are not in this build — and the
     //     build marker is flipped in memory, exactly the two things the readiness list exists to wait for), the
     //     generation is bumped, the host stamp lands in meta_sheets.grid_export_closure through the #6507 port,
     //     the registry row is marked, ONE audit row; export-xlsx (xlsx + csv) answers 403 MULTITABLE_GRID_EXPORT_CLOSED;
     //     a re-POST repairs nothing new and writes no second audit row.
-    // D19 (L02) a job approved BEFORE the enablement: the chunk inside the real lease is refused with the PILOT code
+    // D21 (L02) a job approved BEFORE the enablement: the chunk inside the real lease is refused with the PILOT code
     //     (the enable's bump would have made it PLAN_SUPERSEDED — the control run without the check proves the
     //     order), the job stays queued and meta_records is untouched.
     const PILOT_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/pilot'
@@ -1295,7 +1474,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       return res
     }
 
-    test('D17 (PR B) migration 101: the three pilot columns, the pilot CHECK (both-or-neither, version >= 1), and the audit vocabulary accepts project_pilot_enable', async () => {
+    test('D19 (PR B) migration 101: the three pilot columns, the pilot CHECK (both-or-neither, version >= 1), and the audit vocabulary accepts project_pilot_enable', async () => {
       const cols = await q(
         `SELECT column_name, data_type, is_nullable FROM information_schema.columns
           WHERE table_name = 'integration_stock_prep_project_target' AND column_name IN ('pilot_enabled_at', 'pilot_enabled_by', 'pilot_readiness_version')
@@ -1306,12 +1485,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         ['pilot_enabled_by', 'text', 'YES'],
         ['pilot_readiness_version', 'integer', 'YES'],
       ])
-      const tenant = `tenant_swl_d17_${TOKEN}`
-      const id = `pt_d17_${TOKEN}`
+      const tenant = `tenant_swl_d19_${TOKEN}`
+      const id = `pt_d19_${TOKEN}`
       const insert = (at: string | null, version: number | null) => q(
         `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status, pilot_enabled_at, pilot_enabled_by, pilot_readiness_version)
-         VALUES ($1, $2, 'SYN-SWL-D17', $3, $4, 'active', $5, $6, $7)`,
-        [id, tenant, `sheet_swl_d17_${TOKEN}`, `plm_stock_preparation_sandbox_p_d17${TOKEN}`, at, at ? 'syn' : null, version],
+         VALUES ($1, $2, 'SYN-SWL-D19', $3, $4, 'active', $5, $6, $7)`,
+        [id, tenant, `sheet_swl_d19_${TOKEN}`, `plm_stock_preparation_sandbox_p_d19${TOKEN}`, at, at ? 'syn' : null, version],
       )
       try {
         for (const [at, version] of [['2026-10-23T00:00:00Z', null], [null, 1], ['2026-10-23T00:00:00Z', 0]] as const) {
@@ -1326,16 +1505,16 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         expect(stored.pilot_enabled_by).toBe('syn')
         expect(stored.pilot_readiness_version).toBe(1)
         // The audit vocabulary (re-listed by 101) accepts the new action and still refuses an unknown one.
-        const auditId = `audit_d17_${TOKEN}`
+        const auditId = `audit_d19_${TOKEN}`
         await q(
           `INSERT INTO integration_stock_prep_audit (id, tenant_id, project_id, action, subject_id, mode, actor, detail)
-           VALUES ($1, $2, 'SYN-SWL-D17', 'project_pilot_enable', $3, 'enabled', 'syn', '{"readinessVersion":1}'::jsonb)`,
-          [auditId, tenant, `sheet_swl_d17_${TOKEN}`],
+           VALUES ($1, $2, 'SYN-SWL-D19', 'project_pilot_enable', $3, 'enabled', 'syn', '{"readinessVersion":1}'::jsonb)`,
+          [auditId, tenant, `sheet_swl_d19_${TOKEN}`],
         )
         const unknown = await settle(q(
           `INSERT INTO integration_stock_prep_audit (id, tenant_id, project_id, action, subject_id, mode, actor, detail)
-           VALUES ($1, $2, 'SYN-SWL-D17', 'project_pilot_disable', $3, 'disabled', 'syn', '{}'::jsonb)`,
-          [`${auditId}_unknown`, tenant, `sheet_swl_d17_${TOKEN}`],
+           VALUES ($1, $2, 'SYN-SWL-D19', 'project_pilot_disable', $3, 'disabled', 'syn', '{}'::jsonb)`,
+          [`${auditId}_unknown`, tenant, `sheet_swl_d19_${TOKEN}`],
         ))
         expect(unknown.ok).toBe(false)
         expect((unknown as any).error.code).toBe('23514')
@@ -1345,9 +1524,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       }
     })
 
-    test('D18 (PR B) the enable route on the real stack: readiness, bump, the host stamp through the #6507 port, the registry mark, one audit row; export-xlsx 403; a re-POST writes no second audit row', async () => {
-      const tenantId = `tenant_swl_d18_${TOKEN}`
-      const projectNo = 'SYN-SWL-D18'
+    test('D20 (PR B) the enable route on the real stack: readiness, bump, the host stamp through the #6507 port, the registry mark, one audit row; export-xlsx 403; a re-POST writes no second audit row', async () => {
+      const tenantId = `tenant_swl_d20_${TOKEN}`
+      const projectNo = 'SYN-SWL-D20'
       const projectId = `${tenantId}:integration-core`
       const objectId: string = ownBase.deriveStockPreparationProjectSheetObjectId(tenantId, projectNo)
       const pluginContext = createProductionPluginContext()
@@ -1362,7 +1541,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       const store = projectTargetStoreModule.createStockPreparationProjectTargetStore({ db })
       const audit = auditStoreModule.createStockPreparationAuditStore({ db })
       const lock = createStockPreparationProjectWriteLock({ db })
-      const admin = { id: `u_d18_admin_${TOKEN}`, tenantId, permissions: ['stock-prep:admin'] }
+      const admin = { id: `u_d20_admin_${TOKEN}`, tenantId, permissions: ['stock-prep:admin'] }
       const envBefore = process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
       const STEP4_STUB_TABLES = ['integration_stock_prep_continuation', 'integration_stock_prep_refresh_state']
@@ -1385,7 +1564,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           }
         }
         const routes = new Map<string, any>()
-        const envTarget = { sheetId: `sheet_env_d18_${TOKEN}`, objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} }
+        const envTarget = { sheetId: `sheet_env_d20_${TOKEN}`, objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} }
         const routeContext = {
           api: {
             http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
@@ -1396,7 +1575,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           config: {
             stockPreparationTableActions: [{
               actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID,
-              source: { externalSystemId: `swl_source_rdb_d18_${TOKEN}`, kind: 'data-source:sql-readonly' },
+              source: { externalSystemId: `swl_source_rdb_d20_${TOKEN}`, kind: 'data-source:sql-readonly' },
               target: envTarget,
             }],
             stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envTarget.objectId] },
@@ -1487,20 +1666,20 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       }
     }, 90000)
 
-    test('D19 (PR B, L02) a job approved BEFORE the enablement: the chunk inside the real lease is refused with the pilot code (not PLAN_SUPERSEDED), the job stays queued, meta_records untouched', async () => {
-      const sb = await sandboxSheet('d19')
-      const projectNo = 'SYN-SWL-D19'
-      const tenantId = `tenant_swl_d19_${TOKEN}`
+    test('D21 (PR B, L02) a job approved BEFORE the enablement: the chunk inside the real lease is refused with the pilot code (not PLAN_SUPERSEDED), the job stays queued, meta_records untouched', async () => {
+      const sb = await sandboxSheet('d21')
+      const projectNo = 'SYN-SWL-D21'
+      const tenantId = `tenant_swl_d21_${TOKEN}`
       try {
         const db = createDb({ database: sb.pluginContext.api.database })
         const lock = createStockPreparationProjectWriteLock({ db })
         const store = projectTargetStoreModule.createStockPreparationProjectTargetStore({ db })
         await store.create({ tenantId, projectNo, sheetId: sb.sheetId, objectId: sb.objectId, createdBy: 'syn' })
         const storage: any = sb.pluginContext.storage
-        const jobScope = { tenantId, workspaceId: `ws_swl_d19_${TOKEN}` }
+        const jobScope = { tenantId, workspaceId: `ws_swl_d21_${TOKEN}` }
         const actionId = sb.action.actionId
-        const jobId = `swl_d19_${TOKEN}`
-        const applyJobId = `swl_d19_apply_${TOKEN}`
+        const jobId = `swl_d21_${TOKEN}`
+        const applyJobId = `swl_d21_apply_${TOKEN}`
         const records = sb.multitable.records as any
         const scopedForChunk = () => tableActions.createTargetScopedRecordsApi(records, sb.target, { fieldIdTranslation: 'pre_mapped' })
         // Approved BEFORE the enablement, the way the routes do it.
@@ -1522,11 +1701,11 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         expect(approved.totalDecisions).toBeGreaterThan(0)
         // THE ENABLEMENT on the lock and the registry, as the route performs it.
         await lock.bumpGeneration(sb.key, { reason: 'pilot_enable', tenantId })
-        const marked = await store.markPilotEnabled({ tenantId, projectNo, actorId: 'swl-d19-admin', readinessVersion: 1 })
+        const marked = await store.markPilotEnabled({ tenantId, projectNo, actorId: 'swl-d21-admin', readinessVersion: 1 })
         expect(marked.enabled).toBe(true)
         const gate = pilotGateModule.createStockPreparationPilotGate({ store })
         const before = await countRows(sb.sheetId)
-        const chunk = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d19-chunk' }, async (guard: any) =>
+        const chunk = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d21-chunk' }, async (guard: any) =>
           largeBomJobs.runLargeBomCheckpointApplyJobChunk({
             storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard,
             largeLanePilotCheck: ({ target }: any) => gate.assertLargeLaneAllowed({ tenantId, projectNo, sheetId: target && target.sheetId }, 'large_apply_chunk'),
@@ -1542,7 +1721,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         expect((await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0].lease_id).toBeNull()
         // CONTROL: without the pilot check the same chunk is refused by the generation binding (the enable's bump) —
         // so the pilot check is what ran FIRST above, and the registry's marker is what refused.
-        const control = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d19-control' }, async (guard: any) =>
+        const control = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d21-control' }, async (guard: any) =>
           largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard })))
         expect(control.ok).toBe(false)
         expect((control as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)

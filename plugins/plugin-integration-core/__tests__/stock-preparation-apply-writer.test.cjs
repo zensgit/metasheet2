@@ -1455,6 +1455,36 @@ async function testW8ProductionCallersRequireAFence() {
   assert.deepEqual(api.calls, [], 'W8: refused before any IO')
 }
 
+// PR-0 (batch-refresh phase 2 step 4, design §7.2 (a)): a plan the planner suspended as a whole is refused by the
+// writer itself, before any IO and whatever the caller did — fenced or not. Only the literal `true` suspends; a plan
+// without the key (every plan today) is byte-identical to before.
+async function testW8bTheWriterRefusesASuspendedPlanWithZeroIo() {
+  const plan = { ...buildPlan(), suspended: true }
+  for (const fenced of [false, true]) {
+    const api = createRecordsApi({ existing: seededRowsFor(plan) })
+    const fence = recordingFence(api.calls)
+    await assert.rejects(
+      applyStockPreparationPlan({
+        permission: 'write',
+        plan,
+        target: target(),
+        recordsApi: fenced ? fenceCapable(api.recordsApi).api : api.recordsApi,
+        ...(fenced ? { writeFence: fence, writeFenceRequired: true } : {}),
+      }),
+      (error) => error instanceof StockPreparationApplyWriterError && error.details.code === 'plan_suspended' && error.details.field === 'plan.suspended',
+    )
+    assert.deepEqual(api.calls, [], `W8b (fenced=${fenced}): refused before any records IO and before any fence CAS`)
+  }
+  // Not a verdict: a truthy non-boolean is not what the planner emits, and an unset key runs as before
+  // (this fixture holds a manual_confirm, so the run is `partial` — what matters is that it WROTE).
+  for (const notSuspended of [undefined, false, 'true', 1, {}]) {
+    const api = createRecordsApi({ existing: seededRowsFor(plan) })
+    const result = await applyStockPreparationPlan({ permission: 'write', plan: { ...buildPlan(), ...(notSuspended === undefined ? {} : { suspended: notSuspended }) }, target: target(), recordsApi: api.recordsApi })
+    assert.equal(result.abort, undefined, `W8b: suspended=${JSON.stringify(notSuspended)} is not a suspension`)
+    assert.ok(writesOf(api.calls).length >= 2, `W8b: suspended=${JSON.stringify(notSuspended)} still writes`)
+  }
+}
+
 async function testW9TheFinalReassertTurnsALateLossIntoAStop() {
   const plan = buildPlan()
   const api = createRecordsApi({ existing: seededRowsFor(plan) })
@@ -1479,6 +1509,7 @@ async function main() {
   await testW6AHostRefusalStopsTheRunAtThatDecision()
   await testW7AHostWithoutFenceSupportFailsClosedBeforeAnyIo()
   await testW8ProductionCallersRequireAFence()
+  await testW8bTheWriterRefusesASuspendedPlanWithZeroIo()
   await testW9TheFinalReassertTurnsALateLossIntoAStop()
   await testW10EveryFencedHostWriteRunsInsideTheGuardsHostWriteBracket()
   await testWriteFenceAbsentOrPassingIsByteIdentical()

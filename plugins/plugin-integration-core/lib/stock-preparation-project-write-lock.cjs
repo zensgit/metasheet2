@@ -63,9 +63,16 @@
 //       is refused (501) before any write. The writer runs each host write inside guard.withHostWrite,
 //       so a heartbeat tick never queues behind the holder's own in-flight write (round 6, N6).
 //
-// NOT IN THE LEASE (named, follow-ups): the carry-confirm / confirm writes
-// (stock-preparation-confirm-writes.cjs) write the same sheet without this lease or fence; print and
-// copy are out of scope (they do not write the canonical sheet through this path).
+// THE CARRY-CONFIRM WRITE (batch-refresh phase 2 step 4, PR-0; plan §5.1 / G5): the one other machine
+// write of the canonical sheet — stock-preparation-confirm-writes.cjs applyCarryViaConfirm, which copies
+// an inactive predecessor's HUMAN cells onto its re-keyed row — runs under this lease too (purpose
+// `carry_confirm`: acquired by the route before the ledger pre-flight, released after the patch), its
+// one patch is host-fenced (I5) and version-conditional, and after release the route bumps the
+// generation with reason `carry_confirm` so a token minted before the carry is superseded (the
+// `existingRows` hash chain of the dry-run revision refuses it as well — the bump is the lease-level
+// statement of the same fact). The other confirm writes in that module (material mapping, unit rule)
+// write their own managed sheets, never the canonical sheet. NOT IN THE LEASE: print and copy (they do
+// not write the canonical sheet through this path).
 //
 // FAIL CLOSED. No env flag. Any failure to read or write the row is STORE_FAILED (503), never busy and
 // never "proceed without a lock"; a missing table (deploy without the migration) is a STORE_FAILED.
@@ -130,13 +137,14 @@ const PROJECT_WRITE_ROW_LOCK_WAIT_MS = 5_000
 const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 
 // Closed vocabularies. A later increment adds its own tokens WITH its feature (e.g. a content-change
-// review confirm), never ahead of it.
+// review confirm), never ahead of it. `carry_confirm` (both lists) arrived with the carry-confirm lease
+// (module header): the purpose names the carry's lease, the reason names its post-release bump.
 //   * `pilot_enable` (batch-refresh step 3 PR B): the admin enable of a project's pilot BUMPS the
 //     generation (every plan made before the pilot is superseded) and then holds the lease while the host
 //     stamps the sheet closed for grid export and the registry row is marked — so no apply or chunk writes
 //     the sheet in between, and no writer can be mid-write when the marker lands.
-const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'pilot_enable'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'pilot_enable'])
+const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',

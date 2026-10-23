@@ -527,9 +527,10 @@ test('L11 constants and vocabularies are pinned', () => {
   // Round 6 (S1): the bounded row-lock wait — below the pool's 30 s statement_timeout, above a record write.
   assert.equal(lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS, 5000)
   assert.ok(lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS < 30000, 'the row-lock wait stays below statement_timeout')
+  // PR-0 (batch-refresh phase 2 step 4): `carry_confirm` names the carry-confirm lease and its post-release bump.
   // Batch-refresh step 3 PR B: the pilot enable holds the lease (purpose) after bumping the generation (reason).
-  assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk', 'pilot_enable'])
-  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'pilot_enable'])
+  assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
+  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {
     WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
     PLAN_SUPERSEDED: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED',
@@ -546,6 +547,31 @@ test('L11 an unknown purpose / reason is refused before any IO', async () => {
   await assert.rejects(() => lock.acquire(scope, { purpose: 'something_else' }), rejectsWith(PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 500))
   await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'something_else' }), rejectsWith(PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 500))
   assert.equal(db.log.length, 0)
+})
+
+// PR-0 (batch-refresh phase 2 step 4): the carry-confirm tokens are LIVE vocabulary, not just pinned strings —
+// the lease is granted under purpose `carry_confirm`, the row records it, a contender sees it as the holder's
+// purpose, the bump under reason `carry_confirm` lands and readState reports it (readState filters through the
+// closed lists, so a token missing from either list would read back as null).
+test('L11c carry_confirm is an accepted purpose (acquire, holder details, readState) and an accepted reason (bump, readState)', async () => {
+  const { lock, scope, db } = setup()
+  const grant = await lock.acquire(scope, { purpose: 'carry_confirm', runId: 'swl-carry-1' })
+  const row = db.rows(PROJECT_WRITE_LOCK_TABLE).find((r) => r.scope_key === scope)
+  assert.equal(row.lease_purpose, 'carry_confirm')
+  assert.equal(row.lease_run_id, 'swl-carry-1')
+  await assert.rejects(() => lock.acquire(scope, { purpose: 'small_apply' }), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.equal(error.status, 409)
+    assert.equal(error.details.holderPurpose, 'carry_confirm', 'a contender is told the carry holds the sheet')
+    return true
+  })
+  assert.equal((await lock.readState(scope)).leasePurpose, 'carry_confirm')
+  await lock.createGuard(grant).release()
+  const bumped = await lock.bumpGeneration(scope, { reason: 'carry_confirm' })
+  assert.equal(bumped.generation, 1)
+  const state = await lock.readState(scope)
+  assert.equal(state.generationReason, 'carry_confirm')
+  assert.equal(state.leaseHeld, false)
 })
 
 
