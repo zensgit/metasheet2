@@ -13,6 +13,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import ApprovalCenterView from '../src/views/approval/ApprovalCenterView.vue'
 
 // ---------------------------------------------------------------------------
 // Test report 2026-10-08 — read-state badges on the approval center's tabs.
@@ -424,7 +425,6 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
   })
 
   async function mountView() {
-    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalCenterView as any) })
     app = createApp(Host)
     app.component('ElTabs', ElTabs)

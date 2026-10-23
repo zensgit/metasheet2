@@ -565,3 +565,6 @@ describe('app-level approval todo badge', () => {
     expect(getTodoCountSpy).toHaveBeenCalledTimes(1)
   })
 })
+
+// Preload the shell during collection; mountApp keeps its dynamic import for module resets.
+await import('../src/App.vue')

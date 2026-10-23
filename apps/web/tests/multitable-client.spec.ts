@@ -11,6 +11,23 @@ import {
 import type { AutomationRule } from '../src/multitable/types'
 
 describe('MultitableApiClient', () => {
+  // 客户反馈 2026-10-21 item 1 (review round 1): the DingTalk person-recipient preflight wire contract.
+  it('posts typed recipient ids to the preflight and keeps only strict booleans per id', async () => {
+    const items = [
+      { userId: 'user_fake_a', exists: true, active: true, dingtalkLinked: false, name: 'should not pass through' },
+      { userId: 'user_fake_b', exists: 'yes', active: 1, dingtalkLinked: null },
+      { exists: true },
+    ]
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { items } })))
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.getDingTalkPersonRecipientStatus('sheet 1', ['user_fake_a', 'user_fake_b'])).resolves.toEqual([
+      { userId: 'user_fake_a', exists: true, active: true, dingtalkLinked: false },
+      { userId: 'user_fake_b', exists: false, active: false, dingtalkLinked: false },
+    ])
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/sheets/sheet%201/automations/dingtalk-person-recipient-status')
+    expect(fetchFn.mock.calls[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ userIds: ['user_fake_a', 'user_fake_b'] }) })
+  })
+
   it('accepts only an explicit record-restore identity from the server', async () => {
     const result = { restored: 'r1', sheetId: 's1' }
     const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: result }))) })
