@@ -20,6 +20,18 @@ function expectDirectAsyncImportRoute(path: string) {
   expect(pluginSource).toMatch(pattern)
 }
 
+/** Both the direct registrar and the PUT-plus-POST-/update helper. */
+const ROUTE_REGISTRARS = ['context.api.http.addRoute', 'addAttendanceIdUpdateRoute'] as const
+
+function nextRouteRegistration(from: number): number {
+  let next = -1
+  for (const marker of ROUTE_REGISTRARS) {
+    const at = pluginSource.indexOf(marker, from)
+    if (at !== -1 && (next === -1 || at < next)) next = at
+  }
+  return next
+}
+
 describe('attendance import permission wiring', () => {
   it('exposes a dedicated importer preset and keeps admins import-capable', () => {
     const presets = listAccessPresets()
@@ -122,7 +134,7 @@ describe('attendance import permission wiring', () => {
     for (const path of boundReads) {
       const marker = pluginSource.indexOf(`'${path}'`)
       expect(marker, path).toBeGreaterThanOrEqual(0)
-      const next = pluginSource.indexOf('context.api.http.addRoute', marker + path.length)
+      const next = nextRouteRegistration(marker + path.length)
       const body = pluginSource.slice(marker, next === -1 ? marker + 1200 : next)
       expect(body, path).not.toContain('getOrgId(req)')
       expect(body, path).toContain('readBoundAttendanceImportOrg')
@@ -157,12 +169,14 @@ describe('attendance import permission wiring', () => {
       'POST /api/attendance/import/rollback/:id',
     ]
     const found: string[] = []
-    const re = /context\.api\.http\.addRoute\(\s*'([^']+)'\s*,\s*'([^']+)'/g
+    // `addAttendanceIdUpdateRoute` registers PUT and the same handler at POST <path>/update.
+    // The twin is not a second source literal, so it is covered by scanning the PUT registration.
+    const re = /(?:context\.api\.http\.addRoute|addAttendanceIdUpdateRoute)\(\s*(?:context\s*,\s*)?'([^']+)'\s*,\s*'([^']+)'/g
     for (const match of pluginSource.matchAll(re)) {
       const method = match[1]
       const path = match[2]
       if (!path.startsWith('/api/attendance/import') && !path.startsWith('/api/attendance/integrations')) continue
-      const next = pluginSource.indexOf('context.api.http.addRoute', (match.index ?? 0) + 10)
+      const next = nextRouteRegistration((match.index ?? 0) + 10)
       const body = pluginSource.slice(match.index ?? 0, next === -1 ? pluginSource.length : next)
       const label = `${method} ${path}`
       expect(body, label).not.toContain('getOrgId(req)')
