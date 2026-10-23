@@ -64,6 +64,7 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
 import { grantStockPreparationOverviewRoleRead } from './services/stock-preparation-overview-grants'
+import { closeSheetGridExport, readSheetGridExportClosure } from './services/sheet-grid-export-closure-service'
 import { loadStockPreparationOverviewSheetIds } from './multitable/stock-preparation-overview-contract'
 import { createStockPrepMembersHostPort } from './services/stock-preparation-members-host'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
@@ -1171,6 +1172,37 @@ export class MetaSheetServer {
               }
               return grantStockPreparationOverviewRoleRead(txQuery, { sheetId, roleIds, actorId })
             })
+          },
+          // 备料分批拉取第一期 step 3 (PR A): stamp one project sheet closed for generic grid export. ONE
+          // transaction (canonical writer fence → row lock + liveness → set-once UPDATE); refusals propagate
+          // unwrapped. The scope wrapper (plugin-scope.ts) already refused everything about WHICH sheet and hands
+          // this port to plugin-integration-core only. There is no reopen / unset counterpart.
+          closeSheetGridExport: async ({ sheetId, actorId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery = async (sql: string, params?: unknown[]) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return closeSheetGridExport(txQuery, { sheetId, actorId })
+            })
+          },
+          // Read-only twin: no transaction, no lock; column-tolerant.
+          getSheetGridExportClosure: async ({ sheetId }) => {
+            const readQuery = async (sql: string, params?: unknown[]) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+              }
+            }
+            return readSheetGridExportClosure(readQuery, { sheetId })
           },
         },
         records: {
