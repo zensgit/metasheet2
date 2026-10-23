@@ -39,6 +39,9 @@
  *       lease row's xmax (its FOR SHARE), that backend holds its transactionid lock, a takeover queues behind
  *       THAT backend; after it commits, the inserted record's xmin is the SAME xid. Then the takeover lands and
  *       the old fence is refused.
+ *   D13 (review round 4) an EXPIRED, unclaimed lease at expansion time, through the real lock, large lib and host:
+ *       the holder resumes and writes after the expansion -> approval refused `expansion_stale`, no job; the
+ *       control (the holder never resumes) -> the approval's own bump clears the abandoned lease and succeeds.
  *   D10 a fence for another plugin, or for any table but the allow-listed lease table, is refused by the real
  *       host before any write.
  *   D11 (Codex review P1-b) the large lane through the real lock and host: an expansion planned and approved,
@@ -836,6 +839,71 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       }
     }, 60000)
 
+    test('D13 (round 4) an EXPIRED lease at expansion time: the holder resumes and writes -> approval expansion_stale, no job; never resumes -> the approval clears it and succeeds', async () => {
+      async function stalledFlow(label: string, resume: boolean) {
+        const sb = await sandboxSheet(label)
+        const projectNo = `SYN-SWL-${label.toUpperCase()}`
+        try {
+          const base = Date.now()
+          const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
+          const lockB = createStockPreparationProjectWriteLock({ db: createDb({ database: sb.pluginContext.api.database }), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+          await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
+          const grantA = await lockA.acquire(sb.key, { purpose: 'small_apply', runId: `swl-${label}-a` })
+          const guardA = lockA.createGuard(grantA)
+          // A stalls; on B's clock its lease is past expiry + GRACE and nobody takes it over.
+          const storage: any = sb.pluginContext.storage
+          const jobScope = { tenantId: `tenant_swl_${label}_${TOKEN}`, workspaceId: `ws_swl_${label}_${TOKEN}` }
+          const actionId = sb.action.actionId
+          const jobId = `swl_${label}_${TOKEN}`
+          const records = sb.multitable.records as any
+          await largeBomJobs.createLargeBomBackgroundExpansionJob({
+            storage, ...jobScope, action: sb.action, parameters: { projectNo }, principal: 'swl-d13', createJobId: () => jobId,
+            writeGenerationObserver: async () => writeObservationFromGeneration(await lockB.observeGeneration(sb.key)),
+          })
+          const stored = await storage.get(largeBomJobs.__internals.backgroundJobKey({ ...jobScope, actionId, jobId }))
+          expect(stored.writeObservation.leaseId, 'the expired lease is recorded').toBe(grantA.leaseId)
+          expect(stored.writeObservation.leaseSeq).toBe(grantA.leaseSeq)
+          await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId, jobId, sourceAdapter: sourceOf(projectNo, '2') })
+          await largeBomJobs.planLargeBomBackgroundExpansionJob({
+            storage, ...jobScope, actionId, jobId,
+            existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+            writeGenerationReader: (observed: string) => lockB.readGeneration(observed),
+          })
+          if (resume) {
+            // A comes back: its pre-write CAS renews (lease_seq moves) and it writes through the real host.
+            await guardA.beforeWrite({ index: 0, operation: 'createRecord' })
+            const late = await records.createRecord({ sheetId: sb.sheetId, data: {}, writeFence: guardA.hostWriteFence() })
+            expect(typeof late.id).toBe('string')
+          }
+          const before = (await q(`SELECT generation, fencing_epoch, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+          const applyJobId = `swl_${label}_apply_${TOKEN}`
+          const approval = await settle(largeBomJobs.createLargeBomCheckpointApplyJob({
+            storage, ...jobScope, actionId, jobId, principal: 'swl-d13', permission: 'write', createApplyJobId: () => applyJobId,
+            writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await lockB.bumpGeneration(sb.key, { reason: 'large_approval', expect })),
+          }))
+          const after = (await q(`SELECT generation, fencing_epoch, lease_id, last_interrupted_run_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+          const job = await storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...jobScope, actionId, applyJobId }))
+          return { approval, before, after, job, grantA, guardA }
+        } finally {
+          await dropSheet(sb.sheetId)
+        }
+      }
+      const resumed = await stalledFlow('d13r', true)
+      expect(resumed.approval.ok).toBe(false)
+      expect((resumed.approval as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+      expect((resumed.approval as any).error.details.reason).toBe('expansion_stale')
+      expect(resumed.job, 'no job is created').toBeNull()
+      expect(resumed.after.generation, 'nothing bumped').toBe(resumed.before.generation)
+      const crashed = await stalledFlow('d13c', false)
+      expect(crashed.approval.ok, JSON.stringify((crashed.approval as any).error && (crashed.approval as any).error.details)).toBe(true)
+      expect(crashed.job).not.toBeNull()
+      expect(crashed.after.lease_id, 'the approval bump cleared the abandoned lease').toBeNull()
+      expect(crashed.after.fencing_epoch).toBe(crashed.grantA.fencingEpoch + 1)
+      expect(crashed.after.last_interrupted_run_id).toBe('swl-d13c-a')
+      expect(crashed.after.generation).toBe(crashed.before.generation + 1)
+      await expect(crashed.guardA.beforeWrite({ index: 0, operation: 'createRecord' })).rejects.toMatchObject({ code: PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+    }, 90000)
+
     test('D10 a fence for another plugin, or for any other table, is refused by the real host before any write', async () => {
       const sb = await sandboxSheet('d10')
       try {
@@ -887,7 +955,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         })
         const approve = (applyJobId: string) => largeBomJobs.createLargeBomCheckpointApplyJob({
           storage, ...jobScope, actionId, jobId, principal: 'swl-d11', permission: 'write', createApplyJobId: () => applyJobId,
-          writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'large_approval', expect: { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch } })),
+          writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'large_approval', expect })),
         })
         const oldApproval = await approve(`swl_d11_apply_old_${TOKEN}`)
         expect(oldApproval.writeGeneration).toBe(1)

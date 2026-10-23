@@ -242,27 +242,65 @@ function writeBindingFromGeneration(generation) {
 // epoch 0). The large lane plans and approves ONLY while both are still exactly that — a newer preview /
 // approval (token) or ANY lease taken on the sheet (epoch: every write run acquires) since the expansion
 // read its source makes that expansion stale.
+//
+// AN EXPIRED LEASE AT OBSERVATION (review round 4). observeGeneration refuses only a LIVE lease; a lease
+// that lapsed (expiry + GRACE) but that nobody took over or cleared is observed, and its holder may still
+// resume: its CAS pins lease_id / epoch / seq / token, all unchanged, so it would renew and write under the
+// same token and epoch. So the observation also records that lease's { leaseId, leaseSeq }, and a match
+// then requires the SAME lease_id AND lease_seq. Every holder CAS (heartbeat, pre-write, final re-assert)
+// advances lease_seq, so a resumed holder makes the expansion stale before or right after its first write.
+// A lease that is no longer there does NOT match either: release() clears lease_id WITHOUT moving the
+// epoch (it pins lease_id + epoch and sets neither epoch nor seq), so "lease_id NULL with the same epoch"
+// can mean "the holder came back, wrote and released" — refused, conservatively. The ONE path that may
+// move the row past a recorded lease is the approval's own bump: its abandoned-lease clear is the same
+// CAS, pinned to exactly that lease_id / epoch / seq / token, so an approval after a crash (the holder
+// never came back) still succeeds.
 function writeObservationFromGeneration(observed) {
   return {
     writeScope: observed.scopeKey,
     generationToken: observed.generationToken,
     fencingEpoch: observed.fencingEpoch,
+    ...(observed.leaseId ? { leaseId: observed.leaseId, leaseSeq: observed.leaseSeq } : {}),
   }
+}
+
+function malformedExpectation() {
+  return new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the expected sheet write generation is malformed', { reason: 'expectation_malformed' })
 }
 
 function normalizeGenerationExpectation(expect) {
   const tokenOk = expect && (expect.generationToken === null || (typeof expect.generationToken === 'string' && expect.generationToken.length > 0))
   const epochOk = expect && Number.isInteger(expect.fencingEpoch) && expect.fencingEpoch >= 0
-  if (!tokenOk || !epochOk || (expect.generationToken === null && expect.fencingEpoch !== 0)) {
-    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the expected sheet write generation is malformed', { reason: 'expectation_malformed' })
-  }
-  return { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch }
+  if (!tokenOk || !epochOk || (expect.generationToken === null && expect.fencingEpoch !== 0)) throw malformedExpectation()
+  const hasLeaseId = expect.leaseId !== undefined && expect.leaseId !== null
+  const hasLeaseSeq = expect.leaseSeq !== undefined && expect.leaseSeq !== null
+  if (hasLeaseId !== hasLeaseSeq) throw malformedExpectation()
+  if (!hasLeaseId) return { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch }
+  if (expect.generationToken === null || typeof expect.leaseId !== 'string' || !expect.leaseId
+    || !Number.isInteger(expect.leaseSeq) || expect.leaseSeq < 0) throw malformedExpectation()
+  return { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch, leaseId: expect.leaseId, leaseSeq: expect.leaseSeq }
 }
 
 // Does the row (or its absence) still show exactly what the expansion observed?
 function rowMatchesExpectation(row, expectation) {
   if (expectation.generationToken === null) return !row
-  return Boolean(row) && row.generation_token === expectation.generationToken && integerOf(row.fencing_epoch) === expectation.fencingEpoch
+  if (!row || row.generation_token !== expectation.generationToken || integerOf(row.fencing_epoch) !== expectation.fencingEpoch) return false
+  // A lease recorded at observation must still be exactly that lease at exactly that seq (see above).
+  if (expectation.leaseId) return row.lease_id === expectation.leaseId && integerOf(row.lease_seq) === expectation.leaseSeq
+  return true
+}
+
+// The same comparison over two readGeneration / observeGeneration answers (the plan-time check).
+function generationMatchesObservation(current, observation) {
+  if (!current || !observation) return false
+  const expectation = normalizeGenerationExpectation(observation)
+  if (expectation.generationToken === null) return current.present === false
+  return rowMatchesExpectation(current.present ? {
+    generation_token: current.generationToken,
+    fencing_epoch: current.fencingEpoch,
+    lease_id: current.leaseId,
+    lease_seq: current.leaseSeq,
+  } : null, expectation)
 }
 
 function planSuperseded(reason, details = {}, { fence = false } = {}) {
@@ -641,6 +679,8 @@ function createStockPreparationProjectWriteLock({
       generation: row ? integerOf(row.generation) : 0,
       generationToken: row ? row.generation_token : null,
       fencingEpoch: row ? integerOf(row.fencing_epoch) : 0,
+      leaseId: row && row.lease_id ? row.lease_id : null,
+      leaseSeq: row && row.lease_id ? (integerOf(row.lease_seq) || 0) : null,
     })
   }
 
@@ -872,6 +912,7 @@ module.exports = {
   StockPreparationProjectWriteLockError,
   assertWriteBindingMatchesGuard,
   createStockPreparationProjectWriteLock,
+  generationMatchesObservation,
   normalizeGenerationExpectation,
   sheetWriteScopeKey,
   writeBindingFromGeneration,

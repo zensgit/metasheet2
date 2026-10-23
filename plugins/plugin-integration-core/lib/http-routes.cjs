@@ -8414,7 +8414,12 @@ function requireStockPreparationAudit() {
             return writeBindingFromGeneration(await stockPreparationProjectWriteLock.bumpGeneration(approvalWriteScope, {
               reason: 'large_approval',
               tenantId: routeScope.tenantId,
-              expect: { generationToken: expect.generationToken, fencingEpoch: expect.fencingEpoch },
+              // token + epoch, and the expired lease's id + seq when the expansion recorded one (round 4)
+              expect: {
+                generationToken: expect.generationToken,
+                fencingEpoch: expect.fencingEpoch,
+                ...(expect.leaseId ? { leaseId: expect.leaseId, leaseSeq: expect.leaseSeq } : {}),
+              },
             }))
           }
           : undefined,

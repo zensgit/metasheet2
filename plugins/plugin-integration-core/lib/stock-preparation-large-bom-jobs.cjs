@@ -34,6 +34,7 @@ const {
   PROJECT_WRITE_ERROR_CODES,
   StockPreparationProjectWriteLockError,
   assertWriteBindingMatchesGuard,
+  generationMatchesObservation,
   normalizeGenerationExpectation,
 } = require('./stock-preparation-project-write-lock.cjs')
 
@@ -1234,17 +1235,12 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
   if (typeof input.writeGenerationBinder === 'function') {
     const observed = storedWriteObservation(sourceJob.planWriteObservation)
     const expansionObserved = storedWriteObservation(sourceJob.writeObservation)
-    if (!observed || !expansionObserved
-      || observed.writeScope !== expansionObserved.writeScope
-      || observed.generationToken !== expansionObserved.generationToken
-      || observed.fencingEpoch !== expansionObserved.fencingEpoch) {
+    if (!observed || !expansionObserved || JSON.stringify(observed) !== JSON.stringify(expansionObserved)) {
       throw expansionUnbound()
     }
-    writeBinding = normalizeLargeBomWriteBinding(await input.writeGenerationBinder({
-      writeScope: observed.writeScope,
-      generationToken: observed.generationToken,
-      fencingEpoch: observed.fencingEpoch,
-    }))
+    // The whole observation — token, epoch and, when the expansion saw an expired lease, that lease's id
+    // and seq (review round 4) — is the bump's expectation.
+    writeBinding = normalizeLargeBomWriteBinding(await input.writeGenerationBinder({ ...observed }))
     if (writeBinding.writeScope !== observed.writeScope) {
       throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the approval bound a different sheet than the expansion observed', { reason: 'scope_changed', partial: false })
     }
@@ -1540,8 +1536,8 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     const observed = storedWriteObservation(job.writeObservation)
     if (!observed) throw expansionUnbound()
     const current = await input.writeGenerationReader(observed.writeScope)
-    const currentToken = current && (typeof current.generationToken === 'string' ? current.generationToken : null)
-    if (!current || currentToken !== observed.generationToken) {
+    // Token, epoch and (when one was recorded) the expired lease's id + seq — the same rule as approval.
+    if (!generationMatchesObservation(current, observed)) {
       throw expansionStale(current && Number.isInteger(current.generation) ? current.generation : undefined)
     }
     planWriteObservation = observed
