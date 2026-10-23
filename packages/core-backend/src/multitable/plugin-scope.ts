@@ -332,6 +332,48 @@ export async function assertPluginOwnsObject(
 const STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN = 'plugin-integration-core'
 
 /**
+ * 备料分批拉取第一期 step 3 (PR A): the shared gate of the two grid-export-closure ports (close + read). The
+ * same five checks, in the same order, as `grantSheetRoleWrite` (role list aside — these ports carry none);
+ * each refuses before the next does any IO. The caller has already read every value ONCE.
+ */
+async function assertGridExportClosurePortTarget(
+  multitable: MultitableAPI,
+  pluginName: string,
+  hooks: MultitableScopeHooks,
+  target: { projectId: string; sheetId: string; objectId: string },
+): Promise<void> {
+  const { projectId, sheetId, objectId } = target
+  assertProjectIdAllowedForPlugin(pluginName, projectId)
+  if (!isStockPreparationProjectSheetObjectId(objectId)) {
+    throw new StockPreparationProjectSheetGrantError(
+      422,
+      'MULTITABLE_GRID_EXPORT_CLOSURE_OBJECT_NOT_PROJECT_SHEET',
+      'a grid-export closure may target only a per-project stock-preparation sheet',
+      { field: 'objectId' },
+    )
+  }
+  if (typeof sheetId !== 'string' || sheetId.trim().length === 0
+    || multitable.provisioning.getObjectSheetId(projectId, objectId) !== sheetId) {
+    throw new StockPreparationProjectSheetGrantError(
+      422,
+      'MULTITABLE_GRID_EXPORT_CLOSURE_SHEET_MISMATCH',
+      'the sheet is not the one derived for this project and objectId',
+      { field: 'sheetId' },
+    )
+  }
+  if (!hooks.assertSheetOwnedByPlugin) {
+    throw new MultitableSheetScopeError(pluginName, sheetId, 'unverifiable')
+  }
+  await hooks.assertSheetOwnedByPlugin({ pluginName, sheetId })
+  const ownedByProject = hooks.isSheetOwnedByProject
+    ? await hooks.isSheetOwnedByProject({ sheetId, projectId })
+    : await multitable.provisioning.isSheetOwnedByProject(sheetId, projectId)
+  if (ownedByProject !== true) {
+    throw new MultitableSheetScopeError(pluginName, sheetId, 'other_project')
+  }
+}
+
+/**
  * S3 follow-ups, fix round 1 (read-once): a plain copy of `source`'s own enumerable values EXCEPT the `excluded` keys
  * — each value read once, the excluded ones never read. The caller reads the excluded (checked) keys itself, once,
  * and forwards the copy + those values. Not native object rest: V8 reads an excluded getter during `{ a, ...rest }`.
@@ -808,6 +850,53 @@ export function createPluginScopedMultitableApi(
                 roleIds,
                 actorId: typeof input.actorId === 'string' && input.actorId.trim() ? input.actorId.trim() : null,
               })
+            },
+          }
+        : {}),
+      // 备料分批拉取第一期 step 3 (PR A): the GRID-EXPORT CLOSURE stamp of one project sheet. The stamp can only take
+      // export away, but it is a host-owned fact about a sheet, so the port takes EXACTLY the gate shape of
+      // `grantSheetRoleWrite` above — plugin-integration-core only (every other plugin gets no port, `undefined`),
+      // then, each refusing before the next does any IO: project namespace (pure); the objectId has the
+      // project-sheet shape (pure); the sheet id IS the one derived for (projectId, objectId) (pure); the strict
+      // hook attributes the sheet to THIS plugin (no hook → refused, never guessed); the registry attributes it to
+      // THIS project. Values are read ONCE and the checked values are what the host receives. The read port below
+      // takes the same gates. There is deliberately NO reopen / unset port.
+      ...(typeof multitable.provisioning?.closeSheetGridExport === 'function'
+        && pluginName === STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN
+        ? {
+            closeSheetGridExport: async (input: {
+              projectId: string
+              sheetId: string
+              objectId: string
+              actorId?: string | null
+            }) => {
+              const projectId = input.projectId
+              const sheetId = input.sheetId
+              const objectId = input.objectId
+              const actorId = input.actorId
+              await assertGridExportClosurePortTarget(multitable, pluginName, hooks, { projectId, sheetId, objectId })
+              return multitable.provisioning.closeSheetGridExport!({
+                projectId,
+                sheetId,
+                objectId,
+                actorId: typeof actorId === 'string' && actorId.trim() ? actorId.trim() : null,
+              })
+            },
+          }
+        : {}),
+      ...(typeof multitable.provisioning?.getSheetGridExportClosure === 'function'
+        && pluginName === STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN
+        ? {
+            getSheetGridExportClosure: async (input: {
+              projectId: string
+              sheetId: string
+              objectId: string
+            }) => {
+              const projectId = input.projectId
+              const sheetId = input.sheetId
+              const objectId = input.objectId
+              await assertGridExportClosurePortTarget(multitable, pluginName, hooks, { projectId, sheetId, objectId })
+              return multitable.provisioning.getSheetGridExportClosure!({ projectId, sheetId, objectId })
             },
           }
         : {}),

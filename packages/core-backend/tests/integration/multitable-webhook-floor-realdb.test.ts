@@ -52,6 +52,30 @@ vi.mock('../../src/multitable/stock-preparation-overview-contract', async (impor
     },
   }
 })
+// #6507 review round 2: the three capability resolvers no longer call loadStockPreparationOverviewSheetIds — they read
+// the overview kind and the grid-export closure in ONE statement (loadStockPreparationSheetStamps). The same swallowed
+// error is injected there, so F9 keeps exercising the check the webhook authority actually runs; the overview-loader
+// mock above stays for its non-resolver callers. Whichever fires first consumes `swallow.forSheet`, and F9 asserts it
+// WAS consumed (the injection really ran — a mock on a seam nobody calls can no longer make F9 pass vacuously).
+vi.mock('../../src/multitable/sheet-grid-export-closure', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/multitable/sheet-grid-export-closure')>()
+  return {
+    ...actual,
+    loadStockPreparationSheetStamps: async (...args: Parameters<typeof actual.loadStockPreparationSheetStamps>) => {
+      const [query, ids] = args as unknown as [(sql: string) => Promise<unknown>, string[]]
+      if (swallow.forSheet && ids.includes(swallow.forSheet)) {
+        swallow.forSheet = null
+        try {
+          await query('SELECT 1 FROM wsf_relation_that_does_not_exist')
+        } catch {
+          // swallowed
+        }
+        return { overviewSheetIds: new Set<string>(), gridExportClosedSheetIds: new Set<string>() }
+      }
+      return actual.loadStockPreparationSheetStamps(...args)
+    },
+  }
+})
 
 const authState = vi.hoisted(() => ({ userId: '' }))
 vi.mock('../../src/middleware/auth', async (importOriginal) => {
@@ -429,6 +453,8 @@ describeIfDatabase('subscription webhook floor rules (real DB)', () => {
       swallow.forSheet = swallowed ? c.sheetId : null
       const sink = createSink()
       await new WebhookService(db, sink.fetchFn).deliverEvent('record.deleted' as never, idOnly(c.sheetId))
+      // The injection must have actually run inside the check (it clears the flag when it fires).
+      if (swallowed) expect(swallow.forSheet, 'F9.injected').toBeNull()
       expect((await deliveryRows(c.webhookId)).length, `${tid}.rows`).toBe(swallowed ? 0 : 1)
       if (swallowed) expect(refusals.reasons(), 'F9.reason').toContain('authority_check_failed')
     })

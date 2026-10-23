@@ -703,6 +703,47 @@ export interface MultitableProvisioningAPI {
     alreadyGranted: string[]
   }>
   /**
+   * 备料分批拉取第一期 step 3 (PR A): stamp ONE stock-preparation project sheet closed for GENERIC GRID EXPORT
+   * (column `meta_sheets.grid_export_closure`, set to the host literal `stock_prep_pilot`). Afterwards every capability resolver
+   * reports `canExport: false` on that sheet for everyone, the whole-sheet export route (xlsx and csv) answers 403
+   * MULTITABLE_GRID_EXPORT_CLOSED, copy-with-data refuses it, and the workbench disables its export buttons. The
+   * stamp can only TAKE EXPORT AWAY. SET-ONCE and idempotent: a repeat call writes nothing and reports
+   * `alreadyClosed: true` with the original time and actor. There is NO reopen / unset port.
+   * Same gate shape as `grantSheetRoleWrite`: handed to plugin-integration-core ONLY; the objectId must have the
+   * project-sheet shape, the sheet id must be the one derived for (projectId, objectId), and the registry must
+   * record it as this plugin's and this project's. OPTIONAL: an older host has no port; the plugin must then treat
+   * the pilot as not enablable (never as closed).
+   */
+  closeSheetGridExport?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+    actorId?: string | null
+  }): Promise<{
+    sheetId: string
+    present: boolean
+    closure: 'stock_prep_pilot'
+    closedAt: string | null
+    closedBy: string | null
+    alreadyClosed: boolean
+  }>
+  /**
+   * 备料分批拉取第一期 step 3 (PR A): read the grid-export closure stamp of ONE project sheet (no lock, no write).
+   * Same gates as `closeSheetGridExport`; plugin-integration-core only. `closure: null` = not closed (also on a
+   * database where the migration has not run).
+   */
+  getSheetGridExportClosure?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+  }): Promise<{
+    sheetId: string
+    present: boolean
+    closure: 'stock_prep_pilot' | null
+    closedAt: string | null
+    closedBy: string | null
+  }>
+  /**
    * S3 fix round 1 (R8c): the host stamps a requested `systemKind` at INSERT, refuses to adopt an existing
    * sheet whose kind differs, and reports `systemKind` on every sheet it returns. A plugin that relies on
    * the stamp checks this declaration BEFORE any write and fails closed (503) when it is not `true` — an
