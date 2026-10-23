@@ -12,6 +12,18 @@
 // are not re-derived here: a literal that has to move is a behaviour change of the old flow and
 // needs its own reviewed reason, not a re-capture.
 //
+// RECAPTURED ONCE, REVIEW ROUND 1 (F1), and ONLY these 21 literals: `large.artifactRevision`,
+// `artifactDigest`, `planRevision`, `planArtifactDigest`, `targetRevision`, `publicJobDigest`,
+// `storedJobDigest` of `dash_drop`, `main_drawing_superseded` and `subtree_on`. Reason: the harness's
+// large lane was not route-shaped — it snapshotted the RAW action and expanded with
+// `expansionOptions: {}`, so the subtree never ran there and the background caps were the defaults.
+// It now does what the start / run routes do (normalized action snapshot; re-normalized snapshot ->
+// `largeBomExpansionOptionsForAction` + `requireCompleteBatch: false`). HOW: the round-1 harness was
+// run in `off` mode over an LF `git -c core.autocrlf=false archive` copy of
+// fae8946d19efaadc615b50758cd6f4a50d43a14e (its lib, whose expander has no capture code) in a scratch
+// directory, and over this branch; the two outputs were byte-identical, and against the previous
+// literals exactly the 21 keys above differed (`large.status` and everything outside `large` did not).
+//
 // THE MATRIX. The same scenarios are replayed with the expander's demand-evidence capture OFF, ON,
 // and ON with a recorder that throws from every hook (the harness adds `demandEvidence` to the
 // expander input without wiring any production caller). All three legs must reproduce GOLDEN
@@ -37,10 +49,15 @@
 // VALUES-FREE: synthetic project numbers, part ids and drawing numbers only.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
 const {
   MODES,
+  SCENARIOS,
+  actionFor,
   installExpansionCaptureSwitch,
   observeAll,
+  routeShapedLargeExpansionOptions,
   stripHarnessKeys,
 } = require('./support/stock-preparation-demand-evidence-golden-harness.cjs')
 
@@ -61,6 +78,39 @@ const EXPECTED_EXPANSIONS = Object.freeze({
   subtree_on: 5,
   carry_family: 2,
 })
+
+// Review round 1 (F2): what the recorder must have SEEN, per scenario, on every ON-leg expansion
+// (small dry-run, ledger, mvp-persist, apply, and the route-shaped large lane alike). A recorder whose
+// hooks dispatch to nothing still mints a scheme, a status and a 64-hex fingerprint; it cannot mint
+// these counts. Captured on this branch (they did not exist before it) and cross-checked by hand
+// against each scenario's source.
+const EXPECTED_ON_EVIDENCE = Object.freeze({
+  dash_drop: { observations: 2, pathNodes: 1, status: 'complete', reasons: [] },
+  main_drawing_superseded: { observations: 4, pathNodes: 1, status: 'complete', reasons: [] },
+  root_missing_component: { observations: 2, pathNodes: 1, status: 'incomplete', reasons: ['part_missing'] },
+  not_found: { observations: 0, pathNodes: 0, status: 'project_not_found', reasons: [] },
+  // The detail read fails AFTER the path node was recorded `ok`.
+  global_read_failed: { observations: 0, pathNodes: 1, status: 'incomplete', reasons: ['read_failed'] },
+  duplicate_key_hold_with_ledger_decision: { observations: 2, pathNodes: 1, status: 'complete', reasons: [] },
+  // 1 order line + 2 subtree roots (one skipped as already expanded) — in the large lane too.
+  subtree_on: { observations: 3, pathNodes: 1, status: 'complete', reasons: [] },
+  carry_family: { observations: 1, pathNodes: 1, status: 'complete', reasons: [] },
+})
+
+// The run route's own options builder, evaluated from its source (http-routes.cjs is pinned, so the
+// helper is not exported for this test). Fails loudly if it is renamed or reshaped.
+function routeLargeExpansionOptionsHelper(largeBomBackgroundExpansionCaps) {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'http-routes.cjs'), 'utf8').replace(/\r\n/g, '\n')
+  const start = source.indexOf('function largeBomExpansionOptionsForAction(')
+  const end = source.indexOf('\n}\n', start)
+  assert.ok(start >= 0 && end > start, 'http-routes.cjs still defines largeBomExpansionOptionsForAction')
+  const isPlainObject = (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value))
+  // eslint-disable-next-line no-new-func
+  return new Function('isPlainObject', 'largeBomBackgroundExpansionCaps', `${source.slice(start, end + 2)}\nreturn largeBomExpansionOptionsForAction`)(
+    isPlainObject,
+    largeBomBackgroundExpansionCaps,
+  )
+}
 
 const GOLDEN = {
   dash_drop: {
@@ -107,13 +157,13 @@ const GOLDEN = {
     },
     large: {
       status: 'completed',
-      artifactRevision: '696b360c987b350bac7686783e9a6ce11f0e02595493ceb7184ac231f9519ddd',
-      artifactDigest: 'ff75063b72609ef30ba88321004d11300061ecd8e8e52277bf7e6ac6c21fe387',
-      planRevision: '301c321f477082411e5effe286229620ddb7260ef6c76d0af31002faa822cdda',
-      planArtifactDigest: '5fb81318ac7d9ccc98c212e4712d47c1f5e501c83f11b937da007ac883136b45',
-      targetRevision: '8646594765bcf5c667e34f34b9ec64f140776fd5e8b7e16cf90ac3b29699d461',
-      publicJobDigest: '0b3b25e9c8b316cfde4c5234dbea0e48d995234dd01133732ac9c69919e4842e',
-      storedJobDigest: 'b829e2397c516ce8e03590b4725806eb02bfc1cbd95769911849f89b501ef747',
+      artifactRevision: 'ab7ed3a41cffdf2ab31f1f45104561812701cfc92516b41645769f5590f67cc3',
+      artifactDigest: '9263664e3f879dcb85a63853d7fbcfe96e0ed1c3a0e470ed0072dcfb630f4080',
+      planRevision: 'c7bf5209e652a62082e2d371db059c2f3b7346d89a8c44e6b614a38b45b7a8c8',
+      planArtifactDigest: '43159239974e2c13b36cb62eda770636fe83bb9a8a35dcf469ee0485057521b4',
+      targetRevision: '472472d045b7223785e68e092dc2a500102457f084c5a1e971c6b5b59b4ed449',
+      publicJobDigest: '7c1b12faf7b28c900817a4718ddacae75eff5181c2eb4804df0c517a77ec99ea',
+      storedJobDigest: 'd57f477a197e1f5b7416a1ac5b71e13dc51fa09160be79d5dde7def3f5aecc07',
     },
   },
   main_drawing_superseded: {
@@ -160,13 +210,13 @@ const GOLDEN = {
     },
     large: {
       status: 'completed',
-      artifactRevision: 'a43990d2dca5f76d1cbf46a696f8b64e6c2cfffefef343738df7b09a353f223e',
-      artifactDigest: '2dc97505ac654af19e4c1750136d7a74a40f9d5b0b12deef79d49e49fd5cd217',
-      planRevision: 'e93ba3748a4eab09f776890a95b6fcadd5e29c5424f467b2610a12b9e1648fc9',
-      planArtifactDigest: '128edb63afaa0d800ebd039d250f66b99670c879e0a0efe36481ddac16eb8601',
-      targetRevision: '8646594765bcf5c667e34f34b9ec64f140776fd5e8b7e16cf90ac3b29699d461',
-      publicJobDigest: '704887f8e739d402871bdbbe83c43700e89bb2b9a678872cb41f5a5db6fb8527',
-      storedJobDigest: 'c4f8c64f06fa5292355957de6470bdfb4ec5c2a71c4688df3ce4bd2d291e0aab',
+      artifactRevision: 'c6d16ba67fedb98f785931ce38f532b963aba4a90315cba60fdbdccd2544c0e1',
+      artifactDigest: 'a8551a847015afb8ef11de9590cca1ccb305ca6af2cf78777c26e5d74d72477c',
+      planRevision: '9d6b371391f66f31ce10bb43c6c7c93ca37a55754fe38922607f5dbb0f487473',
+      planArtifactDigest: '9bbde8aff46e3fc66743490d8dd438e4847036c0fbb8c938cec6fa538e037f77',
+      targetRevision: '472472d045b7223785e68e092dc2a500102457f084c5a1e971c6b5b59b4ed449',
+      publicJobDigest: '23c4cb3b85503d5f3f90351bc74e4ba4d4d954556b448b338518260bd25e5ea7',
+      storedJobDigest: '3c7aae4b9cabb4f4409b791614c14cc27688315ebce085a61faed836a8c71e69',
     },
   },
   root_missing_component: {
@@ -338,13 +388,13 @@ const GOLDEN = {
     },
     large: {
       status: 'completed',
-      artifactRevision: '3f07f5969268b9158d0704ccbd8b09cf9600f1371f26b51f0b51496029ab6633',
-      artifactDigest: '18a04c1b3c7b7e8ed23ff49fffaa6e40a39b6d608ae9c41217d1ddd61c1b1170',
-      planRevision: '0c356c75850e8d930f579444530df7cc7891725181e1117b6365255b2d786757',
-      planArtifactDigest: '57a876251a930c93d2302cb4803161662d0fc436ff82591270bb18082e6760b0',
-      targetRevision: '8646594765bcf5c667e34f34b9ec64f140776fd5e8b7e16cf90ac3b29699d461',
-      publicJobDigest: '703f5978b4a65dcbfe9a8e9de2ca66662d5d61a341003e3960e487b9b27e4c68',
-      storedJobDigest: 'a724e3f023eefd8910e605484cfdaa812177188927166d83743340b39c5cdd92',
+      artifactRevision: '92391f84fdb05f0eb1774590cf548fc87ddcd88ef55e31a923c81497913cbc84',
+      artifactDigest: '5fd8a18817bfcab6f09b66a92f209827075e398a76855ee5827e256c8de3f9e6',
+      planRevision: '172c3444d2ea4a448deaab65ba529eae5a6f5ea0ff17817dad671002d9834359',
+      planArtifactDigest: 'f5e7dd3404811761262ac0c8c51c9a3fe5a4f66177a2c0611e403bbc86f2c51a',
+      targetRevision: '472472d045b7223785e68e092dc2a500102457f084c5a1e971c6b5b59b4ed449',
+      publicJobDigest: 'fe00e99742537755df79be530064a5aa87430d2ce0852a65482ec8453a561a5b',
+      storedJobDigest: '15da5df41bf6221ec5e762899b097db38905a8ce13274402fa6058ba6ad2853a',
     },
   },
   carry_family: {
@@ -405,6 +455,23 @@ async function main() {
   assert.match(GOLDEN_BASE_SHA, /^[0-9a-f]{40}$/)
   const harness = installExpansionCaptureSwitch()
 
+  await run('the large lane is route-shaped: the harness builds the run route\'s expansion options', () => {
+    const routeHelper = routeLargeExpansionOptionsHelper(harness.tableActions.largeBomBackgroundExpansionCaps)
+    const large = SCENARIOS.map((build) => build()).filter((scenario) => scenario.large)
+    assert.ok(large.length >= 3)
+    for (const scenario of large) {
+      const normalized = harness.tableActions.assertStockPreparationTargetReady(actionFor(scenario))
+      assert.deepEqual(routeShapedLargeExpansionOptions(harness.tableActions, normalized), routeHelper(normalized), scenario.name)
+    }
+    const subtree = harness.tableActions.assertStockPreparationTargetReady(actionFor(large.find((scenario) => scenario.name === 'subtree_on')))
+    assert.ok(routeHelper(subtree).readPlan.projectSubtree, 'the subtree scenario\'s large lane carries the subtree block')
+    // The two run-route facts the harness mirrors, as text (the route itself needs an HTTP host).
+    const routes = fs.readFileSync(path.join(__dirname, '..', 'lib', 'http-routes.cjs'), 'utf8').replace(/\r\n/g, '\n')
+    assert.ok(routes.includes('const action = assertStockPreparationTargetReady(queuedJob.actionSnapshot)'), 'run route re-normalizes the snapshot')
+    assert.ok(/expansionOptions: \{\n\s+\.\.\.largeBomExpansionOptionsForAction\(action\),/.test(routes), 'run route expands with the helper')
+    assert.ok(routes.includes('requireCompleteBatch: Boolean(largeBomB2aAuthorization),'), 'run route arms the batch check only under B2a')
+  })
+
   for (const mode of MODES) {
     const observed = await observeAll(harness, mode)
     const stripped = stripHarnessKeys(observed)
@@ -435,8 +502,13 @@ async function main() {
           }
           assert.equal(evidence.scheme, DEMAND_EVIDENCE_SCHEME)
           if (mode === 'on') {
-            assert.ok(['complete', 'incomplete', 'project_not_found'].includes(evidence.completeness.status))
             assert.match(evidence.fingerprint, /^[0-9a-f]{64}$/)
+            assert.deepEqual({
+              observations: evidence.counts.observations,
+              pathNodes: evidence.counts.pathNodes,
+              status: evidence.completeness.status,
+              reasons: evidence.completeness.reasons,
+            }, EXPECTED_ON_EVIDENCE[name], 'the recorder saw what the scenario holds')
           } else {
             assert.equal(evidence.completeness.status, 'capture_error', 'an injected fault is reported, never hidden')
             assert.equal(evidence.completeness.reasons.length, 1)

@@ -583,7 +583,13 @@ const RECORDER_HOOKS = Object.freeze([
  * A capture problem is therefore visible in the evidence and invisible to the pull.
  */
 function openDemandEvidenceCapture(request, context = {}) {
-  if (request === undefined || request === null || request === false) return null
+  // THE WALK-LEVEL GATE, deliberately wider than the config normalizer: capture is ON only for the
+  // literal `true` or a plain object. Every other value — `0`, `''`, `NaN`, `1`, `'yes'`, an array —
+  // is OFF and mounts no key, so a falsy-but-not-`false` value can never switch on a
+  // `capture_error` stanza. (`normalizeDemandEvidenceOptions` still REFUSES those at config time;
+  // that is the step-2c config contract, not this gate's.) A plain object with bad keys is ON and
+  // answers `capture_error / options_invalid` without touching the walk.
+  if (request !== true && !isPlainObject(request)) return null
   let fault = null
   let raw = null
   try {

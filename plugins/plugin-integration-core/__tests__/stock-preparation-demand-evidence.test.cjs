@@ -165,6 +165,17 @@ async function main() {
     assert.equal(withObject.fingerprint, evidence.fingerprint, 'a cap that is not reached changes nothing')
   })
 
+  await run('opt-in gate: every non-object other than `true` (0, \'\', NaN, 1, \'yes\', []) is OFF — no key, walk identical', async () => {
+    const off = await expand('SDE-DASH-1', dashProject())
+    for (const request of [0, '', Number.NaN, 1, 'yes', []]) {
+      assert.equal(openDemandEvidenceCapture(request, {}), null, JSON.stringify(request))
+      const { result, calls } = await expand('SDE-DASH-1', dashProject(), { demandEvidence: request })
+      assert.equal(Object.prototype.hasOwnProperty.call(result, 'demandEvidence'), false, `no key for ${JSON.stringify(request)}`)
+      assert.deepEqual(result, off.result)
+      assert.deepEqual(calls, off.calls)
+    }
+  })
+
   await run('opt-in: closed key set and bounds are refused at config time', () => {
     assert.deepEqual(normalizeDemandEvidenceOptions(true), { orderDetailLineIdField: undefined, maxObservations: DEFAULT_MAX_OBSERVATIONS })
     assert.deepEqual(normalizeDemandEvidenceOptions({ orderDetailLineIdField: ' ID ' }), { orderDetailLineIdField: 'ID', maxObservations: DEFAULT_MAX_OBSERVATIONS })

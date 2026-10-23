@@ -17,6 +17,9 @@
 //
 // The capture switch was written and the GOLDEN literals captured on origin/main fae8946d1, where
 // `demandEvidence` was an input the expander ignored; the throwing leg was added with the recorder.
+// Review round 1 made the large lane route-shaped (normalized snapshot + the run route's options);
+// its `large.*` literals were recaptured by running this harness over fae8946d1's lib — see the
+// golden test header.
 //
 // HOW "ON" IS REACHED WITHOUT WIRING ANY CALLER. The table-action and large-BOM modules destructure
 // `expandPlmProjectBom` at require time. This harness replaces that export on the expander module
@@ -456,11 +459,43 @@ function withoutTimes(value) {
   return value
 }
 
+// The large lane's expander options, built the way the run route builds them: http-routes.cjs
+// `largeBomExpansionOptionsForAction(action)` over the RE-NORMALIZED stored action snapshot, plus
+// `requireCompleteBatch: Boolean(largeBomB2aAuthorization)` — `false` while B2a is dormant. The route
+// helper is not exported (http-routes.cjs is a pinned file), so this is a restatement; the golden
+// suite evaluates the route's own helper source and pins that both agree for every scenario.
+function routeShapedLargeExpansionOptions(tableActions, normalizedAction) {
+  const source = normalizedAction && typeof normalizedAction.source === 'object' && normalizedAction.source ? normalizedAction.source : {}
+  const options = {
+    readPlan: source.readPlan,
+    pageLimit: normalizedAction.pageLimit,
+    maxDepth: normalizedAction.maxDepth,
+    ...tableActions.largeBomBackgroundExpansionCaps(normalizedAction),
+  }
+  for (const key of Object.keys(options)) {
+    if (options[key] === undefined || options[key] === null || options[key] === '') delete options[key]
+  }
+  return options
+}
+
+// EVERY entry point the scenarios drive, in ONE place: a wrapper that the routes put around these
+// (a write lease, a generation binder, an atomic-consume token store) is a change to this function.
+function laneCalls(harness) {
+  const { tableActions, largeBomJobs } = harness
+  return {
+    dryRun: tableActions.dryRunStockPreparationAction,
+    apply: tableActions.applyStockPreparationAction,
+    createLargeApplyJob: largeBomJobs.createLargeBomCheckpointApplyJob,
+    tokenStore: () => createMemoryStorage(),
+  }
+}
+
 async function observeScenario(harness, scenario) {
   const { tableActions, largeBomJobs } = harness
+  const lanes = laneCalls(harness)
+  const dryRunStockPreparationAction = lanes.dryRun
+  const applyStockPreparationAction = lanes.apply
   const {
-    dryRunStockPreparationAction,
-    applyStockPreparationAction,
     prepareStockPreparationConfirmationDecisions,
     prepareStockPreparationMvpSnapshot,
     stockPreparationSourceContentDigest,
@@ -474,7 +509,7 @@ async function observeScenario(harness, scenario) {
   const action = actionFor(scenario)
   const parameters = { projectNo: scenario.projectNo }
   const sourceAdapter = createSourceAdapter(scenario.data, { failObjects: scenario.failObjects || [] })
-  const tokenStore = createMemoryStorage()
+  const tokenStore = lanes.tokenStore()
   const observed = {}
 
   // 1. The small dry-run: revision, the token subset, evidence, counts / status / canApply, and the
@@ -596,7 +631,7 @@ async function observeScenario(harness, scenario) {
     }
 
     // 5. Apply against an empty sheet, minus the random token and the clocks.
-    const applyStore = createMemoryStorage()
+    const applyStore = lanes.tokenStore()
     const applyRecords = createRecordsApi([])
     const applyDryRun = await dryRunStockPreparationAction({
       action, parameters, sourceAdapter, recordsApi: applyRecords, tokenStore: applyStore, plannedAt: PLANNED_AT, runId: RUN_ID,
@@ -624,22 +659,33 @@ async function observeScenario(harness, scenario) {
     }
   }
 
-  // 6. The large-BOM lane: artifact revision + artifact digest, plan revision, target revision,
-  //    and the public job projection.
+  // 6. The large-BOM lane, ROUTE-SHAPED (review round 1, F1): the start route snapshots the
+  //    NORMALIZED action (http-routes.cjs `assertStockPreparationTargetReady(getTableAction(...))`),
+  //    the run route re-normalizes that snapshot and expands with `largeBomExpansionOptionsForAction`
+  //    + `requireCompleteBatch` (see `routeShapedLargeExpansionOptions`). Pins the artifact revision
+  //    + artifact digest, plan revision, target revision, and the public job projection.
   if (scenario.large) {
     const storage = createMemoryStorage({ durable: true })
     const now = () => new Date(FIXED_NOW)
     const scope = { tenantId: TENANT_ID, workspaceId: WORKSPACE_ID }
-    await largeBomJobs.createLargeBomBackgroundExpansionJob({
-      storage, ...scope, action, parameters, principal: 'principal_sde_golden', createJobId: () => 'job_sde_golden', now,
+    const normalizedAction = tableActions.assertStockPreparationTargetReady(action)
+    const queued = await largeBomJobs.createLargeBomBackgroundExpansionJob({
+      storage, ...scope, action: normalizedAction, parameters, principal: 'principal_sde_golden', createJobId: () => 'job_sde_golden', now,
     })
+    const runAction = tableActions.assertStockPreparationTargetReady(queued.actionSnapshot)
     const ran = await largeBomJobs.runLargeBomBackgroundExpansionJob({
-      storage, ...scope, actionId: action.actionId, jobId: 'job_sde_golden', sourceAdapter, expansionOptions: {}, now,
+      storage,
+      ...scope,
+      actionId: action.actionId,
+      jobId: 'job_sde_golden',
+      sourceAdapter,
+      expansionOptions: { ...routeShapedLargeExpansionOptions(tableActions, runAction), requireCompleteBatch: false },
+      now,
     })
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_sde_golden', existingRows: [], plannedAt: PLANNED_AT, now,
     })
-    const applyJob = await largeBomJobs.createLargeBomCheckpointApplyJob({
+    const applyJob = await lanes.createLargeApplyJob({
       storage,
       ...scope,
       actionId: action.actionId,
@@ -699,6 +745,8 @@ module.exports = {
   installExpansionCaptureSwitch,
   observeAll,
   observeScenario,
+  routeShapedLargeExpansionOptions,
+  actionFor,
   stableStringify,
   stripHarnessKeys,
 }
