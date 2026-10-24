@@ -77,7 +77,7 @@ pnpm --filter @metasheet/web exec vitest run --watch=false tests/approval-center
 pnpm --filter @metasheet/web exec vitest run --watch=false approval-center approvalCenter approvalMobileResponsive cancelRoundEntryCenterRoute approval-e2e-permissions newTodoPill ui-foundation-style-guard uiFoundationTexture approval-ui-workspace templateCenterI18n templateDetailI18n
 # 红绿对照：在基线上只换入新测试文件再跑一次，预期第 1–11 条红、第 12 条绿
 bash apps/web/scripts/run-required-web-tests.sh
-pnpm --filter @metasheet/web exec vue-tsc --noEmit
+pnpm --filter @metasheet/web type-check
 ```
 
 ## 6 限制
@@ -87,3 +87,4 @@ pnpm --filter @metasheet/web exec vue-tsc --noEmit
 - 数量在每次列表重新加载时刷新；页面闲置时的实时推送不单独刷新它。
 - 撤销申请（另一种流程标识）不计入「考勤待审 N」，仍在完整的「待我处理」列表里。
 - 点开考勤行以后能否看到详情，仍按考勤模块现有的读权；本步不改。
+- 点行时带上的申请编号取自实例里的 `attendanceRequestId`。考勤实例从第一版起（#2071）就写这个字段，所以考勤视图里的行点开都会带上申请编号；本步没有改行点击的逻辑。
