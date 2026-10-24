@@ -27316,10 +27316,10 @@ async function saveLeaveType() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/leave-types/${leaveTypeEditingId.value}`
+      ? `/api/attendance/leave-types/${leaveTypeEditingId.value}/update`
       : '/api/attendance/leave-types'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -27429,10 +27429,10 @@ async function saveOvertimeRule() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/overtime-rules/${overtimeRuleEditingId.value}`
+      ? `/api/attendance/overtime-rules/${overtimeRuleEditingId.value}/update`
       : '/api/attendance/overtime-rules'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -27543,10 +27543,10 @@ async function saveApprovalFlow() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/approval-flows/${approvalFlowEditingId.value}`
+      ? `/api/attendance/approval-flows/${approvalFlowEditingId.value}/update`
       : '/api/attendance/approval-flows'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -27780,10 +27780,10 @@ async function saveScheduleGroup() {
     const query = buildQuery({ orgId: normalizedOrgId() })
     const suffix = query.toString()
     const path = scheduleGroupEditingId.value
-      ? `/api/attendance/schedule-groups/${encodeURIComponent(scheduleGroupEditingId.value)}${suffix ? `?${suffix}` : ''}`
+      ? `/api/attendance/schedule-groups/${encodeURIComponent(scheduleGroupEditingId.value)}/update${suffix ? `?${suffix}` : ''}`
       : `/api/attendance/schedule-groups${suffix ? `?${suffix}` : ''}`
     const response = await apiFetch(path, {
-      method: scheduleGroupEditingId.value ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28198,10 +28198,10 @@ async function saveRotationRule() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/rotation-rules/${rotationRuleEditingId.value}`
+      ? `/api/attendance/rotation-rules/${rotationRuleEditingId.value}/update`
       : '/api/attendance/rotation-rules'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28325,13 +28325,13 @@ async function saveRotationAssignment(options: { asDraft?: boolean } = {}) {
     }
     const endpoint = saveAsDraft
       ? (isEditing
-          ? `/api/attendance/schedule-drafts/rotation-assignments/${rotationAssignmentEditingId.value}`
+          ? `/api/attendance/schedule-drafts/rotation-assignments/${rotationAssignmentEditingId.value}/update`
           : '/api/attendance/schedule-drafts/rotation-assignments')
       : (isEditing
-          ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}`
+          ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}/update`
           : '/api/attendance/rotation-assignments')
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28542,10 +28542,10 @@ async function saveShift() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/shifts/${shiftEditingId.value}`
+      ? `/api/attendance/shifts/${shiftEditingId.value}/update`
       : '/api/attendance/shifts'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28683,13 +28683,13 @@ async function saveAssignment(options: { asDraft?: boolean } = {}) {
     }
     const endpoint = saveAsDraft
       ? (isEditing
-          ? `/api/attendance/schedule-drafts/assignments/${assignmentEditingId.value}`
+          ? `/api/attendance/schedule-drafts/assignments/${assignmentEditingId.value}/update`
           : '/api/attendance/schedule-drafts/assignments')
       : (isEditing
-          ? `/api/attendance/assignments/${assignmentEditingId.value}`
+          ? `/api/attendance/assignments/${assignmentEditingId.value}/update`
           : '/api/attendance/assignments')
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -29076,10 +29076,10 @@ async function saveHoliday() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/holidays/${holidayEditingId.value}`
+      ? `/api/attendance/holidays/${holidayEditingId.value}/update`
       : '/api/attendance/holidays'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -29193,9 +29193,9 @@ async function saveRuleSet() {
     }
 
     const response = await apiFetch(
-      ruleSetEditingId.value ? `/api/attendance/rule-sets/${ruleSetEditingId.value}` : '/api/attendance/rule-sets',
+      ruleSetEditingId.value ? `/api/attendance/rule-sets/${ruleSetEditingId.value}/update` : '/api/attendance/rule-sets',
       {
-        method: ruleSetEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -29490,10 +29490,10 @@ async function saveAttendanceGroup() {
     }
     const response = await apiFetch(
       attendanceGroupEditingId.value
-        ? `/api/attendance/groups/${attendanceGroupEditingId.value}`
+        ? `/api/attendance/groups/${attendanceGroupEditingId.value}/update`
         : '/api/attendance/groups',
       {
-        method: attendanceGroupEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -30386,10 +30386,10 @@ async function savePayrollTemplate() {
 
     const response = await apiFetch(
       payrollTemplateEditingId.value
-        ? `/api/attendance/payroll-templates/${payrollTemplateEditingId.value}`
+        ? `/api/attendance/payroll-templates/${payrollTemplateEditingId.value}/update`
         : '/api/attendance/payroll-templates',
       {
-        method: payrollTemplateEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -30567,10 +30567,10 @@ async function savePayrollCycle() {
 
     const response = await apiFetch(
       payrollCycleEditingId.value
-        ? `/api/attendance/payroll-cycles/${payrollCycleEditingId.value}`
+        ? `/api/attendance/payroll-cycles/${payrollCycleEditingId.value}/update`
         : '/api/attendance/payroll-cycles',
       {
-        method: payrollCycleEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -30864,10 +30864,10 @@ async function submitSchedulerScope() {
     // .strict() schema exactly — an extra key (incl. orgId) is a 400.
     const query = buildQuery({ orgId: normalizedOrgId() })
     const url = editingId
-      ? `/api/attendance/scheduler-scopes/${encodeURIComponent(editingId)}?${query.toString()}`
+      ? `/api/attendance/scheduler-scopes/${encodeURIComponent(editingId)}/update?${query.toString()}`
       : `/api/attendance/scheduler-scopes?${query.toString()}`
     const response = await apiFetch(url, {
-      method: editingId ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify({
         subjectType: schedulerScopeForm.subjectType,
         subjectRef,

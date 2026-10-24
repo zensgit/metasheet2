@@ -19,6 +19,22 @@ const { Transform, Readable } = require('stream')
 const { pipeline } = require('stream/promises')
 const { StringDecoder } = require('string_decoder')
 const { z } = require('zod')
+
+/**
+ * PUT on an `/:id` attendance resource, plus the same handler at `POST <path>/update`.
+ *
+ * Browsers on one client path cannot update `/api/attendance/shifts/:id`: PUT is reset
+ * before Node, and POST to that same path comes back as a fabricated "Sorry, Page Not
+ * Found" (not Express). A distinct `/update` suffix stays off that pattern. Raw PUT
+ * remains for clients that can send it. This does not touch the DELETE method-override.
+ */
+function addAttendanceIdUpdateRoute(context, method, path, handler) {
+  context.api.http.addRoute(method, path, handler)
+  if (method === 'PUT' && typeof path === 'string' && path.endsWith('/:id')) {
+    context.api.http.addRoute('POST', path + '/update', handler)
+  }
+}
+
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
 const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
@@ -39156,7 +39172,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/requests/:id',
       withPermission('attendance:write', async (req, res) => {
@@ -40467,7 +40483,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/leave-types/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -40743,7 +40759,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/overtime-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -41015,7 +41031,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -41276,7 +41292,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -41666,7 +41682,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
@@ -42030,7 +42046,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
@@ -42822,7 +42838,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -45004,7 +45020,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/integrations/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -45913,7 +45929,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/payroll-templates/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -46365,7 +46381,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/payroll-cycles/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -46993,7 +47009,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -48161,7 +48177,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
@@ -48710,7 +48726,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/scheduler-scopes/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -49183,7 +49199,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -49747,7 +49763,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/schedule-drafts/assignments/:id',
       async (req, res) => {
@@ -50159,7 +50175,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/assignments/:id',
       async (req, res) => {
@@ -51620,7 +51636,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/holidays/:id',
       withPermission('attendance:admin', async (req, res) => {
