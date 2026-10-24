@@ -481,7 +481,7 @@ export default defineComponent({
   props: {
     dataSourceId: { type: String, default: '' },
     itemId: { type: String, default: '' },
-    hint: { type: Object as PropType<unknown>, default: null },
+    hint: { type: Object as PropType<{ bindingId: string; sourceKind: 'eco' | 'readiness' } | null>, default: null },
     visibleRows: { type: Array as PropType<MetaRecord[]>, default: () => [] },
     visibleFields: { type: Array as PropType<MetaField[]>, default: () => [] },
     client: {
