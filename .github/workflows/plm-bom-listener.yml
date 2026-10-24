@@ -63,6 +63,7 @@ jobs:
           tests/unit/plm-bom-review-service.test.ts tests/unit/plm-bom-review-wire.test.ts
           tests/unit/idempotency-redis.test.ts tests/unit/approval-completion-shutdown-lifecycle.test.ts
           tests/unit/plm-collaboration-snapshot-service.test.ts tests/unit/plm-collaboration-snapshot-routes.test.ts
+          tests/unit/plm-collaboration-readiness-wire.test.ts
       - name: Real PostgreSQL collaboration snapshot guards
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_listener
