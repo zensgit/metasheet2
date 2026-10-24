@@ -1018,6 +1018,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/groups/{groupId}/fixed-schedule/effectiveness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read group fixed schedule effectiveness
+         * @description Requires attendance:admin. Actor and organization come only from the authenticated principal. Missing authenticated actor returns 401; missing authenticated organization returns 403. Body/query orgId and x-org-id/x-user-id headers may be absent or byte-equal to the principal; mismatches return 403 before scoped SQL. They never select another actor or organization. Returns the canonical current group state, desired configuration, coverage and drift without raw user identifiers. It does not write configuration or assignments. An unavailable dependency returns an error, never a valid effectiveness state.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Trimmed UUID, version 1 through 5 with RFC variant, checked case-insensitively by the existing route. */
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Canonical group effectiveness with exact coverage counts and managed-set drift */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleEffectiveness"];
+                        };
+                    };
+                };
+                /** @description VALIDATION_ERROR; groupId must be a UUID */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required or authenticated actor missing */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description FORBIDDEN; authenticated organization missing, identity selector mismatch or attendance administration permission denied */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description NOT_FOUND; group not found in the authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description INTERNAL_ERROR; actor or permission resolution failed, or effectiveness read failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description DB_NOT_READY; attendance fixed schedule tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/effectiveness/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated member's fixed schedule effectiveness
+         * @description Requires attendance:read. Subject and organization come only from the authenticated principal. No request body or userId/orgId query selectors are part of this contract. Body/query userId or orgId values, after flattening arrays and ignoring null/undefined, are rejected with 400 VALIDATION_ERROR, even when equal to the principal. Existing x-user-id/x-org-id headers may be absent or byte-equal to the principal; a mismatch returns 403 and headers never select identity. Missing authenticated actor returns 401 and missing authenticated organization returns 403. These identity rejections precede scoped SQL. Before loading configuration or assignment facts, the service proves the subject is active, activated (including legacy null activation_status), an active member of the authenticated organization and a member of the named attendance group in that organization. Missing group or failure of any membership/liveness predicate returns the same values-free 404 NOT_FOUND with message Not found. The distinct self projection never contains coverage, drift, managed sets, producer keys or raw user identifiers at any depth. State and reason order come from the same canonical derivation as the admin aggregate. This read does not change configuration, assignments or calculation-group attribution.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Trimmed UUID, version 1 through 5 with RFC variant, checked case-insensitively by the existing route. */
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Exact member-safe group state, desired configuration and own applicability */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleSelfEffectiveness"];
+                        };
+                    };
+                };
+                /** @description VALIDATION_ERROR; invalid groupId or forbidden body/query userId or orgId selector */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required or authenticated actor missing */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description FORBIDDEN; authenticated organization missing, identity header mismatch or attendance read permission denied */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description NOT_FOUND with message Not found; missing group, non-member, inactive or non-activated subject, or inactive or missing organization membership */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description INTERNAL_ERROR; permission resolution failed or effectiveness read failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description DB_NOT_READY; attendance fixed schedule tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/groups/{groupId}/fixed-schedule/editor": {
         parameters: {
             query?: never;
@@ -22872,6 +23048,66 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             updatedAt: string;
+        };
+        /**
+         * @description Canonical server-derived group state; clients do not derive a replacement state or map errors to one.
+         * @enum {string}
+         */
+        AttendanceFixedScheduleEffectivenessState: "not_configured" | "configuration_changed" | "pending_apply" | "effective";
+        /** @description De-duplicated canonical server reasons, in the enum order below. Clients preserve this order. EFFECTIVE may coexist with UNPUBLISHED_MANAGED_ROW when eligible coverage is complete. */
+        AttendanceFixedScheduleEffectivenessReasonCodes: ("NO_DESIRED_CONFIG" | "NO_TARGET_MEMBERS" | "DIFFERENT_MANAGED_KEY_ACTIVE" | "TARGET_MEMBER_MISSING" | "NON_MEMBER_TARGET_ACTIVE" | "DUPLICATE_MATCHING_ASSIGNMENT" | "ASSIGNMENT_VALUE_MISMATCH" | "UNPUBLISHED_MANAGED_ROW" | "EFFECTIVE")[];
+        AttendanceFixedScheduleEffectivenessCoverage: {
+            targetMembers: number;
+            /** @description Members with at least one eligible exact-value desired-key row; duplicates are reported separately by reason code. */
+            matchingMembers: number;
+            missingMembers: number;
+            /** @description Eligible desired-key rows targeting non-members, counted as rows. */
+            nonMemberTargets: number;
+            differentKeyRows: number;
+        };
+        AttendanceFixedScheduleEffectivenessManagedSet: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /**
+             * Format: date
+             * @description Existing managed assignment end date; may be null for historical open-ended rows.
+             */
+            endDate: string | null;
+            producerKey: string;
+            rowCount: number;
+        };
+        AttendanceFixedScheduleEffectivenessDrift: {
+            unconfiguredManagedRows: number;
+            unpublishedManagedRows: number;
+            /** @description Without desired configuration, all active managed rows are grouped; with desired configuration, only eligible different-key rows are grouped. Each set retains the existing exact-key clear identity and row count, without user identifiers. */
+            managedSets: components["schemas"]["AttendanceFixedScheduleEffectivenessManagedSet"][];
+        };
+        AttendanceFixedScheduleEffectiveness: {
+            /** Format: uuid */
+            groupId: string;
+            state: components["schemas"]["AttendanceFixedScheduleEffectivenessState"];
+            reasonCodes: components["schemas"]["AttendanceFixedScheduleEffectivenessReasonCodes"];
+            desired: components["schemas"]["AttendanceFixedScheduleDesired"];
+            coverage: components["schemas"]["AttendanceFixedScheduleEffectivenessCoverage"];
+            drift: components["schemas"]["AttendanceFixedScheduleEffectivenessDrift"];
+            /** Format: date-time */
+            evaluatedAt: string;
+        };
+        AttendanceFixedScheduleSelfEffectiveness: {
+            /** Format: uuid */
+            groupId: string;
+            state: components["schemas"]["AttendanceFixedScheduleEffectivenessState"];
+            reasonCodes: components["schemas"]["AttendanceFixedScheduleEffectivenessReasonCodes"];
+            desired: components["schemas"]["AttendanceFixedScheduleDesired"];
+            /**
+             * @description not_configured when desired configuration is absent; matching only when the authenticated subject has exactly one eligible managed row matching the desired producer key and assignment values; non_matching otherwise. No user identifier or producer key is returned.
+             * @enum {string}
+             */
+            applicability: "not_configured" | "matching" | "non_matching";
+            /** Format: date-time */
+            evaluatedAt: string;
         };
         AttendanceFixedScheduleEditor: {
             /** Format: uuid */
