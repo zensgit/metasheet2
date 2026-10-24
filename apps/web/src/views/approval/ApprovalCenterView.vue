@@ -1885,7 +1885,9 @@ function attendancePendingCountQuery() {
 
 async function refreshAttendancePendingTotal(): Promise<void> {
   const request = ++attendancePendingRequest
-  attendancePendingState.value = 'loading'
+  // Keep the last good number on screen while a reload re-asks (no disabled flicker); a failed
+  // or never-loaded total shows the loading reason until this answer lands.
+  if (attendancePendingState.value !== 'ready') attendancePendingState.value = 'loading'
   try {
     // Read through a closure (never at setup), like the tab badge counts above: several
     // approval-center specs mock the api module with an explicit export list without this name.
