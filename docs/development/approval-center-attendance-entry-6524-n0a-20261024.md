@@ -25,7 +25,9 @@
    - 没有待审：「目前没有轮到你审批的考勤申请。」；
    - 数量取不到（例如无权读取或网络失败）：「暂时无法获取考勤待审数量，请稍后刷新页面再试。」，此时不显示任何数字。
 5. 点某一行仍沿用现有行为：进入考勤模块里这张申请（带申请编号）。不新增、不放宽任何权限；数量与行都走本人已有的列表读取权限。
-6. 新文案中英文都有（中文在 `CENTER_ZH`，英文在 `CENTER_EN`，两表键一致；带数字的按钮文字按文件惯例写在视图里）。
+6. 新文案中英文都有（中文在 `CENTER_ZH`，英文在 `CENTER_EN`，都在 `approvalCenterLabels.ts`，两表键一致）。带数字的两段文字也放在这两张表里，视图只加数字、不另写中英文分支：
+   - 按钮文字取表项 `attendanceFilterLabel`（「考勤待审」/ `Attendance pending`）；数量已知时视图在后面接一个空格和数字。同一视图里的 `ccUnreadBadgeSuffix` 也是表项与数字中间加一个空格拼成，只是那里数字在前；
+   - 考勤视图的状态句：数量未知时取 `attendanceActiveNote`；数量已知时取 `attendanceActiveNoteWithTotal`（「正在只看考勤待审。考勤待审共 {total} 条。」/ `Showing attendance requests only. Attendance requests pending: {total}.`），视图把其中的 `{total}` 换成数字。
 
 不改后端、不改表结构、不改待办查询本身（只用列表接口已有的过滤参数）、不新增接口。
 
@@ -76,20 +78,39 @@
 
 第 13–16 条在组内排在第 6 条之后。第 2、5、6、13–16 条在基线上红，只是因为找不到新按钮或新提示，不是断言了旧行为。
 
-执行状态：**本机未跑**（工作树没有依赖）。本机只做了语法检查：测试文件、`api.ts`、`approvalCenterLabels.ts` 与视图的 `<script setup>` 块都用 esbuild 解析通过。门审后改过的三个测试文件与视图 `<script setup>` 块也重新解析通过。`.vue` 模板本机无法编译，由执行主机上的测试验证。
+### 执行状态
 
-执行主机上要跑的（在仓库根目录）：
+开发所在的机器没有装依赖，只做了语法检查（测试文件、`api.ts`、`approvalCenterLabels.ts` 与视图的 `<script setup>` 块都用 esbuild 解析通过）。测试与 type-check 在另一台执行机器（macOS，Node 20.20.2、pnpm 10.16.1，依赖按本分支的 `pnpm-lock.yaml` 安装）上跑，于 2026-10-24 晚上完成。
+
+在提交 `cc5bf14ab2f9724e1b277980b51126e42c584eb4` 上（仓库根目录）跑的命令与结果：
 
 ```bash
+# (a) 新测试所在的视图测试文件 —— 通过，63/63
 pnpm --filter @metasheet/web exec vitest run --watch=false tests/approval-center.spec.ts
-# 同一视图的其他用例（会挂载或扫描 ApprovalCenterView）
-pnpm --filter @metasheet/web exec vitest run --watch=false approval-center approvalCenter approvalMobileResponsive cancelRoundEntryCenterRoute approval-e2e-permissions newTodoPill ui-foundation-style-guard uiFoundationTexture approval-ui-workspace templateCenterI18n templateDetailI18n platform-shell-nav
-# 门审后新加测试所在的另两个文件
+# (b) 同一视图的相邻用例（会挂载或扫描 ApprovalCenterView）—— 20 个文件、498 条，496 条过、2 条红（两条既有红，见下）
+pnpm --filter @metasheet/web exec vitest run --watch=false approval-center approvalCenter approvalMobileResponsive cancelRoundEntryCenterRoute approval-e2e-permissions newTodoPill ui-foundation-style-guard uiFoundationTexture approval-ui-workspace templateCenterI18n templateDetailI18n approvalApiErrorSurfacing platform-shell-nav
+# (c) 门审后新加测试所在的另两个文件 —— 通过，84/84
 pnpm --filter @metasheet/web exec vitest run --watch=false approvalApiErrorSurfacing approval-store-detail-generation
-# 红绿对照：在基线上只换入三个测试文件再跑一次，预期第 1–11、13–17 条红，第 12、18、19 条绿；其余用例与基线一致
+# (d) 必需 web 测试脚本 —— 通过：20 次 vitest 调用全过，最后一次 598 个文件 / 12644 条
 bash apps/web/scripts/run-required-web-tests.sh
+# (e) type-check —— 通过（vue-tsc -b 与两个 verification tsconfig，0 个错误）
 pnpm --filter @metasheet/web type-check
 ```
+
+- 新增测试：三个文件都全绿（(a) 63/63，(c) 84/84），在 (b)、(d) 里也各跑过一次、全过。
+- 相邻测试：(b) 只有 `approval-ui-workspace.spec.ts` 的 2 条红，都是既有问题：
+  - `approval workspace visual structure > keeps the detail form and timeline as full card surfaces`
+  - `approval workspace visual structure > presents template authoring as a four-step workspace`
+
+  这两条在未改动的基线 `fdb30a671686` 上同样失败（同名、同一条报错、同一断言位置）。它们读的是本分支没碰的两个视图，该测试文件本分支也没改；它不在必需 web 测试脚本里（脚本注释把它列为已知红、不接线），也不在 approval-web-guard 的名单里。所以 (b) 的退出码是 1，但其中本分支引起的失败为 0。
+- 第一轮发现并修好的守卫红：第一轮在提交 `5422f20a03` 上跑时，`templateCenterI18n.spec.ts` 的源码守卫对 `ApprovalCenterView.vue` 的中英文构造计数失败（视图里新增了 4 处中英文三元写法，超出该文件的钉数）；随后把这 4 处文案改为读标签表（提交 `6684a97d2b`、`cc5bf14ab2`，渲染文字中英文都不变，即上面 §2 第 6 条），守卫没改，在 `cc5bf14ab2` 上重跑 58/58 通过。
+- 红绿对照（第一轮做的）：在基线 `fdb30a671686` 上只换入本分支的三个测试文件，其余代码不动，再跑这三个文件——视图组第 1–11、13–16 条红，第 12 条绿，组外用例无失败；`approvalApiErrorSurfacing` 只有第 17 条红；`approval-store-detail-generation` 34/34 绿（含第 18、19 条）。与上表的预期逐条一致；每条红的第一条报错都与表中写的原因相符。三个测试文件此后没有再改，所以对照结论对 `cc5bf14ab2` 仍然成立。
+
+还没做的：
+
+- GitHub CI 还没跑（分支未推送）。上面只复现了必需 web 测试脚本与 type-check，其他必需作业没有复现；执行机器用的是已装好的依赖，没有在干净环境里重新做冻结安装。
+- 真实浏览器走查与截图还没做：按钮三种不可用状态、进入与各种退出考勤视图、中英文蓝条与按钮文字。
+- 读屏播报没有验证：第 15 条只断言了状态区域的结构。
 
 ## 6 限制
 
