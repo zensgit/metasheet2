@@ -8658,6 +8658,84 @@ components:
             - type: 'null'
         duplicate:
           type: boolean
+    AttendanceFixedScheduleConfigSave:
+      type: object
+      additionalProperties: false
+      required: [shiftId, startDate, endDate]
+      properties:
+        shiftId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        orgId: { type: string, description: Must equal the authenticated organization when supplied. }
+        expectedConfigRevision:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          description: Zero expects absence; positive values require an exact saved revision. Omitted retains legacy unconditional save.
+    AttendanceFixedScheduleDesired:
+      type: object
+      nullable: true
+      additionalProperties: false
+      required: [shiftId, startDate, endDate, revision]
+      properties:
+        shiftId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        revision: { type: integer, minimum: 1 }
+    AttendanceFixedScheduleSavedConfig:
+      type: object
+      additionalProperties: false
+      required: [id, orgId, groupId, shiftId, startDate, endDate, revision, updatedBy, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string }
+        groupId: { type: string, format: uuid }
+        shiftId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        revision: { type: integer, minimum: 1 }
+        updatedBy: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AttendanceFixedScheduleEditor:
+      type: object
+      additionalProperties: false
+      required: [groupId, state, reasonCodes, desired, drift, referenceEligibility]
+      properties:
+        groupId: { type: string, format: uuid }
+        state: { type: string, enum: [not_configured, configuration_changed, pending_apply, effective] }
+        reasonCodes:
+          type: array
+          items:
+            type: string
+            enum: [NO_DESIRED_CONFIG, NO_TARGET_MEMBERS, DIFFERENT_MANAGED_KEY_ACTIVE, TARGET_MEMBER_MISSING, NON_MEMBER_TARGET_ACTIVE, DUPLICATE_MATCHING_ASSIGNMENT, ASSIGNMENT_VALUE_MISMATCH, UNPUBLISHED_MANAGED_ROW, EFFECTIVE]
+        desired: { $ref: '#/components/schemas/AttendanceFixedScheduleDesired' }
+        drift:
+          type: object
+          additionalProperties: false
+          required: [managedSets]
+          properties:
+            managedSets:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [shiftId, startDate, endDate, producerKey, rowCount]
+                properties:
+                  shiftId: { type: string, format: uuid }
+                  startDate: { type: string, format: date }
+                  endDate: { type: string, format: date, nullable: true }
+                  producerKey: { type: string }
+                  rowCount: { type: integer, minimum: 1 }
+        referenceEligibility:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [shiftId, allowed, reasonCode]
+          properties:
+            shiftId: { type: string, format: uuid }
+            allowed: { type: boolean }
+            reasonCode: { type: string, nullable: true, enum: [ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED, null] }
   responses:
     ElearningError:
       description: 'Values-free e-learning error `{ error: "<code>" }`'

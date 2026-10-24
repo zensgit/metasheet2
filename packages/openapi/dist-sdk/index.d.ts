@@ -1018,6 +1018,270 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/groups/{groupId}/fixed-schedule/editor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read fixed schedule editor configuration and candidate reference eligibility
+         * @description Uses the existing fixed schedule preview actor, organization and group-manager authorization. The authenticated organization is authoritative. Eligibility is advisory and does not grant write permission; apply and rebuild recheck their existing authorization and canonical posture. An absent shiftId selects the saved desired shift, or returns null eligibility when unconfigured. No coverage counts or raw member identifiers are returned. Unreadable segment or posture state fails closed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    shiftId?: string;
+                };
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Desired configuration, old managed sets and candidate reference eligibility */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleEditor"];
+                        };
+                    };
+                };
+                /** @description Invalid group or candidate shift identifier */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or selected shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Fixed schedule */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save fixed schedule desired configuration
+         * @description Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleConfigSave"];
+                };
+            };
+            responses: {
+                /** @description Saved desired configuration and authoritative revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleSavedConfig"];
+                        };
+                    };
+                };
+                /** @description Invalid date window */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/config/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Save fixed schedule desired configuration through the POST update alias
+         * @description Uses the identical handler, authorization, validation, revision checks and response as PUT config.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleConfigSave"];
+                };
+            };
+            responses: {
+                /** @description Saved desired configuration and authoritative revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleSavedConfig"];
+                        };
+                    };
+                };
+                /** @description Invalid date window */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/effective-calendar": {
         parameters: {
             query?: never;
@@ -22568,6 +22832,73 @@ export interface components {
             completedAt: string | null;
             errorCode: string | null;
             duplicate: boolean;
+        };
+        AttendanceFixedScheduleConfigSave: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            /** @description Must equal the authenticated organization when supplied. */
+            orgId?: string;
+            /** @description Zero expects absence; positive values require an exact saved revision. Omitted retains legacy unconditional save. */
+            expectedConfigRevision?: number;
+        };
+        AttendanceFixedScheduleDesired: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            revision: number;
+        } | null;
+        AttendanceFixedScheduleSavedConfig: {
+            /** Format: uuid */
+            id: string;
+            orgId: string;
+            /** Format: uuid */
+            groupId: string;
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            revision: number;
+            updatedBy: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        AttendanceFixedScheduleEditor: {
+            /** Format: uuid */
+            groupId: string;
+            /** @enum {string} */
+            state: "not_configured" | "configuration_changed" | "pending_apply" | "effective";
+            reasonCodes: ("NO_DESIRED_CONFIG" | "NO_TARGET_MEMBERS" | "DIFFERENT_MANAGED_KEY_ACTIVE" | "TARGET_MEMBER_MISSING" | "NON_MEMBER_TARGET_ACTIVE" | "DUPLICATE_MATCHING_ASSIGNMENT" | "ASSIGNMENT_VALUE_MISMATCH" | "UNPUBLISHED_MANAGED_ROW" | "EFFECTIVE")[];
+            desired: components["schemas"]["AttendanceFixedScheduleDesired"];
+            drift: {
+                managedSets: {
+                    /** Format: uuid */
+                    shiftId: string;
+                    /** Format: date */
+                    startDate: string;
+                    /** Format: date */
+                    endDate: string | null;
+                    producerKey: string;
+                    rowCount: number;
+                }[];
+            };
+            referenceEligibility: {
+                /** Format: uuid */
+                shiftId: string;
+                allowed: boolean;
+                /** @enum {string|null} */
+                reasonCode: "ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED" | null;
+            } | null;
         };
     };
     responses: {

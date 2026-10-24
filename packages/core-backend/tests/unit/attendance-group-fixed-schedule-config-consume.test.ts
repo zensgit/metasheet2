@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url)
 const configServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs') as {
   ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED: string
   createAttendanceGroupFixedScheduleConfigService: (input: Record<string, unknown>) => {
+    upsertConfig: (trx: unknown, input: Record<string, unknown>) => Promise<{ revision: number }>
     resolveConfigForApplyRebuild: (trx: unknown, input: Record<string, unknown>) => Promise<{ config: any; created: boolean }>
   }
 }
@@ -493,5 +494,116 @@ describe('attendance group fixed-schedule apply/rebuild config consumption (unit
       .rejects.toMatchObject({ status: 409, code: configServiceLib.ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED })
     expect(firstTargetLockIndex(db.statements)).toBe(-1)
     expect(db.statements.some(statement => /^\s*(INSERT|UPDATE|DELETE)/i.test(statement))).toBe(false)
+  })
+})
+
+
+describe('fixed-schedule desired config save compare-and-swap', () => {
+  function saveTrx(existing: Record<string, unknown> | null, inserted = true) {
+    return makeTrx([
+      { match: 'SELECT id FROM attendance_groups', rows: [{ id: groupId }] },
+      { match: 'FROM attendance_group_fixed_schedule_configs', rows: existing ? [existing] : [] },
+      { match: 'SELECT id FROM attendance_shifts', rows: [{ id: shiftId }] },
+      { match: 'INSERT INTO attendance_group_fixed_schedule_configs', rows: inserted ? [configRow({ revision: existing ? 3 : 1 })] : [] },
+    ])
+  }
+
+  it.each([
+    { existing: configRow(), expectedConfigRevision: 0 },
+    { existing: configRow(), expectedConfigRevision: 1 },
+    { existing: null, expectedConfigRevision: 2 },
+  ])('rejects stale save expectations before any DML: $expectedConfigRevision', async ({ existing, expectedConfigRevision }) => {
+    const trx = saveTrx(existing)
+    await expect(service.upsertConfig(trx, { ...candidate, expectedConfigRevision }))
+      .rejects.toMatchObject({ status: 409, code: configServiceLib.ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED })
+    expect(trx.statements.some(statement => /^\s*(INSERT|UPDATE|DELETE)/i.test(statement))).toBe(false)
+  })
+
+  it('first-saves only while absent and never overwrites a concurrent winner', async () => {
+    const trx = saveTrx(null, false)
+    await expect(service.upsertConfig(trx, { ...candidate, expectedConfigRevision: 0 }))
+      .rejects.toMatchObject({ status: 409, code: configServiceLib.ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED })
+    expect(trx.statements.at(-1)).toContain('ON CONFLICT (org_id, group_id) DO NOTHING')
+  })
+
+  it('locks the matching config before the shift and preserves the legacy upsert semantics', async () => {
+    const trx = saveTrx(configRow())
+    const result = await service.upsertConfig(trx, { ...candidate, expectedConfigRevision: 2 })
+    expect(result.revision).toBe(3)
+    expect(trx.statements[1]).toContain('FOR UPDATE')
+    expect(trx.statements[2]).toContain('FOR SHARE')
+    expect(trx.statements[3]).toContain('DO UPDATE')
+  })
+
+  it.each([-1, 0.5, null, '2', Number.MAX_SAFE_INTEGER + 1])('rejects invalid expected revision %s before config SQL', async (expectedConfigRevision) => {
+    const trx = saveTrx(null)
+    await expect(service.upsertConfig(trx, { ...candidate, expectedConfigRevision }))
+      .rejects.toMatchObject({ status: 400, code: 'VALIDATION_ERROR' })
+    expect(trx.statements).toHaveLength(1)
+  })
+})
+
+describe('fixed-schedule editor projection', () => {
+  const editorLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-editor-service.cjs')
+  const desired = { shiftId, startDate: candidate.startDate, endDate: candidate.endDate, revision: 2 }
+  const managedSets = [{ shiftId, startDate: candidate.startDate, endDate: candidate.endDate, producerKey: 'old', rowCount: 1 }]
+
+  function editorHarness(segmentCount: unknown, referenceSegments: unknown, storedDesired: unknown = desired) {
+    const getEffectiveness = vi.fn(async () => ({
+      groupId, state: 'configuration_changed', reasonCodes: ['DIFFERENT_MANAGED_KEY_ACTIVE'], desired: storedDesired,
+      coverage: { targetMembers: 1 }, drift: { managedSets, unpublishedManagedRows: 0 }, evaluatedAt: 'now',
+    }))
+    const resolveReferenceSegments = vi.fn(async () => referenceSegments)
+    const trx = { query: vi.fn(async (sql: string, _params?: unknown[]) => sql.includes('COUNT(*)') ? [{ total: segmentCount }] : [{ id: shiftId }]) }
+    const editor = editorLib.createAttendanceGroupFixedScheduleEditorService({ HttpError: FakeHttpError, getEffectiveness, resolveReferenceSegments })
+    return { editor, trx, getEffectiveness, resolveReferenceSegments }
+  }
+
+  it.each([
+    { count: 0, posture: false, allowed: true },
+    { count: 1, posture: false, allowed: true },
+    { count: 2, posture: false, allowed: false },
+    { count: 2, posture: true, allowed: true },
+    { count: 2, posture: 'true', allowed: false },
+  ])('projects strict persisted segment eligibility $count / $posture', async ({ count, posture, allowed }) => {
+    const { editor, trx, resolveReferenceSegments } = editorHarness(count, posture)
+    const result = await editor.getEditor(trx, { orgId, groupId })
+    expect(result).toEqual({
+      groupId, state: 'configuration_changed', reasonCodes: ['DIFFERENT_MANAGED_KEY_ACTIVE'], desired,
+      drift: { managedSets }, referenceEligibility: { shiftId, allowed, reasonCode: allowed ? null : 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED' },
+    })
+    expect(resolveReferenceSegments).toHaveBeenCalledWith(trx, orgId)
+    expect(trx.query.mock.calls[0][0]).toContain('FOR SHARE')
+    expect(resolveReferenceSegments.mock.invocationCallOrder[0]).toBeLessThan(trx.query.mock.invocationCallOrder[0])
+  })
+
+  it('uses the selected candidate without replacing saved desired or old managed sets', async () => {
+    const selected = randomUUID()
+    const { editor, trx } = editorHarness(2, false)
+    const result = await editor.getEditor(trx, { orgId, groupId, shiftId: selected })
+    expect(result.desired).toEqual(desired)
+    expect(result.drift).toEqual({ managedSets })
+    expect(result.referenceEligibility.shiftId).toBe(selected)
+    expect(trx.query.mock.calls[0][1]).toEqual([selected, orgId])
+  })
+
+  it('returns null eligibility for an unconfigured group without a candidate', async () => {
+    const { editor, trx, resolveReferenceSegments } = editorHarness(0, false, null)
+    const result = await editor.getEditor(trx, { orgId, groupId })
+    expect(result.referenceEligibility).toBeNull()
+    expect(trx.query).not.toHaveBeenCalled()
+    expect(resolveReferenceSegments).not.toHaveBeenCalled()
+  })
+
+  it.each([null, -1, 1.5, 'unreadable'])('fails unreadable persisted count %s closed', async (count) => {
+    const { editor, trx } = editorHarness(count, true)
+    await expect(editor.getEditor(trx, { orgId, groupId })).rejects.toMatchObject({ status: 503, code: 'ATTENDANCE_FIXED_SCHEDULE_EDITOR_UNAVAILABLE' })
+  })
+
+  it.each(['segments', 'posture'])('returns 503 for unreadable %s', async (failure) => {
+    const { editor, trx, resolveReferenceSegments } = editorHarness(2, true)
+    if (failure === 'segments') trx.query.mockImplementation(async (sql: string) => { if (sql.includes('COUNT(*)')) throw new Error('schema unavailable'); return [{ id: shiftId }] })
+    else resolveReferenceSegments.mockRejectedValue(new Error('policy unavailable'))
+    await expect(editor.getEditor(trx, { orgId, groupId })).rejects.toMatchObject({ status: 503 })
   })
 })

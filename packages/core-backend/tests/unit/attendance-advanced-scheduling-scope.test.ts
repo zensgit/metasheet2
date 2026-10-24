@@ -49,8 +49,7 @@ function expectGroupOwnerPreviewRoute(method: string, path: string) {
 }
 
 /** Apply/rebuild/clear/config stay scheduler-scope; must not inherit the O3 group-owner write set. */
-function expectSchedulerScopedFixedScheduleWriteRoute(method: string, path: string, assertFn: string) {
-  const handler = extractDirectAsyncRoute(method, path)
+function expectSchedulerScopedFixedScheduleWriteRoute(method: string, path: string, assertFn: string, handler = extractDirectAsyncRoute(method, path)) {
   expect(handler).toContain('resolveAttendanceFixedScheduleRouteActorContext')
   expect(handler).toContain(assertFn)
   expect(handler).not.toContain('canManageAttendanceGroup')
@@ -96,11 +95,24 @@ describe('attendance advanced scheduling scope foundation', () => {
       '/api/attendance/groups/:id/fixed-schedule/clear',
       'assertAttendanceGroupFixedScheduleClearAllowed',
     )
-    expectSchedulerScopedFixedScheduleWriteRoute(
-      'PUT',
-      '/api/attendance/groups/:groupId/fixed-schedule/config',
-      'assertAttendanceGroupFixedScheduleDispatchAllowed',
-    )
+    const saveHandlerStart = pluginSource.indexOf('    const saveAttendanceGroupFixedScheduleConfig = async (req, res) => {')
+    const putRegistration = "    context.api.http.addRoute('PUT', '/api/attendance/groups/:groupId/fixed-schedule/config', saveAttendanceGroupFixedScheduleConfig)"
+    const saveHandlerEnd = pluginSource.indexOf(putRegistration, saveHandlerStart)
+    expect(saveHandlerStart).toBeGreaterThan(-1)
+    expect(saveHandlerEnd).toBeGreaterThan(saveHandlerStart)
+    expect(pluginSource).toContain(putRegistration)
+    expect(pluginSource).toContain("context.api.http.addRoute('POST', '/api/attendance/groups/:groupId/fixed-schedule/config/update', saveAttendanceGroupFixedScheduleConfig)")
+    const saveHandler = pluginSource.slice(saveHandlerStart, saveHandlerEnd)
+    for (const [method, path] of [
+      ['PUT', '/api/attendance/groups/:groupId/fixed-schedule/config'],
+      ['POST', '/api/attendance/groups/:groupId/fixed-schedule/config/update'],
+    ]) {
+      expectSchedulerScopedFixedScheduleWriteRoute(method, path, 'assertAttendanceGroupFixedScheduleDispatchAllowed', saveHandler)
+    }
+    expect(saveHandler.indexOf('resolveAttendanceFixedScheduleRouteActorContext')).toBeLessThan(saveHandler.indexOf('assertAttendanceGroupInActorOrg'))
+    expect(saveHandler.indexOf('assertAttendanceGroupInActorOrg')).toBeLessThan(saveHandler.indexOf('assertAttendanceGroupFixedScheduleDispatchAllowed'))
+    expect(saveHandler.indexOf('assertAttendanceGroupFixedScheduleDispatchAllowed')).toBeLessThan(saveHandler.indexOf('upsertConfig'))
+    expect(saveHandler).toContain('expectedConfigRevision: parsed.data.expectedConfigRevision')
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/approve')
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/reject')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups')

@@ -44,6 +44,7 @@ const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+const { createAttendanceGroupFixedScheduleEditorService } = require('./lib/attendance-group-fixed-schedule-editor-service.cjs')
 const {
   buildAttendanceReportManagedContentPlan,
 } = require('./lib/attendance-report-managed-content-drift.cjs')
@@ -47575,74 +47576,129 @@ module.exports = {
     )
 
     context.api.http.addRoute(
-      'PUT',
-      '/api/attendance/groups/:groupId/fixed-schedule/config',
+      'GET',
+      '/api/attendance/groups/:groupId/fixed-schedule/editor',
       async (req, res) => {
         const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
-        const schema = z.object({
-          shiftId: z.string().min(1),
-          startDate: z.string().min(1),
-          endDate: z.string().min(1),
-          orgId: z.string().optional(),
-        }).strict()
-        const parsed = schema.safeParse(req.body ?? {})
-        if (!parsed.success) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
-          return
-        }
-
         const groupId = normalizeUuidString(req.params.groupId)
         if (!groupId) {
           respondInvalidUuid(res, 'groupId')
           return
         }
-        const shiftId = normalizeUuidString(parsed.data.shiftId)
-        if (!shiftId) {
+        if (process.env.RBAC_BYPASS !== 'true' && !actorAccess.fullAdmin) {
+          try {
+            if (!await canManageAttendanceGroup(actorAccess.orgId, actorAccess.userId, groupId, 'fixed_schedule_preview')) {
+              res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' } })
+              return
+            }
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              respondAttendanceGroupManagerTableMissing(res)
+              return
+            }
+            logger.error('Attendance fixed schedule editor authorization failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+            return
+          }
+        }
+        const shiftId = req.query?.shiftId === undefined ? undefined : normalizeUuidString(req.query.shiftId)
+        if (shiftId === null) {
           respondInvalidUuid(res, 'shiftId')
           return
         }
-        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
-        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
-        if (!startDate || !endDate || startDate > endDate) {
-          res.status(400).json({
-            ok: false,
-            error: { code: 'VALIDATION_ERROR', message: 'A valid startDate on or before endDate is required.' },
-          })
-          return
-        }
-
         try {
-          const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
-            groupId,
-            orgId: actorAccess.orgId,
+          const service = createAttendanceGroupFixedScheduleEditorService({
+            HttpError,
+            getEffectiveness: (trx, input) => getAttendanceGroupFixedScheduleEffectivenessService().getEffectiveness(trx, input),
+            resolveReferenceSegments: resolveReferenceSegmentsPostureForWrite,
           })
-          if (!groupExists) return
-          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
-          if (!access) return
-          const config = await db.transaction(trx => getAttendanceGroupFixedScheduleConfigService().upsertConfig(trx, {
-            orgId: access.orgId,
-            groupId,
-            shiftId,
-            startDate,
-            endDate,
-            updatedBy: access.userId,
-          }))
-          res.json({ ok: true, data: config })
+          const editor = await db.transaction(trx => service.getEditor(trx, { orgId: actorAccess.orgId, groupId, shiftId }))
+          res.json({ ok: true, data: editor })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
           if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance fixed schedule tables missing' } })
             return
           }
-          logger.error('Attendance group fixed schedule config save failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save fixed schedule config' } })
+          logger.error('Attendance fixed schedule editor read failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule editor' } })
         }
       }
     )
+
+    const saveAttendanceGroupFixedScheduleConfig = async (req, res) => {
+      const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+      if (!actorAccess) return
+      const schema = z.object({
+        shiftId: z.string().min(1),
+        startDate: z.string().min(1),
+        endDate: z.string().min(1),
+        orgId: z.string().optional(),
+        expectedConfigRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+      }).strict()
+      const parsed = schema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        return
+      }
+
+      const groupId = normalizeUuidString(req.params.groupId)
+      if (!groupId) {
+        respondInvalidUuid(res, 'groupId')
+        return
+      }
+      const shiftId = normalizeUuidString(parsed.data.shiftId)
+      if (!shiftId) {
+        respondInvalidUuid(res, 'shiftId')
+        return
+      }
+      const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+      const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+      if (!startDate || !endDate || startDate > endDate) {
+        res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'A valid startDate on or before endDate is required.' },
+        })
+        return
+      }
+
+      try {
+        const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+          groupId,
+          orgId: actorAccess.orgId,
+        })
+        if (!groupExists) return
+        const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
+        if (!access) return
+        const config = await db.transaction(trx => getAttendanceGroupFixedScheduleConfigService().upsertConfig(trx, {
+          orgId: access.orgId,
+          groupId,
+          shiftId,
+          startDate,
+          endDate,
+          updatedBy: access.userId,
+          expectedConfigRevision: parsed.data.expectedConfigRevision,
+        }))
+        res.json({ ok: true, data: config })
+      } catch (error) {
+        if (error instanceof HttpError) {
+          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          return
+        }
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+          return
+        }
+        logger.error('Attendance group fixed schedule config save failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save fixed schedule config' } })
+      }
+    }
+    context.api.http.addRoute('PUT', '/api/attendance/groups/:groupId/fixed-schedule/config', saveAttendanceGroupFixedScheduleConfig)
+    context.api.http.addRoute('POST', '/api/attendance/groups/:groupId/fixed-schedule/config/update', saveAttendanceGroupFixedScheduleConfig)
 
     context.api.http.addRoute(
       'POST',
