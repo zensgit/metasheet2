@@ -270,11 +270,9 @@
             {{ t.markAllRead }}
           </el-button>
         </div>
-        <!-- #6524 N0-a: this entry stays in the approval center. 「考勤待审 N」 is the total of the
-             pending list query narrowed to `workflowKey=attendance.request` (independent of the
-             page loaded below); a click narrows THIS list to those rows. It never routes to the
-             attendance module — opening a row (handleRowClick) is unchanged. Disabled, with the
-             reason written next to it, while the total is loading, unreadable, or zero. -->
+        <!-- #6524 N0-a: this entry stays in the approval center and never routes to the
+             attendance module. The count, the attendance-only view and the disabled reasons
+             are described at the "#6524 N0-a" comment block in the script below. -->
         <div
           class="approval-center__attendance-entry"
           data-testid="attendance-approval-queue-entry"
@@ -287,6 +285,8 @@
             <p
               v-if="attendanceOnly"
               class="approval-center__attendance-entry-status"
+              role="status"
+              aria-live="polite"
               data-testid="attendance-approval-queue-active"
             >
               {{ attendanceActiveText }}

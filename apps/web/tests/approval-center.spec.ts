@@ -979,6 +979,19 @@ describe('ApprovalCenterView', () => {
       expect(showAllButton()).toBeNull()
     })
 
+    it('the attendance-view note is a polite status region, so the switch is announced', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 2 })
+
+      await mountView()
+      await flushUi()
+      filterButton()!.click()
+      await flushUi()
+
+      expect(activeNote(), 'the note renders inside the attendance view').toBeTruthy()
+      expect(activeNote()!.getAttribute('role')).toBe('status')
+      expect(activeNote()!.getAttribute('aria-live')).toBe('polite')
+    })
+
     it('a list reload keeps the last 考勤待审 number on screen while the total is re-read', async () => {
       listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 3 })
 
