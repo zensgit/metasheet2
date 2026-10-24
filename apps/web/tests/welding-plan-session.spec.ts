@@ -3,6 +3,7 @@ import { useWeldingPlanSession } from '../src/views/welding/useWeldingPlanSessio
 import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import { WeldingPlanError, type WeldingPlanClient, type RecoveryAuthority, type PlanRecord, type WorkflowState } from '../src/services/welding/planClient'
 import { clone, equal, type PlanRecoveryRecord, type PlanRecoveryStore } from '../src/services/welding/planRecovery'
+import { createCadBridge, type CadWire } from '../src/services/welding/cadBridge'
 
 const owner = { tenant_id: 'tenant', org_id: 'org', auth_user_id: 7, rbac_user_id: 19 }
 const payload = () => ({ schema_version: 1 as const, bom: null, process_refs: [], product: { item_id: 'part', version_id: 'p1' }, drawing: { item_id: 'drawing', version_id: 'd1', file_id: 'f1', file_role: 'drawing', expected_checksum: 'a'.repeat(64) }, welds: [{ weld_id: 'w1', display_no: '1', location: 'old', passes: [], joint_type: '', method: '', material_a: '', material_b: '', filler: '', thickness_a: null, thickness_b: null, manufacturing_length: null, measured_length: null, welding_requirements: '', inspection_requirements: '' }],
@@ -554,6 +555,36 @@ describe('welding plan save and recovery session', () => {
     await f.session.save(); expect(f.client.save).not.toHaveBeenCalled(); expect(await f.session.prepareLeave()).toBe(false)
     await f.session.newDraft(); expect(f.session.state.versionId).toBe('v1'); expect(f.session.state.payload.welds[0].location).toBe('edited')
     f.session.setCadBarrier(null); await f.session.save(); expect(f.client.save).toHaveBeenCalledOnce()
+  })
+  it('a real snapshot timeout blocks saving and a late response cannot acknowledge unsaved edits', async () => {
+    const f = make(); await opened(f)
+    const nativeOverlay = { schema: 'vemcad-weld-overlay/1', snapshot: { meta: { unit: 'mm' }, entities: [] }, bindings: [] }
+    await f.session.edit(p => { p.welds[0].location = 'retain-after-snapshot-timeout'; p.overlay = nativeOverlay }); await settle()
+    const before = clone(f.session.state.payload), recovery = f.getStored()
+    const frame = document.createElement('iframe'); document.body.appendChild(frame)
+    const peer = frame.contentWindow!, sent: CadWire[] = [], action = vi.fn(async () => 1), error = vi.fn()
+    vi.spyOn(peer, 'postMessage').mockImplementation(message => { sent.push(message) })
+    const bridge = createCadBridge({ window, frame, getLocalSeq: () => 0, accepts: () => true, onAction: action, onError: error })
+    const emit = (message: CadWire) => window.dispatchEvent(new MessageEvent('message', { data: message, origin: window.location.origin, source: peer }))
+    try {
+      const loaded = bridge.load({ context_id: 'context', unit: 'mm', cadgf_document: {} }, nativeOverlay)
+      emit({ schema: 'vemcad-weld-bridge/5', type: 'ready', frame_nonce: 'frame' }); await settle()
+      emit({ ...sent.at(-1)!, type: 'helloAck', data: { native_ticket: { context_key: null, edit_revision: 0 } } }); await settle()
+      emit({ ...sent.at(-1)!, type: 'loaded', data: { snapshot: nativeOverlay, native_ticket: { context_key: 'context', edit_revision: 1 }, local_seq: 0 } }); await loaded
+      f.session.setCadBarrier(async () => { await bridge.snapshot() })
+      vi.useFakeTimers()
+      let finished = false
+      const saving = f.session.save().then(() => { finished = true }); await settle()
+      const snapshot = sent.at(-1)!; expect(snapshot.type).toBe('snapshot')
+      await vi.advanceTimersByTimeAsync(9999)
+      expect(finished).toBe(false); expect(f.client.save).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1); await saving
+      expect(error).toHaveBeenCalledOnce(); expect(f.session.state.message).toContain('图纸回应超时')
+      emit({ ...snapshot, type: 'snapshotResult', data: { snapshot: nativeOverlay, native_ticket: { context_key: 'context', edit_revision: 1 }, local_seq: 0 } }); await settle()
+      expect(f.client.save).not.toHaveBeenCalled(); expect(action).not.toHaveBeenCalled()
+      expect(f.session.state.payload).toEqual(before); expect(f.getStored()).toEqual(recovery)
+      expect(f.session.state.dirty).toBe(true); expect(f.session.state.pending).toBeNull()
+    } finally { vi.useRealTimers(); bridge.destroy(); frame.remove() }
   })
   it('preserves history on subsequent represented saves and UNKNOWN', async () => {
     const f = make(); await opened(f); await f.session.edit(p => { p.welds[0].location = 'first' }); await f.session.save()
