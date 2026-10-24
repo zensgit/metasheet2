@@ -1,0 +1,300 @@
+{
+  "at": "2026-10-24T10:45:51.434425+00:00",
+  "nonce": "e35acdb7353444adba12a9ab66832231",
+  "actor": "ACTUAL_GROK47_XHIGH_C3",
+  "session": "gbt-d5a9-1a16cbed5b8-c3",
+  "tree": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+  "base": "37516a0b3cd002c3d416e8f29f4415c2d2b539fc",
+  "branch": "codex/plm-w23-collaboration-entry-types-20261024",
+  "head": "37516a0b3cd002c3d416e8f29f4415c2d2b539fc",
+  "commit": false,
+  "push": false,
+  "phase": "RELEASED",
+  "publication": "held",
+  "publication_gate": "Parent Draft 6531 valuable runs must terminate before any child push. Root owns Source, ONE, and Draft.",
+  "verification_sha256": null,
+  "self_hash_note": "This field stays null. The external sha256 of this file is recorded only on the owner lock.",
+  "ci_failure": {
+    "log": "/tmp/plm-meta6531-job-120849683609-20261024.log",
+    "command": "pnpm --filter @metasheet/web exec vue-tsc --noEmit -p tsconfig.app.json",
+    "error": "src/multitable/views/MultitableWorkbench.vue(293,12): error TS2322: Type '{ bindingId: string; sourceKind: \"eco\" | \"readiness\"; }' is not assignable to type 'null | undefined'."
+  },
+  "scope_sha256": {
+    "apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": {
+      "before": "3f4287e3ae2f822d249ac26912671ed1933226d37697e41e91dad9f5b322373c",
+      "after": "63a385e72b5d133b23c1cd29b5d6c1e0d4ef721abd29d4844818e119e0a07df4",
+      "mode_before": "644",
+      "mode_after": "0o644",
+      "changed_line": 484,
+      "change": "PropType<unknown> became PropType<{ bindingId: string; sourceKind: 'eco' | 'readiness' } | null>"
+    },
+    "docs/development/PLM_W23_COLLABORATION_ENTRY_TYPES_DESIGN_VALIDATION_20261024.md": {
+      "before": null,
+      "after": "75625fa0497be6b69c846789f0d222596d0bde8fba845f9c93e30c519c0e06d8"
+    }
+  },
+  "validator": {
+    "function": "readPlmCollaborationSnapshotHint",
+    "parameter": "unknown",
+    "unchanged": true
+  },
+  "protected_pins": {
+    "source": "/tmp/plm-w23-entry-types-binding-20261024.json",
+    "count": 14099,
+    "matched": 5134,
+    "missing": 0,
+    "mismatches": 0,
+    "null_absent": 8965,
+    "null_present": 0,
+    "before_and_after": true,
+    "panel_in_pin_map": false,
+    "workbench_sha256": "2779924fe9d5a83578165fb9b0a65b476976e192a7bd94d0ae53f99376a7a79e"
+  },
+  "shared_generated": {
+    "vue_3.5_0.d.ts": {
+      "path": "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts",
+      "sha256": "5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8",
+      "mtime_ns": 1792830452822532608,
+      "dir_mtime_ns": 1790739124106486757,
+      "size": 6303
+    },
+    "tsconfig.app.tsbuildinfo": {
+      "path": "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.tmp/tsconfig.app.tsbuildinfo",
+      "sha256": "6c6856cf4e8e0cdeba1d4d3d417a4e00d6cad3be63925f657079bb9338bf3572",
+      "mtime_ns": 1792720957228972828,
+      "dir_mtime_ns": 1790768596710829677,
+      "size": 46881
+    }
+  },
+  "runtime": {
+    "node": "v24.19.0",
+    "node_path": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+    "vue_tsc": "3.1.4",
+    "typescript": "5.8.3",
+    "vitest": "1.6.1"
+  },
+  "typecheck": {
+    "note": "Full src include from the production tsconfig.app.json shape. The old narrow include listed only the panel and did not cover MultitableWorkbench.vue. tsBuildInfoFile and globalTypesPath were redirected into the nonce. No strict, target, or lib change. vue-tsc -b was not used.",
+    "command": "cd /tmp/plm-w23-entry-types-e35acdb7353444adba12a9ab66832231/apps/web && NODE_OPTIONS=--require /tmp/plm-w23-entry-types-e35acdb7353444adba12a9ab66832231/root-private-write-guard.cjs /Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js --noEmit -p tsconfig.private-app.json",
+    "before": {
+      "exit": 2,
+      "stdout": "src/multitable/views/MultitableWorkbench.vue(293,12): error TS2322: Type '{ bindingId: string; sourceKind: \"eco\" | \"readiness\"; }' is not assignable to type 'null | undefined'.",
+      "runner_wall_seconds": 32.82
+    },
+    "after": {
+      "exit": 0,
+      "stdout": "",
+      "stderr": "",
+      "runner_wall_seconds": 32.38
+    }
+  },
+  "cohort": {
+    "command": "cd /tmp/plm-w23-entry-types-e35acdb7353444adba12a9ab66832231/apps/web && /usr/bin/time -p /Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node node_modules/vitest/vitest.mjs run --config vitest.cohort.mts --watch=false",
+    "exit": 0,
+    "files_passed": 6,
+    "tests_passed": 50,
+    "tests_failed": 0,
+    "panel": 27,
+    "host": 10,
+    "root_frozen_preparation": 7,
+    "root_additional_restore": 3,
+    "root_pending_slot": 2,
+    "root_workbench_hint_only": 1,
+    "vitest_seconds": 2.92,
+    "real_seconds": 3.66,
+    "user_seconds": 2.1,
+    "sys_seconds": 0.42,
+    "fixture_wiring_before_counted_run": [
+      {
+        "exit": 1,
+        "tests": 0,
+        "cause": "symlinked setup file resolved outside Vite fs allow"
+      },
+      {
+        "exit": 1,
+        "tests": 0,
+        "cause": "real worktree tsconfig could not resolve @vue/tsconfig without node_modules"
+      }
+    ],
+    "counted_sources": "copies of the current worktree src and tests inside the nonce; panel hash matched the worktree"
+  },
+  "cleanup": {
+    "fixture": "/tmp/plm-w23-entry-types-e35acdb7353444adba12a9ab66832231",
+    "action": "deleted after this file is written and before the owner lock is marked RELEASED",
+    "preserved": [
+      "/tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa",
+      "/tmp/plm-w23-entry-types-binding-20261024.json",
+      "/tmp/plm-w23-entry-types-lock-20261024/owner.json",
+      "/tmp/plm-meta6531-job-120849683609-20261024.log"
+    ]
+  },
+  "not_run": [
+    "browser",
+    "PostgreSQL",
+    "Docker",
+    "Redis",
+    "install",
+    "API server",
+    "vue-tsc -b",
+    "commit",
+    "push",
+    "PR"
+  ],
+  "still_open": [
+    "Root review",
+    "new CI on Draft 6531 after valuable runs terminate",
+    "Source, ONE, and Draft publication owned by Root"
+  ],
+  "not_acceptance": "This release is not Root acceptance and not publication.",
+  "Root_final": {
+    "at": "2026-10-24T10:53:37.657268+00:00",
+    "full_web_source_typecheck": {
+      "at": "2026-10-24T10:49:29.776671+00:00",
+      "scope": "Full current apps/web/src copy using unchanged app compiler options and private generated/output paths; no build-mode/shared generated writes",
+      "copied_entries": 949,
+      "results": [
+        {
+          "tag": "old-red",
+          "started": "2026-10-24T10:48:28.103383+00:00",
+          "ended": "2026-10-24T10:48:56.185173+00:00",
+          "exit": 2,
+          "command": [
+            "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+            "--require",
+            "/tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa/root-private-write-guard.cjs",
+            "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js",
+            "--project",
+            "/tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa/apps/web/tsconfig.root-full-20261024.json",
+            "--noEmit"
+          ],
+          "output": "../../../../../tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa/apps/web/src/multitable/views/MultitableWorkbench.vue(293,12): error TS2322: Type '{ bindingId: string; sourceKind: \"eco\" | \"readiness\"; }' is not assignable to type 'null | undefined'.\n",
+          "log": "/tmp/plm-meta-entry-types-root-full-old-red-20261024.log",
+          "log_sha256": "296de5118249dfa543ddde5d33696c240dee648f368e3e2ecc480311953aadef"
+        },
+        {
+          "tag": "repair-green",
+          "started": "2026-10-24T10:48:56.185651+00:00",
+          "ended": "2026-10-24T10:49:29.776514+00:00",
+          "exit": 0,
+          "command": [
+            "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+            "--require",
+            "/tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa/root-private-write-guard.cjs",
+            "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js",
+            "--project",
+            "/tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa/apps/web/tsconfig.root-full-20261024.json",
+            "--noEmit"
+          ],
+          "output": "",
+          "log": "/tmp/plm-meta-entry-types-root-full-repair-green-20261024.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "Source_before": {
+        "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": {
+          "sha256": "63a385e72b5d133b23c1cd29b5d6c1e0d4ef721abd29d4844818e119e0a07df4",
+          "mtime_ns": 1792838525629095584
+        },
+        "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/docs/development/PLM_W23_COLLABORATION_ENTRY_TYPES_DESIGN_VALIDATION_20261024.md": {
+          "sha256": "75625fa0497be6b69c846789f0d222596d0bde8fba845f9c93e30c519c0e06d8",
+          "mtime_ns": 1792838721364882028
+        },
+        "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/artifacts/plm-w23-collaboration-entry-types-20261024/verification.json": {
+          "sha256": "6e8d1c54f6c1c6539b4c4f3dd00c22ba02d7e6efcd7183522db2c59dc4adc6e3",
+          "mtime_ns": 1792838751435920177
+        }
+      },
+      "Source_after": {
+        "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": {
+          "sha256": "63a385e72b5d133b23c1cd29b5d6c1e0d4ef721abd29d4844818e119e0a07df4",
+          "mtime_ns": 1792838525629095584
+        },
+        "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/docs/development/PLM_W23_COLLABORATION_ENTRY_TYPES_DESIGN_VALIDATION_20261024.md": {
+          "sha256": "75625fa0497be6b69c846789f0d222596d0bde8fba845f9c93e30c519c0e06d8",
+          "mtime_ns": 1792838721364882028
+        },
+        "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/artifacts/plm-w23-collaboration-entry-types-20261024/verification.json": {
+          "sha256": "6e8d1c54f6c1c6539b4c4f3dd00c22ba02d7e6efcd7183522db2c59dc4adc6e3",
+          "mtime_ns": 1792838751435920177
+        }
+      },
+      "shared_before": {
+        "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts": {
+          "sha256": "5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8",
+          "mtime_ns": 1792830452822532608
+        },
+        "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.tmp/tsconfig.app.tsbuildinfo": {
+          "sha256": "6c6856cf4e8e0cdeba1d4d3d417a4e00d6cad3be63925f657079bb9338bf3572",
+          "mtime_ns": 1792720957228972828
+        }
+      },
+      "shared_after": {
+        "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts": {
+          "sha256": "5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8",
+          "mtime_ns": 1792830452822532608
+        },
+        "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.tmp/tsconfig.app.tsbuildinfo": {
+          "sha256": "6c6856cf4e8e0cdeba1d4d3d417a4e00d6cad3be63925f657079bb9338bf3572",
+          "mtime_ns": 1792720957228972828
+        }
+      },
+      "Source_unchanged": true,
+      "shared_unchanged": true
+    },
+    "ui50": {
+      "at": "2026-10-24T10:52:13.827623+00:00",
+      "ended": "2026-10-24T10:52:16.762981+00:00",
+      "command": [
+        "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+        "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "/tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa/apps/web/vitest.root.config.mts",
+        "tests/root-frozen-preparation-races.spec.ts",
+        "tests/root-additional-restore-races.spec.ts",
+        "tests/root-pending-slot-cas.spec.ts",
+        "tests/root-workbench-hint-only.spec.ts",
+        "tests/PlmCollaborationSnapshotsPanel.spec.ts",
+        "tests/PlmBomReviewWorkspaceView.spec.ts",
+        "--reporter=verbose",
+        "--reporter=junit",
+        "--outputFile.junit=/tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa/root-types-ui50.xml"
+      ],
+      "exit": 0,
+      "totals": {
+        "tests": 50,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log_sha256": "5ea144312bb0b00c6a6054467574098a1aac8c6ab3fd9e318ce43422aacfd573",
+      "XML_sha256": "20276534e16dea9c9e202e4d462e2d6faf623f5729826c0239566beef29b11c5",
+      "panel_sha256": "63a385e72b5d133b23c1cd29b5d6c1e0d4ef721abd29d4844818e119e0a07df4",
+      "limits": "Same unchanged 50 controls on the current type-only repaired component; separate from parent-head CI counts and HTTP/browser/install/hour."
+    },
+    "runtime_equivalence": {
+      "at": "2026-10-24T10:51:15.852Z",
+      "old_ref": "37516a0b3cd002c3d416e8f29f4415c2d2b539fc",
+      "old_source_sha256": "3f4287e3ae2f822d249ac26912671ed1933226d37697e41e91dad9f5b322373c",
+      "new_source_sha256": "63a385e72b5d133b23c1cd29b5d6c1e0d4ef721abd29d4844818e119e0a07df4",
+      "old_JS_sha256": "a710170226a9b1c478a3ed23efceadd15c0b3fadb334db6169a1beef174885be",
+      "new_JS_sha256": "a710170226a9b1c478a3ed23efceadd15c0b3fadb334db6169a1beef174885be",
+      "emitted_JS_equal": true,
+      "template_equal": true,
+      "styles_equal": true,
+      "ts": "5.8.3",
+      "vue": "3.5.24",
+      "limits": "Static emitted-script/template/style equivalence; does not replace browser, HTTP, or new exact-head CI."
+    },
+    "initial_equivalence_fixture_attempt": "Missing direct @vue/compiler-sfc link; no product code executed; corrected resolution through installed Vue dependency, no install",
+    "protected_paths": 14099,
+    "parent6531": {
+      "head": "37516a0b3cd002c3d416e8f29f4415c2d2b539fc",
+      "terminal": 22,
+      "success": 18,
+      "failure": 4,
+      "disposition": "3sameTS2322+knownprivatecheckouttoken; personalPGandUIstepsskippedaftertypes, uploadhadnofiles"
+    },
+    "Source_acceptance": "BOUNDED_TYPE_REPAIR_QUALIFIED; EXACT_NEW_HEAD_CI_REQUIRED; NOT_WHOLE_MASTER"
+  }
+}
