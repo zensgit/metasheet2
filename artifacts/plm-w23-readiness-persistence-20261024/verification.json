@@ -1,0 +1,558 @@
+{
+  "nonce": "1d1d9b85c1f04864b3e4488301c85270",
+  "cut": "E",
+  "amendment": "refresh kind from stored binding; failure retention rechecks selected-row, source, actor, and matched identity",
+  "repair": "initial Root reds: GET shape 422 before authorizeSheet and coordinate 409 after it; confirm preflight fieldAndLock or assertSourceFieldGrants before provider egress; stored-row acquireRecordLinkRowAuthLockOnQuery before loadRecordPermissionScopeMap through the stale update; ECO absent-tuple stale kept and readiness absent-tuple stays active on the same binding; full readinessSourceCells helper and exact kind-to-cells ternary",
+  "head": "6aea1f39b065a384c40420c0697226740bf263a9",
+  "branch": "codex/plm-w23-readiness-lifecycle-20261024",
+  "working_tree": "uncommitted edits on the nine scope paths; no commit, push, or CI cancel",
+  "parent_d_source": "b44f2475fbd03cc8633759e9f88e4b1705f79c60",
+  "parent_d_one": "6aea1f39b065a384c40420c0697226740bf263a9",
+  "e_source": "See single PLM_W23_READINESS_LIFECYCLE_CLOSEOUT_20261024.md; assigned after this receipt to avoid self-referential hashes",
+  "e_one": "Single closeout commit only; no additional evidence-only commit loop",
+  "base_head_unchanged": "6aea1f39b065a384c40420c0697226740bf263a9",
+  "parent_draft_pr": 6526,
+  "d_dependency": "Root PostgreSQL admission already passed. This worker did not re-run D. E SOURCE and E ONE were not created.",
+  "source_authority": "77a0bd2aa8444eff682947ec2e3975093f28e71c8b1281b22f8d485f59431c8f",
+  "decisions": {
+    "refresh_request": "Body is expectedVersion plus rowKey for both kinds. Extra sourceKind is strict-schema 422 ECO_REQUEST_INVALID before a transaction. Preview keeps explicit sourceKind.",
+    "refresh_kind": "After the locked binding read, kind is asKind(binding.source_kind). Width 4 or 5 is checked under that kind, then only that kind's wire helper, then binding coordinates, before the kind-specific capability statement, fenceWriterEntry, admit, and provider.",
+    "get_eco": "ECO get ignores req.query and keeps readStoredRow(null), which is ORDER BY record_id LIMIT 1.",
+    "get_readiness": "A malformed selector, including a repeated rowKey or an extra sourceKind, is 422 ECO_REQUEST_INVALID before authorizeSheet. authorizeSheet runs before the binding-coordinate comparison. A denied sheet is 403 FORBIDDEN for a matching five-tuple and for a valid foreign five-tuple, with provider 0. An authorized reader still receives the source-configuration anchor. Record ACL none hides the selected row and leaves the anchor. Absence of a selector returns row null and canRefresh false and does not call readStoredRow.",
+    "failure_retention": "Before the stale update, recheck the active actor, matched identity, and live source fingerprint. A stored selected row takes acquireRecordLinkRowAuthLockOnQuery before loadRecordPermissionScopeMap in the same transaction through the stale update. Record ACL none on that row does not stale. Readiness requires the selected tuple to be stored, so an absent second ruleset on the same binding stays active. An ECO append of a not-yet-stored eco tuple still stales the frozen collection when source, sheet, CAS, and frozen identity match. A stored ECO row still applies the optional ACL check. A later collection CAS advance or disable does not stale. 503 writes no empty row. The row-auth order is a unit query-order control.",
+    "confirm_preflight": "assertExplicitTarget, inside the preflight transaction and before provider egress, uses fieldAndLock(enforce true) for a stored selected tuple and assertSourceFieldGrants for a tuple that is not stored yet. The transaction commits before HTTP. Post-HTTP publication checks remain.",
+    "runtime": "After the ECO table probe, readiness runs a current_schema capability statement for four functions and two constraints. It does not use to_regclass. Failure is 503 READINESS_RUNTIME_UNAVAILABLE before adapter egress.",
+    "writes": "The one meta_records writer arm is the exact finite ternary from kind eco to sourceCells or readinessSourceCells. The richtext guard requires that unique full helper and that full ternary."
+  },
+  "initial_root_reds": {
+    "findings": "/tmp/plm-w23-readiness-lifecycle-initial-root-findings-20261024.json",
+    "packet": "/tmp/plm-w23-readiness-lifecycle-initial-root-packet-20261024.json",
+    "static_review": "/tmp/plm-w23-readiness-lifecycle-astra-review-20261024.json",
+    "security": {
+      "report": "/tmp/plm-w23-readiness-lifecycle-root-security-r1-20261024.json",
+      "log": "/tmp/plm-w23-readiness-lifecycle-root-security-r1-20261024.log",
+      "exit": 1,
+      "tests": "0 passed, 2 failed",
+      "probe_rerun": false
+    },
+    "guard": {
+      "report": "/tmp/plm-w23-readiness-lifecycle-root-guard-r1-20261024.json",
+      "log": "/tmp/plm-w23-readiness-lifecycle-root-guard-r1-20261024.log",
+      "exit": 1,
+      "tests": "1 passed, 2 failed",
+      "old_validator": "/tmp/plm-w23-readiness-lifecycle-root-guard-mutants-20261024.ts",
+      "old_validator_is_green": false
+    },
+    "postgresql": "Root R1 selected collections and Root R3 noop/business-delta/local/comment/history/CAS passed as two separate cases. R1 comment 42P08 and R2 timestamp format were private fixture corrections. This worker did not rerun them."
+  },
+  "static_disposition": {
+    "E-S1": "UNIT_REPAIRED_PROBE_NOT_RERUN. Shape 422 before authorizeSheet. Coordinate 409 after authorizeSheet. Denied sheet matching and valid foreign tuple are 403 with provider 0. Sheet-authorized readers still receive the source-configuration anchor.",
+    "E-S2": "UNIT_QUERY_ORDER_ONLY. acquireRecordLinkRowAuthLockOnQuery precedes loadRecordPermissionScopeMap for a stored selected row and stays in that transaction through the stale update. Source lock still precedes the binding lock. This is not a PostgreSQL interleaving proof.",
+    "E-S3": "UNIT_REPAIRED_ECO_PROBE_NOT_RUN. A not-yet-stored ECO tuple on token 401 still stales the frozen collection. An absent readiness ruleset on the same binding stays active. Two rulesets in one readiness binding are one binding.",
+    "E-S4": "UNIT_REPAIRED_NOT_PG. Preflight fieldAndLock or assertSourceFieldGrants runs before provider egress. Granted business-delta confirm is provider 1 with a meta_records update. Selected-row none, readiness read-only, hidden, concealed, and new-tuple read-only are provider 0.",
+    "richtext_false_green": "CLOSED_IN_CURRENT_VALIDATOR. Full unique readinessSourceCells helper and exact full ternary. Local cell before the loop and review_note in the readiness arm invalidate SAFE. The frozen old /tmp validator was not rerun and is not the green proof."
+  },
+  "accepted_tsc": {
+    "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+    "cwd": "packages/core-backend",
+    "exit": 0,
+    "log": "/tmp/plm-w23-readiness-lifecycle-e-amend-tsc-20261024.log",
+    "log_bytes": 0,
+    "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "when": "after the final route-test edit of the prior amendment"
+  },
+  "package_vitest": [
+    {
+      "cwd": "packages/core-backend",
+      "files": [
+        "tests/unit/plm-collaboration-snapshot-service.test.ts",
+        "tests/unit/plm-collaboration-snapshot-routes.test.ts",
+        "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts"
+      ],
+      "exit": 1,
+      "tests": "1 failed, 162 passed, 163 total",
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-amend-vitest-20261024.log",
+      "log_bytes": 38624,
+      "log_sha256": "66ab5826ca0544f4fd7516735cc15d8ea80f2b1c9cf1c3429845471bdef9196d",
+      "failure": "Route four-part refresh returned 503 because MULTITABLE_ENABLE_WRITER_FENCE was unset, so the service stopped before the stored-kind width check."
+    },
+    {
+      "cwd": "packages/core-backend",
+      "files": [
+        "tests/unit/plm-collaboration-snapshot-routes.test.ts"
+      ],
+      "exit": 0,
+      "tests": "14 passed",
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-amend-vitest-routes-20261024.log",
+      "log_bytes": 3283,
+      "log_sha256": "d3f682b790f90bacbe8597a3b5712db1bc26c36e16cfb873668991167baa3140",
+      "note": "Rerun after that test set the writer-fence flag. The other four files were not edited after the five-file run."
+    }
+  ],
+  "repair_tsc": [
+    {
+      "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+      "cwd": "packages/core-backend",
+      "exit": 0,
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-repair-tsc-20261024.log",
+      "log_bytes": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "note": "Intermediate typecheck before the selector split. Same empty-file digest as the other zero-byte logs. Not the final source."
+    },
+    {
+      "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+      "cwd": "packages/core-backend",
+      "exit": 0,
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-repair-tsc-r2-20261024.log",
+      "log_bytes": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "note": "Typecheck after the selector split. This is the tsc that matches the final TypeScript. The empty digest matches other zero-byte logs; the path distinguishes it."
+    }
+  ],
+  "repair_vitest": [
+    {
+      "cwd": "packages/core-backend",
+      "files": [
+        "tests/unit/plm-collaboration-snapshot-service.test.ts",
+        "tests/unit/plm-collaboration-snapshot-routes.test.ts",
+        "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts"
+      ],
+      "exit": 1,
+      "tests": "2 failed, 167 passed, 169 total",
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-repair-vitest-20261024.log",
+      "log_bytes": 40973,
+      "log_sha256": "70e9b01c57edff404c454e4f617d6d75ed6a16553f8b8111967a2f5ddfbafaf3",
+      "started_local": "13:59:24",
+      "duration_s": 53.49,
+      "failures": [
+        "routes: returns 422 or 409 for a readiness selector and does not read an arbitrary row. Repeated rowKey returned 503 because authorizeSheet ran before malformed-selector 422 on the narrow route pool.",
+        "service: checks selected-row and source-field authority before confirm provider egress. The fieldReadOnly harness returned ECO field ids and missed the readiness source fields."
+      ],
+      "passed_files_in_this_run": [
+        "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts"
+      ],
+      "note": "Separate from the amendment 1 failed / 162 passed / 163. Counts are not added."
+    },
+    {
+      "cwd": "packages/core-backend",
+      "files": [
+        "tests/unit/plm-collaboration-snapshot-service.test.ts"
+      ],
+      "exit": 1,
+      "tests": "1 failed, 38 skipped, 39 total",
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-repair-vitest-confirm-debug-20261024.log",
+      "log_bytes": 5195,
+      "log_sha256": "5726045412f78ae9a76e108c8efa7d97e455775778a01e1d2a09db98bf358950",
+      "note": "Debug instrumentation only. Not acceptance. Removed before the 53-passed run."
+    },
+    {
+      "cwd": "packages/core-backend",
+      "files": [
+        "tests/unit/plm-collaboration-snapshot-service.test.ts",
+        "tests/unit/plm-collaboration-snapshot-routes.test.ts"
+      ],
+      "exit": 0,
+      "tests": "53 passed",
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-repair-vitest-r2-20261024.log",
+      "log_bytes": 10573,
+      "log_sha256": "2c67664c6c2dfe80a412b20d4acbb679190f618b7ff505f8b523a4c40ea34891",
+      "started_local": "14:05:19",
+      "note": "Service and route files after the selector split and the readiness field-id harness fix. Not a five-file total. Not added to 167."
+    }
+  ],
+  "w13_historical_enoent": {
+    "when": "package rerun while .github/workflows/plugin-tests.yml was absent",
+    "cwd": "packages/core-backend",
+    "exit": 1,
+    "tests": "1 failed, 96 passed, 97 total",
+    "log": "/tmp/plm-w23-readiness-lifecycle-vitest-rerun-20261024.log",
+    "log_bytes": 23600,
+    "log_sha256": "c106ddb031d78ec858eebce2b5575b11d00c477e71efbff2d19377fc69a9ad50",
+    "failure": "wiring readFileSync ENOENT"
+  },
+  "w13_wiring_after_fixture": "Passed inside the amendment five-file run and again inside the repair five-file run. Those passing cohorts were not rerun afterward. The passes do not erase the historical ENOENT and do not qualify PostgreSQL.",
+  "extra_protected_baseline": {
+    "path": ".github/workflows/plugin-tests.yml",
+    "head": "6aea1f39b065a384c40420c0697226740bf263a9",
+    "bytes": 151540,
+    "sha256": "5d283f8e886bae27aa999bbe20513c459f1478f03eecd416c85d439aca310bb6",
+    "in_initial_5116_pins": false,
+    "materializing_actor": "UNKNOWN",
+    "materializing_command": "UNKNOWN",
+    "this_closeout": "no git, index, sparse, workflow-byte, or CI change"
+  },
+  "not_run": [
+    "NoactualNativeproviderHTTP/person-purpose-grantendtoend",
+    "NoactualnormalJWTbrowser/unifiedentry oractualinstallation",
+    "No current Ehead remoteCI or wholemasteracceptance",
+    "Minimalfixture caughtsubscriber42P01warning isretained; subscriptionengineunqualified",
+    "Historicalfailures and immutableevidence retained; no passedcohortcounts added"
+  ],
+  "qualification": "ROOT_LOCAL_ACCEPTED_CURRENT_HEAD_CI_PENDING_TRUE_HTTP_BROWSER_INSTALL_OPEN",
+  "outside_pins": 5116,
+  "outside_pin_mismatches": 0,
+  "outside_pin_missing": 0,
+  "outside_pin_note": "R2 comparison after the repair source edits, and R3 comparison after the route-fixture edit: each matched 5116, with 0 mismatch and 0 missing. Owner and binding maps agree. The nine scope paths are outside the map.",
+  "repair_outside_pins": {
+    "matched": 5116,
+    "mismatch": 0,
+    "missing": 0,
+    "owner_binding_value_mismatch": 0,
+    "nine_scope_paths_in_pin_map": false,
+    "free_bytes_at_comparison": 12147056640,
+    "r3_free_bytes_at_comparison": 11806613504
+  },
+  "free_bytes_before_checks": 12358377472,
+  "disk_floor_bytes": 4563402752,
+  "unchanged_in_this_repair": [
+    "packages/core-backend/src/routes/plm-collaboration-snapshots.ts",
+    "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+    "packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts"
+  ],
+  "r3_route_fixture": {
+    "defect": "R2 selectorPool returned an empty row set for every unknown statement and weakened the original negative fixture.",
+    "root_report": "/tmp/plm-w23-readiness-root-route-fixture-r2-20261024.json",
+    "root_log": "/tmp/plm-w23-readiness-root-route-fixture-r2-20261024.log",
+    "root_exit": 1,
+    "root_tests": "0 passed, 1 failed",
+    "root_failure": "SELECT root_fixture_unknown_query() resolved { rows: [], rowCount: 0 } instead of throwing.",
+    "private_probe": "/tmp/plm-w23-readiness-route-fixture-root-probe-20261024.ts",
+    "repair": "Keep the existing admitted selector statements. Add the twelve exact whitespace-normalized readonly authority statements the authorized foreign selector issues through authorizeSheet. Every other statement throws 'selector query continued past the refusal'. One permanent test requires that throw. Malformed and repeated selectors stay 422. The authorized foreign tuple stays 409 after role_id = $2.",
+    "product_source_edited": false,
+    "route_vitest": {
+      "cwd": "packages/core-backend",
+      "file": "tests/unit/plm-collaboration-snapshot-routes.test.ts",
+      "command": "node node_modules/vitest/vitest.mjs run tests/unit/plm-collaboration-snapshot-routes.test.ts --reporter=default",
+      "exit": 0,
+      "tests": "15 passed",
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-r3-routes-20261024.log",
+      "log_bytes": 735,
+      "log_sha256": "e991d2f192558f60525c7dfee95e610d63b7780f35093a6f139cde04de4ed21f",
+      "note": "The prior 14 route cases plus the unknown-statement test. Not added to the R2 2 failed / 167 passed / 169 or to the 53 passed."
+    },
+    "tsc": {
+      "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+      "cwd": "packages/core-backend",
+      "exit": 0,
+      "log": "/tmp/plm-w23-readiness-lifecycle-e-r3-tsc-20261024.log",
+      "log_bytes": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "note": "Package typecheck after the route-fixture edit. The empty digest matches other zero-byte logs; the path distinguishes this run."
+    }
+  },
+  "root_r2_actual_on_service_26a70904": {
+    "service_sha256": "26a70904d4345e32ede8c6884253518c97df3e6378b1fc44a853654cc92a42b0",
+    "review": "/tmp/plm-w23-readiness-lifecycle-r2-root-review-20261024.json",
+    "packet": "/tmp/plm-w23-readiness-lifecycle-r2-root-packet-20261024.json",
+    "security": "2 passed on this service. Separate from the initial 0 passed / 2 failed.",
+    "guard": "Current validator 3 passed, old negatives retained. Separate from the initial 1 passed / 2 failed.",
+    "eco_compat": "Baseline 6aea1f39b065a384c40420c0697226740bf263a9 passed 1. Initial 77a0bd2aa8444eff682947ec2e3975093f28e71c8b1281b22f8d485f59431c8f failed 1. This service passed 1. Same case.",
+    "registered_eco_pg": "7 passed, 0 skipped. Not a D rerun.",
+    "readiness_pg": "2 passed, 0 skipped.",
+    "row_auth_pg": "R1 failed because the fixture expected number 3 and the physical bigint value is the string 3. After that private expectation was corrected, initial 77a failed because the writer committed before the stale update. This service passed: the writer waited on the row-auth lock, blocker pid 70989, until the stale commit, then the writer committed.",
+    "limits": "Root PostgreSQL used a controlled Native provider. No current CI, source HTTP, browser, or install acceptance. This worker did not rerun the cases and did not use the owned PostgreSQL resource.",
+    "counts_are_separate": true
+  },
+  "r3_unchanged_scope_pins": {
+    "packages/core-backend/src/multitable/plm-collaboration-snapshot-service.ts": "26a70904d4345e32ede8c6884253518c97df3e6378b1fc44a853654cc92a42b0",
+    "packages/core-backend/src/routes/plm-collaboration-snapshots.ts": "1bab47a54e20d404aa526a48876c028587efaa4cfcfe3c0eea1a2580a3abbd9b",
+    "packages/core-backend/tests/unit/plm-collaboration-snapshot-service.test.ts": "d222efa810b03ba38b3188b038c6cf7467f8a8fad889709c85e6b29aea3a9dcd",
+    "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts": "f2a6cebf8cb853db95f7fb915abd8a720bf369745e6b9f81e7a3f0f404bcaade",
+    "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts": "37d1750a95cd20450ee91f4cfdb52dc7796fd9e888c8ce4cc018d4e1538bb273",
+    "packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts": "9d994c0437424e258dc0c325520a681d0d3705551a60fffada8727c44d44c2dc"
+  },
+  "author_qualification": "UNIT_ONLY_NOT_PG_HTTP_UI_INSTALL",
+  "author_not_run": [
+    "postgresql",
+    "sql_against_a_database",
+    "integration_test_collection",
+    "tsx",
+    "migration_import",
+    "product_server",
+    "docker",
+    "external_network",
+    "download",
+    "ui",
+    "install",
+    "source_http",
+    "moving_source_review",
+    "root_security_probe_rerun",
+    "frozen_old_guard_validator_rerun",
+    "root_eco_compat_probe"
+  ],
+  "root_final_acceptance": {
+    "at": "2026-10-24T06:43:08.852554+00:00",
+    "status": "ROOT_LOCAL_ACCEPTED_CURRENT_HEAD_CI_PENDING_TRUE_HTTP_BROWSER_INSTALL_OPEN",
+    "product_service_sha256": "26a70904d4345e32ede8c6884253518c97df3e6378b1fc44a853654cc92a42b0",
+    "code_and_test_pins": {
+      "packages/core-backend/src/multitable/plm-collaboration-snapshot-service.ts": "26a70904d4345e32ede8c6884253518c97df3e6378b1fc44a853654cc92a42b0",
+      "packages/core-backend/src/routes/plm-collaboration-snapshots.ts": "1bab47a54e20d404aa526a48876c028587efaa4cfcfe3c0eea1a2580a3abbd9b",
+      "packages/core-backend/tests/unit/plm-collaboration-snapshot-service.test.ts": "d222efa810b03ba38b3188b038c6cf7467f8a8fad889709c85e6b29aea3a9dcd",
+      "packages/core-backend/tests/unit/plm-collaboration-snapshot-routes.test.ts": "62e15ecdc1f219d30ce339e00d0b7dda66323a5cbd5686ac16a980e595e4bea5",
+      "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts": "f2a6cebf8cb853db95f7fb915abd8a720bf369745e6b9f81e7a3f0f404bcaade",
+      "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts": "37d1750a95cd20450ee91f4cfdb52dc7796fd9e888c8ce4cc018d4e1538bb273",
+      "packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts": "9d994c0437424e258dc0c325520a681d0d3705551a60fffada8727c44d44c2dc"
+    },
+    "full_five_units": {
+      "passed": 170,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "files": 5,
+      "typecheck_exit": 0,
+      "suites": [
+        {
+          "name": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+          "tests": "51",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0",
+          "time": "65.39"
+        },
+        {
+          "name": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+          "tests": "42",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0",
+          "time": "0.241"
+        },
+        {
+          "name": "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+          "tests": "23",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0",
+          "time": "0.957"
+        },
+        {
+          "name": "tests/unit/plm-collaboration-snapshot-routes.test.ts",
+          "tests": "15",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0",
+          "time": "0.065"
+        },
+        {
+          "name": "tests/unit/plm-collaboration-snapshot-service.test.ts",
+          "tests": "39",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0",
+          "time": "0.038"
+        }
+      ]
+    },
+    "separate_current_product_PG": {
+      "registered_ECO_cases": 7,
+      "Readiness_collection_noop_CAS_locals_comment_history_cases": 2,
+      "canonical_row_auth_order_cases": 1,
+      "failures_errors_skips": 0,
+      "no_overlap_total_with_parent_D51": true,
+      "native_provider": "CONTROLLED_TEST_BOUNDARY_ONLY",
+      "engine": "actualPostgreSQL16.15, actualcanonicaltransactionhelpers and RecordWriteService"
+    },
+    "independent_controls": "Original2securityRED→2GREEN; originalguard1PASS2FAIL→freshvalidator3PASS; ECOsameprobe6aea1PASS/initial77a1FAIL/current26a1PASS; actualPGroworderinitial77a1FAIL/current26a1PASS afterprivatebigintfixtureassertioncorrection.",
+    "fixture_baseline_disposition": "R2genericemptyanswerRoot1FAIL. GrokR3restoredfinite12authorityroster/defaultthrow; Rootthenreproducedtwoauthority-shaped unknowns stillaccepted byR2-addedbroadbranches. RootnarrowedONLYthose2answers to complete whitespace-normalizedSQL and permanent3unknownshapechecks; sameprivatecontrolnow1PASS. No productcodechangesafter26a.",
+    "cleanup": {
+      "nonce": "10c83578eaf9475a8c7ba22f186e7484",
+      "owned_database_dropped": true,
+      "catalog_baseline_restored": true,
+      "pg_ctl_status_exit": 3,
+      "actual_pid_absent": true,
+      "no_open_files": true,
+      "owned_cluster_runtime_copy_lock_removed": true,
+      "original_runtime_pins_unchanged": true,
+      "lifecycle_archive": "/tmp/plm-w23-eco-persistence-root-pg-20261024-lifecycle-10c83578eaf9475a8c7ba22f186e7484"
+    },
+    "references": [
+      {
+        "path": "/tmp/plm-w23-readiness-lifecycle-root-final-five-20261024.json",
+        "sha256": "56f13ce3db0a6a4bae29657c86399275ffa7562530585c140f120b4bcf67364d",
+        "exit": 0,
+        "counts": {
+          "passed": 170,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "19313477428907081267b55de3a7af56a2edadec8d4245b2a8353a26a1735aa3"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-security-green-20261024.json",
+        "sha256": "f69463da57717512053f2862958e4d6b7deebee251da615c863d37a8099a6364",
+        "exit": 0,
+        "counts": {
+          "passed": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "671a8dafd5bae8f8e88868609909e59bf9c37bb856ecfe6c8037e31e1ee151ff"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-guard-green-20261024.json",
+        "sha256": "44eceb02baf3cdcd9ffccc5830b2e9d227ddcbd9435fd2a4b9cc163c847de509",
+        "exit": 0,
+        "counts": {
+          "passed": 3,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "0404cdbc4532e20f27090953c609e04af487ddad805c227f16ae8aee3e7f7fae"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-eco-initial-20261024.json",
+        "sha256": "f8553d3568f46bd5370f9468ab32b00c097357b4c66ae90000dd7cde998e7de1",
+        "exit": 1,
+        "counts": {
+          "passed": 0,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "eba128c3adb7872cbf0ad3990a30bbe064ee29cc3420333c91f7e38c02122eca"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-eco-baseline-20261024.json",
+        "sha256": "9941843bf0c40236abfcf9efe178aa18b6663c22182aa33939f5e56a81391914",
+        "exit": 0,
+        "counts": {
+          "passed": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "99ab9ff8a34b2c5c57abe16c674535472058a8932878b19980f9bd7974b4ed9b"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-eco-green-20261024.json",
+        "sha256": "f1a53e190236e2623ec3ed97828f9a5cf54dbbf47b3f2d17fd0344b3e893e34c",
+        "exit": 0,
+        "counts": {
+          "passed": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "3cc204a404476c994ecb56ee62a4e39ad731ed62a726700f99541c0a76077231"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-pg-order-r2-initial-20261024.json",
+        "sha256": "6fea9f059adf1b977834e778151d61a803323663d026a704ba6d7dd8028539ac",
+        "exit": 1,
+        "counts": {
+          "passed": 0,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "d77887c6d25f32ad0f2940d37f20b50eb2d64d3c7e3e704ad511a2daea16b2f3"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-pg-order-r2-green-20261024.json",
+        "sha256": "0e213f2eb011eada4fe435fabf0bde433e8c77643d37ab9ddd3067e4e7f3774b",
+        "exit": 0,
+        "counts": {
+          "passed": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "41d0c41265e07a3083d3c39dde75f2ba23741b0f886872e5e74b9ab5a196e53e"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-pg-runtime-green-20261024.json",
+        "sha256": "7b8b2019a1898d876d9c56e134f3e3223061783ea1f73c27b41caaf95d51dc4d",
+        "exit": 0,
+        "counts": {
+          "passed": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "afb2c6775832007b7f3b72975a17f63d536187a042bd12ed00b5ecea6aeaba10"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-lifecycle-root-registered-eco7-r2-20261024.json",
+        "sha256": "0c01c10f09d5126872609525b2493bfa732bbc749c69512060fedde24706f6ad",
+        "exit": 0,
+        "counts": {
+          "passed": 7,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "1465f1bac67d79e99442a3800c928a3b3173aed21338c4c96b144dc1b1c06901"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-route-fixture-r2-20261024.json",
+        "sha256": "f5b2b1848c64c33d4a4cd2a069c88187afe78a01c55a980b5c75fe2779c809b0",
+        "exit": 1,
+        "counts": {
+          "passed": 0,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "a1cbf5bdb677e0783dbb5210f9819fec27bc28775552ec639b10fb786ff7b8de"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-route-fixture-alt-red-20261024.json",
+        "sha256": "b97cc1a2d0460561dc6195782f64f6b2171a3f4f1811e5e173db17ee749f5f9d",
+        "exit": 1,
+        "counts": {
+          "passed": 0,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "d86c3d3164058b33443fe9c9ccb66be3353413d49cb6181b76b94c25fea87f5f"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-root-route-fixture-alt-green-20261024.json",
+        "sha256": "d6877417cfc18253819c3b92b47700c17de226b3c1b887726a67aeb8833a7168",
+        "exit": 0,
+        "counts": {
+          "passed": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "5d02478c7aef9ea8de9af18748b8c033e943d36e423ac6770016c66903f979dd"
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-service-root-final-owned-database-cleanup-20261024.json",
+        "sha256": "8e503d606ef34483894ed9f64fc6ba337af9d2ebd400a6c2caa0c41a49039b82",
+        "exit": null,
+        "counts": null,
+        "log_sha256": null
+      },
+      {
+        "path": "/tmp/plm-w23-readiness-lifecycle-guard-ci-wiring-20261024.json",
+        "sha256": "5f2e38731c894bfa87d3f34bf63b709e1b2398e0a7293d3d69877d3b99e8a03f",
+        "exit": null,
+        "counts": null,
+        "log_sha256": null
+      }
+    ],
+    "private_packets": [
+      "/tmp/plm-w23-readiness-lifecycle-initial-root-packet-20261024.json",
+      "/tmp/plm-w23-readiness-lifecycle-r2-root-packet-20261024.json"
+    ],
+    "limits": [
+      "NoactualNativeproviderHTTP/person-purpose-grantendtoend",
+      "NoactualnormalJWTbrowser/unifiedentry oractualinstallation",
+      "No current Ehead remoteCI or wholemasteracceptance",
+      "Minimalfixture caughtsubscriber42P01warning isretained; subscriptionengineunqualified",
+      "Historicalfailures and immutableevidence retained; no passedcohortcounts added"
+    ]
+  }
+}

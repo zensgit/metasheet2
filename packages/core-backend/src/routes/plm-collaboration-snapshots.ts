@@ -8,6 +8,7 @@ import {
   type EcoCollaborationSnapshotDependencies,
 } from '../multitable/plm-collaboration-snapshot-service'
 import { EcoCollaborationSourceError } from '../multitable/plm-collaboration-snapshot-wire'
+import { ReadinessCollaborationSourceError } from '../multitable/plm-collaboration-readiness-wire'
 
 export function createPlmCollaborationSnapshotsRouter(deps: EcoCollaborationSnapshotDependencies): Router {
   const router = Router()
@@ -52,7 +53,7 @@ export function createPlmCollaborationSnapshotsRouter(deps: EcoCollaborationSnap
   })
   router.get('/:id', async (req, res, next) => {
     try {
-      res.json({ ok: true, data: await service.get(actorOf(req), String(req.params.id)) })
+      res.json({ ok: true, data: await service.get(actorOf(req), String(req.params.id), req.query) })
     } catch (error) {
       next(error)
     }
@@ -78,7 +79,9 @@ export function createPlmCollaborationSnapshotsRouter(deps: EcoCollaborationSnap
     _next: NextFunction,
   ) => {
     res.setHeader('Cache-Control', 'no-store')
-    const known = error instanceof EcoCollaborationSnapshotError || error instanceof EcoCollaborationSourceError
+    const known = error instanceof EcoCollaborationSnapshotError
+      || error instanceof EcoCollaborationSourceError
+      || error instanceof ReadinessCollaborationSourceError
     res.status(known ? error.status : error instanceof ZodError ? 422 : 503).json({
       ok: false,
       error: {
