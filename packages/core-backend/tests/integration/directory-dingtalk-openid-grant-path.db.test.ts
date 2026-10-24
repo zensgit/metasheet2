@@ -11,8 +11,9 @@
  *     member row of the same corp+union, and nobody else's;
  *  4. a re-bind keeps the identity's openId for the same person and clears it for a different one.
  *  5. field item 3: a corp-less (R66-R70) identity backfills the openId into its single linked,
- *     active, same-unionId directory account, never touching the identity row; user management's
- *     「缺 OpenID」 badge reads the directory page's predicate for such an identity.
+ *     active, same-unionId directory account, never touching the identity row; a failing lookup
+ *     stays inside the backfill savepoint; user management's 「缺 OpenID」 keeps its R72 meaning, so
+ *     such a member is never a 「批量关闭缺 OpenID 钉钉扫码」 candidate.
  *
  * The DingTalk HTTP client is mocked; nothing here talks to DingTalk. Section 5 points the mocks
  * back at the real client and answers its HTTP calls from a stubbed global fetch.
@@ -505,19 +506,37 @@ describeIfDb('field item 3: a corp-less DingTalk identity backfills its linked d
       }
     }
 
-    /** User management list row: the 「缺 OpenID」 badge and the openid-missing filter read this flag. */
-    async function userManagementBadge(userId: string): Promise<boolean | null> {
+    async function userManagementRow(userId: string): Promise<Record<string, unknown> | null> {
       const list = await api('GET', `/api/admin/users?q=${encodeURIComponent(userId)}&page=1&pageSize=20`)
       expect(list.status).toBe(200)
-      const row = (list.json?.data?.items ?? []).find((entry: { id?: string }) => entry?.id === userId)
+      return (list.json?.data?.items ?? []).find((entry: { id?: string }) => entry?.id === userId) ?? null
+    }
+
+    /** User management list row: the 「缺 OpenID」 badge and the openid-missing filter read this flag. */
+    async function userManagementBadge(userId: string): Promise<boolean | null> {
+      const row = await userManagementRow(userId)
       return row ? Boolean(row.dingtalkOpenIdMissing) : null
     }
 
-    function captureWarnings(): () => string[] {
-      const lines: string[] = []
+    /** The web's 「批量关闭缺 OpenID 钉钉扫码」 candidates (screeningUsersMissingOpenIdWithGrant). */
+    async function isBulkCloseCandidate(userId: string): Promise<boolean | null> {
+      const row = await userManagementRow(userId)
+      return row ? row.dingtalkOpenIdMissing === true && row.dingtalkLoginEnabled === true : null
+    }
+
+    function grantFromUserManagement(m: Member) {
+      return api('PATCH', `/api/admin/users/${encodeURIComponent(m.userId)}/dingtalk-grant`, { enabled: true })
+    }
+
+    /** warn/error lines, with the text of the error handed to the logger (where values could leak). */
+    function captureWarnings(): () => Array<{ message: string; text: string }> {
+      const lines: Array<{ message: string; text: string }> = []
       const spies = (['warn', 'error'] as const).map((level) =>
-        vi.spyOn(Logger.prototype, level).mockImplementation(((message: unknown) => {
-          lines.push(String(message))
+        vi.spyOn(Logger.prototype, level).mockImplementation(((message: unknown, error?: unknown) => {
+          const detail = error instanceof Error
+            ? [error.message, (error as Error & { detail?: unknown }).detail].map((part) => String(part ?? '')).join(' ')
+            : String(error ?? '')
+          lines.push({ message: String(message), text: `${String(message)} ${detail}` })
         }) as never))
       return () => {
         for (const spy of spies) spy.mockRestore()
@@ -574,20 +593,21 @@ describeIfDb('field item 3: a corp-less DingTalk identity backfills its linked d
       await q(`DELETE FROM users WHERE id = ANY($1::text[])`, [localUserIds]).catch(() => {})
     })
 
-    it('D1: with DINGTALK_CORP_ID unset one scan backfills the linked directory openId; both pages clear, directory grant 200, the next login 200; the identity row is untouched', async () => {
+    it('D1: with DINGTALK_CORP_ID unset one scan backfills the linked directory openId; the directory page clears, directory grant 200, the next login 200; the identity row is untouched', async () => {
       const m = await seedShapeDMember('d1')
       const legacyIdentity = await identityRowOf(m.userId)
       expect(legacyIdentity).toEqual({
         corp_id: null, external_key: m.unionId, provider_union_id: m.unionId, provider_open_id: m.openId,
       })
-      // before: the directory page says 缺 openId, and user management now says so too
+      // before: the directory page says 缺 openId; user management keeps its R72 meaning (no badge
+      // for a corp-less identity), so it never offers this member to the 缺 OpenID bulk close
       await expect(directoryView(m.accountId)).resolves.toEqual({ grantOpenIdAvailable: false, missingOpenIdChip: true })
-      await expect(userManagementBadge(m.userId)).resolves.toBe(true)
+      await expect(userManagementBadge(m.userId)).resolves.toBe(false)
 
       setEnv({ corp: null })
       await expect(scan(m)).resolves.toEqual({ status: 200, userId: m.userId })
 
-      // 刷新当前成员: the directory row learned the openId, both pages clear
+      // 刷新当前成员: the directory row learned the openId and the directory page clears
       await expect(accountOpenIdOf(m.accountId)).resolves.toBe(m.openId)
       await expect(directoryView(m.accountId)).resolves.toEqual({ grantOpenIdAvailable: true, missingOpenIdChip: false })
       await expect(userManagementBadge(m.userId)).resolves.toBe(false)
@@ -629,7 +649,7 @@ describeIfDb('field item 3: a corp-less DingTalk identity backfills its linked d
     it('refused-login enrichment (REQUIRE_GRANT, no grant yet): the 403 scan backfills under the same rule, then directory grant 200 and login 200', async () => {
       const m = await seedShapeDMember('d1g')
       const legacyIdentity = await identityRowOf(m.userId)
-      await expect(userManagementBadge(m.userId)).resolves.toBe(true)
+      await expect(userManagementBadge(m.userId)).resolves.toBe(false)
 
       setEnv({ corp: null, requireGrant: true })
       await expect(scan(m)).resolves.toEqual({ status: 403, userId: null })
@@ -659,16 +679,20 @@ describeIfDb('field item 3: a corp-less DingTalk identity backfills its linked d
       await expect(accountOpenIdOf(m.accountId)).resolves.toBe(m.openId)
     })
 
-    it('user management 开通 keeps its current behaviour for a shape-D member (no new refusal; the badge is display only)', async () => {
+    it('granted from user management (the path the old directory 400 suggested): no new refusal, never a 批量关闭缺 OpenID candidate, and the member keeps signing in', async () => {
       const m = await seedShapeDMember('um-grant')
-      await expect(userManagementBadge(m.userId)).resolves.toBe(true)
-      const grant = await api('PATCH', `/api/admin/users/${encodeURIComponent(m.userId)}/dingtalk-grant`, { enabled: true })
+      const grant = await grantFromUserManagement(m)
       expect(grant.status).toBe(200)
       await expect(grantEnabledOf(m.userId)).resolves.toBe(true)
+      // 缺 OpenID keeps its R72 meaning: a corp-less identity is not flagged, so one click on
+      // 「批量关闭缺 OpenID 钉钉扫码」 cannot disable this member's working login
+      await expect(userManagementBadge(m.userId)).resolves.toBe(false)
+      await expect(isBulkCloseCandidate(m.userId)).resolves.toBe(false)
 
       setEnv({ corp: null })
       await expect(scan(m)).resolves.toEqual({ status: 200, userId: m.userId })
-      await expect(userManagementBadge(m.userId)).resolves.toBe(false)
+      await expect(accountOpenIdOf(m.accountId)).resolves.toBe(m.openId)
+      await expect(isBulkCloseCandidate(m.userId)).resolves.toBe(false)
     })
 
     it('AMB: two linked directory accounts carry the scanned unionId (two corps): no corp is picked, nothing is backfilled, the login still works and nothing is logged', async () => {
@@ -681,11 +705,12 @@ describeIfDb('field item 3: a corp-less DingTalk identity backfills its linked d
          VALUES ($1::uuid, $2, 'linked', 'manual_admin', NOW(), NOW())`,
         [secondAccountId, m.userId],
       )
+      expect((await grantFromUserManagement(m)).status).toBe(200)
       const legacyIdentity = await identityRowOf(m.userId)
 
       setEnv({ corp: null })
       const stopCapture = captureWarnings()
-      let warnings: string[] = []
+      let warnings: Array<{ message: string; text: string }> = []
       let result: { status: number; userId: string | null } | null = null
       try {
         result = await scan(m)
@@ -696,7 +721,9 @@ describeIfDb('field item 3: a corp-less DingTalk identity backfills its linked d
       await expect(accountOpenIdOf(m.accountId)).resolves.toBeNull()
       await expect(accountOpenIdOf(secondAccountId)).resolves.toBeNull()
       await expect(identityRowOf(m.userId)).resolves.toEqual(legacyIdentity)
-      await expect(userManagementBadge(m.userId)).resolves.toBe(true)
+      // a rescan cannot clear this member, so it must never sit in the bulk-close candidates
+      await expect(userManagementBadge(m.userId)).resolves.toBe(false)
+      await expect(isBulkCloseCandidate(m.userId)).resolves.toBe(false)
       expect(warnings).toEqual([])
     })
 
@@ -739,12 +766,77 @@ describeIfDb('field item 3: a corp-less DingTalk identity backfills its linked d
     it('the single linked account is inactive (the member left the directory): nothing is backfilled', async () => {
       const m = await seedShapeDMember('inactive')
       await q(`UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid`, [m.accountId])
+      expect((await grantFromUserManagement(m)).status).toBe(200)
       const legacyIdentity = await identityRowOf(m.userId)
 
       setEnv({ corp: null })
       await expect(scan(m)).resolves.toEqual({ status: 200, userId: m.userId })
       await expect(accountOpenIdOf(m.accountId)).resolves.toBeNull()
       await expect(identityRowOf(m.userId)).resolves.toEqual(legacyIdentity)
+      await expect(isBulkCloseCandidate(m.userId)).resolves.toBe(false)
+    })
+
+    it('the only link is pending (not linked): nothing is backfilled', async () => {
+      const m = await seedShapeDMember('pending-link')
+      await q(`UPDATE directory_account_links SET link_status = 'pending' WHERE directory_account_id = $1::uuid`, [m.accountId])
+
+      setEnv({ corp: null })
+      await expect(scan(m)).resolves.toEqual({ status: 200, userId: m.userId })
+      await expect(accountOpenIdOf(m.accountId)).resolves.toBeNull()
+    })
+
+    it('a linked account of another provider does not count: the single DingTalk link still backfills', async () => {
+      const m = await seedShapeDMember('other-provider')
+      const otherProviderIntegrationId = (await q(
+        `INSERT INTO directory_integrations (org_id, provider, name, status, corp_id)
+         VALUES ($1, 'wecom', $2, 'active', $3) RETURNING id::text AS id`,
+        [ORG, `${ITEM3}-other-provider`, SECOND_CORP],
+      )).rows[0].id as string
+      integrationIds.push(otherProviderIntegrationId)
+      const otherProviderAccountId = (await q(
+        `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, external_key, name, is_active)
+         VALUES ($1::uuid, 'wecom', $2, $3, $4, $4, 'Synthetic member', TRUE) RETURNING id::text AS id`,
+        [otherProviderIntegrationId, SECOND_CORP, `emp_${ITEM3}_other_provider`, m.unionId],
+      )).rows[0].id as string
+      await q(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at)
+         VALUES ($1::uuid, $2, 'linked', 'manual_admin', NOW(), NOW())`,
+        [otherProviderAccountId, m.userId],
+      )
+
+      setEnv({ corp: null })
+      await expect(scan(m)).resolves.toEqual({ status: 200, userId: m.userId })
+      await expect(accountOpenIdOf(m.accountId)).resolves.toBe(m.openId)
+      await expect(accountOpenIdOf(otherProviderAccountId)).resolves.toBeNull()
+    })
+
+    it('a failing corp lookup stays inside the backfill savepoint: login 200, nothing backfilled, one values-free warning', async () => {
+      const m = await seedShapeDMember('lookup-fails')
+      const legacyIdentity = await identityRowOf(m.userId)
+      setEnv({ corp: null })
+      // The lookup filters on link_status: renaming that column for exactly one scan makes the
+      // lookup statement fail inside the savepoint. Restored in finally before anything else runs.
+      await q('ALTER TABLE directory_account_links RENAME COLUMN link_status TO link_status_item3_probe')
+      const stopCapture = captureWarnings()
+      let warnings: Array<{ message: string; text: string }> = []
+      let result: { status: number; userId: string | null } | null = null
+      try {
+        result = await scan(m)
+      } finally {
+        warnings = stopCapture()
+        await q('ALTER TABLE directory_account_links RENAME COLUMN link_status_item3_probe TO link_status')
+      }
+      expect(result).toEqual({ status: 200, userId: m.userId })
+      await expect(accountOpenIdOf(m.accountId)).resolves.toBeNull()
+      await expect(identityRowOf(m.userId)).resolves.toEqual(legacyIdentity)
+      expect(warnings.map((line) => line.message)).toEqual(['DingTalk directory openId backfill failed; login continues'])
+      for (const value of [m.unionId, m.openId, m.userId, m.email]) {
+        expect(warnings.some((line) => line.text.includes(value))).toBe(false)
+      }
+
+      // with the column back, the next scan backfills as usual
+      await expect(scan(m)).resolves.toEqual({ status: 200, userId: m.userId })
+      await expect(accountOpenIdOf(m.accountId)).resolves.toBe(m.openId)
     })
 
     it('#6487 ambiguity is untouched: another local user holding the same person as a corp-less identity makes the scan 409 and nothing changes', async () => {

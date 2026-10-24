@@ -68,10 +68,6 @@ import {
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { readOrgMembershipHistory } from '../directory/org-membership-history'
 import {
-  buildDirectoryAccountLinkedIdentityOpenIdSql,
-  canDirectoryAccountEnableDingTalkGrant,
-} from '../directory/dingtalk-grant-open-id'
-import {
   classifyRecoveryConflict,
   RECOVERY_CONFLICT_HTTP_CODE,
   RECOVERY_CONFLICT_HTTP_MESSAGE,
@@ -915,37 +911,6 @@ async function fetchAdminUserListSignals(userIds: string[]): Promise<Map<string,
   const directoryMap = new Map(directoryResult.rows.map((row) => [row.user_id, row.last_directory_sync_at ?? null]))
   const identityMap = new Map(identityResult.rows.map((row) => [row.local_user_id, row]))
 
-  // Field item 3: a corp-less (legacy) identity is not judged by the rule below, so read the
-  // directory page's own predicate on its linked DingTalk accounts. Display only: the user
-  // management grant (assertUsersCanEnableDingTalkGrant) deliberately keeps its current behaviour.
-  const corpLessIdentityUserIds = userIds.filter((userId) => {
-    const identity = identityMap.get(userId)
-    return Boolean(identity) && !identity?.corp_id
-  })
-  const directoryOpenIdMissingUserIds = new Set<string>()
-  if (corpLessIdentityUserIds.length > 0) {
-    const linkedAccounts = await query<{
-      user_id: string
-      corp_id: string | null
-      open_id: string | null
-      linked_identity_open_id: string | null
-    }>(
-      `SELECT l.local_user_id AS user_id,
-              a.corp_id,
-              a.open_id,
-              ${buildDirectoryAccountLinkedIdentityOpenIdSql('a')} AS linked_identity_open_id
-       FROM directory_account_links l
-       JOIN directory_accounts a ON a.id = l.directory_account_id
-       WHERE l.link_status = 'linked'
-         AND a.provider = $1
-         AND l.local_user_id = ANY($2::text[])`,
-      [DINGTALK_PROVIDER, corpLessIdentityUserIds],
-    )
-    for (const row of linkedAccounts.rows) {
-      if (!canDirectoryAccountEnableDingTalkGrant(row)) directoryOpenIdMissingUserIds.add(row.user_id)
-    }
-  }
-
   for (const userId of userIds) {
     const grant = grantMap.get(userId)
     const identity = identityMap.get(userId)
@@ -960,7 +925,7 @@ async function fetchAdminUserListSignals(userIds: string[]): Promise<Map<string,
       dingtalkIdentityExists: Boolean(identity),
       dingtalkHasUnionId: hasUnionId,
       dingtalkHasOpenId: hasOpenId,
-      dingtalkOpenIdMissing: Boolean(identity && corpId && !hasOpenId) || directoryOpenIdMissingUserIds.has(userId),
+      dingtalkOpenIdMissing: Boolean(identity && corpId && !hasOpenId),
       dingtalkCorpId: corpId,
       lastDirectorySyncAt: directoryMap.get(userId) ?? null,
     })

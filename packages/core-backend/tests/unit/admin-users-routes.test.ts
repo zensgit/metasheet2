@@ -400,64 +400,6 @@ describe('admin-users routes', () => {
     })
   })
 
-  it('flags 缺 OpenID for a corp-less DingTalk identity whose linked corp directory account still lacks an openId (field item 3)', async () => {
-    rbacMocks.isAdmin.mockResolvedValue(true)
-    const listedUser = (id: string) => ({
-      id,
-      email: `${id}@example.com`,
-      name: id,
-      mobile: null,
-      role: 'user',
-      is_active: true,
-      is_admin: false,
-      last_login_at: null,
-      created_at: '2026-03-12T00:00:00.000Z',
-      updated_at: '2026-03-12T00:00:00.000Z',
-    })
-    const corpLessIdentity = (userId: string) => ({
-      local_user_id: userId,
-      corp_id: null,
-      provider_union_id: `union-${userId}`,
-      provider_open_id: `open-${userId}`,
-      last_login_at: '2026-03-13T00:00:00.000Z',
-      created_at: '2026-03-12T00:00:00.000Z',
-      updated_at: '2026-03-13T00:00:00.000Z',
-    })
-    pgMocks.query
-      .mockResolvedValueOnce({ rows: [{ c: 2 }] })
-      .mockResolvedValueOnce({ rows: [listedUser('user-legacy'), listedUser('user-cleared')] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
-        rows: [
-          { user_id: 'user-legacy', last_directory_sync_at: '2026-03-13T00:00:00.000Z' },
-          { user_id: 'user-cleared', last_directory_sync_at: '2026-03-13T00:00:00.000Z' },
-        ],
-      })
-      .mockResolvedValueOnce({ rows: [corpLessIdentity('user-legacy'), corpLessIdentity('user-cleared')] })
-      .mockResolvedValueOnce({
-        rows: [
-          { user_id: 'user-legacy', corp_id: 'ding-corp', open_id: null, linked_identity_open_id: null },
-          { user_id: 'user-cleared', corp_id: 'ding-corp', open_id: 'open-user-cleared', linked_identity_open_id: null },
-        ],
-      })
-
-    const response = await invokeRoute('get', '/api/admin/users')
-
-    expect(response.statusCode).toBe(200)
-    const items = (response.body as Record<string, any>).data.items as Array<Record<string, unknown>>
-    expect(items.find((row) => row.id === 'user-legacy')).toMatchObject({
-      dingtalkHasOpenId: true,
-      dingtalkCorpId: null,
-      dingtalkOpenIdMissing: true,
-    })
-    expect(items.find((row) => row.id === 'user-cleared')).toMatchObject({ dingtalkOpenIdMissing: false })
-    // the directory page's own predicate inputs, for linked DingTalk accounts of corp-less identities only
-    const [linkedSql, linkedParams] = pgMocks.query.mock.calls[5] as [string, unknown[]]
-    expect(linkedSql).toContain('AS linked_identity_open_id')
-    expect(linkedSql).toContain('identity.corp_id = a.corp_id')
-    expect(linkedParams).toEqual(['dingtalk', ['user-legacy', 'user-cleared']])
-  })
-
   it('pins a deep-linked user when the row is outside the paginated window', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
