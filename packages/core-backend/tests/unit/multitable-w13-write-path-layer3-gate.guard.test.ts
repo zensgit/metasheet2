@@ -1119,6 +1119,7 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
    */
   test('chokepoint: the set of files writing meta_records directly (raw INSERT/UPDATE/MERGE SQL or a kysely builder) is frozen (a new write spine outside the three surfaces trips red)', () => {
     const RAW_META_RECORDS_SQL_WRITERS: Record<string, string> = {
+      'multitable/plm-collaboration-snapshot-service.ts': 'OUT OF SCOPE of the three native surfaces: fixed eleven string/null ECO source cells only, readOnly string fields and immutable 11+3 maps protected by DB field/binding/sync/record guards. Fresh sheet/row/field authority and record lock share the canonical fenced query; nonnull mint, canonical revision/history and successful seal share the transaction, and success awaits commit. Source sync cannot patch locals; arbitrary local longText stays on canonical CRUD.',
       'multitable/plm-record-ingress-service.ts': 'OUT OF SCOPE of the native surfaces: fixed token/source binding, fresh sheet/row/field authority and common record-lock guard precede the four text cells, fenced revisions/audit and durable events in one transaction.',
       'multitable/plm-bom-review-service.ts': 'OUT OF SCOPE of the three native surfaces: owner-authorized source snapshot sync; sheet/row/field permission checks, common record-lock rule and revisions run in its fenced transaction. Writes only immutable string source fields.',
       // ── IN SCOPE of this lock: these ARE the three write surfaces ────────────────────────────────

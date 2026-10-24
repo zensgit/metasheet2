@@ -1,0 +1,794 @@
+{
+  "at": "2026-10-23T23:53:53.310265+00:00",
+  "nonce": "9b3703537e3f4d7a9442ce630fe10541",
+  "actor": "CODEX_SOL61_HIGH_FALLBACK_GROK_PROVIDER500",
+  "tree": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+  "base": "b7581fcf393bbafde767297d780e24bcce4905b5",
+  "branch": "codex/plm-w23-eco-ingress-ci-20261024",
+  "scope": [
+    "packages/core-backend/src/multitable/plm-collaboration-snapshot-service.ts",
+    "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+    "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+    "packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+    "docs/development/PLM_W23_ECO_INGRESS_CI_GUARDS_20261024.md",
+    "artifacts/plm-w23-eco-ingress-ci-20261024/verification.json"
+  ],
+  "prior_grok_unavailable": {
+    "at": "2026-10-23T23:43:05.333065+00:00",
+    "nonce": "4ad8bee06fe040a0a2318e0bfd080fbd",
+    "actual_model": "Grok4.7(xhigh)",
+    "actual": "RepeatedproviderServererror500attempts5then4afterwaitingover6minutes; noimplementation/no sourcewrites. Rootsend--interruptactualidle/doneverified. NotGrokRELEASED.",
+    "source33pins_unchanged": true,
+    "new4files_absent": true,
+    "published_base": "b7581fcf393bbafde767297d780e24bcce4905b5",
+    "session_idle_preserved": "gbt-d5a9-1a169a37722-bd",
+    "root_disposition": "Readonlyreadinesswireplan/technicalfreezepreservedfornextauthorizeddevelopment. Prioritizeactual9guardCIrepairahead; nouserdecisionneeded."
+  },
+  "source_pins": {
+    "packages/core-backend/src/multitable/plm-collaboration-snapshot-service.ts": {
+      "before": "1293269d83ef7b89478208fa1b96f362f05df648d9394d137a4c0beb957301d1",
+      "after": "b76af548aa185d9bd83147023da06dd5f8a7b20d94a603bf7a34ad09ee6163c7"
+    },
+    "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts": {
+      "before": "bdf6bffbbbd415b8e281422e4a3e6c1bf6b7a52240029973371909ee57a41dd6",
+      "after": "35fe75f5e3249a1cb1682078b26022539e99e83dfafbbe8328e8a08d3379869a"
+    },
+    "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts": {
+      "before": "d7bb02579ed40ae1d60ded183bd614ce4fedb44db283b051ac2bf291804a748c",
+      "after": "cf2055e7d2aac8cb41aa6d7e83cac558fc8611f02a5647a69b1dfea6d7186721"
+    },
+    "packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts": {
+      "before": "798dc7ca78ca2aae3f8f608e3630bcac1561881d5f11e8b1c4b218f41fe3fa82",
+      "after": "4115a09d1419ffd2aff656315336963e6e49d040636d672d0418200e50d02729"
+    }
+  },
+  "production_normalization": {
+    "substitution": "appendEcoSnapshot -> append",
+    "occurrences": 2,
+    "byte_identical_to_base": true,
+    "normalized_sha256": "1293269d83ef7b89478208fa1b96f362f05df648d9394d137a4c0beb957301d1"
+  },
+  "actual_census": {
+    "keys": {
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: appendEcoSnapshot": {
+        "count": 1,
+        "writesVia": [],
+        "entryWritesVia": [
+          "EcoCollaborationSnapshotService.appendEcoSnapshot>EcoCollaborationSnapshotService.publishRow"
+        ]
+      },
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: assertExplicitTarget": {
+        "count": 1,
+        "writesVia": [],
+        "entryWritesVia": []
+      },
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: provision": {
+        "count": 1,
+        "writesVia": [],
+        "entryWritesVia": [
+          "EcoCollaborationSnapshotService.provision>EcoCollaborationSnapshotService.publishRow"
+        ]
+      },
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.disable :: fenceWriterEntry": {
+        "count": 1,
+        "writesVia": [],
+        "entryWritesVia": []
+      },
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.refresh :: loadRefresh": {
+        "count": 3,
+        "writesVia": [
+          "EcoCollaborationSnapshotService.writeSource"
+        ],
+        "entryWritesVia": []
+      },
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.retainProviderFailure :: fenceWriterEntry": {
+        "count": 1,
+        "writesVia": [],
+        "entryWritesVia": []
+      }
+    },
+    "distinct_keys": 6,
+    "physical_sites": 8,
+    "c2_keys": [
+      "multitable/plm-bom-review-service.ts :: PlmBomReviewService.create :: publishSnapshot",
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: appendEcoSnapshot",
+      "multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: provision",
+      "multitable/recovery-archive-restore-worker.ts :: executeChunk :: executeRecoveryArchiveAsyncRestoreChunk",
+      "services/plm-managed-snapshot-share-flow.ts :: PlmManagedSnapshotShareFlow.complete :: publishConsentedSnapshotOnQuery"
+    ],
+    "c2_count": 5,
+    "url_holder_keys": [],
+    "analyzer_source_unchanged": true,
+    "output": "/tmp/plm-meta-eco-ingress-ci-sol-census-20261024.json",
+    "output_sha256": "1062ba71aaa5761129dfc8b4f641789fd8534a0f83cac7919be79d0ea5a61a88"
+  },
+  "historical_root_red": {
+    "at": "2026-10-23T23:44:38.980670+00:00",
+    "exit": 1,
+    "argv": [
+      "node",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "--config",
+      "vitest.plm-ingress.root-red-20261024.config.ts",
+      "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+      "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+      "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+      "-t",
+      "every holder is classified|writes made inside the BODY|a NEW fence holder is derived|C1-F1: a NEW function named|C1-F1: an object-literal port|W1a \\(REAL tree\\)|W1c \\(REAL tree\\)|every meta_records.data writer file|chokepoint: the set of files writing meta_records directly",
+      "--reporter=default",
+      "--reporter=junit",
+      "--outputFile=/tmp/plm-meta6518-ingress-root-red-20261024.xml",
+      "--maxWorkers=1",
+      "--minWorkers=1"
+    ],
+    "root": "/private/tmp/plm-meta-ingress-root-red-2s6x3x4p",
+    "log": "/tmp/plm-meta6518-ingress-root-red-20261024.log",
+    "sha256": "edc6629edfe34399f30e031a5e4f93ed9d97647753cb0f47d7567c8c2ad386b2",
+    "status": "ACTUAL_ROOT_SELECTED_9_RED_ATTEMPT_NO_BUSINESS_BYPASS_INFERRED"
+  },
+  "frozen_root_packet": {
+    "at": "2026-10-23T23:46:29.306267+00:00",
+    "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta6518-ingress-nine-root-red-and-safety-audit-20261024",
+    "manifest_sha256": "57bef67bb91a907ad1eff30e730e3aa31595c89116be793f09e8b7471aaa25ec",
+    "files": 20,
+    "manifest_sha256_verified": true
+  },
+  "verification": {
+    "first_focused": {
+      "at": "2026-10-23T23:51:02.154167+00:00",
+      "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/vitest.config.mts",
+        "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+        "-t",
+        "every holder is classified|writes made inside the BODY|a NEW fence holder is derived|C1-F1: a NEW function named|C1-F1: an object-literal port|W1a \\(REAL tree\\)|W1c \\(REAL tree\\)|every meta_records.data writer file|chokepoint: the set of files writing meta_records directly|ECO ingress|no stale or miscounted ledger entry|every ledger entry carries an ADR row|every 非数据写入者 holder|writes reached through callees|no allowlisted file went stale",
+        "--reporter=default",
+        "--reporter=junit",
+        "--outputFile=/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/focused.xml",
+        "--maxWorkers=1",
+        "--minWorkers=1"
+      ],
+      "config": "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/vitest.config.mts",
+      "config_sha256": "0d09e0ca939c3d112a6c539c13630c835d9b74d236f1795aa6480698365920fa",
+      "exit": 0,
+      "log": "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/focused.log",
+      "log_sha256": "147f4a709daab3c655a7b9d9c86ab9259c7112df1f8666e6f841aca1dc63547e",
+      "xml": "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/focused.xml",
+      "disk_free_before": 13769068544,
+      "floor": 4563402752,
+      "xml_sha256": "49fc16f68a43e66596a3f8c9a766c44d2d76c58c11ff45bcde070616badd2fab"
+    },
+    "final_focused": {
+      "at": "2026-10-23T23:52:19.633821+00:00",
+      "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/vitest.config.mts",
+        "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+        "-t",
+        "every holder is classified|writes made inside the BODY|a NEW fence holder is derived|C1-F1: a NEW function named|C1-F1: an object-literal port|W1a \\(REAL tree\\)|W1c \\(REAL tree\\)|every meta_records.data writer file|chokepoint: the set of files writing meta_records directly|ECO ingress|no stale or miscounted ledger entry|every ledger entry carries an ADR row|every 非数据写入者 holder|writes reached through callees|no allowlisted file went stale",
+        "--reporter=default",
+        "--reporter=junit",
+        "--outputFile=/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/final-focused.xml",
+        "--maxWorkers=1",
+        "--minWorkers=1"
+      ],
+      "config": "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/vitest.config.mts",
+      "config_sha256": "0d09e0ca939c3d112a6c539c13630c835d9b74d236f1795aa6480698365920fa",
+      "exit": 0,
+      "log": "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/final-focused.log",
+      "log_sha256": "f8156154d0986e50a220e79739ce4d5795e61a6823adb91e4fe51c62b0824369",
+      "xml": "/tmp/plm-meta-eco-ingress-ci-sol-run-20261024/final-focused.xml",
+      "disk_free_before": 13772513280,
+      "floor": 4563402752,
+      "xml_sha256": "d1bb12c332bf23e9ec14d6cadd46d79ca37298d19c83c96d3f462ba23c077038"
+    },
+    "final_passed": 42,
+    "not_selected": 62,
+    "original_failed_nodes_now_passed": 9,
+    "new_controls_passed": 28,
+    "affected_existing_controls_passed": 5,
+    "all_final_passed_nodes": [
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — the census analyzer on synthetic sources > a NEW fence holder is derived and is unclassified against the real ledger (the guard goes red)"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > A. every holder is classified by name — a new fence holder reds here until it is ledgered with a verdict"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > A. every ledger entry carries an ADR row and a reason"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > A. no stale or miscounted ledger entry — a second site under an existing key is new too"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > C. every 非数据写入者 holder writes no meta_records.data value after the fence in its own region"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > C1-F4. writes reached through callees (two levels) are exactly the ledgered `writesVia` of every exempt / non-data-writer site"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > C2-F1. writes made inside the BODY of the entry / seam a site calls, through a callee, are exactly the ledgered `entryWritesVia` — every verdict"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5) > C1-F1: a NEW function named exactly like an entry (ensureView), taking the fence and writing data, is a holder — guard A reds"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5) > C1-F1: an object-literal port named like an entry, opening a transaction around a fence-taking call, is a holder"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5) > ECO ingress: URL append calls are nonwriters, while unknown receivers of the unique ECO entry stay fail-closed"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5) > ECO ingress: a new callee inside the exempt append entry still reds the exact entryWritesVia ledger"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "slice 3b — C2-F1: a write inside the body of an entry or a seam, through a callee, is followed > W1a (REAL tree): provisioning.patchObjectFieldProperty calling a new writer after its fence reds the guard — and only this check"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "slice 3b — C2-F1: a write inside the body of an entry or a seam, through a callee, is followed > W1c (REAL tree): AutomationExecutor.withTransaction calling a new writer after the handler returns reds every one of its call sites"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: adding a local cell to the source projection invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing append canonical fence invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing binding immutability enforced invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing canonical revision history invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing commit before success invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing exact local keys invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing exact source keys invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing field type cannot drift invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing history keeps minted ledger invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing immutable binding maps invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing mapped field lock invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing mapped source type and readonly invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing nonnull operation invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing provision canonical fence invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing receipt row and postimage identity invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing refresh canonical fence invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing source readonly cannot drift invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing source sync forbids extras invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing source sync forbids local insert invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing source sync forbids local update invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing source-only projection invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing string source descriptors invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing successful seal invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress mutation: removing writer flag invalidates SAFE"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress: SAFE requires the exact eleven string/null keys and three canonical local field types"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > ECO ingress: fixed-source exemption keeps source-only payload, immutable schema and transaction guards"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > every meta_records.data writer file is in the audited allowlist"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > no allowlisted file went stale (every audited entry is still a writer)"
+      },
+      {
+        "file": "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+        "name": "W1-3 GW7 — durable structural guard: every record write port is enumerated, and every call site gated or exempt > chokepoint: the set of files writing meta_records directly (raw INSERT/UPDATE/MERGE SQL or a kysely builder) is frozen (a new write spine outside the three surfaces trips red)"
+      }
+    ],
+    "original_failed_nodes": [
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — the census analyzer on synthetic sources > a NEW fence holder is derived and is unclassified against the real ledger (the guard goes red)"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > A. every holder is classified by name — a new fence holder reds here until it is ledgered with a verdict"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "field retype slice 3a — §3.11 fence-holder census (real tree) > C2-F1. writes made inside the BODY of the entry / seam a site calls, through a callee, are exactly the ledgered `entryWritesVia` — every verdict"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5) > C1-F1: a NEW function named exactly like an entry (ensureView), taking the fence and writing data, is a holder — guard A reds"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5) > C1-F1: an object-literal port named like an entry, opening a transaction around a fence-taking call, is a holder"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "slice 3b — C2-F1: a write inside the body of an entry or a seam, through a callee, is followed > W1a (REAL tree): provisioning.patchObjectFieldProperty calling a new writer after its fence reds the guard — and only this check"
+      },
+      {
+        "file": "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "name": "slice 3b — C2-F1: a write inside the body of an entry or a seam, through a callee, is followed > W1c (REAL tree): AutomationExecutor.withTransaction calling a new writer after the handler returns reds every one of its call sites"
+      },
+      {
+        "file": "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "name": "rich-longText write-sink — durable structural guard > every meta_records.data writer file is in the audited allowlist"
+      },
+      {
+        "file": "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+        "name": "W1-3 GW7 — durable structural guard: every record write port is enumerated, and every call site gated or exempt > chokepoint: the set of files writing meta_records directly (raw INSERT/UPDATE/MERGE SQL or a kysely builder) is frozen (a new write spine outside the three surfaces trips red)"
+      }
+    ]
+  },
+  "checks": {
+    "starting_pin_count": 39,
+    "changed_existing_paths": [
+      "packages/core-backend/src/multitable/plm-collaboration-snapshot-service.ts",
+      "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+      "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+      "packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts"
+    ],
+    "readonly_pin_count": 35,
+    "readonly_pins_unchanged": true,
+    "git_diff_check_exit": 0,
+    "floor_bytes": 4563402752,
+    "free_disk_after_tests": 13742514176,
+    "node": "v24.14.1",
+    "vitest": "1.6.1",
+    "test_configuration": "Owned isolated config/cache under /tmp, explicit node environment, no setup files; same bounded no-DB style as the retained root RED.",
+    "new_artifact_ignored_by_git": true,
+    "ignored_artifact_handoff": "The new verification artifact exists and is pinned, but the existing Git info/exclude artifacts/ rule ignores it. Root must explicitly include it when making the authorized source commit; this fallback did not stage it."
+  },
+  "limits": [
+    "Guard repair and local focused checks only; no newly demonstrated rich-text, retype or arbitrary local-write business bypass.",
+    "Structural predicates and in-memory mutation controls are syntactic; they are conditional on installed canonical DB guards and are not an exhaustive type-aware proof.",
+    "No PostgreSQL/Docker, build/tsc, network, browser, CI, commit, push, merge, deployment, notification or issue-close actions.",
+    "The service production delta is exactly two private-identifier substitutions; normalized bytes equal source SHA-256 1293269d83ef7b89478208fa1b96f362f05df648d9394d137a4c0beb957301d1. Existing old-body root PostgreSQL proof does not qualify a new source SHA.",
+    "Root owns independent failed-node checks and one actual PostgreSQL concurrent-confirm qualification after this handoff.",
+    "The historical 178 passing CI cases were not rerun or requalified. The 62 unselected guard cases were not executed.",
+    "Readiness implementation remains separate and untouched; the unavailable Grok attempt concerned that work."
+  ],
+  "latest_nonce": "cff5522c9b674856824eced1c5529588",
+  "historical_first_release_verification_note": "The original 42-test receipts and source pins above describe the first release. The additive guard revision below is the latest guard body; production b76af548 is unchanged.",
+  "additive_guard_revision": {
+    "at": "2026-10-24T00:04:40.933383+00:00",
+    "nonce": "cff5522c9b674856824eced1c5529588",
+    "actor": "CODEX_SOL61_HIGH_FALLBACK_GROK_PROVIDER500",
+    "tree": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+    "base": "b7581fcf393bbafde767297d780e24bcce4905b5",
+    "branch": "codex/plm-w23-eco-ingress-ci-20261024",
+    "scope": [
+      "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+      "docs/development/PLM_W23_ECO_INGRESS_CI_GUARDS_20261024.md",
+      "artifacts/plm-w23-eco-ingress-ci-20261024/verification.json"
+    ],
+    "previous_handoff": "/tmp/plm-meta-eco-ingress-ci-sol-20261024.json",
+    "previous_handoff_sha256": "51fcd8697110a3db6a8524c6bd38440d45c68315305096d385139f3ac94a5e22",
+    "prior_release_owner": "/tmp/plm-meta-eco-ingress-ci-sol-first-release-20261024.json",
+    "guard_sha256": {
+      "before": "cf2055e7d2aac8cb41aa6d7e83cac558fc8611f02a5647a69b1dfea6d7186721",
+      "after": "74219aec1db1b85f6c3cc336146e380ca4417acf6cd7bd956af719b13da27135"
+    },
+    "production_service_sha256": "b76af548aa185d9bd83147023da06dd5f8a7b20d94a603bf7a34ad09ee6163c7",
+    "production_unchanged": true,
+    "reproduction": "Two additive literal UPDATE meta_records SET data statements using alternate payload, one after sync GUC clear inside writeGuardedRow and one in a separate method, leave prior ecoBoundaryFailures empty. New regression assertions failed before the fix. This is a guard gap, not a demonstrated current production bypass.",
+    "change": "AST enumeration across the entire service requires exactly two reviewed literal SQL record writes in writeGuardedRow on query, with exact normalized SQL and sourceCells parameter arrays. Literal insertInto/updateTable/mergeInto/deleteFrom record-table builder ports require explicit review; comments create no sites. Existing sourceCells and payload/schema/fence/mint/seal/history boundaries remain in force.",
+    "verification": {
+      "runs": {
+        "red": {
+          "at": "2026-10-24T00:01:45.741081+00:00",
+          "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+          "argv": [
+            "node",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "--config",
+            "/tmp/plm-meta-eco-ingress-additive-sol-20261024/vitest.config.mts",
+            "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+            "-t",
+            "ECO additive writer: alternate payload",
+            "--reporter=default",
+            "--reporter=junit",
+            "--outputFile=/tmp/plm-meta-eco-ingress-additive-sol-20261024/red.xml",
+            "--maxWorkers=1",
+            "--minWorkers=1"
+          ],
+          "exit": 1,
+          "config": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/vitest.config.mts",
+          "config_sha256": "ea7bd295055ffb7c7d6f726672153103ecb86ecc4e9aca724477b83111af616c",
+          "log": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/red.log",
+          "log_sha256": "13878a3ad995b5dc1e243aa785c4cd6642e87d1fa0276cfb35164fb9ea809448",
+          "xml": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/red.xml",
+          "xml_sha256": "d1f6eec1e00d6e8d9c2baaebde262862a8a0bb54449196399f3a8fc497a78e97"
+        },
+        "first_green": {
+          "at": "2026-10-24T00:02:36.039488+00:00",
+          "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+          "argv": [
+            "node",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "--config",
+            "/tmp/plm-meta-eco-ingress-additive-sol-20261024/vitest.config.mts",
+            "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+            "-t",
+            "ECO additive writer|ECO ingress: fixed-source exemption keeps",
+            "--reporter=default",
+            "--reporter=junit",
+            "--outputFile=/tmp/plm-meta-eco-ingress-additive-sol-20261024/green.xml",
+            "--maxWorkers=1",
+            "--minWorkers=1"
+          ],
+          "exit": 0,
+          "config": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/vitest.config.mts",
+          "config_sha256": "ea7bd295055ffb7c7d6f726672153103ecb86ecc4e9aca724477b83111af616c",
+          "log": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/green.log",
+          "log_sha256": "0326169c2fa9418c3774e9a76dba938e65e83472a05f6e4e5ba5e02989de18d8",
+          "xml": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/green.xml",
+          "floor": 4563402752,
+          "disk_free_before": 13765005312,
+          "xml_sha256": "a981ba6adafd083f2cb3f544b7727bf51a3f484ee03c717c32739c2296978b26"
+        },
+        "final_green": {
+          "at": "2026-10-24T00:03:08.427827+00:00",
+          "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+          "argv": [
+            "node",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "--config",
+            "/tmp/plm-meta-eco-ingress-additive-sol-20261024/vitest.config.mts",
+            "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+            "-t",
+            "ECO additive writer|ECO ingress: fixed-source exemption keeps",
+            "--reporter=default",
+            "--reporter=junit",
+            "--outputFile=/tmp/plm-meta-eco-ingress-additive-sol-20261024/final-green.xml",
+            "--maxWorkers=1",
+            "--minWorkers=1"
+          ],
+          "exit": 0,
+          "config": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/vitest.config.mts",
+          "config_sha256": "ea7bd295055ffb7c7d6f726672153103ecb86ecc4e9aca724477b83111af616c",
+          "log": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/final-green.log",
+          "log_sha256": "2ccfc226262c239783547401b8adbef02e6d6e2a562d9b156e26dc5f14f1d1cf",
+          "xml": "/tmp/plm-meta-eco-ingress-additive-sol-20261024/final-green.xml",
+          "floor": 4563402752,
+          "disk_free_before": 13744517120,
+          "xml_sha256": "2f59ff99b38eac3652547bce3f09818553a0f99c2fbfc7cf2e4970ad5ba392b9"
+        }
+      },
+      "red_failed": 2,
+      "red_not_selected": 30,
+      "final_passed": 9,
+      "final_not_selected": 29,
+      "new_controls": 8,
+      "affected_conditional_controls": 1,
+      "final_passed_node_names": [
+        "rich-longText write-sink — durable structural guard > ECO ingress: fixed-source exemption keeps source-only payload, immutable schema and transaction guards",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: alternate payload inside writeGuardedRow invalidates SAFE",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: alternate payload outside writeGuardedRow invalidates SAFE",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: changing a reviewed source payload in [recordId, binding.sheet_id, JSON.stringify(cells), actor] invalidates SAFE",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: changing a reviewed source payload in [JSON.stringify(cells), actor, recordId, binding.sheet_id, current.version] invalidates SAFE",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: a new literal insertInto builder port invalidates SAFE",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: a new literal updateTable builder port invalidates SAFE",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: a new literal mergeInto builder port invalidates SAFE",
+        "rich-longText write-sink — durable structural guard > ECO additive writer: SQL mentioned only in a comment creates no write site"
+      ],
+      "git_diff_check_exit": 0
+    },
+    "root_reported_prior_qualification": {
+      "source_sha256": "b76af548aa185d9bd83147023da06dd5f8a7b20d94a603bf7a34ad09ee6163c7",
+      "independent_selected_guards": "42 passed before this guard-only revision",
+      "actual_postgresql_concurrent_confirm": "1 passed; source advisory A held, B observed waiting on same advisory, A committed version 2 and B returned 409 without deadlock",
+      "provenance": "Parent task message; this fallback did not execute or independently inspect that PostgreSQL receipt."
+    },
+    "checks": {
+      "starting_pin_count": 41,
+      "readonly_pin_count": 38,
+      "readonly_pins_unchanged": true,
+      "floor_bytes": 4563402752,
+      "free_disk_after": 13704597504,
+      "production_and_other_guards_analyzer_migration_unchanged": true
+    },
+    "limits": [
+      "Only new negative controls and the affected SAFE conditional check ran; the prior 42-pass cohort and PostgreSQL test were not rerun.",
+      "The finite AST census covers literal SQL forms recognized by the existing record-write matcher plus MERGE, and literal named record-table builder ports. Dynamically constructed SQL/table names, runtime aliases and arbitrary builder indirection remain outside this syntactic guard; no general SQL parser or type-aware engine was introduced.",
+      "All SQL/payload mutations are in-memory strings; production source is read-only and remains b76af548.",
+      "No PostgreSQL/resource operations, build, network, browser, CI, commit or push occurred. Root owns final proof and qualification.",
+      "The artifact remains ignored by the existing Git info/exclude artifacts/ rule and needs explicit inclusion in root source commit."
+    ]
+  },
+  "root_qualification_current": {
+    "at": "2026-10-24T00:09:26.077333+00:00",
+    "parent": "b7581fcf393bbafde767297d780e24bcce4905b5",
+    "production_sha256": "b76af548aa185d9bd83147023da06dd5f8a7b20d94a603bf7a34ad09ee6163c7",
+    "root_selected_initial": {
+      "at": "2026-10-23T23:59:19.703550+00:00",
+      "exit": 0,
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "vitest.plm-ingress.root-green-20261024.config.ts",
+        "tests/unit/multitable-field-schema-fence-recheck.guard.test.ts",
+        "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts",
+        "-t",
+        "every holder is classified|writes made inside the BODY|a NEW fence holder is derived|C1-F1: a NEW function named|C1-F1: an object-literal port|W1a \\(REAL tree\\)|W1c \\(REAL tree\\)|every meta_records.data writer file|chokepoint: the set of files writing meta_records directly|ECO ingress|no stale or miscounted ledger entry|every ledger entry carries an ADR row|every 非数据写入者 holder|writes reached through callees|no allowlisted file went stale",
+        "--reporter=default",
+        "--reporter=junit",
+        "--outputFile=/tmp/plm-meta-ingress-root-green-20261024.xml",
+        "--maxWorkers=1",
+        "--minWorkers=1"
+      ],
+      "source39pins_stable": true,
+      "log": "/tmp/plm-meta-ingress-root-green-20261024.log",
+      "sha256": "57cd7181cc7f212e2d8f902fa045f91dae65f8272b2e8d22ebb9815be6e33b56",
+      "root": "/private/tmp/plm-meta-ingress-root-green-a86_0mae",
+      "wrapper_sha256": "46ddf77fb02cf117d56ce7d012d6b919c245af358eae36717fa02541add3b1c6",
+      "scope": "Independent actualfailed9+newnegative28+directlyaffected5, no178passedcohort rerun",
+      "own_wrapper_removed": true
+    },
+    "root_additive_red2_green9": {
+      "at": "2026-10-24T00:06:06.267448+00:00",
+      "source41pins_stable": true,
+      "guard_sha256": "74219aec1db1b85f6c3cc336146e380ca4417acf6cd7bd956af719b13da27135",
+      "production_sha256": "b76af548aa185d9bd83147023da06dd5f8a7b20d94a603bf7a34ad09ee6163c7",
+      "new_guard_regression_red2_green9": [
+        {
+          "at": "2026-10-24T00:06:04.713764+00:00",
+          "label": "red",
+          "exit": 1,
+          "argv": [
+            "node",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "--config",
+            "vitest.plm-ingress.additive-root-20261024.config.ts",
+            "tests/unit/plm-eco-ingress-additive-root-red-20261024.guard.test.ts",
+            "-t",
+            "ECO additive writer: alternate payload",
+            "--reporter=default",
+            "--reporter=junit",
+            "--outputFile=/tmp/plm-meta-ingress-additive-root-red-20261024.xml",
+            "--maxWorkers=1",
+            "--minWorkers=1"
+          ],
+          "log": "/tmp/plm-meta-ingress-additive-root-red-20261024.log",
+          "log_sha256": "b72f657e5ad6edb9d8844fee49bfcf1776e8f9401fe2b1cf0f4fff8fd7730db7",
+          "counts": {
+            "passed": 0,
+            "failures": 2,
+            "errors": 0,
+            "not_selected": 36
+          }
+        },
+        {
+          "at": "2026-10-24T00:06:06.264346+00:00",
+          "label": "green",
+          "exit": 0,
+          "argv": [
+            "node",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "--config",
+            "vitest.plm-ingress.additive-root-20261024.config.ts",
+            "tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+            "-t",
+            "ECO additive writer|ECO ingress: fixed-source exemption keeps",
+            "--reporter=default",
+            "--reporter=junit",
+            "--outputFile=/tmp/plm-meta-ingress-additive-root-green-20261024.xml",
+            "--maxWorkers=1",
+            "--minWorkers=1"
+          ],
+          "log": "/tmp/plm-meta-ingress-additive-root-green-20261024.log",
+          "log_sha256": "8fbd660c7c52edc7d8669c145827b4084734b545818e21b17a94bf4f3247a4cb",
+          "counts": {
+            "passed": 9,
+            "failures": 0,
+            "errors": 0,
+            "not_selected": 29
+          }
+        }
+      ],
+      "root": "/private/tmp/plm-meta-ingress-additive-root-13lpnwv8",
+      "temporary_test_wrapper_removed": true,
+      "scope": "Rootindependentlyremovedonlynewexactsiteenforcementinownedtestcopy; original2inmemoryadditiveDMLmutationsfail. Final9new/affectednodespass, no passing42/PGcohortrerun. No actualproductionbypassclaim."
+    },
+    "actual_pg_concurrent": {
+      "at": "2026-10-23T23:59:41.002478+00:00",
+      "started": "2026-10-23T23:59:40.095003+00:00",
+      "exit": 0,
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "vitest.plm-collaboration-snapshot.root-concurrent-confirm-ingress-r3-20261024.config.ts",
+        "tests/integration/plm-collaboration-snapshot-service.root-concurrent-confirm-ingress-r3-20261024.realdb.test.ts",
+        "--reporter=default",
+        "--reporter=junit",
+        "--outputFile=/tmp/plm-w23-eco-root-concurrent-confirm-ingress-r3-20261024.xml",
+        "--maxWorkers=1",
+        "--minWorkers=1"
+      ],
+      "source_pins_stable": true,
+      "prepared_probe_sha256": "47cb3a33408a1758a039eebadf7589b30859a0c428ff2015bcfe3323bc053a8c",
+      "log": "/tmp/plm-w23-eco-root-concurrent-confirm-ingress-r3-20261024.log",
+      "log_sha256": "de38f57f4c484876ea24620fdd763f567feb58d968a7da5b027b0797fba897b2",
+      "resource_nonce": "e63f390400a8401eb4a952d0d4dbb8fc",
+      "database": "eco_e63f390400a8",
+      "scope": "Exactly1 actualtwo-service-confirm concurrentCAS/lock-order control with canonicalbootstrap+currentservice+realPG+injectedprovider. Eachpositivebaselinefirst; setupfailures NOT counted as businesscounterexamples. No broaderunit/nativeHTTP/installation/wholegoal qualification. Oldresultsretained; privatehelperrenameonlyandnormalizedbytesidentical, boundedaffectedconcurrencycontrol.",
+      "owned_test_and_wrapper_removed": true
+    },
+    "first_root_packet": {
+      "at": "2026-10-24T00:01:06.806695+00:00",
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta-eco-ingress-first-root42-and-pg-concurrent-green-20261024",
+      "manifest_sha256": "5c26741c85917e04a434d496c31afd025968cdccc347bf772db768bfcf76caf5",
+      "files": 14
+    },
+    "additive_packet": {
+      "at": "2026-10-24T00:06:46.111949+00:00",
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta-eco-ingress-additive-root-red2-green9-20261024",
+      "manifest_sha256": "956405290be65e35622618bc12f9351cbf28ab7c8118d8de4a0d6c85ecf1b9ea",
+      "files": 12
+    },
+    "owned_pg_cleanup_packet": {
+      "at": "2026-10-24T00:02:05.999186+00:00",
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta-eco-ingress-owned-pg-cleanup-20261024",
+      "manifest_sha256": "69faca7180ccf8964ca46e27c10c37f11090cd4dedd8aa531577dc8b3a182d7f",
+      "files": 21
+    },
+    "peer_final": {
+      "status": "READ_ONLY_P2_DISPOSED_WITHIN_LITERAL_SCOPE_NO_NEW_ACTIONABLE_FINDING",
+      "at_utc": "2026-10-24T00:08:01.227911+00:00",
+      "tree": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+      "base": "b7581fcf393bbafde767297d780e24bcce4905b5",
+      "released_nonce": "cff5522c9b674856824eced1c5529588",
+      "inputs": [
+        {
+          "path": "/tmp/plm-meta-eco-ingress-additive-sol-20261024.json",
+          "sha256": "f7467e208099879779ba92a973f29d7ecc620d9ece016ac9fb644dc7a222089e"
+        },
+        {
+          "path": "/tmp/plm-meta-eco-ingress-ci-root-peer-review-20261024.json",
+          "sha256": "3d9ff5af896a374f36d575713561149db7dbc9702dfaf137a1c74a3db919cabf"
+        }
+      ],
+      "guard": {
+        "path": "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts",
+        "previous_sha256": "cf2055e7d2aac8cb41aa6d7e83cac558fc8611f02a5647a69b1dfea6d7186721",
+        "before_review_sha256": "74219aec1db1b85f6c3cc336146e380ca4417acf6cd7bd956af719b13da27135",
+        "after_review_sha256": "74219aec1db1b85f6c3cc336146e380ca4417acf6cd7bd956af719b13da27135"
+      },
+      "disposition": {
+        "prior_finding": "P2: positive anchors and cells-specific checks did not reject additional literal data DML using another payload in the same SAFE service. This was a structural guard gap, not a demonstrated current business bypass.",
+        "result": "Closed for the requested finite literal SQL and literal builder scope.",
+        "evidence": [
+          {
+            "lines": "198-226",
+            "detail": "AST traversal covers the whole service. Every recognized literal INSERT/UPDATE/DELETE/MERGE into meta_records is enumerated with enclosing method/function, call expression, normalized SQL, and direct parameter argument. Literal record-table insertInto/updateTable/mergeInto/deleteFrom ports produce an additional site."
+          },
+          {
+            "lines": "229-249",
+            "detail": "Exact ordered equality requires only the two existing writeGuardedRow query calls and their source-cells parameter arrays. A new literal write anywhere, an indirect literal, changed query receiver, or altered reviewed payload fails exact source write sites. Existing sourceCells and boundary checks remain conjunctive."
+          },
+          {
+            "lines": "346-379",
+            "detail": "Two additive counterexamples cover after-GUC-clear inside the original method and a separate method using payload. Two changed-parameter controls cover INSERT and UPDATE; three new literal builder controls fail; comment-only SQL is a positive control and is ignored by the AST."
+          },
+          {
+            "fixed_ref": "b7581fcf393bbafde767297d780e24bcce4905b5:packages/core-backend/tests/utils/fence-holder-census.ts:45",
+            "detail": "Imported RECORDS_WRITE_RE is case-insensitive without a global flag; repeated AST tests do not carry mutable regexp lastIndex. Its exact table-name boundary excludes longer names."
+          }
+        ]
+      },
+      "actionable_findings": [],
+      "scope_limits": [
+        "This is a finite syntactic contract for recognized literal SQL and literal builder table arguments; it is not a general SQL or TypeScript semantic analyzer.",
+        "Constructed/interpolated SQL, computed table names, runtime aliases/dispatch, and arbitrary builder indirection are outside this census. No claim that every possible future writer is detected.",
+        "No test, import, database, resource, network, CI, or product mutation was executed by this reviewer. Static disposition is not runtime, PostgreSQL, or full security acceptance."
+      ],
+      "external_evidence_not_reexecuted": {
+        "worker_reported": "2 red additive assertions before enforcement; final selected 9 green. Counts are attributed to the handoff, not reviewer execution.",
+        "parent_status": "Parent reported existing 42 controls and actual PG 1 green; parent independently owns synthetic RED2 and final GREEN9 execution. This review does not assert their pending outcome.",
+        "production": "Handoff reports production service b76af548aa185d9bd83147023da06dd5f8a7b20d94a603bf7a34ad09ee6163c7 unchanged; supplemental review reads only the guard and fixed matcher definition."
+      }
+    },
+    "guards_final_hash": "74219aec1db1b85f6c3cc336146e380ca4417acf6cd7bd956af719b13da27135",
+    "count_scope": "42 first guards +9 final revision (1 overlap), one actualPGconcurrency; never sum overlaps or claim fullCI.",
+    "remaining": "Currentpublishedparent6518 two failures: repairedguardsawaitchildCI; separateNativecheckoutmissingtokenretained. Readinesspersistence/HTTP/browser/installed/fullmasterNOTcomplete; no merge/deploy/enable/notification."
+  }
+}
