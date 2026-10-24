@@ -694,23 +694,62 @@ function buildEnrichmentExternalKey(
   return existingKey || buildExternalKey(dtUser, corpId)
 }
 
-type BackfillTransactionClient = {
-  query: (sql: string, params?: unknown[]) => Promise<unknown>
-}
+type BackfillTransactionClient = AccessGraphTransactionClient
 
 const DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT = 'dingtalk_directory_open_id_backfill'
+
+/**
+ * Field item 3: the corp a corp-less identity's directory openId backfill may use.
+ *
+ * R66-R70 web logins made while DINGTALK_CORP_ID was unset stored the identity with corp_id NULL
+ * and a bare unionId key. With no corp the backfill had nothing to scope its UPDATE to, so the
+ * member's directory row never learned the openId: the directory page kept "缺 openId" and the
+ * directory grant kept answering 400, however often the member scanned in.
+ *
+ * The corp comes from the directory account an administrator linked to THIS local user, and only
+ * when that link is unambiguous: exactly ONE linked DingTalk directory account, active, whose
+ * union_id is the unionId this login just proved. None, more than one, another unionId or an
+ * inactive account: null, so nothing is backfilled and nothing is logged.
+ *
+ * The result scopes the directory openId backfill ONLY. It never reaches the identity row: its
+ * corp_id, its external_key and the #6484/#6487 namespace and ambiguity rules stay as they were.
+ */
+async function resolveLinkedDirectoryCorpIdForOpenIdBackfill(
+  client: BackfillTransactionClient,
+  localUserId: string,
+  unionId: string,
+): Promise<string | null> {
+  const linked = await client.query(
+    `SELECT account.corp_id, account.union_id, account.is_active
+       FROM directory_account_links link
+       JOIN directory_accounts account
+         ON account.id = link.directory_account_id
+      WHERE link.local_user_id = $1::text
+        AND link.link_status = 'linked'
+        AND account.provider = $2::text
+      LIMIT 2`,
+    [localUserId, PROVIDER],
+  )
+  if (linked.rows.length !== 1) return null
+  const account = linked.rows[0]
+  if (account.is_active !== true) return null
+  if (String(account.union_id ?? '').trim() !== unionId) return null
+  return String(account.corp_id ?? '').trim() || null
+}
 
 /**
  * Copy the openId this login just proved into the directory member row(s) of the SAME person
  * (same corp, same unionId) that still lack one. 通讯录 user/get never returns openId, so
  * without this the directory page kept showing "缺 openId" (and its "refresh this member" hint
- * could never succeed) even after the member had scanned in.
+ * could never succeed) even after the member had scanned in. A corp-less identity uses the corp
+ * of its single linked directory account (resolveLinkedDirectoryCorpIdForOpenIdBackfill).
  *
  * Best effort, never able to fail a login on its own:
  *  - runs inside the caller's transaction (commits together with the identity write) behind a
- *    SAVEPOINT, so a failing UPDATE is rolled back to the savepoint and only logged. Only a
- *    failure of the SAVEPOINT / ROLLBACK TO SAVEPOINT statements themselves propagates — the
- *    transaction is unusable then, and hiding it would silently roll back the identity write;
+ *    SAVEPOINT, so a failing corp lookup or UPDATE is rolled back to the savepoint and only
+ *    logged. Only a failure of the SAVEPOINT / ROLLBACK TO SAVEPOINT statements themselves
+ *    propagates — the transaction is unusable then, and hiding it would silently roll back the
+ *    identity write;
  *  - `FOR UPDATE SKIP LOCKED` never waits: a member row held by a running directory sync is
  *    skipped (that sync now keeps a known openId, and both the grant check and the directory
  *    page's grantOpenIdAvailable read the identity's openId directly), so a login can neither
@@ -721,16 +760,24 @@ async function backfillDirectoryAccountOpenIdInTransaction(
   client: BackfillTransactionClient,
   dtUser: DingTalkUserInfo,
   corpId: string | null | undefined,
+  localUserId: string,
 ): Promise<void> {
   const openId = String(dtUser.openId ?? '').trim()
   const unionId = String(dtUser.unionId ?? '').trim()
   const normalizedCorpId = String(corpId ?? '').trim()
-  if (!openId || !unionId || !normalizedCorpId) return
+  if (!openId || !unionId) return
 
   // Not caught: a failing SAVEPOINT leaves the transaction aborted, and swallowing it would turn
   // the caller's COMMIT into a silent ROLLBACK of the identity write.
   await client.query(`SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
   try {
+    // Inside the savepoint on purpose: the corp lookup must not be able to fail the login either.
+    const backfillCorpId = normalizedCorpId
+      || await resolveLinkedDirectoryCorpIdForOpenIdBackfill(client, localUserId, unionId)
+    if (!backfillCorpId) {
+      await client.query(`RELEASE SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
+      return
+    }
     await client.query(
       `UPDATE directory_accounts AS account
        SET open_id = $4, updated_at = NOW()
@@ -746,7 +793,7 @@ async function backfillDirectoryAccountOpenIdInTransaction(
       // The candidate filter is the ONLY "never replace a known openId" guard: under READ COMMITTED
       // a row locked by FOR UPDATE is re-checked against it on its latest version, so a row that
       // gained an openId meanwhile is dropped. (A duplicate outer re-check would mask its removal.)
-      [PROVIDER, normalizedCorpId, unionId, openId],
+      [PROVIDER, backfillCorpId, unionId, openId],
     )
     await client.query(`RELEASE SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
   } catch (error) {
@@ -923,7 +970,7 @@ async function upsertExternalIdentity(
       })
     }
 
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId)
   })
 }
 
@@ -992,7 +1039,7 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
 
     // The login is still rejected (no grant yet) — but the openId is now proven, which is exactly
     // what the directory page needs before an admin can turn the grant on.
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId)
   })
 }
 

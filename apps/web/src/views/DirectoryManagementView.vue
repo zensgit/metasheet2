@@ -1426,6 +1426,9 @@
               <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__hint">
                 修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。
               </p>
+              <p v-if="shouldWarnMissingOpenIdForGrant(item.account) && item.account.localUser" class="directory-admin__hint">
+                已绑定、升级前用钉钉登录过的成员：升级后请让成员再用钉钉扫码登录一次，点「刷新当前成员」后在本页开通（这类成员不要到用户管理开通）。
+              </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="reviewProcessingAccountId === item.account.id" @click="void refreshSingleReviewItem(item.account.id)">
                   刷新当前成员
@@ -1939,6 +1942,9 @@
               </p>
               <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__hint">
                 修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。
+              </p>
+              <p v-if="shouldWarnMissingOpenIdForGrant(account) && account.localUser" class="directory-admin__hint">
+                已绑定、升级前用钉钉登录过的成员：升级后请让成员再用钉钉扫码登录一次，点「刷新当前成员」后在本页开通（这类成员不要到用户管理开通）。
               </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="bindingAccountId === account.id" @click="void refreshSingleAccount(account.id)">
