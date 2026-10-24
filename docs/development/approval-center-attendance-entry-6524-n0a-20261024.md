@@ -97,7 +97,7 @@ bash apps/web/scripts/run-required-web-tests.sh
 pnpm --filter @metasheet/web type-check
 ```
 
-- 新增测试：三个文件都全绿（(a) 63/63，(c) 84/84），在 (b)、(d) 里也各跑过一次、全过。
+- 新增测试：三个文件都全绿（(a) 63/63，(c) 84/84），在 (d) 里也各跑过一次、全过；其中 `approval-center` 与 `approvalApiErrorSurfacing` 在 (b) 里也跑过、全过。
 - 相邻测试：(b) 只有 `approval-ui-workspace.spec.ts` 的 2 条红，都是既有问题：
   - `approval workspace visual structure > keeps the detail form and timeline as full card surfaces`
   - `approval workspace visual structure > presents template authoring as a four-step workspace`
