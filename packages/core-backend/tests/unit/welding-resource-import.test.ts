@@ -65,13 +65,6 @@ function app() {
 const post = (path: string, body: Buffer = bytes) => (pinned.setApp(app()), request(pinned.url())).post(path)
   .set('Authorization', 'Bearer ms-session').set('Content-Type', 'application/octet-stream').send(body)
 const get = (path: string) => (pinned.setApp(app()), request(pinned.url())).get(path).set('Authorization', 'Bearer ms-session')
-async function until(ready: () => boolean) {
-  for (let i = 0; i < 100; i++) {
-    if (ready()) return
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  throw new Error('Expected asynchronous stage was not entered')
-}
 function paddedJson(value: unknown, length: number): Buffer {
   const original = Buffer.from(JSON.stringify(value))
   if (original.length > length) throw new Error('Fixture exceeds boundary')
@@ -210,7 +203,14 @@ describe('fixed resource import binary relay', () => {
     const server = createServer(app())
     await new Promise<void>(resolve => server.listen(0, resolve))
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const timerSpy = vi.spyOn(globalThis, 'setTimeout')
+    let registeredDeadline!: () => void
+    const deadlineStarted = new Promise<void>(resolve => { registeredDeadline = resolve })
+    const fakeSetTimeout = globalThis.setTimeout
+    const timerSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+      const timer = fakeSetTimeout(callback, delay, ...args)
+      if (delay === 300000) registeredDeadline()
+      return timer
+    })
     let outgoing: ReturnType<typeof httpRequest> | undefined
     let delivered = 0
     try {
@@ -227,13 +227,13 @@ describe('fixed resource import binary relay', () => {
         outgoing.write(Buffer.from([1]))
       })
       void status.catch(() => {})
-      await until(() => timerSpy.mock.calls.some(([, delay]) => delay === 300000))
+      await deadlineStarted
+      expect(timerSpy.mock.calls.some(([, delay]) => delay === 300000)).toBe(true)
       expect(delivered).toBe(0)
       await vi.advanceTimersByTimeAsync(300000)
-      await until(() => delivered !== 0)
+      expect(await status).toBe(502)
       expect(delivered).toBe(502)
       outgoing?.destroy()
-      expect(await status).toBe(502)
       expect(mocks.verifyToken).not.toHaveBeenCalled()
       expect(fetchMock).not.toHaveBeenCalled()
     } finally {
@@ -417,10 +417,13 @@ describe('fixed resource import binary relay', () => {
   it('expires a stalled Y body reader after commit dispatch without leaking a partial ACK', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      queue(new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 201,
+      let enteredReader!: () => void
+      const readerStarted = new Promise<void>(resolve => { enteredReader = resolve })
+      queue(new Response(new ReadableStream<Uint8Array>({ pull() { enteredReader() } }, { highWaterMark: 0 }), { status: 201,
         headers: { 'Content-Type': 'application/json' } }))
       const pending = post(commitPath).then(result => result)
-      await until(() => fetchMock.mock.calls.length === 4)
+      await readerStarted
+      expect(fetchMock).toHaveBeenCalledTimes(4)
       await vi.advanceTimersByTimeAsync(300000)
       const result = await pending
       expect(result.status).toBe(502)
@@ -432,11 +435,14 @@ describe('fixed resource import binary relay', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     let finishCheck: ((value: { rows: Array<{ id: string }> }) => void) | undefined
     try {
+      let enteredCheck!: () => void
+      const checkStarted = new Promise<void>(resolve => { enteredCheck = resolve })
       mocks.query.mockImplementation(() => fetchMock.mock.calls.length === 4 ?
-        new Promise(resolve => { finishCheck = resolve }) : Promise.resolve({ rows: [{ id: 'sid1' }] }))
+        new Promise(resolve => { finishCheck = resolve; enteredCheck() }) : Promise.resolve({ rows: [{ id: 'sid1' }] }))
       queue(json(receipt(1), 201))
       const pending = post(commitPath).then(result => result)
-      await until(() => finishCheck !== undefined)
+      await checkStarted
+      expect(finishCheck).toBeTypeOf('function')
       await vi.advanceTimersByTimeAsync(300000)
       const result = await pending
       expect(result.status).toBe(502)

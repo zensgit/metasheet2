@@ -1835,12 +1835,6 @@ exec npx vitest run \
   tests/welding-assembly-session.spec.ts \
   tests/welding-batch-fields.spec.ts \
   tests/welding-cad-arming-gate.spec.ts \
-  tests/welding-source-change-contract.spec.ts \
-  tests/welding-source-change-panel.spec.ts \
-  tests/welding-source-change-session.spec.ts \
-  tests/welding-source-preparation-client.spec.ts \
-  tests/welding-sparse-save.spec.ts \
-  tests/welding-statistics.spec.ts \
   tests/welding-cad-bridge.spec.ts \
   tests/welding-cad-panel.spec.ts \
   tests/welding-cad-session.spec.ts \
@@ -1858,7 +1852,13 @@ exec npx vitest run \
   tests/welding-resource-import-panel.spec.ts \
   tests/welding-resource-import-session.spec.ts \
   tests/welding-resource-maintenance.spec.ts \
+  tests/welding-source-change-contract.spec.ts \
+  tests/welding-source-change-panel.spec.ts \
+  tests/welding-source-change-session.spec.ts \
+  tests/welding-source-preparation-client.spec.ts \
   tests/welding-source-review-confirmation.spec.ts \
+  tests/welding-sparse-save.spec.ts \
+  tests/welding-statistics.spec.ts \
   tests/welding-workflow-http-contract.spec.ts \
   tests/welding-workflow-panel.spec.ts \
   tests/welding-workflow-session.spec.ts \
