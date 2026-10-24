@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import http from 'node:http'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { Client, Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { MetaSheetServer as MetaSheetServerType } from '../../src/index'
 
+const require = createRequire(import.meta.url)
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 type ShiftDto = { id: string; capabilities: unknown; name: string }
 type HttpResponse = {
@@ -288,6 +290,30 @@ describe('W6 reference capability, actual canonical port and HTTP on PostgreSQL'
     expect(lock).toBeGreaterThan(0)
     expect(posture).toBeGreaterThan(lock)
     expect(readonly.filter(item => /^\s*(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b/.test(item.sql))).toEqual([])
+  })
+
+  it('refuses foreign detail selectors exactly as the collection with real authenticated tenants', async () => {
+    const a = await actor('shadow'), b = await actor()
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = a.orgId
+    const id = await roundTrip(a.orgId, a.token, true)
+    const list = await requestJson(baseUrl + '/api/attendance/shifts?orgId=' + a.orgId, { headers: authHeaders(b.token, b.orgId) })
+    expect(list.status).toBe(404)
+    expect(list.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+    for (const selector of ['query', 'header', 'body'] as const) {
+      const headers = authHeaders(b.token, selector === 'header' ? a.orgId : b.orgId)
+      const detail = await requestJson(baseUrl + '/api/attendance/shifts/' + id + (selector === 'query' ? '?orgId=' + a.orgId : ''), {
+        headers: selector === 'body' ? { ...headers, 'Content-Length': String(Buffer.byteLength(JSON.stringify({ orgId: a.orgId }))) } : headers,
+        body: selector === 'body' ? JSON.stringify({ orgId: a.orgId }) : undefined,
+      })
+      expect(detail.status, selector).toBe(404)
+      expect(detail.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+    }
+    const foreign = await requestJson(baseUrl + '/api/attendance/shifts/' + id, { headers: authHeaders(b.token, b.orgId) })
+    expect(foreign.status).toBe(404)
+    expect(foreign.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+    const own = await requestJson(baseUrl + '/api/attendance/shifts/' + id, { headers: authHeaders(a.token, a.orgId) })
+    expect(own.status).toBe(200)
+    expect((own.body?.data as ShiftDto).capabilities).toEqual(capabilities(true))
   })
 
 })

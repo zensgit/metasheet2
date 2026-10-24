@@ -49195,12 +49195,15 @@ module.exports = {
       'GET',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
         const shiftId = normalizeUuidString(req.params.id)
         if (!shiftId) {
           respondInvalidUuid(res)
           return
         }
+
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
 
         try {
           // W3: dual-read — persisted segments when present, legacy envelope synthesis otherwise.

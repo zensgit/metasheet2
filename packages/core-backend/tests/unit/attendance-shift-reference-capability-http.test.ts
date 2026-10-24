@@ -174,7 +174,7 @@ async function makeHarness() {
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
-    ;(req as express.Request & { user: unknown }).user = {
+    (req as express.Request & { user: unknown }).user = {
       id: 'synthetic-w6-admin', orgId: req.headers['x-test-actor-org'] ?? ORG,
     }
     next()
@@ -315,6 +315,22 @@ describe('W6 reference-authoring hint through registered plugin HTTP routes', ()
     expect(rejected.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
     expect(h.readPort).not.toHaveBeenCalled()
     expect(h.transactions).toEqual([])
+  })
+
+  it.each(['query', 'header', 'body'] as const)('detail rejects a foreign %s org selector before any shift SQL or the hint', async (selector) => {
+    const h = await makeHarness()
+    h.setHint(true)
+    let req = request(pinned.url()).get(`${PATH}/${SHIFT}`)
+    if (selector === 'query') req = req.query({ orgId: OTHER_ORG })
+    if (selector === 'header') req = req.set('x-org-id', OTHER_ORG)
+    if (selector === 'body') req = req.send({ orgId: OTHER_ORG })
+    const response = await req
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+    expect(h.statements.filter(({ sql }) => /attendance_shift|^\s*(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b/.test(sql))).toEqual([])
+    expect(h.readPort).not.toHaveBeenCalled()
+    expect(h.transactions).toEqual([])
+    expect(h.emit).not.toHaveBeenCalled()
   })
 
   it.each(['create', 'update'] as const)('%s retains pre-transaction ambiguity rejection without a hint', async (path) => {
