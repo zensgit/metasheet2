@@ -1,0 +1,216 @@
+{
+  "nonce": "2bf6a540182348378779a1fafb1ad87d",
+  "first_slice_nonce": "56df7428587d4b779b04ca5e4be10a31",
+  "session": "gbt-d5a9-1a169a37722-bd",
+  "base": "db6d1797f2a2e7f3541f5c5133dca7afaffb895a",
+  "head": "db6d1797f2a2e7f3541f5c5133dca7afaffb895a",
+  "branch": "codex/plm-w23-readiness-wire-r2-20261024",
+  "slice": "READINESS_REQUEST_ID_PYTHON_311_STRIP_PARITY",
+  "disk_floor_bytes": 4563402752,
+  "wire_sha256_before_strip_repair": "eb5c7e9e0158c1b9f609e7b08d6bc59cbc8c21c8fdf05d8cab687a2f94214b79",
+  "wire_bytes_before_strip_repair": 15783,
+  "unit_sha256_before_strip_repair": "cbf1f2d8dfaed66329ed7edd825de91f5ec0032a044f2ce6907c587799f9f89a",
+  "unit_bytes_before_strip_repair": 19651,
+  "root_red_log_sha256": "01b120ff6a5974dde880cedd476dd17f901cd23f56e39299f87131ea8d89e208",
+  "python_311_strip_codepoints": 29,
+  "first_slice_tsc_and_unit_are_not_current_proof": true,
+  "first_slice_tsc": {
+    "cwd": "packages/core-backend",
+    "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+    "exit": 0,
+    "result": "passed",
+    "free_bytes_before": 12364804096,
+    "free_bytes_after": 12372164608,
+    "covers_new_test": false
+  },
+  "first_slice_unit": {
+    "cwd": "packages/core-backend",
+    "command": "node node_modules/vitest/vitest.mjs run tests/unit/plm-collaboration-readiness-wire.test.ts",
+    "vitest": "1.6.1",
+    "files": 1,
+    "tests": 7,
+    "passed": 7,
+    "failed": 0,
+    "result": "passed",
+    "duration_ms": 295,
+    "start_utc": "2026-10-24T00:23:38.821167+00:00",
+    "end_utc": "2026-10-24T00:23:39.415569+00:00",
+    "start_local": "08:23:39",
+    "free_bytes_before": 12370837504,
+    "free_bytes_after": 12370710528,
+    "exit": 0
+  },
+  "tsc": {
+    "cwd": "packages/core-backend",
+    "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+    "exit": 0,
+    "result": "passed",
+    "start_utc": "2026-10-24T00:32:40.416673+00:00",
+    "end_utc": "2026-10-24T00:32:48.214339+00:00",
+    "free_bytes_before": 12294406144,
+    "free_bytes_after": 12295307264,
+    "covers_new_test": false
+  },
+  "unit": {
+    "cwd": "packages/core-backend",
+    "command": "node node_modules/vitest/vitest.mjs run tests/unit/plm-collaboration-readiness-wire.test.ts",
+    "vitest": "1.6.1",
+    "files": 1,
+    "tests": 8,
+    "passed": 8,
+    "failed": 0,
+    "result": "passed",
+    "duration_ms": 289,
+    "start_utc": "2026-10-24T00:32:48.236850+00:00",
+    "end_utc": "2026-10-24T00:32:48.814200+00:00",
+    "start_local": "08:32:48",
+    "free_bytes_before": 12295282688,
+    "free_bytes_after": 12299460608,
+    "exit": 0
+  },
+  "native_git_objects_read": {
+    "a9": "a9b901dcc71bfe8cc24524a63b868f8aeb612ce1",
+    "ref_967": "967d564370ac942d3f8d0451bd0de880084a1bf2",
+    "blobs_identical": true,
+    "live_http": "NOT_CALLED",
+    "pins": {
+      "src/yuantus/meta_engine/services/plm_collaboration_readiness_source_service.py": "b96b2eb9ae24a49992c49a9914173a5eebe79c9733f2bc3f07dc2f885bb711a6",
+      "src/yuantus/meta_engine/services/plm_collaboration_source_service.py": "0febca568642259261f32d9700de46faf46fbce491af323e9c4992c34996dd2a",
+      "src/yuantus/meta_engine/services/release_validation.py": "ef44b82fcb15e215c13f14d3f5add8613786fd41c766de7353710b8ccb138bc5",
+      "src/yuantus/meta_engine/web/plm_collaboration_source_router.py": "4b1d24d75fb1e6f0eeeb5ce77392ca972f8e26bf6699dbbb41db8908cb2215fb"
+    }
+  },
+  "postgres": "NOT_RUN",
+  "docker": "NOT_RUN",
+  "browser": "NOT_RUN",
+  "build": "NOT_RUN",
+  "ci": "NOT_RUN",
+  "commit": "NOT_MADE",
+  "push": "NOT_MADE",
+  "adapter": "NOT_IMPLEMENTED",
+  "service": "NOT_IMPLEMENTED",
+  "forward_migration": "NOT_IMPLEMENTED",
+  "source_http": "NOT_IMPLEMENTED",
+  "ui": "NOT_IMPLEMENTED",
+  "installed_acceptance": "NOT_CLAIMED",
+  "old_suites_rerun": false,
+  "root_qualification_current": {
+    "at": "2026-10-24T00:41:52.738822+00:00",
+    "source_sha256": "87a547b7d9915ed10dc48ba5498c9bb16f58d88aaa663e74b6a1d658d705576a",
+    "peer_final": "/tmp/plm-w23-readiness-wire-root-peer-final-20261024.json",
+    "native_helper_oracle": "/tmp/plm-w23-readiness-native-whitespace-root-oracle-20261024.json",
+    "root_frozen_parity3": {
+      "at": "2026-10-24T00:38:20.990584+00:00",
+      "label": "green",
+      "exit": 0,
+      "source_sha256": "87a547b7d9915ed10dc48ba5498c9bb16f58d88aaa663e74b6a1d658d705576a",
+      "root_probe_sha256": "c34d5ffc4ab484a251c2b29920c29979485cb2b0c487157e91e45966dc3c3e4f",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "tests/unit/plm-collaboration-readiness-root-whitespace-20261024.test.ts",
+        "--reporter=default",
+        "--reporter=junit",
+        "--outputFile=/tmp/plm-w23-readiness-whitespace-root-green-20261024.xml",
+        "--maxWorkers=1",
+        "--minWorkers=1"
+      ],
+      "log": "/tmp/plm-w23-readiness-whitespace-root-green-20261024.log",
+      "log_sha256": "6d436ee2207db7a588961f7944c8f2b171e1fa806a1fd5ee58eba4f915f8d5d2",
+      "own_probe_removed": true,
+      "oracle": "/tmp/plm-w23-readiness-native-whitespace-root-oracle-20261024.json",
+      "scope": "ActualPythonhelperparity3owncases, notNativeHTTP/auth/runtimeproof"
+    },
+    "root_newwire8_plus_own6_and_tsc": {
+      "at": "2026-10-24T00:38:52.604888+00:00",
+      "base": "db6d1797f2a2e7f3541f5c5133dca7afaffb895a",
+      "source_sha256": "87a547b7d9915ed10dc48ba5498c9bb16f58d88aaa663e74b6a1d658d705576a",
+      "unit": {
+        "exit": 0,
+        "argv": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "tests/unit/plm-collaboration-readiness-wire.test.ts",
+          "tests/unit/plm-collaboration-readiness-root-counters-20261024.test.ts",
+          "--reporter=default",
+          "--reporter=junit",
+          "--outputFile=/tmp/plm-w23-readiness-final-root-20261024.xml",
+          "--maxWorkers=1",
+          "--minWorkers=1"
+        ],
+        "counts": {
+          "passed": 14,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log": "/tmp/plm-w23-readiness-final-root-20261024.log",
+        "log_sha256": "49f2e041272525201a4a15c9394e0db4a092944e954eed8bab71afbce12b2ee3"
+      },
+      "own_probe_sha256": "ee8a54743524a85c1fad4633db96b69e337e2d9c05791b9990a50d00f087bf3b",
+      "own_probe_removed": true,
+      "source46pins_stable": true,
+      "scope": "Onlynewwireauthor8+independentroot6finiteprotocolcontrols; no oldECO/CIcohortrerun, no PG/HTTP/UI/installacceptance",
+      "tsc": {
+        "exit": 0,
+        "argv": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--pretty",
+          "false"
+        ],
+        "log": "/tmp/plm-w23-readiness-final-root-tsc-20261024.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "root_two_line_BMP_integration": {
+      "at": "2026-10-24T00:38:02.464844+00:00",
+      "nonce": "93657793107a44149df00742220db0dd",
+      "before_sha256": "69dc76df2d4c573e56b84981445b385b7e6e0e5b5ed49ed9adf6917679316553",
+      "after_sha256": "87a547b7d9915ed10dc48ba5498c9bb16f58d88aaa663e74b6a1d658d705576a",
+      "change": "Rootsimplifiedonlynewboundaryhelper: actualNativeoracle29whitespacecodepointsall<=U3000/BMP, no surrogate traversalneeded; exact29-set/nonNUL/codepointlengthsemantics retained. No newabstraction/errorhandling/feature.",
+      "actor": "ActualGrok47implementedwire+parityfix; Codexintegration2linehelperminimumthenindependentvalidation",
+      "scope": "4newcutfiles only;42oldpinsunchanged"
+    },
+    "required_CI_wiring": {
+      "at": "2026-10-24T00:40:49.142717+00:00",
+      "root_nonce": "93657793107a44149df00742220db0dd",
+      "scope_paths": 5,
+      "path": ".github/workflows/plm-bom-listener.yml",
+      "before_sha256": "76011132ec56d7771f0e674b848b1739e8af197c43f67bbaafb1f5e6b2e7607a",
+      "after_sha256": "da580118aca6fa1f2e8d4863b918aa41efbbf266a537125ea1a2f5c5129aa3f0",
+      "diff": "Append only tests/unit/plm-collaboration-readiness-wire.test.ts to existing Wire,transport,loginandworkerregression command; originalallfiles/job/steps/paths/floors/pins/permissionsunchanged.",
+      "reason": "Necessarycurrent-headCI coverage for newpurewire8tests, no newworkflow/engine or weakenedgate."
+    },
+    "green_packet": {
+      "at": "2026-10-24T00:41:52.659305+00:00",
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta-readiness-wire-final-root-green17-and-tsc-20261024",
+      "manifest_sha256": "f9db7f78e2fa0540b406d3461be67b616a613c10b14678e8fcb168dc49bba6ec",
+      "files": 18
+    },
+    "red_packet": {
+      "at": "2026-10-24T00:31:13.011422+00:00",
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta-readiness-wire-python-strip-root-red3-20261024",
+      "manifest_sha256": "067922f3125142af6fcc0f12757343c2aeef9afe02960f37b1c586d2c1c0b88a",
+      "files": 8
+    },
+    "scope": "Purewireonly;42frozenpinsunchangedduringGrok+rootcodechecks. RootthenaddedONEnewunitfilename toexistinglistenerstepso41originalpinsremainunchanged. No app/Adapter/service/migration/auth/grant/flag/route change.",
+    "preparation_refusals": [
+      "FirstNativeoraclecallomittedPYTHONPATHandfailedbeforeimport; correctednormalPYTHONPATHsrcactualhelperoracle retained.",
+      "FrozenREDexecutorinitiallyrefusedRootvalidationownerphase beforetests; newgreenexecutoradmits exactRootnonce andsamefrozenprobe. No protocol/businessRED claimedfromtheserefusals."
+    ],
+    "open": [
+      "Adapter transport",
+      "sharedexisting snapshot engine/readiness persistence",
+      "NEW forward migration",
+      "actual PostgreSQL guards/lifecycle",
+      "actual Native source HTTP",
+      "workspace UI/browser",
+      "installed acceptance",
+      "whole master acceptance"
+    ]
+  }
+}
