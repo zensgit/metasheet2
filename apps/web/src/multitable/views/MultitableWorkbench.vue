@@ -287,6 +287,14 @@
         <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
+        <PlmCollaborationSnapshotsPanel
+          v-if="collaborationSnapshotHint"
+          :key="collaborationSnapshotHint.bindingId + ':' + collaborationSnapshotHint.sourceKind"
+          :hint="collaborationSnapshotHint"
+          :visible-rows="grid.rows.value"
+          :visible-fields="grid.visibleFields.value"
+          :client="workbench.client"
+        />
         <MetaDashboardView
           v-if="showDashboardView"
           :sheet-id="workbench.activeSheetId.value"
@@ -919,6 +927,7 @@ import MetaBulkEditDialog from '../components/MetaBulkEditDialog.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
+import PlmCollaborationSnapshotsPanel, { readPlmCollaborationSnapshotHint } from '../../components/plm/PlmCollaborationSnapshotsPanel.vue'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
 import {
@@ -1050,6 +1059,12 @@ const canOpenWorkflowDesigner = computed(
 // its `isPersonalMode` getter can be threaded into useMultitableGrid's write-routing switch (G-FE-2).
 const personalViewsEnabled = computed(() => capabilitySource.value?.personalViewsEnabled === true)
 const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
+const collaborationSnapshotHint = computed(() => {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return null
+  const sheet = workbench.sheets.value.find((item) => item.id === sheetId)
+  return readPlmCollaborationSnapshotHint(sheet?.plmCollaborationSnapshot)
+})
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
