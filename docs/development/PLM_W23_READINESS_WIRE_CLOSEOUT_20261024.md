@@ -1,0 +1,13 @@
+# Readiness strict wire closeout
+
+SOURCE `415f940a28b889b22bcee242bea86ff6ae84c316`; parent `db6d1797f2a2e7f3541f5c5133dca7afaffb895a` (Draft6519). This is the one separate closeout for this source slice.
+
+The pure protocol module validates the finite Native release-readiness DTO, source scope/fixed Item/required nullable version/ruleset, exact resource kind/type pairs,20/20/20+optional1 caps, summary counts and bounded_not_proven_complete coverage. An optional Item resource must match the fixed Item. It provides the five-part source key, a business hash excluding only capture clocks, and exactly nine canonical readOnly-string source cells; the three approved local collaboration fields are unchanged. It does not authenticate a Native caller or enable Readiness persistence.
+
+Actual Grok4.7(xhigh) implemented the wire and a finite Python3.11 boundary-whitespace fix after independent review. Codex reproduced three request-ID protocol failures against the actual Native helper; the same frozen probe now passes3/3. Root simplified the new boundary helper to two BMP membership checks and added the new unit filename to the existing listener workflow's regression command, preserving all old arguments/gates. YAML parsing and exact-one-argument verification passed.
+
+Root separately executed newwire8 + independent6 controls:14PASS, zero failures/errors/skips; backend TypeScript noEmit exit0. These are protocol/helper proofs. Final source SHA-256 `87a547b7d9915ed10dc48ba5498c9bb16f58d88aaa663e74b6a1d658d705576a`; root14 log `49f2e041272525201a4a15c9394e0db4a092944e954eed8bab71afbce12b2ee3`; parity3 GREEN log `6d436ee2207db7a588961f7944c8f2b171e1fa806a1fd5ee58eba4f915f8d5d2`. Immutable RED manifest `067922f3125142af6fcc0f12757343c2aeef9afe02960f37b1c586d2c1c0b88a`; final GREEN17+tsc manifest `f9db7f78e2fa0540b406d3461be67b616a613c10b14678e8fcb168dc49bba6ec`. Root temporary test files removed.
+
+Design and compact evidence: `PLM_W23_READINESS_WIRE_DESIGN_VALIDATION_20261024.md`, `artifacts/plm-w23-readiness-wire-20261024/verification.json`. Existing Adapter/service/routes/migration/auth/grants/flags remain unchanged; the source kind Readiness still rejects writes. The only changed old file is one added unit argument in the existing workflow, leaving41 other frozen pins intact.
+
+Parent6519 exactdb6 had all-terminal16successful checks and one retained private-checkout-token failure, with record-ingress guards successful. A child still needs its own exact-head CI after publication. Adapter, shared-engine persistence, a NEW forward migration, genuinePG/HTTP, unified workspace UI/browser, actual installed and whole-master acceptance remain open. Keep Draft; no merge/deploy/production enablement/real business notice/issue closure.
