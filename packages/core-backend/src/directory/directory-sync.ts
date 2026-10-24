@@ -1,3 +1,4 @@
+import { readDirectoryRunFilter, readDirectoryAlertFilter, type DirectoryRunFilter } from './directory-sync-observation-filter'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
@@ -5293,24 +5294,29 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
 export async function listDirectorySyncRuns(
   integrationId: string,
   pagination: { limit: number; offset: number },
+  status: DirectoryRunFilter = 'all',
 ): Promise<{ items: DirectorySyncRunSummary[]; total: number }> {
+  const filter = readDirectoryRunFilter(status)
+  if (filter === null) throw new DirectoryValidationError('status must be all, running, completed, failed or aborted')
+  const params: unknown[] = [integrationId]
+  const where = filter === 'all' ? 'integration_id = $1' : 'integration_id = $1 AND status = $2'
+  if (filter !== 'all') params.push(filter)
   const [totalResult, rowsResult] = await Promise.all([
     query<{ total: number }>(
       `SELECT COUNT(*)::int AS total
        FROM directory_sync_runs
-       WHERE integration_id = $1`,
-      [integrationId],
+       WHERE ${where}`,
+      params,
     ),
     query<DirectoryRunRow>(
       `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
        FROM directory_sync_runs
-       WHERE integration_id = $1
-       ORDER BY started_at DESC
-       LIMIT $2 OFFSET $3`,
-      [integrationId, pagination.limit, pagination.offset],
+       WHERE ${where}
+       ORDER BY started_at DESC, id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pagination.limit, pagination.offset],
     ),
   ])
-
   return {
     items: rowsResult.rows.map(summarizeRun),
     total: Number(totalResult.rows[0]?.total ?? 0),
@@ -5348,7 +5354,8 @@ export async function listDirectorySyncAlerts(
   const normalizedIntegrationId = normalizeText(integrationId)
   if (!normalizedIntegrationId) throw new DirectoryValidationError('integrationId is required')
 
-  const normalizedFilter: DirectorySyncAlertFilter = filter === 'pending' || filter === 'acknowledged' ? filter : 'all'
+  const normalizedFilter = readDirectoryAlertFilter(filter)
+  if (normalizedFilter === null) throw new DirectoryValidationError('filter must be all, pending or acknowledged')
   const whereClauses: string[] = ['integration_id = $1']
   const params: unknown[] = [normalizedIntegrationId]
   if (normalizedFilter === 'pending') whereClauses.push('acknowledged_at IS NULL')
@@ -5391,7 +5398,7 @@ export async function listDirectorySyncAlerts(
           updated_at
        FROM directory_sync_alerts
        WHERE ${whereSql}
-       ORDER BY acknowledged_at IS NULL DESC, created_at DESC
+       ORDER BY acknowledged_at IS NULL DESC, created_at DESC, id DESC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pagination.limit, pagination.offset],
     ),
