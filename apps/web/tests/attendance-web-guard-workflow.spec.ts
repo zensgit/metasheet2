@@ -447,4 +447,17 @@ describe('attendance web guard workflow contract', () => {
       expect(words).toContain(token)
     }
   })
+  it.each([
+    'apps/web/tests/directoryManagementViewPreviewEffects.spec.ts',
+    'apps/web/src/views/DirectoryPreviewEffects.vue',
+    'apps/web/src/views/directoryPreviewEffects.ts',
+  ])('registers directory preview effect path %s and its execution filter', path => {
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain(path)
+    expect(workflow.split(path)).toHaveLength(3)
+    expect(targetedRunCommand(workflow).split(/\s+/)).toContain('directoryManagementViewPreviewEffects')
+    expect(requiredLaneExecCommand(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')).split(/\s+/))
+      .toContain('directoryManagementViewPreviewEffects')
+  })
+
 })

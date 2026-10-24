@@ -639,6 +639,7 @@
                 其中已绑定 {{ previewResult.wouldDeactivateLinkedAccounts }}
               </span>
             </div>
+            <DirectoryPreviewEffects :effects="previewResult" />
             <p class="directory-admin__hint">
               自动准入：{{ previewResult.autoAdmissionMode === 'auto_for_scoped_departments'
                 ? `符合条件 ${previewResult.autoAdmissionCandidateCount} 人 · 缺少邮箱跳过 ${previewResult.autoAdmissionSkippedMissingEmailCount} 人 · 命中排除部门 ${previewResult.autoAdmissionExcludedCount} 人`
@@ -2204,7 +2205,7 @@
 
 <script setup lang="ts">
 import { canCopyText, copyText } from '../utils/clipboard'
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
 import DirectoryOptionPicker from '../components/directory/DirectoryOptionPicker.vue'
@@ -2218,6 +2219,8 @@ import {
   type DirectoryRoleCatalogItem,
 } from './directoryConfigPickerOptions'
 import { apiFetch } from '../utils/api'
+import DirectoryPreviewEffects from './DirectoryPreviewEffects.vue'
+import type { DirectoryPreviewEffectCounts } from './directoryPreviewEffects'
 import {
   DINGTALK_REDIRECT_URI_REQUIREMENT,
   formatDingTalkLoginEnvList,
@@ -2274,7 +2277,7 @@ type DirectoryRun = {
 
 // Mirrors DirectorySyncPreview from packages/core-backend/src/directory/directory-sync.ts
 // (DT-OPS-02 preview endpoint) — read-only dry-run counts + samples, nothing written.
-type DirectorySyncPreview = {
+type DirectorySyncPreview = DirectoryPreviewEffectCounts & {
   integrationId: string
   integrationName: string
   departmentsSeen: number
@@ -2605,6 +2608,14 @@ const approvalCardBusy = ref(false)
 // full DingTalk pull — it must not silently block/unblock the global `busy` actions).
 const previewBusy = ref(false)
 const previewResult = ref<DirectorySyncPreview | null>(null)
+let previewRequest = 0
+let previewDisposed = false
+// Switching away invalidates the request even if the selection later returns to the same ID.
+watch(selectedIntegrationId, () => {
+  previewRequest += 1
+  previewResult.value = null
+  previewBusy.value = false
+}, { flush: 'sync' })
 const asyncSyncBusy = ref(false)
 /** Non-empty exactly while this tab is polling a background sync run it started. */
 const pollingRunId = ref('')
@@ -4910,12 +4921,18 @@ function buildSyncInProgressMessage(payload: unknown): string {
 async function previewSync() {
   const integration = selectedIntegration.value
   if (!integration) return
+  const request = ++previewRequest
+  const current = () => !previewDisposed && request === previewRequest
+    && selectedIntegrationId.value === integration.id
   previewBusy.value = true
+  previewResult.value = null
   try {
     const response = await apiFetch(`/api/admin/directory/integrations/${integration.id}/sync/preview`, {
       method: 'POST',
     })
+    if (!current()) return
     const body = await readJson(response)
+    if (!current()) return
     if (!response.ok) {
       if (readApiErrorCode(body) === 'DIRECTORY_SYNC_IN_PROGRESS') {
         setStatus(buildSyncInProgressMessage(body), 'error')
@@ -4928,9 +4945,10 @@ async function previewSync() {
     previewResult.value = preview
     setStatus('同步预览已生成（未写入任何数据）')
   } catch (error) {
+    if (!current()) return
     setStatus(error instanceof Error ? error.message : '同步预览失败', 'error')
   } finally {
-    previewBusy.value = false
+    if (current()) previewBusy.value = false
   }
 }
 
@@ -6255,6 +6273,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  previewDisposed = true
+  previewRequest += 1
   stopDirectoryLocationSync()
   // Timer hygiene: never leak the background-sync poll past the view's lifetime.
   stopRunPolling()

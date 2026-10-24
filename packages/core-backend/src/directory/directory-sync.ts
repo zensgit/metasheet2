@@ -1,3 +1,6 @@
+import { buildDirectoryProspectiveAccounts, projectDirectorySyncPreview, type DirectoryPreviewAccount, type DirectorySyncPreview } from './directory-sync-preview'
+export type { DirectorySyncPreview } from './directory-sync-preview'
+import { buildScopedIdentityKey, addScopedIdentityCandidate, orderDirectoryMatchingAccounts, rememberDirectoryAdmission } from './directory-sync-match-state'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
@@ -2070,14 +2073,6 @@ function readErrorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
-function buildScopedIdentityKey(corpId: string | null | undefined, providerId: string | null | undefined): string | null {
-  const normalizedProviderId = normalizeText(providerId)
-  if (!normalizedProviderId) return null
-  const normalizedCorpId = normalizeText(corpId)
-  // Delimiter concatenation is not injective: ('a:b', 'c') and ('a', 'b:c') collide.
-  return JSON.stringify([normalizedCorpId || null, normalizedProviderId])
-}
-
 function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, openId: string | null | undefined, unionId: string | null | undefined): string {
   const normalizedCorpId = normalizeText(corpId)
   const normalizedOpenId = normalizeText(openId)
@@ -2148,22 +2143,6 @@ function buildRecommendationStatus(
     code,
     message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
   }
-}
-
-function addScopedIdentityCandidate(
-  uniqueMap: Map<string, string>,
-  ambiguousKeys: Set<string>,
-  key: string | null,
-  localUserId: string,
-): void {
-  if (!key || ambiguousKeys.has(key)) return
-  const existingUserId = uniqueMap.get(key)
-  if (existingUserId && existingUserId !== localUserId) {
-    uniqueMap.delete(key)
-    ambiguousKeys.add(key)
-    return
-  }
-  uniqueMap.set(key, localUserId)
 }
 
 function doesExternalIdentityMatchAccount(
@@ -3576,6 +3555,9 @@ async function loadMatchMaps(
   identityClient?: {
     query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
   },
+  localUserClient?: {
+    query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
+  },
 ) {
   const externalKeys = Array.from(new Set(accounts.map((account) => account.external_key).filter(Boolean)))
   const unionIds = Array.from(new Set(
@@ -3625,10 +3607,13 @@ async function loadMatchMaps(
       )
     : Promise.resolve({ rows: [] })
 
+  const readLocalUsers = async (sql: string, params: unknown[]) => localUserClient
+    ? localUserClient.query(sql, params) as Promise<{ rows: LocalUserRow[] }>
+    : query<LocalUserRow>(sql, params)
   const [externalIdentities, emailUsers, mobileUsers] = await Promise.all([
     externalIdentityPromise,
     emails.length > 0
-      ? query<LocalUserRow>(
+      ? readLocalUsers(
         `SELECT id, email
          FROM users
          WHERE lower(email) = ANY($1::text[])`,
@@ -3636,7 +3621,7 @@ async function loadMatchMaps(
       )
       : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<LocalUserRow>>>),
     mobiles.length > 0
-      ? query<LocalUserRow>(
+      ? readLocalUsers(
         `SELECT id, mobile
          FROM users
          WHERE regexp_replace(mobile, '\\s+', '', 'g') = ANY($1::text[])`,
@@ -4390,7 +4375,7 @@ export async function syncDirectoryIntegration(
       let autoAdmissionExcludedCount = 0
       let autoAdmissionFailedCount = 0
       const linkedUserIdByExternalUserId = new Map<string, string>()
-      for (const account of accountIdMap.values()) {
+      for (const account of orderDirectoryMatchingAccounts(Array.from(accountIdMap.values()))) {
         const directoryUser = users.get(account.external_user_id)
         const existing = existingLinks.get(account.id)
         let localUserId: string | null = existing?.local_user_id ?? null
@@ -4566,31 +4551,11 @@ export async function syncDirectoryIntegration(
                 matchStrategy = 'auto_admit'
                 autoAdmittedCount += 1
                 if (!canGrantDingTalkLogin) autoAdmittedWithoutGrantCount += 1
-                if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
-                if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
-                if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
-                if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
-                const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
-                addScopedIdentityCandidate(
-                  scopedExternalIdentityMap,
-                  ambiguousScopedExternalIdentityKeys,
-                  scopedExternalIdentityKey,
-                  created.userId,
-                )
-                const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-                addScopedIdentityCandidate(
-                  scopedOpenIdentityMap,
-                  ambiguousScopedOpenIdentityKeys,
-                  scopedOpenIdentityKey,
-                  created.userId,
-                )
-                const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-                addScopedIdentityCandidate(
-                  scopedUnionIdentityMap,
-                  ambiguousScopedUnionIdentityKeys,
-                  scopedUnionIdentityKey,
-                  created.userId,
-                )
+                rememberDirectoryAdmission({
+                  scopedExternalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap,
+                  ambiguousScopedExternalIdentityKeys, ambiguousScopedUnionIdentityKeys,
+                  ambiguousScopedOpenIdentityKeys, emailMap, mobileMap, ambiguousEmailKeys, ambiguousMobileKeys,
+                }, account, created.userId, cleanEmail, cleanMobile)
               } catch (error) {
                 autoAdmissionFailedCount += 1
                 logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
@@ -5080,214 +5045,67 @@ export async function syncDirectoryIntegration(
  * and apply only diverge here when apply itself fails partway through a run.
  */
 
-/**
- * Placeholder written into `identityMatchMaps` in place of a real `created.userId` (preview
- * never creates anything). Only ever compared as a map VALUE by `matched-kind` branching —
- * never read back as a real user id or returned in any preview response field. Distinctive on
- * purpose so it is unmistakable in a debugger or log if that invariant is ever violated.
- */
-const PREVIEW_ADMIT_SENTINEL_USER_ID = 'preview-would-admit'
-
-export type DirectorySyncPreview = {
-  integrationId: string
-  integrationName: string
-  departmentsSeen: number
-  accountsSeen: number
-  wouldCreateAccounts: number
-  wouldDeactivateAccounts: number
-  /** Deactivations that still hold a linked local user — the offboardings (see DT-OPS-01). */
-  wouldDeactivateLinkedAccounts: number
-  autoAdmissionMode: DirectoryAdmissionMode
-  autoAdmissionCandidateCount: number
-  autoAdmissionSkippedMissingEmailCount: number
-  autoAdmissionExcludedCount: number
-  sampledNewAccounts: Array<{ externalUserId: string; name: string }>
-  sampledDeactivations: Array<{ externalUserId: string; name: string; linked: boolean }>
-}
-
-type ExistingAccountPreviewRow = {
-  external_user_id: string
-  name: string
-  is_active: boolean
-  linked: boolean
-}
-
 export async function previewDirectorySyncIntegration(integrationId: string): Promise<DirectorySyncPreview> {
   const integration = await getIntegrationRow(integrationId)
   if (!integration) throw new DirectoryNotFoundError('Directory integration not found')
-
-  // DT-OPS-02 / R3: refuse a preview while a real sync holds the lease for this
-  // integration. Preview pulls the FULL DingTalk directory (same API quota `syncDirectoryIntegration`
-  // consumes — see the doc-comment above) with no lease check at all; running one during an
-  // in-flight sync doubles the shared quota consumption the lease exists to bound. This is a
-  // READ-ONLY refusal: unlike apply, preview never calls `claimDirectorySyncRun` — it only asks
-  // whether a run is currently `running` and, if so, declines before making any outbound call.
   const activeRunId = await findActiveDirectorySyncRunId(integrationId)
   if (activeRunId) throw new DirectorySyncInProgressError(activeRunId)
-
   const config = parseIntegrationConfig(integration)
   const departments = await fetchAllDepartments(config, integration.name)
   const users = await fetchAllUsers(config, departments)
-
-  const existingResult = await query<ExistingAccountPreviewRow>(
-    `SELECT a.external_user_id,
-            a.name,
-            a.is_active,
-            (l.local_user_id IS NOT NULL AND l.link_status = 'linked') AS linked
-       FROM directory_accounts a
-       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
-      WHERE a.integration_id = $1`,
-    [integrationId],
-  )
-  const existingByExternalId = new Map(existingResult.rows.map((row) => [row.external_user_id, row]))
-
-  // Build the same match maps (external-identity / unique-email / unique-mobile / ambiguous)
-  // `syncDirectoryIntegration` builds, from synthetic account rows shaped exactly like the
-  // ones apply upserts (external_key = unionId||openId||userId, corp_id = integration.corp_id
-  // — see apply lines ~2236/2262). `loadMatchMaps` only reads external_key/union_id/open_id/
-  // email/mobile off each row, so the synthetic `id` is never consulted.
-  const pulledAccountsForMatching = Array.from(users.values()).map((user) => ({
-    id: user.userId,
-    corp_id: integration.corp_id,
-    external_user_id: user.userId,
-    union_id: normalizeOptionalText(user.unionId),
-    open_id: normalizeOptionalText(user.openId),
-    external_key: normalizeText(user.unionId || user.openId || user.userId),
-    name: user.name,
-    email: normalizeOptionalText(user.email),
-    mobile: normalizeOptionalText(user.mobile),
-    // Synthetic "as if pulled from the directory right now" row for match-map building only —
-    // `loadMatchMaps` never reads `is_active` (only external_key/union_id/open_id/email/mobile),
-    // so this is a type-shape fill, not a semantic claim about persisted account state.
-    is_active: true,
-  }))
-  const identityMatchMaps = await loadMatchMaps(pulledAccountsForMatching)
-
-  const sampledNewAccounts: DirectorySyncPreview['sampledNewAccounts'] = []
-  let wouldCreateAccounts = 0
-  let autoAdmissionCandidateCount = 0
-  let autoAdmissionSkippedMissingEmailCount = 0
-  let autoAdmissionExcludedCount = 0
-
-  for (const account of pulledAccountsForMatching) {
-    const user = users.get(account.external_user_id)
-    if (!user) continue
-
-    if (!existingByExternalId.has(user.userId)) {
-      wouldCreateAccounts += 1
-      if (sampledNewAccounts.length < 10) sampledNewAccounts.push({ externalUserId: user.userId, name: user.name })
-    }
-
-    // Walk the exact cascade apply walks: only an account apply would reach the
-    // auto-admission branch for ('none' matched — not already-linked, not identity/email/
-    // mobile/ambiguous-matched) can possibly be an auto-admission candidate.
-    const existingLink = existingByExternalId.get(user.userId)
-    const identityMatch = resolveDirectoryIdentityMatch(
-      {
-        corpId: account.corp_id,
-        externalKey: account.external_key,
-        unionId: account.union_id,
-        openId: account.open_id,
-        email: account.email,
-        mobile: account.mobile,
-      },
-      existingLink?.linked ? { local_user_id: 'linked', link_status: 'linked' } : null,
-      identityMatchMaps,
+  const departmentPathMap = buildDepartmentPathMap(departments)
+  return transaction(async (client) => {
+    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const prior = await client.query(
+      `SELECT a.id, a.corp_id, a.external_user_id, a.union_id, a.open_id, a.external_key,
+              a.name, a.email, a.mobile, a.is_active, l.local_user_id, l.link_status, l.match_strategy
+         FROM directory_accounts a
+         LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+        WHERE a.integration_id = $1`,
+      [integrationId],
     )
-    if (identityMatch.matched !== 'none') continue
-
-    const eligibility = evaluateDirectoryAutoAdmissionEligibility({
-      admissionMode: config.admissionMode,
-      admissionDepartmentIds: config.admissionDepartmentIds,
-      excludeDepartmentIds: config.excludeDepartmentIds,
-      userDepartmentIds: user.departmentIds,
-      departments,
-      email: account.email,
+    const accounts = buildDirectoryProspectiveAccounts(prior.rows as DirectoryPreviewAccount[], users, integration.corp_id)
+    const maps = await loadMatchMaps(accounts, client, client)
+    return projectDirectorySyncPreview({
+      integrationId, integrationName: integration.name, departmentsSeen: departments.size,
+      autoAdmissionMode: config.admissionMode, accounts, users, maps,
+      pendingActivation: isDirectoryPendingActivationEnabled(),
+    }, {
+      query: (sql, params) => client.query(sql, params),
+      match: resolveDirectoryIdentityMatch,
+      eligibility: (account, user) => evaluateDirectoryAutoAdmissionEligibility({
+        admissionMode: config.admissionMode, admissionDepartmentIds: config.admissionDepartmentIds,
+        excludeDepartmentIds: config.excludeDepartmentIds, userDepartmentIds: user?.departmentIds ?? [],
+        departments, email: account.email,
+      }),
+      identifiers: (account) => {
+        const email = account.email ? sanitizeDirectoryAdmissionEmail(account.email) : null
+        const mobile = sanitizeDirectoryAdmissionMobile(account.mobile)
+        // Existing accounts have a known UUID. New account UUIDs are allocated only by apply:
+        // never reject an admission against a username invented from external_user_id.
+        const names = email ? [] : account.existed ? [buildDirectoryAutoAdmissionUsername(account)] : [
+          buildDirectoryAutoAdmissionUsername({ ...account, id: '00000000-0000-0000-0000-000000000000' }),
+          buildDirectoryAutoAdmissionUsername({ ...account, id: 'ffffffff-ffff-ffff-ffff-ffffffffffff' }),
+        ]
+        // Long stable prefixes can truncate the UUID suffix entirely; those names ARE knowable.
+        const username = names.length && names[0] === names[names.length - 1] ? names[0] : null
+        let valid = Boolean(account.open_id || account.union_id)
+          && (!email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+        try { for (const name of names) assertLoginName(name) } catch { valid = false }
+        return { email, mobile, username, valid }
+      },
+      bindKey: (account) => buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id),
+      groups: (linked) => buildDirectoryProjectedMemberGroupPlans({
+        integrationId, integrationName: integration.name, memberGroupSyncMode: config.memberGroupSyncMode,
+        memberGroupDepartmentIds: config.memberGroupDepartmentIds, departments, departmentPathMap,
+        userDepartmentIdsByExternalUserId: new Map(Array.from(users.values()).map(user => [user.userId, user.departmentIds])),
+        linkedUserIdByExternalUserId: linked,
+      }),
+      grants: (plans) => buildDirectoryProjectedGovernanceGrantSet({
+        plans, defaultRoleIds: config.memberGroupDefaultRoleIds, defaultNamespaces: config.memberGroupDefaultNamespaces,
+      }),
     })
-    if (eligibility.excluded) autoAdmissionExcludedCount += 1
-    // Mirror apply exactly: missingEmail only means "skipped" in the branch apply does NOT
-    // create a user (apply creates a user for an in-scope account regardless of missing
-    // email — it falls back to a generated username). Counting it whenever `missingEmail`
-    // is true (independent of inScope) would over-count vs. apply here too.
-    if (eligibility.inScope) {
-      autoAdmissionCandidateCount += 1
-      // Same-batch duplicate fix: mirror apply's post-admit map mutations (see the
-      // `emailMap.set` / `mobileMap.set` / ambiguous-key deletes / identity-map sets right
-      // after `createDirectoryAdmittedUserInTransaction` succeeds, above) onto
-      // `identityMatchMaps` with a sentinel userId instead of a real one — preview writes
-      // nothing, so there is no real created.userId to use, only a placeholder that proves
-      // "an account was admitted here" to the next iteration's `resolveDirectoryIdentityMatch`
-      // call. Keyed with the SAME normalizeText/normalizeMobileIdentifier helpers
-      // `resolveDirectoryIdentityMatch` uses internally (lines ~1129-1130 above), so a later
-      // pulled account in this same pull that shares this one's email/mobile/external-identity
-      // resolves matched:'email'/'mobile'/'external_identity' against it — exactly as it would
-      // resolve against the real user apply creates for this account — instead of independently
-      // resolving matched:'none' and being double-counted.
-      const emailKey = normalizeText(account.email).toLowerCase()
-      const mobileKey = normalizeMobileIdentifier(account.mobile)
-      if (emailKey) {
-        identityMatchMaps.emailMap.set(emailKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
-        identityMatchMaps.ambiguousEmailKeys.delete(emailKey)
-      }
-      if (mobileKey) {
-        identityMatchMaps.mobileMap.set(mobileKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
-        identityMatchMaps.ambiguousMobileKeys.delete(mobileKey)
-      }
-      const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
-      addScopedIdentityCandidate(
-        identityMatchMaps.scopedExternalIdentityMap,
-        identityMatchMaps.ambiguousScopedExternalIdentityKeys,
-        scopedExternalIdentityKey,
-        PREVIEW_ADMIT_SENTINEL_USER_ID,
-      )
-      const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-      addScopedIdentityCandidate(
-        identityMatchMaps.scopedOpenIdentityMap,
-        identityMatchMaps.ambiguousScopedOpenIdentityKeys,
-        scopedOpenIdentityKey,
-        PREVIEW_ADMIT_SENTINEL_USER_ID,
-      )
-      const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-      addScopedIdentityCandidate(
-        identityMatchMaps.scopedUnionIdentityMap,
-        identityMatchMaps.ambiguousScopedUnionIdentityKeys,
-        scopedUnionIdentityKey,
-        PREVIEW_ADMIT_SENTINEL_USER_ID,
-      )
-    } else if (eligibility.missingEmail) {
-      autoAdmissionSkippedMissingEmailCount += 1
-    }
-  }
-
-  const sampledDeactivations: DirectorySyncPreview['sampledDeactivations'] = []
-  let wouldDeactivateAccounts = 0
-  let wouldDeactivateLinkedAccounts = 0
-
-  for (const row of existingResult.rows) {
-    // Already inactive rows are not a *change*; only a live account vanishing is.
-    if (!row.is_active || users.has(row.external_user_id)) continue
-    wouldDeactivateAccounts += 1
-    if (row.linked) wouldDeactivateLinkedAccounts += 1
-    if (sampledDeactivations.length < 10) {
-      sampledDeactivations.push({ externalUserId: row.external_user_id, name: row.name, linked: Boolean(row.linked) })
-    }
-  }
-
-  return {
-    integrationId,
-    integrationName: integration.name,
-    departmentsSeen: departments.size,
-    accountsSeen: users.size,
-    wouldCreateAccounts,
-    wouldDeactivateAccounts,
-    wouldDeactivateLinkedAccounts,
-    autoAdmissionMode: config.admissionMode,
-    autoAdmissionCandidateCount,
-    autoAdmissionSkippedMissingEmailCount,
-    autoAdmissionExcludedCount,
-    sampledNewAccounts,
-    sampledDeactivations,
-  }
+  })
 }
 
 export async function listDirectorySyncRuns(
@@ -6684,7 +6502,8 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
   const existingGroupsResult = await client.query(
     `SELECT id, description
      FROM platform_member_groups
-     WHERE description = ANY($1::text[])`,
+     WHERE description = ANY($1::text[])
+     ORDER BY id ASC`,
     [plans.map((plan) => plan.marker)],
   )
   const groupIdByMarker = new Map<string, string>()
