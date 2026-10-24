@@ -40,6 +40,10 @@ import {
   ECO_COLLABORATION_LOCAL_FIELDS,
   parseEcoCollaborationSource,
 } from '../../src/multitable/plm-collaboration-snapshot-wire'
+import {
+  READINESS_COLLABORATION_LOCAL_FIELDS,
+  READINESS_COLLABORATION_SOURCE_FIELDS,
+} from '../../src/multitable/plm-collaboration-readiness-wire'
 import { RECORDS_WRITE_RE } from '../utils/fence-holder-census'
 
 const SRC = join(__dirname, '../../src')
@@ -169,10 +173,11 @@ const ECO_SERVICE = readFileSync(join(SRC, 'multitable/plm-collaboration-snapsho
 const ECO_DB = readFileSync(join(SRC, 'db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts'), 'utf8').replace(/\r\n/g, '\n')
 const ECO_BOUNDARIES = [
   ['source-only projection', 'service', 'for (const key of ECO_COLLABORATION_ECO_FIELDS) data[fields[key]] = snapshot.eco[key]\n  return data'],
-  ['string source descriptors', 'service', "type: 'string' as const,\n        order,\n        property: { readOnly: true, plmCollaborationSnapshot: { source: true, key } }"],
+  ['string source descriptors', 'service', "type: 'string' as const,\n      order,\n      property: { readOnly: true, plmCollaborationSnapshot: { source: true, key } }"],
+  ['readiness nine-string projection', 'service', 'for (const key of READINESS_COLLABORATION_SOURCE_FIELDS) data[fields[key]] = projected[key]\n  return data'],
   ['writer flag', 'service', "if (!isWriterFenceEnabled()) fail(503, 'ECO_RUNTIME_UNAVAILABLE')"],
   ['provision canonical fence', 'service', 'await fenceWriterEntry(query, sheetId)\n    const sheet = await createSheet({ query, sheetId,'],
-  ['append canonical fence', 'service', 'await fenceWriterEntry(query, binding.sheet_id)\n    await this.authorizeSheet(query, actor, binding, true)\n    const stored = await this.readStoredRow(query, binding.id, preview.row_key)'],
+  ['append canonical fence', 'service', 'await fenceWriterEntry(query, binding.sheet_id)\n    await this.authorizeSheet(query, actor, binding, true)\n    const stored = await this.readStoredRow(query, binding.id, preview.row_key, asKind(binding.source_kind))'],
   ['refresh canonical fence', 'service', 'await fenceWriterEntry(query, binding.sheet_id)\n    await this.authorizeSheet(query, actor, binding, true)\n    const source = await this.admit(query, actor, binding.data_source_id, mode)'],
   ['nonnull operation', 'service', "const ledger = await mintOperation(query, binding.sheet_id)\n    if (ledger.operationId === null) fail(503, 'ECO_RUNTIME_UNAVAILABLE')"],
   ['successful seal', 'service', "if (!(await sealOperation(query, ledger))) fail(503, 'ECO_RUNTIME_UNAVAILABLE')"],
@@ -235,6 +240,21 @@ const ECO_RECORD_WRITE_SITES = [
     '[JSON.stringify(cells), actor, recordId, binding.sheet_id, current.version]'],
 ]
 
+const READINESS_SOURCE_CELLS = [
+  'function readinessSourceCells(snapshot: ReadinessCollaborationSource, fields: Record<string, string>): Record<string, string | null> {',
+  '  const projected = readinessCollaborationSourceCells(snapshot)',
+  '  const data: Record<string, string | null> = {}',
+  '  for (const key of READINESS_COLLABORATION_SOURCE_FIELDS) data[fields[key]] = projected[key]',
+  '  return data',
+  '}',
+].join('\n')
+
+const READINESS_CELLS_TERNARY = [
+  "    const cells = kind === 'eco'",
+  '      ? sourceCells(snapshot as EcoCollaborationSource, binding.source_fields)',
+  '      : readinessSourceCells(snapshot as ReadinessCollaborationSource, binding.source_fields)',
+].join('\n')
+
 function ecoBoundaryFailures(service: string, db: string): string[] {
   const failures = ECO_BOUNDARIES.filter(([_name, file, anchor]) => !(file === 'service' ? service : db).includes(anchor))
     .map(([name]) => String(name))
@@ -246,6 +266,17 @@ function ecoBoundaryFailures(service: string, db: string): string[] {
     '  return data',
     '}',
   ].join('\n')) failures.push('source-only projection')
+  const readinessMarker = 'function readinessSourceCells('
+  const readinessStart = service.indexOf(readinessMarker)
+  const readinessEnd = service.indexOf('\nfunction sourceCells(')
+  const readinessHelper = readinessStart >= 0 && readinessEnd > readinessStart
+    ? service.slice(readinessStart, readinessEnd).trim()
+    : ''
+  if (
+    readinessHelper !== READINESS_SOURCE_CELLS
+    || service.indexOf(readinessMarker) !== service.lastIndexOf(readinessMarker)
+  ) failures.push('readiness nine-string projection')
+  if (service.split(READINESS_CELLS_TERNARY).length - 1 !== 1) failures.push('exact readiness writer arm')
   if (JSON.stringify(ecoRecordWriteSites(service)) !== JSON.stringify(ECO_RECORD_WRITE_SITES)) failures.push('exact source write sites')
   return [...new Set(failures)]
 }
@@ -302,7 +333,7 @@ describe('rich-longText write-sink — durable structural guard', () => {
     expect(ecoBoundaryFailures(ECO_SERVICE, ECO_DB)).toEqual([])
     const writer = ECO_SERVICE.slice(ECO_SERVICE.indexOf('  private async writeGuardedRow('), ECO_SERVICE.indexOf('  private async history('))
     expect(writer.split('\n').filter((line) => /\bcells\b/.test(line)).map((line) => line.trim())).toEqual([
-      'const cells = sourceCells(snapshot, binding.source_fields)',
+      "const cells = kind === 'eco'",
       'data: cells,',
       '[recordId, binding.sheet_id, JSON.stringify(cells), actor],',
       "await this.history(query, actor, binding.sheet_id, recordId, 1, 'create', Object.values(binding.source_fields), cells, cells, ledger)",
@@ -312,7 +343,7 @@ describe('rich-longText write-sink — durable structural guard', () => {
       "await this.history(query, actor, binding.sheet_id, recordId, Number(updated.rows[0].version), 'update', changed, cells, postimage, ledger)",
     ])
     const ordered = [
-      'this.requireWriterFence()', 'const cells = sourceCells(snapshot, binding.source_fields)',
+      'this.requireWriterFence()', "const cells = kind === 'eco'",
       'await mintOperation(query, binding.sheet_id)', 'if (ledger.operationId === null)',
       'INSERT INTO meta_plm_collaboration_syncs', 'INSERT INTO meta_records',
       'await this.history(query,', 'await sealOperation(query, ledger)',
@@ -335,6 +366,47 @@ describe('rich-longText write-sink — durable structural guard', () => {
     const service = file === 'service' ? ECO_SERVICE.replace(anchor, '') : ECO_SERVICE
     const db = file === 'db' ? ECO_DB.replace(anchor, '') : ECO_DB
     expect(ecoBoundaryFailures(service, db)).toContain(name)
+  })
+
+  test('readiness ingress: nine readonly strings stay outside the ECO projection and a local assignment invalidates SAFE', () => {
+    expect(READINESS_COLLABORATION_SOURCE_FIELDS).toEqual([
+      'item_id', 'ruleset_id', 'generated_at', 'coverage_status', 'resources_count',
+      'ok_resources', 'error_count', 'warning_count', 'resources',
+    ])
+    expect(READINESS_COLLABORATION_LOCAL_FIELDS).toEqual([
+      { key: 'collaboration_owner', type: 'person' },
+      { key: 'followup_due_at', type: 'dateTime' },
+      { key: 'review_note', type: 'longText' },
+    ])
+    const projection = ECO_SERVICE.slice(ECO_SERVICE.indexOf('function sourceCells('), ECO_SERVICE.indexOf('\nfunction previewFrom('))
+    expect(projection).not.toContain('READINESS_COLLABORATION_SOURCE_FIELDS')
+    expect(ECO_SERVICE).toContain("kind === 'eco'")
+    expect(ECO_SERVICE).toContain('readinessSourceCells(')
+    const anchor = '  for (const key of READINESS_COLLABORATION_SOURCE_FIELDS) data[fields[key]] = projected[key]'
+    const service = ECO_SERVICE.replace(anchor, `${anchor}\n  data[fields.review_note] = 'local write'`)
+    expect(ecoBoundaryFailures(service, ECO_DB)).toContain('readiness nine-string projection')
+  })
+
+  test('readiness ingress: a local cell before the projection loop invalidates SAFE', () => {
+    const anchor = '  for (const key of READINESS_COLLABORATION_SOURCE_FIELDS) data[fields[key]] = projected[key]'
+    expect(ECO_SERVICE.split(anchor).length - 1).toBe(1)
+    const service = ECO_SERVICE.replace(anchor, `  data[fields.review_note] = 'local write'\n${anchor}`)
+    expect(service).toContain(`${anchor}\n  return data`)
+    expect(ecoRecordWriteSites(service)).toEqual(ECO_RECORD_WRITE_SITES)
+    expect(ecoBoundaryFailures(service, ECO_DB)).toContain('readiness nine-string projection')
+  })
+
+  test('readiness ingress: an additive review_note in the writer arm invalidates SAFE with the helper intact', () => {
+    const arm = '      : readinessSourceCells(snapshot as ReadinessCollaborationSource, binding.source_fields)'
+    expect(ECO_SERVICE.split(arm).length - 1).toBe(1)
+    const service = ECO_SERVICE.replace(
+      arm,
+      "      : { ...readinessSourceCells(snapshot as ReadinessCollaborationSource, binding.source_fields), [binding.local_fields.review_note]: 'local write' }",
+    )
+    const helper = (source: string) => source.slice(source.indexOf('function readinessSourceCells('), source.indexOf('\nfunction sourceCells(')).trim()
+    expect(helper(service)).toBe(helper(ECO_SERVICE))
+    expect(ecoRecordWriteSites(service)).toEqual(ECO_RECORD_WRITE_SITES)
+    expect(ecoBoundaryFailures(service, ECO_DB)).toContain('exact readiness writer arm')
   })
 
   test('ECO ingress mutation: adding a local cell to the source projection invalidates SAFE', () => {

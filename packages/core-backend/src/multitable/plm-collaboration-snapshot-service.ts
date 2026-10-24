@@ -32,6 +32,17 @@ import {
   parseEcoCollaborationSourceInput,
   type EcoCollaborationSource,
 } from './plm-collaboration-snapshot-wire'
+import {
+  READINESS_COLLABORATION_LOCAL_FIELDS,
+  READINESS_COLLABORATION_SOURCE_FIELDS,
+  ReadinessCollaborationSourceError,
+  parseReadinessCollaborationSource,
+  parseReadinessCollaborationSourceInput,
+  readinessCollaborationBusinessHash,
+  readinessCollaborationRowKey,
+  readinessCollaborationSourceCells,
+  type ReadinessCollaborationSource,
+} from './plm-collaboration-readiness-wire'
 import { fenceWriterEntry, isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
 import { mintOperation, sealOperation, OperationLedgerSchemaError, type OperationLedger } from './operation-ledger'
 import { recordConfigRevision } from './config-revision-recorder'
@@ -60,7 +71,57 @@ const STALE_CODES = new Set([
   'ECO_SOURCE_ANCHOR_MISMATCH',
   'ECO_SOURCE_LOGIN_REJECTED',
   'ECO_SOURCE_TOKEN_REJECTED',
+  'READINESS_SOURCE_UNLICENSED',
+  'READINESS_SOURCE_ANCHOR_MISMATCH',
+  'READINESS_SOURCE_LOGIN_REJECTED',
+  'READINESS_SOURCE_TOKEN_REJECTED',
 ])
+const READINESS_CAPABILITY_SQL = `SELECT (
+  EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS proc
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = proc.pronamespace
+    WHERE namespace.nspname = current_schema()
+      AND proc.proname = 'meta_plm_collaboration_readiness_request_id'
+      AND pg_catalog.pg_get_function_identity_arguments(proc.oid) = 'value text'
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS proc
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = proc.pronamespace
+    WHERE namespace.nspname = current_schema()
+      AND proc.proname = 'meta_plm_collaboration_readiness_scope_id'
+      AND pg_catalog.pg_get_function_identity_arguments(proc.oid) = 'value text'
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS proc
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = proc.pronamespace
+    WHERE namespace.nspname = current_schema()
+      AND proc.proname = 'meta_plm_collaboration_readiness_row_key'
+      AND pg_catalog.pg_get_function_identity_arguments(proc.oid) = 'row_key jsonb, data_source_id text, native_tenant_id text, native_org_id text, item_id text'
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS proc
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = proc.pronamespace
+    WHERE namespace.nspname = current_schema()
+      AND proc.proname = 'meta_plm_collaboration_readiness_data_ok'
+      AND pg_catalog.pg_get_function_identity_arguments(proc.oid) = 'item_id text, ruleset_id text, source_fields jsonb, data jsonb'
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint AS constraint_row
+    JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = current_schema()
+      AND constraint_row.conname = 'meta_plm_collaboration_bindings_current_version_check'
+      AND pg_catalog.pg_get_constraintdef(constraint_row.oid) LIKE '%meta_plm_collaboration_readiness_request_id(%'
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint AS constraint_row
+    JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = current_schema()
+      AND constraint_row.conname = 'meta_plm_collaboration_bindings_datasource_check'
+      AND pg_catalog.pg_get_constraintdef(constraint_row.oid) LIKE '%meta_plm_collaboration_readiness_request_id(%'
+  )
+) AS ready`
 
 export class EcoCollaborationSnapshotError extends Error {
   readonly name = 'EcoCollaborationSnapshotError'
@@ -86,11 +147,15 @@ export interface EcoCollaborationSnapshotDependencies {
   dataSourceManager: Pick<DataSourceManager, 'getDataSource'>
 }
 
-type SourceKind = 'eco'
+type SourceKind = 'eco' | 'readiness'
 type LockMode = 'share' | 'update'
+type EcoRowKey = readonly [string, string, string, string]
+type ReadinessRowKey = readonly [string, string, string, string, string]
+type CollaborationRowKey = EcoRowKey | ReadinessRowKey
+type CollaborationSnapshot = EcoCollaborationSource | ReadinessCollaborationSource
 
-interface PreviewRequest {
-  sourceKind: SourceKind
+interface EcoPreviewRequest {
+  sourceKind: 'eco'
   dataSourceId: string
   baseId: string
   itemId: string
@@ -98,6 +163,18 @@ interface PreviewRequest {
   ecoId: string
   name: string
 }
+
+interface ReadinessPreviewRequest {
+  sourceKind: 'readiness'
+  dataSourceId: string
+  baseId: string
+  itemId: string
+  currentVersionId: string | null
+  rulesetId: string
+  name: string
+}
+
+type PreviewRequest = EcoPreviewRequest | ReadinessPreviewRequest
 
 interface ConfirmRequest {
   previewId: string
@@ -108,8 +185,12 @@ interface ConfirmRequest {
 
 interface RefreshRequest {
   expectedVersion: number
-  rowKey: readonly [string, string, string, string]
+  rowKey: readonly string[]
 }
+
+type FetchInput =
+  | { sourceKind: 'eco'; itemId: string; ecoId: string; currentVersionId: string | null }
+  | { sourceKind: 'readiness'; itemId: string; rulesetId: string; currentVersionId: string | null }
 
 interface FailureIdentity {
   bindingId: string
@@ -123,6 +204,16 @@ interface FailureIdentity {
   baseId: string
   name: string
   fingerprint: string
+  rowKey: readonly string[]
+}
+
+interface AcceptedMaterial {
+  sourceKind: SourceKind
+  tenantId: string
+  orgId: string
+  snapshot: CollaborationSnapshot
+  rowKey: CollaborationRowKey
+  hash: string
 }
 
 interface OwnedSource {
@@ -141,7 +232,7 @@ interface PreviewRow {
   current_version_id: string | null
   base_id: string
   name: string
-  row_key: readonly [string, string, string, string]
+  row_key: CollaborationRowKey
   source_fingerprint: string
   business_hash: string
   captured_at: string
@@ -175,7 +266,7 @@ interface BindingRow {
 
 interface StoredRow {
   record_id: string
-  row_key: readonly [string, string, string, string]
+  row_key: CollaborationRowKey
   business_hash: string
   captured_at: string
 }
@@ -200,7 +291,17 @@ const confirmRequestSchema = z.object({
 
 const refreshRequestSchema = z.object({
   expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  rowKey: z.tuple([textId, z.string().refine((value) => isEcoCollaborationId(value, 64)), z.string().refine((value) => isEcoCollaborationId(value, 64)), textId]),
+  rowKey: z.array(z.string()),
+}).strict()
+
+const readinessPreviewRequestSchema = z.object({
+  sourceKind: z.literal('readiness'),
+  dataSourceId: z.string(),
+  baseId: z.string().refine((value) => isEcoCollaborationId(value, 128)),
+  itemId: z.string(),
+  currentVersionId: z.string().nullable(),
+  rulesetId: z.string(),
+  name: z.string().refine((value) => value === value.trim() && value.length > 0 && value.length <= 200 && !value.includes('\0')),
 }).strict()
 
 const disableRequestSchema = z.object({
@@ -222,6 +323,33 @@ function requiredVersion(value: unknown): number {
 }
 
 function parsePreviewRequest(body: unknown): PreviewRequest {
+  if (explicitReadiness(body)) {
+    const parsed = readinessPreviewRequestSchema.safeParse(body)
+    if (!parsed.success) fail(422, 'ECO_REQUEST_INVALID')
+    const current = parsed.data.currentVersionId
+    const request: ReadinessPreviewRequest = {
+      sourceKind: 'readiness',
+      dataSourceId: requiredText(parsed.data.dataSourceId),
+      baseId: requiredText(parsed.data.baseId),
+      itemId: requiredText(parsed.data.itemId),
+      currentVersionId: current == null ? null : requiredText(current),
+      rulesetId: requiredText(parsed.data.rulesetId),
+      name: requiredText(parsed.data.name),
+    }
+    parseReadinessCollaborationSourceInput({
+      itemId: request.itemId,
+      rulesetId: request.rulesetId,
+      currentVersionId: request.currentVersionId,
+    })
+    readinessCollaborationRowKey({
+      dataSourceId: request.dataSourceId,
+      tenantId: 'tenant',
+      orgId: 'org',
+      itemId: request.itemId,
+      rulesetId: request.rulesetId,
+    })
+    return request
+  }
   const parsed = previewRequestSchema.safeParse(body)
   if (!parsed.success || parsed.data.sourceKind !== 'eco') fail(422, 'ECO_REQUEST_INVALID')
   const current = parsed.data.currentVersionId
@@ -254,14 +382,41 @@ function parseConfirmRequest(body: unknown): ConfirmRequest {
 function parseRefreshRequest(body: unknown): RefreshRequest {
   const parsed = refreshRequestSchema.safeParse(body)
   if (!parsed.success) fail(422, 'ECO_REQUEST_INVALID')
-  const key = parsed.data.rowKey
-  if (!Array.isArray(key) || key.length !== 4 || key.some((part) => typeof part !== 'string')) {
-    fail(422, 'ECO_REQUEST_INVALID')
-  }
   return {
     expectedVersion: requiredVersion(parsed.data.expectedVersion),
-    rowKey: [key[0], key[1], key[2], key[3]],
+    rowKey: parsed.data.rowKey.slice(),
   }
+}
+
+function refreshKeyForKind(kind: SourceKind, parts: readonly string[], binding: BindingRow): CollaborationRowKey {
+  if (kind === 'readiness') {
+    if (parts.length !== 5) fail(422, 'ECO_REQUEST_INVALID')
+    const key = readinessCollaborationRowKey({
+      dataSourceId: parts[0],
+      tenantId: parts[1],
+      orgId: parts[2],
+      itemId: parts[3],
+      rulesetId: parts[4],
+    })
+    if (
+      key[0] !== binding.data_source_id
+      || key[1] !== binding.native_tenant_id
+      || key[2] !== binding.native_org_id
+      || key[3] !== binding.item_id
+    ) fail(409, 'ROW_KEY_MISMATCH')
+    return key
+  }
+  if (parts.length !== 4) fail(422, 'ECO_REQUEST_INVALID')
+  const key = ecoCollaborationRowKey({
+    dataSourceId: parts[0],
+    tenantId: parts[1],
+    orgId: parts[2],
+    ecoId: parts[3],
+  })
+  if (key[0] !== binding.data_source_id || key[1] !== binding.native_tenant_id || key[2] !== binding.native_org_id) {
+    fail(409, 'ROW_KEY_MISMATCH')
+  }
+  return key
 }
 
 function parseDisableRequest(body: unknown): { expectedVersion: number } {
@@ -282,12 +437,98 @@ function asText(value: unknown): string | null {
   return typeof value === 'string' ? value : null
 }
 
-function asRowKey(value: unknown): readonly [string, string, string, string] {
+function explicitReadiness(body: unknown): boolean {
+  return Boolean(body) && typeof body === 'object' && !Array.isArray(body) && (body as { sourceKind?: unknown }).sourceKind === 'readiness'
+}
+
+function asKind(value: unknown): SourceKind {
+  if (value === 'eco' || value === 'readiness') return value
+  fail(503, 'ECO_RUNTIME_UNAVAILABLE')
+}
+
+function asRowKey(value: unknown, kind: SourceKind): CollaborationRowKey {
   const key = typeof value === 'string' ? JSON.parse(value) as unknown : value
-  if (!Array.isArray(key) || key.length !== 4 || key.some((part) => typeof part !== 'string')) {
+  if (kind === 'eco') {
+    if (!Array.isArray(key) || key.length !== 4 || key.some((part) => typeof part !== 'string')) {
+      fail(409, 'ROW_KEY_MISMATCH')
+    }
+    return [key[0], key[1], key[2], key[3]]
+  }
+  if (!Array.isArray(key) || key.length !== 5 || key.some((part) => typeof part !== 'string')) {
     fail(409, 'ROW_KEY_MISMATCH')
   }
-  return [key[0], key[1], key[2], key[3]]
+  return [key[0], key[1], key[2], key[3], key[4]]
+}
+
+function ecoIdOf(key: readonly string[], kind: SourceKind): string {
+  if (kind !== 'eco' || key.length !== 4) fail(409, 'ROW_KEY_MISMATCH')
+  return key[3]
+}
+
+function rulesetOf(key: readonly string[], kind: SourceKind): string {
+  if (kind !== 'readiness' || key.length !== 5) fail(409, 'ROW_KEY_MISMATCH')
+  return key[4]
+}
+
+function fetchInputOf(request: PreviewRequest): FetchInput {
+  if (request.sourceKind === 'readiness') {
+    return {
+      sourceKind: 'readiness',
+      itemId: request.itemId,
+      rulesetId: request.rulesetId,
+      currentVersionId: request.currentVersionId,
+    }
+  }
+  return {
+    sourceKind: 'eco',
+    itemId: request.itemId,
+    ecoId: request.ecoId,
+    currentVersionId: request.currentVersionId,
+  }
+}
+
+function fetchInputFromKey(kind: SourceKind, itemId: string, key: readonly string[], currentVersionId: string | null): FetchInput {
+  if (kind === 'readiness') {
+    if (key[3] !== itemId) fail(409, 'ROW_KEY_MISMATCH')
+    return { sourceKind: 'readiness', itemId, rulesetId: rulesetOf(key, kind), currentVersionId }
+  }
+  return { sourceKind: 'eco', itemId, ecoId: ecoIdOf(key, kind), currentVersionId }
+}
+
+function parseReadinessSelector(input: unknown): ReadinessRowKey | null {
+  if (input == null) return null
+  if (typeof input !== 'object' || Array.isArray(input)) fail(422, 'ECO_REQUEST_INVALID')
+  const record = input as Record<string, unknown>
+  const names = Object.keys(record)
+  if (names.length === 0) return null
+  if (names.length !== 1 || names[0] !== 'rowKey') fail(422, 'ECO_REQUEST_INVALID')
+  const raw = record.rowKey
+  if (typeof raw !== 'string') fail(422, 'ECO_REQUEST_INVALID')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    fail(422, 'ECO_REQUEST_INVALID')
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 5 || parsed.some((part) => typeof part !== 'string')) {
+    fail(422, 'ECO_REQUEST_INVALID')
+  }
+  return readinessCollaborationRowKey({
+    dataSourceId: parsed[0],
+    tenantId: parsed[1],
+    orgId: parsed[2],
+    itemId: parsed[3],
+    rulesetId: parsed[4],
+  })
+}
+
+function assertReadinessSelectorBinding(key: ReadinessRowKey, binding: BindingRow): void {
+  if (
+    key[0] !== binding.data_source_id
+    || key[1] !== binding.native_tenant_id
+    || key[2] !== binding.native_org_id
+    || key[3] !== binding.item_id
+  ) fail(409, 'ROW_KEY_MISMATCH')
 }
 
 function asMap(value: unknown): Record<string, string> {
@@ -373,6 +614,37 @@ function sourceFingerprint(row: Record<string, unknown>): string {
   })
 }
 
+function fieldPlans(kind: SourceKind, ownerId: string) {
+  const sourceKeys = kind === 'readiness' ? READINESS_COLLABORATION_SOURCE_FIELDS : ECO_COLLABORATION_ECO_FIELDS
+  const locals = kind === 'readiness' ? READINESS_COLLABORATION_LOCAL_FIELDS : ECO_COLLABORATION_LOCAL_FIELDS
+  const sourceFields = Object.fromEntries(sourceKeys.map((key) => [key, getObjectFieldId(NAMESPACE, ownerId, key)]))
+  const localFields = Object.fromEntries(locals.map((field) => [field.key, getObjectFieldId(NAMESPACE, ownerId, field.key)]))
+  const descriptors = [
+    ...sourceKeys.map((key, order) => ({
+      id: sourceFields[key],
+      name: key,
+      type: 'string' as const,
+      order,
+      property: { readOnly: true, plmCollaborationSnapshot: { source: true, key } },
+    })),
+    ...locals.map((field, index) => ({
+      id: localFields[field.key],
+      name: field.key,
+      type: field.type,
+      order: sourceKeys.length + index,
+      property: {},
+    })),
+  ]
+  return { sourceFields, localFields, descriptors }
+}
+
+function readinessSourceCells(snapshot: ReadinessCollaborationSource, fields: Record<string, string>): Record<string, string | null> {
+  const projected = readinessCollaborationSourceCells(snapshot)
+  const data: Record<string, string | null> = {}
+  for (const key of READINESS_COLLABORATION_SOURCE_FIELDS) data[fields[key]] = projected[key]
+  return data
+}
+
 function sourceCells(snapshot: EcoCollaborationSource, fields: Record<string, string>): Record<string, string | null> {
   const data: Record<string, string | null> = {}
   for (const key of ECO_COLLABORATION_ECO_FIELDS) data[fields[key]] = snapshot.eco[key]
@@ -381,18 +653,19 @@ function sourceCells(snapshot: EcoCollaborationSource, fields: Record<string, st
 
 function previewFrom(row: Record<string, unknown> | undefined): PreviewRow | null {
   if (!row) return null
+  const sourceKind = asKind(row.source_kind)
   return {
     id: String(row.id),
     actor_id: String(row.actor_id),
     data_source_id: String(row.data_source_id),
-    source_kind: String(row.source_kind),
+    source_kind: sourceKind,
     native_tenant_id: String(row.native_tenant_id),
     native_org_id: String(row.native_org_id),
     item_id: String(row.item_id),
     current_version_id: asText(row.current_version_id),
     base_id: String(row.base_id),
     name: String(row.name),
-    row_key: asRowKey(row.row_key),
+    row_key: asRowKey(row.row_key, sourceKind),
     source_fingerprint: String(row.source_fingerprint),
     business_hash: String(row.business_hash),
     captured_at: asText(row.captured_at) ?? '',
@@ -411,7 +684,7 @@ function bindingFrom(row: Record<string, unknown> | undefined): BindingRow | nul
     id: String(row.id),
     creator_id: String(row.creator_id),
     data_source_id: String(row.data_source_id),
-    source_kind: String(row.source_kind),
+    source_kind: asKind(row.source_kind),
     native_tenant_id: String(row.native_tenant_id),
     native_org_id: String(row.native_org_id),
     item_id: String(row.item_id),
@@ -442,7 +715,7 @@ function sameFrozen(preview: PreviewRow, binding: BindingRow): boolean {
     && preview.source_fingerprint === binding.source_fingerprint
 }
 
-function failureIdentity(binding: BindingRow, expectedVersion: number): FailureIdentity {
+function failureIdentity(binding: BindingRow, expectedVersion: number, rowKey: readonly string[]): FailureIdentity {
   return {
     bindingId: binding.id,
     expectedVersion,
@@ -455,7 +728,15 @@ function failureIdentity(binding: BindingRow, expectedVersion: number): FailureI
     baseId: binding.base_id,
     name: binding.name,
     fingerprint: binding.source_fingerprint,
+    rowKey,
   }
+}
+
+function capturedCoordinates(binding: BindingRow, rowKey: readonly string[]): string[] {
+  if (binding.source_kind === 'readiness') {
+    return [binding.data_source_id, binding.native_tenant_id, binding.native_org_id, binding.item_id, rowKey[4] ?? '']
+  }
+  return [binding.data_source_id, binding.native_tenant_id, binding.native_org_id, rowKey[3] ?? '']
 }
 
 function sameFailureIdentity(binding: BindingRow, identity: FailureIdentity): boolean {
@@ -469,6 +750,7 @@ function sameFailureIdentity(binding: BindingRow, identity: FailureIdentity): bo
     && binding.base_id === identity.baseId
     && binding.name === identity.name
     && binding.source_fingerprint === identity.fingerprint
+    && sameKey(identity.rowKey, capturedCoordinates(binding, identity.rowKey))
 }
 
 export class EcoCollaborationSnapshotService {
@@ -480,43 +762,46 @@ export class EcoCollaborationSnapshotService {
     this.requireWriterFence()
     const before = await this.transaction(async (query) => {
       this.requireWriterFence()
-      await this.runtime(query)
+      await this.runtime(query, input.sourceKind)
       await this.active(query, actor)
       await this.authorizeBase(query, actor, input.baseId)
       return this.admit(query, actor, input.dataSourceId, 'share')
     })
-    const snapshot = await this.fetch(input.dataSourceId, {
-      itemId: input.itemId,
-      ecoId: input.ecoId,
-      currentVersionId: input.currentVersionId,
-    }, before.config)
-    const material = this.accept(snapshot, before.config, input)
+    const snapshot = await this.fetch(input.dataSourceId, fetchInputOf(input), before.config)
+    const material = this.accept(snapshot, before.config, fetchInputOf(input))
     return this.transaction(async (query) => {
       this.requireWriterFence()
-      await this.runtime(query)
+      await this.runtime(query, input.sourceKind)
       await this.active(query, actor)
       await this.authorizeBase(query, actor, input.baseId)
       const after = await this.admit(query, actor, input.dataSourceId, 'share')
       if (after.fingerprint !== before.fingerprint) fail(409, 'SOURCE_CHANGED')
-      this.accept(snapshot, after.config, input)
+      this.accept(snapshot, after.config, fetchInputOf(input))
       const id = randomUUID()
       const inserted = await query(
         `INSERT INTO meta_plm_collaboration_previews (
            id, actor_id, data_source_id, source_kind, native_tenant_id, native_org_id, item_id,
            current_version_id, base_id, name, row_key, source_fingerprint, business_hash, captured_at, expires_at
          ) VALUES (
-           $1::uuid, $2, $3, 'eco', $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13::timestamptz,
+           $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14::timestamptz,
            now() + interval '15 minutes'
          ) RETURNING id, expires_at`,
         [
-          id, actor, input.dataSourceId, material.tenantId, material.orgId, input.itemId,
+          id, actor, input.dataSourceId, input.sourceKind, material.tenantId, material.orgId, input.itemId,
           input.currentVersionId, input.baseId, input.name, JSON.stringify(material.rowKey),
           after.fingerprint, material.hash, material.snapshot.snapshot_at,
         ],
       )
       const row = inserted.rows[0]
       if (!row) fail(503, 'ECO_RUNTIME_UNAVAILABLE')
-      return {
+      const anchor = {
+        dataSourceId: input.dataSourceId,
+        tenantId: material.tenantId,
+        orgId: material.orgId,
+        itemId: input.itemId,
+        currentVersionId: input.currentVersionId,
+      }
+      const common = {
         previewId: String(row.id),
         expiresAt: asText(row.expires_at),
         businessHash: material.hash,
@@ -524,15 +809,20 @@ export class EcoCollaborationSnapshotService {
         rowKey: material.rowKey,
         baseId: input.baseId,
         name: input.name,
-        anchor: {
-          dataSourceId: input.dataSourceId,
-          tenantId: material.tenantId,
-          orgId: material.orgId,
-          itemId: input.itemId,
-          currentVersionId: input.currentVersionId,
-          ecoId: input.ecoId,
-        },
-        eco: material.snapshot.eco,
+      }
+      if (input.sourceKind === 'readiness') {
+        if (material.sourceKind !== 'readiness') fail(503, 'ECO_RUNTIME_UNAVAILABLE')
+        return {
+          ...common,
+          anchor: { ...anchor, rulesetId: input.rulesetId },
+          readiness: readinessCollaborationSourceCells(material.snapshot as ReadinessCollaborationSource),
+        }
+      }
+      if (material.sourceKind !== 'eco') fail(503, 'ECO_RUNTIME_UNAVAILABLE')
+      return {
+        ...common,
+        anchor: { ...anchor, ecoId: input.ecoId },
+        eco: (material.snapshot as EcoCollaborationSource).eco,
       }
     })
   }
@@ -542,6 +832,7 @@ export class EcoCollaborationSnapshotService {
     const existing = await this.transaction(async (query) => {
       await this.runtime(query)
       const preview = await this.readPreview(query, actor, input.previewId, false)
+      if (preview) await this.runtime(query, asKind(preview.source_kind))
       if (!preview || preview.request_id || preview.binding_id || preview.consumed_at) return preview
       const taken = await query(
         'SELECT id FROM meta_plm_collaboration_previews WHERE request_id=$1::uuid AND id<>$2::uuid',
@@ -554,15 +845,12 @@ export class EcoCollaborationSnapshotService {
     if (existing.request_id || existing.binding_id || existing.consumed_at) return this.replay(actor, input)
     if (existing.expired) fail(409, 'PREVIEW_EXPIRED')
     this.requireWriterFence()
-    const wire = {
-      itemId: existing.item_id,
-      ecoId: existing.row_key[3],
-      currentVersionId: existing.current_version_id,
-    }
+    const previewKind = asKind(existing.source_kind)
+    const wire = fetchInputFromKey(previewKind, existing.item_id, existing.row_key, existing.current_version_id)
     const before = await this.transaction(async (query) => {
       this.requireWriterFence()
       await this.lockSource(query, existing.data_source_id)
-      await this.runtime(query)
+      await this.runtime(query, previewKind)
       await this.active(query, actor)
       await this.authorizeBase(query, actor, existing.base_id)
       const retainedTarget = input.expectedVersion > 0
@@ -572,19 +860,20 @@ export class EcoCollaborationSnapshotService {
       return { admitted, retainedTarget }
     })
     if (before.admitted.fingerprint !== existing.source_fingerprint) fail(409, 'SOURCE_CHANGED')
-    let snapshot: EcoCollaborationSource
+    let snapshot: CollaborationSnapshot
+    let material: AcceptedMaterial
     try {
       snapshot = await this.fetch(existing.data_source_id, wire, before.admitted.config)
+      material = this.acceptFrozen(snapshot, before.admitted.config, existing)
     } catch (error) {
       throw await this.retainProviderFailure(actor, before.retainedTarget, error)
     }
-    const material = this.acceptFrozen(snapshot, before.admitted.config, existing)
     if (material.hash !== existing.business_hash) fail(409, 'SOURCE_CHANGED')
     try {
       return await this.transaction(async (query) => {
         this.requireWriterFence()
         await this.lockSource(query, existing.data_source_id)
-        await this.runtime(query)
+        await this.runtime(query, previewKind)
         const locked = await this.readPreview(query, actor, input.previewId, true)
         if (!locked) fail(404, 'NOT_FOUND')
         if (locked.data_source_id !== existing.data_source_id) fail(409, 'SOURCE_CHANGED')
@@ -606,15 +895,24 @@ export class EcoCollaborationSnapshotService {
     }
   }
 
-  async get(actor: string, bindingId: string) {
+  async get(actor: string, bindingId: string, queryInput?: unknown) {
     if (!z.string().uuid().safeParse(bindingId).success) fail(422, 'ECO_REQUEST_INVALID')
     return this.transaction(async (query) => {
       await this.runtime(query)
       await this.active(query, actor)
       const binding = await this.readBinding(query, bindingId, false)
       if (!binding) fail(404, 'NOT_FOUND')
+      const kind = asKind(binding.source_kind)
+      await this.runtime(query, kind)
+      // Malformed selectors stay 422 without a sheet read. Coordinate comparison
+      // waits until authorizeSheet, so a denied sheet is 403 for a matching
+      // selector and for a valid foreign tuple.
+      const selected = kind === 'readiness' ? parseReadinessSelector(queryInput) : null
       await this.authorizeSheet(query, actor, binding, false)
-      const stored = await this.readStoredRow(query, binding.id, null)
+      if (selected) assertReadinessSelectorBinding(selected, binding)
+      const stored = kind === 'readiness'
+        ? (selected ? await this.readStoredRow(query, binding.id, selected, kind) : null)
+        : await this.readStoredRow(query, binding.id, null, kind)
       const denied = stored
         ? (await loadRecordPermissionScopeMap(query, binding.sheet_id, [stored.record_id], actor)).get(stored.record_id)?.accessLevel === 'none'
         : false
@@ -622,6 +920,7 @@ export class EcoCollaborationSnapshotService {
       const projected = stored && !denied
         ? await this.visibleCells(query, actor, binding, stored.record_id, record?.data ?? {})
         : null
+      const selectedRow = kind === 'readiness' ? Boolean(selected) : true
       return {
         id: binding.id,
         status: binding.status,
@@ -630,9 +929,11 @@ export class EcoCollaborationSnapshotService {
         baseId: binding.base_id,
         sheetId: binding.sheet_id,
         viewId: binding.view_id,
-        sourceKind: 'eco' as const,
+        sourceKind: kind,
         anchor: this.anchor(binding),
-        canRefresh: await this.canRefresh(query, actor, binding, denied ? null : stored, record),
+        canRefresh: selectedRow
+          ? await this.canRefresh(query, actor, binding, denied ? null : stored, record)
+          : false,
         row: stored && !denied && projected ? {
           recordId: stored.record_id,
           rowKey: projected.sourceMetadataVisible ? stored.row_key : null,
@@ -649,18 +950,21 @@ export class EcoCollaborationSnapshotService {
     if (!z.string().uuid().safeParse(bindingId).success) fail(422, 'ECO_REQUEST_INVALID')
     this.requireWriterFence()
     const loaded = await this.transaction(async (query) => this.loadRefresh(query, actor, bindingId, input, 'share'))
-    const retainedTarget = failureIdentity(loaded.binding, input.expectedVersion)
-    let snapshot: EcoCollaborationSource
+    const retainedTarget = failureIdentity(loaded.binding, input.expectedVersion, loaded.stored.row_key)
+    const refreshKind = asKind(loaded.binding.source_kind)
+    let snapshot: CollaborationSnapshot
+    let material: AcceptedMaterial
     try {
-      snapshot = await this.fetch(loaded.binding.data_source_id, {
-        itemId: loaded.binding.item_id,
-        ecoId: loaded.stored.row_key[3],
-        currentVersionId: loaded.binding.current_version_id,
-      }, loaded.source.config)
+      snapshot = await this.fetch(loaded.binding.data_source_id, fetchInputFromKey(
+        refreshKind,
+        loaded.binding.item_id,
+        loaded.stored.row_key,
+        loaded.binding.current_version_id,
+      ), loaded.source.config)
+      material = this.acceptFrozen(snapshot, loaded.source.config, this.previewShape(loaded.binding, loaded.stored))
     } catch (error) {
       throw await this.retainProviderFailure(actor, retainedTarget, error)
     }
-    const material = this.acceptFrozen(snapshot, loaded.source.config, this.previewShape(loaded.binding, loaded.stored))
     if (material.hash === loaded.stored.business_hash) {
       await this.transaction(async (query) => {
         const again = await this.loadRefresh(query, actor, bindingId, input, 'share')
@@ -690,6 +994,7 @@ export class EcoCollaborationSnapshotService {
       await this.active(query, actor)
       const binding = await this.readBinding(query, bindingId, true)
       if (!binding) fail(404, 'NOT_FOUND')
+      await this.runtime(query, asKind(binding.source_kind))
       if (binding.creator_id !== actor) fail(403, 'FORBIDDEN')
       await fenceWriterEntry(query, binding.sheet_id)
       await this.authorizeSheet(query, actor, binding, true)
@@ -722,7 +1027,9 @@ export class EcoCollaborationSnapshotService {
 
   private translate(error: unknown): unknown {
     if (error instanceof EcoCollaborationSnapshotError) return error
-    if (error instanceof EcoCollaborationSourceError) return new EcoCollaborationSnapshotError(error.status, error.code)
+    if (error instanceof EcoCollaborationSourceError || error instanceof ReadinessCollaborationSourceError) {
+      return new EcoCollaborationSnapshotError(error.status, error.code)
+    }
     if (error instanceof ManagedCompanionRefusal) {
       const code = error.code === 'PLM_MANAGED_SCHEMA_MISSING'
         ? 'ECO_SOURCE_SCHEMA_MISSING'
@@ -747,7 +1054,7 @@ export class EcoCollaborationSnapshotService {
     return error
   }
 
-  private async runtime(query: EcoQuery): Promise<void> {
+  private async runtime(query: EcoQuery, kind: SourceKind = 'eco'): Promise<void> {
     const found = await query(
       `SELECT (
          to_regclass('meta_plm_collaboration_bindings') IS NOT NULL
@@ -760,6 +1067,9 @@ export class EcoCollaborationSnapshotService {
        ) AS ready`,
     )
     if (found.rows[0]?.ready !== true) fail(503, 'ECO_RUNTIME_UNAVAILABLE')
+    if (kind !== 'readiness') return
+    const admitted = await query(READINESS_CAPABILITY_SQL)
+    if (admitted.rows[0]?.ready !== true) fail(503, 'READINESS_RUNTIME_UNAVAILABLE')
   }
 
   private async active(query: EcoQuery, actor: string): Promise<void> {
@@ -831,36 +1141,75 @@ export class EcoCollaborationSnapshotService {
 
   private async fetch(
     dataSourceId: string,
-    input: { itemId: string; ecoId: string; currentVersionId: string | null },
+    input: FetchInput,
     config: DataSourceConfig,
-  ): Promise<EcoCollaborationSource> {
-    let adapter: { getEcoCollaborationSource?: (input: unknown, freshSourceConfig: DataSourceConfig) => Promise<unknown> }
+  ): Promise<CollaborationSnapshot> {
+    let adapter: {
+      getEcoCollaborationSource?: (input: unknown, freshSourceConfig: DataSourceConfig) => Promise<unknown>
+      getReadinessCollaborationSource?: (input: unknown, freshSourceConfig: DataSourceConfig) => Promise<unknown>
+    }
     try {
       adapter = this.deps.dataSourceManager.getDataSource(dataSourceId) as typeof adapter
     } catch {
-      fail(502, 'ECO_SOURCE_UNAVAILABLE')
+      fail(502, input.sourceKind === 'readiness' ? 'READINESS_SOURCE_UNAVAILABLE' : 'ECO_SOURCE_UNAVAILABLE')
     }
-    if (typeof adapter.getEcoCollaborationSource !== 'function') fail(502, 'ECO_SOURCE_UNAVAILABLE')
     try {
-      const raw = await adapter.getEcoCollaborationSource(
-        parseEcoCollaborationSourceInput(input),
+      if (input.sourceKind === 'readiness') {
+        if (typeof adapter.getReadinessCollaborationSource !== 'function') fail(502, 'READINESS_SOURCE_UNAVAILABLE')
+        return await adapter.getReadinessCollaborationSource(
+          parseReadinessCollaborationSourceInput({
+            itemId: input.itemId,
+            rulesetId: input.rulesetId,
+            currentVersionId: input.currentVersionId,
+          }),
+          config,
+        ) as ReadinessCollaborationSource
+      }
+      if (input.sourceKind !== 'eco') fail(503, 'ECO_RUNTIME_UNAVAILABLE')
+      if (typeof adapter.getEcoCollaborationSource !== 'function') fail(502, 'ECO_SOURCE_UNAVAILABLE')
+      return await adapter.getEcoCollaborationSource(
+        parseEcoCollaborationSourceInput({
+          itemId: input.itemId,
+          ecoId: input.ecoId,
+          currentVersionId: input.currentVersionId,
+        }),
         config,
-      )
-      return raw as EcoCollaborationSource
+      ) as EcoCollaborationSource
     } catch (error) {
       throw this.translate(error)
     }
   }
 
-  private accept(
-    snapshot: EcoCollaborationSource,
-    config: DataSourceConfig,
-    input: { itemId: string; ecoId: string; currentVersionId: string | null },
-  ) {
+  private accept(snapshot: CollaborationSnapshot, config: DataSourceConfig, input: FetchInput): AcceptedMaterial {
     try {
       const tenantId = fixedScope(config, 'x-tenant-id', 'tenantId')
       const orgId = fixedScope(config, 'x-org-id', 'orgId')
-      const parsed = parseEcoCollaborationSource(snapshot, {
+      if (input.sourceKind === 'readiness') {
+        const parsed = parseReadinessCollaborationSource(snapshot as ReadinessCollaborationSource, {
+          tenantId,
+          orgId,
+          itemId: input.itemId,
+          rulesetId: input.rulesetId,
+          currentVersionId: input.currentVersionId,
+        })
+        const rowKey = readinessCollaborationRowKey({
+          dataSourceId: config.id,
+          tenantId,
+          orgId,
+          itemId: input.itemId,
+          rulesetId: input.rulesetId,
+        })
+        return {
+          sourceKind: 'readiness',
+          tenantId,
+          orgId,
+          snapshot: parsed,
+          rowKey,
+          hash: readinessCollaborationBusinessHash(config.id, parsed),
+        }
+      }
+      if (input.sourceKind !== 'eco') fail(503, 'ECO_RUNTIME_UNAVAILABLE')
+      const parsed = parseEcoCollaborationSource(snapshot as EcoCollaborationSource, {
         tenantId,
         orgId,
         itemId: input.itemId,
@@ -868,23 +1217,32 @@ export class EcoCollaborationSnapshotService {
         currentVersionId: input.currentVersionId,
       })
       const rowKey = ecoCollaborationRowKey({ dataSourceId: config.id, tenantId, orgId, ecoId: input.ecoId })
-      return { tenantId, orgId, snapshot: parsed, rowKey, hash: ecoCollaborationBusinessHash(config.id, parsed) }
+      return {
+        sourceKind: 'eco',
+        tenantId,
+        orgId,
+        snapshot: parsed,
+        rowKey,
+        hash: ecoCollaborationBusinessHash(config.id, parsed),
+      }
     } catch (error) {
       throw this.translate(error)
     }
   }
 
-  private acceptFrozen(snapshot: EcoCollaborationSource, config: DataSourceConfig, preview: PreviewRow) {
-    const accepted = this.accept(snapshot, config, {
-      itemId: preview.item_id,
-      ecoId: preview.row_key[3],
-      currentVersionId: preview.current_version_id,
-    })
+  private acceptFrozen(snapshot: CollaborationSnapshot, config: DataSourceConfig, preview: PreviewRow): AcceptedMaterial {
+    const kind = asKind(preview.source_kind)
+    const accepted = this.accept(
+      snapshot,
+      config,
+      fetchInputFromKey(kind, preview.item_id, preview.row_key, preview.current_version_id),
+    )
     if (
-      accepted.tenantId !== preview.native_tenant_id
+      accepted.sourceKind !== kind
+      || accepted.tenantId !== preview.native_tenant_id
       || accepted.orgId !== preview.native_org_id
       || !sameKey(accepted.rowKey, preview.row_key)
-    ) fail(409, 'ECO_SOURCE_ANCHOR_MISMATCH')
+    ) fail(409, kind === 'readiness' ? 'READINESS_SOURCE_ANCHOR_MISMATCH' : 'ECO_SOURCE_ANCHOR_MISMATCH')
     return accepted
   }
 
@@ -916,6 +1274,7 @@ export class EcoCollaborationSnapshotService {
       await this.runtime(query)
       const peeked = await this.readPreview(query, actor, input.previewId, false)
       if (!peeked) fail(404, 'NOT_FOUND')
+      await this.runtime(query, asKind(peeked.source_kind))
       await this.lockSource(query, peeked.data_source_id)
       const preview = await this.readPreview(query, actor, input.previewId, true)
       if (!preview) fail(404, 'NOT_FOUND')
@@ -942,23 +1301,25 @@ export class EcoCollaborationSnapshotService {
       fail(409, 'SOURCE_CHANGED')
     }
     await this.authorizeSheet(query, actor, binding, true)
-    const stored = await this.readStoredRow(query, binding.id, preview.row_key)
+    const stored = await this.readStoredRow(query, binding.id, preview.row_key, asKind(binding.source_kind))
     return this.retained(binding, stored?.record_id ?? null, false, true)
   }
 
-  private async provision(query: EcoQuery, actor: string, preview: PreviewRow, snapshot: EcoCollaborationSource) {
+  private async provision(query: EcoQuery, actor: string, preview: PreviewRow, snapshot: CollaborationSnapshot) {
+    const kind = asKind(preview.source_kind)
     const occupied = await query(
       `SELECT id FROM meta_plm_collaboration_bindings
         WHERE base_id=$1 AND data_source_id=$2 AND native_tenant_id=$3 AND native_org_id=$4
-          AND item_id=$5 AND source_kind='eco' FOR UPDATE`,
-      [preview.base_id, preview.data_source_id, preview.native_tenant_id, preview.native_org_id, preview.item_id],
+          AND item_id=$5 AND source_kind=$6 FOR UPDATE`,
+      [preview.base_id, preview.data_source_id, preview.native_tenant_id, preview.native_org_id, preview.item_id, kind],
     )
     if (occupied.rows[0]) fail(409, 'COLLECTION_CONFLICT')
     const bindingId = randomUUID()
     const sheetId = getObjectSheetId(NAMESPACE, preview.id)
     const viewId = getObjectViewId(NAMESPACE, preview.id, 'grid')
-    const sourceFields = Object.fromEntries(ECO_COLLABORATION_ECO_FIELDS.map((key) => [key, getObjectFieldId(NAMESPACE, preview.id, key)]))
-    const localFields = Object.fromEntries(ECO_COLLABORATION_LOCAL_FIELDS.map((field) => [field.key, getObjectFieldId(NAMESPACE, preview.id, field.key)]))
+    const planned = fieldPlans(kind, preview.id)
+    const sourceFields = planned.sourceFields
+    const localFields = planned.localFields
     const ids = [...Object.values(sourceFields), ...Object.values(localFields)]
     if (new Set(ids).size !== ids.length) fail(503, 'ECO_RUNTIME_UNAVAILABLE')
     const present = await query('SELECT id FROM meta_fields WHERE id = ANY($1::text[])', [ids])
@@ -966,22 +1327,7 @@ export class EcoCollaborationSnapshotService {
     await fenceWriterEntry(query, sheetId)
     const sheet = await createSheet({ query, sheetId, baseId: preview.base_id, name: preview.name })
     if (!sheet.created) fail(409, 'COLLECTION_CONFLICT')
-    const descriptors = [
-      ...ECO_COLLABORATION_ECO_FIELDS.map((key, order) => ({
-        id: sourceFields[key],
-        name: key,
-        type: 'string' as const,
-        order,
-        property: { readOnly: true, plmCollaborationSnapshot: { source: true, key } },
-      })),
-      ...ECO_COLLABORATION_LOCAL_FIELDS.map((field, index) => ({
-        id: localFields[field.key],
-        name: field.key,
-        type: field.type,
-        order: ECO_COLLABORATION_ECO_FIELDS.length + index,
-        property: {},
-      })),
-    ]
+    const descriptors = planned.descriptors
     await ensureFields({ query, sheetId, fields: descriptors })
     const view = await createView({ query, sheetId, viewId, name: '全部', type: 'grid' })
     if (!view.created) fail(409, 'COLLECTION_CONFLICT')
@@ -1014,10 +1360,10 @@ export class EcoCollaborationSnapshotService {
          current_version_id, source_fingerprint, base_id, sheet_id, view_id, name, source_fields,
          local_fields, version, status
        ) VALUES (
-         $1::uuid, $2, $3, 'eco', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, 1, 'active'
+         $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, 1, 'active'
        )`,
       [
-        bindingId, actor, preview.data_source_id, preview.native_tenant_id, preview.native_org_id,
+        bindingId, actor, preview.data_source_id, kind, preview.native_tenant_id, preview.native_org_id,
         preview.item_id, preview.current_version_id, preview.source_fingerprint, preview.base_id,
         sheetId, viewId, preview.name, JSON.stringify(sourceFields), JSON.stringify(localFields),
       ],
@@ -1025,7 +1371,7 @@ export class EcoCollaborationSnapshotService {
     const binding = await this.readBinding(query, bindingId, true)
     if (!binding) fail(503, 'ECO_RUNTIME_UNAVAILABLE')
     const recordId = `rec_${randomUUID()}`
-    await this.publishRow(query, actor, binding, null, recordId, snapshot, ecoCollaborationBusinessHash(binding.data_source_id, snapshot), 1, false)
+    await this.publishRow(query, actor, binding, null, recordId, snapshot, this.snapshotHash(kind, binding.data_source_id, snapshot), 1, false)
     return { bindingId, sheetId, viewId, version: 1, status: 'active' as const, recordId, noop: false }
   }
 
@@ -1035,7 +1381,7 @@ export class EcoCollaborationSnapshotService {
     preview: PreviewRow,
     targetBindingId: string,
     expectedVersion: number,
-    snapshot: EcoCollaborationSource,
+    snapshot: CollaborationSnapshot,
   ) {
     const binding = await this.readBinding(query, targetBindingId, true)
     if (!binding || !sameFrozen(preview, binding)) fail(409, 'TARGET_MISMATCH')
@@ -1044,9 +1390,9 @@ export class EcoCollaborationSnapshotService {
     }
     await fenceWriterEntry(query, binding.sheet_id)
     await this.authorizeSheet(query, actor, binding, true)
-    const stored = await this.readStoredRow(query, binding.id, preview.row_key)
+    const stored = await this.readStoredRow(query, binding.id, preview.row_key, asKind(binding.source_kind))
     const recordId = stored?.record_id ?? `rec_${randomUUID()}`
-    const version = await this.publishRow(query, actor, binding, stored, recordId, snapshot, ecoCollaborationBusinessHash(binding.data_source_id, snapshot), expectedVersion, true)
+    const version = await this.publishRow(query, actor, binding, stored, recordId, snapshot, this.snapshotHash(asKind(binding.source_kind), binding.data_source_id, snapshot), expectedVersion, true)
     return {
       bindingId: binding.id,
       sheetId: binding.sheet_id,
@@ -1064,7 +1410,7 @@ export class EcoCollaborationSnapshotService {
     binding: BindingRow,
     stored: StoredRow | null,
     recordId: string,
-    snapshot: EcoCollaborationSource,
+    snapshot: CollaborationSnapshot,
     hash: string,
     expectedVersion: number,
     advanceBinding: boolean,
@@ -1083,7 +1429,7 @@ export class EcoCollaborationSnapshotService {
     actor: string,
     binding: BindingRow,
     stored: StoredRow,
-    snapshot: EcoCollaborationSource,
+    snapshot: CollaborationSnapshot,
     hash: string,
     expectedVersion: number,
   ) {
@@ -1120,21 +1466,33 @@ export class EcoCollaborationSnapshotService {
     binding: BindingRow,
     stored: StoredRow | null,
     recordId: string,
-    snapshot: EcoCollaborationSource,
+    snapshot: CollaborationSnapshot,
     hash: string,
   ): Promise<void> {
     this.requireWriterFence()
-    const cells = sourceCells(snapshot, binding.source_fields)
+    const kind = asKind(binding.source_kind)
+    const cells = kind === 'eco'
+      ? sourceCells(snapshot as EcoCollaborationSource, binding.source_fields)
+      : readinessSourceCells(snapshot as ReadinessCollaborationSource, binding.source_fields)
     const ledger = await mintOperation(query, binding.sheet_id)
     if (ledger.operationId === null) fail(503, 'ECO_RUNTIME_UNAVAILABLE')
     const syncId = randomUUID()
-    const patch = {
-      row_key: [...ecoCollaborationRowKey({
+    const rowKey = kind === 'eco'
+      ? ecoCollaborationRowKey({
         dataSourceId: binding.data_source_id,
         tenantId: binding.native_tenant_id,
         orgId: binding.native_org_id,
-        ecoId: snapshot.eco.id,
-      })],
+        ecoId: (snapshot as EcoCollaborationSource).eco.id,
+      })
+      : readinessCollaborationRowKey({
+        dataSourceId: binding.data_source_id,
+        tenantId: binding.native_tenant_id,
+        orgId: binding.native_org_id,
+        itemId: binding.item_id,
+        rulesetId: (snapshot as ReadinessCollaborationSource).readiness.ruleset_id,
+      })
+    const patch = {
+      row_key: [...rowKey],
       data: cells,
       business_hash: hash,
       captured_at: snapshot.snapshot_at,
@@ -1253,7 +1611,16 @@ export class EcoCollaborationSnapshotService {
     }
     await fenceWriterEntry(query, binding.sheet_id)
     await this.authorizeSheet(query, actor, binding, true)
-    return failureIdentity(binding, expectedVersion)
+    // Field and selected-row authority finish inside this preflight transaction,
+    // which commits before provider egress, so the row-auth lock is not held across HTTP.
+    const kind = asKind(binding.source_kind)
+    const stored = await this.readStoredRow(query, binding.id, preview.row_key, kind)
+    if (stored && sameKey(stored.row_key, preview.row_key)) {
+      await this.fieldAndLock(query, actor, binding, stored.record_id, true)
+    } else {
+      await this.assertSourceFieldGrants(query, actor, binding)
+    }
+    return failureIdentity(binding, expectedVersion, preview.row_key)
   }
 
   private async loadRefresh(
@@ -1271,6 +1638,9 @@ export class EcoCollaborationSnapshotService {
     await this.lockSource(query, peeked.data_source_id)
     const binding = await this.readBinding(query, bindingId, true)
     if (!binding) fail(404, 'NOT_FOUND')
+    const kind = asKind(binding.source_kind)
+    const rowKey = refreshKeyForKind(kind, input.rowKey, binding)
+    await this.runtime(query, kind)
     if (binding.data_source_id !== peeked.data_source_id) fail(409, 'VERSION_CONFLICT')
     if (binding.creator_id !== actor) fail(403, 'FORBIDDEN')
     if (binding.status !== 'active') fail(409, 'BINDING_NOT_ACTIVE')
@@ -1279,8 +1649,8 @@ export class EcoCollaborationSnapshotService {
     await this.authorizeSheet(query, actor, binding, true)
     const source = await this.admit(query, actor, binding.data_source_id, mode)
     if (source.fingerprint !== binding.source_fingerprint) fail(409, 'SOURCE_CHANGED')
-    const stored = await this.readStoredRow(query, binding.id, input.rowKey)
-    if (!stored || !sameKey(stored.row_key, input.rowKey)) fail(409, 'ROW_KEY_MISMATCH')
+    const stored = await this.readStoredRow(query, binding.id, rowKey, kind)
+    if (!stored || !sameKey(stored.row_key, rowKey)) fail(409, 'ROW_KEY_MISMATCH')
     await this.fieldAndLock(query, actor, binding, stored.record_id, true)
     return { binding, stored, source }
   }
@@ -1376,14 +1746,17 @@ export class EcoCollaborationSnapshotService {
     for (const [key, id] of Object.entries({ ...binding.source_fields, ...binding.local_fields })) {
       if (!hidden.has(id) && Object.prototype.hasOwnProperty.call(data, id)) cells[key] = data[id]
     }
-    const sourceMetadataVisible = ECO_COLLABORATION_ECO_FIELDS.every((key) => {
+    const sourceKeys = asKind(binding.source_kind) === 'readiness'
+      ? READINESS_COLLABORATION_SOURCE_FIELDS
+      : ECO_COLLABORATION_ECO_FIELDS
+    const sourceMetadataVisible = sourceKeys.every((key) => {
       const id = binding.source_fields[key]
       return typeof id === 'string' && id.length > 0 && present.has(id) && !hidden.has(id)
     })
     return { cells, sourceMetadataVisible }
   }
 
-  private async readStoredRow(query: EcoQuery, bindingId: string, rowKey: readonly string[] | null): Promise<StoredRow | null> {
+  private async readStoredRow(query: EcoQuery, bindingId: string, rowKey: readonly string[] | null, kind: SourceKind): Promise<StoredRow | null> {
     const found = rowKey
       ? await query(
         `SELECT record_id, row_key, business_hash, captured_at
@@ -1399,7 +1772,7 @@ export class EcoCollaborationSnapshotService {
     if (!row) return null
     return {
       record_id: String(row.record_id),
-      row_key: asRowKey(row.row_key),
+      row_key: asRowKey(row.row_key, kind),
       business_hash: String(row.business_hash),
       captured_at: asText(row.captured_at) ?? '',
     }
@@ -1450,6 +1823,12 @@ export class EcoCollaborationSnapshotService {
     }
   }
 
+  private snapshotHash(kind: SourceKind, dataSourceId: string, snapshot: CollaborationSnapshot): string {
+    if (kind === 'eco') return ecoCollaborationBusinessHash(dataSourceId, snapshot as EcoCollaborationSource)
+    if (kind === 'readiness') return readinessCollaborationBusinessHash(dataSourceId, snapshot as ReadinessCollaborationSource)
+    return fail(503, 'ECO_RUNTIME_UNAVAILABLE')
+  }
+
   private retained(binding: BindingRow, recordId: string | null, noop: boolean, replayed = false) {
     return {
       bindingId: binding.id,
@@ -1481,17 +1860,34 @@ export class EcoCollaborationSnapshotService {
         await this.authorizeSheet(query, actor, binding, true)
         const admitted = await this.admit(query, actor, binding.data_source_id, 'share')
         if (admitted.fingerprint !== identity.fingerprint) return
+        const kind = asKind(binding.source_kind)
+        const selected = await this.readStoredRow(query, binding.id, identity.rowKey, kind)
+        const selectedMatches = Boolean(selected && sameKey(selected.row_key, identity.rowKey))
+        // Readiness stales only a stored selected tuple. An ECO append of a tuple
+        // that is not stored yet still stales the frozen collection. A stored row,
+        // either kind, rechecks its ACL under the canonical row-auth lock.
+        if (kind === 'readiness' && !selectedMatches) return
+        if (selectedMatches && selected) {
+          await acquireRecordLinkRowAuthLockOnQuery(query, binding.sheet_id, selected.record_id)
+          const recordScope = (await loadRecordPermissionScopeMap(query, binding.sheet_id, [selected.record_id], actor)).get(selected.record_id)
+          if (recordScope?.accessLevel === 'none') return
+        }
         await query(
           `UPDATE meta_plm_collaboration_bindings
               SET status='stale', version=version+1, updated_at=now(), last_failure_code=$4, last_failure_at=now()
             WHERE id=$1::uuid AND version=$2 AND status='active' AND creator_id=$3
               AND data_source_id=$5 AND source_kind=$6 AND native_tenant_id=$7 AND native_org_id=$8
               AND item_id=$9 AND current_version_id IS NOT DISTINCT FROM $10
-              AND base_id=$11 AND name=$12 AND source_fingerprint=$13`,
+              AND base_id=$11 AND name=$12 AND source_fingerprint=$13
+              AND ($14::jsonb IS NULL OR EXISTS (
+                SELECT 1 FROM meta_plm_collaboration_rows AS selected
+                WHERE selected.binding_id = $1::uuid AND selected.row_key = $14::jsonb
+              ))`,
           [
             binding.id, identity.expectedVersion, actor, translated.code,
             identity.dataSourceId, identity.sourceKind, identity.tenantId, identity.orgId,
             identity.itemId, identity.currentVersionId, identity.baseId, identity.name, identity.fingerprint,
+            selectedMatches ? JSON.stringify(identity.rowKey) : null,
           ],
         )
       })

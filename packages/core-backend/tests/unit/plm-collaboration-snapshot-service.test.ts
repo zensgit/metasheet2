@@ -14,6 +14,14 @@ import {
   parseEcoCollaborationSource,
 } from '../../src/multitable/plm-collaboration-snapshot-wire'
 import {
+  READINESS_COLLABORATION_SOURCE_FIELDS,
+  ReadinessCollaborationSourceError,
+  parseReadinessCollaborationSource,
+  readinessCollaborationBusinessHash,
+  readinessCollaborationSourceCells,
+} from '../../src/multitable/plm-collaboration-readiness-wire'
+import { __resetOperationLedgerColumnProbe } from '../../src/multitable/operation-ledger'
+import {
   classifyManagedSourceOnQuery,
   setManagedBindingReaderForTests,
 } from '../../src/services/plm-managed-companion'
@@ -118,9 +126,13 @@ interface ScriptState {
   sourceConfigOverride: typeof sourceConfig | null
   fieldReadOnly: boolean
   recordNone: boolean
+  recordNoneIds: string[]
+  userActive: boolean
   hiddenFieldId: string | null
   concealedFieldId: string | null
   sourceOwner: string
+  readinessInstalled: boolean
+  readinessAdapter: boolean
   previews: Array<Record<string, unknown>>
   bindings: Array<Record<string, unknown>>
   stored: Array<Record<string, unknown>>
@@ -139,9 +151,13 @@ function emptyState(): ScriptState {
     sourceConfigOverride: null,
     fieldReadOnly: false,
     recordNone: false,
+    recordNoneIds: [],
+    userActive: true,
     hiddenFieldId: null,
     concealedFieldId: null,
     sourceOwner: actor,
+    readinessInstalled: false,
+    readinessAdapter: true,
     previews: [],
     bindings: [],
     stored: [],
@@ -154,7 +170,23 @@ function rowsOf(rows: unknown[]) {
 }
 
 function answer(state: ScriptState, sql: string, params: unknown[] = []) {
+  if (sql.includes('meta_plm_collaboration_readiness_request_id')) {
+    return rowsOf([{ ready: state.readinessInstalled === true }])
+  }
   if (sql.includes('to_regclass')) return rowsOf([{ ready: true }])
+  if (sql.includes("column_name = 'operation_id'")) return rowsOf([{ present: 1 }])
+  if (sql.includes('INSERT INTO meta_sheets')) return { rows: [], rowCount: 1 }
+  if (sql.includes('FROM meta_sheets') && sql.includes('deleted_at IS NULL')) {
+    return rowsOf([{ id: params[0], base_id: baseId, name: 'collection', description: null, system_kind: null }])
+  }
+  if (sql.includes('INSERT INTO meta_views')) return { rows: [], rowCount: 1 }
+  if (sql.includes('FROM meta_views')) {
+    return rowsOf([{
+      id: params[0], sheet_id: sheetId, name: '全部', type: 'grid',
+      filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {},
+    }])
+  }
+  if (sql.includes('SELECT id FROM meta_fields WHERE id = ANY')) return rowsOf([])
   if (sql.includes('plm_managed_source_bindings')) {
     if (state.schemaMissing) {
       throw Object.assign(new Error('relation "plm_managed_source_bindings" does not exist'), { code: '42P01' })
@@ -175,7 +207,7 @@ function answer(state: ScriptState, sql: string, params: unknown[] = []) {
   if (sql.includes('FROM users')) {
     return rowsOf([{
       id: actor,
-      is_active: true,
+      is_active: state.userActive,
       role: 'member',
       activation_status: 'activated',
       local_password_set: true,
@@ -190,7 +222,8 @@ function answer(state: ScriptState, sql: string, params: unknown[] = []) {
   }
   if (sql.includes('FROM field_permissions')) {
     if (state.fieldReadOnly) {
-      return rowsOf(Object.values(sourceFields).map((fieldId) => ({
+      const fieldIds = [...Object.values(sourceFields), ...Object.values(readinessFields)]
+      return rowsOf(fieldIds.map((fieldId) => ({
         field_id: fieldId,
         visible: true,
         read_only: true,
@@ -200,9 +233,10 @@ function answer(state: ScriptState, sql: string, params: unknown[] = []) {
       return rowsOf([{ field_id: state.concealedFieldId, visible: false, read_only: false }])
     }
   }
-  if (sql.includes('FROM record_permissions') && state.recordNone) {
+  if (sql.includes('FROM record_permissions') && (state.recordNone || state.recordNoneIds.length > 0)) {
     const ids = Array.isArray(params[2]) ? params[2] : []
-    return rowsOf(ids.map((id) => ({ record_id: id, access_level: 'none' })))
+    const denied = state.recordNone ? ids : ids.filter((id) => state.recordNoneIds.includes(String(id)))
+    return rowsOf(denied.map((id) => ({ record_id: id, access_level: 'none' })))
   }
   if (sql.includes('FROM meta_fields')) {
     const ids = Array.isArray(params[1]) ? params[1] : Array.isArray(params[0]) ? params[0] : []
@@ -226,10 +260,97 @@ function answer(state: ScriptState, sql: string, params: unknown[] = []) {
       .filter((row) => row.id === id && row.actor_id === owner)
       .map((row) => ({ ...row, expired: row.expired === true })))
   }
-  if (sql.includes('FROM meta_plm_collaboration_bindings')) {
+  if (sql.includes('INSERT INTO meta_plm_collaboration_bindings')) {
+    state.bindings.push({
+      id: params[0],
+      creator_id: params[1],
+      data_source_id: params[2],
+      source_kind: params[3],
+      native_tenant_id: params[4],
+      native_org_id: params[5],
+      item_id: params[6],
+      current_version_id: params[7],
+      source_fingerprint: params[8],
+      base_id: params[9],
+      sheet_id: params[10],
+      view_id: params[11],
+      name: params[12],
+      source_fields: JSON.parse(String(params[13])),
+      local_fields: JSON.parse(String(params[14])),
+      version: 1,
+      status: 'active',
+      last_failure_code: null,
+      last_failure_at: null,
+    })
+    return rowsOf([])
+  }
+  if (sql.includes('FROM meta_plm_collaboration_bindings') && !sql.includes('UPDATE ')) {
+    if (sql.includes('source_kind=$6')) {
+      return rowsOf(state.bindings.filter((row) =>
+        row.base_id === params[0]
+        && row.data_source_id === params[1]
+        && row.native_tenant_id === params[2]
+        && row.native_org_id === params[3]
+        && row.item_id === params[4]
+        && row.source_kind === params[5]))
+    }
     return rowsOf(state.bindings.filter((row) => row.id === params[0]))
   }
-  if (sql.includes('FROM meta_plm_collaboration_rows')) {
+  if (sql.includes('INSERT INTO meta_plm_collaboration_rows')) {
+    state.stored.push({
+      binding_id: params[0],
+      row_key: JSON.parse(String(params[1])),
+      record_id: params[2],
+      business_hash: params[3],
+      captured_at: params[4],
+    })
+    return rowsOf([])
+  }
+  if (sql.includes('UPDATE meta_plm_collaboration_rows')) {
+    const row = state.stored.find((entry) => entry.binding_id === params[2] && entry.record_id === params[3])
+    if (row) {
+      row.business_hash = params[0]
+      row.captured_at = params[1]
+    }
+    return rowsOf([])
+  }
+  if (sql.includes('INSERT INTO meta_records')) {
+    state.records.push({
+      id: params[0],
+      sheet_id: params[1],
+      data: JSON.parse(String(params[2])),
+      version: 1,
+      locked: false,
+      locked_by: null,
+      created_by: params[3],
+    })
+    return { rows: [], rowCount: 1 }
+  }
+  if (sql.includes('UPDATE meta_records')) {
+    const record = state.records.find((entry) => entry.id === params[2] && entry.sheet_id === params[3] && entry.version === params[4])
+    if (!record) return { rows: [], rowCount: 0 }
+    record.data = { ...(record.data as Record<string, unknown>), ...JSON.parse(String(params[0])) }
+    record.version = Number(record.version) + 1
+    return rowsOf([{ version: record.version, data: record.data }])
+  }
+  if (sql.includes('INSERT INTO meta_record_revisions')) return rowsOf([{ seq: '1' }])
+  if (sql.includes('consumed_at=now()')) {
+    const preview = state.previews.find((entry) => entry.id === params[2] && entry.actor_id === params[3] && entry.request_id == null)
+    if (!preview) return { rows: [], rowCount: 0 }
+    preview.request_id = params[0]
+    preview.binding_id = params[1]
+    preview.consumed_at = capturedAt
+    return { rows: [], rowCount: 1 }
+  }
+  if (sql.includes('SET version = version + 1') && sql.includes("status='active'")) {
+    const binding = state.bindings.find((entry) => entry.id === params[0])
+    if (!binding || binding.version !== params[1] || binding.status !== 'active' || binding.creator_id !== params[2]) {
+      return { rows: [], rowCount: 0 }
+    }
+    binding.version = Number(binding.version) + 1
+    return rowsOf([{ version: binding.version }])
+  }
+  if (sql.includes('FROM meta_plm_collaboration_rows') && !sql.includes('UPDATE ')) {
     const matched = state.stored.filter((row) => {
       if (row.binding_id !== params[0]) return false
       if (!sql.includes('row_key=$2')) return true
@@ -255,6 +376,11 @@ function answer(state: ScriptState, sql: string, params: unknown[] = []) {
     if (!binding || binding.version !== params[1] || binding.status !== 'active' || binding.creator_id !== params[2]) {
       return { rows: [], rowCount: 0 }
     }
+    if (params.length > 13 && params[13] != null) {
+      const key = typeof params[13] === 'string' ? JSON.parse(params[13]) : params[13]
+      const stored = state.stored.find((row) => row.binding_id === binding.id && JSON.stringify(row.row_key) === JSON.stringify(key))
+      if (!stored) return { rows: [], rowCount: 0 }
+    }
     binding.version = Number(binding.version) + 1
     binding.status = 'stale'
     binding.last_failure_code = params[3]
@@ -263,12 +389,16 @@ function answer(state: ScriptState, sql: string, params: unknown[] = []) {
   return rowsOf([])
 }
 
-function harness(state = emptyState(), body = dto()) {
+function harness(state = emptyState(), body = dto(), readinessBody: unknown = undefined) {
   const calls: string[] = []
   const transactions: string[][] = []
   const provider = vi.fn(async () => {
     state.providerReturned = true
     return body
+  })
+  const readinessProvider = vi.fn(async () => {
+    state.providerReturned = true
+    return readinessBody
   })
   const pool = {
     async transaction<T>(fn: (tx: { query: EcoQuery }) => Promise<T>): Promise<T> {
@@ -287,9 +417,13 @@ function harness(state = emptyState(), body = dto()) {
   }
   const service = new EcoCollaborationSnapshotService({
     pool,
-    dataSourceManager: { getDataSource: () => ({ getEcoCollaborationSource: provider }) } as never,
+    dataSourceManager: {
+      getDataSource: () => state.readinessAdapter
+        ? { getEcoCollaborationSource: provider, getReadinessCollaborationSource: readinessProvider }
+        : { getEcoCollaborationSource: provider },
+    } as never,
   })
-  return { service, calls, transactions, provider, state }
+  return { service, calls, transactions, provider, readinessProvider, state }
 }
 
 function previewBody() {
@@ -388,6 +522,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setManagedBindingReaderForTests(null)
+  __resetOperationLedgerColumnProbe()
   vi.unstubAllEnvs()
 })
 
@@ -444,6 +579,7 @@ describe('ECO collaboration snapshot service', () => {
     expect(shareAt).toBeLessThan(insertAt)
     expect(calls[insertAt]).toContain("now() + interval '15 minutes'")
     expect(calls[insertAt]).not.toContain('request_id')
+    expect(calls[insertAt]).not.toContain("'eco'")
     expect(provider).toHaveBeenCalledTimes(1)
     expect(mutations(calls)).toHaveLength(1)
   })
@@ -702,6 +838,84 @@ describe('ECO collaboration snapshot service', () => {
     expect(state.bindings.find((row) => row.id === unrelated)).toMatchObject({ status: 'active', version: 5 })
   })
 
+  it('stales the frozen ECO collection when a not-yet-stored eco tuple is token-refused', async () => {
+    const refused = harness()
+    refused.provider.mockRejectedValue(new EcoCollaborationSourceError(401, 'ECO_SOURCE_TOKEN_REJECTED'))
+    const target = seedBinding(refused.state, 3)
+    const unrelated = seedBinding(refused.state, 5)
+    refused.state.bindings[1].item_id = 'item-B'
+    refused.state.bindings[1].name = 'B collection'
+    const storedBefore = refused.state.stored.map((row) => JSON.stringify(row.row_key))
+    const previewId = seedPreview(refused.state, null, null, {
+      row_key: [dataSourceId, tenant, org, 'eco-b'],
+    })
+    await expect(refused.service.confirm(actor, {
+      previewId,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: target,
+    })).rejects.toMatchObject({ status: 401, code: 'ECO_SOURCE_TOKEN_REJECTED' })
+    expect(refused.provider).toHaveBeenCalledTimes(1)
+    expect(refused.state.bindings.find((row) => row.id === target)).toMatchObject({
+      status: 'stale',
+      version: 4,
+      last_failure_code: 'ECO_SOURCE_TOKEN_REJECTED',
+    })
+    expect(refused.state.bindings.find((row) => row.id === unrelated)).toMatchObject({ status: 'active', version: 5 })
+    expect(refused.state.stored.map((row) => JSON.stringify(row.row_key))).toEqual(storedBefore)
+    expect(refused.state.previews[0]).toMatchObject({ request_id: null, consumed_at: null })
+
+    const rotated = harness()
+    const rotatedId = seedBinding(rotated.state, 3)
+    const rotatedPreview = seedPreview(rotated.state, null, null, {
+      row_key: [dataSourceId, tenant, org, 'eco-b'],
+    })
+    rotated.provider.mockImplementation(async () => {
+      rotated.state.sourceConfigOverride = { ...sourceConfig, credentials: { token: 'rotated-token' } }
+      throw new EcoCollaborationSourceError(401, 'ECO_SOURCE_TOKEN_REJECTED')
+    })
+    await expect(rotated.service.confirm(actor, {
+      previewId: rotatedPreview,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: rotatedId,
+    })).rejects.toMatchObject({ status: 401, code: 'ECO_SOURCE_TOKEN_REJECTED' })
+    expect(rotated.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+
+    const advanced = harness()
+    const advancedId = seedBinding(advanced.state, 3)
+    const advancedPreview = seedPreview(advanced.state, null, null, {
+      row_key: [dataSourceId, tenant, org, 'eco-b'],
+    })
+    advanced.provider.mockImplementation(async () => {
+      advanced.state.bindings[0].version = 4
+      throw new EcoCollaborationSourceError(401, 'ECO_SOURCE_TOKEN_REJECTED')
+    })
+    await expect(advanced.service.confirm(actor, {
+      previewId: advancedPreview,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: advancedId,
+    })).rejects.toMatchObject({ status: 401, code: 'ECO_SOURCE_TOKEN_REJECTED' })
+    expect(advanced.state.bindings[0]).toMatchObject({ status: 'active', version: 4 })
+
+    const revoked = harness()
+    const revokedId = seedBinding(revoked.state, 3)
+    const revokedPreview = seedPreview(revoked.state, null)
+    revoked.provider.mockImplementation(async () => {
+      revoked.state.recordNoneIds = [recordId]
+      throw new EcoCollaborationSourceError(401, 'ECO_SOURCE_TOKEN_REJECTED')
+    })
+    await expect(revoked.service.confirm(actor, {
+      previewId: revokedPreview,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: revokedId,
+    })).rejects.toMatchObject({ status: 401, code: 'ECO_SOURCE_TOKEN_REJECTED' })
+    expect(revoked.provider).toHaveBeenCalledTimes(1)
+    expect(revoked.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+  })
+
   it('rejects an exact replay after the source fingerprint changes and keeps the binding', async () => {
     const { service, provider, state, calls } = harness()
     const bindingId = seedBinding(state, 4)
@@ -842,5 +1056,783 @@ describe('ECO collaboration snapshot service', () => {
         if (preview >= 0) expect(preview).toBeGreaterThan(advisory)
       }
     }
+  })
+})
+
+const rulesetA = 'ruleset-a'
+const rulesetB = 'ruleset-b'
+const readinessFields = Object.fromEntries(READINESS_COLLABORATION_SOURCE_FIELDS.map((key) => [key, `fld_${key}`]))
+
+function issueFree(kind: 'mbom_release' | 'routing_release', resourceType: 'mbom' | 'routing', id: string) {
+  return {
+    kind,
+    name: id,
+    state: 'open',
+    resource_type: resourceType,
+    resource_id: id,
+    errors: [] as Array<{ code: string; rule_id: string }>,
+    warnings: [] as Array<{ code: string; rule_id: string }>,
+  }
+}
+
+function readinessDto(
+  ruleset = rulesetA,
+  resources: ReturnType<typeof issueFree>[] = [],
+  generatedAt = capturedAt,
+  snapshotAt = capturedAt,
+  version: string | null = 'ver-1',
+) {
+  return {
+    projection_contract: 'release_readiness_collaboration_source.v1' as const,
+    feature_key: 'collaboration_source_read' as const,
+    entitled: true as const,
+    source: { tenant_id: tenant, org_id: org, item_id: itemId, current_version_id: version },
+    snapshot_at: snapshotAt,
+    readiness: {
+      item_id: itemId,
+      ruleset_id: ruleset,
+      generated_at: generatedAt,
+      coverage_status: 'bounded_not_proven_complete' as const,
+      summary: {
+        resources: resources.length,
+        ok_resources: resources.filter((resource) => resource.errors.length === 0).length,
+        error_count: resources.reduce((sum, resource) => sum + resource.errors.length, 0),
+        warning_count: resources.reduce((sum, resource) => sum + resource.warnings.length, 0),
+      },
+      resources,
+    },
+  }
+}
+
+function readinessPreviewBody(ruleset = rulesetA) {
+  return {
+    sourceKind: 'readiness' as const,
+    dataSourceId,
+    baseId,
+    itemId,
+    currentVersionId: 'ver-1' as string | null,
+    rulesetId: ruleset,
+    name: 'Readiness collection',
+  }
+}
+
+function readinessKey(ruleset = rulesetA) {
+  return [dataSourceId, tenant, org, itemId, ruleset] as const
+}
+
+function seedReadiness(state: ScriptState, ruleset = rulesetA, version = 4, hash = readinessCollaborationBusinessHash(
+  dataSourceId,
+  parseReadinessCollaborationSource(readinessDto(ruleset), {
+    tenantId: tenant, orgId: org, itemId, rulesetId: ruleset, currentVersionId: 'ver-1',
+  }),
+)) {
+  const bindingId = state.bindings.find((row) => row.source_kind === 'readiness')?.id as string | undefined ?? randomUUID()
+  if (!state.bindings.some((row) => row.id === bindingId)) {
+    state.bindings.push({
+      id: bindingId,
+      creator_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      source_fingerprint: fingerprint,
+      base_id: baseId,
+      sheet_id: sheetId,
+      view_id: viewId,
+      name: 'Readiness collection',
+      source_fields: readinessFields,
+      local_fields: localFields,
+      version,
+      status: 'active',
+      last_failure_code: null,
+      last_failure_at: null,
+    })
+  }
+  const record = `rec-${ruleset}`
+  state.stored.push({
+    binding_id: bindingId,
+    record_id: record,
+    row_key: [...readinessKey(ruleset)],
+    business_hash: hash,
+    captured_at: capturedAt,
+  })
+  state.records.push({
+    id: record,
+    sheet_id: sheetId,
+    data: {
+      [readinessFields.ruleset_id]: ruleset,
+      [readinessFields.resources]: '[]',
+      [localFields.review_note]: 'kept',
+    },
+    version: 1,
+    locked: false,
+    locked_by: null,
+    created_by: actor,
+  })
+  return bindingId
+}
+
+describe('Readiness collaboration snapshot service', () => {
+  it('stores a readiness preview after the capability check and keeps ECO free of that probe', async () => {
+    const ready = harness(emptyState(), dto(), readinessDto())
+    ready.state.readinessInstalled = true
+    const result = await ready.service.preview(actor, readinessPreviewBody())
+    expect(result.rowKey).toEqual([...readinessKey()])
+    expect(result).not.toHaveProperty('eco')
+    expect(result.readiness.resources).toBe('[]')
+    expect(result.readiness.coverage_status).toBe('bounded_not_proven_complete')
+    expect(JSON.stringify(result)).not.toContain('plain-token')
+    const probeAt = ready.calls.findIndex((sql) => sql.includes('meta_plm_collaboration_readiness_request_id'))
+    const providerAt = ready.calls.length
+    expect(probeAt).toBeGreaterThanOrEqual(0)
+    expect(probeAt).toBeLessThan(providerAt)
+    expect(ready.readinessProvider).toHaveBeenCalledTimes(1)
+    expect(ready.provider).not.toHaveBeenCalled()
+    expect(ready.calls.some((sql) => sql.includes('to_regclass'))).toBe(true)
+    expect(ready.calls.find((sql) => sql.includes('meta_plm_collaboration_readiness_request_id'))).not.toContain('to_regclass')
+
+    const eco = harness()
+    await eco.service.preview(actor, previewBody())
+    expect(eco.calls.some((sql) => sql.includes('meta_plm_collaboration_readiness_request_id'))).toBe(false)
+    expect(eco.provider).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a readiness preview on a foundation-only schema before the provider', async () => {
+    const missing = harness(emptyState(), dto(), readinessDto())
+    await expect(missing.service.preview(actor, readinessPreviewBody())).rejects.toMatchObject({
+      status: 503,
+      code: 'READINESS_RUNTIME_UNAVAILABLE',
+    })
+    expect(missing.readinessProvider).not.toHaveBeenCalled()
+    expect(missing.provider).not.toHaveBeenCalled()
+    expect(missing.calls.some((sql) => sql.includes('meta_plm_collaboration_readiness_request_id'))).toBe(true)
+
+    const eco = harness()
+    await eco.service.preview(actor, previewBody())
+    expect(eco.provider).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a readiness preview that still carries an ECO id before any query', async () => {
+    const { service, calls, provider, readinessProvider } = harness()
+    await expect(service.preview(actor, { ...readinessPreviewBody(), ecoId: 'eco-1' })).rejects.toMatchObject({
+      status: 422,
+      code: 'ECO_REQUEST_INVALID',
+    })
+    expect(calls).toEqual([])
+    expect(provider).not.toHaveBeenCalled()
+    expect(readinessProvider).not.toHaveBeenCalled()
+  })
+
+  it('confirms the first readiness row and appends a second ruleset on the same binding', async () => {
+    const first = harness(emptyState(), dto(), readinessDto(rulesetA))
+    first.state.readinessInstalled = true
+    const preview = await first.service.preview(actor, readinessPreviewBody(rulesetA))
+    first.state.previews.push({
+      id: preview.previewId,
+      actor_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      base_id: baseId,
+      name: 'Readiness collection',
+      row_key: [...readinessKey(rulesetA)],
+      source_fingerprint: fingerprint,
+      business_hash: preview.businessHash,
+      captured_at: capturedAt,
+      request_id: null,
+      binding_id: null,
+      consumed_at: null,
+      expired: false,
+    })
+    const created = await first.service.confirm(actor, {
+      previewId: preview.previewId,
+      requestId: randomUUID(),
+      expectedVersion: 0,
+    })
+    expect(created.replayed).toBe(false)
+    expect(first.state.bindings).toHaveLength(1)
+    expect(first.state.bindings[0]).toMatchObject({ source_kind: 'readiness', item_id: itemId, version: 1 })
+    expect(first.state.stored.map((row) => row.row_key)).toEqual([[...readinessKey(rulesetA)]])
+    expect(first.readinessProvider).toHaveBeenCalledTimes(2)
+
+    const second = harness(emptyState(), dto(), readinessDto(rulesetB))
+    second.state.readinessInstalled = true
+    const bindingId = seedReadiness(second.state, rulesetA, 1)
+    const again = await second.service.preview(actor, readinessPreviewBody(rulesetB))
+    second.state.previews.push({
+      id: again.previewId,
+      actor_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      base_id: baseId,
+      name: 'Readiness collection',
+      row_key: [...readinessKey(rulesetB)],
+      source_fingerprint: fingerprint,
+      business_hash: again.businessHash,
+      captured_at: capturedAt,
+      request_id: null,
+      binding_id: null,
+      consumed_at: null,
+      expired: false,
+    })
+    const appended = await second.service.confirm(actor, {
+      previewId: again.previewId,
+      requestId: randomUUID(),
+      expectedVersion: 1,
+      targetBindingId: bindingId,
+    })
+    expect(appended.bindingId).toBe(bindingId)
+    expect(second.state.bindings).toHaveLength(1)
+    expect(second.state.stored.map((row) => row.row_key[4])).toEqual([rulesetA, rulesetB])
+  })
+
+  it('selects two readiness rows independently and returns a shell when the selector is absent', async () => {
+    const harnessed = harness()
+    harnessed.state.readinessInstalled = true
+    const id = seedReadiness(harnessed.state, rulesetA, 2)
+    seedReadiness(harnessed.state, rulesetB, 2)
+    const absent = await harnessed.service.get(actor, id, {})
+    expect(absent).toMatchObject({ id, sourceKind: 'readiness', row: null, canRefresh: false })
+    expect(harnessed.calls.some((sql) => sql.includes('ORDER BY record_id LIMIT 1'))).toBe(false)
+    const selectedA = await harnessed.service.get(actor, id, { rowKey: JSON.stringify(readinessKey(rulesetA)) })
+    const selectedB = await harnessed.service.get(actor, id, { rowKey: JSON.stringify(readinessKey(rulesetB)) })
+    expect(selectedA.row?.rowKey).toEqual([...readinessKey(rulesetA)])
+    expect(selectedB.row?.rowKey).toEqual([...readinessKey(rulesetB)])
+    expect(selectedA.row?.cells.ruleset_id).toBe(rulesetA)
+    expect(selectedB.row?.cells.ruleset_id).toBe(rulesetB)
+    expect(harnessed.readinessProvider).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed, repeated, four-part, or foreign readiness selector', async () => {
+    const { service, state, readinessProvider } = harness()
+    state.readinessInstalled = true
+    const id = seedReadiness(state, rulesetA, 2)
+    await expect(service.get(actor, id, { rowKey: [rulesetA], extra: '1' })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    await expect(service.get(actor, id, { rowKey: ['a', 'b'] })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    await expect(service.get(actor, id, { rowKey: JSON.stringify(['a', 'b', 'c', 'd']) })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    await expect(service.get(actor, id, { rowKey: '{not-json' })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    await expect(service.get(actor, id, {
+      rowKey: JSON.stringify(readinessKey(rulesetA)),
+      sourceKind: 'readiness',
+    })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    await expect(service.get(actor, id, {
+      rowKey: JSON.stringify(['other-source', tenant, org, itemId, rulesetA]),
+    })).rejects.toMatchObject({ status: 409, code: 'ROW_KEY_MISMATCH' })
+    expect(state.calls).toBeUndefined()
+    expect(readinessProvider).not.toHaveBeenCalled()
+    expect(state.stored).toHaveLength(1)
+  })
+
+  it('returns 403 for a denied sheet before a matching or foreign readiness selector, and keeps the anchor for a sheet-authorized reader', async () => {
+    const visible = harness()
+    visible.state.readinessInstalled = true
+    const id = seedReadiness(visible.state, rulesetA, 3)
+    const selected = { rowKey: JSON.stringify(readinessKey(rulesetA)) }
+    const positive = await visible.service.get(actor, id, selected)
+    expect(positive.row).toMatchObject({ recordId: `rec-${rulesetA}`, rowKey: [...readinessKey(rulesetA)] })
+    expect(positive.anchor).toMatchObject({ dataSourceId, tenantId: tenant, orgId: org, itemId })
+    expect(visible.readinessProvider).not.toHaveBeenCalled()
+    expect(visible.provider).not.toHaveBeenCalled()
+
+    visible.state.recordNoneIds = [`rec-${rulesetA}`]
+    const concealed = await visible.service.get(actor, id, selected)
+    expect(concealed.row).toBeNull()
+    expect(concealed.anchor).toMatchObject({ dataSourceId, tenantId: tenant, orgId: org, itemId })
+    expect(concealed).toMatchObject({ id, status: 'active', sourceKind: 'readiness' })
+    expect(visible.readinessProvider).not.toHaveBeenCalled()
+    visible.state.recordNoneIds = []
+
+    visible.state.sheetGrant = false
+    const atDenial = visible.calls.length
+    await expect(visible.service.get(actor, id, selected)).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
+    expect(visible.calls.slice(atDenial).some((sql) => sql.includes('FROM spreadsheet_permissions'))).toBe(true)
+    const beforeForeign = visible.calls.length
+    await expect(visible.service.get(actor, id, {
+      rowKey: JSON.stringify(['foreign-source', tenant, org, itemId, rulesetA]),
+    })).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
+    expect(visible.calls.slice(beforeForeign).some((sql) => sql.includes('FROM spreadsheet_permissions'))).toBe(true)
+    expect(visible.readinessProvider).not.toHaveBeenCalled()
+    expect(visible.provider).not.toHaveBeenCalled()
+  })
+
+  it('keeps a clock-only generated_at change as a noop and writes an ordered resource change', async () => {
+    const clock = harness(emptyState(), dto(), readinessDto(rulesetA, [], '2026-10-24T02:03:04.000000Z', '2026-10-24T02:03:04.000000Z'))
+    clock.state.readinessInstalled = true
+    const id = seedReadiness(clock.state, rulesetA, 3)
+    const before = clock.state.stored[0].captured_at
+    const noop = await clock.service.refresh(actor, id, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })
+    expect(noop).toMatchObject({ noop: true, recordId: 'rec-ruleset-a' })
+    expect(clock.state.stored[0].captured_at).toBe(before)
+    expect(mutations(clock.calls).some((sql) => sql.includes('meta_records'))).toBe(false)
+    expect(clock.calls.some((sql) => /^\s*insert\s+into\s+meta_record_revisions\b/i.test(sql))).toBe(false)
+    expect(clock.calls.some((sql) => /^\s*insert\s+into\s+meta_record_history_operations\b/i.test(sql))).toBe(false)
+
+    const ordered = [issueFree('routing_release', 'routing', 'route-1'), issueFree('mbom_release', 'mbom', 'mbom-1')]
+    const changed = harness(emptyState(), dto(), readinessDto(rulesetA, ordered))
+    changed.state.readinessInstalled = true
+    const changedId = seedReadiness(changed.state, rulesetA, 3)
+    const written = await changed.service.refresh(actor, changedId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })
+    expect(written.noop).toBe(false)
+    expect(changed.state.stored[0].business_hash).not.toBe(readinessCollaborationBusinessHash(
+      dataSourceId,
+      parseReadinessCollaborationSource(readinessDto(rulesetA), {
+        tenantId: tenant, orgId: org, itemId, rulesetId: rulesetA, currentVersionId: 'ver-1',
+      }),
+    ))
+    expect(mutations(changed.calls).some((sql) => sql.includes('UPDATE meta_records'))).toBe(true)
+    const cells = readinessCollaborationSourceCells(parseReadinessCollaborationSource(readinessDto(rulesetA, ordered), {
+      tenantId: tenant, orgId: org, itemId, rulesetId: rulesetA, currentVersionId: 'ver-1',
+    }))
+    expect(String((changed.state.records[0].data as Record<string, unknown>)[readinessFields.resources])).toBe(cells.resources)
+    expect(cells.resources.indexOf('route-1')).toBeLessThan(cells.resources.indexOf('mbom-1'))
+  })
+
+  it('does not treat a native version change as a clock noop and does not resurrect on 503', async () => {
+    const shifted = harness(emptyState(), dto(), readinessDto(rulesetA, [], capturedAt, capturedAt, 'ver-2'))
+    shifted.state.readinessInstalled = true
+    const id = seedReadiness(shifted.state, rulesetA, 3)
+    await expect(shifted.service.refresh(actor, id, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 409, code: 'READINESS_SOURCE_ANCHOR_MISMATCH' })
+    expect(shifted.state.bindings[0]).toMatchObject({ status: 'stale', version: 4 })
+    expect(mutations(shifted.calls).some((sql) => sql.includes('meta_records'))).toBe(false)
+
+    const down = harness(emptyState(), dto(), readinessDto())
+    down.state.readinessInstalled = true
+    down.readinessProvider.mockRejectedValue(new ReadinessCollaborationSourceError(503, 'READINESS_SOURCE_UNAVAILABLE'))
+    const downId = seedReadiness(down.state, rulesetA, 3)
+    await expect(down.service.refresh(actor, downId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 503, code: 'READINESS_SOURCE_UNAVAILABLE' })
+    expect(down.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+    expect(down.state.stored).toHaveLength(1)
+    expect(mutations(down.calls).some((sql) => sql.includes('meta_records'))).toBe(false)
+  })
+
+  it('stales only a stored readiness tuple and leaves the same binding active when another ruleset is absent', async () => {
+    const { service, state, readinessProvider } = harness(emptyState(), dto(), readinessDto(rulesetB))
+    state.readinessInstalled = true
+    readinessProvider.mockRejectedValue(new ReadinessCollaborationSourceError(401, 'READINESS_SOURCE_TOKEN_REJECTED'))
+    const bindingId = seedReadiness(state, rulesetA, 3)
+    const previewId = randomUUID()
+    state.previews.push({
+      id: previewId,
+      actor_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      base_id: baseId,
+      name: 'Readiness collection',
+      row_key: [...readinessKey(rulesetB)],
+      source_fingerprint: fingerprint,
+      business_hash: 'different-hash-is-not-reached',
+      captured_at: capturedAt,
+      request_id: null,
+      binding_id: null,
+      consumed_at: null,
+      expired: false,
+    })
+    await expect(service.confirm(actor, {
+      previewId,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: bindingId,
+    })).rejects.toMatchObject({ status: 401, code: 'READINESS_SOURCE_TOKEN_REJECTED' })
+    expect(state.bindings[0]).toMatchObject({ id: bindingId, status: 'active', version: 3 })
+    expect(state.bindings).toHaveLength(1)
+    expect(state.stored).toHaveLength(1)
+    expect(state.stored[0].row_key).toEqual([...readinessKey(rulesetA)])
+  })
+
+  it('replays a consumed readiness preview without a provider call', async () => {
+    const { service, state, readinessProvider } = harness()
+    state.readinessInstalled = true
+    const bindingId = seedReadiness(state, rulesetA, 4)
+    const requestId = randomUUID()
+    const previewId = randomUUID()
+    state.previews.push({
+      id: previewId,
+      actor_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      base_id: baseId,
+      name: 'Readiness collection',
+      row_key: [...readinessKey(rulesetA)],
+      source_fingerprint: fingerprint,
+      business_hash: state.stored[0].business_hash,
+      captured_at: capturedAt,
+      request_id: requestId,
+      binding_id: bindingId,
+      consumed_at: capturedAt,
+      expired: false,
+    })
+    const replayed = await service.confirm(actor, { previewId, requestId, expectedVersion: 0 })
+    expect(replayed).toMatchObject({ bindingId, replayed: true })
+    expect(readinessProvider).not.toHaveBeenCalled()
+  })
+
+  it('refuses a foreign family and a cross-kind refresh before the provider', async () => {
+    const foreign = harness(emptyState(), dto(), readinessDto(rulesetA))
+    foreign.state.readinessInstalled = true
+    const ecoBinding = seedBinding(foreign.state, 3)
+    const previewId = randomUUID()
+    foreign.state.previews.push({
+      id: previewId,
+      actor_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      base_id: baseId,
+      name: 'Readiness collection',
+      row_key: [...readinessKey(rulesetA)],
+      source_fingerprint: fingerprint,
+      business_hash: 'unused',
+      captured_at: capturedAt,
+      request_id: null,
+      binding_id: null,
+      consumed_at: null,
+      expired: false,
+    })
+    await expect(foreign.service.confirm(actor, {
+      previewId,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: ecoBinding,
+    })).rejects.toMatchObject({ status: 409, code: 'TARGET_MISMATCH' })
+    expect(foreign.readinessProvider).not.toHaveBeenCalled()
+
+    const crossed = harness()
+    const id = seedBinding(crossed.state, 3)
+    await expect(crossed.service.refresh(actor, id, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey()],
+    })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    expect(crossed.provider).not.toHaveBeenCalled()
+
+    const readiness = harness()
+    readiness.state.readinessInstalled = true
+    const readinessId = seedReadiness(readiness.state, rulesetA, 3)
+    await expect(readiness.service.refresh(actor, readinessId, {
+      expectedVersion: 3,
+      rowKey: [dataSourceId, tenant, org, itemId],
+    })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    const callsBeforeKind = readiness.calls.length
+    await expect(readiness.service.refresh(actor, readinessId, {
+      sourceKind: 'readiness',
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 422, code: 'ECO_REQUEST_INVALID' })
+    expect(readiness.calls).toHaveLength(callsBeforeKind)
+    expect(readiness.readinessProvider).not.toHaveBeenCalled()
+  })
+
+  it('refuses a late readiness failure when selected-row, source, actor, or collection authority changed', async () => {
+    const denied = harness(emptyState(), dto(), readinessDto(rulesetA))
+    denied.state.readinessInstalled = true
+    const deniedId = seedReadiness(denied.state, rulesetA, 3)
+    seedReadiness(denied.state, rulesetB, 3)
+    denied.readinessProvider.mockImplementation(async () => {
+      denied.state.recordNoneIds = ['rec-ruleset-a']
+      throw new ReadinessCollaborationSourceError(401, 'READINESS_SOURCE_TOKEN_REJECTED')
+    })
+    await expect(denied.service.refresh(actor, deniedId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 401, code: 'READINESS_SOURCE_TOKEN_REJECTED' })
+    expect(denied.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+    const hiddenA = await denied.service.get(actor, deniedId, { rowKey: JSON.stringify(readinessKey(rulesetA)) })
+    const visibleB = await denied.service.get(actor, deniedId, { rowKey: JSON.stringify(readinessKey(rulesetB)) })
+    expect(hiddenA.row).toBeNull()
+    expect(hiddenA).toMatchObject({ version: 3, status: 'active' })
+    expect(visibleB.row?.rowKey).toEqual([...readinessKey(rulesetB)])
+
+    const rotated = harness(emptyState(), dto(), readinessDto(rulesetA))
+    rotated.state.readinessInstalled = true
+    const rotatedId = seedReadiness(rotated.state, rulesetA, 3)
+    seedReadiness(rotated.state, rulesetB, 3)
+    rotated.readinessProvider.mockImplementation(async () => {
+      rotated.state.sourceConfigOverride = { ...sourceConfig, credentials: { token: 'rotated-token' } }
+      throw new ReadinessCollaborationSourceError(403, 'READINESS_SOURCE_UNLICENSED')
+    })
+    await expect(rotated.service.refresh(actor, rotatedId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 403, code: 'READINESS_SOURCE_UNLICENSED' })
+    expect(rotated.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+    const stillB = await rotated.service.get(actor, rotatedId, { rowKey: JSON.stringify(readinessKey(rulesetB)) })
+    expect(stillB.row?.rowKey).toEqual([...readinessKey(rulesetB)])
+
+    const quiet = harness(emptyState(), dto(), readinessDto(rulesetA))
+    quiet.state.readinessInstalled = true
+    const quietId = seedReadiness(quiet.state, rulesetA, 3)
+    quiet.readinessProvider.mockRejectedValue(new ReadinessCollaborationSourceError(401, 'READINESS_SOURCE_TOKEN_REJECTED'))
+    await expect(quiet.service.refresh(actor, quietId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 401, code: 'READINESS_SOURCE_TOKEN_REJECTED' })
+    expect(quiet.state.bindings[0]).toMatchObject({
+      status: 'stale',
+      version: 4,
+      last_failure_code: 'READINESS_SOURCE_TOKEN_REJECTED',
+    })
+
+    const advanced = harness(emptyState(), dto(), readinessDto(rulesetA))
+    advanced.state.readinessInstalled = true
+    const advancedId = seedReadiness(advanced.state, rulesetA, 3)
+    seedReadiness(advanced.state, rulesetB, 3)
+    advanced.readinessProvider.mockImplementation(async () => {
+      advanced.state.bindings[0].version = 4
+      throw new ReadinessCollaborationSourceError(401, 'READINESS_SOURCE_TOKEN_REJECTED')
+    })
+    await expect(advanced.service.refresh(actor, advancedId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 401, code: 'READINESS_SOURCE_TOKEN_REJECTED' })
+    expect(advanced.state.bindings[0]).toMatchObject({ status: 'active', version: 4 })
+
+    const stopped = harness(emptyState(), dto(), readinessDto(rulesetA))
+    stopped.state.readinessInstalled = true
+    const stoppedId = seedReadiness(stopped.state, rulesetA, 3)
+    stopped.readinessProvider.mockImplementation(async () => {
+      stopped.state.bindings[0].status = 'disabled'
+      stopped.state.bindings[0].version = 4
+      throw new ReadinessCollaborationSourceError(403, 'READINESS_SOURCE_UNLICENSED')
+    })
+    await expect(stopped.service.refresh(actor, stoppedId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 403, code: 'READINESS_SOURCE_UNLICENSED' })
+    expect(stopped.state.bindings[0]).toMatchObject({ status: 'disabled', version: 4 })
+    expect(stopped.state.records).toHaveLength(1)
+
+    const asleep = harness(emptyState(), dto(), readinessDto(rulesetA))
+    asleep.state.readinessInstalled = true
+    const asleepId = seedReadiness(asleep.state, rulesetA, 3)
+    asleep.readinessProvider.mockImplementation(async () => {
+      asleep.state.userActive = false
+      throw new ReadinessCollaborationSourceError(401, 'READINESS_SOURCE_LOGIN_REJECTED')
+    })
+    await expect(asleep.service.refresh(actor, asleepId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 401, code: 'READINESS_SOURCE_LOGIN_REJECTED' })
+    expect(asleep.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+  })
+
+  it('checks selected-row and source-field authority before confirm provider egress', async () => {
+    const changed = readinessDto(rulesetA, [issueFree('mbom_release', 'mbom', 'delta-mbom')])
+    const granted = harness(emptyState(), dto(), changed)
+    granted.state.readinessInstalled = true
+    const grantedId = seedReadiness(granted.state, rulesetA, 3)
+    const grantedPreview = await granted.service.preview(actor, readinessPreviewBody(rulesetA))
+    granted.state.previews.push({
+      id: grantedPreview.previewId,
+      actor_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      base_id: baseId,
+      name: 'Readiness collection',
+      row_key: [...readinessKey(rulesetA)],
+      source_fingerprint: fingerprint,
+      business_hash: grantedPreview.businessHash,
+      captured_at: capturedAt,
+      request_id: null,
+      binding_id: null,
+      consumed_at: null,
+      expired: false,
+    })
+    expect(granted.readinessProvider).toHaveBeenCalledTimes(1)
+    granted.readinessProvider.mockClear()
+    const beforeGranted = granted.calls.length
+    const published = await granted.service.confirm(actor, {
+      previewId: grantedPreview.previewId,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: grantedId,
+    })
+    expect(published).toMatchObject({
+      bindingId: grantedId,
+      recordId: `rec-${rulesetA}`,
+      version: 4,
+      noop: false,
+      replayed: false,
+    })
+    expect(granted.readinessProvider).toHaveBeenCalledTimes(1)
+    expect(mutations(granted.calls.slice(beforeGranted)).some((sql) => sql.includes('UPDATE meta_records'))).toBe(true)
+    expect(granted.state.previews[0].consumed_at).toBeTruthy()
+    expect(granted.provider).not.toHaveBeenCalled()
+
+    const refusals: Array<(state: ScriptState) => void> = [
+      (state) => { state.recordNoneIds = [`rec-${rulesetA}`] },
+      (state) => { state.fieldReadOnly = true },
+      (state) => { state.hiddenFieldId = readinessFields.resources },
+      (state) => { state.concealedFieldId = readinessFields.resources },
+    ]
+    for (const mutate of refusals) {
+      const denied = harness(emptyState(), dto(), changed)
+      denied.state.readinessInstalled = true
+      const bindingId = seedReadiness(denied.state, rulesetA, 3)
+      const preview = await denied.service.preview(actor, readinessPreviewBody(rulesetA))
+      denied.state.previews.push({
+        id: preview.previewId,
+        actor_id: actor,
+        data_source_id: dataSourceId,
+        source_kind: 'readiness',
+        native_tenant_id: tenant,
+        native_org_id: org,
+        item_id: itemId,
+        current_version_id: 'ver-1',
+        base_id: baseId,
+        name: 'Readiness collection',
+        row_key: [...readinessKey(rulesetA)],
+        source_fingerprint: fingerprint,
+        business_hash: preview.businessHash,
+        captured_at: capturedAt,
+        request_id: null,
+        binding_id: null,
+        consumed_at: null,
+        expired: false,
+      })
+      denied.readinessProvider.mockClear()
+      mutate(denied.state)
+      const beforeDenied = mutations(denied.calls).length
+      await expect(denied.service.confirm(actor, {
+        previewId: preview.previewId,
+        requestId: randomUUID(),
+        expectedVersion: 3,
+        targetBindingId: bindingId,
+      })).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
+      expect(denied.readinessProvider).not.toHaveBeenCalled()
+      expect(mutations(denied.calls).slice(beforeDenied)).toEqual([])
+      expect(denied.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+      expect(denied.state.previews[0]).toMatchObject({ request_id: null, consumed_at: null })
+      expect(denied.provider).not.toHaveBeenCalled()
+    }
+
+    const appended = harness(emptyState(), dto(), readinessDto(rulesetB))
+    appended.state.readinessInstalled = true
+    const appendedId = seedReadiness(appended.state, rulesetA, 3)
+    const appendPreview = await appended.service.preview(actor, readinessPreviewBody(rulesetB))
+    appended.state.previews.push({
+      id: appendPreview.previewId,
+      actor_id: actor,
+      data_source_id: dataSourceId,
+      source_kind: 'readiness',
+      native_tenant_id: tenant,
+      native_org_id: org,
+      item_id: itemId,
+      current_version_id: 'ver-1',
+      base_id: baseId,
+      name: 'Readiness collection',
+      row_key: [...readinessKey(rulesetB)],
+      source_fingerprint: fingerprint,
+      business_hash: appendPreview.businessHash,
+      captured_at: capturedAt,
+      request_id: null,
+      binding_id: null,
+      consumed_at: null,
+      expired: false,
+    })
+    appended.readinessProvider.mockClear()
+    appended.state.fieldReadOnly = true
+    await expect(appended.service.confirm(actor, {
+      previewId: appendPreview.previewId,
+      requestId: randomUUID(),
+      expectedVersion: 3,
+      targetBindingId: appendedId,
+    })).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
+    expect(appended.readinessProvider).not.toHaveBeenCalled()
+    expect(appended.state.bindings[0]).toMatchObject({ status: 'active', version: 3 })
+    expect(appended.state.stored).toHaveLength(1)
+  })
+
+  it('orders the row-auth advisory before the selected-row scope read in the same stale transaction', async () => {
+    const quiet = harness(emptyState(), dto(), readinessDto(rulesetA))
+    quiet.state.readinessInstalled = true
+    const quietId = seedReadiness(quiet.state, rulesetA, 3)
+    quiet.readinessProvider.mockRejectedValue(new ReadinessCollaborationSourceError(401, 'READINESS_SOURCE_TOKEN_REJECTED'))
+    await expect(quiet.service.refresh(actor, quietId, {
+      expectedVersion: 3,
+      rowKey: [...readinessKey(rulesetA)],
+    })).rejects.toMatchObject({ status: 401, code: 'READINESS_SOURCE_TOKEN_REJECTED' })
+    expect(quiet.state.bindings[0]).toMatchObject({ status: 'stale', version: 4 })
+    const tx = quiet.transactions.find((sqls) => sqls.some((sql) => sql.includes("status='stale'")))
+    expect(tx).toBeTruthy()
+    const sourceLock = tx!.findIndex((sql) => sql.includes('pg_advisory_xact_lock(hashtextextended'))
+    const bindingLock = tx!.findIndex((sql) => sql.includes('FROM meta_plm_collaboration_bindings') && sql.includes('FOR UPDATE'))
+    const rowAuth = tx!.findIndex((sql) => sql.includes('pg_advisory_xact_lock(hashtext($1))'))
+    const scope = tx!.findIndex((sql) => sql.includes('FROM record_permissions rp'))
+    const stale = tx!.findIndex((sql) => sql.includes("status='stale'"))
+    expect(sourceLock).toBeGreaterThanOrEqual(0)
+    expect(bindingLock).toBeGreaterThan(sourceLock)
+    expect(rowAuth).toBeGreaterThan(bindingLock)
+    expect(scope).toBeGreaterThan(rowAuth)
+    expect(stale).toBeGreaterThan(scope)
+  })
+
+  it('masks a hidden readiness source cell and keeps source metadata for a local-only hide', async () => {
+    const hidden = harness()
+    hidden.state.readinessInstalled = true
+    hidden.state.hiddenFieldId = readinessFields.resources
+    const hiddenId = seedReadiness(hidden.state, rulesetA, 2)
+    const hiddenBody = await hidden.service.get(actor, hiddenId, { rowKey: JSON.stringify(readinessKey(rulesetA)) })
+    expect(hiddenBody.row?.rowKey).toBeNull()
+    expect(hiddenBody.row?.businessHash).toBeNull()
+    expect(hiddenBody.row?.capturedAt).toBeNull()
+    expect(hiddenBody.row?.cells.resources).toBeUndefined()
+
+    const local = harness()
+    local.state.readinessInstalled = true
+    local.state.hiddenFieldId = localFields.review_note
+    const localId = seedReadiness(local.state, rulesetA, 2)
+    const body = await local.service.get(actor, localId, { rowKey: JSON.stringify(readinessKey(rulesetA)) })
+    expect(body.row?.rowKey).toEqual([...readinessKey(rulesetA)])
+    expect(body.row?.businessHash).toBeTruthy()
+    expect(body.row?.capturedAt).toBe(capturedAt)
+    expect(JSON.stringify(body.row)).not.toContain('kept')
+    expect(local.readinessProvider).not.toHaveBeenCalled()
+  })
+
+  it('reports a missing readiness adapter as unavailable and does not call ECO transport', async () => {
+    const { service, state, provider, readinessProvider } = harness(emptyState(), dto(), readinessDto())
+    state.readinessInstalled = true
+    state.readinessAdapter = false
+    await expect(service.preview(actor, readinessPreviewBody())).rejects.toMatchObject({
+      status: 502,
+      code: 'READINESS_SOURCE_UNAVAILABLE',
+    })
+    expect(provider).not.toHaveBeenCalled()
+    expect(readinessProvider).not.toHaveBeenCalled()
   })
 })
