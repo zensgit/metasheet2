@@ -1,0 +1,266 @@
+import { validateResourceOriginal, type ResourceOriginal } from './resourceContracts'
+import { clone, equal, exact, jsonBytes, need, safeId, validateOwner, type WeldingOwner } from './planRecovery'
+import { generationBasis, validateCreateReview, validateRetryReview, type CreateReviewRequest, type GenerationBasis, type RetryReviewRequest, type RequestScope, validateWorkflowBody, type WorkflowOriginal, finalGenerationBasis } from './planClient'
+import { validateReuseRequest, type ReuseOriginal } from './planClient'
+import { equalImportPending, validateImportPending, verifyImportPending, type ResourceImportPending } from './resourceImportContracts'
+
+export interface ResourceImportRecoveryStore {
+  getResourceImport(owner: WeldingOwner, scope?: RequestScope): Promise<ResourceImportPending | null>
+  claimResourceImport(value: ResourceImportPending, scope?: RequestScope): Promise<boolean>
+  clearResourceImport(value: ResourceImportPending, scope?: RequestScope): Promise<boolean>
+  subscribe?(listener: () => void): () => void
+  close(): void
+}
+
+export type GenerationPending = {
+  schema: 'metasheet.welding_command_pending/1'; kind: 'generation'; owner: WeldingOwner
+  plan_id: string; item_version_id: string
+} & ({ action: 'create'; body: CreateReviewRequest; basis: null } | { action: 'retry'; body: RetryReviewRequest; basis: GenerationBasis })
+
+export type ResourcePending = { schema: 'metasheet.welding_command_pending/1'; kind: 'resource'; owner: WeldingOwner } & ResourceOriginal
+export function validateResourcePending(value: unknown): ResourcePending {
+  exact(value, ['schema', 'kind', 'owner', 'action', 'resource_id', 'body', 'source'])
+  need(value.schema === 'metasheet.welding_command_pending/1' && value.kind === 'resource')
+  validateOwner(value.owner)
+  validateResourceOriginal({ action: value.action, resource_id: value.resource_id, body: value.body, source: value.source })
+  need(bytes(jsonBytes(value)) <= 6 * 1024 * 1024, '原资料请求记录超过 6 MiB')
+  return clone(value) as ResourcePending
+}
+export interface ResourceRecoveryStore {
+  getResource(owner: WeldingOwner, scope?: RequestScope): Promise<ResourcePending | null>
+  claimResource(value: ResourcePending, scope?: RequestScope): Promise<boolean>
+  clearResource(value: ResourcePending, scope?: RequestScope): Promise<boolean>
+  subscribe?(listener: () => void): () => void
+  close(): void
+}
+
+const bytes = (value: string) => new TextEncoder().encode(value).byteLength
+export function validateGenerationPending(value: unknown): GenerationPending {
+  exact(value, ['schema', 'kind', 'action', 'owner', 'plan_id', 'item_version_id', 'body', 'basis'])
+  need(value.schema === 'metasheet.welding_command_pending/1' && value.kind === 'generation')
+  validateOwner(value.owner); safeId(value.plan_id); safeId(value.item_version_id)
+  if (value.action === 'create') { validateCreateReview(value.body); need(value.basis === null) }
+  else {
+    need(value.action === 'retry'); validateRetryReview(value.body)
+    const fixed = generationBasis(value.basis)
+    need(equal(fixed, value.basis) && fixed.plan_id === value.plan_id && fixed.item_version_id === value.item_version_id)
+  }
+  need(bytes(jsonBytes(value)) <= 32768, '原生成请求超过 32 KiB')
+  return clone(value) as GenerationPending
+}
+export interface GenerationRecoveryStore {
+  get(owner: WeldingOwner, scope?: RequestScope): Promise<GenerationPending | null>
+  claim(value: GenerationPending, scope?: RequestScope): Promise<boolean>
+  clear(value: GenerationPending, scope?: RequestScope): Promise<boolean>
+  subscribe?(listener: () => void): () => void
+  close(): void
+}
+export type WorkflowPending = { schema: 'metasheet.welding_command_pending/1'; kind: 'workflow'; owner: WeldingOwner } & (WorkflowOriginal | ReuseOriginal)
+export function validateWorkflowPending(value: unknown): WorkflowPending {
+  need(typeof value === 'object' && value !== null); const action = (value as { action?: unknown }).action
+  exact(value, ['schema', 'kind', 'action', 'owner', 'plan_id', 'item_version_id', 'body', ...(action === 'final-retry' ? ['basis'] : [])])
+  need(value.schema === 'metasheet.welding_command_pending/1' && value.kind === 'workflow')
+  validateOwner(value.owner); safeId(value.plan_id); safeId(value.item_version_id)
+  need(['submit', 'review', 'withdraw', 'reopen', 'final-render', 'final-retry', 'release', 'revise', 'reuse'].includes(String(value.action)))
+  if (value.action === 'reuse') need(validateReuseRequest(value.body).target_plan_id !== value.plan_id)
+  else validateWorkflowBody(value.action as WorkflowOriginal['action'], value.body)
+  if (value.action === 'final-retry') { const fixed = finalGenerationBasis(value.basis); need(equal(fixed, value.basis) && fixed.plan_id === value.plan_id && fixed.item_version_id === value.item_version_id) }
+  need(bytes(jsonBytes(value)) <= (value.action === 'reuse' ? 262144 : 65536), value.action === 'reuse' ? '原复用请求超过 256 KiB' : '原评审请求超过 64 KiB')
+  return clone(value) as unknown as WorkflowPending
+}
+export interface CommandRecoveryStore extends GenerationRecoveryStore {
+  getWorkflow(owner: WeldingOwner, plan: string, version: string, scope?: RequestScope): Promise<WorkflowPending | null>
+  claimWorkflow(value: WorkflowPending, scope?: RequestScope): Promise<boolean>
+  clearWorkflow(value: WorkflowPending, scope?: RequestScope): Promise<boolean>
+}
+const keyFor = (owner: WeldingOwner) => { validateOwner(owner); return ['generation', owner.tenant_id, owner.org_id, owner.auth_user_id, owner.rbac_user_id] }
+const workflowKey = (owner: WeldingOwner, plan: string, version: string) => { keyFor(owner); safeId(plan); safeId(version); return ['workflow', owner.tenant_id, owner.org_id, owner.auth_user_id, owner.rbac_user_id, plan, version] }
+const resourceKey = (owner: WeldingOwner) => { keyFor(owner); return ['resource', owner.tenant_id, owner.org_id, owner.auth_user_id, owner.rbac_user_id] }
+const importKey = (owner: WeldingOwner) => { keyFor(owner); return ['resource-import', owner.tenant_id, owner.org_id, owner.auth_user_id, owner.rbac_user_id] }
+const kindRange = (kind: 'generation' | 'workflow' | 'resource' | 'resource-import') => IDBKeyRange.bound([kind], [kind, []])
+const leases = new WeakMap<RequestScope, { owner: string; active: boolean }>()
+export async function withGenerationOwnerLock<T>(owner: WeldingOwner, scope: RequestScope, action: (scope: RequestScope) => Promise<T>): Promise<T> {
+  const name = `metasheet-welding-generation:${JSON.stringify(keyFor(owner))}`, lease = leases.get(scope)
+  need(scope.accepts() && !scope.signal?.aborted, '会话已变化，原生成请求保留')
+  if (lease?.active && lease.owner === name) return action(scope)
+  need(typeof navigator !== 'undefined' && navigator.locks, '当前浏览器无法安全核对跨页原请求，编制与生成未发送')
+  return navigator.locks.request(name, { mode: 'exclusive', ...(scope.signal ? { signal: scope.signal } : {}) }, async () => {
+    need(scope.accepts() && !scope.signal?.aborted, '会话已变化，原生成请求保留')
+    const lease = { owner: name, active: true }, locked: RequestScope = { signal: scope.signal, accepts: () => lease.active && scope.accepts() }
+    leases.set(locked, lease)
+    try { return await action(locked) } finally { lease.active = false }
+  })
+}
+
+export async function openGenerationRecoveryStore(factory: IDBFactory = indexedDB): Promise<CommandRecoveryStore & ResourceRecoveryStore & ResourceImportRecoveryStore> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = factory.open('metasheet-welding-command-recovery', 1); let failed = false
+    request.onupgradeneeded = () => request.result.createObjectStore('pending')
+    request.onerror = request.onblocked = () => { failed = true; reject(new Error('原生成请求存储不可用，未发送新请求')) }
+    request.onsuccess = () => { if (failed) request.result.close(); else resolve(request.result) }
+  })
+  const listeners = new Set<() => void>(), channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('metasheet-welding-generation-pending')
+  const changed = () => { for (const listener of listeners) listener() }
+  if (channel) channel.onmessage = changed
+  const close = () => { listeners.clear(); channel?.close(); db.close() }
+  db.onversionchange = close
+  function transaction<T>(mode: IDBTransactionMode, scope: RequestScope | undefined, operation: (store: IDBObjectStore, done: (value: T) => void, fail: (cause: unknown) => void, check: () => void) => void): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('pending', mode); let result: T, error: unknown
+      const fail = (cause: unknown) => { error = cause; tx.abort() }
+      const check = () => need(scope?.accepts() !== false && !scope?.signal?.aborted, '页面已变化，原生成请求保留')
+      const abort = () => fail(new Error('会话已变化，原生成请求保留'))
+      tx.oncomplete = () => { scope?.signal?.removeEventListener('abort', abort); if (mode === 'readwrite') { changed(); channel?.postMessage(null) }; resolve(result) }
+      tx.onabort = tx.onerror = () => { scope?.signal?.removeEventListener('abort', abort); reject(error || new Error('原生成请求存储未完成')) }
+      scope?.signal?.addEventListener('abort', abort, { once: true })
+      try { check(); operation(tx.objectStore('pending'), value => { result = value }, fail, check) } catch (cause) { fail(cause) }
+    })
+  }
+  function parse(raw: unknown, owner: WeldingOwner): GenerationPending | null {
+    if (raw === undefined) return null
+    need(typeof raw === 'string' && bytes(raw) <= 32768)
+    const value = validateGenerationPending(JSON.parse(raw)); need(equal(value.owner, owner) && raw === jsonBytes(value))
+    return value
+  }
+  function parseWorkflow(raw: unknown, owner: WeldingOwner, plan: string, version: string): WorkflowPending | null {
+    if (raw === undefined) return null
+    need(typeof raw === 'string' && bytes(raw) <= 262144)
+    const value = validateWorkflowPending(JSON.parse(raw)); need(equal(value.owner, owner) && value.plan_id === plan && value.item_version_id === version && raw === jsonBytes(value))
+    return value
+  }
+  function parseResource(raw: unknown, owner: WeldingOwner): ResourcePending | null {
+    if (raw === undefined) return null
+    need(typeof raw === 'string' && bytes(raw) <= 6 * 1024 * 1024)
+    const value = validateResourcePending(JSON.parse(raw)); need(equal(value.owner, owner) && raw === jsonBytes(value))
+    return value
+  }
+  function parseImport(raw: unknown, owner: WeldingOwner): ResourceImportPending | null {
+    if (raw === undefined) return null
+    const value = validateImportPending(raw); need(equal(value.owner, owner), '整批原请求身份与存储槽不符，记录保留')
+    return value
+  }
+  async function getResourceImport(owner: WeldingOwner, scope?: RequestScope): Promise<ResourceImportPending | null> {
+    const key = importKey(owner)
+    const value = await transaction<ResourceImportPending | null>('readonly', scope, (store, done, fail, check) => {
+      const request = store.get(key)
+      request.onsuccess = () => { try { check(); done(parseImport(request.result, owner)) } catch (cause) { fail(cause) } }
+    })
+    // Hash only after the read transaction completes; WebCrypto must not keep an IDB transaction alive.
+    const verified = value ? await verifyImportPending(value) : null
+    need(scope?.accepts() !== false && !scope?.signal?.aborted, '页面已变化，整批原请求保留')
+    return verified
+  }
+  async function changeImport(input: ResourceImportPending, clear: boolean, scope?: RequestScope): Promise<boolean> {
+    const value = await verifyImportPending(input), key = importKey(value.owner)
+    return withGenerationOwnerLock(value.owner, scope ?? { accepts: () => true }, async locked => {
+      const observed = await getResourceImport(value.owner, locked)
+      if (observed && !equalImportPending(observed, value) || clear && !observed) return false
+      return transaction<boolean>('readwrite', locked, (store, done, fail, check) => {
+        const request = store.get(key)
+        request.onsuccess = () => { try {
+          check(); const current = parseImport(request.result, value.owner)
+          if (current ? !observed || !equalImportPending(current, observed) : observed !== null) { done(false); return }
+          if (clear) { store.delete(key); done(true); return }
+          if (current) { done(equalImportPending(current, value)); return }
+          const count = store.count(kindRange('resource-import'))
+          count.onsuccess = () => { try { check(); need(count.result < 8, '整批原请求空间已满，旧记录保留'); store.put(value, key); done(true) } catch (cause) { fail(cause) } }
+        } catch (cause) { fail(cause) } }
+      })
+    })
+  }
+  return {
+    getResourceImport,
+    claimResourceImport: (input, scope) => changeImport(input, false, scope),
+    clearResourceImport: (input, scope) => changeImport(input, true, scope),
+    get(owner, scope) {
+      const key = keyFor(owner)
+      return transaction<GenerationPending | null>('readonly', scope, (store, done, fail, check) => {
+        const request = store.get(key)
+        request.onsuccess = () => { try { check(); done(parse(request.result, owner)) } catch (cause) { fail(cause) } }
+      })
+    },
+    claim(input, scope) {
+      const value = validateGenerationPending(input), raw = jsonBytes(value)
+      return withGenerationOwnerLock(value.owner, scope ?? { accepts: () => true }, locked => transaction<boolean>('readwrite', locked, (store, done, fail, check) => {
+        const request = store.get(keyFor(value.owner))
+        request.onsuccess = () => {
+          try {
+            check()
+            if (request.result !== undefined) { parse(request.result, value.owner); done(request.result === raw); return }
+            const other = store.get(workflowKey(value.owner, value.plan_id, value.item_version_id))
+            other.onsuccess = () => { try {
+              check(); if (parseWorkflow(other.result, value.owner, value.plan_id, value.item_version_id)) { done(false); return }
+              const count = store.count(kindRange('generation'))
+              count.onsuccess = () => { try { check(); need(count.result < 8, '原生成请求空间已满，旧记录保留'); store.put(raw, keyFor(value.owner)); done(true) } catch (cause) { fail(cause) } }
+            } catch (cause) { fail(cause) } }
+
+          } catch (cause) { fail(cause) }
+        }
+      }))
+    },
+    clear(input, scope) {
+      const value = validateGenerationPending(input), raw = jsonBytes(value)
+      return withGenerationOwnerLock(value.owner, scope ?? { accepts: () => true }, locked => transaction<boolean>('readwrite', locked, (store, done, fail, check) => {
+        const request = store.get(keyFor(value.owner))
+        request.onsuccess = () => { try { check(); if (request.result !== raw) { done(false); return }; store.delete(keyFor(value.owner)); done(true) } catch (cause) { fail(cause) } }
+      }))
+    },
+    getWorkflow(owner, plan, version, scope) {
+      const key = workflowKey(owner, plan, version)
+      return transaction<WorkflowPending | null>('readonly', scope, (store, done, fail, check) => {
+        const request = store.get(key)
+        request.onsuccess = () => { try { check(); done(parseWorkflow(request.result, owner, plan, version)) } catch (cause) { fail(cause) } }
+      })
+    },
+    claimWorkflow(input, scope) {
+      const value = validateWorkflowPending(input), raw = jsonBytes(value), key = workflowKey(value.owner, value.plan_id, value.item_version_id)
+      return withGenerationOwnerLock(value.owner, scope ?? { accepts: () => true }, locked => transaction<boolean>('readwrite', locked, (store, done, fail, check) => {
+        const request = store.get(key)
+        request.onsuccess = () => { try {
+          check()
+          if (request.result !== undefined) { parseWorkflow(request.result, value.owner, value.plan_id, value.item_version_id); done(request.result === raw); return }
+          const other = store.get(keyFor(value.owner))
+          other.onsuccess = () => { try {
+            check(); const generation = parse(other.result, value.owner)
+            if (generation?.plan_id === value.plan_id && generation.item_version_id === value.item_version_id) { done(false); return }
+            const count = store.count(kindRange('workflow'))
+            count.onsuccess = () => { try { check(); need(count.result < 64, '原评审请求空间已满，旧记录保留'); store.put(raw, key); done(true) } catch (cause) { fail(cause) } }
+          } catch (cause) { fail(cause) } }
+        } catch (cause) { fail(cause) } }
+      }))
+    },
+    clearWorkflow(input, scope) {
+      const value = validateWorkflowPending(input), raw = jsonBytes(value), key = workflowKey(value.owner, value.plan_id, value.item_version_id)
+      return withGenerationOwnerLock(value.owner, scope ?? { accepts: () => true }, locked => transaction<boolean>('readwrite', locked, (store, done, fail, check) => {
+        const request = store.get(key)
+        request.onsuccess = () => { try { check(); if (request.result !== raw) { done(false); return }; store.delete(key); done(true) } catch (cause) { fail(cause) } }
+      }))
+    },
+    getResource(owner, scope) {
+      return transaction<ResourcePending | null>('readonly', scope, (store, done, fail, check) => {
+        const request = store.get(resourceKey(owner))
+        request.onsuccess = () => { try { check(); done(parseResource(request.result, owner)) } catch (cause) { fail(cause) } }
+      })
+    },
+    claimResource(input, scope) {
+      const value = validateResourcePending(input), raw = jsonBytes(value)
+      return withGenerationOwnerLock(value.owner, scope ?? { accepts: () => true }, locked => transaction<boolean>('readwrite', locked, (store, done, fail, check) => {
+        const request = store.get(resourceKey(value.owner))
+        request.onsuccess = () => { try {
+          check()
+          if (request.result !== undefined) { parseResource(request.result, value.owner); done(request.result === raw); return }
+          const count = store.count(kindRange('resource'))
+          count.onsuccess = () => { try { check(); need(count.result < 8, '原资料请求空间已满，旧记录保留'); store.put(raw, resourceKey(value.owner)); done(true) } catch (cause) { fail(cause) } }
+        } catch (cause) { fail(cause) } }
+      }))
+    },
+    clearResource(input, scope) {
+      const value = validateResourcePending(input), raw = jsonBytes(value)
+      return withGenerationOwnerLock(value.owner, scope ?? { accepts: () => true }, locked => transaction<boolean>('readwrite', locked, (store, done, fail, check) => {
+        const request = store.get(resourceKey(value.owner))
+        request.onsuccess = () => { try { check(); if (request.result !== raw) { done(false); return }; store.delete(resourceKey(value.owner)); done(true) } catch (cause) { fail(cause) } }
+      }))
+    },
+    subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener) } }, close,
+  }
+}

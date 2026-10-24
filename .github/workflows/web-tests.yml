@@ -23,6 +23,7 @@
 name: Web Tests
 
 on:
+  workflow_dispatch: {}
   merge_group:
     types: [checks_requested]
   pull_request:
@@ -73,5 +74,33 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install locked Playwright Chromium for welding recovery
+        run: pnpm --filter @metasheet/web exec playwright install --with-deps chromium
+
+      - name: Prepare welding native browser and evidence directory
+        working-directory: apps/web
+        run: |
+          executable="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')"
+          test -f "$executable"
+          output="$(mktemp -d "$RUNNER_TEMP/welding-native.XXXXXX")"
+          output="$(realpath "$output")"
+          {
+            echo "WELDING_UI_CHROMIUM_EXECUTABLE=$executable"
+            echo "WELDING_FOUNDATION_OUTPUT_DIR=$output"
+            echo "WELDING_FOUNDATION_RUN_LABEL=required-web-1"
+          } >> "$GITHUB_ENV"
+
       - name: Run the always-on web spec gate
         run: bash apps/web/scripts/run-required-web-tests.sh
+
+      - name: Verify native welding joint diagrams
+        timeout-minutes: 5
+        env:
+          WELDING_FOUNDATION_RUN_LABEL: joint-diagram-native-1
+        run: pnpm --filter @metasheet/web exec vitest run tests/welding-joint-diagram-native.spec.ts --reporter=dot
+
+      - name: Verify native welding binary import recovery
+        timeout-minutes: 5
+        env:
+          WELDING_FOUNDATION_RUN_LABEL: resource-import-native-1
+        run: pnpm --filter @metasheet/web exec vitest run tests/welding-resource-import-native.spec.ts --reporter=dot

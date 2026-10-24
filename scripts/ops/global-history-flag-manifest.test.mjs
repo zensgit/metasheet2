@@ -206,7 +206,9 @@ function globalHistoryFlagsInSource() {
     .filter((t) => !NON_GH_EXACT.has(t))
   // Task routes mount only when this flag is the exact string true (AGENTS.md: every new env flag).
   const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks])].sort()
+  // Dedicated welding gates, exact flags only (not a new family wildcard).
+  const welding = grepFlagTokens('WELDING_(READ|WRITE)_ENABLED')
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...welding])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {

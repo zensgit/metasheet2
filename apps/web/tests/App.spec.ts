@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   // Brand-link cases: the top-left brand must follow resolveHomePath(), so the mock exposes the
   // focus flags and the resolver as configurable state instead of constants.
   focus: { attendance: false, plm: false },
+  weldingFeatures: { plm: false, weldingRead: false },
   resolveHomePath: vi.fn(() => '/home'),
 }))
 
@@ -47,7 +48,7 @@ vi.mock('../src/stores/featureFlags', () => ({
     loadProductFeatures: mocks.loadProductFeatures,
     isAttendanceFocused: () => mocks.focus.attendance,
     isPlmWorkbenchFocused: () => mocks.focus.plm,
-    hasFeature: () => false,
+    hasFeature: (key: string) => mocks.weldingFeatures[key as keyof typeof mocks.weldingFeatures] ?? false,
     resolveHomePath: mocks.resolveHomePath,
   }),
 }))
@@ -517,5 +518,37 @@ describe('App primary nav after the 外接数据源 fold (整合切片 2026-09-0
 
     const el = await mountApp()
     expect(navHrefs(el)).not.toContain('/data-sources')
+  })
+})
+
+describe('App welding entry', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  afterEach(() => {
+    app?.unmount(); container?.remove()
+    app = null; container = null
+    mocks.focus.plm = false
+    Object.assign(mocks.weldingFeatures, { plm: false, weldingRead: false })
+    vi.clearAllMocks()
+  })
+  it.each([false, true])('requires explicit read flag in the %s PLM focus shell', async focused => {
+    mocks.route.path = '/plm'; mocks.route.fullPath = '/plm'; mocks.route.meta = {}
+    mocks.focus.plm = focused
+    mocks.weldingFeatures.plm = true
+    mocks.weldingFeatures.weldingRead = false
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 200 })) as typeof fetch
+    async function mount() {
+      container = document.createElement('div'); document.body.appendChild(container)
+      app = createApp(App as Component)
+      app.component('router-view', { render: () => h('div') })
+      app.component('router-link', { props: ['to'], render() { return h('a', { href: this.$props.to }, this.$slots.default?.()) } })
+      app.mount(container); await flushUi()
+    }
+    await mount()
+    expect(container!.querySelector('a[href="/plm/welding"]')).toBeNull()
+    app!.unmount(); container!.remove()
+    mocks.weldingFeatures.weldingRead = true
+    await mount()
+    expect(container!.querySelector('a[href="/plm/welding"]')?.textContent).toBe('焊接工作台')
   })
 })

@@ -1,0 +1,4 @@
+f5bceb8bff8f5d6e8786d4b05310582ff699f2584835effb877cb17a07054cdc  apps/web/tests/fixtures/welding-resource-import-old-v1/commandRecovery.ts.txt
+ec18e6e1a503c1228ea6449622b702e8954c11a564e32353bcb16b6ad388377d  apps/web/tests/fixtures/welding-resource-import-old-v1/planClient.ts.txt
+20b244acf3f0dc88f3325dd9be8bd752be72a1b9f62f10d5538d0e2603bbe635  apps/web/tests/fixtures/welding-resource-import-old-v1/planRecovery.ts.txt
+4cc6a355543250efc7af5862e6b7a3e8f9bdbcc0925ec3efe8a3b627bc3d3dcf  apps/web/tests/fixtures/welding-resource-import-old-v1/resourceContracts.ts.txt

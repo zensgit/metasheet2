@@ -139,6 +139,8 @@ export const GLOBAL_GATE_EXCEPTIONS: readonly GateException[] = [
   { path: '/api/auth/dingtalk/launch', kind: 'exact', reason: 'DingTalk OAuth launch — pre-authentication redirect.' },
   { path: '/api/auth/dingtalk/callback', kind: 'exact', reason: 'DingTalk OAuth callback — authenticated by the OAuth code, not a session.' },
 
+  { path: '/api/welding/jwks', kind: 'exact', reason: 'Dedicated public RSA verification key, separately gated by WELDING_READ_ENABLED; descendants remain session protected.' },
+
   // --- Non-tenant informational endpoints.
   { path: '/api/plugins', kind: 'exact', reason: 'Plugin inventory summary. `exact`: routes that plugins register under /api/plugins/** are NOT covered and stay behind the gate.' },
   { path: '/api/permissions/health', kind: 'exact', reason: 'Permission-subsystem liveness probe; serves no tenant data.' },

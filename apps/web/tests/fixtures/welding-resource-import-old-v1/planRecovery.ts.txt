@@ -1,0 +1,351 @@
+export interface WeldingOwner {
+  tenant_id: string
+  org_id: string
+  auth_user_id: number
+  rbac_user_id: number
+}
+
+export interface ReviewResolution {
+  weld_id: string
+  expected_review_digest: string
+  disposition: 'retain' | 'adjusted' | 'no_binding' | 'remove_weld' | 'cancel_association'
+  note: string
+}
+
+export interface AssemblySide {
+  role: string; path: string[]; item_id: string; version_id: string
+  witness?: { witness_id: string; source: 'manual'; material?: string; thickness?: { value: number; unit: 'mm' | 'in' } }
+}
+export interface AssemblyChange {
+  expected_content_hash: string; from_fingerprint: string; to_fingerprint: string
+}
+export interface AssemblyCancel { weld_id: string; reason: string }
+
+export type PlanPayload = Record<string, unknown> & {
+  schema_version: 1
+  product: { item_id: string; version_id: string } | null
+  drawing: { item_id: string; version_id: string; file_id: string; file_role: string; expected_checksum: string } | null
+  welds: Array<Record<string, unknown> & { weld_id: string; display_no: string }>
+}
+
+export interface PlanRecoveryRecord {
+  schema: 'yuantus.welding_plan_recovery/1'
+  recovery_id: string
+  updated_at: number
+  owner: WeldingOwner
+  draft: {
+    plan_id: string; version_id: string | null; base_draft_seq: number; base_content_hash: string | null
+    name: string; number: string; payload: PlanPayload
+  }
+  pending: null | { method: 'POST' | 'PUT'; path: string; body: Record<string, unknown>; local_ahead: boolean }
+}
+
+export const DRAFT_BYTES = 5 * 1024 * 1024
+export const RECORD_BYTES = 12 * 1024 * 1024
+const STORE_BYTES = 64 * 1024 * 1024
+const encoder = new TextEncoder()
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export const isHash = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+export function need(value: unknown, message = '工艺数据格式无法确认'): asserts value {
+  if (!value) throw new Error(message)
+}
+export function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+export function exact(value: unknown, required: string[], optional: string[] = []): asserts value is Record<string, unknown> {
+  need(isObject(value) && required.every(key => Object.hasOwn(value, key))
+    && Object.keys(value).every(key => required.includes(key) || optional.includes(key)))
+}
+export function text(value: unknown): asserts value is string {
+  need(typeof value === 'string' && !value.includes('\0'))
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const low = value.charCodeAt(++i)
+      need(low >= 0xdc00 && low <= 0xdfff)
+    } else need(code < 0xdc00 || code > 0xdfff)
+  }
+}
+export function safeId(value: unknown): asserts value is string {
+  text(value)
+  need(value.length > 0 && Array.from(value).length <= 64 && value.trim() === value
+    && !/[\r\n\0/\\%]/.test(value) && value !== '.' && value !== '..')
+}
+export function sourceId(value: unknown): asserts value is string {
+  text(value)
+  const chars = Array.from(value), space = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/
+  need(chars.length > 0 && chars.length <= 64 && !space.test(chars[0]) && !space.test(chars[chars.length - 1]) && !/[\r\n]/.test(value))
+}
+export function validateReviewResolution(value: unknown): ReviewResolution {
+  exact(value, ['weld_id', 'expected_review_digest', 'disposition', 'note'])
+  sourceId(value.weld_id); text(value.note)
+  need(isHash(value.expected_review_digest) && typeof value.disposition === 'string' && ['retain', 'adjusted', 'no_binding', 'remove_weld', 'cancel_association'].includes(value.disposition))
+  need(Array.from(value.note).length <= 4000 && /[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u.test(value.note), '请填写非空复核解释（最多 4000 字符）')
+  return clone(value) as unknown as ReviewResolution
+}
+export function validateAssemblySide(value: unknown): AssemblySide {
+  exact(value, ['role', 'path', 'item_id', 'version_id'], ['witness'])
+  text(value.role)
+  const whitespace = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/
+  const role = Array.from(value.role)
+  need(role.length > 0 && role.length <= 128 && !whitespace.test(role[0]) && !whitespace.test(role[role.length - 1]) && !/[\r\n]/.test(value.role))
+  sourceId(value.item_id); sourceId(value.version_id)
+  need(Array.isArray(value.path) && value.path.length <= 20); value.path.forEach(sourceId)
+  if (Object.hasOwn(value, 'witness')) {
+    exact(value.witness, ['witness_id', 'source'], ['material', 'thickness'])
+    sourceId(value.witness.witness_id); need(value.witness.source === 'manual')
+    if (Object.hasOwn(value.witness, 'material')) {
+      text(value.witness.material)
+      need(Array.from(value.witness.material).length <= 256 && Array.from(value.witness.material).some(char => !whitespace.test(char)))
+    }
+    if (Object.hasOwn(value.witness, 'thickness')) {
+      exact(value.witness.thickness, ['value', 'unit'])
+      need(typeof value.witness.thickness.value === 'number' && Number.isFinite(value.witness.thickness.value) && value.witness.thickness.value > 0
+        && typeof value.witness.thickness.unit === 'string' && ['mm', 'in'].includes(value.witness.thickness.unit))
+    }
+  }
+  return clone(value) as unknown as AssemblySide
+}
+export function validateAssemblyChange(value: unknown): AssemblyChange {
+  exact(value, ['expected_content_hash', 'from_fingerprint', 'to_fingerprint'])
+  need(isHash(value.expected_content_hash) && isHash(value.from_fingerprint) && isHash(value.to_fingerprint))
+  return clone(value) as unknown as AssemblyChange
+}
+export function validateAssemblyCancel(value: unknown): AssemblyCancel {
+  exact(value, ['weld_id', 'reason']); sourceId(value.weld_id); text(value.reason)
+  need(Array.from(value.reason).length <= 4000 && /[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u.test(value.reason), '请填写取消采用的理由（最多 4000 字符）')
+  return clone(value) as unknown as AssemblyCancel
+}
+export function validateOwner(value: unknown): WeldingOwner {
+  exact(value, ['tenant_id', 'org_id', 'auth_user_id', 'rbac_user_id'])
+  for (const key of ['tenant_id', 'org_id']) { text(value[key]); need((value[key] as string).length > 0) }
+  for (const key of ['auth_user_id', 'rbac_user_id']) need(Number.isSafeInteger(value[key]) && (value[key] as number) > 0)
+  return value as unknown as WeldingOwner
+}
+
+// Check before stringify: it would otherwise silently turn undefined/nonfinite values into null.
+export function jsonBytes(value: unknown): string {
+  const seen = new Set<object>()
+  function visit(item: unknown, depth: number): void {
+    need(depth <= 32)
+    if (item === null || typeof item === 'boolean') return
+    if (typeof item === 'string') { text(item); return }
+    if (typeof item === 'number') {
+      need(Number.isFinite(item) && (!Number.isInteger(item) || Number.isSafeInteger(item) || /[eE]/.test(JSON.stringify(item))))
+      return
+    }
+    need(item && typeof item === 'object' && !seen.has(item)
+      && (Array.isArray(item) || Object.getPrototypeOf(item) === Object.prototype || Object.getPrototypeOf(item) === null))
+    seen.add(item)
+    for (const key of Reflect.ownKeys(item)) {
+      if (Array.isArray(item) && key === 'length') continue
+      need(typeof key === 'string'); text(key)
+      const descriptor = Object.getOwnPropertyDescriptor(item, key)!
+      need(descriptor.enumerable && Object.hasOwn(descriptor, 'value'))
+      visit(descriptor.value, depth + 1)
+    }
+    if (Array.isArray(item)) need(Object.keys(item).length === item.length)
+    seen.delete(item)
+  }
+  visit(value, 0)
+  return JSON.stringify(value)
+}
+export function clone<T>(value: T): T { return JSON.parse(jsonBytes(value)) as T }
+export function equal(a: unknown, b: unknown): boolean {
+  return a === b || isObject(a) && isObject(b) && Object.keys(a).length === Object.keys(b).length
+    && Object.keys(a).every(key => Object.hasOwn(b, key) && equal(a[key], b[key]))
+    || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((item, i) => equal(item, b[i]))
+}
+export function validatePayload(value: unknown): PlanPayload {
+  need(isObject(value) && value.schema_version === 1 && Array.isArray(value.welds))
+  need(Object.hasOwn(value, 'product') && Object.hasOwn(value, 'drawing'))
+  for (const key of ['product', 'drawing']) {
+    const target = value[key]
+    if (target === null) continue
+    need(isObject(target)); sourceId(target.item_id); sourceId(target.version_id)
+    if (key === 'drawing') {
+      sourceId(target.file_id)
+      need(['drawing', 'native_cad'].includes(String(target.file_role)) && typeof target.expected_checksum === 'string'
+        && /^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{64})$/.test(target.expected_checksum))
+    }
+  }
+  need(encoder.encode(jsonBytes(value)).byteLength <= DRAFT_BYTES, '正文超过 5 MiB')
+  need(value.welds.length <= 500)
+  if (Object.hasOwn(value, 'assembly_format')) need(value.assembly_format === 'yuantus.welding_assembly/1')
+  if (value.assembly_format === 'yuantus.welding_assembly/1' && Object.hasOwn(value, 'bom') && value.bom !== null) {
+    exact(value.bom, ['baseline_id', 'expected_fingerprint']); sourceId(value.bom.baseline_id); need(isHash(value.bom.expected_fingerprint))
+  }
+  for (const weld of value.welds) {
+    need(isObject(weld)); sourceId(weld.weld_id); text(weld.display_no)
+    if (Object.hasOwn(weld, 'assembly')) {
+      need(value.assembly_format === 'yuantus.welding_assembly/1')
+      exact(weld.assembly, ['a', 'b'])
+      const a = validateAssemblySide(weld.assembly.a), b = validateAssemblySide(weld.assembly.b)
+      need(!equal(a.path, b.path), '请选择两个不同的装配位置')
+    }
+  }
+  // Existing F18/source/overlay fields are retained. Domain rules remain in Yuantus.
+  return value as PlanPayload
+}
+export function validateRecovery(value: unknown): PlanRecoveryRecord {
+  exact(value, ['schema', 'recovery_id', 'updated_at', 'owner', 'draft', 'pending'])
+  need(value.schema === 'yuantus.welding_plan_recovery/1' && typeof value.recovery_id === 'string' && uuid.test(value.recovery_id))
+  need(Number.isSafeInteger(value.updated_at) && (value.updated_at as number) >= 0)
+  validateOwner(value.owner)
+  const draft = value.draft
+  exact(draft, ['plan_id', 'version_id', 'base_draft_seq', 'base_content_hash', 'name', 'number', 'payload'])
+  safeId(draft.plan_id); text(draft.name); text(draft.number); validatePayload(draft.payload)
+  if (draft.version_id === null) need(draft.base_draft_seq === 0 && draft.base_content_hash === null)
+  else { safeId(draft.version_id); need(Number.isSafeInteger(draft.base_draft_seq) && (draft.base_draft_seq as number) >= 1 && isHash(draft.base_content_hash)) }
+  if (value.pending !== null) {
+    const pending = value.pending
+    exact(pending, ['method', 'path', 'body', 'local_ahead']); need(typeof pending.local_ahead === 'boolean')
+    const body = pending.body
+    if (pending.method === 'POST' && draft.version_id === null) {
+      exact(body, ['plan_id', 'name', 'number', 'save_id', 'payload'])
+      need(draft.version_id === null && pending.path === '' && body.plan_id === draft.plan_id
+        && body.name === draft.name && body.number === draft.number && !Object.hasOwn(body.payload as object, 'assembly_format'))
+    } else {
+      need(draft.version_id !== null)
+      const target = `/${encodeURIComponent(draft.plan_id)}/versions/${encodeURIComponent(draft.version_id as string)}`
+      need(pending.method === 'PUT' && pending.path === `${target}/draft`
+        || pending.method === 'POST' && pending.path === `${target}/assembly-apply`)
+      exact(body, ['expected_draft_seq', 'save_id', 'payload'], ['overlay_context_id', 'measure_geometry', 'source_change', 'review_resolution', 'assembly_change', 'assembly_cancel'])
+      need(body.expected_draft_seq === draft.base_draft_seq && (body.expected_draft_seq as number) <= 2147483646)
+      need(['source_change', 'review_resolution', 'assembly_change', 'assembly_cancel'].filter(key => Object.hasOwn(body, key)).length <= 1)
+      if (Object.hasOwn(body, 'assembly_change')) need(validateAssemblyChange(body.assembly_change).expected_content_hash === draft.base_content_hash)
+      if (Object.hasOwn(body, 'assembly_cancel')) validateAssemblyCancel(body.assembly_cancel)
+      if (pending.method === 'POST') need(Object.hasOwn(body, 'assembly_change'))
+      if (Object.hasOwn(body, 'overlay_context_id')) safeId(body.overlay_context_id)
+      if (Object.hasOwn(body, 'measure_geometry')) need(typeof body.measure_geometry === 'boolean')
+      if (Object.hasOwn(body, 'review_resolution')) {
+        validateReviewResolution(body.review_resolution)
+        need(!Object.hasOwn(body, 'source_change') && body.measure_geometry !== true)
+      }
+    }
+    sourceId(body.save_id); validatePayload(body.payload)
+    need(encoder.encode(jsonBytes(body)).byteLength <= DRAFT_BYTES, '保存请求超过 5 MiB')
+  }
+  need(encoder.encode(jsonBytes(value)).byteLength <= RECORD_BYTES, '恢复记录超过 12 MiB')
+  return clone(value) as unknown as PlanRecoveryRecord
+}
+const keyFor = (record: PlanRecoveryRecord) => [...ownerKey(record.owner), record.recovery_id]
+const ownerKey = (owner: WeldingOwner) => {
+  validateOwner(owner)
+  return [owner.tenant_id, owner.org_id, owner.auth_user_id, owner.rbac_user_id]
+}
+
+export interface PlanRecoveryStore {
+  list(owner: WeldingOwner): Promise<PlanRecoveryRecord[]>
+  get(owner: WeldingOwner, id: string): Promise<PlanRecoveryRecord | null>
+  claim(record: PlanRecoveryRecord, signal?: AbortSignal): Promise<boolean>
+  compareReplace(expected: PlanRecoveryRecord, replacement: PlanRecoveryRecord | null, signal?: AbortSignal): Promise<boolean>
+  close(): void
+}
+
+export async function openPlanRecoveryStore(factory: IDBFactory = indexedDB): Promise<PlanRecoveryStore> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = factory.open('metasheet-welding-plan-recovery', 1)
+    let blocked = false
+    request.onupgradeneeded = () => request.result.createObjectStore('records')
+    request.onerror = request.onblocked = () => { blocked = true; reject(new Error('本地恢复存储不可用')) }
+    request.onsuccess = () => { if (blocked) request.result.close(); else resolve(request.result) }
+  })
+  db.onversionchange = () => db.close()
+  function transaction<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore, done: (value: T) => void, fail: (error: unknown) => void) => void, signal?: AbortSignal): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('records', mode)
+      let result: T, error: unknown
+      const fail = (cause: unknown) => { error = cause; tx.abort() }
+      const abort = () => fail(new Error('会话已变化，原恢复记录保留'))
+      tx.oncomplete = () => { signal?.removeEventListener('abort', abort); resolve(result) }
+      tx.onabort = tx.onerror = () => { signal?.removeEventListener('abort', abort); reject(error || new Error('恢复存储未完成')) }
+      if (signal?.aborted) { abort(); return }
+      signal?.addEventListener('abort', abort, { once: true })
+      try { operation(tx.objectStore('records'), value => { result = value }, fail) } catch (cause) { fail(cause) }
+    })
+  }
+  function read(value: unknown): PlanRecoveryRecord {
+    need(isObject(value) && typeof value.json === 'string')
+    const record = validateRecovery(JSON.parse(value.json))
+    need(record.updated_at === value.updated_at)
+    return record
+  }
+  function write(store: IDBObjectStore, record: PlanRecoveryRecord, done: (value: boolean) => void, fail: (error: unknown) => void): void {
+    const key = keyFor(record), raw = jsonBytes(record), prefix = ownerKey(record.owner)
+    let total = encoder.encode(raw).byteLength, count = 0
+    const scan = store.openCursor()
+    scan.onsuccess = () => {
+      try {
+        const cursor = scan.result
+        if (!cursor) {
+          need(count < 8 && total <= STORE_BYTES, '恢复空间已满；旧记录保留，未发送保存')
+          store.put({ json: raw, updated_at: record.updated_at }, key); done(true); return
+        }
+        if (factory.cmp(cursor.key, key) !== 0) {
+          const existing = read(cursor.value)
+          need(equal(cursor.key, keyFor(existing)))
+          total += encoder.encode(cursor.value.json).byteLength
+          const cursorKey = cursor.key
+          if (Array.isArray(cursorKey) && prefix.every((part, i) => cursorKey[i] === part)) count++
+        }
+        cursor.continue()
+      } catch (cause) { fail(cause) }
+    }
+  }
+  return {
+    list(owner) {
+      const prefix = ownerKey(owner)
+      return transaction<PlanRecoveryRecord[]>('readonly', (store, done, fail) => {
+        const records: PlanRecoveryRecord[] = [], scan = store.openCursor()
+        scan.onsuccess = () => {
+          try {
+            const cursor = scan.result
+            if (!cursor) { done(records.sort((a, b) => b.updated_at - a.updated_at)); return }
+            const cursorKey = cursor.key
+            if (Array.isArray(cursorKey) && prefix.every((part, i) => cursorKey[i] === part)) {
+              const record = read(cursor.value); need(equal(keyFor(record), cursor.key)); records.push(record)
+            }
+            cursor.continue()
+          } catch (cause) { fail(cause) }
+        }
+      })
+    },
+    get(owner, id) {
+      need(uuid.test(id))
+      const key = [...ownerKey(owner), id]
+      return transaction<PlanRecoveryRecord | null>('readonly', (store, done, fail) => {
+        const request = store.get(key)
+        request.onsuccess = () => {
+          try { const record = request.result === undefined ? null : read(request.result); need(!record || equal(keyFor(record), key)); done(record) }
+          catch (cause) { fail(cause) }
+        }
+      })
+    },
+    claim(input, signal) {
+      const record = validateRecovery(input)
+      return transaction<boolean>('readwrite', (store, done, fail) => {
+        const request = store.get(keyFor(record))
+        request.onsuccess = () => {
+          try { if (request.result !== undefined) done(equal(read(request.result), record)); else write(store, record, done, fail) }
+          catch (cause) { fail(cause) }
+        }
+      }, signal)
+    },
+    compareReplace(input, replacementInput, signal) {
+      const expected = validateRecovery(input), replacement = replacementInput === null ? null : validateRecovery(replacementInput)
+      need(!replacement || equal(keyFor(expected), keyFor(replacement)))
+      return transaction<boolean>('readwrite', (store, done, fail) => {
+        const request = store.get(keyFor(expected))
+        request.onsuccess = () => {
+          try {
+            if (request.result === undefined || !equal(read(request.result), expected)) { done(false); return }
+            if (replacement) write(store, replacement, done, fail)
+            else { store.delete(keyFor(expected)); done(true) }
+          } catch (cause) { fail(cause) }
+        }
+      }, signal)
+    },
+    close: () => db.close(),
+  }
+}

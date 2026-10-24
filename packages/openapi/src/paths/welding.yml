@@ -1,0 +1,1262 @@
+paths:
+  /api/welding/jwks:
+    get:
+      operationId: getWeldingJwks
+      summary: Dedicated welding SSO assertion public verification key
+      description: Default disabled; requires exact WELDING_READ_ENABLED=true. No parameters or request body. This exact public endpoint does not exempt descendants. All responses use Cache-Control no-store.
+      security: []
+      responses:
+        '200':
+          description: Dedicated RSA public key only
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    minItems: 1
+                    maxItems: 1
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [kty, n, e, use, alg, kid]
+                      properties:
+                        kty: { type: string, enum: [RSA] }
+                        n: { type: string }
+                        e: { type: string }
+                        use: { type: string, enum: [sig] }
+                        alg: { type: string, enum: [RS256] }
+                        kid: { type: string }
+        '400': { description: WELDING_INVALID_REQUEST; no-store }
+        '503': { description: WELDING_UNAVAILABLE; no-store }
+  /api/welding/authority:
+    get:
+      operationId: getWeldingAuthority
+      summary: Resolve current native session through fixed Yuantus identity authority
+      description: Default disabled; exact read flag required. No query parameters or body. Requires an active registered native session and verified fixed tenant; no header tenant fallback. Exchanges a dedicated RS256 assertion using server-only configuration and returns only the verified authority. Assertion lifetime is at most 60 seconds subject to upstream clock skew; the upstream credential is an ordinary bearer, remains local to this call, and is never returned. All responses use Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Verified current authority
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [schema, owner]
+                properties:
+                  schema: { type: string, enum: [yuantus.welding_generation_authority/1] }
+                  owner:
+                    type: object
+                    additionalProperties: false
+                    required: [tenant_id, org_id, auth_user_id, rbac_user_id]
+                    properties:
+                      tenant_id: { type: string }
+                      org_id: { type: string }
+                      auth_user_id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+                      rbac_user_id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        '400': { description: WELDING_INVALID_REQUEST; no-store }
+        '401': { description: Native session missing or invalid; no-store }
+        '403': { description: Native password change required; no-store }
+        '502': { description: WELDING_UPSTREAM_REJECTED; no upstream body is returned; no-store }
+        '503': { description: WELDING_UNAVAILABLE; no-store }
+  /api/welding/cad-assets/tickets:
+    post:
+      operationId: issueWeldingCadAssetTicket
+      summary: Issue a short same-origin ticket for one pinned CAD editor, history or preparation source
+      description: Exact WELDING_READ_ENABLED=true and native bearer session required. Request JSON is limited to 1024 original bytes and has no query. The server verifies the installed manifest pin, performs personal SSO and a fresh fixed CAD context or source document read, and binds one 60-second-or-less in-process ticket to the original native sid, owner, target scope and installed pin. The returned cookie contains only an opaque random value and is HttpOnly, Secure, SameSite Strict and scoped to /welding-cad/{pin}/. Each static GET repeats native session, personal SSO, source ACL and pin checks. No Y bearer or domain body is returned. The static host is an authenticated non-API route and is intentionally absent from this OpenAPI document. A restart invalidates tickets; at most 256 live tickets are held. The absolute installed root is supplied by WELDING_CAD_ASSET_ROOT. Responses are no-store.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [purpose, plan_id, version_id, context_id]
+                  properties:
+                    purpose: { type: string, enum: [editor] }
+                    plan_id: { type: string, minLength: 1, maxLength: 64 }
+                    version_id: { type: string, minLength: 1, maxLength: 64 }
+                    context_id: { type: string, minLength: 1, maxLength: 64 }
+                - type: object
+                  additionalProperties: false
+                  required: [purpose, plan_id, version_id, change_id, side]
+                  properties:
+                    purpose: { type: string, enum: [history] }
+                    plan_id: { type: string, minLength: 1, maxLength: 64 }
+                    version_id: { type: string, minLength: 1, maxLength: 64 }
+                    change_id: { type: string, minLength: 1, maxLength: 64 }
+                    side: { type: string, enum: [before, after] }
+                - type: object
+                  additionalProperties: false
+                  required: [purpose, plan_id, version_id, context_id, side]
+                  properties:
+                    purpose: { type: string, enum: [preparation] }
+                    plan_id: { type: string, minLength: 1, maxLength: 64 }
+                    version_id: { type: string, minLength: 1, maxLength: 64 }
+                    context_id: { type: string, minLength: 1, maxLength: 64 }
+                    side: { type: string, enum: [before, after] }
+      responses:
+        '201':
+          description: Bound short ticket; Set-Cookie contains only an opaque value
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [asset_url, bundle_sha256, expires_at]
+                properties:
+                  asset_url: { type: string }
+                  bundle_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  expires_at: { type: string, format: date-time }
+        '400': { description: Invalid fixed descriptor; no-store }
+        '413': { description: Oversized original JSON; no-store }
+        '401': { description: Native session required; no-store }
+        '403': { description: Upstream CAD source denied; no-store }
+        '404': { description: Source not visible; no-store }
+        '429': { description: Process-local live ticket capacity reached; no-store }
+        '502': { description: Upstream or source contract rejected; no-store }
+        '503': { description: Read gate or installed bundle unavailable; no-store }
+  /api/welding/plans:
+    get:
+      operationId: listWeldingPlans
+      summary: List currently authorized process plans
+      description: Fixed Yuantus domain read through a fresh native session and per-request personal SSO. Requires exact WELDING_READ_ENABLED=true; no browser-selected target or actor. Responses are no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: product_id, in: query, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: product_version_id, in: query, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Authorized finite plan page; no-store }
+        '400': { description: Invalid or duplicate query; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus scope denied; no-store }
+        '502': { description: Upstream read unavailable; no-store }
+        '503': { description: Read gate or Yuantus setup unavailable; no-store }
+    post:
+      operationId: createWeldingPlan
+      summary: Create one process plan from the original JSON bytes
+      description: Requires exact read and write flags plus fresh native and Yuantus authorization. Body maximum 5 MiB. No automatic retry; a transport failure after dispatch is WELDING_RESULT_UNKNOWN. Yuantus validates the original JSON including duplicate keys and CAS fields.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus CreatePlanRequest; original JSON bytes are forwarded }
+      responses:
+        '201': { description: Yuantus create receipt; no-store }
+        '400': { description: Invalid request; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus actor denied; no-store }
+        '404': { description: Fixed source invisible; no-store }
+        '409': { description: Source or save conflict; no-store }
+        '413': { description: Plan body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Transport result unknown after dispatch; no-store }
+        '503': { description: Write gate or Yuantus setup unavailable; no-store }
+  /api/welding/resources/import/templates/{format}:
+    get:
+      operationId: downloadWeldingResourceImportTemplate
+      summary: Download the fixed authorized CSV or XLSX resource import template
+      description: Read gate, personal SSO and native session required. No request body or query. Original Yuantus binary bytes, exact MIME and fixed filename are checked; whole response limit 1 MiB, whole relay deadline 300 seconds. No-store and nosniff on success and failure.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: format, in: path, required: true, schema: { type: string, enum: [csv, xlsx] } }
+      responses:
+        '200':
+          description: Complete fixed template bytes with attachment filename; no-store
+          content:
+            text/csv: { schema: { type: string, format: binary } }
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: { schema: { type: string, format: binary } }
+        '400': { description: Invalid method, path, query or body; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus actor denied; no-store }
+        '502': { description: Bounded upstream response rejected; no-store }
+        '503': { description: Read gate or Yuantus unavailable; no-store }
+  /api/welding/resources/import/preview:
+    post:
+      operationId: previewWeldingResourceImport
+      summary: Preflight one complete fixed CSV or XLSX resource file
+      description: Read gate and personal SSO required. Send original octet-stream bytes at most 5 MiB. Yuantus authorizes all rows and fixed sources; 200 can contain ready=false and complete issues. Strict whole JSON response limit 32 MiB, whole relay deadline 300 seconds. No-store and nosniff.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: format, in: query, required: true, schema: { type: string, enum: [csv, xlsx] } }
+      requestBody:
+        required: true
+        content: { application/octet-stream: { schema: { type: string, format: binary, maxLength: 5242880 } } }
+      responses:
+        '200': { description: Complete yuantus.welding_resource_import/1 preview with all rows and issues; no-store }
+        '400': { description: Invalid method, path, query or body; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus actor denied; no-store }
+        '413': { description: Upload exceeds 5 MiB or Yuantus import budget; no-store }
+        '415': { description: Yuantus rejected media type; no-store }
+        '422': { description: Yuantus rejected fixed file or rows; validated issues when available; no-store }
+        '502': { description: Bounded upstream response rejected; no-store }
+        '503': { description: Read gate or Yuantus unavailable; no-store }
+  /api/welding/resources/import/commit:
+    post:
+      operationId: commitWeldingResourceImport
+      summary: Create the whole confirmed resource batch as Draft
+      description: Read and write gates plus personal SSO required at preflight and dispatch. Original bytes, format, import_id and Yuantus preview_digest bind one atomic create-only command. Caller persists the original command before dispatch; after any uncertain ACK preserve it and explicitly replay identical bytes and parameters. Strict 201 complete receipt limit 1 MiB, whole relay deadline 300 seconds. No-store and nosniff.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: format, in: query, required: true, schema: { type: string, enum: [csv, xlsx] } }
+        - { name: import_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: preview_digest, in: query, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      requestBody:
+        required: true
+        content: { application/octet-stream: { schema: { type: string, format: binary, maxLength: 5242880 } } }
+      responses:
+        '201': { description: Complete yuantus.welding_resource_import/1 receipt for all rows; no-store }
+        '400': { description: Invalid method, path, query or body; no-store }
+        '401': { description: Native session unavailable before dispatch; no-store }
+        '403': { description: Yuantus actor denied; original pending command remains; no-store }
+        '404': { description: Fixed source unavailable; original pending command remains; no-store }
+        '409': { description: Source, digest, number or import ID conflict; original pending command remains; no-store }
+        '413': { description: Upload or Yuantus import budget exceeded; no-store }
+        '415': { description: Yuantus rejected media type; no-store }
+        '422': { description: Yuantus rejected file or rows; validated issues when available; no-store }
+        '502': { description: WELDING_RESULT_UNKNOWN after dispatch or bounded response rejection; preserve original pending command; no-store }
+        '503': { description: Write gate or Yuantus unavailable; no-store }
+  /api/welding/resources:
+    post:
+      operationId: createWeldingResource
+      summary: Register one authorized enterprise welding resource
+      description: Fixed Yuantus resource command using original JSON bytes, personal SSO, exact read and write flags, and a 5 MiB request limit. A successful response is bounded to 32 MiB; larger valid acknowledgments after dispatch are WELDING_RESULT_UNKNOWN. Preserve the original request ID for authoritative recovery; no automatic retry.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus CreateResourceRequest; original JSON bytes forwarded }
+      responses:
+        '201': { description: Authorized version-pinned resource record including full payload and source snapshot; no-store }
+        '400': { description: Invalid or unaddressable request; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus action denied; no-store }
+        '404': { description: Fixed source invisible; no-store }
+        '409': { description: Resource or receipt conflict; no-store }
+        '413': { description: Request exceeds 5 MiB; no-store }
+        '422': { description: Yuantus strict DTO rejected; no-store }
+        '502': { description: WELDING_RESULT_UNKNOWN after dispatch; no-store }
+        '503': { description: Gate or Yuantus setup unavailable; no-store }
+  /api/welding/resources/catalog:
+    get:
+      operationId: listWeldingResourceCatalog
+      summary: Browse authorized fixed resource summaries with a bound cursor
+      description: Exact recorded-field filters and paired mm/in thickness values. Each page has at most limit authorized matches; next_cursor only indicates another authorized match. Refresh to discover concurrent changes; no cross-page snapshot promise. Personal SSO and native session are rechecked. The entire response is bounded to 2 MiB and failures never return partial items.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: kind, in: query, schema: { type: string, enum: [wps, pqr, parameter_reference, requirements, material, filler, joint_diagram] } }
+        - { name: method, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: material_a, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: material_b, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: filler, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: joint_type, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: thickness_a_value, in: query, schema: { type: number, minimum: 0 } }
+        - { name: thickness_a_unit, in: query, schema: { type: string, enum: [mm, in] } }
+        - { name: thickness_b_value, in: query, schema: { type: number, minimum: 0 } }
+        - { name: thickness_b_unit, in: query, schema: { type: string, enum: [mm, in] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
+        - { name: cursor, in: query, schema: { $ref: '#/components/schemas/WeldingCatalogCursor' } }
+      responses:
+        '200':
+          description: Complete authorized summary page; no-store
+          content: { application/json: { schema: { $ref: '#/components/schemas/WeldingResourceCatalog' } } }
+        '400': { description: Unknown, duplicate or invalid parameters; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus scope denied; no-store }
+        '422': { description: Cursor binding or domain query rejected; no-store }
+        '502': { description: Upstream or whole bounded response unavailable; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/resources/{resource_id}/version-catalog:
+    get:
+      operationId: listWeldingResourceVersionCatalog
+      summary: Browse authorized fixed version summaries without loading all history bodies
+      description: Version IDs sort lexically, not chronologically. current_version_id is disclosed only when independently readable, even if outside this page; null does not prove there is no current version. Selection must read the fixed detail again. Personal SSO and native session are rechecked; the entire response is bounded to 2 MiB, with no partial items.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: resource_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
+        - { name: cursor, in: query, schema: { $ref: '#/components/schemas/WeldingCatalogCursor' } }
+      responses:
+        '200':
+          description: Complete authorized fixed version summary page; no-store
+          content: { application/json: { schema: { $ref: '#/components/schemas/WeldingResourceVersionCatalog' } } }
+        '400': { description: Unknown, duplicate or invalid parameters; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus scope denied; no-store }
+        '404': { description: Resource unavailable; no-store }
+        '422': { description: Cursor binding rejected; no-store }
+        '502': { description: Upstream or whole bounded response unavailable; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/process-references/candidate-catalog:
+    get:
+      operationId: listWeldingProcessReferenceCatalog
+      summary: Browse authorized fixed document candidates
+      description: Uses the existing document ID/current title/current number search semantics, including SQL wildcard characters. Each page has at most 20 authorized fixed references. Explicit selection fixes item/version/file/role and fingerprint; checksum is a separate file checksum. Candidate visibility does not grant resource writes or professional applicability. Personal SSO and native session are rechecked; the entire response is bounded to 2 MiB, with no partial items.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: cursor, in: query, schema: { $ref: '#/components/schemas/WeldingCatalogCursor' } }
+      responses:
+        '200':
+          description: Complete authorized fixed document candidate page; no-store
+          content: { application/json: { schema: { $ref: '#/components/schemas/WeldingProcessReferenceCatalog' } } }
+        '400': { description: Unknown, duplicate or invalid parameters; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus scope denied; no-store }
+        '422': { description: Cursor binding or query rejected; no-store }
+        '502': { description: Upstream or whole bounded response unavailable; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/resources/{resource_id}/versions/{version_id}:
+    get:
+      operationId: getWeldingResourceVersion
+      summary: Read one authorized immutable enterprise resource version
+      description: Fixed Yuantus read with personal SSO and source ACL recheck. Full record response is bounded to 32 MiB; a larger valid record fails closed as WELDING_UPSTREAM_REJECTED.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: resource_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Authorized full resource version record; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus scope denied; no-store }
+        '404': { description: Resource or source invisible; no-store }
+        '502': { description: Upstream read or bounded response unavailable; no-store }
+        '503': { description: Read gate or Yuantus setup unavailable; no-store }
+  /api/welding/resources/{resource_id}/versions/{version_id}/diagram:
+    get:
+      operationId: getWeldingResourceJointDiagram
+      summary: Read the authorized original image of a fixed joint-diagram resource version
+      description: >-
+        Personal SSO and the read gate are required; the write gate is not required.
+        No query, body, redirect, compressed response or trailing path is accepted.
+        Only a strict joint_diagram resource descriptor with a qualified PNG, JPEG or WebP
+        of 1..5242880 bytes is accepted. The complete original image is buffered and its
+        exact Content-Length, MIME and lowercase SHA256 checked before sending any image bytes.
+        A fresh fixed descriptor and owner must match, followed by a final native session
+        recheck. The five-minute total deadline includes identity, metadata, stream and
+        final authorization waits; disconnect cancels reading. A historical version need
+        not be current, and a cached client descriptor is not an authorization grant.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: resource_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200':
+          description: Complete verified original image; no partial image is returned
+          headers:
+            Content-Length: { schema: { type: integer, minimum: 1, maximum: 5242880 }, description: Exact original image byte count }
+            X-Content-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' }, description: SHA256 of the returned original bytes }
+            Content-Disposition: { schema: { type: string, enum: [inline] } }
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+            X-Content-Type-Options: { schema: { type: string, enum: [nosniff] } }
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        '400': { description: Invalid method, fixed path, query or body; no-store }
+        '401': { description: Native session unavailable or changed; no-store }
+        '403': { description: Yuantus scope denied; no-store }
+        '404': { description: Resource or diagram unavailable; no-store }
+        '409': { description: Yuantus fixed diagram changed while being read; no-store }
+        '413': { description: Yuantus image exceeds 5 MiB; no-store }
+        '422': { description: Yuantus image qualification rejected; no-store }
+        '502': { description: Changed owner or descriptor, invalid image response, timeout or unavailable upstream; no-store }
+        '503': { description: Read gate, setup or image storage unavailable; no-store }
+  /api/welding/resources/{resource_id}/revisions:
+    post:
+      operationId: reviseWeldingResource
+      summary: Register one CAS-bound enterprise resource revision
+      description: Fixed Yuantus revision command with original 5 MiB JSON bytes and exact read and write flags. A successful response is bounded to 32 MiB; larger valid acknowledgments after dispatch remain WELDING_RESULT_UNKNOWN with the original request ID pending.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: resource_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus ReviseResourceRequest; original JSON bytes forwarded }
+      responses:
+        '201': { description: Authorized successor record with predecessor IDs and content hash; no-store }
+        '400': { description: Invalid request; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus revision denied; no-store }
+        '404': { description: Resource or source invisible; no-store }
+        '409': { description: Current version, source, or receipt conflict; no-store }
+        '413': { description: Request exceeds 5 MiB; no-store }
+        '422': { description: Yuantus strict DTO rejected; no-store }
+        '502': { description: WELDING_RESULT_UNKNOWN after dispatch; no-store }
+        '503': { description: Gate or Yuantus setup unavailable; no-store }
+  /api/welding/plans/product-context:
+    get:
+      operationId: getWeldingPlanProductContext
+      summary: Resolve one fixed product version
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: product_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: product_version_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Authorized product context; no-store }
+        '400': { description: Invalid query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Not visible; no-store }
+  /api/welding/plans/product-candidates:
+    get:
+      operationId: listWeldingPlanProductCandidates
+      summary: Search authorized product candidates
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20 } }
+      responses:
+        '200': { description: Authorized candidates; no-store }
+        '400': { description: Invalid query; no-store }
+  /api/welding/plans/drawing-candidates:
+    get:
+      operationId: listWeldingPlanDrawingCandidates
+      summary: Search authorized fixed drawing candidates
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20 } }
+      responses:
+        '200': { description: Authorized candidates; no-store }
+        '400': { description: Invalid query; no-store }
+  /api/welding/plans/bom-candidates:
+    get:
+      operationId: listWeldingPlanBomCandidates
+      summary: List authorized BOM choices for one fixed product version
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: product_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: product_version_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Authorized BOM choices; no-store }
+        '400': { description: Invalid query; no-store }
+  /api/welding/plans/reuse-product-candidates:
+    get:
+      operationId: listWeldingPlanReuseProductCandidates
+      summary: Search fixed product versions for reuse selection
+      description: Read-only selection with target read and plan-create authority; product update is not required. Read ON and write OFF are supported. Zero request body; duplicate or unknown query parameters are rejected. Results contain at most the requested limit of distinct fixed product/version pairs. Selection does not grant reuse or publication authority.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
+      responses:
+        '200':
+          description: Authorized fixed product metadata; no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 20
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [item_id, version_id, version_label, name, number]
+                      properties:
+                        item_id: { type: string, minLength: 1, maxLength: 64 }
+                        version_id: { type: string, minLength: 1, maxLength: 64 }
+                        version_label: { type: string, nullable: true, maxLength: 64 }
+                        name: { type: string, maxLength: 256 }
+                        number: { type: string, maxLength: 128 }
+        '400': { description: Invalid finite query or nonempty body; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Plan-create authority denied; no-store }
+        '404': { description: Not visible; no-store }
+        '422': { description: Yuantus query validation rejected; no-store }
+        '429': { description: Upstream rate limit; no-store }
+        '502': { description: Upstream or bounded metadata rejected without content disclosure; no-store }
+        '503': { description: Read gate or Yuantus setup unavailable; no-store }
+  /api/welding/plans/reuse-product-context:
+    get:
+      operationId: getWeldingPlanReuseProductContext
+      summary: Confirm one fixed product version for reuse selection
+      description: Read-only selection with target read and plan-create authority; product update is not required. Read ON and write OFF are supported. Zero request body; duplicate or unknown query parameters are rejected. Source IDs are Unicode query values with 1-64 codepoints, no boundary whitespace, CR, LF or NUL; URL-encode reserved characters. The returned pair must exactly match the requested pair. Selection does not grant reuse or publication authority.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: product_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: product_version_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200':
+          description: Authorized exact product context; no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [schema, product]
+                properties:
+                  schema: { type: string, enum: [yuantus.welding_plan_entry/1] }
+                  product:
+                    type: object
+                    additionalProperties: false
+                    required: [item_id, version_id, version_label, name, number]
+                    properties:
+                      item_id: { type: string, minLength: 1, maxLength: 64 }
+                      version_id: { type: string, minLength: 1, maxLength: 64 }
+                      version_label: { type: string, nullable: true, maxLength: 64 }
+                      name: { type: string, maxLength: 256 }
+                      number: { type: string, maxLength: 128 }
+        '400': { description: Invalid finite query or nonempty body; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Plan-create authority denied; no-store }
+        '404': { description: Fixed product or version not visible; no-store }
+        '422': { description: Yuantus query validation rejected; no-store }
+        '429': { description: Upstream rate limit; no-store }
+        '502': { description: Upstream or bounded metadata rejected without content disclosure; no-store }
+        '503': { description: Read gate or Yuantus setup unavailable; no-store }
+  /api/welding/plans/reuse-bom-candidates:
+    get:
+      operationId: listWeldingPlanReuseBomCandidates
+      summary: List optional locked BOM choices for reuse selection
+      description: Read-only selection with target read and plan-create authority; product update is not required. Read ON and write OFF are supported. Zero request body; duplicate or unknown query parameters are rejected. Source IDs are Unicode query values with 1-64 codepoints, no boundary whitespace, CR, LF or NUL; URL-encode reserved characters. Full BOM authorization precedes this four-field projection; no occurrence tree is returned. Baseline IDs are distinct. Selection does not grant reuse authority or inherit a default BOM.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: product_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: product_version_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200':
+          description: Authorized compact BOM metadata; no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 20
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [baseline_id, fingerprint, name, number]
+                      properties:
+                        baseline_id: { type: string, minLength: 1, maxLength: 64 }
+                        fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                        name: { type: string, maxLength: 256 }
+                        number: { type: string, maxLength: 256 }
+        '400': { description: Invalid finite query or nonempty body; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Plan-create authority denied; no-store }
+        '404': { description: Fixed product or version not visible; no-store }
+        '422': { description: Yuantus query validation rejected; no-store }
+        '429': { description: Upstream rate limit; no-store }
+        '502': { description: Upstream or bounded metadata rejected without content disclosure; no-store }
+        '503': { description: Read gate or Yuantus setup unavailable; no-store }
+  /api/welding/plans/recovery-authority:
+    get:
+      operationId: getWeldingPlanRecoveryAuthority
+      summary: Resolve current exact recovery owner
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Current Yuantus recovery owner; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus actor denied; no-store }
+    post:
+      operationId: checkWeldingPlanRecoveryAuthority
+      summary: Check one original local recovery request without domain mutation
+      description: Available with read gate ON and write gate OFF. Original JSON body maximum 13 MiB; Yuantus checks exact owner and receipt. No new save operation is constructed.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus recovery authority envelope; original JSON bytes are forwarded }
+      responses:
+        '200': { description: Original request status or authority; no-store }
+        '400': { description: Invalid envelope; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus actor denied; no-store }
+        '409': { description: Original request conflict; no-store }
+        '413': { description: Recovery body exceeds 13 MiB; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}:
+    get:
+      operationId: getWeldingPlanVersion
+      summary: Read one authorized fixed process plan version
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Fixed plan with source history; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '503': { description: Read or Yuantus setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/draft:
+    put:
+      operationId: saveWeldingPlanDraft
+      summary: Save one fixed Draft with Yuantus CAS
+      description: Requires exact read and write flags and fresh authorization. Original JSON body maximum 5 MiB. A transport failure after dispatch is ambiguous and never retried automatically.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus SavePlanRequest with expected_draft_seq and save_id; original JSON bytes are forwarded }
+      responses:
+        '200': { description: Saved CAS receipt; no-store }
+        '400': { description: Invalid request; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Yuantus actor denied; no-store }
+        '404': { description: Plan or source invisible; no-store }
+        '409': { description: CAS or source conflict; no-store }
+        '413': { description: Plan body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or Yuantus setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/source-review:
+    get:
+      operationId: getWeldingSourceReview
+      summary: Read current source review at one authorized plan version
+      description: Exact read flag and fresh individual authorization; no-store. The returned draft_seq and content_hash identify the reviewed save point.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200': { description: Bound review page; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read or Yuantus setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/source-changes:
+    get:
+      operationId: listWeldingSourceChanges
+      summary: Read authorized source change history
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200': { description: Authorized history page; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/source-changes/{change_id}:
+    get:
+      operationId: getWeldingSourceChange
+      summary: Read one authorized historical change
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: change_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Bound change detail; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/source-changes/{change_id}/documents/{side}:
+    get:
+      operationId: getWeldingSourceChangeDocument
+      summary: Read one authorized before or after CAD history witness
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: change_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: side, in: path, required: true, schema: { type: string, enum: [before, after] } }
+      responses:
+        '200': { description: Bound historical document and source hashes; no-store }
+        '400': { description: Invalid path or side; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/source-change-preparations:
+    post:
+      operationId: prepareWeldingSourceChange
+      summary: Prepare a source change at an exact Draft save point
+      description: Exact read and write flags; original JSON maximum 5 MiB. Yuantus validates open_id, expected_draft_seq, expected_content_hash and drawing. Lost ACK after dispatch returns WELDING_RESULT_UNKNOWN without automatic retry. Response maximum 24 MiB.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus PrepareSourceChangeRequest; original JSON bytes forwarded }
+      responses:
+        '201': { description: Bound preparation and CAD context; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Source invisible; no-store }
+        '409': { description: Save point or open ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/source-change-preparations/{context_id}:
+    get:
+      operationId: getWeldingSourceChangePreparation
+      summary: Read an existing unconfirmed preparation and both readonly CAD witnesses
+      description: Requires the read flag and current personal authority; write flag is not required. No query or body. Revalidates the owner, editable Draft save point, both source permissions and bytes, preparation digest and lifetime. Does not create, activate or extend a context. Both sides use the current viewer pin while the old origin may retain its historical pin. Response maximum 24 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: context_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Existing preparation and both authorized witnesses; no-store }
+        '400': { description: Invalid path, query or body; no-store }
+        '401': { description: Native session missing or invalid; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Preparation missing or invisible; no-store }
+        '409': { description: Preparation expired, revoked or activated; Draft save point or source conflict; no-store }
+        '502': { description: Invalid or oversized upstream response; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/cad-contexts:
+    post:
+      operationId: openWeldingCadContext
+      summary: Open one server-qualified CAD context
+      description: Exact read and write flags; original JSON maximum 5 MiB. Editor URL is accepted only at the fixed same-origin /welding-cad/{pin}/welding-frame.html path. Static host installation is separate. Lost ACK is unknown and not retried automatically.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus OpenCadContextRequest; original JSON bytes forwarded }
+      responses:
+        '201': { description: Bound CAD context; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Source invisible; no-store }
+        '409': { description: Save point or open ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/cad-contexts/{context_id}:
+    get:
+      operationId: getWeldingCadContext
+      summary: Read one still-authorized fixed CAD context
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: context_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Bound CAD context; no-store }
+        '400': { description: Invalid path; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Context invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+    delete:
+      operationId: revokeWeldingCadContext
+      summary: Revoke one fixed CAD context
+      description: Literal DELETE, exact read and write flags, no body. Yuantus returns 204 empty; lost ACK is WELDING_RESULT_UNKNOWN without automatic retry.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: context_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '204': { description: Revoked or already revoked; no response body; no-store }
+        '400': { description: Invalid path or body; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Context invisible; no-store }
+        '409': { description: Context conflict; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/render-templates:
+    get:
+      operationId: getWeldingRenderTemplates
+      summary: Read Yuantus-authoritative welding instruction templates
+      description: Exact read flag, fresh native session and personal Yuantus authorization. No query/body. JSON response maximum 2 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: yuantus.welding_instruction_templates/1 catalog; no-store }
+        '400': { description: Invalid path, query or body; no-store }
+        '401': { description: Native session unavailable; no-store }
+        '403': { description: Denied; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or Yuantus setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/renders:
+    get:
+      operationId: listWeldingPlanRenders
+      summary: Read authorized review or final generation task statuses
+      description: Exact read flag and fresh personal authorization; fixed target and unique bounded query. Status DTO has separate review and final schemas. Response maximum 2 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: purpose, in: query, schema: { type: string, enum: [review, final] } }
+      responses:
+        '200': { description: Fixed authorized task page and file descriptors; no-store }
+        '400': { description: Invalid or duplicate query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Plan invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+    post:
+      operationId: createWeldingReviewRender
+      summary: Queue one review instruction generation for the saved Draft
+      description: Exact read and write flags; original strict JSON body maximum 5 MiB. Yuantus validates current Draft seq/hash, template digest and sources. Fixed 202 ACK maximum 64 KiB. Dispatched write with lost or invalid ACK returns WELDING_RESULT_UNKNOWN without automatic retry; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus CreateGenerationRequest; original JSON bytes forwarded }
+      responses:
+        '202': { description: Bound yuantus.welding_generation_ack/1; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Source invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/artifacts/{generation_id}:
+    get:
+      operationId: getWeldingGenerationStatus
+      summary: Read one authorized review or final generation task descriptor
+      description: Exact read flag. Fixed UUID target; JSON metadata only, response maximum 128 KiB. Final uses yuantus.welding_final_generation/1 and is not projected as review. Binary bytes use the fixed files route; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: generation_id, in: path, required: true, schema: { type: string, pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' } }
+      responses:
+        '200': { description: Bound authorized task status and file descriptors; no-store }
+        '400': { description: Invalid target or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Task invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/artifacts/{generation_id}/files/{format}:
+    get:
+      operationId: downloadWeldingGenerationFile
+      summary: Download one verified review or final generation PDF or DOCX
+      description: Exact read flag and personal Yuantus source authority; write flag is not required. Fixed lowercase UUID and pdf or docx only; no query or body. A fresh authorized status descriptor is checked before and after a bounded private spool of at most 128 MiB. Exact MIME, Content-Length, X-Artifact-SHA256, actual bytes, and native session are verified before any file response header; no-store. Yuantus may write a download audit.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: generation_id, in: path, required: true, schema: { type: string, pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' } }
+        - { name: format, in: path, required: true, schema: { type: string, enum: [pdf, docx] } }
+      responses:
+        '200':
+          description: Fully verified binary file; fixed attachment filename and no-store
+          headers:
+            Content-Length: { schema: { type: integer, minimum: 1, maximum: 134217728 } }
+            X-Artifact-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document: { schema: { type: string, format: binary } }
+        '400': { description: Invalid fixed path or query; no-store }
+        '401': { description: Native session invalid; no-store }
+        '403': { description: Yuantus source denied; no-store }
+        '404': { description: Generation invisible; no-store }
+        '409': { description: Generation not Ready or changed; no-store }
+        '502': { description: Invalid upstream transport, descriptor, or bytes; no file sent; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/artifacts/{generation_id}/retry:
+    post:
+      operationId: retryWeldingGeneration
+      summary: Retry one fixed failed review or final generation task
+      description: Exact read and write flags; original strict JSON maximum 5 MiB with request_id and expected_attempt. Yuantus locks and checks attempt CAS; final purpose additionally requires its WorkflowAuthority. Review and final 202 ACK schemas are distinct, each bounded at 64 KiB. ACK does not repeat attempt. Lost or invalid ACK is WELDING_RESULT_UNKNOWN, with no automatic retry; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: generation_id, in: path, required: true, schema: { type: string, pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Yuantus RetryGenerationRequest; original JSON bytes forwarded }
+      responses:
+        '202': { description: Bound review or final generation ACK; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Task invisible; no-store }
+        '409': { description: Attempt or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/review-state:
+    get:
+      operationId: getWeldingReviewState
+      summary: Read current or retained official review state
+      description: Exact read flag and fresh personal Yuantus WorkflowAuthority; editor OFF may still permit official history. Response maximum 24 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Bound yuantus.welding_review_state/1; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/review-history:
+    get:
+      operationId: getWeldingReviewHistory
+      summary: Read one authorized review and revision event page
+      description: Exact read flag; editor OFF may still permit official history. Bounded JSON response maximum 64 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200': { description: Bound yuantus.welding_review_history/1 page; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/publication:
+    get:
+      operationId: getWeldingPublication
+      summary: Read one fixed authorized official publication descriptor
+      description: JSON metadata and pdf/docx descriptors only; bytes use the fixed publication files route. Exact read flag; maximum 2 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Bound yuantus.welding_plan_publication/1; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/publication/files/{format}:
+    get:
+      operationId: downloadWeldingPublicationFile
+      summary: Download one verified frozen official publication PDF or DOCX
+      description: Exact read flag and fresh personal Yuantus publication authority; write flag and editor activation are not required. Fixed plan/version and pdf or docx only; no query or body. The authorized publication descriptor is checked before and after a bounded private spool of at most 128 MiB. Exact MIME, Content-Length, X-Artifact-SHA256, actual bytes, and native session are verified before any file response header; no-store. Yuantus may write a download audit.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: format, in: path, required: true, schema: { type: string, enum: [pdf, docx] } }
+      responses:
+        '200':
+          description: Fully verified binary file; fixed attachment filename and no-store
+          headers:
+            Content-Length: { schema: { type: integer, minimum: 1, maximum: 134217728 } }
+            X-Artifact-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document: { schema: { type: string, format: binary } }
+        '400': { description: Invalid fixed path or query; no-store }
+        '401': { description: Native session invalid; no-store }
+        '403': { description: Yuantus publication denied; no-store }
+        '404': { description: Publication invisible; no-store }
+        '409': { description: Publication changed; no-store }
+        '502': { description: Invalid upstream transport, descriptor, or bytes; no file sent; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/publications:
+    get:
+      operationId: listWeldingPublications
+      summary: Read authorized official version directory
+      description: Fixed plan scope with unique finite page query. Exact read flag, maximum 2 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200': { description: Bound yuantus.welding_publication_directory/1; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/publication-comparison:
+    get:
+      operationId: compareWeldingPublications
+      summary: Compare two named authorized official versions
+      description: Actual Yuantus plan-scoped route; requires exactly one safe from and to version ID. JSON maximum 24 MiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: from_version_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: to_version_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Bound yuantus.welding_publication_comparison/1; no-store }
+        '400': { description: Invalid path or query; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/validate:
+    post:
+      operationId: validateWeldingPlanWorkflow
+      summary: Check current Draft save point and readiness without transition
+      description: Read-only POST with exact read flag even while write flag is OFF. Original strict JSON maximum 5 MiB; validation response maximum 64 KiB; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus ValidatePlanRequest; original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound yuantus.welding_plan_validation/1; no-store }
+        '400': { description: Invalid path or body; no-store }
+        '403': { description: Denied; no-store }
+        '409': { description: Save point changed; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/submit:
+    post:
+      operationId: submitWeldingPlan
+      summary: Submit one saved Draft to assigned review
+      description: Exact read and write flags; original strict JSON maximum 5 MiB. Yuantus checks assigned reviewer and role. Lost or invalid ACK is WELDING_RESULT_UNKNOWN; no automatic retry; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus SubmitPlanRequest; original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound yuantus.welding_plan_workflow_ack/1; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/review:
+    post:
+      operationId: reviewWeldingPlan
+      summary: Approve or reject the assigned original submission
+      description: Exact read and write flags; original strict JSON maximum 5 MiB. Yuantus WorkflowAuthority checks reviewer and decision. Lost ACK is unknown; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus ReviewPlanRequest; original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound approve or reject workflow ACK; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/withdraw:
+    post:
+      operationId: withdrawWeldingPlan
+      summary: Withdraw the original pending submission
+      description: Exact read and write flags; original strict JSON maximum 5 MiB. Yuantus checks requester or scoped admin. Lost ACK is unknown; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus WithdrawPlanRequest; original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound withdraw workflow ACK; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/reopen:
+    post:
+      operationId: reopenWeldingPlan
+      summary: Reopen one approved version into Draft
+      description: Exact read and write flags; original strict JSON maximum 5 MiB. Yuantus increments the Draft sequence. Lost ACK is unknown; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus ReopenPlanRequest; original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound reopen workflow ACK; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/final-renders:
+    post:
+      operationId: createWeldingFinalRender
+      summary: Queue approved fixed final instruction generation
+      description: Exact read and write flags; original strict JSON maximum 5 MiB. Yuantus checks decision, role, template and sources. Fixed final ACK is 202; lost ACK is unknown; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus FinalRenderRequest; original bytes forwarded } } } }
+      responses:
+        '202': { description: Bound yuantus.welding_final_generation_ack/1; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/release:
+    post:
+      operationId: releaseWeldingPlan
+      summary: Release one approved plan and fixed final artifacts
+      description: Exact read and write flags; original strict JSON maximum 5 MiB. Yuantus checks final file hashes and publication authority. Lost ACK is unknown; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus ReleasePlanRequest; original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound release workflow ACK with publication ID; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/revise:
+    post:
+      operationId: reviseWeldingPlan
+      summary: Create the next Draft from one authorized official publication
+      description: Exact read and write flags; original strict JSON maximum 5 MiB. Yuantus owns inheritance and canonical hashes; bound ACK maximum 11 MiB. Lost ACK is unknown; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus RevisePlanRequest; original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound yuantus.welding_plan_revision_ack/1; no-store }
+        '400': { description: Invalid request; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Save point or request ID conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/workflow-receipts/resolve:
+    post:
+      operationId: resolveWeldingWorkflowReceipt
+      summary: Reauthorize one original workflow command receipt
+      description: Read-only POST with exact read flag while write flag is OFF. Original strict JSON maximum 5 MiB; finite command enum and final-retry generation ID only. Committed requires bound ACK; unknown requires null. No new transition or retry; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus WorkflowResolutionRequest with original command body bytes forwarded } } } }
+      responses:
+        '200': { description: Bound yuantus.welding_workflow_resolution/1; no-store }
+        '400': { description: Invalid command, path or body; no-store }
+        '403': { description: Denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Original command conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Invalid upstream resolution; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/reuse:
+    post:
+      operationId: reuseWeldingPlan
+      summary: Copy selected formal welds into an independent Draft
+      description: Exact read and write flags; original strict ReusePlanRequest JSON maximum 5 MiB. A supplied string target plan ID must satisfy the finite BFF route policy before identity or dispatch. Yuantus owns domain validation, hashes and provenance. The independent 16-field ACK binds source publication and savepoint plus target plan; target hash may differ. Lost or invalid ACK remains WELDING_RESULT_UNKNOWN; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus ReusePlanRequest; complete original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound yuantus.welding_plan_reuse_ack/1; no-store }
+        '400': { description: Invalid finite request; no-store }
+        '403': { description: Yuantus denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Original request or source conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Result unknown after dispatch; no-store }
+        '503': { description: Write gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/reuse-receipts/resolve:
+    post:
+      operationId: resolveWeldingReuseReceipt
+      summary: Reauthorize the original reuse receipt
+      description: Read-only POST with exact read flag while write flag is OFF. Forward the complete original ReusePlanRequest bytes, maximum 5 MiB, without a workflow envelope. Committed requires the original bound reuse ACK; unknown requires null. No retry or write; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, description: Yuantus ReusePlanRequest; complete original bytes forwarded } } } }
+      responses:
+        '200': { description: Bound yuantus.welding_reuse_resolution/1; no-store }
+        '400': { description: Invalid finite request; no-store }
+        '403': { description: Yuantus denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Original request or source conflict; no-store }
+        '413': { description: Body exceeds 5 MiB; no-store }
+        '422': { description: Domain body rejected; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }
+  /api/welding/plans/{plan_id}/versions/{version_id}/reuse-provenance:
+    get:
+      operationId: readWeldingReuseProvenance
+      summary: Read authorized provenance of one reused target
+      description: Exact read flag while write flag is OFF. Use the exact target plan and version path; provenance retains the initial adoption version for later Yuantus-authorized revisions. Bind the target plan, verified tenant and organization, original source and request. Historical author may differ from the authorized reader. Yuantus owns hashes and source authorization; no-store.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: plan_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: version_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
+      responses:
+        '200': { description: Bound yuantus.welding_reuse_provenance/1; no-store }
+        '400': { description: Invalid finite request; no-store }
+        '403': { description: Yuantus denied; no-store }
+        '404': { description: Invisible; no-store }
+        '409': { description: Original request or source conflict; no-store }
+        '502': { description: Invalid upstream result; no-store }
+        '503': { description: Read gate or setup unavailable; no-store }

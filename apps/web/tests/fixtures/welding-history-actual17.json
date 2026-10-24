@@ -1,0 +1,1248 @@
+{
+  "schema": "yuantus.welding_review_history/1",
+  "plan_id": "147aa780-4d0d-497b-879e-c743582b9be1",
+  "item_version_id": "af8726ac-5fe2-4401-ab57-ac1557d70d4c",
+  "total": 2,
+  "limit": 50,
+  "offset": 0,
+  "items": [
+    {
+      "event_id": "238c01f8-f0ed-41cf-953b-943fd545f6c9",
+      "approval": {
+        "approval_request_id": "2676f87d-3c37-4837-96b1-cbd240eb9fe1",
+        "state": "pending",
+        "submission_hash": "01356a07bcd3f96e351d1c2e3a9c178c4e171305d5c12b412365ee61c0633eee",
+        "submission": {
+          "assets": [
+            {
+              "format": "docx",
+              "sha256": "4d9b135e0a100ba63e1ae2ea774405e22cd49ac4cae55de787b258a966b5df8a",
+              "file_id": "17a7d72a-df26-4e3f-8b68-1337d66888e1",
+              "asset_id": "806935ce-549a-464f-98a3-d0cf78fab5d3",
+              "byte_size": 13822997,
+              "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            },
+            {
+              "format": "layout_png",
+              "sha256": "f1eb9683b905ff9d592f13ca8be223ca847d8bdcae62b3695d856f3f8b6f8bb7",
+              "file_id": "11ee1040-85a2-47dc-a085-c5073d39a751",
+              "asset_id": "de062acd-0238-4ff4-a28b-888fdce9ffec",
+              "byte_size": 83109,
+              "mime_type": "image/png"
+            },
+            {
+              "format": "pdf",
+              "sha256": "31e5fd8a12acab6b83c35b52a16d6ed10bda860bb47fd2028e99d19c37925a9e",
+              "file_id": "6c515a27-32c8-45c6-96fa-3f9bdc9d900f",
+              "asset_id": "317d58d6-3f37-4c99-bf65-19483e825f6b",
+              "byte_size": 299891,
+              "mime_type": "application/pdf"
+            }
+          ],
+          "org_id": "real-api-org",
+          "review": {
+            "schema": "yuantus.welding_source_review/1",
+            "evidence": {
+              "event_hashes": {
+                "03ecd5e7-1795-4173-a554-fe5bfff69e1d": "9cc34cce192ce374181167dd387c992175d0249056b01f99580f3dd3020622b4",
+                "37afd828-bf6f-4a2f-a958-09892dd8b788": "9771a5e9bc295618fdf1b77eb59d461383ce43ce937651f3365de6afba58a841",
+                "44f8eb68-ee5c-4bd6-9a73-1fc9abc50744": "9e3183de4a921f0191cce9d92f707c1d396be2f49ea8709c52552b19c225d6b9",
+                "68e87d41-7342-4e4a-a5f1-a900dfb9c9a4": "8cc8f3d81d8725e35b28ba3ce64f7ea91d8eb9d2c845cf2b2dd65562ad50f7fc",
+                "a6e3bfcd-d73d-4c5f-a8f0-e966677ee934": "32c824df28d0eb7ac9a250bc07450c3261a92005b0089ce3391cc4d0a0cb7043",
+                "ac7adc40-3228-4785-b39d-dc8edef3e217": "dab9afd43dda5b77b09ab51f979a09ee599f8eff06676557320817af62c97770"
+              },
+              "change_hashes": {
+                "01dae007-e2f2-45e6-be2f-5995b77c57f1": "987308c57d49460a84da4475ecb623f12ec07b7fc46aeda4ca4fdb49d9455960"
+              }
+            },
+            "state_sha256": "d9cc8d621f5eb335d67949b90e335e6338ea39ef00a63614e1ef16c8242ba023",
+            "pending_count": 0,
+            "unbound_count": 0,
+            "confirmed_count": 3,
+            "removed_pending_count": 0
+          },
+          "schema": "yuantus.welding_submission/1",
+          "attempt": 1,
+          "plan_id": "147aa780-4d0d-497b-879e-c743582b9be1",
+          "sources": {
+            "drawing": {
+              "file_id": "f777a6ab-6d22-4d71-ad16-9546165c80e1",
+              "item_id": "f02-drawing-one",
+              "checksum": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89",
+              "file_name": "vemcad-synthetic-geometry.dwg",
+              "file_role": "native_cad",
+              "version_id": "efe4da6f-a94e-46b7-bfdc-d292003cd1af",
+              "version_label": "1.A"
+            },
+            "product": {
+              "item_id": "f02-product-one",
+              "version_id": "6233499b-bdaa-4fde-b4f9-0b1a2af67305",
+              "version_label": "1.A"
+            },
+            "process_refs": [],
+            "source_review": {
+              "schema": "yuantus.welding_source_review/1",
+              "evidence": {
+                "event_hashes": {
+                  "03ecd5e7-1795-4173-a554-fe5bfff69e1d": "9cc34cce192ce374181167dd387c992175d0249056b01f99580f3dd3020622b4",
+                  "37afd828-bf6f-4a2f-a958-09892dd8b788": "9771a5e9bc295618fdf1b77eb59d461383ce43ce937651f3365de6afba58a841",
+                  "44f8eb68-ee5c-4bd6-9a73-1fc9abc50744": "9e3183de4a921f0191cce9d92f707c1d396be2f49ea8709c52552b19c225d6b9",
+                  "68e87d41-7342-4e4a-a5f1-a900dfb9c9a4": "8cc8f3d81d8725e35b28ba3ce64f7ea91d8eb9d2c845cf2b2dd65562ad50f7fc",
+                  "a6e3bfcd-d73d-4c5f-a8f0-e966677ee934": "32c824df28d0eb7ac9a250bc07450c3261a92005b0089ce3391cc4d0a0cb7043",
+                  "ac7adc40-3228-4785-b39d-dc8edef3e217": "dab9afd43dda5b77b09ab51f979a09ee599f8eff06676557320817af62c97770"
+                },
+                "change_hashes": {
+                  "01dae007-e2f2-45e6-be2f-5995b77c57f1": "987308c57d49460a84da4475ecb623f12ec07b7fc46aeda4ca4fdb49d9455960"
+                }
+              },
+              "state_sha256": "d9cc8d621f5eb335d67949b90e335e6338ea39ef00a63614e1ef16c8242ba023",
+              "pending_count": 0,
+              "confirmed_count": 3,
+              "removed_pending_count": 0
+            },
+            "overlay_origin": {
+              "unit": "mm",
+              "basis": {
+                "drawing": {
+                  "file_id": "f777a6ab-6d22-4d71-ad16-9546165c80e1",
+                  "item_id": "f02-drawing-one",
+                  "file_role": "native_cad",
+                  "version_id": "efe4da6f-a94e-46b7-bfdc-d292003cd1af",
+                  "expected_checksum": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89"
+                },
+                "product": {
+                  "item_id": "f02-product-one",
+                  "version_id": "6233499b-bdaa-4fde-b4f9-0b1a2af67305"
+                }
+              },
+              "input": {
+                "bytes": 8491,
+                "sha256": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89"
+              },
+              "schema": "yuantus.welding_plan_cad_origin/1",
+              "source": {
+                "state": "Draft",
+                "title": "Synthetic drawing",
+                "file_id": "f777a6ab-6d22-4d71-ad16-9546165c80e1",
+                "item_id": "f02-drawing-one",
+                "checksum": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89",
+                "file_name": "vemcad-synthetic-geometry.dwg",
+                "file_role": "native_cad",
+                "version_id": "efe4da6f-a94e-46b7-bfdc-d292003cd1af",
+                "fingerprint": "34a583240a31fa230c4fa1f3109561242e46cf98511c6cd18dc1bde2879aa03b",
+                "is_released": false,
+                "version_label": "1.A"
+              },
+              "task_id": "4e0df48513aa4972a9617a5bcf55aad8",
+              "document": {
+                "bytes": 4699,
+                "sha256": "0d830ca0fbe6a5dd3ccaeae403d2393b084a8112b34ded50bfa6b32a394fec72"
+              },
+              "context_id": "90b18137-f8af-479a-9850-c7f3fbe8261d",
+              "request_id": "23b3b6d80d3931f0284ea44d3ab6e3d8",
+              "unit_basis": "dxf.source_semantics_v1.insunits",
+              "rbac_user_id": 101,
+              "bundle_sha256": "84a099a4cc4a13a76fe74f71aa79954b43eb9d8e2cfc00a2fd9cf721dcb86b8c",
+              "adapter_schema": "vemcad-weld-source/1",
+              "expected_artifacts": {
+                "router": "2dd38403498c989ccb9861fb2d40c973bbfd405f9b07e34222f8483485919af2",
+                "importer": "1da5061353dfab63f00d4cd3b7219f4283c1636b80158d2667fdeeb829a6f0f7",
+                "convert_cli": "df2e8213b50fa95e139e8e5f81be689c67b55d20dcc76310d1ff2750b904f04b",
+                "plm_convert": "7d537b3e5280d648349fd4d0ad0844ff9c77aac45a7cc6b9c6582393be5f7bb5"
+              },
+              "owner_auth_user_id": 1,
+              "runtime_artifact_profile": {
+                "input": {
+                  "bytes": 8491,
+                  "sha256": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89"
+                },
+                "schema": "vemcad.server_observed_artifacts/v1",
+                "task_id": "4e0df48513aa4972a9617a5bcf55aad8",
+                "document": {
+                  "bytes": 4699,
+                  "sha256": "0d830ca0fbe6a5dd3ccaeae403d2393b084a8112b34ded50bfa6b32a394fec72"
+                },
+                "artifacts": {
+                  "router": {
+                    "bytes": 93380,
+                    "sha256": "2dd38403498c989ccb9861fb2d40c973bbfd405f9b07e34222f8483485919af2"
+                  },
+                  "importer": {
+                    "bytes": 55312,
+                    "sha256": "1da5061353dfab63f00d4cd3b7219f4283c1636b80158d2667fdeeb829a6f0f7"
+                  },
+                  "convert_cli": {
+                    "bytes": 889056,
+                    "sha256": "df2e8213b50fa95e139e8e5f81be689c67b55d20dcc76310d1ff2750b904f04b"
+                  },
+                  "plm_convert": {
+                    "bytes": 19307,
+                    "sha256": "7d537b3e5280d648349fd4d0ad0844ff9c77aac45a7cc6b9c6582393be5f7bb5"
+                  }
+                },
+                "request_id": "23b3b6d80d3931f0284ea44d3ab6e3d8"
+              }
+            },
+            "geometry_measurement": {
+              "rows": [
+                {
+                  "reason": null,
+                  "status": "measured",
+                  "weld_id": "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                  "included": true,
+                  "length_mm": 12.066344381131255,
+                  "group_name": "",
+                  "classification": ""
+                },
+                {
+                  "reason": null,
+                  "status": "measured",
+                  "weld_id": "8940b090-2040-4396-b579-d299a38e169a",
+                  "included": true,
+                  "length_mm": 8.799066560884278,
+                  "group_name": "",
+                  "classification": ""
+                },
+                {
+                  "reason": null,
+                  "status": "measured",
+                  "weld_id": "2f18ba36-5639-4d44-9be9-8fa89e7123b6",
+                  "included": true,
+                  "length_mm": 15.684647302904565,
+                  "group_name": "",
+                  "classification": ""
+                }
+              ],
+              "groups": [
+                {
+                  "manual": {
+                    "complete": false,
+                    "value_mm": 0,
+                    "known_count": 0,
+                    "missing_count": 3
+                  },
+                  "geometry": {
+                    "complete": true,
+                    "value_mm": 36.550058244920095,
+                    "known_count": 3,
+                    "missing_count": 0
+                  },
+                  "group_name": "",
+                  "weld_count": 3,
+                  "manufacturing": {
+                    "complete": false,
+                    "value_mm": 0,
+                    "known_count": 0,
+                    "missing_count": 3
+                  },
+                  "included_count": 3
+                }
+              ],
+              "schema": "yuantus.welding_geometry_measurement/1",
+              "totals": {
+                "manual": {
+                  "complete": false,
+                  "value_mm": 0,
+                  "known_count": 0,
+                  "missing_count": 3
+                },
+                "geometry": {
+                  "complete": true,
+                  "value_mm": 36.550058244920095,
+                  "known_count": 3,
+                  "missing_count": 0
+                },
+                "weld_count": 3,
+                "manufacturing": {
+                  "complete": false,
+                  "value_mm": 0,
+                  "known_count": 0,
+                  "missing_count": 3
+                },
+                "included_count": 3
+              },
+              "algorithm": "vemcad-weld-length/1",
+              "source_unit": "mm",
+              "bundle_sha256": "84a099a4cc4a13a76fe74f71aa79954b43eb9d8e2cfc00a2fd9cf721dcb86b8c",
+              "geometry_basis_sha256": "665753e6472db447ddb601948d60ba79597e33b3b2fe1aa4c9a842c45695cb23"
+            }
+          },
+          "reviewer": {
+            "auth_user_id": 6,
+            "display_name": "real-api-reviewer",
+            "rbac_user_id": 106
+          },
+          "draft_seq": 5,
+          "requester": {
+            "auth_user_id": 1,
+            "display_name": "real-api-author",
+            "rbac_user_id": 101
+          },
+          "tenant_id": "real-api-tenant",
+          "render_key": "478c76c4172c3f13becaf1b59039915bf13ca35d9d5089b33b0e7a132f371a78",
+          "input_sha256": "6cbd4ea3eb7c3d2431c728a04e30e4197f1cda56e13d491b481e453e6c9e0125",
+          "attempt_token": "d0d165a3-ea7d-47f6-9c45-54f6428b16cd",
+          "version_label": "1.A",
+          "render_profile": {
+            "schema": "yuantus.welding_instruction_profile/1",
+            "runtime": {
+              "layout": {
+                "schema": "yuantus.welding_layout_runtime/1",
+                "batch_schema": "vemcad-weld-png-batch-request/2",
+                "node_version": "v20.20.2",
+                "detail_schema": "vemcad-weld-png-detail-render/2",
+                "runner_sha256": "bb38e4bfad74c76b4663b737a3f5088d506ab8892f773a12ab17077042eec347",
+                "overlay_schema": "vemcad-weld-overlay/3",
+                "browser_version": "154.0.8037.98",
+                "playwright_version": "1.57.0"
+              },
+              "limits": {
+                "seconds": 600,
+                "pdf_pages": 2000,
+                "output_bytes": 134217728,
+                "layout_png_bytes": 67108864
+              },
+              "python": "3.11.17",
+              "schema": "yuantus.welding_instruction_runtime/2",
+              "machine": "arm64",
+              "platform": "Darwin",
+              "libraries": {
+                "lxml": "6.1.1",
+                "pypdf": "6.14.2",
+                "Pillow": "12.0.0",
+                "fonttools": "4.61.1",
+                "python-docx": "1.2.0"
+              },
+              "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+              "node_sha256": "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6",
+              "browser_sha256": "ccffd5c5fe77ba3212e07c2c69091f8048b73c396b4647ecaa150e1e01a04954",
+              "layout_details": {
+                "fit": "independent_full_roles",
+                "number": "complete_caption",
+                "caption": "business_view_and_primary",
+                "identity": "weld_and_representation",
+                "image_box_mm": [
+                  178,
+                  118
+                ],
+                "max_png_bytes": 67108864
+              },
+              "soffice_sha256": "c772a72b6f07e953a34956cebedf5d037b1ea841fad29014b1ee6355775c1d1e",
+              "soffice_version": "LibreOffice 26.2.6.3 8221e31b3ac356a1623c672912a3d2b492f7e3d1",
+              "renderer_sources": {
+                "welding_instruction_body.py": "cf6dbf73a3cd0f531deadf1365b27344d189932178e271b87edbbf61238fcf9a",
+                "welding_instruction_docx.py": "6315998fb7d699c3da16b17f0bbcf50d8d11749efa15144d56ea524d2f4e4092",
+                "welding_plan_instruction_document.py": "afacd28838a361982a029d42fc379d4c688b15a7a71d24293b3eda07bafc9a4c",
+                "welding_representation_instruction_body.py": "a34921f6ff2a16be17cac739325d19935c4929b1a2407b8f81e0bcbb2a954d69",
+                "welding_representation_instruction_document.py": "d2e5135f8c3e0112afd20c3b69b7481f071578625ac5e199eefafeff13dda6e4"
+              },
+              "font_license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+              "native_bundle_sha256": "84a099a4cc4a13a76fe74f71aa79954b43eb9d8e2cfc00a2fd9cf721dcb86b8c",
+              "legacy_layout_runner_sha256": "937e0b22ca412342682f8012b8e2dac442ab3aaa63badd3447c0329ab0282235"
+            },
+            "template": {
+              "id": "welding-a4",
+              "digest": "d0cbb9ae7bbe8c743da429901d64b0fea218955689e4afbf40fb79331166d57c",
+              "version": "3"
+            },
+            "template_options": {
+              "logo": null,
+              "footer_text": "",
+              "header_text": "第 1 轮评审",
+              "optional_columns": [
+                "group_name",
+                "classification",
+                "filler"
+              ],
+              "organization_name": "焊接普通页面验证"
+            }
+          },
+          "item_version_id": "af8726ac-5fe2-4401-ab57-ac1557d70d4c",
+          "renderer_receipt": {
+            "pdf": {
+              "page_count": 10,
+              "text_coverage": "complete_character_counts_and_weld_heading_order",
+              "embedded_fonts": [
+                "/BAAAAA+NotoSansCJKsc-Regular",
+                "/CAAAAA+NotoSansCJKsc-Regular"
+              ],
+              "image_pixel_hashes": [
+                "110ae0de2bd2866a960fb41a2a4d4b912eef7d5ac1402faca0055e3be05cce9b",
+                "1679e903bba3a3fd78d35ebe9b68b1385a2b903c6c1074d072121b94f21d4865",
+                "3eabe1191cb6be12b498735ff0a195ede6f662372f1ce8ea3bbb28b4dda7086b",
+                "9b7f162b5fb073ae2d26cbc6cef4a443cba1f159a7df621837f9faf3c3f53abb"
+              ]
+            },
+            "font": {
+              "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+              "codepoints_sha256": "3206e993b0ece732fb9f1b44cb2f54b45c2aaa57a3cb5631007211c9a28a85a7",
+              "missing_codepoints": 0,
+              "required_codepoints": 250
+            },
+            "files": {
+              "pdf": {
+                "byte_size": 299891,
+                "artifact_sha256": "31e5fd8a12acab6b83c35b52a16d6ed10bda860bb47fd2028e99d19c37925a9e"
+              },
+              "docx": {
+                "byte_size": 13822997,
+                "artifact_sha256": "4d9b135e0a100ba63e1ae2ea774405e22cd49ac4cae55de787b258a966b5df8a"
+              },
+              "layout_png": {
+                "byte_size": 83109,
+                "artifact_sha256": "f1eb9683b905ff9d592f13ca8be223ca847d8bdcae62b3695d856f3f8b6f8bb7"
+              }
+            },
+            "layout": {
+              "pan": {
+                "x": 1323.6416042356802,
+                "y": 861.3261486946582
+              },
+              "zoom": 39.95658950157419,
+              "schema": "vemcad-weld-png-render/1",
+              "extents": {
+                "maxX": 23,
+                "maxY": 16,
+                "minX": -29.188796680497923,
+                "minY": -19.81148367600817
+              },
+              "renderer": "vemcad-weld-layout-png/1",
+              "width_px": 2400,
+              "height_px": 1600,
+              "padding_px": 80,
+              "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+              "source_unit": "mm",
+              "layout_state": "compiled",
+              "unbound_weld_ids": [],
+              "included_weld_ids": [
+                "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                "8940b090-2040-4396-b579-d299a38e169a",
+                "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+              ],
+              "rendered_codepoints": [
+                49,
+                50,
+                51,
+                87
+              ],
+              "unbound_entity_count": 0
+            },
+            "schema": "yuantus.welding_instruction_render/3",
+            "body_sha256": "73f5bf6e0bc20e6ebacf80c3a46b708b2512545ddf237d8b047d4fc1230ef05d",
+            "layout_details": [
+              {
+                "file": "detail-0001.png",
+                "receipt": {
+                  "pan": {
+                    "x": 3406.9269682718455,
+                    "y": 2150.9493740872667
+                  },
+                  "zoom": 107.14555546030374,
+                  "roles": {
+                    "label_id": 2,
+                    "leader_id": null,
+                    "entity_ids": [
+                      1
+                    ]
+                  },
+                  "schema": "vemcad-weld-png-detail-render/2",
+                  "extents": {
+                    "maxX": -11.837136929460577,
+                    "maxY": -6.0708197755932325,
+                    "minX": -29.188796680497923,
+                    "minY": -19.81148367600817
+                  },
+                  "weld_id": "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                  "renderer": "vemcad-weld-layout-detail-png/2",
+                  "width_px": 2400,
+                  "height_px": 1600,
+                  "view_kind": "detail",
+                  "view_name": "正视直线",
+                  "is_primary": true,
+                  "padding_px": 80,
+                  "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+                  "source_unit": "mm",
+                  "layout_state": "compiled",
+                  "world_viewport": {
+                    "maxX": -9.39774836152584,
+                    "maxY": -5.142064658868538,
+                    "minX": -31.797184247498485,
+                    "minY": -20.075021916183633
+                  },
+                  "unbound_weld_ids": [],
+                  "included_weld_ids": [
+                    "cbef4c7e-acff-482a-9c54-c5dd2b8c3743"
+                  ],
+                  "representation_id": "9f200cc2-7338-46c3-ba21-1d622923a610",
+                  "rendered_codepoints": [
+                    49,
+                    87
+                  ],
+                  "unbound_entity_count": 0
+                },
+                "weld_id": "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                "png_size": 28817,
+                "png_sha256": "922b4b611ebd0f5bca61c557d848697bfd4cd4c5e35bbb0b6f407687e44649e0",
+                "representation_id": "9f200cc2-7338-46c3-ba21-1d622923a610"
+              },
+              {
+                "file": "detail-0002.png",
+                "receipt": {
+                  "pan": {
+                    "x": 1712.53144357752,
+                    "y": 1349.7520263900537
+                  },
+                  "zoom": 85.13471486450794,
+                  "roles": {
+                    "label_id": 4,
+                    "leader_id": null,
+                    "entity_ids": [
+                      3
+                    ]
+                  },
+                  "schema": "vemcad-weld-png-detail-render/2",
+                  "extents": {
+                    "maxX": 2.7271784232365164,
+                    "maxY": 1.771223519352957,
+                    "minX": -14.62448132780083,
+                    "minY": -15.330436231684388
+                  },
+                  "weld_id": "8940b090-2040-4396-b579-d299a38e169a",
+                  "renderer": "vemcad-weld-layout-detail-png/2",
+                  "width_px": 2400,
+                  "height_px": 1600,
+                  "view_kind": "detail",
+                  "view_name": "正视圆弧",
+                  "is_primary": true,
+                  "padding_px": 80,
+                  "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+                  "source_unit": "mm",
+                  "layout_state": "compiled",
+                  "world_viewport": {
+                    "maxX": 8.075067350804987,
+                    "maxY": 2.9394351529598284,
+                    "minX": -20.11554800298582,
+                    "minY": -15.854308416234042
+                  },
+                  "unbound_weld_ids": [],
+                  "included_weld_ids": [
+                    "8940b090-2040-4396-b579-d299a38e169a"
+                  ],
+                  "representation_id": "0a8b8bcb-b5fe-4b0b-a38f-3097c0f91a1e",
+                  "rendered_codepoints": [
+                    50,
+                    87
+                  ],
+                  "unbound_entity_count": 0
+                },
+                "weld_id": "8940b090-2040-4396-b579-d299a38e169a",
+                "png_size": 62838,
+                "png_sha256": "a8170d9503e918bd4511907772af3142b617e314e42eb7c2b0221602784b0454",
+                "representation_id": "0a8b8bcb-b5fe-4b0b-a38f-3097c0f91a1e"
+              },
+              {
+                "file": "detail-0003.png",
+                "receipt": {
+                  "pan": {
+                    "x": 3283.017110753809,
+                    "y": 112.26187085933213
+                  },
+                  "zoom": 98.49560960160117,
+                  "roles": {
+                    "label_id": 6,
+                    "leader_id": null,
+                    "entity_ids": [
+                      5
+                    ]
+                  },
+                  "schema": "vemcad-weld-png-detail-render/2",
+                  "extents": {
+                    "maxX": -12.957468879668049,
+                    "maxY": 14.09459461512902,
+                    "minX": -29.188796680497923,
+                    "minY": -0.7664012354933867
+                  },
+                  "weld_id": "2f18ba36-5639-4d44-9be9-8fa89e7123b6",
+                  "renderer": "vemcad-weld-layout-detail-png/2",
+                  "width_px": 2400,
+                  "height_px": 1600,
+                  "view_kind": "detail",
+                  "view_name": "正视折线",
+                  "is_primary": true,
+                  "padding_px": 80,
+                  "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+                  "source_unit": "mm",
+                  "layout_state": "compiled",
+                  "world_viewport": {
+                    "maxX": -8.965040313222797,
+                    "maxY": 15.104613648855295,
+                    "minX": -33.33160862735997,
+                    "minY": -1.1397652272361505
+                  },
+                  "unbound_weld_ids": [],
+                  "included_weld_ids": [
+                    "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+                  ],
+                  "representation_id": "f3264f73-5ba3-4137-879d-18b08b6f5e80",
+                  "rendered_codepoints": [
+                    51,
+                    87
+                  ],
+                  "unbound_entity_count": 0
+                },
+                "weld_id": "2f18ba36-5639-4d44-9be9-8fa89e7123b6",
+                "png_size": 52039,
+                "png_sha256": "ca5d92748076297d0bd9373987b2091782e2f9aa8e5858b5314b24d54886dd2c",
+                "representation_id": "f3264f73-5ba3-4137-879d-18b08b6f5e80"
+              }
+            ],
+            "excluded_weld_ids": [],
+            "included_weld_ids": [
+              "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+              "8940b090-2040-4396-b579-d299a38e169a",
+              "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+            ]
+          },
+          "excluded_weld_ids": [],
+          "included_weld_ids": [
+            "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+            "8940b090-2040-4396-b579-d299a38e169a",
+            "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+          ],
+          "plan_content_hash": "536269b1c4be3170f17149166993dbf2e12aa2d0da18f3239d9171a89cee2bfa",
+          "review_generation_id": "70ad88b8-75c9-49e1-8773-af7a6b284012"
+        },
+        "decision": null
+      },
+      "action": "created",
+      "from_state": null,
+      "to_state": "draft",
+      "note": null,
+      "actor": {
+        "auth_user_id": 1,
+        "display_name": "real-api-author",
+        "rbac_user_id": 101
+      },
+      "created_at": "2026-10-12T02:03:14.580912+00:00"
+    },
+    {
+      "event_id": "adfc1d34-ab6e-4ffb-b710-7f1898c9e579",
+      "approval": {
+        "approval_request_id": "2676f87d-3c37-4837-96b1-cbd240eb9fe1",
+        "state": "pending",
+        "submission_hash": "01356a07bcd3f96e351d1c2e3a9c178c4e171305d5c12b412365ee61c0633eee",
+        "submission": {
+          "assets": [
+            {
+              "format": "docx",
+              "sha256": "4d9b135e0a100ba63e1ae2ea774405e22cd49ac4cae55de787b258a966b5df8a",
+              "file_id": "17a7d72a-df26-4e3f-8b68-1337d66888e1",
+              "asset_id": "806935ce-549a-464f-98a3-d0cf78fab5d3",
+              "byte_size": 13822997,
+              "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            },
+            {
+              "format": "layout_png",
+              "sha256": "f1eb9683b905ff9d592f13ca8be223ca847d8bdcae62b3695d856f3f8b6f8bb7",
+              "file_id": "11ee1040-85a2-47dc-a085-c5073d39a751",
+              "asset_id": "de062acd-0238-4ff4-a28b-888fdce9ffec",
+              "byte_size": 83109,
+              "mime_type": "image/png"
+            },
+            {
+              "format": "pdf",
+              "sha256": "31e5fd8a12acab6b83c35b52a16d6ed10bda860bb47fd2028e99d19c37925a9e",
+              "file_id": "6c515a27-32c8-45c6-96fa-3f9bdc9d900f",
+              "asset_id": "317d58d6-3f37-4c99-bf65-19483e825f6b",
+              "byte_size": 299891,
+              "mime_type": "application/pdf"
+            }
+          ],
+          "org_id": "real-api-org",
+          "review": {
+            "schema": "yuantus.welding_source_review/1",
+            "evidence": {
+              "event_hashes": {
+                "03ecd5e7-1795-4173-a554-fe5bfff69e1d": "9cc34cce192ce374181167dd387c992175d0249056b01f99580f3dd3020622b4",
+                "37afd828-bf6f-4a2f-a958-09892dd8b788": "9771a5e9bc295618fdf1b77eb59d461383ce43ce937651f3365de6afba58a841",
+                "44f8eb68-ee5c-4bd6-9a73-1fc9abc50744": "9e3183de4a921f0191cce9d92f707c1d396be2f49ea8709c52552b19c225d6b9",
+                "68e87d41-7342-4e4a-a5f1-a900dfb9c9a4": "8cc8f3d81d8725e35b28ba3ce64f7ea91d8eb9d2c845cf2b2dd65562ad50f7fc",
+                "a6e3bfcd-d73d-4c5f-a8f0-e966677ee934": "32c824df28d0eb7ac9a250bc07450c3261a92005b0089ce3391cc4d0a0cb7043",
+                "ac7adc40-3228-4785-b39d-dc8edef3e217": "dab9afd43dda5b77b09ab51f979a09ee599f8eff06676557320817af62c97770"
+              },
+              "change_hashes": {
+                "01dae007-e2f2-45e6-be2f-5995b77c57f1": "987308c57d49460a84da4475ecb623f12ec07b7fc46aeda4ca4fdb49d9455960"
+              }
+            },
+            "state_sha256": "d9cc8d621f5eb335d67949b90e335e6338ea39ef00a63614e1ef16c8242ba023",
+            "pending_count": 0,
+            "unbound_count": 0,
+            "confirmed_count": 3,
+            "removed_pending_count": 0
+          },
+          "schema": "yuantus.welding_submission/1",
+          "attempt": 1,
+          "plan_id": "147aa780-4d0d-497b-879e-c743582b9be1",
+          "sources": {
+            "drawing": {
+              "file_id": "f777a6ab-6d22-4d71-ad16-9546165c80e1",
+              "item_id": "f02-drawing-one",
+              "checksum": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89",
+              "file_name": "vemcad-synthetic-geometry.dwg",
+              "file_role": "native_cad",
+              "version_id": "efe4da6f-a94e-46b7-bfdc-d292003cd1af",
+              "version_label": "1.A"
+            },
+            "product": {
+              "item_id": "f02-product-one",
+              "version_id": "6233499b-bdaa-4fde-b4f9-0b1a2af67305",
+              "version_label": "1.A"
+            },
+            "process_refs": [],
+            "source_review": {
+              "schema": "yuantus.welding_source_review/1",
+              "evidence": {
+                "event_hashes": {
+                  "03ecd5e7-1795-4173-a554-fe5bfff69e1d": "9cc34cce192ce374181167dd387c992175d0249056b01f99580f3dd3020622b4",
+                  "37afd828-bf6f-4a2f-a958-09892dd8b788": "9771a5e9bc295618fdf1b77eb59d461383ce43ce937651f3365de6afba58a841",
+                  "44f8eb68-ee5c-4bd6-9a73-1fc9abc50744": "9e3183de4a921f0191cce9d92f707c1d396be2f49ea8709c52552b19c225d6b9",
+                  "68e87d41-7342-4e4a-a5f1-a900dfb9c9a4": "8cc8f3d81d8725e35b28ba3ce64f7ea91d8eb9d2c845cf2b2dd65562ad50f7fc",
+                  "a6e3bfcd-d73d-4c5f-a8f0-e966677ee934": "32c824df28d0eb7ac9a250bc07450c3261a92005b0089ce3391cc4d0a0cb7043",
+                  "ac7adc40-3228-4785-b39d-dc8edef3e217": "dab9afd43dda5b77b09ab51f979a09ee599f8eff06676557320817af62c97770"
+                },
+                "change_hashes": {
+                  "01dae007-e2f2-45e6-be2f-5995b77c57f1": "987308c57d49460a84da4475ecb623f12ec07b7fc46aeda4ca4fdb49d9455960"
+                }
+              },
+              "state_sha256": "d9cc8d621f5eb335d67949b90e335e6338ea39ef00a63614e1ef16c8242ba023",
+              "pending_count": 0,
+              "confirmed_count": 3,
+              "removed_pending_count": 0
+            },
+            "overlay_origin": {
+              "unit": "mm",
+              "basis": {
+                "drawing": {
+                  "file_id": "f777a6ab-6d22-4d71-ad16-9546165c80e1",
+                  "item_id": "f02-drawing-one",
+                  "file_role": "native_cad",
+                  "version_id": "efe4da6f-a94e-46b7-bfdc-d292003cd1af",
+                  "expected_checksum": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89"
+                },
+                "product": {
+                  "item_id": "f02-product-one",
+                  "version_id": "6233499b-bdaa-4fde-b4f9-0b1a2af67305"
+                }
+              },
+              "input": {
+                "bytes": 8491,
+                "sha256": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89"
+              },
+              "schema": "yuantus.welding_plan_cad_origin/1",
+              "source": {
+                "state": "Draft",
+                "title": "Synthetic drawing",
+                "file_id": "f777a6ab-6d22-4d71-ad16-9546165c80e1",
+                "item_id": "f02-drawing-one",
+                "checksum": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89",
+                "file_name": "vemcad-synthetic-geometry.dwg",
+                "file_role": "native_cad",
+                "version_id": "efe4da6f-a94e-46b7-bfdc-d292003cd1af",
+                "fingerprint": "34a583240a31fa230c4fa1f3109561242e46cf98511c6cd18dc1bde2879aa03b",
+                "is_released": false,
+                "version_label": "1.A"
+              },
+              "task_id": "4e0df48513aa4972a9617a5bcf55aad8",
+              "document": {
+                "bytes": 4699,
+                "sha256": "0d830ca0fbe6a5dd3ccaeae403d2393b084a8112b34ded50bfa6b32a394fec72"
+              },
+              "context_id": "90b18137-f8af-479a-9850-c7f3fbe8261d",
+              "request_id": "23b3b6d80d3931f0284ea44d3ab6e3d8",
+              "unit_basis": "dxf.source_semantics_v1.insunits",
+              "rbac_user_id": 101,
+              "bundle_sha256": "84a099a4cc4a13a76fe74f71aa79954b43eb9d8e2cfc00a2fd9cf721dcb86b8c",
+              "adapter_schema": "vemcad-weld-source/1",
+              "expected_artifacts": {
+                "router": "2dd38403498c989ccb9861fb2d40c973bbfd405f9b07e34222f8483485919af2",
+                "importer": "1da5061353dfab63f00d4cd3b7219f4283c1636b80158d2667fdeeb829a6f0f7",
+                "convert_cli": "df2e8213b50fa95e139e8e5f81be689c67b55d20dcc76310d1ff2750b904f04b",
+                "plm_convert": "7d537b3e5280d648349fd4d0ad0844ff9c77aac45a7cc6b9c6582393be5f7bb5"
+              },
+              "owner_auth_user_id": 1,
+              "runtime_artifact_profile": {
+                "input": {
+                  "bytes": 8491,
+                  "sha256": "bb2e82479a955c4b67a2d48b9d9aa2b855482dfc61fe1f946f5c4c8a5daaad89"
+                },
+                "schema": "vemcad.server_observed_artifacts/v1",
+                "task_id": "4e0df48513aa4972a9617a5bcf55aad8",
+                "document": {
+                  "bytes": 4699,
+                  "sha256": "0d830ca0fbe6a5dd3ccaeae403d2393b084a8112b34ded50bfa6b32a394fec72"
+                },
+                "artifacts": {
+                  "router": {
+                    "bytes": 93380,
+                    "sha256": "2dd38403498c989ccb9861fb2d40c973bbfd405f9b07e34222f8483485919af2"
+                  },
+                  "importer": {
+                    "bytes": 55312,
+                    "sha256": "1da5061353dfab63f00d4cd3b7219f4283c1636b80158d2667fdeeb829a6f0f7"
+                  },
+                  "convert_cli": {
+                    "bytes": 889056,
+                    "sha256": "df2e8213b50fa95e139e8e5f81be689c67b55d20dcc76310d1ff2750b904f04b"
+                  },
+                  "plm_convert": {
+                    "bytes": 19307,
+                    "sha256": "7d537b3e5280d648349fd4d0ad0844ff9c77aac45a7cc6b9c6582393be5f7bb5"
+                  }
+                },
+                "request_id": "23b3b6d80d3931f0284ea44d3ab6e3d8"
+              }
+            },
+            "geometry_measurement": {
+              "rows": [
+                {
+                  "reason": null,
+                  "status": "measured",
+                  "weld_id": "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                  "included": true,
+                  "length_mm": 12.066344381131255,
+                  "group_name": "",
+                  "classification": ""
+                },
+                {
+                  "reason": null,
+                  "status": "measured",
+                  "weld_id": "8940b090-2040-4396-b579-d299a38e169a",
+                  "included": true,
+                  "length_mm": 8.799066560884278,
+                  "group_name": "",
+                  "classification": ""
+                },
+                {
+                  "reason": null,
+                  "status": "measured",
+                  "weld_id": "2f18ba36-5639-4d44-9be9-8fa89e7123b6",
+                  "included": true,
+                  "length_mm": 15.684647302904565,
+                  "group_name": "",
+                  "classification": ""
+                }
+              ],
+              "groups": [
+                {
+                  "manual": {
+                    "complete": false,
+                    "value_mm": 0,
+                    "known_count": 0,
+                    "missing_count": 3
+                  },
+                  "geometry": {
+                    "complete": true,
+                    "value_mm": 36.550058244920095,
+                    "known_count": 3,
+                    "missing_count": 0
+                  },
+                  "group_name": "",
+                  "weld_count": 3,
+                  "manufacturing": {
+                    "complete": false,
+                    "value_mm": 0,
+                    "known_count": 0,
+                    "missing_count": 3
+                  },
+                  "included_count": 3
+                }
+              ],
+              "schema": "yuantus.welding_geometry_measurement/1",
+              "totals": {
+                "manual": {
+                  "complete": false,
+                  "value_mm": 0,
+                  "known_count": 0,
+                  "missing_count": 3
+                },
+                "geometry": {
+                  "complete": true,
+                  "value_mm": 36.550058244920095,
+                  "known_count": 3,
+                  "missing_count": 0
+                },
+                "weld_count": 3,
+                "manufacturing": {
+                  "complete": false,
+                  "value_mm": 0,
+                  "known_count": 0,
+                  "missing_count": 3
+                },
+                "included_count": 3
+              },
+              "algorithm": "vemcad-weld-length/1",
+              "source_unit": "mm",
+              "bundle_sha256": "84a099a4cc4a13a76fe74f71aa79954b43eb9d8e2cfc00a2fd9cf721dcb86b8c",
+              "geometry_basis_sha256": "665753e6472db447ddb601948d60ba79597e33b3b2fe1aa4c9a842c45695cb23"
+            }
+          },
+          "reviewer": {
+            "auth_user_id": 6,
+            "display_name": "real-api-reviewer",
+            "rbac_user_id": 106
+          },
+          "draft_seq": 5,
+          "requester": {
+            "auth_user_id": 1,
+            "display_name": "real-api-author",
+            "rbac_user_id": 101
+          },
+          "tenant_id": "real-api-tenant",
+          "render_key": "478c76c4172c3f13becaf1b59039915bf13ca35d9d5089b33b0e7a132f371a78",
+          "input_sha256": "6cbd4ea3eb7c3d2431c728a04e30e4197f1cda56e13d491b481e453e6c9e0125",
+          "attempt_token": "d0d165a3-ea7d-47f6-9c45-54f6428b16cd",
+          "version_label": "1.A",
+          "render_profile": {
+            "schema": "yuantus.welding_instruction_profile/1",
+            "runtime": {
+              "layout": {
+                "schema": "yuantus.welding_layout_runtime/1",
+                "batch_schema": "vemcad-weld-png-batch-request/2",
+                "node_version": "v20.20.2",
+                "detail_schema": "vemcad-weld-png-detail-render/2",
+                "runner_sha256": "bb38e4bfad74c76b4663b737a3f5088d506ab8892f773a12ab17077042eec347",
+                "overlay_schema": "vemcad-weld-overlay/3",
+                "browser_version": "154.0.8037.98",
+                "playwright_version": "1.57.0"
+              },
+              "limits": {
+                "seconds": 600,
+                "pdf_pages": 2000,
+                "output_bytes": 134217728,
+                "layout_png_bytes": 67108864
+              },
+              "python": "3.11.17",
+              "schema": "yuantus.welding_instruction_runtime/2",
+              "machine": "arm64",
+              "platform": "Darwin",
+              "libraries": {
+                "lxml": "6.1.1",
+                "pypdf": "6.14.2",
+                "Pillow": "12.0.0",
+                "fonttools": "4.61.1",
+                "python-docx": "1.2.0"
+              },
+              "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+              "node_sha256": "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6",
+              "browser_sha256": "ccffd5c5fe77ba3212e07c2c69091f8048b73c396b4647ecaa150e1e01a04954",
+              "layout_details": {
+                "fit": "independent_full_roles",
+                "number": "complete_caption",
+                "caption": "business_view_and_primary",
+                "identity": "weld_and_representation",
+                "image_box_mm": [
+                  178,
+                  118
+                ],
+                "max_png_bytes": 67108864
+              },
+              "soffice_sha256": "c772a72b6f07e953a34956cebedf5d037b1ea841fad29014b1ee6355775c1d1e",
+              "soffice_version": "LibreOffice 26.2.6.3 8221e31b3ac356a1623c672912a3d2b492f7e3d1",
+              "renderer_sources": {
+                "welding_instruction_body.py": "cf6dbf73a3cd0f531deadf1365b27344d189932178e271b87edbbf61238fcf9a",
+                "welding_instruction_docx.py": "6315998fb7d699c3da16b17f0bbcf50d8d11749efa15144d56ea524d2f4e4092",
+                "welding_plan_instruction_document.py": "afacd28838a361982a029d42fc379d4c688b15a7a71d24293b3eda07bafc9a4c",
+                "welding_representation_instruction_body.py": "a34921f6ff2a16be17cac739325d19935c4929b1a2407b8f81e0bcbb2a954d69",
+                "welding_representation_instruction_document.py": "d2e5135f8c3e0112afd20c3b69b7481f071578625ac5e199eefafeff13dda6e4"
+              },
+              "font_license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+              "native_bundle_sha256": "84a099a4cc4a13a76fe74f71aa79954b43eb9d8e2cfc00a2fd9cf721dcb86b8c",
+              "legacy_layout_runner_sha256": "937e0b22ca412342682f8012b8e2dac442ab3aaa63badd3447c0329ab0282235"
+            },
+            "template": {
+              "id": "welding-a4",
+              "digest": "d0cbb9ae7bbe8c743da429901d64b0fea218955689e4afbf40fb79331166d57c",
+              "version": "3"
+            },
+            "template_options": {
+              "logo": null,
+              "footer_text": "",
+              "header_text": "第 1 轮评审",
+              "optional_columns": [
+                "group_name",
+                "classification",
+                "filler"
+              ],
+              "organization_name": "焊接普通页面验证"
+            }
+          },
+          "item_version_id": "af8726ac-5fe2-4401-ab57-ac1557d70d4c",
+          "renderer_receipt": {
+            "pdf": {
+              "page_count": 10,
+              "text_coverage": "complete_character_counts_and_weld_heading_order",
+              "embedded_fonts": [
+                "/BAAAAA+NotoSansCJKsc-Regular",
+                "/CAAAAA+NotoSansCJKsc-Regular"
+              ],
+              "image_pixel_hashes": [
+                "110ae0de2bd2866a960fb41a2a4d4b912eef7d5ac1402faca0055e3be05cce9b",
+                "1679e903bba3a3fd78d35ebe9b68b1385a2b903c6c1074d072121b94f21d4865",
+                "3eabe1191cb6be12b498735ff0a195ede6f662372f1ce8ea3bbb28b4dda7086b",
+                "9b7f162b5fb073ae2d26cbc6cef4a443cba1f159a7df621837f9faf3c3f53abb"
+              ]
+            },
+            "font": {
+              "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+              "codepoints_sha256": "3206e993b0ece732fb9f1b44cb2f54b45c2aaa57a3cb5631007211c9a28a85a7",
+              "missing_codepoints": 0,
+              "required_codepoints": 250
+            },
+            "files": {
+              "pdf": {
+                "byte_size": 299891,
+                "artifact_sha256": "31e5fd8a12acab6b83c35b52a16d6ed10bda860bb47fd2028e99d19c37925a9e"
+              },
+              "docx": {
+                "byte_size": 13822997,
+                "artifact_sha256": "4d9b135e0a100ba63e1ae2ea774405e22cd49ac4cae55de787b258a966b5df8a"
+              },
+              "layout_png": {
+                "byte_size": 83109,
+                "artifact_sha256": "f1eb9683b905ff9d592f13ca8be223ca847d8bdcae62b3695d856f3f8b6f8bb7"
+              }
+            },
+            "layout": {
+              "pan": {
+                "x": 1323.6416042356802,
+                "y": 861.3261486946582
+              },
+              "zoom": 39.95658950157419,
+              "schema": "vemcad-weld-png-render/1",
+              "extents": {
+                "maxX": 23,
+                "maxY": 16,
+                "minX": -29.188796680497923,
+                "minY": -19.81148367600817
+              },
+              "renderer": "vemcad-weld-layout-png/1",
+              "width_px": 2400,
+              "height_px": 1600,
+              "padding_px": 80,
+              "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+              "source_unit": "mm",
+              "layout_state": "compiled",
+              "unbound_weld_ids": [],
+              "included_weld_ids": [
+                "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                "8940b090-2040-4396-b579-d299a38e169a",
+                "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+              ],
+              "rendered_codepoints": [
+                49,
+                50,
+                51,
+                87
+              ],
+              "unbound_entity_count": 0
+            },
+            "schema": "yuantus.welding_instruction_render/3",
+            "body_sha256": "73f5bf6e0bc20e6ebacf80c3a46b708b2512545ddf237d8b047d4fc1230ef05d",
+            "layout_details": [
+              {
+                "file": "detail-0001.png",
+                "receipt": {
+                  "pan": {
+                    "x": 3406.9269682718455,
+                    "y": 2150.9493740872667
+                  },
+                  "zoom": 107.14555546030374,
+                  "roles": {
+                    "label_id": 2,
+                    "leader_id": null,
+                    "entity_ids": [
+                      1
+                    ]
+                  },
+                  "schema": "vemcad-weld-png-detail-render/2",
+                  "extents": {
+                    "maxX": -11.837136929460577,
+                    "maxY": -6.0708197755932325,
+                    "minX": -29.188796680497923,
+                    "minY": -19.81148367600817
+                  },
+                  "weld_id": "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                  "renderer": "vemcad-weld-layout-detail-png/2",
+                  "width_px": 2400,
+                  "height_px": 1600,
+                  "view_kind": "detail",
+                  "view_name": "正视直线",
+                  "is_primary": true,
+                  "padding_px": 80,
+                  "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+                  "source_unit": "mm",
+                  "layout_state": "compiled",
+                  "world_viewport": {
+                    "maxX": -9.39774836152584,
+                    "maxY": -5.142064658868538,
+                    "minX": -31.797184247498485,
+                    "minY": -20.075021916183633
+                  },
+                  "unbound_weld_ids": [],
+                  "included_weld_ids": [
+                    "cbef4c7e-acff-482a-9c54-c5dd2b8c3743"
+                  ],
+                  "representation_id": "9f200cc2-7338-46c3-ba21-1d622923a610",
+                  "rendered_codepoints": [
+                    49,
+                    87
+                  ],
+                  "unbound_entity_count": 0
+                },
+                "weld_id": "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+                "png_size": 28817,
+                "png_sha256": "922b4b611ebd0f5bca61c557d848697bfd4cd4c5e35bbb0b6f407687e44649e0",
+                "representation_id": "9f200cc2-7338-46c3-ba21-1d622923a610"
+              },
+              {
+                "file": "detail-0002.png",
+                "receipt": {
+                  "pan": {
+                    "x": 1712.53144357752,
+                    "y": 1349.7520263900537
+                  },
+                  "zoom": 85.13471486450794,
+                  "roles": {
+                    "label_id": 4,
+                    "leader_id": null,
+                    "entity_ids": [
+                      3
+                    ]
+                  },
+                  "schema": "vemcad-weld-png-detail-render/2",
+                  "extents": {
+                    "maxX": 2.7271784232365164,
+                    "maxY": 1.771223519352957,
+                    "minX": -14.62448132780083,
+                    "minY": -15.330436231684388
+                  },
+                  "weld_id": "8940b090-2040-4396-b579-d299a38e169a",
+                  "renderer": "vemcad-weld-layout-detail-png/2",
+                  "width_px": 2400,
+                  "height_px": 1600,
+                  "view_kind": "detail",
+                  "view_name": "正视圆弧",
+                  "is_primary": true,
+                  "padding_px": 80,
+                  "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+                  "source_unit": "mm",
+                  "layout_state": "compiled",
+                  "world_viewport": {
+                    "maxX": 8.075067350804987,
+                    "maxY": 2.9394351529598284,
+                    "minX": -20.11554800298582,
+                    "minY": -15.854308416234042
+                  },
+                  "unbound_weld_ids": [],
+                  "included_weld_ids": [
+                    "8940b090-2040-4396-b579-d299a38e169a"
+                  ],
+                  "representation_id": "0a8b8bcb-b5fe-4b0b-a38f-3097c0f91a1e",
+                  "rendered_codepoints": [
+                    50,
+                    87
+                  ],
+                  "unbound_entity_count": 0
+                },
+                "weld_id": "8940b090-2040-4396-b579-d299a38e169a",
+                "png_size": 62838,
+                "png_sha256": "a8170d9503e918bd4511907772af3142b617e314e42eb7c2b0221602784b0454",
+                "representation_id": "0a8b8bcb-b5fe-4b0b-a38f-3097c0f91a1e"
+              },
+              {
+                "file": "detail-0003.png",
+                "receipt": {
+                  "pan": {
+                    "x": 3283.017110753809,
+                    "y": 112.26187085933213
+                  },
+                  "zoom": 98.49560960160117,
+                  "roles": {
+                    "label_id": 6,
+                    "leader_id": null,
+                    "entity_ids": [
+                      5
+                    ]
+                  },
+                  "schema": "vemcad-weld-png-detail-render/2",
+                  "extents": {
+                    "maxX": -12.957468879668049,
+                    "maxY": 14.09459461512902,
+                    "minX": -29.188796680497923,
+                    "minY": -0.7664012354933867
+                  },
+                  "weld_id": "2f18ba36-5639-4d44-9be9-8fa89e7123b6",
+                  "renderer": "vemcad-weld-layout-detail-png/2",
+                  "width_px": 2400,
+                  "height_px": 1600,
+                  "view_kind": "detail",
+                  "view_name": "正视折线",
+                  "is_primary": true,
+                  "padding_px": 80,
+                  "font_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+                  "source_unit": "mm",
+                  "layout_state": "compiled",
+                  "world_viewport": {
+                    "maxX": -8.965040313222797,
+                    "maxY": 15.104613648855295,
+                    "minX": -33.33160862735997,
+                    "minY": -1.1397652272361505
+                  },
+                  "unbound_weld_ids": [],
+                  "included_weld_ids": [
+                    "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+                  ],
+                  "representation_id": "f3264f73-5ba3-4137-879d-18b08b6f5e80",
+                  "rendered_codepoints": [
+                    51,
+                    87
+                  ],
+                  "unbound_entity_count": 0
+                },
+                "weld_id": "2f18ba36-5639-4d44-9be9-8fa89e7123b6",
+                "png_size": 52039,
+                "png_sha256": "ca5d92748076297d0bd9373987b2091782e2f9aa8e5858b5314b24d54886dd2c",
+                "representation_id": "f3264f73-5ba3-4137-879d-18b08b6f5e80"
+              }
+            ],
+            "excluded_weld_ids": [],
+            "included_weld_ids": [
+              "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+              "8940b090-2040-4396-b579-d299a38e169a",
+              "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+            ]
+          },
+          "excluded_weld_ids": [],
+          "included_weld_ids": [
+            "cbef4c7e-acff-482a-9c54-c5dd2b8c3743",
+            "8940b090-2040-4396-b579-d299a38e169a",
+            "2f18ba36-5639-4d44-9be9-8fa89e7123b6"
+          ],
+          "plan_content_hash": "536269b1c4be3170f17149166993dbf2e12aa2d0da18f3239d9171a89cee2bfa",
+          "review_generation_id": "70ad88b8-75c9-49e1-8773-af7a6b284012"
+        },
+        "decision": null
+      },
+      "action": "submit",
+      "from_state": "draft",
+      "to_state": "pending",
+      "note": "",
+      "actor": {
+        "auth_user_id": 1,
+        "display_name": "real-api-author",
+        "rbac_user_id": 101
+      },
+      "created_at": "2026-10-12T02:03:14.580912+00:00"
+    }
+  ]
+}

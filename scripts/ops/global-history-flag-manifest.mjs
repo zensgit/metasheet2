@@ -48,6 +48,26 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'WELDING_READ_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose: 'Default OFF. Exact true enables dedicated JWKS, current-session authority exchange, and finite welding plan reads; grants no domain write operations.',
+    source: 'packages/core-backend/src/integrations/welding/provider.ts#weldingEnabled; packages/core-backend/src/routes/welding.ts#weldingPreflight',
+  },
+  {
+    key: 'WELDING_WRITE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['WELDING_READ_ENABLED'],
+    conflictsWith: [],
+    danger: 'high',
+    purpose: 'Default OFF. Exact true plus the welding read gate permits only finite welding plan mutations, subject to fresh native and Yuantus authorization.',
+    source: 'packages/core-backend/src/integrations/welding/provider.ts#weldingWriteAvailable; packages/core-backend/src/routes/welding.ts#weldingPreflight',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',

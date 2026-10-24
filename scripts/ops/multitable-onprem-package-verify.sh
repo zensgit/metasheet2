@@ -981,6 +981,8 @@ required=(
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260516113000_repair_onprem_multitable_record_create.js"
+  "packages/core-backend/src/db/migrations/20250925_create_view_tables.sql"
+  "packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql"
   "packages/core-backend/package.json"
   "packages/core-backend/scripts/smoke-sqlserver.ts"
   "packages/openapi/dist-sdk/package.json"

@@ -475,6 +475,70 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data.features.tasks).toBe(expected)
   })
 
+  const WELDING_FLAG_CASES = [
+    ['unset', undefined, undefined, false, false],
+    ['empty', '', '', false, false],
+    ['uppercase', 'TRUE', 'TRUE', false, false],
+    ['numeric', '1', '1', false, false],
+    ['leading space', ' true', 'true', false, false],
+    ['trailing space', 'true ', 'true', false, false],
+    ['read off, write on', 'false', 'true', false, false],
+    ['read on, write unset', 'true', undefined, true, false],
+    ['read on, write uppercase', 'true', 'TRUE', true, false],
+    ['read on, write off', 'true', 'false', true, false],
+    ['both exact true', 'true', 'true', true, true],
+  ] as const
+
+  describe.each(['login', 'me'] as const)('welding flags on /%s', (endpoint) => {
+    it.each(WELDING_FLAG_CASES)('%s is explicit and not inferred from PLM or administrator', async (_label, read, write, expectedRead, expectedWrite) => {
+      vi.stubEnv('PRODUCT_MODE', 'plm-workbench')
+      vi.stubEnv('ENABLE_PLM', 'true')
+      vi.stubEnv('WELDING_READ_ENABLED', read)
+      vi.stubEnv('WELDING_WRITE_ENABLED', write)
+      const user = {
+        id: 'user-1',
+        email: 'admin@example.com',
+        name: 'Admin',
+        role: 'admin',
+        permissions: ['welding:admin', 'attendance:admin'],
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      }
+      authServiceMocks.login.mockResolvedValue({ user, token: 'jwt-login-token' })
+      authServiceMocks.verifyToken.mockResolvedValue(user)
+      const response = endpoint === 'login'
+        ? await invokeRoute('post', '/login', { body: { email: user.email, password: 'WelcomePass9A' } })
+        : await invokeRoute('get', '/me', { headers: { authorization: 'Bearer live-token' } })
+      expect(response.statusCode).toBe(200)
+      expect((response.body as Record<string, any>).data.features).toMatchObject({
+        plm: true,
+        attendanceAdmin: true,
+        weldingRead: expectedRead,
+        weldingWrite: expectedWrite,
+      })
+    })
+  })
+
+  it.each(['login', 'me'] as const)('mirrors welding flags on /%s for an ordinary user without inferring PLM or business permissions', async (endpoint) => {
+    vi.stubEnv('PRODUCT_MODE', 'platform')
+    vi.stubEnv('ENABLE_PLM', '0')
+    vi.stubEnv('WELDING_READ_ENABLED', 'true')
+    vi.stubEnv('WELDING_WRITE_ENABLED', 'true')
+    const user = {
+      id: 'user-1', email: 'user@example.com', name: 'User', role: 'user', permissions: [],
+      created_at: new Date('2026-03-13T00:00:00.000Z'), updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    }
+    authServiceMocks.login.mockResolvedValue({ user, token: 'jwt-login-token' })
+    authServiceMocks.verifyToken.mockResolvedValue(user)
+    const response = endpoint === 'login'
+      ? await invokeRoute('post', '/login', { body: { email: user.email, password: 'WelcomePass9A' } })
+      : await invokeRoute('get', '/me', { headers: { authorization: 'Bearer live-token' } })
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features).toMatchObject({
+      plm: false, attendanceAdmin: false, weldingRead: true, weldingWrite: true,
+    })
+  })
+
   it('accepts a generic identifier payload for login', async () => {
     authServiceMocks.login.mockResolvedValue({
       user: {

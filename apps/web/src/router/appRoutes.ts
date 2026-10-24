@@ -243,6 +243,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'PLM Audit', titleZh: 'PLM 审计', requiresAuth: true, requiredFeature: 'plm' }
   },
   {
+    path: '/plm/welding',
+    name: 'plm-welding',
+    component: () => import('../views/welding/WeldingWorkbenchView.vue'),
+    meta: { title: 'Welding Workbench', titleZh: '焊接工作台', requiresAuth: true, requiredFeature: 'plm' }
+  },
+  {
     // PLM-COLLAB P3-D2: token-bound BOM-review embed. Bare page (no shell, no metasheet session) --
     // it is authed by a PLM-minted embed token delivered via postMessage from an allowlisted parent,
     // NOT by a metasheet session. Mirrors the public-form route's no-session meta.

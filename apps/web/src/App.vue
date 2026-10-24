@@ -11,6 +11,7 @@
           <template v-if="plmWorkbenchFocused">
             <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+            <router-link v-if="canUseWelding" to="/plm/welding" class="nav-link">{{ navLabels.welding }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
             <!-- P1b slice 1: the 待办 badge is a SIBLING of the link, never a child of it, so the
                  nav link's own text stays exactly the label (see approvalNavTodoBadge.spec.ts).
@@ -96,6 +97,7 @@
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+            <router-link v-if="canUseWelding" to="/plm/welding" class="nav-link">{{ navLabels.welding }}</router-link>
           </template>
         </template>
       </div>
@@ -209,6 +211,7 @@ const isLoggedIn = computed(() => {
   return Boolean(getToken())
 })
 const canUsePlm = computed(() => hasFeature('plm'))
+const canUseWelding = computed(() => canUsePlm.value && hasFeature('weldingRead'))
 const navLabels = computed(() => {
   if (isZh.value) {
     return {
@@ -236,6 +239,7 @@ const navLabels = computed(() => {
       dataSources: '外接数据源',
       plugins: '插件',
       plm: 'PLM',
+      welding: '焊接工作台',
       audit: '审计',
       plmWorkbench: 'PLM 工作台',
       myDelegation: '我的委托',
@@ -266,6 +270,7 @@ const navLabels = computed(() => {
     dataSources: 'Data Sources',
     plugins: 'Plugins',
     plm: 'PLM',
+    welding: 'Welding Workbench',
     audit: 'Audit',
     plmWorkbench: 'PLM Workbench',
     myDelegation: 'My Delegation',

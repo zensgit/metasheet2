@@ -1,0 +1,946 @@
+{
+  "name": "WeldInput.filler",
+  "request": {
+    "schema_version": 1,
+    "product": {
+      "item_id": "product",
+      "version_id": "product-v1"
+    },
+    "drawing": {
+      "item_id": "drawing",
+      "version_id": "drawing-v1",
+      "file_id": "drawing-file",
+      "file_role": "drawing",
+      "expected_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "bom": null,
+    "overlay": {
+      "schema": "vemcad-weld-overlay/3",
+      "snapshot": {
+        "nextEntityId": 103,
+        "nextLayerId": 1,
+        "nextConstraintId": 1,
+        "layers": [
+          {
+            "id": 0,
+            "name": "0",
+            "visible": true,
+            "locked": false,
+            "printable": true,
+            "frozen": false,
+            "construction": false,
+            "color": "#d0d7de",
+            "lineType": "CONTINUOUS",
+            "lineWeight": 0.0
+          }
+        ],
+        "entities": [
+          {
+            "id": 101,
+            "layerId": 0,
+            "visible": true,
+            "color": "#2c3e50",
+            "name": "",
+            "lineType": "CONTINUOUS",
+            "lineWeight": 0.0,
+            "lineWeightSource": "BYLAYER",
+            "lineTypeScale": 1.0,
+            "lineTypeScaleSource": "DEFAULT",
+            "type": "line",
+            "start": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "end": {
+              "x": 300.0,
+              "y": 0.0
+            }
+          },
+          {
+            "id": 102,
+            "layerId": 0,
+            "visible": true,
+            "color": "#2c3e50",
+            "name": "",
+            "lineType": "CONTINUOUS",
+            "lineWeight": 0.0,
+            "lineWeightSource": "BYLAYER",
+            "lineTypeScale": 1.0,
+            "lineTypeScaleSource": "DEFAULT",
+            "type": "line",
+            "start": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "end": {
+              "x": 300.0,
+              "y": 0.0
+            }
+          }
+        ],
+        "constraints": [],
+        "meta": {
+          "schema": "vemcad-web-2d-v1",
+          "unit": "mm",
+          "unitDeclared": true,
+          "unitScale": 1,
+          "label": "",
+          "author": "",
+          "comment": "",
+          "currentSpace": 0,
+          "currentLayout": "Model"
+        }
+      },
+      "bindings": [
+        {
+          "weld_id": "weld-1",
+          "primary_representation_id": "rep-front",
+          "representations": [
+            {
+              "representation_id": "rep-front",
+              "view_name": "主视图",
+              "entity_ids": [
+                101
+              ],
+              "label_id": null,
+              "leader_id": null
+            },
+            {
+              "representation_id": "rep-back",
+              "view_name": "背视图",
+              "entity_ids": [
+                102
+              ],
+              "label_id": null,
+              "leader_id": null
+            }
+          ]
+        }
+      ]
+    },
+    "welds": [
+      {
+        "weld_id": "weld-1",
+        "display_no": "W-01",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-2",
+        "display_no": "W-02",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-3",
+        "display_no": "W-03",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-4",
+        "display_no": "W-04",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-5",
+        "display_no": "W-05",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-6",
+        "display_no": "W-06",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-7",
+        "display_no": "W-07",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-8",
+        "display_no": "W-08",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-9",
+        "display_no": "W-09",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-10",
+        "display_no": "W-10",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      }
+    ],
+    "process_refs": []
+  },
+  "canonical": {
+    "schema_version": 1,
+    "product": {
+      "item_id": "product",
+      "version_id": "product-v1"
+    },
+    "drawing": {
+      "item_id": "drawing",
+      "version_id": "drawing-v1",
+      "file_id": "drawing-file",
+      "file_role": "drawing",
+      "expected_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "bom": null,
+    "overlay": {
+      "schema": "vemcad-weld-overlay/3",
+      "snapshot": {
+        "nextEntityId": 103,
+        "nextLayerId": 1,
+        "nextConstraintId": 1,
+        "layers": [
+          {
+            "id": 0,
+            "name": "0",
+            "visible": true,
+            "locked": false,
+            "printable": true,
+            "frozen": false,
+            "construction": false,
+            "color": "#d0d7de",
+            "lineType": "CONTINUOUS",
+            "lineWeight": 0.0
+          }
+        ],
+        "entities": [
+          {
+            "id": 101,
+            "layerId": 0,
+            "visible": true,
+            "color": "#2c3e50",
+            "name": "",
+            "lineType": "CONTINUOUS",
+            "lineWeight": 0.0,
+            "lineWeightSource": "BYLAYER",
+            "lineTypeScale": 1.0,
+            "lineTypeScaleSource": "DEFAULT",
+            "type": "line",
+            "start": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "end": {
+              "x": 300.0,
+              "y": 0.0
+            }
+          },
+          {
+            "id": 102,
+            "layerId": 0,
+            "visible": true,
+            "color": "#2c3e50",
+            "name": "",
+            "lineType": "CONTINUOUS",
+            "lineWeight": 0.0,
+            "lineWeightSource": "BYLAYER",
+            "lineTypeScale": 1.0,
+            "lineTypeScaleSource": "DEFAULT",
+            "type": "line",
+            "start": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "end": {
+              "x": 300.0,
+              "y": 0.0
+            }
+          }
+        ],
+        "constraints": [],
+        "meta": {
+          "schema": "vemcad-web-2d-v1",
+          "unit": "mm",
+          "unitDeclared": true,
+          "unitScale": 1,
+          "label": "",
+          "author": "",
+          "comment": "",
+          "currentSpace": 0,
+          "currentLayout": "Model"
+        }
+      },
+      "bindings": [
+        {
+          "weld_id": "weld-1",
+          "primary_representation_id": "rep-front",
+          "representations": [
+            {
+              "representation_id": "rep-front",
+              "view_name": "主视图",
+              "entity_ids": [
+                101
+              ],
+              "label_id": null,
+              "leader_id": null
+            },
+            {
+              "representation_id": "rep-back",
+              "view_name": "背视图",
+              "entity_ids": [
+                102
+              ],
+              "label_id": null,
+              "leader_id": null
+            }
+          ]
+        }
+      ]
+    },
+    "welds": [
+      {
+        "weld_id": "weld-1",
+        "display_no": "W-01",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-2",
+        "display_no": "W-02",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-3",
+        "display_no": "W-03",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-4",
+        "display_no": "W-04",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-5",
+        "display_no": "W-05",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-6",
+        "display_no": "W-06",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-7",
+        "display_no": "W-07",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-8",
+        "display_no": "W-08",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-9",
+        "display_no": "W-09",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      },
+      {
+        "weld_id": "weld-10",
+        "display_no": "W-10",
+        "location": "",
+        "joint_type": "demonstration",
+        "method": "SMAW",
+        "material_a": "DEMO-A",
+        "material_b": "DEMO-B",
+        "filler": "",
+        "thickness_a": null,
+        "thickness_b": null,
+        "manufacturing_length": {
+          "value": 100.0,
+          "unit": "mm"
+        },
+        "measured_length": {
+          "value": 80.0,
+          "unit": "mm"
+        },
+        "passes": [
+          {
+            "sequence": 1,
+            "method": "",
+            "filler": "",
+            "current": {
+              "value": 100.0,
+              "unit": "A"
+            },
+            "voltage": null,
+            "speed": null
+          }
+        ],
+        "welding_requirements": "",
+        "inspection_requirements": ""
+      }
+    ],
+    "process_refs": []
+  }
+}

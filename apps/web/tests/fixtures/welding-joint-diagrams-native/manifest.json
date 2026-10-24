@@ -1,0 +1,126 @@
+{
+  "schema": "metasheet.synthetic_joint_diagrams/1",
+  "pillow": "12.0.0",
+  "fixtures": [
+    {
+      "name": "corners.png",
+      "format": "png",
+      "mime_type": "image/png",
+      "exif_orientation": 1,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 96,
+      "display_height": 64,
+      "bytes": 234,
+      "sha256": "30af19468ca96a04aa8ed990f002c0b21b04aaad26d451f58c0992ce02c1eff5"
+    },
+    {
+      "name": "corners.webp",
+      "format": "webp",
+      "mime_type": "image/webp",
+      "exif_orientation": 1,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 96,
+      "display_height": 64,
+      "bytes": 76,
+      "sha256": "44bd350703b5108a7e99bbf4109e826a82578d887057657004bc6c8f3287db55"
+    },
+    {
+      "name": "corners-exif-1.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 1,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 96,
+      "display_height": 64,
+      "bytes": 925,
+      "sha256": "f5779f514edb6ab80f6e09f4264f07aefc85ec70a1ac52c262299b8d8de1cdf8"
+    },
+    {
+      "name": "corners-exif-2.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 2,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 96,
+      "display_height": 64,
+      "bytes": 925,
+      "sha256": "93ef9419544e47961a2a1641b082d24c1a5a9fb659b3a8ad02d8490a007c195f"
+    },
+    {
+      "name": "corners-exif-3.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 3,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 96,
+      "display_height": 64,
+      "bytes": 925,
+      "sha256": "07c03e4cd3051bbe1a9f7a32ba92483f243deeced1abfefeb962fe266fe11fd5"
+    },
+    {
+      "name": "corners-exif-4.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 4,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 96,
+      "display_height": 64,
+      "bytes": 925,
+      "sha256": "3b4d81db55a1046c2b4e8a3be33deea6be7cd9422b568ba1cb9d8aa0c0612bc0"
+    },
+    {
+      "name": "corners-exif-5.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 5,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 64,
+      "display_height": 96,
+      "bytes": 925,
+      "sha256": "bcf1e3f66589275617c5a6703b3bab1ead6ef27c5a11c797b5a2de303ac54b0d"
+    },
+    {
+      "name": "corners-exif-6.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 6,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 64,
+      "display_height": 96,
+      "bytes": 925,
+      "sha256": "13408a5612169281d8564609a240edfebc3b14337fcd201a37d3d54638e0aac5"
+    },
+    {
+      "name": "corners-exif-7.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 7,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 64,
+      "display_height": 96,
+      "bytes": 925,
+      "sha256": "9f3239dc2c5ddb18c05011d31622abfd16b01b77763575be1d28a9ad201167f3"
+    },
+    {
+      "name": "corners-exif-8.jpg",
+      "format": "jpeg",
+      "mime_type": "image/jpeg",
+      "exif_orientation": 8,
+      "encoded_width": 96,
+      "encoded_height": 64,
+      "display_width": 64,
+      "display_height": 96,
+      "bytes": 925,
+      "sha256": "950014f5dcb8c4a2d32c362e3c7f0d07bc69e2e31641b13b3e4db8120d123bbe"
+    }
+  ]
+}

@@ -335,6 +335,8 @@ import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
+import { weldingPreflight, weldingPlanRawBody, weldingRouter } from './routes/welding'
+import { weldingCadPreflight, weldingCadRawBody, weldingCadHostRouter } from './routes/welding-cad-host'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import {
   createElearningAppInstallationRouter,
@@ -1752,6 +1754,11 @@ export class MetaSheetServer {
       this.app.use(elearningPilotRuntime.router)
     }
 
+    this.app.use(weldingPreflight)
+    this.app.use(weldingPlanRawBody)
+    this.app.use(weldingCadPreflight)
+    this.app.use(weldingCadRawBody)
+
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
@@ -2142,6 +2149,8 @@ export class MetaSheetServer {
       }
     })
 
+    this.app.use(weldingRouter())
+    this.app.use(weldingCadHostRouter())
     this.app.use('/api/platform/apps', createPlatformAppsRouter({
       pluginLoader: this.pluginLoader,
       pluginStatus: this.pluginStatus,

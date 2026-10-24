@@ -11,6 +11,68 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    WeldingCatalogCursor:
+      type: string
+      minLength: 66
+      maxLength: 4096
+      pattern: '^[A-Za-z0-9_-]+\.[0-9a-f]{64}$'
+      description: Opaque signed cursor bound to the current identity, exact endpoint and filters; never an access grant.
+    WeldingResourceSummary:
+      type: object
+      additionalProperties: false
+      required: [resource_id, item_version_id, version_label, state, name, number, kind, content_hash]
+      properties:
+        resource_id: { type: string, minLength: 1, maxLength: 64 }
+        item_version_id: { type: string, minLength: 1, maxLength: 64 }
+        version_label: { type: string, maxLength: 128 }
+        state: { type: string, maxLength: 128 }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        number: { type: string, minLength: 1, maxLength: 128 }
+        kind: { type: string, enum: [wps, pqr, parameter_reference, requirements, material, filler, joint_diagram] }
+        content_hash: { type: string, pattern: '^[0-9a-f]{64}$' }
+    WeldingResourceCatalog:
+      type: object
+      additionalProperties: false
+      required: [schema, items, next_cursor]
+      properties:
+        schema: { type: string, enum: [yuantus.welding_resource_catalog/1] }
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/WeldingResourceSummary' } }
+        next_cursor: { type: string, nullable: true, maxLength: 4096, pattern: '^[A-Za-z0-9_-]+\.[0-9a-f]{64}$' }
+    WeldingResourceVersionCatalog:
+      type: object
+      additionalProperties: false
+      required: [schema, resource_id, current_version_id, items, next_cursor]
+      properties:
+        schema: { type: string, enum: [yuantus.welding_resource_versions/1] }
+        resource_id: { type: string, minLength: 1, maxLength: 64 }
+        current_version_id: { type: string, nullable: true, minLength: 1, maxLength: 64 }
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/WeldingResourceSummary' } }
+        next_cursor: { type: string, nullable: true, maxLength: 4096, pattern: '^[A-Za-z0-9_-]+\.[0-9a-f]{64}$' }
+    WeldingDocumentCandidate:
+      type: object
+      additionalProperties: false
+      required: [item_id, version_id, file_id, file_role, title, version_label, state, is_released, file_name, checksum, fingerprint]
+      properties:
+        item_id: { type: string, minLength: 1, maxLength: 64 }
+        version_id: { type: string, minLength: 1, maxLength: 64 }
+        file_id: { type: string, minLength: 1, maxLength: 64 }
+        file_role: { type: string, enum: [attachment, reference] }
+        title: { type: string }
+        version_label: { type: string, nullable: true }
+        state: { type: string, nullable: true }
+        is_released: { type: boolean }
+        file_name: { type: string }
+        checksum: { type: string, pattern: '^[0-9a-f]{64}$' }
+        fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+    WeldingProcessReferenceCatalog:
+      type: object
+      additionalProperties: false
+      required: [schema, items, limit, next_cursor]
+      properties:
+        schema: { type: string, enum: [yuantus.welding_process_reference_catalog/1] }
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/WeldingDocumentCandidate' } }
+        limit: { type: integer, enum: [20] }
+        next_cursor: { type: string, nullable: true, maxLength: 4096, pattern: '^[A-Za-z0-9_-]+\.[0-9a-f]{64}$' }
     StandardResponse:
       type: object
       properties:

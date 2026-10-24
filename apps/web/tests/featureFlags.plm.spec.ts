@@ -59,3 +59,26 @@ describe('featureFlags plm gating', () => {
     expect(flags.isPlmWorkbenchFocused()).toBe(false)
   })
 })
+
+describe('welding flags only mirror explicit backend booleans', () => {
+  beforeEach(() => { localStorage.clear(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs() })
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); localStorage.clear() })
+  it.each([
+    [{}, false, false],
+    [{ weldingRead: false, weldingWrite: true }, false, false],
+    [{ weldingRead: true, weldingWrite: false }, true, false],
+    [{ weldingRead: true, weldingWrite: true }, true, true],
+    [{ weldingRead: 'true', weldingWrite: 'true' }, false, false],
+  ])('backend %j resolves read=%s/write=%s without PLM/admin/override inference', async (patch, read, write) => {
+    localStorage.setItem('auth_token', 'native-session')
+    localStorage.setItem('metasheet_features', JSON.stringify({ plm: true, weldingRead: true, weldingWrite: true }))
+    vi.stubEnv('DEV', true)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: { user: { id: 'native', role: 'admin' }, features: { attendance: false, workflow: false, plm: true, mode: 'plm-workbench', ...patch } } }), { status: 200 })))
+    const { useFeatureFlags } = await import('../src/stores/featureFlags')
+    const flags = useFeatureFlags()
+    await flags.loadProductFeatures(true)
+    expect(flags.hasFeature('plm')).toBe(true)
+    expect(flags.hasFeature('weldingRead')).toBe(read)
+    expect(flags.hasFeature('weldingWrite')).toBe(write)
+  })
+})

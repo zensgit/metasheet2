@@ -1,0 +1,1209 @@
+import { resourcePath, validateResourceOriginal, validateResourceAck, validateResourceMaintenanceRecord, resourceCatalogQuery, resourceVersionQuery, resourceDocumentQuery,
+  validateResourceCatalog, validateResourceVersionCatalog, validateResourceDocumentCatalog, RESOURCE_CATALOG_BYTES,
+  resourceDiagram, type ResourceMaintenanceRecord, type ResourceCatalogQuery, type CreateResourceRequest, type ReviseResourceRequest, type ResourceBasis } from './resourceContracts'
+import { apiFetch, type ApiFetchOptions } from '../../utils/api'
+import { readAuthSessionSignature, readStoredToken } from '../../composables/authPrincipal'
+import { copyImportBytes, importFormat, validateImportIssues, validateImportPending, validateImportPreview, validateImportReceipt,
+  IMPORT_DEADLINE_MS, IMPORT_PREVIEW_BYTES, IMPORT_RESPONSE_BYTES, type ResourceImportFormat, type ResourceImportIssue, type ResourceImportPending } from './resourceImportContracts'
+import {
+  clone, equal, exact, isHash, isObject, jsonBytes, need, safeId, sourceId, text, validateOwner, validatePayload,
+  validateRecovery, validateAssemblySide, validateAssemblyChange, DRAFT_BYTES, type AssemblySide, type PlanPayload, type PlanRecoveryRecord, type WeldingOwner,
+} from './planRecovery'
+
+export interface PlanRecord extends Record<string, unknown> {
+  plan_id: string; item_version_id: string; draft_seq: number; content_hash: string
+  name: string; number: string; state: string; version_label: string
+  payload: PlanPayload; sources: Record<string, unknown>
+}
+export interface PlanCandidate extends Record<string, unknown> {
+  item_id: string; version_id: string; name: string; number: string; version_label: string | null
+}
+export interface ReuseBomCandidate {
+  baseline_id: string; fingerprint: string; name: string; number: string
+}
+export interface BomOccurrence {
+  path: string[]; item_id: string; version_id: string; name: string; number: string; version_label: string
+  quantity?: string; uom?: string; find_number?: string
+}
+export interface BomProjection {
+  baseline_id: string; fingerprint: string; name: string; number: string; captured_depth: number
+  root: BomOccurrence; occurrences: BomOccurrence[]
+}
+export interface AssemblyView {
+  sides: Record<'a' | 'b', { selection: AssemblySide; facts: Record<string, unknown> | null; provenance: Record<string, unknown> | null; unknown: string[] }>
+  unknown: string[]
+}
+export interface AssemblyPreview {
+  schema: 'yuantus.welding_assembly_preview/1'; plan_id: string; item_version_id: string; draft_seq: number; content_hash: string
+  from_fingerprint: string; to_fingerprint: string
+  affected_welds: Array<{ weld_id: string; reason_codes: string[]; before: AssemblyView | null; after: AssemblyView | null; state: 'known' | 'unknown' }>
+}
+function projectionText(value: unknown, max: number): asserts value is string {
+  text(value); need(Array.from(value).length <= max)
+}
+function projectionId(value: unknown): asserts value is string {
+  projectionText(value, 64)
+  const chars = Array.from(value), whitespace = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/
+  need(chars.length > 0 && !whitespace.test(chars[0]) && !whitespace.test(chars[chars.length - 1]))
+}
+function projectionPath(value: unknown): asserts value is string[] {
+  need(Array.isArray(value) && value.length <= 20); value.forEach(projectionId)
+}
+export function validateBomProjection(value: unknown, product?: { item_id: string; version_id: string }): BomProjection {
+  exact(value, ['baseline_id', 'fingerprint', 'name', 'number', 'captured_depth', 'root', 'occurrences'])
+  projectionId(value.baseline_id); need(isHash(value.fingerprint))
+  projectionText(value.name, 256); projectionText(value.number, 256)
+  need(Number.isSafeInteger(value.captured_depth) && Array.isArray(value.occurrences) && value.occurrences.length <= 999)
+  const nodes = [value.root, ...value.occurrences], paths = new Set<string>()
+  for (const [index, node] of nodes.entries()) {
+    exact(node, ['path', 'item_id', 'version_id', 'name', 'number', 'version_label', ...(index ? ['quantity', 'uom', 'find_number'] : [])])
+    projectionPath(node.path); projectionId(node.item_id); projectionId(node.version_id)
+    projectionText(node.name, 256); projectionText(node.number, 256); projectionText(node.version_label, 64)
+    need(index ? node.path.length > 0 : node.path.length === 0)
+    if (index) { projectionText(node.quantity, 64); need(node.quantity.length > 0); projectionText(node.uom, 256); projectionText(node.find_number, 256) }
+    const key = JSON.stringify(node.path)
+    need(!paths.has(key) && (!index || paths.has(JSON.stringify(node.path.slice(0, -1)))))
+    paths.add(key)
+  }
+  need(isObject(value.root) && (!product || value.root.item_id === product.item_id && value.root.version_id === product.version_id))
+  need(new TextEncoder().encode(jsonBytes(value)).byteLength <= 1024 * 1024)
+  return clone(value) as unknown as BomProjection
+}
+function assemblyCodes(value: unknown): asserts value is string[] {
+  need(Array.isArray(value) && value.every(code => typeof code === 'string' && code.length > 0) && new Set(value).size === value.length)
+}
+function assemblyView(value: unknown): void {
+  if (value === null) return
+  exact(value, ['sides', 'unknown']); exact(value.sides, ['a', 'b']); assemblyCodes(value.unknown)
+  const unknown = new Set<string>()
+  for (const name of ['a', 'b']) {
+    const side = value.sides[name]
+    exact(side, ['selection', 'facts', 'provenance', 'unknown']); validateAssemblySide(side.selection); assemblyCodes(side.unknown)
+    side.unknown.forEach(code => unknown.add(code))
+    if (side.facts !== null) {
+      exact(side.facts, ['path', 'item_id', 'version_id'], ['quantity', 'uom', 'find_number'])
+      projectionPath(side.facts.path); projectionId(side.facts.item_id); projectionId(side.facts.version_id)
+      need(isObject(side.selection) && equal(side.facts.path, side.selection.path))
+      const nested = side.facts.path.length > 0
+      need(['quantity', 'uom', 'find_number'].every(key => Object.hasOwn(side.facts as object, key) === nested))
+      for (const key of ['quantity', 'uom', 'find_number']) if (Object.hasOwn(side.facts, key)) projectionText(side.facts[key], key === 'quantity' ? 64 : 256)
+    }
+    if (side.provenance !== null) {
+      exact(side.provenance, ['auth_actor_id', 'rbac_actor_id', 'draft_seq', 'item_version_id'])
+      for (const key of ['auth_actor_id', 'rbac_actor_id', 'draft_seq']) need(Number.isSafeInteger(side.provenance[key]) && (side.provenance[key] as number) >= 1)
+      safeId(side.provenance.item_version_id)
+    }
+  }
+  const a = value.sides.a, b = value.sides.b
+  need(isObject(a) && isObject(b) && isObject(a.selection) && isObject(b.selection) && !equal(a.selection.path, b.selection.path))
+  need(equal([...unknown].sort(), [...value.unknown].sort()))
+}
+export function validateAssemblyPreview(value: unknown, plan: string, version: string, body: Record<string, unknown>): AssemblyPreview {
+  const command = validateAssemblyChange(body.assembly_change), requestedPayload = validatePayload(body.payload)
+  exact(value, ['schema', 'plan_id', 'item_version_id', 'draft_seq', 'content_hash', 'from_fingerprint', 'to_fingerprint', 'affected_welds'])
+  need(value.schema === 'yuantus.welding_assembly_preview/1' && value.plan_id === plan && value.item_version_id === version
+    && Number.isSafeInteger(value.draft_seq) && (value.draft_seq as number) >= 1
+    && value.draft_seq === body.expected_draft_seq && value.content_hash === command.expected_content_hash
+    && value.from_fingerprint === command.from_fingerprint && value.to_fingerprint === command.to_fingerprint
+    && Array.isArray(value.affected_welds) && value.affected_welds.length <= 1000)
+  const welds = new Set<string>()
+  for (const row of value.affected_welds) {
+    exact(row, ['weld_id', 'reason_codes', 'before', 'after', 'state']); sourceId(row.weld_id); assemblyCodes(row.reason_codes); need(row.reason_codes.length > 0)
+    need(!welds.has(row.weld_id) && typeof row.state === 'string' && ['known', 'unknown'].includes(row.state)); welds.add(row.weld_id)
+    assemblyView(row.before); assemblyView(row.after)
+    const assembly = requestedPayload.welds.find(weld => weld.weld_id === row.weld_id)?.assembly
+    need((row.after === null) === !isObject(assembly))
+    if (isObject(row.after)) {
+      need(isObject(assembly) && isObject(row.after.sides))
+      for (const name of ['a', 'b']) {
+        const side = row.after.sides[name]
+        need(isObject(side) && equal(side.selection, assembly[name]))
+      }
+    }
+    if (isObject(row.after) && Array.isArray(row.after.unknown) && row.after.unknown.length) need(row.state === 'unknown')
+  }
+  return clone(value) as unknown as AssemblyPreview
+}
+export interface DrawingCandidate extends PlanCandidate {
+  file_id: string; file_role: 'drawing' | 'native_cad'; checksum: string
+}
+export interface RecoveryAuthority {
+  schema: 'yuantus.welding_plan_recovery_authority/1'
+  owner: WeldingOwner; record_id: string; current: PlanRecord | null; can_write: boolean; conflict: boolean
+}
+export interface SourceReviewItem extends Record<string, unknown> {
+  weld_id: string; present: boolean; state: 'pending' | 'confirmed'; expected_review_digest: string
+  reason_codes: string[]; view: Record<string, unknown>; baseline_view: Record<string, unknown>
+}
+export interface SourceReview extends Record<string, unknown> {
+  schema: 'yuantus.welding_source_review/1'; plan_id: string; item_version_id: string
+  draft_seq: number; content_hash: string; can_write: boolean; offset: number; limit: number; total: number
+  summary: Record<string, unknown> & { pending_count: number; removed_pending_count: number }
+  items: SourceReviewItem[]
+}
+export function validateSourceReview(value: unknown, plan: string, version: string, offset: number): SourceReview {
+  need(isObject(value) && value.schema === 'yuantus.welding_source_review/1' && value.plan_id === plan && value.item_version_id === version
+    && Number.isSafeInteger(value.draft_seq) && (value.draft_seq as number) >= 1 && isHash(value.content_hash)
+    && typeof value.can_write === 'boolean' && value.offset === offset && value.limit === 50
+    && Number.isSafeInteger(value.total) && (value.total as number) >= 0 && isObject(value.summary) && Array.isArray(value.items) && value.items.length <= 50)
+  for (const key of ['pending_count', 'removed_pending_count']) need(Number.isSafeInteger(value.summary[key]) && (value.summary[key] as number) >= 0)
+  const welds = new Set<string>()
+  for (const row of value.items) {
+    need(isObject(row)); sourceId(row.weld_id)
+    need(!welds.has(row.weld_id) && typeof row.present === 'boolean' && typeof row.state === 'string' && ['pending', 'confirmed'].includes(row.state)
+      && isHash(row.expected_review_digest) && Array.isArray(row.reason_codes) && row.reason_codes.every(code => typeof code === 'string')
+      && isObject(row.view) && isObject(row.baseline_view))
+    welds.add(row.weld_id)
+  }
+  return clone(value) as unknown as SourceReview
+}
+export interface RequestScope { accepts(): boolean; signal?: AbortSignal }
+export class WeldingPlanError extends Error {
+  readonly status: number
+  readonly code: string
+  constructor(message: string, status = 0, code = '') { super(message); this.status = status; this.code = code }
+}
+export class WeldingResourceImportError extends WeldingPlanError {
+  readonly issues: ResourceImportIssue[]
+  constructor(message: string, status = 0, code = '', issues: ResourceImportIssue[] = []) { super(message, status, code); this.issues = issues }
+}
+export function validatePlan(value: unknown, plan?: string, version?: string): PlanRecord {
+  need(isObject(value))
+  safeId(value.plan_id); safeId(value.item_version_id)
+  need((plan === undefined || value.plan_id === plan) && (version === undefined || value.item_version_id === version))
+  need(Number.isSafeInteger(value.draft_seq) && (value.draft_seq as number) >= 1 && isHash(value.content_hash))
+  text(value.name); text(value.number); text(value.version_label)
+  need(['Draft', 'InReview', 'Approved', 'Released', 'Superseded'].includes(String(value.state)) && isObject(value.sources))
+  validatePayload(value.payload)
+  return clone(value) as PlanRecord
+}
+export function validateSaveAck(value: unknown, record: PlanRecoveryRecord): PlanRecord {
+  record = validateRecovery(record)
+  need(record.pending)
+  const creating = record.draft.version_id === null
+  const ack = validatePlan(value, record.draft.plan_id, record.draft.version_id ?? undefined)
+  need(ack.draft_seq === (creating ? 1 : record.draft.base_draft_seq + 1), '保存回应序号不匹配，原请求仍待确认')
+  need(ack.state === 'Draft', '保存回执状态不匹配，原请求仍待确认')
+  if (creating)
+    need(ack.name === record.pending.body.name && ack.number === record.pending.body.number, '新建回执名称或编号不匹配，原请求仍待确认')
+  const requested = record.pending.body.payload as PlanPayload
+  if (isObject(requested.overlay) && requested.overlay.schema === 'vemcad-weld-overlay/3') {
+    need(ack.save_id === record.pending.body.save_id, '保存回执键不匹配，原请求仍待确认')
+  }
+  if (isObject(requested.overlay) && requested.overlay.schema === 'vemcad-weld-overlay/3' || Object.hasOwn(record.pending.body, 'review_resolution') || Object.hasOwn(record.pending.body, 'source_change')
+    || requested.assembly_format === 'yuantus.welding_assembly/1' || Object.hasOwn(record.pending.body, 'assembly_change') || Object.hasOwn(record.pending.body, 'assembly_cancel'))
+    need(equal(ack.payload, canonicalSavePayload(requested)), '保存回应正文不匹配，原请求仍待确认')
+  if (Object.hasOwn(record.pending.body, 'source_change')) {
+    const origin = ack.sources.overlay_origin
+    need(isObject(origin) && origin.schema === 'yuantus.welding_plan_cad_origin/1'
+      && origin.context_id === record.pending.body.overlay_context_id
+      && origin.owner_auth_user_id === record.owner.auth_user_id && origin.rbac_user_id === record.owner.rbac_user_id
+      && equal(origin.basis, { product: ack.payload.product, drawing: ack.payload.drawing }), '换图来源回执不匹配，原请求仍待确认')
+  }
+  return ack
+}
+function canonicalSavePayload(payload: PlanPayload): PlanPayload {
+  const value: PlanPayload = { bom: null, process_refs: [], ...clone(payload) }
+  if (value.drawing) value.drawing.expected_checksum = value.drawing.expected_checksum.toLowerCase()
+  value.welds = value.welds.map(weld => {
+    const row: Record<string, unknown> & { weld_id: string; display_no: string } = { location: '', joint_type: '', method: '', material_a: '', material_b: '', filler: '',
+      thickness_a: null, thickness_b: null, manufacturing_length: null, measured_length: null,
+      welding_requirements: '', inspection_requirements: '', passes: [], ...weld }
+    need(Array.isArray(row.passes))
+    row.passes = row.passes.map(pass => { need(isObject(pass)); return { method: '', filler: '', current: null, voltage: null, speed: null, ...pass } })
+    return row
+  })
+  if (Array.isArray(value.resource_refs)) {
+    if (!value.resource_refs.length) delete value.resource_refs
+    else value.resource_refs.forEach(ref => { need(isObject(ref) && Array.isArray(ref.selected_fields)); ref.selected_fields.sort() })
+  }
+  return value
+}
+export const WELDING_CAD_PIN = 'b05b3684664f215ced015f09f23d300fcccf8ba49ea4e8826e1a373070083bb8'
+export interface CadContext extends Record<string, unknown> {
+  context_id: string; plan_id: string; item_version_id: string; draft_seq: number; expires_at: string
+  unit: 'mm' | 'in'; editor_url: string; cadgf_document: Record<string, unknown>; origin: Record<string, unknown>
+}
+export interface SourcePreparation extends CadContext {
+  source_change: { expected_content_hash: string; preparation_digest: string
+    before: { payload: PlanPayload; sources: Record<string, unknown>; document: Record<string, unknown> }
+    after: { payload: PlanPayload; sources: Record<string, unknown>; document: Record<string, unknown> } }
+}
+export function validateSourcePreparation(value: unknown, point: PlanRecord, drawing: NonNullable<PlanPayload['drawing']>, owner: WeldingOwner, context?: string): SourcePreparation {
+  validateOwner(owner); validatePayload({ ...clone(point.payload), drawing })
+  need(isObject(value) && value.plan_id === point.plan_id && value.item_version_id === point.item_version_id
+    && value.draft_seq === point.draft_seq && typeof value.expires_at === 'string' && Date.parse(value.expires_at) > Date.now()
+    && ['mm', 'in'].includes(String(value.unit)) && isObject(value.origin) && isObject(value.cadgf_document))
+  safeId(value.context_id); need(context === undefined || value.context_id === context)
+  const origin = value.origin, basis = { product: point.payload.product, drawing }
+  need(origin.schema === 'yuantus.welding_plan_cad_origin/1' && origin.context_id === value.context_id
+    && origin.owner_auth_user_id === owner.auth_user_id && origin.rbac_user_id === owner.rbac_user_id
+    && equal(origin.basis, basis) && origin.bundle_sha256 === WELDING_CAD_PIN && origin.unit === value.unit
+    && value.editor_url === `/welding-cad/${WELDING_CAD_PIN}/welding-frame.html`
+    && isObject(origin.input) && origin.input.sha256 === value.input_sha256
+    && isObject(origin.document) && origin.document.sha256 === value.document_sha256 && equal(origin.source, value.source))
+  const change = value.source_change
+  exact(change, ['expected_content_hash', 'preparation_digest', 'before', 'after'])
+  need(change.expected_content_hash === point.content_hash && isHash(change.preparation_digest))
+  need(isObject(change.before) && isObject(change.after) && isObject(change.after.document) && isObject(change.after.sources))
+  for (const name of ['before', 'after'] as const) {
+    const side = change[name]
+    exact(side, ['payload', 'sources', 'document']); const payload = validatePayload(side.payload)
+    need(isObject(side.sources) && isObject(side.document) && isObject(side.document.cadgf_document)
+      && side.document.view_bundle_sha256 === WELDING_CAD_PIN && isObject(side.document.origin))
+    const witness = side.document.origin, target = payload.drawing
+    need(isObject(target) && isObject(witness.basis) && isObject(witness.source) && isObject(witness.input) && isObject(witness.document)
+      && ['yuantus.welding_plan_cad_origin/1', 'yuantus.welding_plan_cad_review_origin/1'].includes(String(witness.schema))
+      && isHash(witness.bundle_sha256) && isHash(witness.input.sha256) && witness.input.sha256 === target.expected_checksum
+      && isHash(witness.document.sha256) && isHash(witness.source.fingerprint) && ['mm', 'in'].includes(String(witness.unit))
+      && equal(witness.basis.drawing, target))
+    for (const key of ['input', 'document']) {
+      const descriptor = witness[key] as Record<string, unknown>
+      need(Number.isSafeInteger(descriptor.bytes) && Number(descriptor.bytes) >= 0)
+    }
+    need(isObject(side.sources.drawing) && isObject(side.sources.product))
+    need(isObject(payload.product) && side.sources.product.item_id === payload.product.item_id && side.sources.product.version_id === payload.product.version_id)
+    need(isObject(witness.basis.product)); safeId(witness.basis.product.version_id)
+    for (const key of ['item_id', 'version_id', 'file_id', 'file_role'] as const)
+      need(witness.source[key] === target[key] && side.sources.drawing[key] === target[key])
+    need(typeof witness.source.checksum === 'string' && witness.source.checksum.toLowerCase() === target.expected_checksum
+      && typeof side.sources.drawing.checksum === 'string' && side.sources.drawing.checksum.toLowerCase() === target.expected_checksum)
+    need(equal(witness.basis.product, payload.product) || name === 'before' && witness.schema === 'yuantus.welding_plan_cad_origin/1'
+      && isObject(witness.basis.product) && isObject(payload.product) && witness.basis.product.item_id === payload.product.item_id)
+    if (side.sources.overlay_origin != null) need(equal(side.sources.overlay_origin, witness))
+    else need(witness.schema === 'yuantus.welding_plan_cad_review_origin/1')
+  }
+  need(equal(change.before.payload, point.payload) && equal(change.before.sources, point.sources)
+    && equal(change.after.payload, { ...point.payload, drawing }) && !equal(drawing, point.payload.drawing)
+    && equal(change.after.document.origin, origin) && equal(change.after.sources.overlay_origin, origin)
+    && equal(change.after.document.cadgf_document, value.cadgf_document), '换图准备与保存点不一致')
+  return clone(value) as unknown as SourcePreparation
+}
+export interface ResourceRecord extends Record<string, unknown> {
+  resource_id: string; item_version_id: string; content_hash: string; kind: string
+  payload: { schema_version: number; kind: string; suggested_fields: Record<string, unknown> }
+}
+export const resourceFields: Record<string, string> = { method: '焊接方法', material_a: '母材 A', material_b: '母材 B', filler: '填充材料', joint_type: '接头形式', thickness_a: '板厚 A', thickness_b: '板厚 B', welding_requirements: '焊接要求', inspection_requirements: '检验要求', passes: '层道（整体替换）' }
+export function validateResource(value: unknown, resource: string, version: string): ResourceRecord {
+  need(isObject(value) && value.resource_id === resource && value.item_version_id === version && isHash(value.content_hash)
+    && ['wps', 'pqr', 'parameter_reference', 'requirements', 'material', 'filler', 'joint_diagram'].includes(String(value.kind))
+    && isObject(value.payload) && value.payload.schema_version === 1 && value.payload.kind === value.kind && isObject(value.payload.suggested_fields))
+  const allowed: Record<string, string[]> = { parameter_reference: ['method', 'material_a', 'material_b', 'filler', 'joint_type', 'thickness_a', 'thickness_b', 'passes'], requirements: ['welding_requirements', 'inspection_requirements'], material: ['material_a', 'material_b'], filler: ['filler'], joint_diagram: ['joint_type'] }
+  need(Object.keys(value.payload.suggested_fields).every(key => Object.hasOwn(resourceFields, key) && (!allowed[String(value.kind)] || allowed[String(value.kind)].includes(key))))
+  return clone(value) as ResourceRecord
+}
+function candidate(value: unknown, drawing = false): PlanCandidate | DrawingCandidate {
+  need(isObject(value)); safeId(value.item_id); safeId(value.version_id)
+  text(value.name); text(value.number); need(value.version_label === null || typeof value.version_label === 'string')
+  if (drawing) {
+    safeId(value.file_id)
+    need(['drawing', 'native_cad'].includes(String(value.file_role)) && typeof value.checksum === 'string'
+      && /^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{64})$/.test(value.checksum))
+  }
+  return clone(value) as PlanCandidate | DrawingCandidate
+}
+const encoded = (value: string) => { safeId(value); return encodeURIComponent(value) }
+const planPath = (plan: string, version: string) => `/plans/${encoded(plan)}/versions/${encoded(version)}`
+const pairQuery = (product: { item_id: string; version_id: string }) => new URLSearchParams({ product_id: (safeId(product.item_id), product.item_id), product_version_id: (safeId(product.version_id), product.version_id) }).toString()
+export function parseWeldingEntry(search: string): { plan_id: string; version_id: string } | { product_id: string; product_version_id: string } | null {
+  for (const part of search.replace(/^\?/, '').split('&')) if (part) for (const value of part.split('=')) decodeURIComponent(value.replace(/\+/g, ' '))
+  const params = new URLSearchParams(search), keys = [...params.keys()]
+  if (!keys.length) return null
+  need(keys.every(key => ['plan_id', 'version_id', 'product_id', 'product_version_id'].includes(key) && params.getAll(key).length === 1))
+  const plan = params.has('plan_id') || params.has('version_id')
+  const pair = plan ? ['plan_id', 'version_id'] : ['product_id', 'product_version_id']
+  need(keys.length === 2 && pair.every(key => params.has(key)))
+  const values = pair.map(key => { const value = params.get(key)!; safeId(value); return value })
+  return plan ? { plan_id: values[0], version_id: values[1] } : { product_id: values[0], product_version_id: values[1] }
+}
+
+export interface TemplateOptions {
+  organization_name: string; header_text: string; footer_text: string
+  optional_columns: Array<'group_name' | 'classification' | 'filler'>
+  logo: null | { item_id: string; version_id: string; file_id: string; file_role: 'reference'; expected_checksum: string }
+}
+export interface RenderTemplate { id: 'welding-a4'; version: '1' | '2' | '3'; digest: string; name: string; available: boolean; unavailable_reason: string | null; default_options: TemplateOptions; options_schema: Record<string, unknown> }
+export interface CreateReviewRequest { request_id: string; expected_draft_seq: number; expected_content_hash: string; purpose: 'review'; template_id: 'welding-a4'; template_version: '1' | '2' | '3'; template_digest: string; template_options: TemplateOptions }
+export interface RetryReviewRequest { request_id: string; expected_attempt: number }
+export interface GenerationBasis {
+  generation_id: string; render_key: string; plan_id: string; item_version_id: string; draft_seq: number
+  plan_content_hash: string; generation_content_hash: string; purpose: 'review'
+  template: { id: 'welding-a4'; version: '1' | '2' | '3'; digest: string }
+}
+export interface GenerationAck extends GenerationBasis { schema: 'yuantus.welding_generation_ack/1'; request_id: string }
+export interface GenerationFile { format: 'pdf' | 'docx'; mime_type: string; byte_size: number; artifact_sha256: string }
+export interface ReviewGeneration extends GenerationBasis {
+  schema: 'yuantus.welding_plan_generation/1'; status: 'Queued' | 'Running' | 'Ready' | 'Failed'; attempt: number; created_at: string
+  review: { pending_count: number; unbound_count: number }; files: { pdf: GenerationFile | null; docx: GenerationFile | null }
+  error: null | { stage: string; code: string; message: string }
+}
+const basisKeys = ['generation_id', 'render_key', 'plan_id', 'item_version_id', 'draft_seq', 'plan_content_hash', 'generation_content_hash', 'purpose', 'template']
+const uuidId = (value: unknown) => { need(typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)); return value }
+const boundedText = (value: unknown, max: number) => { text(value); need(Array.from(value).length <= max) }
+const sequence = (value: unknown, minimum = 0) => need(Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= 2147483647)
+export const generationMime = (format: 'pdf' | 'docx') => format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+export function validateTemplateOptions(value: unknown): TemplateOptions {
+  exact(value, ['organization_name', 'header_text', 'footer_text', 'optional_columns', 'logo'])
+  boundedText(value.organization_name, 128); boundedText(value.header_text, 256); boundedText(value.footer_text, 256)
+  need(Array.isArray(value.optional_columns) && value.optional_columns.length <= 3 && new Set(value.optional_columns).size === value.optional_columns.length && value.optional_columns.every(key => ['group_name', 'classification', 'filler'].includes(key)))
+  if (value.logo !== null) {
+    exact(value.logo, ['item_id', 'version_id', 'file_id', 'file_role', 'expected_checksum'])
+    for (const key of ['item_id', 'version_id', 'file_id']) safeId(value.logo[key])
+    need(value.logo.file_role === 'reference' && isHash(value.logo.expected_checksum))
+  }
+  return clone(value) as unknown as TemplateOptions
+}
+export function validateCreateReview(value: unknown): CreateReviewRequest {
+  exact(value, ['request_id', 'expected_draft_seq', 'expected_content_hash', 'purpose', 'template_id', 'template_version', 'template_digest', 'template_options'])
+  uuidId(value.request_id); sequence(value.expected_draft_seq, 1)
+  need(isHash(value.expected_content_hash) && value.purpose === 'review' && value.template_id === 'welding-a4' && ['1', '2', '3'].includes(String(value.template_version)) && isHash(value.template_digest))
+  validateTemplateOptions(value.template_options)
+  return clone(value) as unknown as CreateReviewRequest
+}
+export function validateRetryReview(value: unknown): RetryReviewRequest {
+  exact(value, ['request_id', 'expected_attempt']); uuidId(value.request_id); sequence(value.expected_attempt)
+  return clone(value) as unknown as RetryReviewRequest
+}
+export function generationBasis(value: unknown): GenerationBasis {
+  need(isObject(value)); uuidId(value.generation_id); safeId(value.plan_id); safeId(value.item_version_id); sequence(value.draft_seq, 1)
+  need(isHash(value.render_key) && isHash(value.plan_content_hash) && isHash(value.generation_content_hash) && value.purpose === 'review')
+  exact(value.template, ['id', 'version', 'digest']); need(value.template.id === 'welding-a4' && ['1', '2', '3'].includes(String(value.template.version)) && isHash(value.template.digest))
+  return Object.fromEntries(basisKeys.map(key => [key, clone(value[key])])) as unknown as GenerationBasis
+}
+export function validateReviewAck(value: unknown, request: CreateReviewRequest | RetryReviewRequest, target: { plan_id: string; item_version_id: string } | GenerationBasis): GenerationAck {
+  exact(value, ['schema', 'request_id', ...basisKeys]); need(value.schema === 'yuantus.welding_generation_ack/1' && value.request_id === request.request_id)
+  const fixed = generationBasis(value)
+  need(fixed.plan_id === target.plan_id && fixed.item_version_id === target.item_version_id)
+  if ('expected_attempt' in request) need(equal(fixed, target), '重试生成物依据不匹配，原请求保留')
+  else need(fixed.draft_seq === request.expected_draft_seq && fixed.plan_content_hash === request.expected_content_hash && equal(fixed.template, { id: request.template_id, version: request.template_version, digest: request.template_digest }), '生成保存点或模板不匹配，原请求保留')
+  return clone(value) as unknown as GenerationAck
+}
+export function validateGenerationFile(value: unknown, format: 'pdf' | 'docx'): GenerationFile {
+  exact(value, ['format', 'mime_type', 'byte_size', 'artifact_sha256'])
+  need(value.format === format && value.mime_type === generationMime(format) && Number.isSafeInteger(value.byte_size) && (value.byte_size as number) > 0 && (value.byte_size as number) <= 128 * 1024 * 1024 && isHash(value.artifact_sha256))
+  return clone(value) as unknown as GenerationFile
+}
+export function validateReviewGeneration(value: unknown, target?: GenerationBasis): ReviewGeneration {
+  exact(value, ['schema', ...basisKeys, 'status', 'attempt', 'created_at', 'review', 'files', 'error'])
+  need(value.schema === 'yuantus.welding_plan_generation/1'); const fixed = generationBasis(value); need(!target || equal(target, fixed))
+  need(['Queued', 'Running', 'Ready', 'Failed'].includes(String(value.status))); sequence(value.attempt); boundedText(value.created_at, 64); need(Number.isFinite(Date.parse(String(value.created_at))))
+  exact(value.review, ['pending_count', 'unbound_count']); sequence(value.review.pending_count); sequence(value.review.unbound_count)
+  exact(value.files, ['pdf', 'docx'])
+  for (const format of ['pdf', 'docx'] as const) { if (value.status === 'Ready') validateGenerationFile(value.files[format], format); else need(value.files[format] === null) }
+  if (value.error !== null) { exact(value.error, ['stage', 'code', 'message']); boundedText(value.error.stage, 128); boundedText(value.error.code, 128); boundedText(value.error.message, 2000); need(value.error.stage && value.error.code && value.error.message) }
+  return clone(value) as unknown as ReviewGeneration
+}
+
+export interface FinalTemplate { id: 'welding-approval-appendix'; version: '1'; digest: string }
+export interface FinalGenerationBasis {
+  generation_id: string; render_key: string; plan_id: string; item_version_id: string; draft_seq: number
+  plan_content_hash: string; generation_content_hash: string; purpose: 'final'; approval_request_id: string
+  submission_hash: string; decision_hash: string; template: FinalTemplate
+}
+export interface FinalGenerationAck extends FinalGenerationBasis { schema: 'yuantus.welding_final_generation_ack/1'; request_id: string }
+export interface FinalGeneration extends FinalGenerationBasis {
+  schema: 'yuantus.welding_final_generation/1'; status: 'Queued' | 'Running' | 'Ready' | 'Failed'; state: string
+  attempt: number; created_at: string; files: { pdf: GenerationFile | null; docx: GenerationFile | null }
+  error: null | { stage: string; code: string; message: string }
+}
+export interface Publication {
+  schema: 'yuantus.welding_plan_publication/1'; publication_id: string; plan_id: string; item_version_id: string; state: 'Released' | 'Superseded'
+  draft_seq: number; content_hash: string; version_label: string; name: string; number: string; approval_request_id: string
+  submission_hash: string; decision_hash: string; review_generation_id: string; final_generation_id: string; generation_content_hash: string
+  requester: WorkflowActor; reviewer: WorkflowActor; opinion: string; approved_at: string; published_at: string; publisher: WorkflowActor
+  files: { pdf: GenerationFile; docx: GenerationFile }
+}
+export type WorkflowAction = 'submit' | 'review' | 'withdraw' | 'reopen' | 'final-render' | 'final-retry' | 'release' | 'revise'
+export interface WorkflowBasis { expected_draft_seq: number; expected_content_hash: string }
+export interface SubmitWorkflowRequest extends WorkflowBasis { request_id: string; review_generation_id: string; reviewer_rbac_id: number }
+export interface ReviewWorkflowRequest extends WorkflowBasis { request_id: string; approval_request_id: string; expected_submission_hash: string; decision: 'approve' | 'reject'; opinion: string }
+export interface ReasonWorkflowRequest extends WorkflowBasis { request_id: string; approval_request_id: string; expected_submission_hash: string; reason: string }
+export interface FinalRenderRequest extends WorkflowBasis { request_id: string; approval_request_id: string; expected_submission_hash: string; expected_decision_hash: string; template_id: FinalTemplate['id']; template_version: FinalTemplate['version']; template_digest: string }
+export interface ReviseWorkflowRequest extends WorkflowBasis { request_id: string; source_publication_id: string; reason: string }
+export interface ReuseRequest extends WorkflowBasis {
+  request_id: string; source_publication_id: string; selected_weld_ids: string[]; target_plan_id: string
+  name: string; number: string; product: { item_id: string; version_id: string }
+  drawing: { item_id: string; version_id: string; file_id: string; file_role: string; expected_checksum: string }
+  bom?: { baseline_id: string; expected_fingerprint: string } | null; reason: string
+}
+export interface ReuseOriginal { action: 'reuse'; plan_id: string; item_version_id: string; body: ReuseRequest }
+export interface ReuseAck {
+  schema: 'yuantus.welding_plan_reuse_ack/1'; action: 'reuse'; request_id: string; reuse_id: string
+  source_plan_id: string; source_version_id: string; source_publication_id: string; source_draft_seq: number; source_content_hash: string
+  target_plan_id: string; target_version_id: string; target_version_label: string; target_draft_seq: 1; target_content_hash: string
+  state: 'Draft'; reuse_provenance_sha256: string
+}
+export interface ReuseProvenance {
+  schema: 'yuantus.welding_reuse_provenance/1'; reuse_id: string; reuse_provenance_sha256: string
+  basis: { schema: 'yuantus.welding_reuse/1'; request: ReuseRequest
+    metadata: { id: string; tenant_id: string; org_id: string; source_plan_id: string; source_version_id: string; source_publication_id: string; target_plan_id: string; target_version_id: string; request_id: string; request_digest: string; reason: string; actor: WorkflowActor; created_at: string }
+    source: { draft_seq: number; content_hash: string }; target: { version_label: string; payload: PlanPayload; sources: Record<string, unknown>; content_hash: string }
+    mappings: Array<{ source_weld_id: string; target_weld_id: string; source_values: Record<string, unknown>; copy_values: Record<string, unknown>; process_associations: unknown[]; resource_associations: unknown[] }>
+  }
+}
+const sourceSpace = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/
+function reuseSourceText(value: unknown, maximum = 64): asserts value is string {
+  text(value); const chars = Array.from(value)
+  need(chars.length > 0 && chars.length <= maximum && !sourceSpace.test(chars[0]) && !sourceSpace.test(chars[chars.length - 1]) && !/[\r\n]/.test(value))
+}
+function reusePairQuery(product: { item_id: string; version_id: string }): string {
+  reuseSourceText(product.item_id); reuseSourceText(product.version_id)
+  return new URLSearchParams({ product_id: product.item_id, product_version_id: product.version_id }).toString()
+}
+function reuseProductCandidate(value: unknown): PlanCandidate {
+  exact(value, ['item_id', 'version_id', 'version_label', 'name', 'number'])
+  reuseSourceText(value.item_id); reuseSourceText(value.version_id)
+  boundedText(value.name, 256); boundedText(value.number, 128)
+  if (value.version_label !== null) boundedText(value.version_label, 64)
+  return clone(value) as PlanCandidate
+}
+function reuseBomCandidate(value: unknown): ReuseBomCandidate {
+  exact(value, ['baseline_id', 'fingerprint', 'name', 'number'])
+  reuseSourceText(value.baseline_id); need(isHash(value.fingerprint))
+  boundedText(value.name, 256); boundedText(value.number, 256)
+  return clone(value) as unknown as ReuseBomCandidate
+}
+export function validateReuseRequest(value: unknown): ReuseRequest {
+  need(isObject(value)); exact(value, ['request_id', 'source_publication_id', 'expected_draft_seq', 'expected_content_hash', 'selected_weld_ids', 'target_plan_id', 'name', 'number', 'product', 'drawing', 'reason', ...(Object.hasOwn(value, 'bom') ? ['bom'] : [])])
+  reuseSourceText(value.request_id); reuseSourceText(value.source_publication_id); safeId(value.target_plan_id); reuseSourceText(value.target_plan_id)
+  sequence(value.expected_draft_seq, 1); need(isHash(value.expected_content_hash))
+  reuseSourceText(value.name, 128); reuseSourceText(value.number, 128); boundedText(value.reason, 4000)
+  need(Array.from(value.reason as string).some(char => !sourceSpace.test(char)))
+  need(Array.isArray(value.selected_weld_ids) && value.selected_weld_ids.length >= 1 && value.selected_weld_ids.length <= 500 && new Set(value.selected_weld_ids).size === value.selected_weld_ids.length)
+  value.selected_weld_ids.forEach(id => reuseSourceText(id))
+  exact(value.product, ['item_id', 'version_id']); reuseSourceText(value.product.item_id); reuseSourceText(value.product.version_id)
+  exact(value.drawing, ['item_id', 'version_id', 'file_id', 'file_role', 'expected_checksum'])
+  for (const key of ['item_id', 'version_id', 'file_id']) reuseSourceText(value.drawing[key])
+  need(['drawing', 'native_cad'].includes(String(value.drawing.file_role)) && typeof value.drawing.expected_checksum === 'string' && /^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{64})$/.test(value.drawing.expected_checksum))
+  if (value.bom !== undefined && value.bom !== null) { exact(value.bom, ['baseline_id', 'expected_fingerprint']); reuseSourceText(value.bom.baseline_id); need(isHash(value.bom.expected_fingerprint)) }
+  need(new TextEncoder().encode(jsonBytes(value)).byteLength <= DRAFT_BYTES)
+  return clone(value) as unknown as ReuseRequest
+}
+export function validateReuseAck(value: unknown, original: ReuseOriginal): ReuseAck {
+  need(original.action === 'reuse'); safeId(original.plan_id); safeId(original.item_version_id); const body = validateReuseRequest(original.body)
+  exact(value, ['schema', 'action', 'request_id', 'reuse_id', 'source_plan_id', 'source_version_id', 'source_publication_id', 'source_draft_seq', 'source_content_hash', 'target_plan_id', 'target_version_id', 'target_version_label', 'target_draft_seq', 'target_content_hash', 'state', 'reuse_provenance_sha256'])
+  need(value.schema === 'yuantus.welding_plan_reuse_ack/1' && value.action === 'reuse' && value.request_id === body.request_id && value.source_plan_id === original.plan_id && value.source_version_id === original.item_version_id && value.source_publication_id === body.source_publication_id && value.source_draft_seq === body.expected_draft_seq && value.source_content_hash === body.expected_content_hash && value.target_plan_id === body.target_plan_id && value.target_plan_id !== original.plan_id && value.target_version_id !== original.item_version_id && value.target_draft_seq === 1 && value.state === 'Draft')
+  safeId(value.reuse_id); safeId(value.target_version_id); workflowText(value.target_version_label, 128, true); need(isHash(value.target_content_hash) && isHash(value.reuse_provenance_sha256))
+  return clone(value) as unknown as ReuseAck
+}
+export function validateReuseProvenance(value: unknown, plan: string, version: string, owner: WeldingOwner): ReuseProvenance {
+  safeId(plan); safeId(version); validateOwner(owner)
+  exact(value, ['schema', 'reuse_id', 'reuse_provenance_sha256', 'basis']); safeId(value.reuse_id)
+  need(value.schema === 'yuantus.welding_reuse_provenance/1' && isHash(value.reuse_provenance_sha256))
+  const basis = value.basis; exact(basis, ['schema', 'metadata', 'request', 'source', 'target', 'mappings']); need(basis.schema === 'yuantus.welding_reuse/1')
+  const metadata = basis.metadata; exact(metadata, ['id', 'tenant_id', 'org_id', 'source_plan_id', 'source_version_id', 'source_publication_id', 'target_plan_id', 'target_version_id', 'request_id', 'request_digest', 'reason', 'actor', 'created_at'])
+  need(metadata.id === value.reuse_id && metadata.tenant_id === owner.tenant_id && metadata.org_id === owner.org_id && metadata.target_plan_id === plan && metadata.source_plan_id !== plan && isHash(metadata.request_digest))
+  for (const key of ['source_plan_id', 'source_version_id', 'target_version_id']) safeId(metadata[key])
+  workflowActor(metadata.actor); workflowDate(metadata.created_at)
+  const request = validateReuseRequest(basis.request)
+  need(request.target_plan_id === plan && request.request_id === metadata.request_id && request.source_publication_id === metadata.source_publication_id && request.reason === metadata.reason)
+  exact(basis.source, ['draft_seq', 'content_hash']); need(basis.source.draft_seq === request.expected_draft_seq && basis.source.content_hash === request.expected_content_hash)
+  const target = basis.target; exact(target, ['version_label', 'payload', 'sources', 'content_hash']); workflowText(target.version_label, 128, true); need(isHash(target.content_hash)); const payload = validatePayload(target.payload)
+  need(equal(payload.product, request.product) && equal(payload.drawing, request.drawing) && equal(payload.bom, request.bom ?? null) && isObject(target.sources) && equal(target.sources.reuse, { schema: 'yuantus.welding_reuse/1', reuse_id: value.reuse_id }))
+  need(Array.isArray(basis.mappings) && basis.mappings.length === request.selected_weld_ids.length)
+  basis.mappings.forEach((mapping, index) => {
+    exact(mapping, ['source_weld_id', 'target_weld_id', 'source_values', 'copy_values', 'process_associations', 'resource_associations'])
+    need(mapping.source_weld_id === request.selected_weld_ids[index]); reuseSourceText(mapping.target_weld_id)
+    need(isObject(mapping.source_values) && isObject(mapping.copy_values) && Array.isArray(mapping.process_associations) && Array.isArray(mapping.resource_associations))
+  })
+  // The requested version and reader may differ from the initial adoption version and actor.
+  return clone(value) as unknown as ReuseProvenance
+}
+export interface ReleaseWorkflowRequest extends WorkflowBasis { request_id: string; approval_request_id: string; expected_submission_hash: string; expected_decision_hash: string; final_generation_id: string; expected_final_pdf_sha256: string; expected_final_docx_sha256: string }
+export type WorkflowOriginal = { plan_id: string; item_version_id: string } & ({ action: 'submit'; body: SubmitWorkflowRequest } | { action: 'review'; body: ReviewWorkflowRequest } | { action: 'withdraw' | 'reopen'; body: ReasonWorkflowRequest } | { action: 'final-render'; body: FinalRenderRequest } | { action: 'final-retry'; body: RetryReviewRequest; basis: FinalGenerationBasis } | { action: 'release'; body: ReleaseWorkflowRequest } | { action: 'revise'; body: ReviseWorkflowRequest })
+export interface WorkflowActor { auth_user_id: number; rbac_user_id: number; display_name: string }
+export interface WorkflowApproval {
+  approval_request_id: string; state: 'pending' | 'approved' | 'rejected' | 'cancelled'; submission_hash: string
+  submission: Record<string, unknown> & { tenant_id: string; org_id: string; plan_id: string; item_version_id: string; draft_seq: number; plan_content_hash: string; requester: WorkflowActor; reviewer: WorkflowActor; review_generation_id: string }
+  decision: null | { decision_hash: string; decision: { decision: 'approve' | 'reject'; opinion: string; reviewer: WorkflowActor; decided_at: string } }
+}
+export interface WorkflowState {
+  schema: 'yuantus.welding_review_state/1'; plan_id: string; item_version_id: string; state: string; draft_seq: number; content_hash: string
+  is_current: boolean; approval: WorkflowApproval | null; final_generation: FinalGeneration | null; publication: Publication | null
+  final_profile: FinalTemplate | null; allowed_actions: string[]; issues: string[]
+}
+export interface WorkflowHistory { schema: 'yuantus.welding_review_history/1'; plan_id: string; item_version_id: string; total: number; limit: number; offset: number; items: Array<{ event_id: string; approval: WorkflowApproval | null; action: string; from_state: string | null; to_state: string; note: string | null; actor: WorkflowActor; created_at: string; revision?: RevisionAck; publication?: Publication }> }
+export interface WorkflowAck { schema: 'yuantus.welding_plan_workflow_ack/1'; request_id: string; action: string; plan_id: string; item_version_id: string; draft_seq: number; content_hash: string; state: string; approval_request_id: string; publication_id: string | null }
+const workflowStates = ['Draft', 'InReview', 'Approved', 'Released', 'Superseded']
+const workflowActions = ['submit', 'approve', 'reject', 'withdraw', 'reopen', 'final-render', 'final-retry', 'release', 'revise']
+const positiveId = (value: unknown) => need(Number.isSafeInteger(value) && (value as number) > 0)
+const workflowText = (value: unknown, maximum: number, required = false) => { boundedText(value, maximum); need(!required || Boolean((value as string).trim())) }
+const workflowDate = (value: unknown) => { workflowText(value, 64, true); need(Number.isFinite(Date.parse(value as string))) }
+function workflowActor(value: unknown) { exact(value, ['auth_user_id', 'rbac_user_id', 'display_name']); positiveId(value.auth_user_id); positiveId(value.rbac_user_id); workflowText(value.display_name, 256) }
+export function validateWorkflowBody(action: WorkflowAction, value: unknown): WorkflowOriginal['body'] {
+  const base = ['request_id', 'expected_draft_seq', 'expected_content_hash'], approved = [...base, 'approval_request_id', 'expected_submission_hash']
+  need(['submit', 'review', 'withdraw', 'reopen', 'final-render', 'final-retry', 'release', 'revise'].includes(action))
+  if (action === 'revise') { exact(value, [...base, 'source_publication_id', 'reason']); safeId(value.request_id); safeId(value.source_publication_id); sequence(value.expected_draft_seq, 1); need(isHash(value.expected_content_hash)); workflowText(value.reason, 4000, true); return clone(value) as unknown as ReviseWorkflowRequest }
+  if (action === 'final-retry') { exact(value, ['request_id', 'expected_attempt']); safeId(value.request_id); sequence(value.expected_attempt); return clone(value) as unknown as RetryReviewRequest }
+  if (action === 'final-render' || action === 'release') {
+    exact(value, [...approved, 'expected_decision_hash', ...(action === 'final-render' ? ['template_id', 'template_version', 'template_digest'] : ['final_generation_id', 'expected_final_pdf_sha256', 'expected_final_docx_sha256'])])
+    safeId(value.request_id); safeId(value.approval_request_id); sequence(value.expected_draft_seq, 1)
+    for (const key of ['expected_content_hash', 'expected_submission_hash', 'expected_decision_hash']) need(isHash(value[key]))
+    if (action === 'final-render') finalProfile({ id: value.template_id, version: value.template_version, digest: value.template_digest })
+    else { uuidId(value.final_generation_id); need(isHash(value.expected_final_pdf_sha256) && isHash(value.expected_final_docx_sha256)) }
+    return clone(value) as unknown as FinalRenderRequest | ReleaseWorkflowRequest
+  }
+  exact(value, action === 'submit' ? [...base, 'review_generation_id', 'reviewer_rbac_id'] : action === 'review' ? [...approved, 'decision', 'opinion'] : [...approved, 'reason'])
+  safeId(value.request_id); sequence(value.expected_draft_seq, 1); need(isHash(value.expected_content_hash))
+  if (action === 'submit') { safeId(value.review_generation_id); positiveId(value.reviewer_rbac_id) }
+  else { safeId(value.approval_request_id); need(isHash(value.expected_submission_hash)) }
+  if (action === 'review') { need(['approve', 'reject'].includes(String(value.decision))); workflowText(value.opinion, 4000, value.decision === 'reject') }
+  if (action === 'withdraw' || action === 'reopen') workflowText(value.reason, 4000, true)
+  return clone(value) as unknown as SubmitWorkflowRequest | ReviewWorkflowRequest | ReasonWorkflowRequest
+}
+function workflowApproval(value: unknown, plan: string, version: string, owner: WeldingOwner): WorkflowApproval {
+  exact(value, ['approval_request_id', 'state', 'submission_hash', 'submission', 'decision']); safeId(value.approval_request_id); need(isHash(value.submission_hash) && ['pending', 'approved', 'rejected', 'cancelled'].includes(String(value.state)))
+  const fixed = value.submission
+  exact(fixed, ['schema', 'tenant_id', 'org_id', 'plan_id', 'item_version_id', 'version_label', 'draft_seq', 'plan_content_hash', 'requester', 'reviewer', 'review_generation_id', 'render_key', 'input_sha256', 'render_profile', 'attempt', 'attempt_token', 'assets', 'renderer_receipt', 'sources', 'review', 'included_weld_ids', 'excluded_weld_ids'])
+  need(fixed.schema === 'yuantus.welding_submission/1' && fixed.tenant_id === owner.tenant_id && fixed.org_id === owner.org_id && fixed.plan_id === plan && fixed.item_version_id === version)
+  for (const key of ['tenant_id', 'org_id', 'plan_id', 'item_version_id', 'review_generation_id', 'attempt_token']) safeId(fixed[key])
+  workflowText(fixed.version_label, 256, true); sequence(fixed.draft_seq, 1); positiveId(fixed.attempt)
+  for (const key of ['plan_content_hash', 'render_key', 'input_sha256']) need(isHash(fixed[key]))
+  workflowActor(fixed.requester); workflowActor(fixed.reviewer)
+  const requester = fixed.requester as unknown as WorkflowActor, reviewer = fixed.reviewer as unknown as WorkflowActor
+  need(requester.auth_user_id !== reviewer.auth_user_id && requester.rbac_user_id !== reviewer.rbac_user_id)
+  for (const key of ['render_profile', 'renderer_receipt', 'sources', 'review']) need(isObject(fixed[key]))
+  for (const key of ['included_weld_ids', 'excluded_weld_ids']) { need(Array.isArray(fixed[key])); (fixed[key] as unknown[]).forEach(id => reuseSourceText(id)); need(new Set(fixed[key] as unknown[]).size === (fixed[key] as unknown[]).length) }
+  need(Array.isArray(fixed.assets) && fixed.assets.length === 3); const formats = new Set()
+  for (const asset of fixed.assets) {
+    exact(asset, ['asset_id', 'file_id', 'format', 'sha256', 'byte_size', 'mime_type']); safeId(asset.asset_id); safeId(asset.file_id); need(isHash(asset.sha256))
+    need(['pdf', 'docx', 'layout_png'].includes(String(asset.format)) && !formats.has(asset.format)); formats.add(asset.format)
+    need(asset.mime_type === (asset.format === 'layout_png' ? 'image/png' : generationMime(asset.format as 'pdf' | 'docx')) && Number.isSafeInteger(asset.byte_size) && (asset.byte_size as number) > 0 && (asset.byte_size as number) <= 128 * 1024 * 1024)
+  }
+  if (value.decision !== null) {
+    exact(value.decision, ['decision', 'decision_hash']); need(isHash(value.decision.decision_hash)); const decision = value.decision.decision
+    exact(decision, ['schema', 'approval_request_id', 'submission_hash', 'request_id', 'decision', 'opinion', 'reviewer', 'decided_at'])
+    need(decision.schema === 'yuantus.welding_decision/1' && decision.approval_request_id === value.approval_request_id && decision.submission_hash === value.submission_hash && ['approve', 'reject'].includes(String(decision.decision)))
+    safeId(decision.request_id); workflowActor(decision.reviewer); need((decision.reviewer as unknown as WorkflowActor).auth_user_id === reviewer.auth_user_id && (decision.reviewer as unknown as WorkflowActor).rbac_user_id === reviewer.rbac_user_id); workflowText(decision.opinion, 4000, decision.decision === 'reject'); workflowDate(decision.decided_at)
+    need(value.state === (decision.decision === 'approve' ? 'approved' : 'rejected'))
+  } else need(!['approved', 'rejected'].includes(String(value.state)))
+  return clone(value) as unknown as WorkflowApproval
+}
+function finalProfile(value: unknown) { exact(value, ['id', 'version', 'digest']); need(value.id === 'welding-approval-appendix' && value.version === '1' && isHash(value.digest)) }
+function finalFiles(value: unknown, ready = true) {
+  exact(value, ['pdf', 'docx']); let total = 0
+  for (const format of ['pdf', 'docx'] as const) { if (!ready) need(value[format] === null); else total += validateGenerationFile(value[format], format).byte_size }
+  need(total <= 128 * 1024 * 1024)
+}
+export function validateFinalGeneration(value: unknown, basis?: FinalGenerationBasis): FinalGeneration {
+  exact(value, ['schema', 'generation_id', 'render_key', 'plan_id', 'item_version_id', 'draft_seq', 'plan_content_hash', 'generation_content_hash', 'purpose', 'approval_request_id', 'submission_hash', 'decision_hash', 'template', 'status', 'state', 'attempt', 'created_at', 'files', 'error'])
+  const fixed = finalGenerationBasis(value); if (basis) need(equal(fixed, basis), '批准生成依据已变化')
+  need(value.schema === 'yuantus.welding_final_generation/1' && value.purpose === 'final' && ['Queued', 'Running', 'Ready', 'Failed'].includes(String(value.status)) && workflowStates.includes(String(value.state)))
+  for (const key of ['generation_id', 'plan_id', 'item_version_id', 'approval_request_id']) safeId(value[key])
+  for (const key of ['render_key', 'plan_content_hash', 'generation_content_hash', 'submission_hash', 'decision_hash']) need(isHash(value[key]))
+  sequence(value.draft_seq, 1); sequence(value.attempt); workflowDate(value.created_at); finalProfile(value.template); finalFiles(value.files, value.status === 'Ready')
+  if (value.error !== null) { exact(value.error, ['stage', 'code', 'message']); workflowText(value.error.stage, 128, true); workflowText(value.error.code, 128, true); workflowText(value.error.message, 2000, true) }
+  return clone(value) as unknown as FinalGeneration
+}
+export function validatePublication(value: unknown, plan: string, version: string): Publication {
+  exact(value, ['schema', 'publication_id', 'plan_id', 'item_version_id', 'state', 'draft_seq', 'content_hash', 'version_label', 'name', 'number', 'approval_request_id', 'submission_hash', 'decision_hash', 'review_generation_id', 'final_generation_id', 'generation_content_hash', 'requester', 'reviewer', 'opinion', 'approved_at', 'published_at', 'publisher', 'files'])
+  need(value.plan_id === plan && value.item_version_id === version && value.review_generation_id !== value.final_generation_id)
+  uuidId(value.review_generation_id); uuidId(value.final_generation_id)
+  need(value.schema === 'yuantus.welding_plan_publication/1' && ['Released', 'Superseded'].includes(String(value.state)))
+  for (const key of ['publication_id', 'plan_id', 'item_version_id', 'approval_request_id', 'review_generation_id', 'final_generation_id']) safeId(value[key])
+  for (const key of ['content_hash', 'submission_hash', 'decision_hash', 'generation_content_hash']) need(isHash(value[key]))
+  sequence(value.draft_seq, 1); for (const key of ['version_label', 'name', 'number']) workflowText(value[key], 256)
+  workflowActor(value.requester); workflowActor(value.reviewer); workflowActor(value.publisher); workflowText(value.opinion, 4000); workflowDate(value.approved_at); workflowDate(value.published_at); finalFiles(value.files)
+  return clone(value) as unknown as Publication
+}
+export function validateWorkflowState(value: unknown, plan: string, version: string, owner: WeldingOwner): WorkflowState {
+  validateOwner(owner); exact(value, ['schema', 'plan_id', 'item_version_id', 'state', 'draft_seq', 'content_hash', 'is_current', 'approval', 'final_generation', 'publication', 'final_profile', 'allowed_actions', 'issues'])
+  need(value.schema === 'yuantus.welding_review_state/1' && value.plan_id === plan && value.item_version_id === version && workflowStates.includes(String(value.state)) && typeof value.is_current === 'boolean')
+  sequence(value.draft_seq, 1); need(isHash(value.content_hash)); need(Array.isArray(value.allowed_actions) && value.allowed_actions.every(action => workflowActions.includes(action)) && new Set(value.allowed_actions).size === value.allowed_actions.length)
+  need(Array.isArray(value.issues)); value.issues.forEach(issue => workflowText(issue, 128, true))
+  const approval = value.approval === null ? null : workflowApproval(value.approval, plan, version, owner)
+  if (approval) need(approval.submission.draft_seq === value.draft_seq && approval.submission.plan_content_hash === value.content_hash)
+  need(!(value.state === 'Draft' && approval !== null) && !(value.state === 'InReview' && approval?.state !== 'pending') && !(['Approved', 'Released', 'Superseded'].includes(String(value.state)) && approval?.state !== 'approved'))
+  if (value.final_profile !== null) finalProfile(value.final_profile)
+  const final = value.final_generation === null ? null : validateFinalGeneration(value.final_generation)
+  if (final) need(approval && final.generation_id !== approval.submission.review_generation_id && final.plan_id === plan && final.item_version_id === version && final.draft_seq === value.draft_seq && final.plan_content_hash === value.content_hash && final.approval_request_id === approval.approval_request_id && final.submission_hash === approval.submission_hash && final.decision_hash === approval.decision?.decision_hash)
+  if (value.publication !== null) {
+    const publication = validatePublication(value.publication, plan, version)
+    need(approval && final && publication.plan_id === plan && publication.item_version_id === version && publication.state === value.state && publication.draft_seq === value.draft_seq && publication.content_hash === value.content_hash && publication.approval_request_id === approval.approval_request_id && publication.submission_hash === approval.submission_hash && publication.decision_hash === approval.decision?.decision_hash && publication.review_generation_id === approval.submission.review_generation_id && publication.final_generation_id === final.generation_id && publication.generation_content_hash === final.generation_content_hash && final.status === 'Ready' && equal(publication.files, final.files))
+  } else need(!['Released', 'Superseded'].includes(String(value.state)))
+  return clone(value) as unknown as WorkflowState
+}
+export function validateWorkflowHistory(value: unknown, plan: string, version: string, owner: WeldingOwner, offset: number): WorkflowHistory {
+  exact(value, ['schema', 'plan_id', 'item_version_id', 'total', 'limit', 'offset', 'items'])
+  need(value.schema === 'yuantus.welding_review_history/1' && value.plan_id === plan && value.item_version_id === version && value.limit === 50 && value.offset === offset && Array.isArray(value.items) && value.items.length <= 50)
+  need(Number.isSafeInteger(value.total) && (value.total as number) >= 0 && (!value.items.length || (value.total as number) >= offset + value.items.length)); const events = new Set(); let revisions = 0
+  // Approval events retain approval states; release and revise use plan lifecycle states.
+  const transitions: Record<string, readonly [string | null, string]> = {
+    created: [null, 'draft'], submit: ['draft', 'pending'], approve: ['pending', 'approved'], reject: ['pending', 'rejected'],
+    withdraw: ['pending', 'cancelled'], reopen: ['approved', 'approved'], release: ['Approved', 'Released'], revise: ['Released', 'Draft'],
+  }
+  for (const item of value.items) {
+    need(isObject(item)); exact(item, ['event_id', 'approval', 'action', 'from_state', 'to_state', 'note', 'actor', 'created_at', ...(item.action === 'release' ? ['publication'] : item.action === 'revise' ? ['revision'] : [])])
+    safeId(item.event_id); need(!events.has(item.event_id)); events.add(item.event_id); need(['created', 'submit', 'approve', 'reject', 'withdraw', 'reopen', 'release', 'revise'].includes(String(item.action)))
+    const transition = transitions[String(item.action)]
+    need(item.from_state === transition[0] && item.to_state === transition[1]); workflowActor(item.actor); workflowDate(item.created_at); if (item.note !== null) workflowText(item.note, 4000)
+    if (item.approval !== null) workflowApproval(item.approval, plan, version, owner)
+    if (item.action === 'release') { const publication = validatePublication(item.publication, plan, version); need(publication.plan_id === plan && publication.item_version_id === version) }
+    if (item.action === 'revise') {
+      const r = item.revision
+      exact(r, ['schema', 'request_id', 'action', 'plan_id', 'source_version_id', 'source_publication_id', 'source_draft_seq', 'source_content_hash', 'target_version_id', 'target_version_label', 'target_draft_seq', 'target_content_hash', 'inheritance_id', 'inheritance_sha256', 'state'])
+      need(++revisions === 1 && item.approval === null && item.from_state === 'Released' && item.to_state === 'Draft' && r.schema === 'yuantus.welding_plan_revision_ack/1' && r.action === 'revise' && r.plan_id === plan && r.target_version_id === version && r.source_version_id !== version && r.target_draft_seq === 1 && r.state === 'Draft' && r.inheritance_id === item.event_id)
+      for (const key of ['request_id', 'plan_id', 'source_version_id', 'source_publication_id', 'target_version_id', 'inheritance_id']) safeId(r[key])
+      sequence(r.source_draft_seq, 1); for (const key of ['source_content_hash', 'target_content_hash', 'inheritance_sha256']) need(isHash(r[key])); workflowText(r.target_version_label, 256, true); workflowText(item.note, 4000, true)
+    }
+  }
+  return clone(value) as unknown as WorkflowHistory
+}
+export function validateWorkflowAck(value: unknown, original: WorkflowOriginal): WorkflowAck {
+  need(original.action !== 'final-render' && original.action !== 'final-retry' && original.action !== 'revise'); validateWorkflowBody(original.action, original.body); const body = original.body, action = original.action === 'review' ? original.body.decision : original.action
+  exact(value, ['schema', 'request_id', 'action', 'plan_id', 'item_version_id', 'draft_seq', 'content_hash', 'state', 'approval_request_id', 'publication_id'])
+  need(value.schema === 'yuantus.welding_plan_workflow_ack/1' && value.request_id === body.request_id && value.action === action && value.plan_id === original.plan_id && value.item_version_id === original.item_version_id && value.draft_seq === body.expected_draft_seq + (action === 'reopen' ? 1 : 0) && value.content_hash === body.expected_content_hash && value.state === ({ submit: 'InReview', approve: 'Approved', reject: 'Draft', withdraw: 'Draft', reopen: 'Draft', release: 'Released' } as Record<string, string>)[action] && (action === 'release' ? typeof value.publication_id === 'string' : value.publication_id === null))
+  if (action === 'release') safeId(value.publication_id)
+  safeId(value.approval_request_id); if (original.action !== 'submit') need(value.approval_request_id === original.body.approval_request_id)
+  return clone(value) as unknown as WorkflowAck
+}
+export interface RevisionAck {
+  schema: 'yuantus.welding_plan_revision_ack/1'; request_id: string; action: 'revise'; plan_id: string
+  source_version_id: string; source_publication_id: string; source_draft_seq: number; source_content_hash: string
+  target_version_id: string; target_version_label: string; target_draft_seq: 1; target_content_hash: string
+  inheritance_id: string; inheritance_sha256: string; state: 'Draft'
+}
+export function validateRevisionAck(value: unknown, original: WorkflowOriginal): RevisionAck {
+  need(original.action === 'revise'); validateWorkflowBody('revise', original.body)
+  exact(value, ['schema', 'request_id', 'action', 'plan_id', 'source_version_id', 'source_publication_id', 'source_draft_seq', 'source_content_hash', 'target_version_id', 'target_version_label', 'target_draft_seq', 'target_content_hash', 'inheritance_id', 'inheritance_sha256', 'state'])
+  need(value.schema === 'yuantus.welding_plan_revision_ack/1' && value.action === 'revise' && value.request_id === original.body.request_id && value.plan_id === original.plan_id && value.source_version_id === original.item_version_id && value.source_publication_id === original.body.source_publication_id && value.source_draft_seq === original.body.expected_draft_seq && value.source_content_hash === original.body.expected_content_hash)
+  for (const key of ['request_id', 'plan_id', 'source_version_id', 'source_publication_id', 'target_version_id', 'inheritance_id']) safeId(value[key])
+  need(value.target_version_id !== value.source_version_id && value.target_draft_seq === 1 && value.target_content_hash === value.source_content_hash && value.state === 'Draft' && isHash(value.inheritance_sha256))
+  workflowText(value.target_version_label, 128, true)
+  return clone(value) as unknown as RevisionAck
+}
+export interface PublicationEntry { publication_id: string; item_version_id: string; version_label: string; state: 'Released' | 'Superseded'; published_at: string; content_hash: string }
+export interface PublicationDirectory { schema: 'yuantus.welding_publication_directory/1'; plan_id: string; total: number; limit: number; offset: number; items: PublicationEntry[]; current_publication: PublicationEntry | null }
+export interface PublicationComparison {
+  schema: 'yuantus.welding_publication_comparison/1'; plan_id: string
+  from: Pick<PublicationEntry, 'item_version_id' | 'version_label' | 'publication_id' | 'content_hash'>; to: PublicationComparison['from']
+  summary: { added: number; removed: number; changed: number; unchanged: number }
+  welds: Array<{ weld_id: string; kind: 'added' | 'removed' | 'changed' | 'unchanged'; changed_fields: string[] }>; plan_changes: string[]
+}
+function publicationEntry(value: unknown) {
+  exact(value, ['publication_id', 'item_version_id', 'version_label', 'state', 'published_at', 'content_hash'])
+  safeId(value.publication_id); safeId(value.item_version_id); workflowText(value.version_label, 256, true); workflowDate(value.published_at)
+  need(['Released', 'Superseded'].includes(String(value.state)) && isHash(value.content_hash))
+  return value as unknown as PublicationEntry
+}
+export function validatePublicationDirectory(value: unknown, plan: string, offset: number): PublicationDirectory {
+  exact(value, ['schema', 'plan_id', 'total', 'limit', 'offset', 'items', 'current_publication'])
+  need(value.schema === 'yuantus.welding_publication_directory/1' && value.plan_id === plan && value.offset === offset)
+  sequence(value.limit, 1); need((value.limit as number) <= 50); sequence(value.total)
+  need(Array.isArray(value.items) && value.items.length <= (value.limit as number) && (!value.items.length || (value.total as number) >= offset + value.items.length))
+  const ids = new Set<string>(), versions = new Set<string>(); let previous: PublicationEntry | null = null
+  for (const item of value.items) {
+    const row = publicationEntry(item); need(!ids.has(row.publication_id) && !versions.has(row.item_version_id)); ids.add(row.publication_id); versions.add(row.item_version_id)
+    if (previous) need(Date.parse(previous.published_at) > Date.parse(row.published_at) || Date.parse(previous.published_at) === Date.parse(row.published_at) && previous.publication_id > row.publication_id)
+    previous = row
+  }
+  if (value.current_publication !== null) {
+    const current = publicationEntry(value.current_publication); need(current.state === 'Released')
+    const visible = value.items.find(row => (row as PublicationEntry).publication_id === current.publication_id || (row as PublicationEntry).item_version_id === current.item_version_id)
+    if (visible) need(equal(visible, current))
+  }
+  return clone(value) as unknown as PublicationDirectory
+}
+export function validatePublicationComparison(value: unknown, plan: string, from: string, to: string): PublicationComparison {
+  exact(value, ['schema', 'plan_id', 'from', 'to', 'summary', 'welds', 'plan_changes'])
+  need(value.schema === 'yuantus.welding_publication_comparison/1' && value.plan_id === plan)
+  for (const [key, version] of [['from', from], ['to', to]]) {
+    const side = value[key]; exact(side, ['item_version_id', 'version_label', 'publication_id', 'content_hash']); need(side.item_version_id === version); safeId(side.publication_id); workflowText(side.version_label, 256, true); need(isHash(side.content_hash))
+  }
+  const kinds = ['added', 'removed', 'changed', 'unchanged'] as const, counts = { added: 0, removed: 0, changed: 0, unchanged: 0 }
+  exact(value.summary, [...kinds]); for (const kind of kinds) sequence(value.summary[kind])
+  const fields = ['display_no', 'group_name', 'classification', 'included', 'parameters', 'welding_steps', 'geometry', 'process_refs', 'resource_refs', 'order']
+  const ordered = (raw: unknown, allowed: string[]) => { need(Array.isArray(raw)); let index = -1; for (const key of raw) { const next = allowed.indexOf(String(key)); need(next > index); index = next } }
+  need(Array.isArray(value.welds) && value.welds.length <= 1000); let previous = ''
+  for (const row of value.welds) {
+    exact(row, ['weld_id', 'kind', 'changed_fields']); safeId(row.weld_id); need((row.weld_id as string) > previous && kinds.includes(row.kind as typeof kinds[number])); previous = row.weld_id as string
+    ordered(row.changed_fields, fields); need((row.kind === 'changed') === ((row.changed_fields as unknown[]).length > 0)); counts[row.kind as typeof kinds[number]]++
+  }
+  need(equal(value.summary, counts) && counts.removed + counts.changed + counts.unchanged <= 500 && counts.added + counts.changed + counts.unchanged <= 500)
+  ordered(value.plan_changes, ['drawing', 'product', 'bom', 'preparation_notes', 'overlay'])
+  return clone(value) as unknown as PublicationComparison
+}
+const finalBasisKeys = ['generation_id', 'render_key', 'plan_id', 'item_version_id', 'draft_seq', 'plan_content_hash', 'generation_content_hash', 'purpose', 'approval_request_id', 'submission_hash', 'decision_hash', 'template']
+export function finalGenerationBasis(value: unknown): FinalGenerationBasis {
+  need(isObject(value)); uuidId(value.generation_id); safeId(value.plan_id); safeId(value.item_version_id); safeId(value.approval_request_id); sequence(value.draft_seq, 1)
+  for (const key of ['render_key', 'plan_content_hash', 'generation_content_hash', 'submission_hash', 'decision_hash']) need(isHash(value[key]))
+  need(value.purpose === 'final'); finalProfile(value.template)
+  return Object.fromEntries(finalBasisKeys.map(key => [key, clone(value[key])])) as unknown as FinalGenerationBasis
+}
+export function validateFinalAck(value: unknown, original: Extract<WorkflowOriginal, { action: 'final-render' | 'final-retry' }>): FinalGenerationAck {
+  validateWorkflowBody(original.action, original.body); exact(value, ['schema', 'request_id', ...finalBasisKeys])
+  need(value.schema === 'yuantus.welding_final_generation_ack/1' && value.request_id === original.body.request_id)
+  const fixed = finalGenerationBasis(value); need(fixed.plan_id === original.plan_id && fixed.item_version_id === original.item_version_id)
+  if (original.action === 'final-retry') need(equal(fixed, original.basis), '重试批准文件依据不匹配，原请求保留')
+  else {
+    const body = original.body
+    need(fixed.draft_seq === body.expected_draft_seq && fixed.plan_content_hash === body.expected_content_hash && fixed.approval_request_id === body.approval_request_id && fixed.submission_hash === body.expected_submission_hash && fixed.decision_hash === body.expected_decision_hash && equal(fixed.template, { id: body.template_id, version: body.template_version, digest: body.template_digest }), '批准文件依据不匹配，原请求保留')
+  }
+  return clone(value) as unknown as FinalGenerationAck
+}
+export function validateWorkflowResolution(value: unknown, original: WorkflowOriginal): WorkflowAck | FinalGenerationAck | RevisionAck | null {
+  exact(value, ['schema', 'command', 'request_id', 'status', 'ack']); need(value.schema === 'yuantus.welding_workflow_resolution/1' && value.command === original.action && value.request_id === original.body.request_id && ['unknown', 'committed'].includes(String(value.status)))
+  if (value.status === 'unknown') { need(value.ack === null); return null }
+  return original.action === 'revise' ? validateRevisionAck(value.ack, original) : original.action === 'final-render' || original.action === 'final-retry' ? validateFinalAck(value.ack, original) : validateWorkflowAck(value.ack, original)
+}
+
+export function createWeldingPlanClient(transport: typeof apiFetch = apiFetch) {
+  async function readBounded(response: Response, maxBytes: number, check: () => void): Promise<Uint8Array> {
+    const declared = response.headers.get('content-length')
+    need(declared === null || /^\d+$/.test(declared) && Number(declared) <= maxBytes)
+    check()
+    if (!response.body) return new Uint8Array()
+    const reader = response.body.getReader(), chunks: Uint8Array[] = []; let bytes = 0
+    try {
+      while (true) {
+        const chunk = await reader.read(); check()
+        if (chunk.done) break
+        bytes += chunk.value.byteLength; need(bytes <= maxBytes, '回应超过固定容量')
+        chunks.push(chunk.value)
+      }
+      const result = new Uint8Array(bytes); let offset = 0
+      for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
+      return result
+    } finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
+  }
+  async function request(path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body: unknown, scope?: RequestScope, maxBytes = 13 * 1024 * 1024, expectedStatus?: number): Promise<unknown> {
+    const signature = readAuthSessionSignature()
+    const check = () => {
+      if (!readStoredToken() || signature !== readAuthSessionSignature() || scope?.accepts() === false || scope?.signal?.aborted)
+        throw new WeldingPlanError('会话或页面已变化，原请求保留', 0, 'WELDING_STALE_SESSION')
+    }
+    check()
+    const raw = body === undefined ? undefined : jsonBytes(body)
+    if (raw !== undefined) need(new TextEncoder().encode(raw).byteLength <= (path === '/plans/recovery-authority' ? 13 * 1024 * 1024 : DRAFT_BYTES))
+    const options: ApiFetchOptions = { method, ...(method === 'DELETE' ? { bypassDeleteFallback: true } : {}), signal: scope?.signal, suppressUnauthorizedRedirect: true, redirect: 'error', cache: 'no-store', ...(raw === undefined ? {} : { body: raw }) }
+    let response: Response
+    try { response = await transport(`/api/welding${path}`, options) } catch (error) {
+      check()
+      throw new WeldingPlanError(error instanceof Error ? error.message : '连接中断，原请求保留')
+    }
+    check()
+    need(!response.redirected && Number(response.headers.get('content-length') || 0) <= maxBytes)
+    const rawResponse = new TextDecoder('utf-8', { fatal: true }).decode(await readBounded(response, maxBytes, check))
+    check()
+    need(new TextEncoder().encode(rawResponse).byteLength <= maxBytes)
+    if (method === 'DELETE' && response.ok) { need(response.status === 204 && rawResponse === ''); return null }
+    let result: unknown
+    try { result = JSON.parse(rawResponse) } catch { throw new WeldingPlanError('回应格式无法确认，原请求保留', response.status >= 400 ? response.status : 0) }
+    if (!response.ok) {
+      const code = isObject(result) && isObject(result.error) && typeof result.error.code === 'string' ? result.error.code : ''
+      throw new WeldingPlanError(response.status === 409 ? '保存点冲突，本地编辑与原基础保留' : `焊接请求未确认（${response.status}）`, response.status, code)
+    }
+    need(expectedStatus === undefined || response.status === expectedStatus, '回应状态无法确认')
+    return result
+  }
+  async function owner(path: '/authority' | '/plans/recovery-authority', scope?: RequestScope): Promise<WeldingOwner> {
+    const value = await request(path, 'GET', undefined, scope)
+    exact(value, ['schema', 'owner'])
+    need(value.schema === (path === '/authority' ? 'yuantus.welding_generation_authority/1' : 'yuantus.welding_plan_recovery_authority/1'))
+    return clone(validateOwner(value.owner))
+  }
+  async function importRequest(action: 'template' | 'preview' | 'commit', format: ResourceImportFormat, input: ArrayBuffer | undefined, scope?: RequestScope, pending?: ResourceImportPending): Promise<unknown> {
+    importFormat(format)
+    const raw = input === undefined ? undefined : copyImportBytes(input), signature = readAuthSessionSignature(), controller = new AbortController()
+    const check = () => need(!controller.signal.aborted && !!readStoredToken() && signature === readAuthSessionSignature()
+      && scope?.accepts() !== false && !scope?.signal?.aborted, '会话或整批选择已变化，原请求保留')
+    check()
+    const query = new URLSearchParams({ format })
+    if (action === 'commit') { need(pending); sourceId(pending.import_id); need(isHash(pending.preview_digest)); query.set('import_id', pending.import_id); query.set('preview_digest', pending.preview_digest) }
+    const path = action === 'template' ? `/templates/${format}` : `/${action}?${query}`
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined, rejectAbort: (error: Error) => void = () => {}
+    const stopped = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
+    const abort = () => { controller.abort(); void reader?.cancel().catch(() => {}); rejectAbort(new WeldingResourceImportError('整批请求已取消或超过 330 秒，原请求保留', 0, action === 'commit' ? 'WELDING_RESULT_UNKNOWN' : 'WELDING_REQUEST_ABORTED')) }
+    const timer = setTimeout(abort, IMPORT_DEADLINE_MS)
+    scope?.signal?.addEventListener('abort', abort, { once: true })
+    const task = async () => {
+      const response = await transport(`/api/welding/resources/import${path}`, { method: action === 'template' ? 'GET' : 'POST',
+        ...(raw === undefined ? {} : { body: raw, headers: { 'Content-Type': 'application/octet-stream' } }), signal: controller.signal,
+        redirect: 'error', cache: 'no-store', suppressUnauthorizedRedirect: true })
+      check(); need(!response.redirected, '整批回应不可重定向')
+      const limit = response.ok && action === 'preview' ? IMPORT_PREVIEW_BYTES : IMPORT_RESPONSE_BYTES
+      const declared = response.headers.get('content-length')
+      need(declared === null || /^\d+$/.test(declared) && Number.isSafeInteger(Number(declared)) && Number(declared) <= limit, '整批回应超过容量')
+      const chunks: Uint8Array[] = []; let size = 0
+      reader = response.body?.getReader()
+      if (reader) while (true) {
+        const chunk = await reader.read(); check(); if (chunk.done) break
+        size += chunk.value.byteLength; need(size <= limit, '整批回应超过容量'); chunks.push(chunk.value)
+      }
+      const bytes = new Uint8Array(size); let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+      check()
+      const mime = response.headers.get('content-type')?.toLowerCase() ?? ''
+      if (response.ok && action === 'template') {
+        const expected = format === 'csv' ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        need(response.status === 200 && size > 0 && (mime === expected || format === 'csv' && /^text\/csv\s*;\s*charset=utf-8$/.test(mime)))
+        const filename = `welding-resource-import-v1.${format}`
+        need(response.headers.get('content-disposition') === `attachment; filename="${filename}"`)
+        return { blob: new Blob([bytes], { type: expected }), filename }
+      }
+      need(/^application\/json(?:\s*;\s*charset=utf-8)?$/.test(mime), '整批回应类型无法确认')
+      const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+      if (!response.ok) {
+        exact(value, ['error']); exact(value.error, ['code'], ['message', 'issues']); text(value.error.code)
+        const issues = Object.hasOwn(value.error, 'issues') ? validateImportIssues(value.error.issues) : []
+        if (Object.hasOwn(value.error, 'message')) text(value.error.message)
+        throw new WeldingResourceImportError(typeof value.error.message === 'string' ? value.error.message : `整批请求未确认（${response.status}）`, response.status, value.error.code, issues)
+      }
+      need(response.status === (action === 'commit' ? 201 : 200), '整批回应状态无法确认')
+      return value
+    }
+    try { return await Promise.race([task(), stopped]) }
+    catch (error) {
+      if (error instanceof WeldingResourceImportError) throw error
+      throw new WeldingResourceImportError(error instanceof Error ? error.message : '整批回应无法确认', 0, action === 'commit' ? 'WELDING_RESULT_UNKNOWN' : '')
+    } finally {
+      clearTimeout(timer); scope?.signal?.removeEventListener('abort', abort)
+      controller.abort(); if (reader) { void reader.cancel().catch(() => {}); try { reader.releaseLock() } catch { /* A cancelled pending read releases its own lock. */ } }
+    }
+  }
+  return {
+    async resourceImportTemplate(format: ResourceImportFormat, scope?: RequestScope): Promise<{ blob: Blob; filename: string }> {
+      return await importRequest('template', format, undefined, scope) as { blob: Blob; filename: string }
+    },
+    async previewResourceImport(format: ResourceImportFormat, bytes: ArrayBuffer, rawHash: string, scope?: RequestScope) {
+      return validateImportPreview(await importRequest('preview', format, bytes, scope), format, rawHash)
+    },
+    async commitResourceImport(input: ResourceImportPending, scope?: RequestScope) {
+      const pending = validateImportPending(input)
+      try { return validateImportReceipt(await importRequest('commit', pending.format, pending.bytes, scope, pending), pending) }
+      catch (error) {
+        if (error instanceof WeldingResourceImportError) throw error
+        throw new WeldingResourceImportError(error instanceof Error ? error.message : '整批回执无法确认', 0, 'WELDING_RESULT_UNKNOWN')
+      }
+    },
+    authority: (scope?: RequestScope) => owner('/authority', scope),
+    recoveryOwner: (scope?: RequestScope) => owner('/plans/recovery-authority', scope),
+    async list(offset = 0, product?: { item_id: string; version_id: string }, scope?: RequestScope) {
+      need(Number.isSafeInteger(offset) && offset >= 0)
+      const value = await request(`/plans?limit=50&offset=${offset}${product ? `&${pairQuery(product)}` : ''}`, 'GET', undefined, scope)
+      need(isObject(value) && Array.isArray(value.items) && value.limit === 50 && value.offset === offset && Number.isSafeInteger(value.total) && (value.total as number) >= 0)
+      return { items: value.items.map(item => validatePlan(item)), total: value.total as number, limit: 50, offset }
+    },
+    async productCandidates(query: string, scope?: RequestScope) {
+      text(query); need(query.trim() === query && query.length > 0 && Array.from(query).length <= 100)
+      const value = await request(`/plans/product-candidates?${new URLSearchParams({ query, limit: '20' })}`, 'GET', undefined, scope)
+      need(isObject(value) && Array.isArray(value.items) && value.items.length <= 20)
+      return value.items.map(item => candidate(item) as PlanCandidate)
+    },
+    async reuseProductCandidates(query: string, scope?: RequestScope) {
+      reuseSourceText(query, 100)
+      const value = await request(`/plans/reuse-product-candidates?${new URLSearchParams({ query, limit: '20' })}`, 'GET', undefined, scope)
+      exact(value, ['items']); need(Array.isArray(value.items) && value.items.length <= 20)
+      const items = value.items.map(reuseProductCandidate)
+      need(new Set(items.map(item => JSON.stringify([item.item_id, item.version_id]))).size === items.length)
+      return items
+    },
+    async reuseProductContext(product: { item_id: string; version_id: string }, scope?: RequestScope) {
+      const pair = { item_id: product.item_id, version_id: product.version_id }
+      const value = await request(`/plans/reuse-product-context?${reusePairQuery(pair)}`, 'GET', undefined, scope)
+      exact(value, ['schema', 'product']); need(value.schema === 'yuantus.welding_plan_entry/1')
+      const result = reuseProductCandidate(value.product)
+      need(result.item_id === pair.item_id && result.version_id === pair.version_id)
+      return result
+    },
+    async reuseBomCandidates(product: { item_id: string; version_id: string }, scope?: RequestScope) {
+      const value = await request(`/plans/reuse-bom-candidates?${reusePairQuery(product)}`, 'GET', undefined, scope)
+      exact(value, ['items']); need(Array.isArray(value.items) && value.items.length <= 20)
+      const items = value.items.map(reuseBomCandidate)
+      need(new Set(items.map(item => item.baseline_id)).size === items.length)
+      return items
+    },
+    async drawingCandidates(query: string, scope?: RequestScope) {
+      text(query); need(query.trim() === query && query.length > 0 && Array.from(query).length <= 100)
+      const value = await request(`/plans/drawing-candidates?${new URLSearchParams({ query, limit: '20' })}`, 'GET', undefined, scope)
+      need(isObject(value) && Array.isArray(value.items) && value.items.length <= 20)
+      return value.items.map(item => candidate(item, true) as DrawingCandidate)
+    },
+    async productContext(product: { item_id: string; version_id: string }, scope?: RequestScope) {
+      const value = await request(`/plans/product-context?${pairQuery(product)}`, 'GET', undefined, scope)
+      exact(value, ['schema', 'product']); need(value.schema === 'yuantus.welding_plan_entry/1')
+      const result = candidate(value.product) as PlanCandidate
+      need(result.item_id === product.item_id && result.version_id === product.version_id)
+      return result
+    },
+    async bomCandidates(product: { item_id: string; version_id: string }, scope?: RequestScope) {
+      const value = await request(`/plans/bom-candidates?${pairQuery(product)}`, 'GET', undefined, scope, 21 * 1024 * 1024, 200)
+      exact(value, ['items']); need(Array.isArray(value.items) && value.items.length <= 20)
+      const items = value.items.map(item => validateBomProjection(item, product))
+      need(new Set(items.map(item => item.baseline_id)).size === items.length)
+      return items
+    },
+    async assemblyPreview(input: PlanRecoveryRecord, scope?: RequestScope) {
+      const record = validateRecovery(input), pending = record.pending
+      need(record.draft.version_id && pending?.method === 'POST' && Object.hasOwn(pending.body, 'assembly_change'))
+      return validateAssemblyPreview(await request(`/plans/${encoded(record.draft.plan_id)}/versions/${encoded(record.draft.version_id)}/assembly-preview`, 'POST', pending.body, scope, 11 * 1024 * 1024, 200), record.draft.plan_id, record.draft.version_id, pending.body)
+    },
+    async resource(resource: string, version: string, scope?: RequestScope) {
+      return validateResource(await request(`/resources/${encoded(resource)}/versions/${encoded(version)}`, 'GET', undefined, scope, 32 * 1024 * 1024), resource, version)
+    },
+    async readResource(resource: string, version: string, scope?: RequestScope) {
+      return validateResourceMaintenanceRecord(await request(`/resources/${encoded(resource)}/versions/${encoded(version)}`, 'GET', undefined, scope, 32 * 1024 * 1024, 200), resource, version)
+    },
+    async readResourceDiagram(input: ResourceMaintenanceRecord, scope?: RequestScope): Promise<Blob> {
+      const record = validateResourceMaintenanceRecord(input, input.resource_id, input.item_version_id), diagram = resourceDiagram(record)
+      const path = `/api/welding/resources/${encoded(record.resource_id)}/versions/${encoded(record.item_version_id)}/diagram`
+      const signature = readAuthSessionSignature(), controller = new AbortController()
+      const check = () => need(!controller.signal.aborted && !!readStoredToken() && signature === readAuthSessionSignature()
+        && scope?.accepts() !== false && !scope?.signal?.aborted, '会话或接头图选择已变化')
+      const abort = () => controller.abort(), timer = setTimeout(abort, 30000)
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+      let rejectAbort!: (reason: Error) => void
+      const cancelled = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
+      const onAbort = () => rejectAbort(new Error('接头图读取已取消或超过 30 秒'))
+      controller.signal.addEventListener('abort', onAbort, { once: true })
+      scope?.signal?.addEventListener('abort', abort, { once: true })
+      const limited: RequestScope = { signal: controller.signal, accepts: () => !controller.signal.aborted && signature === readAuthSessionSignature() && scope?.accepts() !== false }
+      const wait = async <T>(action: () => Promise<T>): Promise<T> => { check(); const value = await Promise.race([action(), cancelled]); check(); return value }
+      try {
+        check()
+        const first = await wait(() => owner('/authority', limited))
+        const response = await wait(() => transport(path, { method: 'GET', signal: controller.signal, suppressUnauthorizedRedirect: true, redirect: 'error', cache: 'no-store' }))
+        if (response.status !== 200) throw new WeldingPlanError(`接头图无法读取（${response.status}）`, response.status)
+        need(!response.redirected && !!response.body && response.headers.get('content-type') === diagram.mime_type
+          && response.headers.get('content-length') === String(diagram.byte_size) && response.headers.get('X-Content-SHA256') === diagram.actual_sha256
+          && [null, 'identity'].includes(response.headers.get('content-encoding')), '接头图回应资格不匹配')
+        reader = response.body!.getReader()
+        const chunks: Uint8Array[] = []; let size = 0
+        while (true) {
+          const chunk = await wait(() => reader!.read())
+          if (chunk.done) break
+          size += chunk.value.byteLength; need(size <= diagram.byte_size && size <= DRAFT_BYTES, '接头图超过固定容量')
+          chunks.push(chunk.value)
+        }
+        need(size === diagram.byte_size, '接头图实际长度不匹配')
+        const bytes = new Uint8Array(size); let offset = 0
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+        const digest = await wait(() => crypto.subtle.digest('SHA-256', bytes))
+        need([...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('') === diagram.actual_sha256, '接头图实际摘要不匹配')
+        need(equal(await wait(() => owner('/authority', limited)), first), '接头图身份已变化')
+        return new Blob([bytes], { type: diagram.mime_type })
+      } finally {
+        clearTimeout(timer); scope?.signal?.removeEventListener('abort', abort)
+        controller.signal.removeEventListener('abort', onAbort); controller.abort()
+        void reader?.cancel().catch(() => {})
+      }
+    },
+    async resourceCatalog(query: ResourceCatalogQuery, scope?: RequestScope) {
+      const params = resourceCatalogQuery(query), limit = query.limit ?? 20
+      return validateResourceCatalog(await request(`/resources/catalog${params ? `?${params}` : ''}`, 'GET', undefined, scope, RESOURCE_CATALOG_BYTES, 200), limit)
+    },
+    async resourceVersionCatalog(resource: string, query: { limit?: number; cursor?: string }, scope?: RequestScope) {
+      const params = resourceVersionQuery(query), limit = query.limit ?? 20
+      return validateResourceVersionCatalog(await request(`/resources/${encoded(resource)}/version-catalog${params ? `?${params}` : ''}`, 'GET', undefined, scope, RESOURCE_CATALOG_BYTES, 200), resource, limit)
+    },
+    async resourceDocumentCatalog(query: string, cursor: string | undefined, scope?: RequestScope) {
+      return validateResourceDocumentCatalog(await request(`/process-references/candidate-catalog?${resourceDocumentQuery(query, cursor)}`, 'GET', undefined, scope, RESOURCE_CATALOG_BYTES, 200))
+    },
+    async createResource(body: CreateResourceRequest, scope?: RequestScope) {
+      const original = validateResourceOriginal({ action: 'create', resource_id: body.resource_id, body, source: null })
+      return validateResourceAck(await request(resourcePath(original), 'POST', original.body, scope, 32 * 1024 * 1024, 201), original)
+    },
+    async reviseResource(resource: string, body: ReviseResourceRequest, source: ResourceBasis, scope?: RequestScope) {
+      const original = validateResourceOriginal({ action: 'revise', resource_id: resource, body, source })
+      return validateResourceAck(await request(resourcePath(original), 'POST', original.body, scope, 32 * 1024 * 1024, 201), original)
+    },
+    async createCadContext(plan: string, version: string, openId: string, seq: number, scope?: RequestScope) {
+      safeId(openId); need(Number.isSafeInteger(seq) && seq >= 1)
+      return request(`${planPath(plan, version)}/cad-contexts`, 'POST', { open_id: openId, expected_draft_seq: seq }, scope)
+    },
+    readCadContext: (plan: string, version: string, context: string, scope?: RequestScope) => request(`${planPath(plan, version)}/cad-contexts/${encoded(context)}`, 'GET', undefined, scope),
+    revokeCadContext: (plan: string, version: string, context: string, scope?: RequestScope) => request(`${planPath(plan, version)}/cad-contexts/${encoded(context)}`, 'DELETE', undefined, scope),
+    async prepareSourceChange(point: PlanRecord, drawing: NonNullable<PlanPayload['drawing']>, owner: WeldingOwner, openId: string, scope?: RequestScope) {
+      safeId(openId)
+      const body = { open_id: openId, expected_draft_seq: point.draft_seq, expected_content_hash: point.content_hash, drawing }
+      return validateSourcePreparation(await request(`${planPath(point.plan_id, point.item_version_id)}/source-change-preparations`, 'POST', body, scope, 24 * 1024 * 1024, 201), point, drawing, owner)
+    },
+    async readSourcePreparation(point: PlanRecord, drawing: NonNullable<PlanPayload['drawing']>, owner: WeldingOwner, context: string, scope?: RequestScope) {
+      return validateSourcePreparation(await request(`${planPath(point.plan_id, point.item_version_id)}/source-change-preparations/${encoded(context)}`, 'GET', undefined, scope, 24 * 1024 * 1024, 200), point, drawing, owner, context)
+    },
+    async cadTicket(target: { purpose: 'editor'; plan_id: string; version_id: string; context_id: string } | { purpose: 'history'; plan_id: string; version_id: string; change_id: string; side: 'before' | 'after' } | { purpose: 'preparation'; plan_id: string; version_id: string; context_id: string; side: 'before' | 'after' }, scope?: RequestScope) {
+      for (const key of ['plan_id', 'version_id'] as const) safeId(target[key])
+      if (target.purpose === 'history') safeId(target.change_id)
+      else safeId(target.context_id)
+      if (target.purpose !== 'editor') need(['before', 'after'].includes(target.side))
+      const value = await request('/cad-assets/tickets', 'POST', target, scope, 1024)
+      exact(value, ['asset_url', 'bundle_sha256', 'expires_at'])
+      need(value.bundle_sha256 === WELDING_CAD_PIN && value.asset_url === `/welding-cad/${WELDING_CAD_PIN}/${target.purpose === 'editor' ? 'welding-frame.html' : 'welding-history.html'}`
+        && typeof value.expires_at === 'string' && Date.parse(value.expires_at) > Date.now(), 'CAD 固定安装包或票据无法确认')
+      return value as { asset_url: string; bundle_sha256: string; expires_at: string }
+    },
+    async sourceReview(plan: string, version: string, offset = 0, scope?: RequestScope) {
+      need(Number.isSafeInteger(offset) && offset >= 0)
+      const value = await request(`${planPath(plan, version)}/source-review?limit=50&offset=${offset}`, 'GET', undefined, scope)
+      return validateSourceReview(value, plan, version, offset)
+    },
+    async sourceChanges(plan: string, version: string, offset = 0, scope?: RequestScope) {
+      need(Number.isSafeInteger(offset) && offset >= 0)
+      const value = await request(`${planPath(plan, version)}/source-changes?limit=50&offset=${offset}`, 'GET', undefined, scope)
+      need(isObject(value) && Array.isArray(value.items) && value.offset === offset && value.limit === 50)
+      return clone(value)
+    },
+    async sourceChange(plan: string, version: string, change: string, scope?: RequestScope) {
+      const value = await request(`${planPath(plan, version)}/source-changes/${encoded(change)}`, 'GET', undefined, scope)
+      need(isObject(value) && value.schema === 'yuantus.welding_source_change/1' && value.change_id === change && isObject(value.before) && isObject(value.after))
+      return clone(value)
+    },
+    async sourceDocument(plan: string, version: string, change: string, side: 'before' | 'after', scope?: RequestScope) {
+      need(['before', 'after'].includes(side))
+      const value = await request(`${planPath(plan, version)}/source-changes/${encoded(change)}/documents/${side}`, 'GET', undefined, scope)
+      need(isObject(value) && value.schema === 'yuantus.welding_source_document/1' && value.change_id === change && value.side === side
+        && isObject(value.payload) && isObject(value.cadgf_document) && value.view_bundle_sha256 === WELDING_CAD_PIN)
+      return clone(value)
+    },
+    async renderTemplates(scope?: RequestScope): Promise<RenderTemplate[]> {
+      const value = await request('/render-templates', 'GET', undefined, scope, 2 * 1024 * 1024)
+      exact(value, ['schema', 'items']); need(value.schema === 'yuantus.welding_instruction_templates/1' && Array.isArray(value.items) && value.items.length <= 20)
+      const seen = new Set<string>()
+      return value.items.map(item => {
+        exact(item, ['id', 'version', 'digest', 'name', 'available', 'unavailable_reason', 'default_options', 'options_schema'])
+        need(item.id === 'welding-a4' && ['1', '2', '3'].includes(String(item.version)) && isHash(item.digest) && typeof item.available === 'boolean' && isObject(item.options_schema))
+        boundedText(item.name, 256); need(item.name); need(item.unavailable_reason === null || typeof item.unavailable_reason === 'string' && item.unavailable_reason.length > 0); if (item.unavailable_reason !== null) boundedText(item.unavailable_reason, 256)
+        validateTemplateOptions(item.default_options); const key = `${item.id}:${item.version}`; need(!seen.has(key)); seen.add(key)
+        return clone(item) as unknown as RenderTemplate
+      })
+    },
+    async createReviewGeneration(plan: string, version: string, body: CreateReviewRequest, scope?: RequestScope) {
+      const original = validateCreateReview(body)
+      return validateReviewAck(await request(`${planPath(plan, version)}/renders`, 'POST', original, scope, 64 * 1024, 202), original, { plan_id: plan, item_version_id: version })
+    },
+    async listReviewGenerations(plan: string, version: string, offset = 0, scope?: RequestScope) {
+      need(Number.isSafeInteger(offset) && offset >= 0)
+      const value = await request(`${planPath(plan, version)}/renders?limit=20&offset=${offset}&purpose=review`, 'GET', undefined, scope, 2 * 1024 * 1024)
+      exact(value, ['items', 'total', 'limit', 'offset']); need(Array.isArray(value.items) && value.items.length <= 20 && value.limit === 20 && value.offset === offset && Number.isSafeInteger(value.total) && (value.total as number) >= 0 && (!value.items.length || (value.total as number) >= offset + value.items.length))
+      const items = value.items.map(item => { const record = validateReviewGeneration(item); need(record.plan_id === plan && record.item_version_id === version); return record })
+      need(new Set(items.map(item => item.generation_id)).size === items.length)
+      return { items, total: value.total as number, limit: 20, offset }
+    },
+    async readReviewGeneration(id: string, scope?: RequestScope) {
+      uuidId(id); const value = validateReviewGeneration(await request(`/artifacts/${id}`, 'GET', undefined, scope, 128 * 1024)); need(value.generation_id === id); return value
+    },
+    async retryReviewGeneration(basis: GenerationBasis, body: RetryReviewRequest, scope?: RequestScope) {
+      exact(basis, basisKeys); const fixed = generationBasis(basis), original = validateRetryReview(body)
+      return validateReviewAck(await request(`/artifacts/${fixed.generation_id}/retry`, 'POST', original, scope, 64 * 1024, 202), original, fixed)
+    },
+    async downloadReviewFile(id: string, descriptor: GenerationFile, scope?: RequestScope): Promise<Blob> {
+      uuidId(id); const file = validateGenerationFile(descriptor, descriptor.format), signature = readAuthSessionSignature()
+      const check = () => { if (!readStoredToken() || signature !== readAuthSessionSignature() || scope?.accepts() === false || scope?.signal?.aborted) throw new WeldingPlanError('会话或文件选择已变化', 0, 'WELDING_STALE_SESSION') }
+      check()
+      const response = await transport(`/api/welding/artifacts/${id}/files/${file.format}`, { method: 'GET', signal: scope?.signal, suppressUnauthorizedRedirect: true, redirect: 'error', cache: 'no-store' }); check()
+      if (!response.ok) throw new WeldingPlanError(`文件无法读取（${response.status}）`, response.status)
+      need(response.status === 200 && !response.redirected && response.headers.get('content-type')?.split(';')[0] === file.mime_type && response.headers.get('content-length') === String(file.byte_size) && response.headers.get('X-Artifact-SHA256') === file.artifact_sha256)
+      const bytes = await readBounded(response, file.byte_size, check); check(); need(bytes.byteLength === file.byte_size)
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>))].map(value => value.toString(16).padStart(2, '0')).join(''); check(); need(digest === file.artifact_sha256, '文件实际摘要不匹配')
+      return new Blob([bytes as Uint8Array<ArrayBuffer>], { type: file.mime_type })
+    },
+    async readReviewState(plan: string, version: string, owner: WeldingOwner, scope?: RequestScope) { return validateWorkflowState(await request(`${planPath(plan, version)}/review-state`, 'GET', undefined, scope, 24 * 1024 * 1024, 200), plan, version, owner) },
+    async readReviewHistory(plan: string, version: string, owner: WeldingOwner, offset = 0, scope?: RequestScope) {
+      need(Number.isSafeInteger(offset) && offset >= 0)
+      return validateWorkflowHistory(await request(`${planPath(plan, version)}/review-history?limit=50&offset=${offset}`, 'GET', undefined, scope, 64 * 1024 * 1024, 200), plan, version, owner, offset)
+    },
+    async validateWorkflowPlan(plan: string, version: string, body: WorkflowBasis, scope?: RequestScope) {
+      exact(body, ['expected_draft_seq', 'expected_content_hash']); sequence(body.expected_draft_seq, 1); need(isHash(body.expected_content_hash))
+      const value = await request(`${planPath(plan, version)}/validate`, 'POST', body, scope, 64 * 1024, 200)
+      exact(value, ['schema', 'plan_id', 'item_version_id', 'draft_seq', 'content_hash', 'ready', 'issues'])
+      need(value.schema === 'yuantus.welding_plan_validation/1' && value.plan_id === plan && value.item_version_id === version && value.draft_seq === body.expected_draft_seq && value.content_hash === body.expected_content_hash && typeof value.ready === 'boolean' && Array.isArray(value.issues))
+      value.issues.forEach(issue => workflowText(issue, 128, true)); need(value.ready === (value.issues.length === 0))
+      return { ready: value.ready as boolean, issues: clone(value.issues) as string[] }
+    },
+    async submitWorkflowPlan(plan: string, version: string, body: SubmitWorkflowRequest, scope?: RequestScope) {
+      const original: WorkflowOriginal = { plan_id: plan, item_version_id: version, action: 'submit', body }; validateWorkflowBody('submit', body)
+      return validateWorkflowAck(await request(`${planPath(plan, version)}/submit`, 'POST', body, scope, 64 * 1024, 200), original)
+    },
+    async reviewWorkflowPlan(plan: string, version: string, body: ReviewWorkflowRequest, scope?: RequestScope) {
+      const original: WorkflowOriginal = { plan_id: plan, item_version_id: version, action: 'review', body }; validateWorkflowBody('review', body)
+      return validateWorkflowAck(await request(`${planPath(plan, version)}/review`, 'POST', body, scope, 64 * 1024, 200), original)
+    },
+    async withdrawWorkflowPlan(plan: string, version: string, body: ReasonWorkflowRequest, scope?: RequestScope) {
+      const original: WorkflowOriginal = { plan_id: plan, item_version_id: version, action: 'withdraw', body }; validateWorkflowBody('withdraw', body)
+      return validateWorkflowAck(await request(`${planPath(plan, version)}/withdraw`, 'POST', body, scope, 64 * 1024, 200), original)
+    },
+    async reopenWorkflowPlan(plan: string, version: string, body: ReasonWorkflowRequest, scope?: RequestScope) {
+      const original: WorkflowOriginal = { plan_id: plan, item_version_id: version, action: 'reopen', body }; validateWorkflowBody('reopen', body)
+      return validateWorkflowAck(await request(`${planPath(plan, version)}/reopen`, 'POST', body, scope, 64 * 1024, 200), original)
+    },
+    async createFinalGeneration(plan: string, version: string, body: FinalRenderRequest, scope?: RequestScope) {
+      validateWorkflowBody('final-render', body)
+      return validateFinalAck(await request(`${planPath(plan, version)}/final-renders`, 'POST', body, scope, 128 * 1024, 202), { plan_id: plan, item_version_id: version, action: 'final-render', body })
+    },
+    async readFinalGeneration(basis: FinalGenerationBasis, scope?: RequestScope) {
+      const fixed = finalGenerationBasis(basis); need(equal(fixed, basis))
+      return validateFinalGeneration(await request(`/artifacts/${fixed.generation_id}`, 'GET', undefined, scope, 128 * 1024, 200), fixed)
+    },
+    async retryFinalGeneration(basis: FinalGenerationBasis, body: RetryReviewRequest, scope?: RequestScope) {
+      const fixed = finalGenerationBasis(basis); need(equal(fixed, basis)); validateWorkflowBody('final-retry', body)
+      return validateFinalAck(await request(`/artifacts/${fixed.generation_id}/retry`, 'POST', body, scope, 64 * 1024, 202), { plan_id: fixed.plan_id, item_version_id: fixed.item_version_id, action: 'final-retry', body, basis: fixed })
+    },
+    async releaseWorkflowPlan(plan: string, version: string, body: ReleaseWorkflowRequest, scope?: RequestScope) {
+      validateWorkflowBody('release', body)
+      return validateWorkflowAck(await request(`${planPath(plan, version)}/release`, 'POST', body, scope, 64 * 1024, 200), { plan_id: plan, item_version_id: version, action: 'release', body })
+    },
+    async reviseWorkflowPlan(plan: string, version: string, body: ReviseWorkflowRequest, scope?: RequestScope) {
+      validateWorkflowBody('revise', body)
+      return validateRevisionAck(await request(`${planPath(plan, version)}/revise`, 'POST', body, scope, 11 * 1024 * 1024, 200), { plan_id: plan, item_version_id: version, action: 'revise', body })
+    },
+    async reusePlan(plan: string, version: string, body: ReuseRequest, scope?: RequestScope) {
+      const original: ReuseOriginal = { action: 'reuse', plan_id: plan, item_version_id: version, body: validateReuseRequest(body) }
+      need(body.target_plan_id !== plan)
+      return validateReuseAck(await request(`${planPath(plan, version)}/reuse`, 'POST', original.body, scope, 64 * 1024, 200), original)
+    },
+    async resolveReuseReceipt(original: ReuseOriginal, scope?: RequestScope) {
+      need(original.action === 'reuse'); validateReuseRequest(original.body); need(original.body.target_plan_id !== original.plan_id)
+      const value = await request(`${planPath(original.plan_id, original.item_version_id)}/reuse-receipts/resolve`, 'POST', original.body, scope, 64 * 1024, 200)
+      exact(value, ['schema', 'command', 'request_id', 'status', 'ack']); need(value.schema === 'yuantus.welding_reuse_resolution/1' && value.command === 'reuse' && value.request_id === original.body.request_id)
+      if (value.status === 'unknown') { need(value.ack === null); return null }
+      need(value.status === 'committed'); return validateReuseAck(value.ack, original)
+    },
+    async readReuseProvenance(plan: string, version: string, owner: WeldingOwner, scope?: RequestScope) {
+      return validateReuseProvenance(await request(`${planPath(plan, version)}/reuse-provenance`, 'GET', undefined, scope, 11 * 1024 * 1024, 200), plan, version, owner)
+    },
+    async readPublications(plan: string, offset = 0, scope?: RequestScope) {
+      sequence(offset)
+      return validatePublicationDirectory(await request(`/plans/${encoded(plan)}/publications?limit=20&offset=${offset}`, 'GET', undefined, scope, 2 * 1024 * 1024, 200), plan, offset)
+    },
+    async comparePublications(plan: string, from: string, to: string, scope?: RequestScope) {
+      return validatePublicationComparison(await request(`/plans/${encoded(plan)}/publication-comparison?from_version_id=${encoded(from)}&to_version_id=${encoded(to)}`, 'GET', undefined, scope, 24 * 1024 * 1024, 200), plan, from, to)
+    },
+    async readPublication(plan: string, version: string, scope?: RequestScope) {
+      return validatePublication(await request(`${planPath(plan, version)}/publication`, 'GET', undefined, scope, 2 * 1024 * 1024, 200), plan, version)
+    },
+    async downloadPublicationFile(publication: Publication, format: 'pdf' | 'docx', scope?: RequestScope): Promise<Blob> {
+      const fixed = validatePublication(publication, publication.plan_id, publication.item_version_id); need(format === 'pdf' || format === 'docx')
+      const file = fixed.files[format], signature = readAuthSessionSignature()
+      const check = () => { if (!readStoredToken() || signature !== readAuthSessionSignature() || scope?.accepts() === false || scope?.signal?.aborted) throw new WeldingPlanError('会话或正式文件选择已变化', 0, 'WELDING_STALE_SESSION') }
+      check()
+      const response = await transport(`/api/welding${planPath(fixed.plan_id, fixed.item_version_id)}/publication/files/${format}`, { method: 'GET', signal: scope?.signal, suppressUnauthorizedRedirect: true, redirect: 'error', cache: 'no-store' }); check()
+      if (!response.ok) throw new WeldingPlanError(`正式文件无法读取（${response.status}）`, response.status)
+      need(response.status === 200 && !response.redirected && response.headers.get('content-type')?.split(';')[0] === file.mime_type && response.headers.get('content-length') === String(file.byte_size) && response.headers.get('X-Artifact-SHA256') === file.artifact_sha256)
+      const bytes = await readBounded(response, file.byte_size, check); check(); need(bytes.byteLength === file.byte_size)
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>))].map(value => value.toString(16).padStart(2, '0')).join(''); check(); need(digest === file.artifact_sha256, '正式文件实际摘要不匹配')
+      return new Blob([bytes as Uint8Array<ArrayBuffer>], { type: file.mime_type })
+    },
+    async resolveWorkflowReceipt(original: WorkflowOriginal, scope?: RequestScope) {
+      if (original.action === 'final-retry') { const fixed = finalGenerationBasis(original.basis); need(equal(fixed, original.basis) && fixed.plan_id === original.plan_id && fixed.item_version_id === original.item_version_id) }
+      validateWorkflowBody(original.action, original.body)
+      return validateWorkflowResolution(await request(`${planPath(original.plan_id, original.item_version_id)}/workflow-receipts/resolve`, 'POST', { command: original.action, body: original.body, ...(original.action === 'final-retry' ? { generation_id: finalGenerationBasis(original.basis).generation_id } : {}) }, scope, 11 * 1024 * 1024, 200), original)
+    },
+    async read(plan: string, version: string, scope?: RequestScope) { return validatePlan(await request(planPath(plan, version), 'GET', undefined, scope), plan, version) },
+    async save(input: PlanRecoveryRecord, scope?: RequestScope) {
+      const record = validateRecovery(input), pending = record.pending
+      need(pending)
+      return validateSaveAck(await request(`/plans${pending.path}`, pending.method, pending.body, scope, 13 * 1024 * 1024, record.draft.version_id === null ? 201 : 200), record)
+    },
+    async recover(purpose: 'restore' | 'retry', input: PlanRecoveryRecord, scope?: RequestScope): Promise<RecoveryAuthority> {
+      need(purpose === 'restore' || purpose === 'retry')
+      const record = validateRecovery(input)
+      const value = await request('/plans/recovery-authority', 'POST', { purpose, record }, scope)
+      exact(value, ['schema', 'owner', 'record_id', 'current', 'can_write', 'conflict'])
+      need(value.schema === 'yuantus.welding_plan_recovery_authority/1' && value.record_id === record.recovery_id
+        && equal(validateOwner(value.owner), record.owner) && typeof value.can_write === 'boolean' && typeof value.conflict === 'boolean')
+      const current = value.current === null ? null : validatePlan(value.current, record.draft.plan_id, record.draft.version_id ?? undefined)
+      return { ...value, current } as unknown as RecoveryAuthority
+    },
+  }
+}
+export type WeldingPlanClient = ReturnType<typeof createWeldingPlanClient>

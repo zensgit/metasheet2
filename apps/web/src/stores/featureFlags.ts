@@ -10,6 +10,8 @@ export interface ProductFeatures {
   attendanceAdmin: boolean
   attendanceImport: boolean
   plm: boolean
+  weldingRead: boolean
+  weldingWrite: boolean
   /**
    * T3-1 v0 — mobile approval surface (responsive web) rollout gate (ballot Q11).
    * Tenant/user-scoped, DEFAULT OFF: the flag is only true when the backend
@@ -90,6 +92,8 @@ const DEFAULT_FEATURES: ProductFeatures = {
   attendanceAdmin: false,
   attendanceImport: false,
   plm: false,
+  weldingRead: false,
+  weldingWrite: false,
   approvalMobile: false,
   approvalAttachments: false,
   approvalCanvasV2: false,
@@ -285,6 +289,8 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
           : undefined,
     elearning: typeof featuresNode.elearning === 'boolean' ? featuresNode.elearning : undefined,
     tasks: typeof featuresNode.tasks === 'boolean' ? featuresNode.tasks : undefined,
+    weldingRead: typeof featuresNode.weldingRead === 'boolean' ? featuresNode.weldingRead : undefined,
+    weldingWrite: typeof featuresNode.weldingWrite === 'boolean' ? featuresNode.weldingWrite : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -433,6 +439,9 @@ function resolveFeatures(
     attendanceAdmin,
     attendanceImport,
     plm,
+    // Exact backend flags only; PLM/admin/mode and local overrides never enable welding writes.
+    weldingRead: backend.weldingRead === true,
+    weldingWrite: backend.weldingRead === true && backend.weldingWrite === true,
     approvalMobile,
     approvalAttachments,
     approvalCanvasV2,

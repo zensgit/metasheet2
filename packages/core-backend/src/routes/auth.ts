@@ -290,6 +290,7 @@ function buildFeaturePayload(authUser: User) {
   const workflow = FEATURE_FLAGS.workflowEnabled
   const plm = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
   const mode = resolveEffectiveProductMode(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
+  const weldingRead = process.env.WELDING_READ_ENABLED === 'true'
 
   return {
     attendance,
@@ -297,6 +298,8 @@ function buildFeaturePayload(authUser: User) {
     attendanceAdmin,
     attendanceImport,
     plm,
+    weldingRead,
+    weldingWrite: weldingRead && process.env.WELDING_WRITE_ENABLED === 'true',
     // B3-07 (#4195): surfaces the APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF) to the
     // web client so the fill view swaps the B2-28 placeholder for the real uploader ONLY flag-ON.
     approvalAttachments: isApprovalAttachmentsEnabled(),

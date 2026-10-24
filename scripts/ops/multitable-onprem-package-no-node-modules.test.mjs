@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -28,6 +29,89 @@ test('on-prem verifier requires the superseded audit migration marker', () => {
     'the package verifier must reject builds that could replay the non-idempotent legacy audit SQL',
   )
 })
+
+const sourceSqlMigrations = [
+  'packages/core-backend/src/db/migrations/20250925_create_view_tables.sql',
+  'packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql',
+]
+
+// Run the real input/copy and archive/content guards, stopping before release
+// generation or unrelated runtime contracts. Fixtures never build the application.
+function packageSqlFixture(t, script, arrayName) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-package-sql-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const array = script.match(new RegExp(`\n${arrayName}=\\(\n([\\s\\S]*?)\n\\)`))
+  assert.ok(array, `missing ${arrayName} input list`)
+  const paths = [...array[1].matchAll(/^\s*"([^"]+)"\s*$/gm)].map((match) => match[1])
+  for (const rel of [...paths, ...sourceSqlMigrations].sort((a, b) => b.length - a.length)) {
+    const file = path.join(root, 'package', rel)
+    if (fs.existsSync(file)) continue
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, 'fixture\n')
+  }
+  for (const rel of sourceSqlMigrations) {
+    fs.copyFileSync(path.join(repoRoot, rel), path.join(root, 'package', rel))
+  }
+  return root
+}
+
+function runPackageSqlScript(script, args, cwd, env = {}) {
+  return spawnSync('bash', [script, ...args], {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+    timeout: 10000,
+  })
+}
+
+for (const missing of sourceSqlMigrations) {
+  test(`on-prem package build refuses missing source SQL ${path.basename(missing)}`, (t) => {
+    const root = packageSqlFixture(t, buildScript, 'REQUIRED_PATHS')
+    const stop = buildScript.indexOf('\nrun rm -rf "$BUILD_ROOT"')
+    const copy = buildScript.match(/for rel in "\$\{REQUIRED_PATHS\[@\]\}"; do\n  copy_path "\$rel"\ndone/)
+    assert.ok(stop > 0 && copy)
+    const script = path.join(root, 'package/scripts/ops/build-inputs.sh')
+    fs.writeFileSync(script, `${buildScript.slice(0, stop)}\n${copy[0]}\n`)
+    const env = {
+      PACKAGE_VERSION: 'fixture', PACKAGE_TAG: 'sql', OUTPUT_DIR: path.join(root, 'output'),
+      INSTALL_DEPS: '0', BUILD_WEB: '0', BUILD_BACKEND: '0',
+    }
+    const clean = runPackageSqlScript(script, [], root, env)
+    assert.equal(clean.status, 0, clean.stderr)
+    fs.rmSync(path.join(root, 'output'), { recursive: true, force: true })
+    fs.unlinkSync(path.join(root, 'package', missing))
+    const result = runPackageSqlScript(script, [], root, env)
+    assert.equal(result.status, 1, result.stderr)
+    assert.ok(result.stderr.includes(`Required file missing before packaging: ${missing}`), result.stderr)
+    assert.equal(fs.existsSync(path.join(root, 'output')), false)
+  })
+
+  test(`on-prem package verifier rejects rehashed archive missing source SQL ${path.basename(missing)}`, (t) => {
+    const root = packageSqlFixture(t, verifyScript, 'required')
+    const stop = verifyScript.indexOf('\ndeploy_run_wrapper=')
+    assert.ok(stop > 0)
+    const script = path.join(root, 'verify-content.sh')
+    fs.writeFileSync(script, `${verifyScript.slice(0, stop)}\nfi\n`)
+    const archive = path.join(root, 'fixture.tgz')
+    const pack = () => {
+      const result = spawnSync('tar', ['-czf', archive, '-C', root, 'package'], {
+        env: { ...process.env, COPYFILE_DISABLE: '1' }, encoding: 'utf8', timeout: 10000,
+      })
+      assert.equal(result.status, 0, result.stderr)
+      const hash = createHash('sha256').update(fs.readFileSync(archive)).digest('hex')
+      fs.writeFileSync(`${archive}.sha256`, `${hash}  fixture.tgz\n`)
+      fs.writeFileSync(path.join(root, 'SHA256SUMS'), `${hash}  fixture.tgz\n`)
+    }
+    pack()
+    const clean = runPackageSqlScript(script, [archive], root, { VERIFY_SHA: '1', EXTRACT_ROOT: '' })
+    assert.equal(clean.status, 0, clean.stderr)
+    fs.unlinkSync(path.join(root, 'package', missing))
+    pack() // Regenerate the archive inventory and checksum after removing SQL.
+    const result = runPackageSqlScript(script, [archive], root, { VERIFY_SHA: '1', EXTRACT_ROOT: '' })
+    assert.equal(result.status, 1, result.stderr)
+    assert.ok(result.stderr.includes(`Required package content missing: ${missing}`), result.stderr)
+  })
+}
 
 function runVerifierFunction(functionName, listEntries) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-package-list-'))
