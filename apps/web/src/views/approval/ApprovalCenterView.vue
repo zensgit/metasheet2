@@ -745,7 +745,7 @@ import PageHeader from '../../components/layout/PageHeader.vue'
 const router = useRouter()
 const route = useRoute()
 const store = useApprovalStore()
-const { canWrite, permissions: approvalAccess } = useApprovalPermissions()
+const { canWrite, canAct, permissions: approvalAccess } = useApprovalPermissions()
 
 // B2-01 (待办列表关键字段摘要) — lazy per-templateId FormSchema cache + row summary-line lookup,
 // shared by the desktop table below (all four tabs) and ApprovalMobileList (passed the raw
@@ -1029,12 +1029,17 @@ function waitClass(createdAt: string): string {
 function isHandlerNodeRow(row: UnifiedApprovalDTO): boolean {
   return row.currentNodeType === 'handler'
 }
-// 撤销轮 rows decide through the attendance route, so their approve / reject affordances (inline,
-// pane, batch) follow the grant that route checks (`canDecideCancelRoundWith`) — the same predicate
-// the detail view uses. Display only; the route remains the authority.
+// The approve / reject affordances (inline, pane, batch) follow the grant the decision route checks,
+// exactly as the detail view's `canDecidePrimary` does: a platform row decides through the generic
+// route behind `approvals:act` (`canAct`), so a viewer holding only `approvals:read` — even one sitting
+// on the node's role seat — is offered no control that could only come back 403; a 撤销轮 row decides
+// through the attendance route, so it follows that route's grant (`canDecideCancelRoundWith`) instead.
+// `canDecideCurrentNode !== false` is the detail view's idiom too; list rows do not carry the field
+// today (`undefined` keeps the prior behaviour). Display only; the route remains the authority.
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
   return row.status === 'pending' && !isAttendanceApproval(row) && !isHandlerNodeRow(row)
-    && (!isCancelRoundWorkflow(row) || canDecideCancelRoundWith(approvalAccess?.value))
+    && (isCancelRoundWorkflow(row) ? canDecideCancelRoundWith(approvalAccess?.value) : canAct.value)
+    && row.canDecideCurrentNode !== false
 }
 
 // UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
