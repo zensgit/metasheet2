@@ -173,6 +173,12 @@ jobs:
       - name: Attendance legacy repair package contracts
         run: node --test scripts/ops/attendance-onprem-package-verify-migrations.test.mjs scripts/ops/onprem-package-runtime-closure.test.mjs
 
+      # Dockerfile.frontend builds apps/web from listed COPYs, and the image build runs only on push to
+      # main. No deps, no DB: fails the required `test` check if apps/web/src reaches a file the
+      # builder stage does not copy (the #6315 YiDa panel's plugin-lib imports red main this way).
+      - name: Frontend Docker build-context closure
+        run: node --test scripts/ops/frontend-docker-context-closure.test.mjs
+
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
       - name: W0 exact-anchor L6/L7 CI wiring contract
