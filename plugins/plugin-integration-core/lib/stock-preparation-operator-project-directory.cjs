@@ -716,7 +716,7 @@ async function listOperatorProjectDirectory({
       // THE DEEP-LINK HANDLE, `{ sheetId, viewId }` or null — see its own note above the computation.
       // It is NOT a permission decision and this module cannot make one: multitable enforces access
       // when the operator lands. Null means "no bound sheet this caller is proved to own", which the
-      // front end renders as 「打开多维表工作台」 rather than as a dead button.
+      // front end renders as 「打开多维表首页」 (it opens the multitable home) rather than as a dead button.
       fillTarget,
       // THE ANTI-SILENT-TRUNCATION FLAG (设计稿 N1). True when the union may be missing project
       // numbers, in all THREE ways that can happen: the pull-target scan hit `PULL_TARGET_MAX_PAGES`,

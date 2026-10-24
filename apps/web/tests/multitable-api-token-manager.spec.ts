@@ -613,6 +613,28 @@ describe('MetaApiTokenManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
+  // 客户反馈 2026-10-21 (c): the automation editor opens this dialog directly on DingTalk Groups, on top of its drawer.
+  it('opens directly on the DingTalk Groups tab when asked, above the drawer that opened it', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, sheetId: 'sheet_1', client, initialTab: 'dingtalk-groups' })
+    await flushPromises()
+
+    const selected = document.querySelector('[role="tab"][aria-selected="true"]')
+    expect(selected?.textContent?.trim()).toBe('DingTalk Groups')
+    expect(document.querySelectorAll('[data-dingtalk-group-id]').length).toBe(1)
+    const overlay = document.querySelector('.meta-api-mgr__overlay') as HTMLElement
+    // element-plus drawers start at z-index 2000; a fixed 1000 would sit behind the rule editor.
+    expect(Number(overlay.style.zIndex)).toBeGreaterThanOrEqual(2000)
+  })
+
+  it('ignores an initial DingTalk Groups tab the actor cannot see', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, sheetId: 'sheet_1', client, canManageAutomation: false, initialTab: 'dingtalk-groups' })
+    await flushPromises()
+    const selected = document.querySelector('[role="tab"][aria-selected="true"]')
+    expect(selected?.textContent?.trim()).toBe('API Tokens')
+  })
+
   it('hides DingTalk group management without automation permission', async () => {
     const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
     mount({ visible: true, client, canManageAutomation: false })

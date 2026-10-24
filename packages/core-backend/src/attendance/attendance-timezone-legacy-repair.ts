@@ -281,6 +281,12 @@ export interface AttendanceLegacyPreflightCountsV1 {
   ordinaryLegacyRecordsWithoutCompanion: number
   openOrdinaryLegacyRecordsWithoutCompanion: number
   unsupportedLegacyRecordsWithoutCompanion: number
+  /**
+   * Companion-less, calculation-untracked records whose zone equals the single valid default zone,
+   * with multi-timezone off and legacy posture: writable now without repair (compatibility amendment 2).
+   * A subset of ordinary + unsupported (those counts are unchanged); it is excluded from BLOCKED.
+   */
+  writableNowLegacyRecordsWithoutCompanion: number
   v2CandidatesRequireValidation: number
   invalidCompanions: number
   companionCandidatesRequireValidation: number
@@ -351,7 +357,7 @@ export async function inspectAttendanceTimezoneLegacyRepairV1(pool: AttendanceLe
   const counts: AttendanceLegacyPreflightCountsV1 = {
     defaultRules: 0, missingDefaultRules: 0, multipleDefaultRules: 0, invalidDefaultTimezones: 0,
     recordsScanned: 0, ordinaryLegacyRecordsWithoutCompanion: 0, openOrdinaryLegacyRecordsWithoutCompanion: 0,
-    unsupportedLegacyRecordsWithoutCompanion: 0, v2CandidatesRequireValidation: 0,
+    unsupportedLegacyRecordsWithoutCompanion: 0, writableNowLegacyRecordsWithoutCompanion: 0, v2CandidatesRequireValidation: 0,
     invalidCompanions: 0, companionCandidatesRequireValidation: 0, legacyRepairPostureBlocked: 0, pendingRelatedRequestsScanned: 0,
     pendingRequestsWithoutUsableContext: 0, pendingRequestsRequireValidation: 0,
     tokenCandidatesRequireValidation: 0, overtimeCandidatesRequireValidation: 0,
@@ -379,6 +385,12 @@ export async function inspectAttendanceTimezoneLegacyRepairV1(pool: AttendanceLe
     const rollout = await client.query('SELECT state,scope FROM attendance_calculation_rollout_state WHERE org_id=$1', [input.orgId])
     const legacyPosture = rollout.rows.length === 0 || (rollout.rows.length === 1
       && rollout.rows[0].state === 'legacy' && rollout.rows[0].scope === 'synthetic_staging')
+    // Amendment 2: with multi-timezone off, an untracked same-zone record without a companion is
+    // computed from the current default as before the upgrade, so it is not an upgrade blocker.
+    const policy = await client.query('SELECT enabled FROM attendance_timezone_policies WHERE org_id=$1', [input.orgId])
+    const multiTimezoneOff = policy.rows.length === 0 || (policy.rows.length === 1 && policy.rows[0].enabled === false)
+    const soleDefaultZone: string | null = defaults.rows.length === 1 && counts.invalidDefaultTimezones === 0
+      && typeof defaults.rows[0].timezone === 'string' ? defaults.rows[0].timezone : null
     let scanComplete = defaults.rows.length <= 1000
     const scan = async (query: string, visit: (row: Record<string, any>) => void) => {
       let after: string | null = null
@@ -404,6 +416,9 @@ export async function inspectAttendanceTimezoneLegacyRepairV1(pool: AttendanceLe
       WHERE r.org_id=$1 AND r.visibility_state='active' AND ($2::uuid IS NULL OR r.id>$2::uuid)
       ORDER BY r.id LIMIT $3`, row => {
       counts.recordsScanned++
+      // Subset of the two counts below; see the amendment 2 note above.
+      if (!row.companion && row.current_calculation_id === null && legacyPosture && multiTimezoneOff
+        && soleDefaultZone !== null && row.timezone === soleDefaultZone) counts.writableNowLegacyRecordsWithoutCompanion++
       if (row.companion) {
         if (!validPreflightCompanion(row, input.orgId)) counts.invalidCompanions++
         else if (row.companion.frame_snapshot?.identity?.source !== 'legacy_repair') counts.companionCandidatesRequireValidation++
@@ -436,7 +451,7 @@ export async function inspectAttendanceTimezoneLegacyRepairV1(pool: AttendanceLe
     })
     const blocked = counts.missingDefaultRules + counts.multipleDefaultRules + counts.invalidDefaultTimezones
       + counts.ordinaryLegacyRecordsWithoutCompanion + counts.unsupportedLegacyRecordsWithoutCompanion
-      + counts.invalidCompanions + counts.legacyRepairPostureBlocked + counts.pendingRequestsWithoutUsableContext
+      - counts.writableNowLegacyRecordsWithoutCompanion + counts.invalidCompanions + counts.legacyRepairPostureBlocked + counts.pendingRequestsWithoutUsableContext
     const review = counts.v2CandidatesRequireValidation + counts.tokenCandidatesRequireValidation
       + counts.companionCandidatesRequireValidation + counts.overtimeCandidatesRequireValidation
       + counts.pendingRequestsRequireValidation

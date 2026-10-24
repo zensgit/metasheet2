@@ -26,6 +26,7 @@
  */
 import crypto from 'node:crypto'
 import { performance } from 'node:perf_hooks'
+import { currentSettlementCoordinationContextV1 } from './coordination/settlement-coordination-context'
 import {
   AttendanceW4OperationError,
   W4_ADVISORY_HELPER_WAIT_MS,
@@ -1293,6 +1294,15 @@ export async function acquireAttendanceCalculationRolloutLock(
   mode: 'shared' | 'exclusive',
 ): Promise<void> {
   if (mode !== 'shared' && mode !== 'exclusive') fail('W4C0_LOCK_MODE_INVALID')
+  // Settlement coordination (r6.1 §3.5): inside a coordinated transaction, S1 / S2 already hold
+  // class-00 at transaction level, so this call is a re-entrant no-op — after checking, with no round
+  // trip, that the coordination credential is this connection's and covers this org with class-00.
+  // Anything else is refused instead of being left to wait for class-00 after the snapshot.
+  const coordinated = currentSettlementCoordinationContextV1()
+  if (coordinated) {
+    if (mode !== 'shared' || !coordinated.covers(trx, org, true)) fail('W4C0_ROLLOUT_LOCK_NOT_COORDINATED')
+    return
+  }
   const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
   const acquisitionSql =
     mode === 'shared'

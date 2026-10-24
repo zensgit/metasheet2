@@ -8,6 +8,7 @@ import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { createIntegrationYidaOwnerRouter, yidaOwnerNoStoreMiddleware,
   type YidaInitializationHttpPort, type YidaOwnerHttpPort } from '../../src/routes/integration-yida-owner'
+import { YidaInitializationError } from '../../src/integration/yida-initialization-runtime'
 import { draftInput, syntheticMaterial } from '../utils/stock-preparation-yida-owner-http-fixture'
 
 const commandId = '11111111-1111-4111-8111-111111111111'
@@ -33,13 +34,13 @@ function port(result: unknown = initialized()) {
   return { value, calls }
 }
 async function dispatch(method: string, body: unknown, value?: YidaInitializationHttpPort,
-  options: { query?: Record<string, unknown>; headers?: Record<string, string>; authenticated?: boolean; url?: string } = {}) {
+  options: { query?: Record<string, unknown>; headers?: Record<string, string>; authenticated?: boolean; url?: string; owner?: YidaOwnerHttpPort } = {}) {
   const req = Object.assign(new EventEmitter(), { method, url: options.url ?? '/initialization',
     originalUrl: '/api/integration/yida-owner-send/initialization', headers: options.headers ?? {}, query: options.query ?? {},
     body, user: options.authenticated === false ? undefined : { id: actor.actorId }, authenticatedTenantId: actor.tenantId, aborted: false })
   const headers: Record<string, unknown> = {}
   let status = 0
-  const router = createIntegrationYidaOwnerRouter({} as YidaOwnerHttpPort, value)
+  const router = createIntegrationYidaOwnerRouter(options.owner ?? {} as YidaOwnerHttpPort, value)
   const res = Object.assign(new EventEmitter(), { writableEnded: false, destroyed: false,
     setHeader(key: string, value: unknown) { headers[key.toLowerCase()] = value },
     status(value: number) { status = value; return this },
@@ -78,11 +79,26 @@ function actualInputBoundary(removeIdentityGuard = false): (value: unknown) => u
 describe('YiDa initialization HTTP contract — no IO fake host port', () => {
   it('GET ready and POST initialized preserve status, exact metadata and trusted actor', async () => {
     const f = port(), request = input()
-    expect(await dispatch('GET', undefined, f.value)).toEqual({ status: 200, result: { ok: true, data: ready() } })
-    expect(await dispatch('POST', request, f.value)).toEqual({ status: 201, result: { ok: true, data: initialized() } })
+    expect(await dispatch('GET', undefined, f.value)).toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false } } })
+    expect(await dispatch('POST', request, f.value)).toEqual({ status: 201, result: { ok: true, data: { ...initialized(), sendEnabled: false } } })
     expect(f.calls).toHaveLength(2); expect(f.calls[1].actor).toEqual(actor)
     expect(f.calls[1].input).toEqual(request); expect(f.calls[1].signal.aborted).toBe(false)
     expect(JSON.stringify(initialized())).not.toContain(request.material.appSecret)
+  })
+  it('sendEnabled is the owner runtime boolean, read only after an authorized status, and a throwing read is false', async () => {
+    const f = port(), reads: unknown[] = []
+    const owner = (value: unknown) => ({ sendEnabled() { reads.push(value); if (value instanceof Error) throw value; return value } }) as unknown as YidaOwnerHttpPort
+    for (const [value, expected] of [[true, true], [false, false], ['true', false], [1, false], [new Error('PRIVATE_SWITCH_CANARY'), false]] as const) {
+      expect(await dispatch('GET', undefined, f.value, { owner: owner(value) }))
+        .toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: expected } } })
+    }
+    expect(await dispatch('POST', input(), f.value, { owner: owner(true) }))
+      .toEqual({ status: 201, result: { ok: true, data: { ...initialized(), sendEnabled: true } } })
+    reads.length = 0
+    const denied: YidaInitializationHttpPort = { ...f.value, async status() { throw new YidaInitializationError('DENIED') } }
+    expect(await dispatch('GET', undefined, denied, { owner: owner(true) }))
+      .toEqual({ status: 403, result: { ok: false, error: { code: 'YIDA_INITIALIZATION_DENIED' } } })
+    expect(reads).toEqual([])
   })
   it('raw identity mismatch and padded material userId reject before host invocation', async () => {
     const f = port(), request = input()

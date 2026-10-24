@@ -359,6 +359,10 @@ async function main() {
         // per-tenant "count then insert under a cap" mutex (stock-preparation-project-target-store.cjs).
         'advisoryXactLock',
         'commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
+        // setLocalLockTimeout: HANDLE-ONLY (asserted absent from the root surface in 7e.), the stock-prep
+        // sheet write lock's bound on how long its takeover / abandoned-lease clear / release may wait for
+        // a row a stalled fenced write holds FOR SHARE (stock-preparation-project-write-lock.cjs, PR #6501 S1).
+        'setLocalLockTimeout',
         // setTransactionIsolationLevel: HANDLE-ONLY (asserted absent from the root surface in 4.),
         // the external-system delete lock protocol's isolation pin (external-system-pointer-lock.cjs).
         'setTransactionIsolationLevel',
@@ -437,6 +441,44 @@ async function main() {
     )
   }
   assert.ok(!mockDb9tryBad.calls.some((c) => c.sql), 'a refused key issues no statement')
+
+  // --- 7e. setLocalLockTimeout (PR #6501 S1): ONE fixed literal (set_config, is_local = true), the timeout as
+  // its ONE parameter (decimal milliseconds text), on the tx connection; refused outside 1..30000 ms, before
+  // any statement; NOT on the root helper (a local setting in autocommit ends with its own statement).
+  assert.equal(typeof db9.setLocalLockTimeout, 'undefined',
+    'setLocalLockTimeout is NOT on the root helper (in autocommit a local setting bounds nothing)')
+  assert.equal(__internals.LOCAL_LOCK_TIMEOUT_STATEMENT, "SELECT set_config('lock_timeout', $1, true)",
+    'the lock-timeout statement is set_config with is_local = true (SET LOCAL takes no bind parameter)')
+  assert.equal(__internals.LOCAL_LOCK_TIMEOUT_MAX_MS, 30000, 'the bound never exceeds the pool statement_timeout (30 s)')
+  const mockDb9lt = mockDatabase()
+  const db9lt = createDb({ database: mockDb9lt })
+  await db9lt.transaction(async (trx) => {
+    await trx.setLocalLockTimeout(5000)
+    await trx.setLocalLockTimeout(1)
+    await trx.setLocalLockTimeout(30000)
+    await trx.updateRow('integration_runs', { status: 'done' }, { id: 'r1' })
+  })
+  assert.deepEqual(
+    mockDb9lt.calls.filter((c) => c.sql).map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })).slice(0, 3),
+    [
+      { sql: "SELECT set_config('lock_timeout', $1, true)", params: ['5000'], tx: true },
+      { sql: "SELECT set_config('lock_timeout', $1, true)", params: ['1'], tx: true },
+      { sql: "SELECT set_config('lock_timeout', $1, true)", params: ['30000'], tx: true },
+    ],
+    'the lock-timeout statement is a fixed literal; the timeout is its only parameter, as decimal text; it runs on the transaction connection',
+  )
+  assert.ok(/UPDATE "integration_runs"/.test(mockDb9lt.calls[3].sql) && mockDb9lt.calls[3].tx === true,
+    'the statements that follow run in the same transaction')
+  const mockDb9ltBad = mockDatabase()
+  const db9ltBad = createDb({ database: mockDb9ltBad })
+  for (const badMs of [0, -1, 30001, 1.5, NaN, Infinity, '5000', null, undefined, {}, [5000], { valueOf: () => 5000 }]) {
+    await assert.rejects(
+      db9ltBad.transaction((trx) => trx.setLocalLockTimeout(badMs)),
+      (error) => error instanceof ScopeViolationError,
+      `setLocalLockTimeout refuses a non-integer / out-of-range timeout: ${JSON.stringify(badMs)}`,
+    )
+  }
+  assert.ok(!mockDb9ltBad.calls.some((c) => c.sql), 'a refused timeout issues no statement')
 
   // --- 7b. setTransactionIsolationLevel: whitelist key -> fixed literal, on the tx connection ----
   assert.equal(typeof db9.setTransactionIsolationLevel, 'undefined',

@@ -35,6 +35,7 @@ import {
   enqueueAttendanceResultEventOutboxV1,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
+  attendanceW4ConnectionDiscardV1,
 } from './w4c0-operation-registry'
 import { readAttendanceCleaningSheetScope } from './attendance-multitable-cleaning-authority'
 import { AttendanceW4OperationError } from './w4c0-operation-contract'
@@ -478,7 +479,9 @@ export function createAttendanceRecordOperationBoundaryV1(
         }, sheetScope ? { attendanceCleaningAuthority: true,
           attendanceCleaningSheetIds: [sheetScope.projectionSheetId, sheetScope.catalogSheetId] } : undefined)
       } catch (error) {
-        if (error instanceof AttendanceCleaningConnectionUncertainError) connectionError = error
+        // Settlement coordination (r6.1 §1.1 P1-1): the runner's mark and the older uncertain classes
+        // (the cleaning one included) destroy the connection; anything else returns it.
+        connectionError = attendanceW4ConnectionDiscardV1(error)
         if (attendanceCleaningEntry && error instanceof AttendanceW4RegistryError) {
           if (error instanceof AttendanceCleaningConnectionUncertainError) fail('ATTENDANCE_CLEANING_OUTCOME_UNKNOWN', 503)
           if (error.code === 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY') fail('ATTENDANCE_CLEANING_BUSY', 409)

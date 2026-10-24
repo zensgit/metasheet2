@@ -994,10 +994,11 @@ describe('Attendance admin regressions', () => {
         writes.push({ url, method, body })
         return jsonResponse(201, { ok: true, data: { shift: { id: 'shift-created', ...body } } })
       }
-      if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'PUT') {
+      if (/^\/api\/attendance\/shifts\/[^/]+\/update$/.test(url) && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         writes.push({ url, method, body })
-        return jsonResponse(200, { ok: true, data: { shift: { id: url.split('/').pop(), ...body } } })
+        const id = url.slice('/api/attendance/shifts/'.length, -'/update'.length)
+        return jsonResponse(200, { ok: true, data: { shift: { id, ...body } } })
       }
       if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'DELETE') {
         writes.push({ url, method, body: {} })
@@ -1071,8 +1072,8 @@ describe('Attendance admin regressions', () => {
     await flushUi(6)
     expect(writes).toHaveLength(1)
     expect(writes[0]).toMatchObject({
-      url: '/api/attendance/shifts/shift-split',
-      method: 'PUT',
+      url: '/api/attendance/shifts/shift-split/update',
+      method: 'POST',
       body: {
         name: 'Split shift',
         timezone: 'Asia/Shanghai',
@@ -3015,7 +3016,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
-      if (url.includes('/api/attendance/scheduler-scopes/scope-7') && method === 'PUT') {
+      if (url.includes('/api/attendance/scheduler-scopes/scope-7/update') && method === 'POST') {
         puts.push({ url, body: JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')) })
         return jsonResponse(200, { ok: true, data: { ...existing } })
       }
@@ -3047,7 +3048,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
 
     expect(puts).toHaveLength(1)
-    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-7')
+    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-7/update')
     // toEqual: no orgId (rides the query) and no isActive (backend merge preserves the flag).
     expect(puts[0].body).toEqual({
       subjectType: 'role',
@@ -3078,7 +3079,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
-      if (url.includes('/api/attendance/scheduler-scopes/scope-u') && method === 'PUT') {
+      if (url.includes('/api/attendance/scheduler-scopes/scope-u/update') && method === 'POST') {
         puts.push(JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')))
         return jsonResponse(200, { ok: true, data: { ...existing } })
       }
@@ -4012,7 +4013,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
       const method = String(init?.method || 'GET').toUpperCase()
-      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+      if (url === '/api/attendance/groups/group-a/update' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         Object.assign(routeGroup, body)
         return jsonResponse(200, { ok: true, data: { ...routeGroup } })
@@ -4101,7 +4102,7 @@ describe('Attendance admin regressions', () => {
         if (listCalls === 1) return oldestList
         return jsonResponse(200, { ok: true, data: { items: [], total: 250, page: 1, pageSize: 200 } })
       }
-      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+      if (url === '/api/attendance/groups/group-a/update' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         savedNames.push(String(body.name))
         return jsonResponse(200, { ok: true, data: { ...routeGroup, ...body } })
@@ -7297,7 +7298,7 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
-      if (url.includes('/api/attendance/schedule-groups/sg-child') && method === 'PUT') {
+      if (url.includes('/api/attendance/schedule-groups/sg-child/update') && method === 'POST') {
         const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}'))
         puts.push(body)
         groups = groups.map(group => group.id === 'sg-child' ? { ...group, ...body } : group)

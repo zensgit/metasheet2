@@ -7,8 +7,13 @@
  * revocation is observed by the next transaction. No remote source is configured.
  */
 import { randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { runYidaInitializationBootstrapCli } from '../../scripts/bootstrap-yida-initialization-owner'
 import { assertAutomationIntegrationActor } from '../../src/integration/automation-live-authority'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
@@ -265,5 +270,42 @@ describeDatabase('Automation live actor authority: real locked evidence', () => 
       })
     } finally { await actor.query('ROLLBACK') }
     await expect(authorize()).resolves.toBeUndefined()
+  })
+
+  // The operator CLI's immutable YiDa anchor consumes this same live check before
+  // its slot lock: an identity the runtime would always deny is never anchored.
+  it('operator bootstrap CLI anchors only a live integration admin member; refusals leave no anchor row', async () => {
+    const root = path.resolve(__dirname, '..', '..', '..', '..')
+    await admin.query(['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
+      '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
+      '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
+      '096_create_integration_yida_initialization.sql'].map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n'))
+    const anchors = async () => (await admin.query('SELECT owner_id, tenant_id FROM integration_yida_initialization_anchor')).rows
+    const saved = process.env.DATABASE_URL
+    let directory = ''
+    const run = async (ownerId: string, tenantId: string) => {
+      const file = path.join(directory, `${randomBytes(4).toString('hex')}.json`)
+      await writeFile(file, JSON.stringify({ ownerId, tenantId }))
+      return runYidaInitializationBootstrapCli(['--input', file, '--apply'])
+    }
+    try {
+      // Setup inside the try: the finally always restores the URL and removes the directory.
+      directory = await mkdtemp(path.join(tmpdir(), 'yida-bootstrap-'))
+      const url = new URL(saved!)
+      url.searchParams.set('options', `-c search_path=${schema}`)
+      process.env.DATABASE_URL = url.toString()
+      for (const [ownerId, tenantId] of [['synthetic-unknown-owner', input.tenantId], [input.actorId, input.tenantId],
+        ['synthetic-other-actor', 'synthetic-other-tenant']]) {
+        expect(await run(ownerId, tenantId)).toEqual({ ok: false, status: 'denied' })
+        expect(await anchors()).toEqual([])
+      }
+      expect(await run('synthetic-other-actor', input.tenantId)).toEqual({ ok: true, status: 'provisioned' })
+      await grant('normalized')
+      expect(await run(input.actorId, input.tenantId)).toEqual({ ok: false, status: 'conflict' })
+      expect(await anchors()).toEqual([{ owner_id: 'synthetic-other-actor', tenant_id: input.tenantId }])
+    } finally {
+      process.env.DATABASE_URL = saved
+      if (directory) await rm(directory, { recursive: true, force: true })
+    }
   })
 })

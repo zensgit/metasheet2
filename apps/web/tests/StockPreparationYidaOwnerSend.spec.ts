@@ -251,6 +251,16 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('shows a server DENIED refusal by its own code rather than as a session change', async () => {
+    fetchSpy.mockResolvedValueOnce(error('YIDA_OWNER_HTTP_DENIED', 403))
+    await click('save')
+    expect(q('error').textContent).toBe('YIDA_OWNER_HTTP_DENIED')
+    expect(absent('draft')).toBe(true)
+    expect(absent('grant')).toBe(true)
+    expect(uuidSpy).not.toHaveBeenCalled()
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('allows explicit read and revoke for an existing grant when sending is later disabled', async () => {
     await approve()
     fetchSpy.mockResolvedValueOnce(error('YIDA_OWNER_RUNTIME_DISABLED', 403))

@@ -24,8 +24,9 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     expect(result.headers['x-content-type-options']).toBe('nosniff')
     expect(Object.keys(result.body).sort()).toEqual(['data', 'ok']); expect(result.body.ok).toBe(true)
     const view = result.body.data as Data
-    expect(Object.keys(view).sort()).toEqual(['canSend', 'commandId', 'draft', 'externalWriteAttempted', 'status', 'tokenIssued'])
+    expect(Object.keys(view).sort()).toEqual(['canSend', 'commandId', 'draft', 'externalWriteAttempted', 'sendEnabled', 'status', 'tokenIssued'])
     expect(view).toMatchObject({ canSend: false, tokenIssued: false, externalWriteAttempted: false })
+    expect(typeof view.sendEnabled).toBe('boolean')
     return view
   }
   function denied(result: Awaited<ReturnType<YidaOwnerHttpRealdbFixture['http']>>, status: number, code: string) {
@@ -54,7 +55,7 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
   it('OFF initialization writes 090/091/092/result in one host transaction and GET alone recovers closed metadata', async () => {
     expect((await f.initializationProof()).counts).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0])
     const ready = data(await f.http('GET', '/initialization'), 200)
-    expect(ready).toMatchObject({ status: 'ready', draft: null })
+    expect(ready).toMatchObject({ status: 'ready', draft: null, sendEnabled: false })
     const anchor = (await f.rows('integration_yida_initialization_anchor'))[0]
     expect(ready.commandId).toBe(anchor.command_id)
     expect(anchor).toMatchObject({ owner_id: principals.owner, tenant_id: tenant, workspace_id: null })
@@ -73,12 +74,22 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     expect(await f.initializationProof()).toEqual(before)
     denied(await f.http('POST', '/drafts', draftInput()), 403, 'YIDA_OWNER_RUNTIME_DISABLED')
     await noExternalWrite()
+    // The display bit follows the host's exact-literal send switch, only on this owner-authorized reply.
+    f.setEnablement('true')
+    expect(data(await f.http('GET', '/initialization'), 200)).toEqual({ ...recovered, sendEnabled: true })
+    f.setEnablement('TRUE')
+    expect(data(await f.http('GET', '/initialization'), 200)).toEqual({ ...recovered, sendEnabled: false })
+    f.setEnablement('false')
+    expect(await f.initializationProof()).toEqual(before); await noExternalWrite()
     const output = JSON.stringify([made, recovered])
     for (const value of [...Object.values(syntheticMaterial()), 'synthetic-http-review', 'synthetic-http-organization',
       'synthetic_http_form', 'synthetic HTTP part']) expect(output.includes(value)).toBe(false)
   })
   it('the second actually qualified administrator cannot read ready or initialize the anchor owner slot', async () => {
+    f.setEnablement('true')
     const ready = data(await f.http('GET', '/initialization'), 200), before = await f.initializationProof()
+    expect(ready.sendEnabled).toBe(true)
+    // A refused caller never learns the switch: the denial body is the closed code only.
     denied(await f.http('GET', '/initialization', undefined, { token: f.tokens.otherOwner }), 403, 'YIDA_INITIALIZATION_DENIED')
     denied(await f.http('POST', '/initialization', input(ready.commandId), { token: f.tokens.otherOwner }), 403, 'YIDA_INITIALIZATION_DENIED')
     expect(await f.initializationProof()).toEqual(before); await noExternalWrite()

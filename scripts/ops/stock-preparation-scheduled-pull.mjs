@@ -534,6 +534,17 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
     if (refusal === 'STOCK_PREPARATION_PROJECT_ARCHIVED') {
       return { ...record, action: 'skipped_project_sheet_archived', note: 'the project sheet is archived; restore it before pulling', durationMs: Date.now() - startedAt }
     }
+    // 备料分批拉取第一期 step 3 PR B (plan §5.1 / §9.4 L03): a PILOT project whose BOM exceeded a small-lane cap.
+    // The server refused instead of handing the pull to the large lane, and this script must not either: it is a
+    // FAILURE (exit non-zero), named, so the owner decides — never a skip that looks like a quiet success, and
+    // never a retry of the background channel.
+    if (refusal === 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED') {
+      return { ...record, action: 'error', error: refusal, note: 'the pilot project exceeds the small-lane cap and the large lane is refused for pilot projects; the owner must decide — nothing was written', failed: true, durationMs: Date.now() - startedAt }
+    }
+    // Its sibling: the pilot marker could not be read (503) — fail closed, by name.
+    if (refusal === 'STOCK_PREP_PILOT_STATE_UNREADABLE') {
+      return { ...record, action: 'error', error: refusal, note: 'the pilot state of this project could not be read; the pull did not continue', failed: true, durationMs: Date.now() - startedAt }
+    }
   }
   if (!dryRun.ok || dryRun.parseError || !dryRun.json || dryRun.json.ok !== true || !dryRun.json.data) {
     const code = errorCodeOf(dryRun)

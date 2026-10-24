@@ -29,7 +29,9 @@ async function prepareAttendanceTimezoneDefaultRecovery(trx, {
     WHERE org_id=$1 AND visibility_state='active' AND first_in_at IS NOT NULL AND last_out_at IS NULL`,[orgId])
   for (const record of open) {
     const frozen = await readFrozenContext(trx,{orgId,userId:String(record.user_id),workDate:record.work_date})
-    if (!frozen) fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED')
+    // A pre-companion record has no frozen reading for the new default to change.
+    // Its later writes follow the companion store's same-zone, default-only rule.
+    if (!frozen) continue
     const {frame} = frozen
     if (frozen.recordId !== record.id || frame.orgId !== orgId || frame.userId !== String(record.user_id)
       || frame.workDate !== record.work_date || frame.timezone !== record.timezone) {
@@ -38,8 +40,12 @@ async function prepareAttendanceTimezoneDefaultRecovery(trx, {
   }
 
   // A missing default provides no trustworthy old wall zone. UTC -2..+1
-  // conservatively covers possibly started overnight published dates. A nearby
-  // date (including tomorrow) needs its own matching freeze, not another slot's.
+  // conservatively covers possibly started overnight published dates. Only a
+  // frozen reading is protected: a nearby date with a freeze must match its own
+  // slot. A date without one may still hold records written by paths that skip
+  // the strict default (old pending approvals, import); those stay unfrozen and
+  // follow the companion store's same-zone rule, so a different new zone makes
+  // them refuse later writes rather than be reinterpreted.
   const day = now.toISOString().slice(0,10)
   const groups = await trx.query(`SELECT EXISTS(SELECT 1 FROM attendance_calculation_group_memberships
     WHERE org_id=$1 AND effective_from <= $2::date+1
@@ -61,7 +67,8 @@ async function prepareAttendanceTimezoneDefaultRecovery(trx, {
     if (!candidates.length) fail('ATTENDANCE_TIMEZONE_DEFAULT_RECOVERY_SOURCE_AMBIGUOUS')
     for (const candidate of candidates) {
       const frozen = await readFrozenContext(trx,{orgId,userId,workDate:candidate.workDate})
-      const frame = frozen?.frame
+      if (!frozen) continue
+      const frame = frozen.frame
       if (!frame || candidate.orgId !== orgId || candidate.userId !== userId
         || frame.orgId !== orgId || frame.userId !== userId || frame.workDate !== candidate.workDate
         || frame.identity.assignmentId !== candidate.assignmentId || frame.identity.shiftId !== candidate.shiftId

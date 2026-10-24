@@ -275,4 +275,20 @@ describe('operator-only persistent anchor control contract', () => {
     expect(bad.state.anchor).toBeUndefined()
     await rejected(bootstrap.provisionYidaInitializationAnchor({ database: f.database }, { ownerId: actor.actorId, tenantId: actor.tenantId, workspaceId: null } as { ownerId: string; tenantId: string }), 'INPUT')
   })
+  it('checks the live owner before the slot lock: denied or unavailable authority never anchors', async () => {
+    for (const deny of ['admin', 'membership'] as const) {
+      const f = fixture({ missing: true })
+      if (deny === 'admin') f.allowed = false; else f.memberships = false
+      await rejected(bootstrap.provisionYidaInitializationAnchor({ database: f.database }, { ownerId: actor.actorId, tenantId: actor.tenantId }), 'DENIED')
+      expect(f.state.anchor).toBeUndefined()
+      expect(f.sql.some(sql => sql.includes('pg_advisory_xact_lock') || sql.startsWith('INSERT'))).toBe(false)
+    }
+    const broken = fixture({ missing: true, beforeQuery: async sql => { if (sql.includes('FROM user_orgs')) throw new Error('private') } })
+    await rejected(bootstrap.provisionYidaInitializationAnchor({ database: broken.database }, { ownerId: actor.actorId, tenantId: actor.tenantId }), 'UNAVAILABLE')
+    expect(broken.state.anchor).toBeUndefined()
+    const f = fixture({ missing: true })
+    await bootstrap.provisionYidaInitializationAnchor({ database: f.database }, { ownerId: actor.actorId, tenantId: actor.tenantId })
+    expect(f.sql.findIndex(sql => sql.includes('FROM user_orgs'))).toBeGreaterThan(-1)
+    expect(f.sql.findIndex(sql => sql.includes('FROM user_orgs'))).toBeLessThan(f.sql.findIndex(sql => sql.includes('pg_advisory_xact_lock')))
+  })
 })

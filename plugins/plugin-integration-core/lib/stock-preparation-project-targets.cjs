@@ -362,6 +362,31 @@ function hasPlmSystemLock(property) {
  * Any host failure is ONE typed code, `STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_FAILED`, naming the logical
  * column it stopped at — the same request can be retried (columns already marked are skipped).
  */
+/**
+ * PR B readiness: READ the PLM column lock of ONE project sheet — no write. `{ fieldCount, marked,
+ * missing, unmarked, readBeforeWrite }`; a host without `getObjectField` answers `readBeforeWrite: false`
+ * (nothing can be proven) and a host failure propagates to the caller (readiness reads it as not ok).
+ */
+async function readProjectSheetPlmSystemColumnLock({ provisioning, projectId, objectId } = {}) {
+  if (!isPlmLockTargetObjectId(objectId)) {
+    throw new StockPreparationProjectTargetError(500, 'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED', 'only a project\'s registered stock-preparation sheet carries the PLM column lock', { objectIdShape: 'not_project_sheet' })
+  }
+  const fieldCount = PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS.length
+  if (!provisioning || typeof provisioning.getObjectField !== 'function') {
+    return { fieldCount, marked: 0, missing: fieldCount, unmarked: 0, readBeforeWrite: false }
+  }
+  let marked = 0
+  let missing = 0
+  let unmarked = 0
+  for (const fieldId of PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS) {
+    const current = await provisioning.getObjectField({ projectId, objectId, fieldId })
+    if (!current) { missing += 1; continue }
+    if (hasPlmSystemLock(current.property)) marked += 1
+    else unmarked += 1
+  }
+  return { fieldCount, marked, missing, unmarked, readBeforeWrite: true }
+}
+
 async function markProjectSheetPlmSystemColumns({ provisioning, projectId, objectId } = {}) {
   if (!isPlmLockTargetObjectId(objectId)) {
     throw new StockPreparationProjectTargetError(500, 'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED', 'only a project\'s registered stock-preparation sheet carries the PLM column lock', { objectIdShape: 'not_project_sheet' })
@@ -761,6 +786,7 @@ module.exports = {
   provisionProjectSheet,
   syncProjectSheetContractOptions,
   markProjectSheetPlmSystemColumns,
+  readProjectSheetPlmSystemColumnLock,
   PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS,
   HUMAN_WRITE_LOCK_PROPERTY_KEY,
   HUMAN_WRITE_LOCK_PLM_SYSTEM,

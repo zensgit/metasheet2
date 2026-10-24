@@ -80,6 +80,8 @@ export type AutomationLabelKey =
   | 'log.reason.targetRecordMissing'
   | 'log.reason.targetRecordMissingNoop'
   | 'log.reason.backwriteTargetRecordMissing'
+  | 'log.reason.dingtalkLinkHint'
+  | 'log.reason.dingtalkLegacyNotLinked'
   | 'support.copyPacket'
   | 'support.downloadJson'
   | 'support.clipboardUnavailable'
@@ -94,6 +96,13 @@ export type AutomationLabelKey =
   | 'delivery.dingtalkPrefix'
   | 'delivery.statusSkippedUnbound'
   | 'delivery.unboundReason'
+  | 'delivery.userNotFound'
+  | 'delivery.unnamedUser'
+  | 'delivery.currentStatePrefix'
+  | 'delivery.currentUserNotFound'
+  | 'delivery.currentInactive'
+  | 'delivery.currentNotLinked'
+  | 'delivery.currentReachable'
   | 'editor.titleEdit'
   | 'editor.titleNew'
   | 'editor.name'
@@ -253,6 +262,7 @@ export type AutomationLabelKey =
   | 'manager.testRunning'
   | 'manager.testRunningDingTalkWarning'
   | 'manager.testRunAtLeastOneActionFailed'
+  | 'manager.testRunDingTalkSimulatedNote'
   // #5817 follow-up: test-run button refusals, keyed by the route's error code
   // (MetaAutomationManager.vue TEST_RUN_ERROR_LABELS). The server's English message is never shown.
   | 'manager.testRunError.forbidden'
@@ -288,7 +298,20 @@ export type AutomationLabelKey =
   | 'dingtalk.searchUsersOrGroupsPlaceholder'
   | 'dingtalk.searchingUsersOrGroups'
   | 'dingtalk.noMatchingUsersOrGroups'
+  | 'dingtalk.recipientSearchScopeHint'
+  | 'dingtalk.openGroupSettings'
+  | 'dingtalk.reloadGroups'
   | 'dingtalk.inactiveUsersCannotBeAdded'
+  | 'dingtalk.recipientMissing'
+  | 'dingtalk.recipientInactive'
+  | 'dingtalk.recipientNotLinked'
+  | 'dingtalk.recipientChecking'
+  | 'dingtalk.recipientOutsideMemberList'
+  | 'dingtalk.saveNoticeChecking'
+  | 'dingtalk.saveNoticeSaved'
+  | 'dingtalk.recipientCheckFailed'
+  | 'dingtalk.saveNoticeUnchecked'
+  | 'log.openPersonDeliveries'
   | 'dingtalk.localUserIds'
   | 'dingtalk.localUserIdsPlaceholder'
   | 'dingtalk.memberGroupIds'
@@ -463,6 +486,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.reason.targetRecordMissing',
   'log.reason.targetRecordMissingNoop',
   'log.reason.backwriteTargetRecordMissing',
+  'log.reason.dingtalkLinkHint',
+  'log.reason.dingtalkLegacyNotLinked',
   'support.copyPacket',
   'support.downloadJson',
   'support.clipboardUnavailable',
@@ -477,6 +502,13 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'delivery.dingtalkPrefix',
   'delivery.statusSkippedUnbound',
   'delivery.unboundReason',
+  'delivery.userNotFound',
+  'delivery.unnamedUser',
+  'delivery.currentStatePrefix',
+  'delivery.currentUserNotFound',
+  'delivery.currentInactive',
+  'delivery.currentNotLinked',
+  'delivery.currentReachable',
   'editor.titleEdit',
   'editor.titleNew',
   'editor.name',
@@ -630,6 +662,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.testRunning',
   'manager.testRunningDingTalkWarning',
   'manager.testRunAtLeastOneActionFailed',
+  'manager.testRunDingTalkSimulatedNote',
   'manager.testRunError.forbidden',
   'manager.testRunError.unauthenticated',
   'manager.testRunError.sheetDeleted',
@@ -663,7 +696,20 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'dingtalk.searchUsersOrGroupsPlaceholder',
   'dingtalk.searchingUsersOrGroups',
   'dingtalk.noMatchingUsersOrGroups',
+  'dingtalk.recipientSearchScopeHint',
+  'dingtalk.openGroupSettings',
+  'dingtalk.reloadGroups',
   'dingtalk.inactiveUsersCannotBeAdded',
+  'dingtalk.recipientMissing',
+  'dingtalk.recipientInactive',
+  'dingtalk.recipientNotLinked',
+  'dingtalk.recipientChecking',
+  'dingtalk.recipientOutsideMemberList',
+  'dingtalk.saveNoticeChecking',
+  'dingtalk.saveNoticeSaved',
+  'dingtalk.recipientCheckFailed',
+  'dingtalk.saveNoticeUnchecked',
+  'log.openPersonDeliveries',
   'dingtalk.localUserIds',
   'dingtalk.localUserIdsPlaceholder',
   'dingtalk.memberGroupIds',
@@ -838,6 +884,16 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'Approval result not written back: the trigger record no longer exists (nothing was changed).',
     zh: '审批结果未写回：触发记录已不存在（未做任何修改）',
   },
+  // 客户反馈 2026-10-21 (a): the fixed "what to do" after a DingTalk person-message recipient count.
+  'log.reason.dingtalkLinkHint': {
+    en: 'Each member must be linked to DingTalk in the directory and sign in with DingTalk once.',
+    zh: '成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。',
+  },
+  // 客户反馈 2026-10-21 item 1 follow-up: replaces the pre-#6481 step error that listed the raw user ids.
+  'log.reason.dingtalkLegacyNotLinked': {
+    en: 'Some recipients were not linked to DingTalk (older record; the users are not listed).',
+    zh: '有收件人未绑定钉钉（旧记录，未列出具体用户）。',
+  },
   'support.copyPacket': { en: 'Copy redacted packet', zh: '复制脱敏包' },
   'support.downloadJson': { en: 'Download JSON', zh: '下载 JSON' },
   'support.clipboardUnavailable': { en: 'Clipboard unavailable', zh: '剪贴板不可用' },
@@ -852,6 +908,16 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'delivery.dingtalkPrefix': { en: 'DingTalk', zh: '钉钉' },
   'delivery.statusSkippedUnbound': { en: 'Skipped / unbound', zh: '跳过 / 未绑定' },
   'delivery.unboundReason': { en: 'DingTalk account is not linked or user is inactive', zh: '钉钉账号未绑定或用户已停用' },
+  // Review round 2: identity text in the person delivery viewer describes the user record NOW.
+  'delivery.userNotFound': { en: 'No user with this ID', zh: '未找到该用户' },
+  'delivery.unnamedUser': { en: 'Unnamed user', zh: '未命名用户' },
+  // Codex review P2: a skipped row keeps its stored (historical) reason; the user's state today is a separate,
+  // explicitly labelled line — never presented as the cause at send time.
+  'delivery.currentStatePrefix': { en: 'Current state: ', zh: '当前状态：' },
+  'delivery.currentUserNotFound': { en: 'no user with this ID', zh: '找不到该用户' },
+  'delivery.currentInactive': { en: 'inactive', zh: '已停用' },
+  'delivery.currentNotLinked': { en: 'not linked to DingTalk', zh: '未绑定钉钉' },
+  'delivery.currentReachable': { en: 'active and linked to DingTalk', zh: '已启用且已绑定钉钉' },
   'editor.titleEdit': { en: 'Edit Automation Rule', zh: '编辑自动化规则' },
   'editor.titleNew': { en: 'New Automation Rule', zh: '新建自动化规则' },
   'editor.name': { en: 'Name', zh: '名称' },
@@ -1073,7 +1139,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'parallelBranch.addField': { en: '+ Field', zh: '+ 字段' },
   'parallelBranch.addAction': { en: '+ Action', zh: '+ 动作' },
   'parallelBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
-  'testRun.warning': { en: 'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.', zh: '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。' },
+  // 客户反馈 2026-10-21 item 1 follow-up: the UI test run is always a simulation (client.testAutomationRule
+  // posts no mode, so the route runs `simulate`); the copy says so instead of warning about real sends.
+  'testRun.warning': {
+    en: 'Test Run simulates the saved rule: it sends no DingTalk messages and does not check whether recipients are linked to DingTalk. Real delivery is only checked when the rule actually fires.',
+    zh: '测试运行是对已保存规则的模拟：不会发送任何钉钉消息，也不会检查接收人是否已绑定钉钉；实际能否送达只在规则真实触发时才会检查。',
+  },
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
   'testRun.confirmTitle': { en: 'Run test?', zh: '运行测试？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
@@ -1126,8 +1197,13 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.cardOpenPublicForm': { en: 'Open public form', zh: '打开公开表单' },
   'manager.cardOpenInternalView': { en: 'Open internal view', zh: '打开内部处理视图' },
   'manager.testRunning': { en: 'Running test.', zh: '正在运行测试。' },
-  'manager.testRunningDingTalkWarning': { en: 'Running test. DingTalk actions may send real messages.', zh: '正在运行测试。钉钉动作可能发送真实消息。' },
+  'manager.testRunningDingTalkWarning': { en: 'Running a simulated test. No DingTalk messages are sent.', zh: '正在模拟运行测试，不会发送钉钉消息。' },
   'manager.testRunAtLeastOneActionFailed': { en: 'At least one action failed.', zh: '至少一个动作失败。' },
+  // 客户反馈 2026-10-21 (a): a simulated test run never resolves DingTalk recipients (the dry run reads no data).
+  'manager.testRunDingTalkSimulatedNote': {
+    en: 'This was a simulated run: no DingTalk person message was sent and recipients were not checked for a DingTalk link. Members who are not linked will not receive the message when the rule fires.',
+    zh: '这是模拟运行：没有实际发送钉钉个人消息，也没有检查接收人是否已绑定钉钉；未绑定钉钉的成员在规则真实触发时收不到消息。',
+  },
   'manager.testRunError.forbidden': { en: 'You do not have permission to test-run automations on this sheet.', zh: '你没有在此表上测试运行自动化的权限。' },
   'manager.testRunError.unauthenticated': { en: 'Your session has expired. Sign in again and retry.', zh: '登录已失效，请重新登录后重试。' },
   'manager.testRunError.sheetDeleted': { en: 'This sheet has been deleted, so the test did not run. Restore the sheet and try again.', zh: '该表已被删除，测试未运行。请先恢复该表后重试。' },
@@ -1151,17 +1227,45 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'dingtalk.addGroups': { en: 'Add DingTalk groups', zh: '添加钉钉群' },
   'dingtalk.addGroupOption': { en: '-- add DingTalk group --', zh: '-- 添加钉钉群 --' },
   'dingtalk.groupsRegisteredHint': { en: 'DingTalk groups registered for this table or shared from the organization catalog are listed here.', zh: '此处列出为本数据表注册或从组织目录共享的钉钉群。' },
-  'dingtalk.noGroupsAvailable': { en: 'No DingTalk groups are available for this table yet. Add one in API Tokens & Webhooks > DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.', zh: '此数据表暂无可用钉钉群。请在 API Token 与 Webhook > 钉钉群中添加，或让管理员共享组织目录群，也可使用下方记录群字段路径。' },
+  // 客户反馈 2026-10-21 (c): name the place exactly as the table toolbar shows it (API & Webhooks button, DingTalk Groups tab).
+  'dingtalk.noGroupsAvailable': { en: 'No DingTalk groups are available for this table yet. Add one in the table toolbar under API & Webhooks > DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.', zh: '此数据表暂无可用钉钉群。请在数据表工具栏「API 与 Webhook」的「钉钉群」页签中添加，或让管理员共享组织目录群，也可使用下方记录群字段路径。' },
+  'dingtalk.openGroupSettings': { en: 'Open API & Webhooks > DingTalk Groups', zh: '打开「API 与 Webhook > 钉钉群」' },
+  'dingtalk.reloadGroups': { en: 'Reload DingTalk groups', zh: '重新加载钉钉群' },
   'dingtalk.remove': { en: 'Remove', zh: '移除' },
   'dingtalk.recordGroupFieldPaths': { en: 'Record group field paths (optional)', zh: '记录群字段路径（可选）' },
   'dingtalk.recordGroupFieldPathHint': { en: 'Use record fields whose value is a DingTalk group destination ID, not a local user, member group, or DingTalk group name.', zh: '使用值为钉钉群目标 ID 的记录字段，不要使用本地用户、成员组或钉钉群名称。' },
   'dingtalk.pickGroupField': { en: 'Pick group field', zh: '选择群字段' },
   'dingtalk.pickFieldOption': { en: '-- pick field --', zh: '-- 选择字段 --' },
   'dingtalk.searchUsersOrGroups': { en: 'Search and add users or member groups', zh: '搜索并添加用户或成员组' },
-  'dingtalk.searchUsersOrGroupsPlaceholder': { en: 'Search by user, member group, email, or subject ID', zh: '按用户、成员组、邮箱或主体 ID 搜索' },
+  'dingtalk.searchUsersOrGroupsPlaceholder': { en: 'Search by name, login name, email, member group, or subject ID', zh: '按姓名、登录名、邮箱、成员组或主体 ID 搜索' },
   'dingtalk.searchingUsersOrGroups': { en: 'Searching users and member groups...', zh: '正在搜索用户和成员组...' },
   'dingtalk.noMatchingUsersOrGroups': { en: 'No matching users or member groups', zh: '没有匹配的用户或成员组' },
+  // 客户反馈 2026-10-21 (b): say who the picker lists, so a missing user is explainable rather than a dead end.
+  'dingtalk.recipientSearchScopeHint': { en: 'Only active users with access to this table (a multitable read or write role) are listed. Users without access can still be entered under Local user IDs below.', zh: '这里只列出对此表有访问权限（多维表读/写角色）的启用用户；没有访问权限的用户可在下方「本地用户 ID」中直接填写。' },
   'dingtalk.inactiveUsersCannotBeAdded': { en: 'Inactive users cannot be added', zh: '不能添加已停用用户' },
+  // 客户反馈 2026-10-21 item 1 (review round 1): a recipient's state from the sender-side preflight.
+  'dingtalk.recipientMissing': { en: 'No user with this ID', zh: '未找到该用户' },
+  'dingtalk.recipientInactive': { en: 'Inactive', zh: '已停用' },
+  'dingtalk.recipientNotLinked': { en: 'Not linked to DingTalk', zh: '未绑定钉钉' },
+  'dingtalk.recipientChecking': { en: 'Checking DingTalk link…', zh: '正在检查钉钉绑定…' },
+  // Review round 1c: the user exists (the sender sees it) but holds no multitable role, so the member search
+  // cannot name it — say so instead of leaving a bare id that reads like a typo.
+  'dingtalk.recipientOutsideMemberList': {
+    en: 'User exists, but is not in this table’s member list',
+    zh: '用户存在，但不在多维表成员列表中',
+  },
+  'dingtalk.saveNoticeChecking': {
+    en: 'Some DingTalk recipients were still being checked — reopen the rule to see whether they can receive the message.',
+    zh: '部分钉钉收件人仍在检查中，可重新打开规则查看他们能否收到消息。',
+  },
+  'dingtalk.saveNoticeSaved': { en: 'Saved.', zh: '已保存。' },
+  // Review round 2: a preflight outage must not read as "all fine" (that was the "0 reached, no warning" field case).
+  'dingtalk.recipientCheckFailed': { en: 'Could not check DingTalk link', zh: '无法检查钉钉绑定' },
+  'dingtalk.saveNoticeUnchecked': {
+    en: '{count} recipient(s) could not be checked for a DingTalk link — after saving, check this rule’s DingTalk person delivery records.',
+    zh: '{count} 位收件人无法检查钉钉绑定，保存后请在「钉钉个人消息投递记录」中确认。',
+  },
+  'log.openPersonDeliveries': { en: 'View DingTalk person delivery records', zh: '查看钉钉个人消息投递记录' },
   'dingtalk.localUserIds': { en: 'Local user IDs', zh: '本地用户 ID' },
   'dingtalk.localUserIdsPlaceholder': { en: 'Use comma or newline separated local user IDs', zh: '使用逗号或换行分隔本地 userId' },
   'dingtalk.memberGroupIds': { en: 'Member group IDs (optional)', zh: '成员组 ID（可选）' },
@@ -1415,6 +1519,19 @@ export interface AutomationStepOutputView {
 export function automationStepOutputView(output: unknown, isZh: boolean): AutomationStepOutputView {
   if (!output || typeof output !== 'object' || Array.isArray(output)) return { reason: null, output }
   const record = output as Record<string, unknown>
+  // 客户反馈 2026-10-21 (a): a DingTalk person message that skipped recipients reads as a count sentence
+  // ("0 人收到：N 人未绑定钉钉"), never as ids. The reason code and the per-cause counts are dropped from
+  // the JSON below. Item 1 follow-up: the stored skipped user ids (skippedUserIds) are dropped too, so the
+  // run log says how many were skipped, never who.
+  const dingTalkOutcome = readDingTalkRecipientOutcome(output)
+  if (dingTalkOutcome) {
+    const strip = ['skippedReasonCounts', 'skippedUserIds', ...(record.reason === DINGTALK_RECIPIENTS_UNREACHABLE_REASON ? ['reason'] : [])]
+    const rest = Object.fromEntries(Object.entries(record).filter(([k]) => !strip.includes(k)))
+    return {
+      reason: automationDingTalkRecipientOutcomeText(dingTalkOutcome, isZh),
+      output: Object.keys(rest).length > 0 ? rest : null,
+    }
+  }
   let key: AutomationLabelKey | null = null
   let strip: string[] = []
   if (record.reason === TARGET_RECORD_MISSING_REASON) {
@@ -2123,6 +2240,150 @@ export function automationTestRunSkipped(duration: string, isZh: boolean): strin
 
 export function automationTestRunSucceeded(duration: string, isZh: boolean): string {
   return isZh ? `测试运行成功${duration}。` : `Test run succeeded${duration}.`
+}
+
+/** The backend's values-free "nobody reachable" code (automation-executor.ts DINGTALK_RECIPIENTS_UNREACHABLE_REASON). */
+export const DINGTALK_RECIPIENTS_UNREACHABLE_REASON = 'dingtalk_recipients_unreachable'
+
+export interface DingTalkRecipientOutcome {
+  notified: number
+  skipped: number
+  /** null when the step predates the per-cause counts (then `skipped` is all we know). */
+  counts: { notLinked: number; inactive: number; notFound: number } | null
+}
+
+function nonNegativeCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null
+}
+
+/**
+ * 客户反馈 2026-10-21 (a): reads a send_dingtalk_person_message step output that skipped at least one
+ * recipient. Counts only — the ids in `skippedUserIds` are never read here.
+ */
+export function readDingTalkRecipientOutcome(output: unknown): DingTalkRecipientOutcome | null {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return null
+  const record = output as Record<string, unknown>
+  const notified = nonNegativeCount(record.notifiedUsers)
+  const skipped = nonNegativeCount(record.skippedRecipientCount)
+  if (notified === null || skipped === null || skipped === 0) return null
+  const raw = record.skippedReasonCounts
+  let counts: DingTalkRecipientOutcome['counts'] = null
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const r = raw as Record<string, unknown>
+    const notLinked = nonNegativeCount(r.notLinked)
+    const inactive = nonNegativeCount(r.inactive)
+    const notFound = nonNegativeCount(r.notFound)
+    if (notLinked !== null && inactive !== null && notFound !== null) counts = { notLinked, inactive, notFound }
+  }
+  return { notified, skipped, counts }
+}
+
+/** "0 人收到：N 人未绑定钉钉。" + the fixed link hint. Values-free: counts only. */
+export function automationDingTalkRecipientOutcomeText(outcome: DingTalkRecipientOutcome, isZh: boolean): string {
+  const parts: string[] = []
+  let needsLinkHint = false
+  if (outcome.counts) {
+    if (outcome.counts.notLinked > 0) {
+      needsLinkHint = true
+      parts.push(isZh ? `${outcome.counts.notLinked} 人未绑定钉钉` : `${outcome.counts.notLinked} not linked to DingTalk`)
+    }
+    if (outcome.counts.inactive > 0) parts.push(isZh ? `${outcome.counts.inactive} 人已停用` : `${outcome.counts.inactive} inactive`)
+    if (outcome.counts.notFound > 0) parts.push(isZh ? `${outcome.counts.notFound} 人不存在` : `${outcome.counts.notFound} not found`)
+  }
+  if (parts.length === 0) {
+    needsLinkHint = true
+    parts.push(isZh ? `${outcome.skipped} 人未绑定钉钉或已停用` : `${outcome.skipped} not linked to DingTalk or inactive`)
+  }
+  const head = isZh
+    ? `${outcome.notified} 人收到：${parts.join('，')}。`
+    : `${outcome.notified} received: ${parts.join(', ')}.`
+  return needsLinkHint ? `${head}${isZh ? '' : ' '}${automationLabel('log.reason.dingtalkLinkHint', isZh)}` : head
+}
+
+/** The pre-#6481 executor wrote `DingTalk account not linked for users: <ids>` as the step error. */
+const LEGACY_DINGTALK_NOT_LINKED_ERROR = /^\s*DingTalk account not linked for users\b/i
+
+/**
+ * 客户反馈 2026-10-21 item 1 follow-up: the text of a step's `error` line in the run logs ('' = no line).
+ * - A legacy DingTalk person-message error (it listed the raw user ids) becomes a values-free sentence, any locale.
+ * - zh: a step whose output carries the values-free unreachable reason code already reads as the Chinese
+ *   count sentence (automationStepOutputView), so the English error line is not shown.
+ * - Anything else: the error as stored (callers still pass it through summarizeStepError).
+ */
+export function automationStepErrorText(error: unknown, output: unknown, isZh: boolean): string {
+  if (error === null || error === undefined || error === '') return ''
+  const text = String(error)
+  if (LEGACY_DINGTALK_NOT_LINKED_ERROR.test(text)) return automationLabel('log.reason.dingtalkLegacyNotLinked', isZh)
+  if (
+    isZh
+    && output
+    && typeof output === 'object'
+    && !Array.isArray(output)
+    && (output as Record<string, unknown>).reason === DINGTALK_RECIPIENTS_UNREACHABLE_REASON
+    && readDingTalkRecipientOutcome(output) !== null
+  ) return ''
+  return text
+}
+
+/** Test-run banner when a live DingTalk person message skipped recipients (never a plain "succeeded"). */
+export function automationTestRunDingTalkOutcome(duration: string, outcomeText: string, isZh: boolean): string {
+  return isZh
+    ? `测试运行已完成${duration}。钉钉个人消息：${outcomeText}`
+    : `Test run finished${duration}. DingTalk person message: ${outcomeText}`
+}
+
+export interface DingTalkSelectedRecipientCounts {
+  notLinked: number
+  inactive: number
+  notFound: number
+}
+
+/**
+ * Rule editor: selected users the sender will skip — not linked to DingTalk, inactive, or no such user
+ * (review round 1: inactive and unknown ids count too). Counts only; a bare number keeps the original
+ * not-linked-only sentence.
+ */
+export function automationDingTalkSelectedNotLinkedSummary(input: number | DingTalkSelectedRecipientCounts, isZh: boolean): string {
+  const counts = typeof input === 'number' ? { notLinked: input, inactive: 0, notFound: 0 } : input
+  const notLinked = Math.max(0, counts.notLinked)
+  const inactive = Math.max(0, counts.inactive)
+  const notFound = Math.max(0, counts.notFound)
+  if (notLinked + inactive + notFound <= 0) return ''
+  const hint = notLinked > 0 ? `${isZh ? '' : ' '}${automationLabel('log.reason.dingtalkLinkHint', isZh)}` : ''
+  if (inactive === 0 && notFound === 0) {
+    const head = isZh
+      ? `${notLinked} 位已选用户未绑定钉钉，规则触发时他们收不到消息。`
+      : `${notLinked} selected ${notLinked === 1 ? 'user is' : 'users are'} not linked to DingTalk and will not receive the message when the rule fires.`
+    return `${head}${hint}`
+  }
+  const parts: string[] = []
+  if (notLinked > 0) parts.push(isZh ? `${notLinked} 位未绑定钉钉` : `${notLinked} not linked to DingTalk`)
+  if (inactive > 0) parts.push(isZh ? `${inactive} 位已停用` : `${inactive} inactive`)
+  if (notFound > 0) parts.push(isZh ? `${notFound} 个 ID 未找到用户` : `${notFound} with no matching user`)
+  const head = isZh
+    ? `已选收件人中 ${parts.join('，')}，规则触发时他们收不到消息。`
+    : `Selected recipients: ${parts.join(', ')} — they will not receive the message when the rule fires.`
+  return `${head}${hint}`
+}
+
+/**
+ * Review round 1 F7: the notice shown when a rule with DingTalk person recipients is saved while some are
+ * still being checked or are known to be unreachable. Never blocks the save. '' = no notice.
+ */
+export function automationDingTalkSaveNotice(
+  counts: DingTalkSelectedRecipientCounts & { checking: number; unchecked?: number },
+  isZh: boolean,
+): string {
+  // Review round 2: "still checking" no longer hides the counts already known, and a failed / timed-out
+  // check is said out loud (never "no warning"). Shown only AFTER the save really succeeded.
+  const parts: string[] = []
+  if (counts.checking > 0) parts.push(automationLabel('dingtalk.saveNoticeChecking', isZh))
+  const unchecked = Math.max(0, counts.unchecked ?? 0)
+  if (unchecked > 0) parts.push(automationLabel('dingtalk.saveNoticeUnchecked', isZh).replace('{count}', String(unchecked)))
+  const summary = automationDingTalkSelectedNotLinkedSummary(counts, isZh)
+  if (summary) parts.push(summary)
+  if (parts.length === 0) return ''
+  return [automationLabel('dingtalk.saveNoticeSaved', isZh), ...parts].join(isZh ? '' : ' ')
 }
 
 export function supportCopyFailed(message: string, isZh: boolean): string {

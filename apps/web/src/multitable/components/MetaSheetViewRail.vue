@@ -46,8 +46,20 @@
             @click="onSheetActivate(s)"
             @keydown="onTreeKeydown($event, { key: sheetKey(s.id), type: 'sheet', id: s.id })"
           >
-            <span class="meta-view-rail__chevron" aria-hidden="true">
-              <el-icon><component :is="s.id === activeSheetId ? IconCaretBottom : IconCaretRight" /></el-icon>
+            <!--
+              Customer field report 2026-10-21 (#6): the chevron of the ACTIVE sheet toggles its view
+              list open/closed (local fold state) and still emits the same-id select-sheet the button
+              would have emitted (MultitableWorkbench.vue's onSelectSheet uses it to leave the dashboard;
+              for the active sheet it never switches anything). On any other sheet the click falls
+              through to the button and activates that sheet, which auto-expands it.
+            -->
+            <span
+              class="meta-view-rail__chevron"
+              data-testid="rail-sheet-chevron"
+              aria-hidden="true"
+              @click="onChevronClick($event, s)"
+            >
+              <el-icon><component :is="isSheetExpanded(s) ? IconCaretBottom : IconCaretRight" /></el-icon>
             </span>
             <span class="meta-view-rail__sheet-name">{{ s.name }}</span>
             <!--
@@ -144,7 +156,7 @@
             @click.stop="emit('delete-sheet', s.id)"
           >&#x1F5D1;</button>
         </div>
-        <ul v-if="s.id === activeSheetId && views.length" role="group" class="meta-view-rail__views">
+        <ul v-if="isSheetExpanded(s) && views.length" role="group" class="meta-view-rail__views">
           <li v-for="v in views" :key="v.id" class="meta-view-rail__view-row">
             <button
               role="treeitem"
@@ -286,6 +298,16 @@ interface FlatNode {
   id: string
 }
 
+// Customer field report 2026-10-21 (#6): only the active sheet can be expanded (its views are the only
+// ones loaded), and it is expanded by default — activating a sheet always shows its views. The user can
+// fold the active sheet via its chevron (or ArrowLeft); that fold is local UI state and is cleared
+// whenever the active sheet changes, so the next activation auto-expands again.
+const collapsedSheetId = ref<string | null>(null)
+watch(() => props.activeSheetId, () => { collapsedSheetId.value = null })
+function isSheetExpanded(s: MetaSheet): boolean {
+  return s.id === props.activeSheetId && collapsedSheetId.value !== s.id
+}
+
 // Flattened, DOM-order list of every focusable tree node: each sheet, and — immediately after the
 // ACTIVE sheet only — its view leaves. `views` only ever holds the active sheet's views (§1.3 data
 // invariant, enforced by the consumer), so this iteration order already matches the design's key map
@@ -294,7 +316,7 @@ const flatNodes = computed<FlatNode[]>(() => {
   const nodes: FlatNode[] = []
   for (const s of props.sheets) {
     nodes.push({ key: sheetKey(s.id), type: 'sheet', id: s.id })
-    if (s.id === props.activeSheetId) {
+    if (isSheetExpanded(s)) {
       for (const v of props.views) {
         nodes.push({ key: viewKey(v.id), type: 'view', id: v.id })
       }
@@ -342,7 +364,8 @@ function sheetAriaExpanded(s: MetaSheet): 'true' | 'false' | undefined {
   // views must not claim to be expanded (nothing is actually shown). Non-active sheets are "false"
   // (collapsed, but expandable via activation). See design §5.3.
   if (s.id !== props.activeSheetId) return 'false'
-  return props.views.length > 0 ? 'true' : undefined
+  if (props.views.length === 0) return undefined
+  return isSheetExpanded(s) ? 'true' : 'false'
 }
 
 async function moveFocusTo(key: string) {
@@ -355,6 +378,17 @@ async function moveFocusTo(key: string) {
 
 function onSheetActivate(s: MetaSheet) {
   focusedKey.value = sheetKey(s.id)
+  // Clicking a folded active sheet's name unfolds it again (same as activating any sheet).
+  if (collapsedSheetId.value === s.id) collapsedSheetId.value = null
+  emit('select-sheet', s.id)
+}
+
+function onChevronClick(event: MouseEvent, s: MetaSheet) {
+  if (s.id !== props.activeSheetId) return // fall through: the button click activates (and expands) it
+  event.stopPropagation() // the button's own handler would unfold a folded sheet
+  focusedKey.value = sheetKey(s.id)
+  collapsedSheetId.value = collapsedSheetId.value === s.id ? null : s.id
+  // Keep the button's same-id emit: the workbench returns from the dashboard to the grid on it.
   emit('select-sheet', s.id)
 }
 
@@ -410,9 +444,14 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
     }
     case 'ArrowRight': {
       event.preventDefault()
-      // Only the ACTIVE (already-expanded) sheet has a first view leaf to move into; a non-active
-      // sheet is a no-op (expanding it would require activating it, which arrow keys never do).
+      // Only the ACTIVE sheet has view leaves; a non-active sheet is a no-op (expanding it would
+      // require activating it, which arrow keys never do). A folded active sheet unfolds first
+      // (focus stays on it), an unfolded one moves focus into its first view.
       if (node.type === 'sheet' && node.id === props.activeSheetId) {
+        if (collapsedSheetId.value === node.id) {
+          collapsedSheetId.value = null
+          break
+        }
         const firstView = nodes.find((n) => n.type === 'view')
         if (firstView) void moveFocusTo(firstView.key)
       }
@@ -420,9 +459,10 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
     }
     case 'ArrowLeft': {
       event.preventDefault()
-      // A view leaf's parent is always the active sheet (§1.3); a sheet node is a no-op (collapse is
-      // a derived state, not something arrow keys can "undo").
+      // A view leaf's parent is always the active sheet (§1.3). On the active sheet node itself
+      // ArrowLeft folds its view list (focus stays put); on any other sheet it is a no-op.
       if (node.type === 'view') void moveFocusTo(sheetKey(props.activeSheetId))
+      else if (node.id === props.activeSheetId && props.views.length > 0) collapsedSheetId.value = node.id
       break
     }
     case 'Home': {

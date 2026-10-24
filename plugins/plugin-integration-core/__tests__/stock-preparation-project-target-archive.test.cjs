@@ -331,8 +331,16 @@ test('A-07 the 200 cap counts archived rows: a new create is 409 LIMIT; archivin
 })
 
 /** A completed, planned large-BOM job written straight into the route's durable storage. */
+const swlLockLib = require(path.join(__dirname, '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
+
 async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }) {
   const at = '2026-10-09T00:00:00.000Z'
+  // Codex review P1-b: a seeded expansion + plan carries what the routes record — the target sheet's write
+  // generation observed from the mounted lock (none when no lock service is wired).
+  const seedLock = h.projectWriteLock
+  const writeObservation = seedLock && target && typeof target.sheetId === 'string'
+    ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
+    : null
   const job = {
     jobId, ...JOB_SCOPE, actionId: ACTION_ID,
     status: 'completed', authoritative: true, projectNoPresent: true,
@@ -348,17 +356,34 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
     budgets: {},
     evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
     createdAt: at, updatedAt: at,
+    ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
   }
   await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, jobId }), job)
 }
 
 /** Status + error code: the short form a failure message names (a 200 is `200:ok`). */
 const outcome = (res) => `${res.statusCode}:${(res.body && res.body.error && res.body.error.code) || 'ok'}`
-/** The WHOLE answer — status, JSON body, headers and a streamed body — for "byte-identical" claims. */
+/**
+ * The export's Content-Disposition, split around the ONE wall-clock segment it carries: the route stamps the
+ * filename with the current second (`stockPreparationExportTimestamp()`), so two calls that straddle a second
+ * boundary differ there and nowhere else. Fully anchored: prefix (incl. the sanitized project token) and suffix
+ * stay byte-compared; only `\d{8}T\d{6}Z` is replaced.
+ */
+const EXPORT_DISPOSITION_RE = /^(attachment; filename="stock-prep-[A-Za-z0-9._-]+-)(\d{8}T\d{6}Z)(\.xlsx")$/
+const EXPORT_TIMESTAMP_MASK = '<export-second>'
+const maskExportTimestamp = (headers) => {
+  const value = headers['Content-Disposition']
+  if (typeof value !== 'string' || !EXPORT_DISPOSITION_RE.test(value)) return headers
+  return { ...headers, 'Content-Disposition': value.replace(EXPORT_DISPOSITION_RE, `$1${EXPORT_TIMESTAMP_MASK}$3`) }
+}
+/**
+ * The WHOLE answer — status, JSON body, headers and a streamed body — for "byte-identical" claims. The only
+ * byte not compared is the export filename's seconds timestamp (see EXPORT_DISPOSITION_RE).
+ */
 const fullAnswer = (res) => JSON.stringify({
   status: res.statusCode,
   body: res.body === undefined ? null : res.body,
-  headers: res.headers || {},
+  headers: maskExportTimestamp(res.headers || {}),
   sent: res.sentBuffer === undefined ? null : Buffer.from(res.sentBuffer).toString('base64'),
 })
 
@@ -393,12 +418,13 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     await h.records.createRecord({ sheetId, data: { [fid('projectNo')]: PROJECT, [fid('active')]: true, [fid('idempotencyKey')]: 'idem-s4-1' } })
     const projectTarget = { sheetId, objectId, fieldIdMap: {} }
     await seedPlannedExpansionJob(h, { jobId: 'job-s4-apply', target: projectTarget })
-    await seedPlannedExpansionJob(h, { jobId: 'job-s4-plan', target: projectTarget })
     const jobParams = (jobId, applyJobId) => ({ actionId: ACTION_ID, jobId, ...(applyJobId ? { applyJobId } : {}) })
     // An apply job approved while the project was ACTIVE — the archive must stop its run.
     const approved = await projectSheet.call(h.routes, 'POST', APPLY_START_PATH, { user: PLATFORM_ADMIN, params: jobParams('job-s4-apply'), body: { confirm: { acceptManualConfirmHold: true } }, query: { tenantId: TENANT } })
     assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
     const applyJobId = approved.body.data.jobId
+    // Expanded AFTER that approval (P1-b: an expansion observed before it would now be stale).
+    await seedPlannedExpansionJob(h, { jobId: 'job-s4-plan', target: projectTarget })
 
     // THE READ ROWS, BEFORE: 看板, 导出, 交接状态, conflict-policies list.
     const reads = {
@@ -412,6 +438,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     for (const [label, run] of Object.entries(reads)) {
       const res = await run()
       before[label] = outcome(res)
+      if (label === 'export') assert.match(res.headers['Content-Disposition'], EXPORT_DISPOSITION_RE, 'export (before): the filename has the shape the mask expects')
       beforeFull[label] = fullAnswer(res)
     }
     assert.equal(before.board, '200:ok', `the board answers while active: ${before.board}`)
@@ -464,6 +491,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     for (const [label, run] of Object.entries(reads)) {
       const res = await run()
       assert.equal(outcome(res), before[label], `${label} answers exactly as before the archive`)
+      if (label === 'export') assert.match(res.headers['Content-Disposition'], EXPORT_DISPOSITION_RE, 'export (after): the filename has the shape the mask expects')
       assert.equal(fullAnswer(res), beforeFull[label], `${label}: the whole answer is byte-identical`)
     }
     // GET target still reads; only the lifecycle fields move.

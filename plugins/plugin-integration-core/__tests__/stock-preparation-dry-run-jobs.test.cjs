@@ -330,6 +330,8 @@ test('J-03 the guard sequence, enumerated from the source, is the same list on b
     'getTableAction(',
     'resolveTenantId(',
     'assertResolvedProjectTargetTenancy(',
+    // Batch-refresh phase 0 step 1: the sheet write-lock precheck (refuses while another run writes the sheet).
+    'assertNoLiveWriter(',
     'assertB2aStockPreparationReadAuthorized(',
     'loadTableActionSourceAdapter(',
   ]

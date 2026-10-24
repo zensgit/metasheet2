@@ -529,3 +529,6 @@ describe('ApprovalCenterView — cancel-round affordances follow the attendance 
     expect(container!.querySelector('[data-testid="approval-row-reject-cr_1"]')).not.toBeNull()
   })
 })
+
+// Preload after all eager mock dependencies initialize; keep mount imports unchanged.
+await import('../src/views/approval/ApprovalCenterView.vue')

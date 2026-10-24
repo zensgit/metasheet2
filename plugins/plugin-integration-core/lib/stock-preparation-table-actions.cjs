@@ -56,6 +56,7 @@ const {
 const {
   DECISIONS,
   EXISTING_ROW_CREATED_BY,
+  EXISTING_ROW_RECORD_REF,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
@@ -79,6 +80,7 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const {
   applyStockPreparationPlan,
+  countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
   // ONE definition of logical->physical translation, not two. This file used to
   // carry its own byte-identical copy of `mapFieldName`, and the `pre_mapped`
@@ -86,6 +88,7 @@ const {
   // makes that agreement structural instead of a comment. It also means the
   // writer's refusal to fall back on an unmapped `ext_` id applies here too.
   __internals: { mapFieldName },
+  assertHostFencedWriteSupported,
 } = require('./stock-preparation-apply-writer.cjs')
 const {
   assertExtensionFieldIdValid,
@@ -122,6 +125,12 @@ const {
   readPlanSourceObjects,
   requireResolvedB2aSourceObjects,
 } = require('./b2a-trial-registry.cjs')
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
+  assertWriteBindingMatchesGuard,
+  sheetWriteScopeKey,
+} = require('./stock-preparation-project-write-lock.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -1097,6 +1106,19 @@ function unmapRecordFields(record, fieldIdMap = {}) {
   return out
 }
 
+// Batch-refresh step 4 (PR-1, design §6.5): the record id + version the project-scoped read used to
+// drop, on the planner's Symbol key — hash-neutral exactly like EXISTING_ROW_CREATED_BY above (pinned
+// by stock-preparation-continuation-golden.test.cjs). ENVELOPE records only (`data` present, read from
+// the envelope, never from `data`), and only for a non-blank string id; otherwise the key is ABSENT.
+// Nothing outside the continuation pairing module reads it.
+function withExistingRowRecordRef(row, record) {
+  const id = isPlainObject(record) && isPlainObject(record.data) ? record.id : undefined
+  if (typeof id !== 'string' || id.trim() === '') return row
+  const version = Number.isInteger(record.version) ? record.version : null
+  row[EXISTING_ROW_RECORD_REF] = Object.freeze({ id, version })
+  return row
+}
+
 async function readExistingStockPreparationRows(recordsApi, target, projectNo, options = {}) {
   const api = ensureRecordsApi(recordsApi)
   const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
@@ -1116,7 +1138,7 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
     if (!Array.isArray(pageRows)) {
       throw new StockPreparationTableActionError(500, 'TABLE_ACTION_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
-    rows.push(...pageRows.map((row) => unmapRecordFields(row, target.fieldIdMap)))
+    rows.push(...pageRows.map((row) => withExistingRowRecordRef(unmapRecordFields(row, target.fieldIdMap), row)))
     if (pageRows.length < limit) return rows
   }
   throw new StockPreparationTableActionError(422, 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE', 'existing stock-preparation rows exceeded maxPages', {
@@ -1414,6 +1436,11 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   if (api.supportsFilterValueLists === true) {
     scopedApi.supportsFilterValueLists = true
   }
+  // PR #6501 (P1-a): forward the host's fenced-write declaration the same way — copied, never asserted.
+  // The writer refuses to run a fenced plan when it is absent; `writeFence` itself rides `...input`.
+  if (api.supportsWriteFence === true) {
+    scopedApi.supportsWriteFence = true
+  }
   if (readOnly) return scopedApi
 
   scopedApi.createRecord = async function createRecord(input = {}) {
@@ -1702,6 +1729,102 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
   })
 }
 
+// #6475 fix round 2 — WHAT A SYNC'S WRITE READ, AS CONTENT.
+//
+// The project-sync panel's archive (④, mvp-persist) is a SECOND read of the source, after the write
+// (③, apply). Round 1 made ④ prove it reads the same SOURCE as ③ (http-routes.cjs
+// `stockPreparationSourceScopeDigest`). That says nothing about the source's CONTENT: a PLM edit
+// between ③ and ④ (a quantity, a part added or removed) used to be archived as this sync's batch
+// while the sheet held what ③ wrote.
+//
+// This revision is the content half: one hash over exactly what the expansion produced for this
+// project — the rows in canonical identity order, the status, the action, the parameters and the
+// read plan. It deliberately leaves out everything that differs between ③ and ④ while the source
+// does not:
+//   * the target sheet's rows and the plan (③ plans against the sheet BEFORE its write, ④ after);
+//   * the source binding's workspace row (③ resolves with the page's workspace hint, ④ with none —
+//     WHICH system was read is the scope digest's job, not this one's);
+//   * the tenant `ext_` keys an `extFieldMapping` adds to a row. The apply expands WITH the mapping
+//     and mvp-persist deliberately WITHOUT it (see `prepareStockPreparationMvpSnapshot`), and the
+//     snapshot vocabulary has no `ext_` key, so they are not part of what the archive keeps;
+//   * row errors. A plan that carries any is held (every row error is a manual_confirm), so neither
+//     the panel's apply nor mvp-persist's readiness gate reaches a state where they could differ.
+// Values-free on the wire: only the truncated, domain-separated digest below ever leaves the process.
+const SOURCE_CONTENT_REVISION_SCHEME = 'stock-preparation/source-content/v1'
+const STOCK_PREPARATION_SOURCE_CONTENT_DIGEST_PATTERN = /^[0-9a-f]{32}$/
+
+function withoutTenantExtensionKeys(row) {
+  if (!isPlainObject(row)) return row
+  const out = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (!isTenantExtensionField(key)) out[key] = value
+  }
+  return out
+}
+
+function buildSourceContentRevision({ action, parameters, expansion }) {
+  const rows = Array.isArray(expansion && expansion.rows) ? expansion.rows.map(withoutTenantExtensionKeys) : []
+  return hashJson({
+    scheme: SOURCE_CONTENT_REVISION_SCHEME,
+    actionId: action.actionId,
+    parameters,
+    readPlan: action.source.readPlan,
+    status: expansion ? expansion.status : null,
+    rows: canonicalHashOrder(rows, expandedRowHashIdentity),
+  })
+}
+
+// What the apply answers as `sourceContentDigest` and what mvp-persist compares it with. One
+// definition, so the two sides cannot drift.
+function stockPreparationSourceContentDigest(sourceContentRevision) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify([SOURCE_CONTENT_REVISION_SCHEME, sourceContentRevision]))
+    .digest('hex')
+    .slice(0, 32)
+}
+
+const STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE = 'STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH'
+
+// #6475 fix round 2 — THE REVISION mvp-persist MINTS ITS IDS FROM.
+//
+// The dry-run `revision` hashes the target sheet's rows as they stand, so a 备注 edit — a column the
+// sync never writes and the archive never keeps — moved the archive's run id and, under the default
+// rule, its batch id: a duplicate batch of identical lines, or (creation-hour rule) a permanent
+// idempotency conflict. This is that same revision over the same inputs with ONE difference: each
+// existing row loses the columns PEOPLE own — the template's human_preserved columns, and every tenant
+// `ext_` column outside the action's declared extension band (the only `ext_` columns a sync writes:
+// `assertExtFieldMappingAgreesWithAction` refuses a mapping that writes an undeclared one).
+// Everything the sync itself wrote stays, the refresh stamps included, so a sync that really rewrote
+// the sheet still mints a new run (a BOM that changed and changed back still gets its own batch under
+// the default rule, as before). For rows that carry no such column it is byte-identical to `revision`,
+// so a batch kept from an untouched sheet keeps its id. Not used for tokens or the ledger.
+function withoutPeopleOwnedColumns(row, humanFieldIds, declaredExtensionFieldIds) {
+  if (!isPlainObject(row)) return row
+  const out = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (humanFieldIds.has(key)) continue
+    if (isTenantExtensionField(key) && !declaredExtensionFieldIds.has(key)) continue
+    out[key] = value
+  }
+  return out
+}
+
+function buildArchiveRevision({ action, parameters, dryRun }) {
+  const humanFieldIds = new Set((action.template && Array.isArray(action.template.fields) ? action.template.fields : [])
+    .filter((field) => field && field.ownership === 'human_preserved')
+    .map((field) => field.id))
+  const declaredExtensionFieldIds = new Set(Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : [])
+  return buildRevision({
+    action,
+    parameters,
+    expansion: dryRun.expansion,
+    existingRows: (Array.isArray(dryRun.existingRows) ? dryRun.existingRows : [])
+      .map((row) => withoutPeopleOwnedColumns(row, humanFieldIds, declaredExtensionFieldIds)),
+    conflictPolicyReview: dryRun.conflictPolicyReview,
+    plan: dryRun.plan,
+  })
+}
+
 // Confirmation-ledger readback merge (FIRST CUT: duplicate_expanded_key x
 // keep_multiple_rows only). The ledger review arrives in the SAME shape the
 // stored table-scope review uses ({ policies: [{ fingerprint, policy }] }), so
@@ -1819,15 +1942,91 @@ async function createDryRunToken(tokenStore, record) {
   return token
 }
 
-async function consumeDryRunToken(tokenStore, token, expected) {
+// THE CLAIM STORE MUST BE ABLE TO CLAIM. A single-use token is only single-use if taking it is ONE
+// atomic step: `get` then `delete` lets two concurrent applies both read the record before either
+// removes it, and both proceed to write. The host's plugin storage offers `consume` — one
+// `DELETE ... RETURNING` on the durable store (packages/core-backend/src/plugins/plugin-durable-storage.ts),
+// one synchronous Map step in memory — so of two concurrent claims exactly one answers the record.
+// A store without it is refused (501) rather than claimed non-atomically: there is deliberately no
+// get+delete fallback here.
+function requireConsumableTokenStore(tokenStore) {
   const store = requireTokenStore(tokenStore)
+  if (typeof store.consume !== 'function') {
+    throw new StockPreparationTableActionError(501, 'TABLE_ACTION_TOKEN_STORE_UNAVAILABLE', 'table action requires plugin storage with an atomic consume to claim dry-run tokens')
+  }
+  return store
+}
+
+// ── PROJECT WRITE GUARD (batch-refresh phase 0 step 1) ─────────────────────────────────────────────
+// See lib/stock-preparation-project-write-lock.cjs for the protocol. This module never acquires the
+// lease itself: the route holds it around the whole apply (so a busy refusal costs no B2a claim, no
+// adapter load and no token) and hands the guard in. What this module enforces is that the guard is
+// there, is for THIS write scope, and that the claimed token was planned under the generation the
+// lease grant observed.
+
+// The binding a dry-run token stores ALONGSIDE its existing fields. Exactly these three keys; never
+// hashed into a revision, never answered.
+const WRITE_BINDING_KEYS = Object.freeze(['writeScope', 'writeGeneration', 'writeGenerationToken'])
+
+function normalizeWriteBinding(binding) {
+  if (!isPlainObject(binding)
+    || typeof binding.writeScope !== 'string' || !binding.writeScope
+    || typeof binding.writeGenerationToken !== 'string' || !binding.writeGenerationToken
+    || !Number.isInteger(binding.writeGeneration) || binding.writeGeneration < 0) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the project write generation binder returned no usable binding', { reason: 'binding_malformed' })
+  }
+  return Object.fromEntries(WRITE_BINDING_KEYS.map((key) => [key, binding[key]]))
+}
+
+function requireProjectWriteGuard(guard) {
+  if (!guard || typeof guard.beforeWrite !== 'function' || typeof guard.scopeKey !== 'string' || typeof guard.generationToken !== 'string') {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep apply requires the sheet write lock; nothing is written without it')
+  }
+  return guard
+}
+
+// S5: the guard the route acquired must be for exactly this target sheet (the write scope, R-52; the project
+// number was validated just above). A mismatch is a programming error in the caller, never a client error.
+function assertProjectWriteGuardScope(guard, action) {
+  if (guard.scopeKey !== sheetWriteScopeKey(action.target.sheetId)) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the sheet write guard does not cover this target sheet')
+  }
+}
+
+// A fenced stop of the writer surfaces as the fence's own typed error, with the partial outcome
+// attached (values-free counts). `partial` means ROWS MAY HAVE LANDED: at least one host write was
+// attempted (a confirmed write, or a host call that raised and may have committed — review round 2). It
+// is `false` only when no host write was issued at all, and it tells the route to stamp `failed`, not
+// `refused`. `written` stays the confirmed count; `attemptedWrites` is the attempted one.
+function projectWriteAbortError(applyResult) {
+  const source = applyResult.abort && applyResult.abort.error
+  const counts = isPlainObject(applyResult.counts) ? { ...applyResult.counts } : {}
+  const written = Number(applyResult.written || 0)
+  const attemptedWrites = countAttemptedHostWrites(applyResult)
+  const details = {
+    ...(source && isPlainObject(source.details) ? source.details : {}),
+    partial: attemptedWrites > 0,
+    written,
+    attemptedWrites,
+    counts,
+    abortedAtDecisionIndex: applyResult.abort.index,
+  }
+  const status = source && Number.isInteger(source.status) ? source.status : 409
+  const code = source && typeof source.code === 'string' ? source.code : PROJECT_WRITE_ERROR_CODES.LEASE_LOST
+  const message = source && source.message ? source.message : 'the project write stopped before finishing its plan'
+  return new StockPreparationProjectWriteLockError(status, code, message, details)
+}
+
+async function consumeDryRunToken(tokenStore, token, expected) {
+  const store = requireConsumableTokenStore(tokenStore)
   const dryRunToken = optionalString(token)
   if (!dryRunToken) {
     throw new StockPreparationTableActionError(400, 'TABLE_ACTION_DRY_RUN_TOKEN_REQUIRED', 'dryRunToken is required for apply', { field: 'confirm.dryRunToken' })
   }
   const key = tokenStoreKey(dryRunToken)
-  const stored = await store.get(key)
-  if (typeof store.delete === 'function') await store.delete(key)
+  // ATOMIC CLAIM: read-and-remove in one store operation. Validation runs AFTER the claim, so a token
+  // refused below (expired / mismatched) stays burned — the same single-use semantics as before.
+  const stored = await store.consume(key)
   if (!isPlainObject(stored)) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID', 'dryRunToken is missing, expired, or already used')
   }
@@ -2131,7 +2330,17 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // vanish according to whether the PROJECT exists in the source, which is a property of the data;
     // whether a mapping is configured is a property of the deployment, and evidence should only ever
     // report the second.
-    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping, b2aSchemaContract }
+    return {
+      expansion,
+      existingRows: [],
+      plan: emptyPlan(),
+      revision,
+      sourceContentRevision: buildSourceContentRevision({ action, parameters, expansion }),
+      canApply: false,
+      hasGlobalErrors,
+      extFieldMapping,
+      b2aSchemaContract,
+    }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
   // #5860: one sheet = one project. BEFORE the plan (dry-run) and, because apply recomputes this very
@@ -2200,6 +2409,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     existingRows,
     plan,
     revision,
+    // #6475 round 2: the content half only — see buildSourceContentRevision. NOT an input to
+    // `revision` (which keeps hashing exactly what it always did, so no token or batch id moves).
+    sourceContentRevision: buildSourceContentRevision({ action, parameters, expansion }),
     canApply: !hasGlobalErrors && !hasHardRowErrors,
     hasGlobalErrors,
     conflictPolicyReview,
@@ -2318,13 +2530,32 @@ async function dryRunStockPreparationAction(input = {}) {
     b2aSourceObjects,
     b2aNow: input.now,
   })
+  // 备料分批拉取第一期 step 3 PR B (plan §5.1 「超过小车道上限时明确拒绝,不自动转大车道」): when the
+  // expansion hit a small-lane cap, the route's pilot guard runs HERE — after the expansion (that is when
+  // the cap is known), before the token block and before the response that would tell the panel to start
+  // the large lane. A pilot project is refused 409 STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED by the guard
+  // (an unreadable pilot state is its 503); a non-pilot project returns through the guard and keeps its
+  // `large_bom_bounded` answer byte for byte. Absent guard (a direct lib caller) = the pre-PR-B path.
+  if (isLargeBomBoundedExpansion(dryRun.expansion) && typeof input.pilotLaneGuard === 'function') {
+    await input.pilotLaneGuard()
+  }
   let dryRunToken = null
   if (dryRun.canApply) {
+    // PLAN GENERATION (batch-refresh phase 0 step 1): an applicable preview SUPERSEDES every earlier
+    // plan of this write scope. The route's binder bumps the generation (refused 409 while a live
+    // writer holds the sheet — then no token is minted) and the token records the generation it was
+    // planned under, ALONGSIDE its existing fields: never hashed, never answered, so the revision,
+    // the evidence and the response are byte-identical with or without it. No binder (the lock
+    // service is not wired) mints an UNBOUND token, which apply refuses (token_unbound).
+    const writeBinding = typeof input.projectWriteGenerationBinder === 'function'
+      ? normalizeWriteBinding(await input.projectWriteGenerationBinder())
+      : null
     dryRunToken = await createDryRunToken(input.tokenStore, {
       actionId: action.actionId,
       parametersHash: hashJson(parameters),
       revision: dryRun.revision,
       conflictPolicyReview: runOnlyReview,
+      ...(writeBinding || {}),
     })
   }
   // W3a. Computed ONLY when the caller explicitly asked and the route's operator-scope gate let the
@@ -2487,14 +2718,45 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
   if (isLargeBomBoundedExpansion(dryRun.expansion)) {
     throw new StockPreparationTableActionError(409, 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED', 'source expansion requires the large-BOM workflow')
   }
+  // #6475 fix round 2 — WITH THE APPLY'S CONTENT DIGEST, THE ARCHIVE IS WHAT THE SYNC WROTE, OR NOTHING.
+  //
+  // The panel hands step ③'s `sourceContentDigest` back to step ④. Present, it makes two claims this
+  // function now proves before anything is persisted:
+  //   1. the source still says what ③ read (the digest of THIS expansion equals ③'s) — checked BEFORE
+  //      the readiness gate, so a PLM change between ③ and ④ is named as such even where it also
+  //      makes the recomputed plan unready (an identity or lineage change does both);
+  //   2. the sheet holds all of it: this recomputed plan, against the sheet ③ just wrote, has nothing
+  //      left to add, update or mark inactive. A partial write (some rows failed) or a hand edit of a
+  //      PLM-owned cell since ③ leaves such rows, and archiving then would keep a batch the sheet does
+  //      not hold.
+  // Absent, nothing here runs and the route is the admin's direct "archive the source now" it always
+  // was — that caller makes no claim about a write, and this cannot hold it to one.
+  // The digest selects nothing: it can only make this function refuse.
+  const writtenSourceContentDigest = input.writtenSourceContentDigest === undefined ? null : input.writtenSourceContentDigest
+  if (writtenSourceContentDigest !== null) {
+    if (stockPreparationSourceContentDigest(dryRun.sourceContentRevision) !== writtenSourceContentDigest) {
+      throw new StockPreparationTableActionError(409, STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE, 'the source no longer holds what this sync wrote; nothing was stored', { reason: 'source_changed_since_write' })
+    }
+  }
   if (!dryRun.canApply || !dryRun.plan.valid) {
     throw new StockPreparationTableActionError(409, 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', 'source expansion is not ready for internal persistence')
+  }
+  if (writtenSourceContentDigest !== null) {
+    const pending = {
+      add: Number(dryRun.plan.counts[DECISIONS.ADD] || 0),
+      update: Number(dryRun.plan.counts[DECISIONS.UPDATE] || 0),
+      inactive: Number(dryRun.plan.counts[DECISIONS.INACTIVE] || 0),
+    }
+    if (pending.add + pending.update + pending.inactive > 0) {
+      throw new StockPreparationTableActionError(409, STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE, 'the sheet does not hold everything this sync read; nothing was stored', { reason: 'sheet_not_settled', pending })
+    }
   }
   return {
     action,
     parameters,
     expansionResult: dryRun.expansion.rows,
     revision: dryRun.revision,
+    archiveRevision: buildArchiveRevision({ action, parameters, dryRun }),
     evidence: {
       ...evidenceForDryRun({
         action,
@@ -2649,6 +2911,14 @@ async function applyStockPreparationAction(input = {}) {
     projectSheetGate: input.projectSheetGate,
   })
   const parameters = normalizeActionParameters(input.parameters)
+  // PROJECT WRITE GUARD (S5): held by the route around this whole call. Required — no guard, no write
+  // (501) — and for exactly this target sheet (500 otherwise). Both refusals come before
+  // the B2a claim, the reads and the token claim, so neither burns the token.
+  const projectWriteGuard = requireProjectWriteGuard(input.projectWriteGuard)
+  assertProjectWriteGuardScope(projectWriteGuard, action)
+  // P1-a: every record write of this run is host-fenced. A records host that cannot honour the fence
+  // refuses here (501), before the token is claimed; the writer re-checks on the scoped api it is handed.
+  assertHostFencedWriteSupported(input.recordsApi, projectWriteGuard)
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
   // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
   // outside their registered scope would also lose the artifact that proves what they planned.
@@ -2683,10 +2953,15 @@ async function applyStockPreparationAction(input = {}) {
   // other project) can still apply the plan they proved. The call inside `computeDryRun` runs once
   // more a moment later for the same reason the existence probe does.
   await assertTargetSheetHoldsNoForeignActiveRows(input.recordsApi, action.target, parameters.projectNo)
+  // I4: claimed only now — the lease is held, so a busy refusal never reached this line.
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
   })
+  // I3 (S8): the token must have been planned under the generation the lease GRANT observed. A newer
+  // applicable preview (or a large approval) of this project since then refuses here — before any
+  // re-read and before any write — 409 STOCK_PREP_PROJECT_PLAN_SUPERSEDED. The token stays burned.
+  assertWriteBindingMatchesGuard(tokenRecord, projectWriteGuard, { unboundReason: 'token_unbound' })
   // Stored boundary: consumeDryRunToken returns the record verbatim from the token store and merges
   // nothing from the request, so this content is server-minted and was already validated at
   // selection time. Re-validating it as a fresh selection would 422 an in-flight token issued before
@@ -2754,12 +3029,22 @@ async function applyStockPreparationAction(input = {}) {
     // C4 apply: the writer already maps every payload key through the operator-configured
     // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
     recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
+    // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write, and the
+    // same lease + generation re-checked by the host inside every record write transaction (P1-a).
+    writeFence: projectWriteGuard,
+    writeFenceRequired: true,
   })
+  // The fence stopped the run (lease lost / plan superseded / lock store failed): an ERROR, carrying
+  // the partial counts and the decision index it stopped at — never a plausible `partial` success.
+  if (applyResult.status === 'aborted') throw projectWriteAbortError(applyResult)
   return {
     action: publicActionMetadata(action),
     status: applyResult.status,
     permission: applyResult.permission,
     dryRunRevision: dryRun.revision,
+    // #6475 round 2: the content this write read. The route answers only its digest
+    // (`stockPreparationSourceContentDigest`) and strips this key from the response.
+    sourceContentRevision: dryRun.sourceContentRevision,
     apply: summarizeApplyResultForEvidence(applyResult),
     evidence: {
       actionId: action.actionId,
@@ -2808,6 +3093,9 @@ module.exports = {
   largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
+  STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE,
+  STOCK_PREPARATION_SOURCE_CONTENT_DIGEST_PATTERN,
+  stockPreparationSourceContentDigest,
   normalizeActionParameters,
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
@@ -2816,7 +3104,9 @@ module.exports = {
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
     assertTargetFieldsExist,
+    buildArchiveRevision,
     buildRevision,
+    buildSourceContentRevision,
     confirmationDecisionEvidence,
     hasHardApplyBlockingRowErrors,
     mergeTableScopeConflictPolicyReviews,
@@ -2824,6 +3114,12 @@ module.exports = {
     normalizeActionReadConcurrency,
     actionReadConcurrency,
     consumeDryRunToken,
+    requireConsumableTokenStore,
+    WRITE_BINDING_KEYS,
+    assertProjectWriteGuardScope,
+    normalizeWriteBinding,
+    projectWriteAbortError,
+    requireProjectWriteGuard,
     createDryRunToken,
     hashJson,
     normalizeActionExtensionFieldIds,

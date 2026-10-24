@@ -11,6 +11,9 @@ const {
   applyExtFieldMapping,
   isNormalizedExtFieldMapping,
 } = require('./stock-preparation-ext-field-mapping.cjs')
+// Batch-refresh step 2b. Held as a namespace (not destructured) so the capture seam stays the
+// module's own export — see `openDemandEvidenceCapture`.
+const demandEvidenceCapture = require('./stock-preparation-demand-evidence.cjs')
 
 const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
@@ -1494,6 +1497,74 @@ function selectOrderRootCandidates(candidates, rules) {
 }
 
 /**
+ * Batch-refresh step 2b — WHY each candidate was kept or dropped, one label per candidate, aligned
+ * with `candidates`. PURE, and it does NOT decide: the decision is read off `result.selected` (what
+ * `selectOrderRootCandidates` actually returned, by object identity) and this function only names
+ * the rule that branch of the selector applied, plus the candidates the decision was taken against
+ * (`related`, as indexes into `candidates`). If the label it derives disagrees with the real
+ * decision — the selector changed and this did not — the rule is `unexplained`, never a guess.
+ *
+ * Rules: `root_selection_disabled`; no 总图: `no_main_drawing_keep_all` (dash rule off),
+ * `dash_descendant` (related = EVERY dash parent among the candidates, not just the first) or
+ * `not_dash_descendant`; with 总图: `main_drawing_chosen` (related = the 总图 lines not chosen),
+ * `main_drawing_not_chosen` (related = the chosen one; `ruleDetail` says whether it is the SAME part
+ * — a second order line for the chosen 总图 is dropped today because the keep-set holds one object —
+ * and whether it lost on a lower version or a tie), `sheet_metal`, `not_main_or_sheet_metal`.
+ */
+function explainRootSelection(candidates, result, rules) {
+  const list = Array.isArray(candidates) ? candidates : []
+  const selected = new Set(result && Array.isArray(result.selected) ? result.selected : [])
+  const decisionOf = (candidate) => (selected.has(candidate) ? 'selected' : 'dropped')
+  const label = (candidate, rule, impliedKeep, related = [], ruleDetail = {}) => {
+    const decision = decisionOf(candidate)
+    const consistent = impliedKeep === (decision === 'selected')
+    return { decision, rule: consistent ? rule : 'unexplained', related, ruleDetail }
+  }
+  if (!rules || rules.enabled !== true) {
+    return list.map((candidate) => label(candidate, 'root_selection_disabled', true))
+  }
+  const mainIndexes = []
+  list.forEach((candidate, index) => {
+    if (hasMainDrawingShape(candidate.componentCode, rules)) mainIndexes.push(index)
+  })
+  if (mainIndexes.length === 0) {
+    if (rules.dropDashDescendants !== true) {
+      return list.map((candidate) => label(candidate, 'no_main_drawing_keep_all', true))
+    }
+    return list.map((candidate, j) => {
+      const parents = []
+      for (let i = 0; i < list.length; i += 1) {
+        if (i === j) continue
+        if (list[i].componentSourceId === candidate.componentSourceId) continue
+        if (dashHierarchyRelationship(list[i].componentCode, candidate.componentCode) === 1) parents.push(i)
+      }
+      return parents.length > 0
+        ? label(candidate, 'dash_descendant', false, parents)
+        : label(candidate, 'not_dash_descendant', true)
+    })
+  }
+  // Same tie rule as the selector: the first 总图 with the highest version wins.
+  let bestIndex = mainIndexes[0]
+  for (const index of mainIndexes.slice(1)) {
+    if (compareSourceVersion(list[index].sourceVersion, list[bestIndex].sourceVersion) > 0) bestIndex = index
+  }
+  const best = list[bestIndex]
+  return list.map((candidate, index) => {
+    if (index === bestIndex) {
+      return label(candidate, 'main_drawing_chosen', true, mainIndexes.filter((other) => other !== bestIndex))
+    }
+    if (mainIndexes.includes(index)) {
+      return label(candidate, 'main_drawing_not_chosen', false, [bestIndex], {
+        sameComponentAsChosen: candidate.componentSourceId === best.componentSourceId,
+        versionAgainstChosen: compareSourceVersion(candidate.sourceVersion, best.sourceVersion) < 0 ? 'lower' : 'tie',
+      })
+    }
+    if (hasSheetMetalShape(candidate.componentCode, rules)) return label(candidate, 'sheet_metal', true)
+    return label(candidate, 'not_main_or_sheet_metal', false)
+  })
+}
+
+/**
  * #5862 — VALUES-FREE 根选择报告:一个模式 token、四个整数、若干 flag token。没有图号、没有名称。
  *
  * 它回答的是操作员在 dry-run 里最常问的那一句「为什么根是这几条」:有没有认出总图、认出了几张
@@ -2047,6 +2118,12 @@ async function expandPlmProjectBom(input = {}) {
     if (run.readEngine) await run.readEngine.close()
   }
   if (run.readEngine) result.readPhase = run.readEngine.report(run.now() - run.startedAt)
+  // Batch-refresh step 2b — OPT-IN demand evidence, mounted beside `readPhase` and for the same
+  // reason NOT inside `summary` (or `rows`, or anything `summarizeBomExpansionForEvidence` projects):
+  // every revision, token, ledger fingerprint and artifact hash reads those, and none reads the
+  // expansion object whole. Absent request => no recorder => no key at all. Runs on every return
+  // path the walk has (failureResult and not_found included); `finalize` cannot throw.
+  if (run.demand) result.demandEvidence = run.demand.finalize({ projectNo: run.projectNo, result })
   return result
 }
 
@@ -2095,6 +2172,18 @@ async function walkPlmProjectBom(input, run) {
       ROW_ERROR_LIMIT,
       ROW_ERROR_LIMIT_CEILING,
     ),
+  }
+  // Batch-refresh step 2b — the demand-evidence recorder, or `null` when the caller did not ask
+  // (every existing caller). Every `if (demand)` line below is a no-op on `null`, and a present
+  // recorder is guarded: its hooks return nothing, swallow their own faults and never read.
+  const demand = demandEvidenceCapture.openDemandEvidenceCapture(input.demandEvidence, {
+    plan,
+    rootSelection,
+    explainRootSelection,
+  })
+  if (demand) {
+    run.demand = demand
+    run.projectNo = projectNo
   }
   const readStats = []
   const errors = []
@@ -2496,15 +2585,21 @@ async function walkPlmProjectBom(input, run) {
   // SOURCE DATA defect nobody on the floor can fix by creating a part, so naming the part would put a
   // customer value on the wire for no operator action — and every value-bearing key is a leak surface
   // that has to earn its keep.
+  // Batch-refresh step 2b: which way the LAST `readPart` went, for the demand recorder only (a read
+  // that returns `undefined` is either a missing or an ambiguous part, and the evidence names which).
+  let lastPartOutcome
   async function readPart(componentSourceId, depth, locus = {}, entry) {
+    lastPartOutcome = undefined
     const matches = await read(plan.part.object, { [plan.part.idField]: componentSourceId }, entry)
     const candidates = matchesByField(matches, plan.part.idField, componentSourceId)
     if (candidates.length > 1) {
+      lastPartOutcome = 'part_ambiguous'
       addRowError({ type: 'ambiguous_component', field: plan.part.idField, depth })
       return undefined
     }
     const row = candidates[0]
     if (!row) {
+      lastPartOutcome = 'part_missing'
       addRowError({ type: 'missing_component', field: plan.part.idField, depth })
       addMissingComponent({
         componentSourceId,
@@ -2688,6 +2783,7 @@ async function walkPlmProjectBom(input, run) {
    *     first time) and COUNTED as `nodesSkippedAlreadyVisited`. Refusing it would kill the entire
    *     pull — the ALREADY-COMPLETED order path included — over a perfectly well-formed directory.
    */
+  const subtreeRootNodeIds = new Map()
   async function discoverSubtreeRoots(seedPathIds, subtree, counters) {
     // Membership is decided AT ENQUEUE, not at dequeue. Deciding it at dequeue is functionally
     // identical but lets one node enter the queue once per PARENT EDGE pointing at it, so a
@@ -2735,6 +2831,8 @@ async function walkPlmProjectBom(input, run) {
             return null
           }
           roots.push(rootSourceId)
+          // Batch-refresh step 2b: the folder node a subtree root hangs off, for the recorder only.
+          if (demand) subtreeRootNodeIds.set(rootSourceId, nodeId)
         }
       }
 
@@ -2786,34 +2884,43 @@ async function walkPlmProjectBom(input, run) {
       if (errors.length > 0) break
       const pathId = readField(pathRow, plan.pathExAttr.pathIdField)
       if (isBlank(pathId)) {
+        if (demand) demand.pathNode(pathId, 'missing_path_id')
         addRowError({ type: 'missing_path_id', field: plan.pathExAttr.pathIdField, depth: 0 })
         continue
       }
       const pathInfoMatches = await read(plan.pathInfo.object, { [plan.pathInfo.idField]: pathId })
       const pathInfoCandidates = matchesByField(pathInfoMatches, plan.pathInfo.idField, pathId)
       if (pathInfoCandidates.length > 1) {
+        if (demand) demand.pathNode(pathId, 'ambiguous_path')
         addRowError({ type: 'ambiguous_path', field: plan.pathInfo.idField, depth: 0 })
         continue
       }
       if (!pathInfoCandidates[0]) {
+        if (demand) demand.pathNode(pathId, 'missing_path')
         addRowError({ type: 'missing_path', field: plan.pathInfo.idField, depth: 0 })
         continue
       }
+      if (demand) demand.pathNode(pathId, 'ok')
       const orderHeads = await read(plan.orderHead.object, { [plan.orderHead.pathIdField]: pathId })
+      if (demand) demand.orderHeadsRead(orderHeads.length)
       const orderDetailAheads = readAhead ? readAheadOrderDetails(orderHeads) : undefined
       for (const [orderHeadIndex, orderHead] of orderHeads.entries()) {
         if (errors.length > 0) break
         const orderId = readField(orderHead, plan.orderHead.idField)
+        // The order-head id: read here and, before step 2b, used only as the detail filter below.
+        if (demand) demand.orderHead(orderId)
         if (isBlank(orderId)) {
           addRowError({ type: 'missing_order_id', field: plan.orderHead.idField, depth: 0 })
           continue
         }
         const details = await read(plan.orderDetail.object, { [plan.orderDetail.orderIdField]: orderId }, orderDetailAheads && orderDetailAheads[orderHeadIndex])
+        if (demand) demand.orderLinesRead(details.length)
         const rootPartAheads = readAhead ? readAheadRootParts(details) : undefined
         for (const [detailIndex, detail] of details.entries()) {
           if (errors.length > 0) break
           const componentSourceId = toKey(readField(detail, plan.orderDetail.componentIdField))
           if (componentSourceId === null) {
+            if (demand) demand.orderLine({ detail, componentSourceId })
             addRowError({ type: 'missing_component_source_id', field: plan.orderDetail.componentIdField, depth: 0 })
             continue
           }
@@ -2822,6 +2929,8 @@ async function walkPlmProjectBom(input, run) {
             depth: 0,
             relation: 'root',
           })
+          // Before the quantity refusal, so a line excluded for its quantity is still observed.
+          if (demand) demand.orderLine({ detail, componentSourceId, quantity: qty })
           if (!qty.ok) {
             addRowError(qty.error)
             continue
@@ -2834,10 +2943,13 @@ async function walkPlmProjectBom(input, run) {
             bomId: null,
             path: makePath(pathTokens),
           }, rootPartAheads && rootPartAheads[detailIndex])
-          if (!partRow) continue
+          if (!partRow) {
+            if (demand) demand.orderLinePart(lastPartOutcome)
+            continue
+          }
           // PHASE 1 ends here: a candidate, not yet a row. 图号/版本 are read through the read
           // plan's declared part slots — the same two values 老系统 selects roots by.
-          rootCandidates.push({
+          const candidate = {
             componentSourceId,
             componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
             sourceVersion: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
@@ -2845,7 +2957,9 @@ async function walkPlmProjectBom(input, run) {
             rawQuantity: qty.value,
             sortLine: plan.orderDetail.sortField ? readField(detail, plan.orderDetail.sortField) : undefined,
             pathTokens,
-          })
+          }
+          rootCandidates.push(candidate)
+          if (demand) demand.orderLinePart('found', candidate)
         }
       }
     }
@@ -2859,6 +2973,9 @@ async function walkPlmProjectBom(input, run) {
   const rootSelectionResult = selectOrderRootCandidates(rootCandidates, rootSelection)
   rootsFilteredOut = rootSelectionResult.droppedCount
   rootSelectionReport = rootSelectionResult.report
+  // Batch-refresh step 2b — the decision per candidate, labelled by `explainRootSelection` (pure,
+  // and it reads the decision off this result rather than re-deciding).
+  if (demand) demand.rootSelection(rootCandidates, rootSelectionResult)
 
   // PHASE 3 — expansion, in candidate (read) order. Byte-identical to the pre-F1c loop body.
   try {
@@ -2879,11 +2996,14 @@ async function walkPlmProjectBom(input, run) {
         extFieldMapping,
       })
       if (rowResult.error) {
+        if (demand) demand.rootRow(candidate, false)
         addRowError(rowResult.error)
         continue
       }
       if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
-      if (!pushRow(rowResult.row)) break
+      const pushed = pushRow(rowResult.row)
+      if (demand) demand.rootRow(candidate, pushed)
+      if (!pushed) break
       // The ONLY line the order loop gained, and it is a no-op unless the optional block is
       // configured. Counted HERE, where an order root is actually produced, rather than
       // re-derived later from `rows`: the subtree segment does not run on every exit path (an
@@ -2936,9 +3056,11 @@ async function walkPlmProjectBom(input, run) {
         for (const rootSourceId of discovered) {
           if (errors.length > 0) break
           if (expandedComponentIds.has(rootSourceId)) {
+            if (demand) demand.subtreeRoot(rootSourceId, subtreeRootNodeIds.get(rootSourceId), true)
             subtreeCounters.rootsSkippedAlreadyExpanded += 1
             continue
           }
+          if (demand) demand.subtreeRoot(rootSourceId, subtreeRootNodeIds.get(rootSourceId), false)
           const pathTokens = [rootSourceId]
           // W3a: the SUBTREE root, and it is a root in exactly the sense the order path's root is —
           // no parent above it, no BOM head that named it (the folder walk found it, not a BOM). Same
@@ -2951,7 +3073,16 @@ async function walkPlmProjectBom(input, run) {
             bomId: null,
             path: makePath(pathTokens),
           })
-          if (!partRow) continue
+          if (!partRow) {
+            if (demand) demand.subtreeRootPart(lastPartOutcome)
+            continue
+          }
+          if (demand) {
+            demand.subtreeRootPart('found', {
+              componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
+              sourceVersion: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
+            })
+          }
           const rowResult = rowFromPart(plan, {
             projectNo,
             parentSourceId: null,
@@ -2964,11 +3095,14 @@ async function walkPlmProjectBom(input, run) {
             extFieldMapping,
           })
           if (rowResult.error) {
+            if (demand) demand.subtreeRootRow(false)
             addRowError(rowResult.error)
             continue
           }
           if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
-          if (!pushRow(rowResult.row)) break
+          const pushed = pushRow(rowResult.row)
+          if (demand) demand.subtreeRootRow(pushed)
+          if (!pushed) break
           expandedComponentIds.add(rowResult.componentSourceId)
           subtreeCounters.rootsExpanded += 1
           subtreeCounters.rootQuantitySource.subtreeDefault += 1
@@ -3273,6 +3407,8 @@ module.exports = {
     // 同父去重键。它们不做 IO,所以「老系统这条规则在这里是什么行为」可以不起适配器就钉住。
     // (`normalizeRootSelection` 已在上面公开导出 —— 它是配置契约的一部分,不只是测试钩子。)
     selectOrderRootCandidates,
+    // Batch-refresh step 2b — the per-candidate label of what `selectOrderRootCandidates` decided.
+    explainRootSelection,
     hasMainDrawingShape,
     hasSheetMetalShape,
     makeRootSelectionReport,

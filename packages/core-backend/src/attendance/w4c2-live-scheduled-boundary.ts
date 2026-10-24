@@ -127,6 +127,7 @@ import {
   readOnlinePunchReplayV1,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
+  attendanceW4ConnectionDiscardV1,
 } from './w4c0-operation-registry'
 import { AttendanceW4OperationError } from './w4c0-operation-contract'
 import {
@@ -2001,7 +2002,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
     try {
       return await body(connection.client)
     } catch (error) {
-      if (error instanceof OnlinePunchConnectionUncertainError) discard = error
+      // Settlement coordination (r6.1 §1.1 P1-1): the runner's mark and the older uncertain classes
+      // (the online-punch one included) destroy the connection; anything else returns it.
+      discard = attendanceW4ConnectionDiscardV1(error)
       throw error
     } finally {
       connection.release(discard)

@@ -632,3 +632,6 @@ describe('ApprovalDetailView mark-read on mount (WP3 slice 2)', () => {
     expect(elErrorSpy).not.toHaveBeenCalled()
   })
 })
+
+// Preload after all eager mock dependencies initialize; keep mount imports unchanged.
+await import('../src/views/approval/ApprovalCenterView.vue')

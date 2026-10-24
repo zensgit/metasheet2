@@ -192,7 +192,9 @@ watch(
 // renumbering would change (raised only when rows are copied). Their copy tells the user to untick
 // 「包含数据」, so a structure-only copy must stay possible — but only after a structure-only probe has
 // shown its disclosures.
-const DATA_ONLY_REFUSALS: ReadonlySet<string> = new Set(['COPY_TOO_LARGE', 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD'])
+// 备料分批拉取第一期 step 3: a sheet whose generic grid export is closed refuses only the WITH-DATA copy
+// (COPY_SOURCE_GRID_EXPORT_CLOSED); its structure can still be copied.
+const DATA_ONLY_REFUSALS: ReadonlySet<string> = new Set(['COPY_TOO_LARGE', 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD', 'COPY_SOURCE_GRID_EXPORT_CLOSED'])
 function isDataOnlyRefusal(error: unknown): boolean {
   return isCopySheetError(error) && typeof error.code === 'string' && DATA_ONLY_REFUSALS.has(error.code)
 }

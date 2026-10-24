@@ -204,13 +204,16 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
     expect(ui!.requests).toEqual([])
   }
-  async function observeReady(commandId: string) {
+  async function observeReady(commandId: string, sendEnabled = false) {
     const response = ui!.waitApi('GET', '/initialization')
     await ui!.page.getByTestId('sp-yida-init-refresh').click()
     expect(await realBrowserData(await response, 200)).toEqual({ commandId, status: 'ready', draft: null,
-      canSend: false, tokenIssued: false, externalWriteAttempted: false })
+      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled })
+    if (!sendEnabled) expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
     await ui!.page.getByTestId('sp-yida-init-ready').waitFor()
     await ui!.settled()
+    // ON shows the CREATE entry, enabled until an initialization request locks it.
+    if (sendEnabled) expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(false)
     expect(await ui!.page.getByTestId('sp-yida-init-submit').isDisabled()).toBe(true)
     await noSend()
   }
@@ -222,20 +225,23 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
       executionIdentity: syntheticMaterial().userId,
     } })
   }
-  async function inspectRecovery(commandId: string) {
+  async function inspectRecovery(commandId: string, sendEnabled = false) {
     const before = await host.initializationProof(), response = ui!.waitApi('GET', '/initialization')
     await ui!.page.getByTestId('sp-yida-init-refresh').click()
     const recovered = await realBrowserData(await response, 200)
     expect(recovered).toMatchObject({ commandId, status: 'initialized', draft: { rowCount: 3, reused: true },
-      canSend: false, tokenIssued: false, externalWriteAttempted: false })
+      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled })
     await ui!.page.getByTestId('sp-yida-init-initialized').waitFor()
+    // Switch off means not visible: only an owner-authorized ON reply renders the CREATE entry.
+    if (sendEnabled) await ui!.page.getByTestId('sp-yida-owner-open').waitFor()
+    else expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
     await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
     expect(await host.initializationProof()).toEqual(before)
     await noSend()
     return recovered.draft as unknown as Draft
   }
 
-  it('real parent DOM initializes the empty slot while OFF, clears material and preserves old draft/approval OFF denial', async () => {
+  it('real parent DOM initializes the empty slot while OFF without a CREATE entry; ON reveals it for one parent owner send', async () => {
     const commandId = await startParent()
     await observeReady(commandId); await fillPrivate()
     const response = ui!.waitApi('POST', '/initialization')
@@ -243,7 +249,7 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
     const result = await realBrowserData(await response, 201)
     expect(result).toMatchObject({ commandId, status: 'initialized', draft: { rowCount: 3, reused: false },
-      canSend: false, tokenIssued: false, externalWriteAttempted: false })
+      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: false })
     await ui!.page.getByTestId('sp-yida-init-initialized').waitFor()
     expect((await host.initializationProof()).counts).toEqual(initializedCounts)
     const stored = (await host.rows('integration_yida_initializations'))[0], persisted = result.draft as Data
@@ -251,37 +257,84 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
       workspace_id: null, operation_id: persisted.operationId, credential_generation: 1 })
     await checkInitializationRequest(commandId); await noSend()
     const draft = await inspectRecovery(commandId)
-    // The same parent opens the unchanged old SDK path. Its OFF denial is real,
-    // not a client stub or a claim that initialization enables sending.
-    await ui!.page.getByTestId('sp-yida-owner-open').click()
-    const off = ui!.waitApi('POST', '/drafts'), before = await host.initializationProof()
+    // OFF: the UI offers no CREATE entry at all. The old draft/approval OFF denials stay real and
+    // independent of the UI: verify them with actual returned row membership, never forged UI state.
+    expect(await ui!.page.getByTestId('stock-prep-yida-owner-send-panel').count()).toBe(0)
+    const before = await host.initializationProof()
     host.sql.length = 0
-    await ui!.page.getByTestId('sp-yida-owner-save').click()
-    expect(await realBrowserJson(await off, 403)).toEqual({ ok: false, error: { code: 'YIDA_OWNER_RUNTIME_DISABLED' } })
-    await ui!.page.getByTestId('sp-yida-owner-disabled').waitFor()
-    expect(await ui!.page.getByTestId('sp-yida-owner-save').isDisabled()).toBe(true)
-    expect(host.sql).toEqual([])
-    // No approval button is present after OFF. Verify the existing server gate
-    // independently with actual returned row membership, never forge UI state.
+    const off = await host.http('POST', '/drafts', input())
+    expect(off.status).toBe(403)
+    expect(off.body).toEqual({ ok: false, error: { code: 'YIDA_OWNER_RUNTIME_DISABLED' } })
     const approval = await host.http('POST', '/approvals', { operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
       confirmationId: randomUUID(), acknowledgeOnce: true, ttlMs: 900000 })
     expect(approval.status).toBe(403)
     expect(approval.body).toEqual({ ok: false, error: { code: 'YIDA_OWNER_RUNTIME_DISABLED' } })
     expect(host.sql).toEqual([]); expect(await host.initializationProof()).toEqual(before); await noSend()
     expect(ui!.requests.map(request => [request.method, request.path])).toEqual([
-      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization'], ['GET', prefix + '/initialization'], ['POST', prefix + '/drafts'],
+      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization'], ['GET', prefix + '/initialization'],
     ])
-    // All original OFF checks finish first. A post-success export may then
-    // close the local panels but must not alter the permanent command or PG.
+    // A post-success export closes the local panels but must not alter the permanent command or PG.
     await exportWithoutPrivateValues(commandId)
-  }, 60000)
+    // ON: the parent recompiles its unchanged DOM config; only the owner-authorized GET reveals the entry.
+    host.setEnablement('true')
+    const page = ui!.page, expected = input()
+    await page.getByTestId('sp-yida-run').click()
+    await page.getByTestId('sp-yida-initialization-open').click()
+    await page.getByTestId('stock-prep-yida-initialization-panel').waitFor()
+    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+    await inspectRecovery(commandId, true)
+    await page.getByTestId('sp-yida-owner-open').click()
+    await page.getByTestId('stock-prep-yida-owner-send-panel').waitFor()
+    const saved = ui!.waitApi('POST', '/drafts')
+    await page.getByTestId('sp-yida-owner-save').click()
+    const owned = await realBrowserData(await saved, 201) as unknown as Draft
+    // The actual parent captured its own DOM input and handed exactly that to the owner child.
+    expect(ui!.requests.filter(request => request.path === prefix + '/drafts').map(request => request.body)).toEqual([expected])
+    expect(owned.rows).toHaveLength(3)
+    await page.getByTestId('sp-yida-owner-draft').waitFor()
+    await page.getByTestId('sp-yida-owner-row').selectOption(owned.rows[2].rowKey)
+    const previewed = ui!.waitApi('POST', '/preview')
+    await page.getByTestId('sp-yida-owner-preview').click()
+    const preview = await realBrowserData(await previewed, 200)
+    await page.getByTestId('sp-yida-owner-payload').waitFor()
+    expect(preview.payload).toEqual(host.compiledPayload(expected, 2))
+    await page.getByTestId('sp-yida-owner-ack').check()
+    const approved = ui!.waitApi('POST', '/approvals')
+    await page.getByTestId('sp-yida-owner-approve').click()
+    const grant = await realBrowserData(await approved, 201)
+    await page.getByTestId('sp-yida-owner-grant').waitFor()
+    // The child's actual locked-change event must reach the actual parent.
+    expect(await page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
+    expect((await host.proof()).counts).toEqual([1, 0, 0, 1, 0, 0])
+    expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([0, 0])
+    const sentResponse = ui!.waitApi('POST', '/submissions')
+    await page.getByTestId('sp-yida-owner-submit').click()
+    const sent = await realBrowserData(await sentResponse, 200)
+    await page.getByTestId('sp-yida-owner-acknowledged').waitFor()
+    expect(sent).toMatchObject({ status: 'acknowledged', businessVerified: false, externalWriteAttempted: true,
+      approval: { grantId: grant.grantId, remainingAttempts: 0 }, delivery: { status: 'acknowledged', durable: true } })
+    expect([host.tokenPayloads.length, host.formPayloads.length, host.tokenCommitted, host.validRequests]).toEqual([1, 1, true, true])
+    expect(host.formPayloads[0]).toEqual(preview.payload)
+    expect((await host.proof()).counts).toEqual([1, 0, 1, 2, 1, 3])
+    expect(await page.getByTestId('sp-yida-owner-submit').isDisabled()).toBe(true)
+    expect(ui!.requests.map(request => [request.method, request.path])).toEqual([
+      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization'], ['GET', prefix + '/initialization'],
+      ['GET', prefix + '/initialization'], ['POST', prefix + '/drafts'], ['POST', prefix + '/preview'],
+      ['POST', prefix + '/approvals'], ['POST', prefix + '/submissions'],
+    ])
+    expect((await host.rows('integration_yida_initialization_anchor'))[0].command_id).toBe(commandId)
+  }, 90000)
 
   it('another actually qualified admin cannot obtain ready and its pretyped secret controls are cleared', async () => {
     await startParent(true); await fillPrivate()
     const before = await host.initializationProof(), response = ui!.waitApi('GET', '/initialization')
     await ui!.page.getByTestId('sp-yida-init-refresh').click()
     expect(await realBrowserJson(await response, 403)).toEqual({ ok: false, error: { code: 'YIDA_INITIALIZATION_DENIED' } })
-    await ui!.page.getByTestId('sp-yida-init-error').waitFor(); await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
+    // The refusal is shown by its own code, never as a session change.
+    await ui!.page.getByTestId('sp-yida-init-error').filter({ hasText: 'YIDA_INITIALIZATION_DENIED' }).waitFor()
+    await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
+    expect(await ui!.page.getByTestId('sp-yida-init-error').innerText()).toBe('YIDA_INITIALIZATION_DENIED')
+    expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
     expect(await ui!.page.getByTestId('sp-yida-init-ready').count()).toBe(0)
     expect(await ui!.page.getByTestId('sp-yida-init-submit').isDisabled()).toBe(true)
     expect(await ui!.page.getByTestId('sp-yida-init-refresh').isDisabled()).toBe(true)
@@ -291,7 +344,9 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
 
   it('withholding an actual committed 201 freezes POST, then only explicit same-command GET recovers initialized', async () => {
     const commandId = await startParent()
-    await observeReady(commandId); await fillPrivate()
+    // Switch ON: the CREATE entry renders, so only its initialization lock can keep it closed.
+    host.setEnablement('true')
+    await observeReady(commandId, true); await fillPrivate()
     const held = ui!.delayNext('POST', '/initialization'), response = ui!.waitApi('POST', '/initialization')
     expectedAborts = 1
     try {
@@ -303,6 +358,7 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
       expect((await host.initializationProof()).counts).toEqual(initializedCounts)
       await noSend(); await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
       expect(await ui!.page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
+      expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(true)
       // Keep the original real SDK's existing 15-second logical deadline. Do
       // not install fake timers, alter its reader, resolve its promise or retry.
       await ui!.page.getByTestId('sp-yida-init-error').filter({ hasText: 'YIDA_INITIALIZATION_CANCELLED' }).waitFor({ timeout: 20000 })
@@ -320,7 +376,8 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     } finally { held.release() }
     await ui!.settled()
     const before = await host.initializationProof()
-    await inspectRecovery(commandId)
+    await inspectRecovery(commandId, true)
+    expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(false)
     expect(await host.initializationProof()).toEqual(before)
     expect(await ui!.page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(false)
     expect(ui!.requests.map(request => [request.method, request.path])).toEqual([

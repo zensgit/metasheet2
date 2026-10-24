@@ -822,7 +822,11 @@ function onAddView() {
   const name = newViewName.value.trim()
   if (!name) return
   emit('create-view', { sheetId: props.sheetId, name, type: newViewType.value })
+  // Customer field report 2026-10-21 (#8): the add commits immediately (the view appears in the rail),
+  // so the whole new-view draft is consumed — reset the type too. Leaving a non-grid type selected kept
+  // newViewDraftDirty true and closing the dialog asked to discard "unsaved" changes that did not exist.
   newViewName.value = ''
+  newViewType.value = 'grid'
 }
 
 function startRename(view: MetaView) {

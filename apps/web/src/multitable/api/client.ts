@@ -52,6 +52,7 @@ import type {
   MetaCommentMentionSuggestion,
   MetaSheetPermissionAccessLevel,
   MetaSheetPermissionCandidate,
+  DingTalkPersonRecipientStatus,
   MetaSheetPermissionEntry,
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
@@ -4307,6 +4308,38 @@ export class MultitableApiClient implements CommentsApiClient {
     return data.deliveries ?? []
   }
 
+  /**
+   * 客户反馈 2026-10-21 item 1: the rule editor's DingTalk person-recipient preflight. The server reads the
+   * sender's own query and answers booleans per id (at most 200 ids per request; callers chunk).
+   */
+  async getDingTalkPersonRecipientStatus(
+    sheetId: string,
+    userIds: string[],
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DingTalkPersonRecipientStatus[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/dingtalk-person-recipient-status`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds }),
+        // Review round 2: the editor abandons a hung lookup after a timeout.
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    )
+    const data = await this.parseJson<{ items?: unknown }>(res)
+    const items = Array.isArray(data?.items) ? data.items : []
+    return items
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+      .filter((item) => typeof item.userId === 'string')
+      .map((item) => ({
+        userId: item.userId as string,
+        exists: item.exists === true,
+        active: item.active === true,
+        dingtalkLinked: item.dingtalkLinked === true,
+      }))
+  }
+
   // --- Automation V1: test / logs / stats ---
   async testAutomationRule(sheetId: string, ruleId: string): Promise<AutomationExecution> {
     const res = await this.fetch(
@@ -4390,9 +4423,15 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson<AutomationRunView>(res)
   }
 
-  async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
+  async getAutomationDingTalkPersonDeliveries(
+    sheetId: string,
+    ruleId: string,
+    limit?: number,
+    options: { status?: 'success' | 'failed' | 'skipped' | 'outcome_unknown' } = {},
+  ): Promise<DingTalkPersonDelivery[]> {
+    // Review round 2: `status` is filtered on the SERVER (before its LIMIT), not only in the viewer.
     const res = await this.fetch(
-      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit, status: options.status })}`,
     )
     const data = await this.parseJson<{ deliveries: DingTalkPersonDelivery[] }>(res)
     return Array.isArray(data?.deliveries) ? data.deliveries : []

@@ -112,9 +112,12 @@ function assertValidPlan(plan, intent) {
     || plan.evidence.plannedUpdate !== (intent === 'update' ? plan.rows.length : 0)) fail('PLAN')
   for (let index = 0; index < plan.rows.length; index += 1) {
     const row = plan.rows[index]
+    // The form transport refuses an empty form after the durable claim; a row
+    // with no sendable field must never become a draft that can be approved.
     if (row.index !== index || row.status !== `planned_${intent}` || row.remoteState !== 'unverified'
       || row.issues.length !== 0 || typeof row.localBusinessKey !== 'string' || !row.localBusinessKey
-      || !row.payload || !row.protocolPreview || row.protocolPreview.contract !== 'dingtalk-yida-1.0-data-only'
+      || !row.payload || Object.keys(row.payload).length === 0
+      || !row.protocolPreview || row.protocolPreview.contract !== 'dingtalk-yida-1.0-data-only'
       || row.protocolPreview.completeness !== 'data_fields_only') fail('PLAN')
   }
 }

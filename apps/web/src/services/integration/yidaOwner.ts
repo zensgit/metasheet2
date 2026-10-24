@@ -210,7 +210,7 @@ function submission(value: unknown, grantId: string): YidaOwnerSubmission {
 /** Captured session only. All actions are explicit; no retries, cookies, scope
  * headers, external origins, logs or persisted payload/command keys. Disposing
  * also rejects late responses even if the transport ignores AbortSignal. */
-export function createYidaOwnerClient(options: { onInvalidated?: () => void } = {}) {
+export function createYidaOwnerClient(options: { onInvalidated?: (code?: string) => void } = {}) {
   const token = readStoredToken(), signature = readAuthSessionSignature()
   if (!token || token.length > 16384 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(token)
     || signature === 'invalid' || token !== readStoredToken()) throw new YidaOwnerClientError('UNAUTHORIZED')
@@ -228,7 +228,8 @@ export function createYidaOwnerClient(options: { onInvalidated?: () => void } = 
     for (const controller of controllers) controller.abort()
     controllers.clear()
   }
-  const invalidate = () => { if (disposed) return; dispose(); options.onInvalidated?.() }
+  // A server refusal passes its own code; session/storage/principal changes pass none.
+  const invalidate = (code?: string) => { if (disposed) return; dispose(); options.onInvalidated?.(code) }
   const checkSession = () => {
     if (readAuthSessionSignature() !== signature || readStoredToken() !== token || scopeHint() !== startedScope) invalidate()
   }
@@ -236,7 +237,7 @@ export function createYidaOwnerClient(options: { onInvalidated?: () => void } = 
     if (event.key === null || event.key === EXPLICIT_SESSION_ORG_KEY || event.key === 'tenantId' || event.key === 'workspaceId'
       || TOKEN_KEYS.some(key => key === event.key)) invalidate()
   }
-  unsubscribe = onAuthPrincipalChange(invalidate)
+  unsubscribe = onAuthPrincipalChange(() => invalidate())
   window.addEventListener('storage', onStorage)
   window.addEventListener('focus', checkSession)
   const assertSession = () => { checkSession(); if (disposed) throw new YidaOwnerClientError('YIDA_OWNER_SESSION_CHANGED') }
@@ -285,7 +286,7 @@ export function createYidaOwnerClient(options: { onInvalidated?: () => void } = 
       if (!response.ok) {
         const error = object(envelope.error, ['code'])
         if (typeof error.code !== 'string' || !Object.prototype.hasOwnProperty.call(errorStatuses, error.code) || !errorStatuses[error.code].includes(response.status)) invalid()
-        if (error.code === 'YIDA_OWNER_HTTP_DENIED') invalidate()
+        if (error.code === 'YIDA_OWNER_HTTP_DENIED') invalidate(error.code)
         throw new YidaOwnerClientError(error.code)
       }
       if (response.status !== status) invalid()

@@ -219,14 +219,35 @@
         <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
         {{ l('toolbar.import') }}
       </MtButton>
-      <MtButton v-if="canExport" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
+      <!-- Review round 2: in the sheet-switch stale window (`exportPending`) the pair stays MOUNTED but disabled, so an
+           ordinary-to-ordinary switch does not unmount and remount it; it is enabled again once the new sheet's own
+           capabilities arrive. -->
+      <MtButton v-if="canExport && !exportClosedReason" :disabled="exportPending" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
         <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
         {{ l('toolbar.exportCsv') }}
       </MtButton>
-      <MtButton v-if="canExport" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
+      <MtButton v-if="canExport && !exportClosedReason" :disabled="exportPending" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
         <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
         {{ l('toolbar.exportXlsx') }}
       </MtButton>
+      <!-- 备料分批拉取第一期 step 3: on a sheet the host closed for generic grid export the two export buttons stay
+           visible but DISABLED, and the wrapper carries the reason (a disabled <button> shows no tooltip in every
+           browser, so the title sits on the span). Native `disabled` means a click emits nothing. -->
+      <span
+        v-if="exportClosedReason"
+        class="meta-toolbar__export-closed"
+        data-testid="meta-toolbar-export-closed"
+        :title="exportClosedReason"
+      >
+        <MtButton disabled :title="exportClosedReason" :aria-label="l('toolbar.exportCsv')" data-export-closed="csv" @click="emit('export-csv')">
+          <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+          {{ l('toolbar.exportCsv') }}
+        </MtButton>
+        <MtButton disabled :title="exportClosedReason" :aria-label="l('toolbar.exportExcel')" data-export-closed="xlsx" @click="emit('export-xlsx')">
+          <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+          {{ l('toolbar.exportXlsx') }}
+        </MtButton>
+      </span>
       <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
       <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
     </div>
@@ -303,6 +324,12 @@ const props = withDefaults(defineProps<{
   filterConjunction: FilterConjunction
   canCreateRecord: boolean
   canExport?: boolean
+  // 备料分批拉取第一期 step 3: non-empty ⇒ the sheet's generic grid export is closed; the export buttons render
+  // disabled with this reason. Absent / empty ⇒ unchanged (`canExport` alone decides, as before).
+  exportClosedReason?: string | null
+  // Review round 2: true while the capabilities shown belong to ANOTHER sheet (the workbench's sheet-switch window):
+  // the export pair renders disabled, without any reason, until the active sheet's capabilities land.
+  exportPending?: boolean
   canUndo: boolean
   canRedo: boolean
   // Nested / multi-level grouping: ordered group field ids (level 0 = outermost), 1..MAX_GROUP_LEVELS.
@@ -439,6 +466,7 @@ function onAddFilterGroup() {
 .meta-toolbar { display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); }
 .meta-toolbar__left { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; gap: 2px; align-items: center; }
 .meta-toolbar__right { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; gap: 4px; align-items: center; }
+.meta-toolbar__export-closed { display: inline-flex; gap: 4px; align-items: center; cursor: not-allowed; }
 .meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 4px 6px; background: var(--ms-border-light, #e7e8ec); flex-shrink: 0; }
 .meta-toolbar__btn {
   display: inline-flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box;

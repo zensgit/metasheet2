@@ -26,8 +26,8 @@ function draftInput(): YidaOwnerDraftInput {
 }
 function metadata() { return { targetRef: ids.target, operationId: ids.operation, status: 'unverified', identityKind: 'local-unverified',
   canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false, rowCount: 1, rows: [{ rowKey: ids.row, index: 0 }], reused: false } }
-function ready() { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false } }
-function initialized() { return { ...ready(), status: 'initialized', draft: metadata() } }
+function ready(sendEnabled = false) { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled } }
+function initialized(sendEnabled = false) { return { ...ready(sendEnabled), status: 'initialized', draft: metadata() } }
 const material: YidaInitializationMaterial = { appKey: ' SYN-KEY\r\n原字节 ', appSecret: ' SYN-SECRET\n原字节 ', systemToken: ' SYN-TOKEN\r\n原字节 ', userId: 'SYN-EXECUTION' }
 function payload(): YidaInitializationInput { return { commandId: ids.command, material: { ...material }, draft: draftInput(),
   attestation: { kind: 'owner-reviewed-target', reviewRef: 'SYN-REVIEW', organizationId: 'SYN-ORG', executionIdentity: material.userId } } }
@@ -189,23 +189,53 @@ describe('Yida initialization explicit local management UI', () => {
     pending.resolve(json(initialized(), 201)); await flush(); expect(root?.textContent).toBe(''); expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('mounts only after valid real v2 static preparation; initialized can manually open old OFF chain and export has no material', async () => {
+  it('mounts only after valid real v2 static preparation; switch OFF shows no CREATE entry and export has no material', async () => {
     root = document.createElement('div'); document.body.appendChild(root); app = createApp(StockPreparationYidaPreviewPanel); app.mount(root)
     const parentClick = async (id: string) => { const button = root?.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`); if (!button) throw new Error('MISSING_PARENT_NODE'); button.click(); await flush() }
     const mode = root.querySelector<HTMLSelectElement>('[data-testid="sp-yida-preview-mode"]')!; mode.value = 'protocol'; mode.dispatchEvent(new Event('change')); await flush()
     await parentClick('sp-yida-protocol-example-primary'); await parentClick('sp-yida-run')
     expect(root.querySelector('[data-testid="stock-prep-yida-initialization-panel"]')).toBeNull(); expect(fetchSpy).not.toHaveBeenCalled()
+    // No server read yet: the single-row CREATE entry is not even rendered.
+    expect(root.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull(); expect(root.textContent).not.toContain('CREATE')
     await parentClick('sp-yida-initialization-open'); expect(fetchSpy).not.toHaveBeenCalled(); await observeReady(); await fill()
-    fetchSpy.mockResolvedValueOnce(json(initialized(), 201)); await click('submit'); await parentClick('sp-yida-owner-open')
+    expect(root.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
+    fetchSpy.mockResolvedValueOnce(json(initialized(), 201)); await click('submit')
+    // The owner-authorized replies said OFF: still no entry, no owner panel, no owner request.
+    expect(root.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull(); expect(root.textContent).not.toContain('CREATE')
     expect(fetchSpy).toHaveBeenCalledTimes(2)
-    fetchSpy.mockResolvedValueOnce(error('YIDA_OWNER_RUNTIME_DISABLED', 403)); await parentClick('sp-yida-owner-save')
-    expect(root.querySelector('[data-testid="sp-yida-owner-disabled"]')?.textContent).toContain('发送开关关闭')
-    expect((root.querySelector('[data-testid="sp-yida-owner-save"]') as HTMLButtonElement).disabled).toBe(true)
-    expect(fetchSpy).toHaveBeenCalledTimes(3)
     await parentClick('sp-yida-rule-export')
     const exported = (root.querySelector('[data-testid="sp-yida-rule-export-text"]') as HTMLTextAreaElement).value
     for (const field of Object.values(material)) expect(exported.includes(field)).toBe(false)
-    expect(Object.hasOwn(JSON.parse(exported), 'material')).toBe(false); expect(fetchSpy).toHaveBeenCalledTimes(3)
+    expect(Object.hasOwn(JSON.parse(exported), 'material')).toBe(false); expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('switch ON reported by the owner-authorized GET reveals the CREATE entry; a cleared state hides it again', async () => {
+    root = document.createElement('div'); document.body.appendChild(root); app = createApp(StockPreparationYidaPreviewPanel); app.mount(root)
+    const parentClick = async (id: string) => { const button = root?.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`); if (!button) throw new Error('MISSING_PARENT_NODE'); button.click(); await flush() }
+    const owner = () => root?.querySelector('[data-testid="sp-yida-owner-open"]') ?? null
+    const mode = root.querySelector<HTMLSelectElement>('[data-testid="sp-yida-preview-mode"]')!; mode.value = 'protocol'; mode.dispatchEvent(new Event('change')); await flush()
+    await parentClick('sp-yida-protocol-example-primary'); await parentClick('sp-yida-run'); await parentClick('sp-yida-initialization-open')
+    expect(owner()).toBeNull()
+    fetchSpy.mockResolvedValueOnce(json(ready(true))); await click('refresh')
+    expect(owner()).not.toBeNull(); expect(owner()?.textContent).toContain('打开单行 CREATE 确认')
+    // An explicit GET clears the observed state first; a pending or OFF reply never keeps the entry.
+    const pending = deferred<Response>(); fetchSpy.mockReturnValueOnce(pending.promise); await click('refresh')
+    expect(owner()).toBeNull()
+    pending.resolve(json(ready(false))); await flush(); expect(owner()).toBeNull()
+    fetchSpy.mockResolvedValueOnce(json(ready(true))); await click('refresh'); expect(owner()).not.toBeNull()
+    await parentClick('sp-yida-owner-open')
+    expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).not.toBeNull()
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it.each(['YIDA_INITIALIZATION_DENIED', 'YIDA_OWNER_HTTP_DENIED'])('a server %s shows its own code and keeps the panel closed', async code => {
+    mountPanel(); await fill()
+    fetchSpy.mockResolvedValueOnce(error(code, 403)); await click('refresh')
+    expect(q('error').textContent).toBe(code)
+    expect(q<HTMLButtonElement>('refresh').disabled).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    expect(absent('ready')).toBe(true); noSecrets(); expect(fetchSpy).toHaveBeenCalledTimes(1)
+    await click('refresh'); expect(fetchSpy).toHaveBeenCalledTimes(1); expect(q('error').textContent).toBe(code)
   })
 })
 
@@ -224,7 +254,7 @@ describe('Yida initialization actual service boundaries', () => {
   })
   it.each([
     { ...ready(), canSend: true }, { ...ready(), tokenIssued: true }, { ...ready(), externalWriteAttempted: true },
-    { ...ready(), material }, { ...ready(), draft: metadata() }, { ...initialized(), draft: null },
+    { ...ready(), material }, { ...ready(), draft: metadata() }, { ...initialized(), draft: null }, { ...ready(), sendEnabled: 'true' },
     { ...initialized(), draft: { ...metadata(), rows: [{ rowKey: ids.row, index: 1 }] } },
     { ...initialized(), draft: { ...metadata(), rowCount: 2, rows: [{ rowKey: ids.row, index: 0 }, { rowKey: ids.row, index: 1 }] } },
     { ...initialized(), draft: { ...metadata(), canApply: true } },
@@ -290,6 +320,7 @@ describe('actual service guard-removal negative probes', () => {
     { name: 'canSend false', anchor: 'row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false', replacement: 'row.tokenIssued !== false || row.externalWriteAttempted !== false', data: { ...ready(), canSend: true } },
     { name: 'tokenIssued false', anchor: 'row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false', replacement: 'row.canSend !== false || row.externalWriteAttempted !== false', data: { ...ready(), tokenIssued: true } },
     { name: 'externalWrite false', anchor: 'row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false', replacement: 'row.canSend !== false || row.tokenIssued !== false', data: { ...ready(), externalWriteAttempted: true } },
+    { name: 'boolean sendEnabled', anchor: " || typeof row.sendEnabled !== 'boolean'", replacement: '', data: { ...ready(), sendEnabled: 'true' } },
     { name: 'status draft consistency', anchor: " || (row.status === 'ready') !== (row.draft === null)", replacement: '', data: { ...ready(), draft: metadata() } },
     { name: 'exact row index', anchor: '    if (member.index !== index) invalid()', replacement: '', data: { ...initialized(), draft: { ...metadata(), rows: [{ rowKey: ids.row, index: 1 }] } } },
     { name: 'unique member identity', anchor: '  if (new Set(rows.map(member => member.rowKey)).size !== rows.length) invalid()', replacement: '', data: { ...initialized(), draft: { ...metadata(), rowCount: 2, rows: [{ rowKey: ids.row, index: 0 }, { rowKey: ids.row, index: 1 }] } } },

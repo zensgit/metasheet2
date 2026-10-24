@@ -46,11 +46,18 @@ const {
 } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
-  applyStockPreparationAction,
-  dryRunStockPreparationAction,
+  applyStockPreparationAction: rawApplyStockPreparationAction,
+  dryRunStockPreparationAction: rawDryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
   __internals: { buildRevision, normalizeActionReadConcurrency, actionReadConcurrency },
 } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+// Batch-refresh phase 0 step 1: apply requires the project write guard (the route holds the lease) and an
+// applicable dry-run binds its token to the plan generation. This suite predates that, so it calls the lib
+// through the REAL lock module (in memory, support/stock-preparation-project-write-lock-kit.cjs) exactly the way
+// the routes do: the dry-run with the generation binder, the apply inside the lease with the guard.
+const projectWriteLockHarness = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs')).createLibWriteLockHarness()
+const applyStockPreparationAction = projectWriteLockHarness.wrapApply(rawApplyStockPreparationAction)
+const dryRunStockPreparationAction = projectWriteLockHarness.wrapDryRun(rawDryRunStockPreparationAction)
 
 const PROJECT = 'SYN-RC-0001'
 const CONCURRENCIES = [1, 2, 4, 8]
@@ -830,6 +837,8 @@ function memoryStorage() {
     async get(key) { return map.has(key) ? clone(map.get(key)) : null },
     async set(key, value) { map.set(key, clone(value)) },
     async delete(key) { map.delete(key) },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) { if (!map.has(key)) return null; const value = map.get(key); map.delete(key); return clone(value) },
   }
 }
 
