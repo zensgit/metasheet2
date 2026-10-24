@@ -95,9 +95,9 @@ describe('attendance advanced scheduling scope foundation', () => {
       '/api/attendance/groups/:id/fixed-schedule/clear',
       'assertAttendanceGroupFixedScheduleClearAllowed',
     )
-    const saveHandlerStart = pluginSource.indexOf('    const saveAttendanceGroupFixedScheduleConfig = async (req, res) => {')
+    const saveHandlerStart = pluginSource.indexOf('    async function saveAttendanceGroupFixedScheduleConfig(req, res) {')
     const putRegistration = "    context.api.http.addRoute('PUT', '/api/attendance/groups/:groupId/fixed-schedule/config', saveAttendanceGroupFixedScheduleConfig)"
-    const saveHandlerEnd = pluginSource.indexOf(putRegistration, saveHandlerStart)
+    const saveHandlerEnd = pluginSource.indexOf('\n    }\n', saveHandlerStart) + '\n    }'.length
     expect(saveHandlerStart).toBeGreaterThan(-1)
     expect(saveHandlerEnd).toBeGreaterThan(saveHandlerStart)
     expect(pluginSource).toContain(putRegistration)
