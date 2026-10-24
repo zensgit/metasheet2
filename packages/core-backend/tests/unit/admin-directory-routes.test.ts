@@ -1877,6 +1877,203 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  describe('observation page and filter contracts', () => {
+    const integrationId = 'd1000000-0000-4000-8000-000000000001'
+    const admin = { id: 'observation-admin', role: 'admin' }
+    const runPath = '/integrations/:integrationId/runs'
+    const alertPath = '/integrations/:integrationId/alerts'
+    const invalidFilters = [
+      { label: 'unknown', value: 'unknown' },
+      { label: 'unsupported success', value: 'success' },
+      { label: 'empty', value: '' },
+      { label: 'whitespace', value: ' all ' },
+      { label: 'case variant', value: 'ALL' },
+      { label: 'array', value: ['all'] },
+      { label: 'object', value: { filter: 'all' } },
+      { label: 'number', value: 1 },
+      { label: 'boolean', value: false },
+      { label: 'null', value: null },
+    ]
+
+    it.each([undefined, 'all', 'running', 'completed', 'failed', 'aborted'] as const)(
+      'lists runs with status %s and the public page contract',
+      async (status) => {
+        const items = [{ id: 'observation-run', integrationId, status: status === 'all' || status === undefined ? 'completed' : status }]
+        directoryMocks.listDirectorySyncRuns.mockResolvedValue({ items, total: 9 })
+
+        const response = await invokeRoute('get', runPath, {
+          params: { integrationId },
+          query: { ...(status === undefined ? {} : { status }), page: '3', pageSize: '4', limit: '1', offset: '999' },
+          user: admin,
+        })
+
+        expect(response.statusCode).toBe(200)
+        expect(directoryMocks.listDirectorySyncRuns.mock.calls).toEqual([
+          status === undefined || status === 'all'
+            ? [integrationId, { limit: 4, offset: 8 }]
+            : [integrationId, { limit: 4, offset: 8 }, status],
+        ])
+        expect(response.body).toEqual({
+          ok: true,
+          data: { items, total: 9, page: 3, pageSize: 4 },
+          meta: undefined,
+        })
+      },
+    )
+
+    it.each(invalidFilters)('rejects $label run status before the service', async ({ value }) => {
+      const response = await invokeRoute('get', runPath, {
+        params: { integrationId }, query: { status: value }, user: admin,
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'DIRECTORY_RUNS_FAILED', message: 'status must be all, running, completed, failed or aborted', details: undefined },
+      })
+      expect(directoryMocks.listDirectorySyncRuns).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { query: {}, filter: 'all' },
+      { query: { filter: 'all' }, filter: 'all' },
+      { query: { filter: 'pending' }, filter: 'pending' },
+      { query: { filter: 'acknowledged' }, filter: 'acknowledged' },
+      { query: { ack: 'all', filter: 'pending' }, filter: 'all' },
+      { query: { ack: 'pending', filter: 'acknowledged' }, filter: 'pending' },
+      { query: { ack: 'acknowledged', filter: 'pending' }, filter: 'acknowledged' },
+      { query: { ack: 'pending', filter: 'invalid' }, filter: 'pending' },
+      { query: { ack: null, filter: 'acknowledged' }, filter: 'acknowledged' },
+      { query: { ack: null }, filter: 'all' },
+      { query: { ack: undefined, filter: 'pending' }, filter: 'pending' },
+    ])('lists alerts with alias selection $query and global counts', async ({ query, filter }) => {
+      const items = [{ id: 'observation-alert', integrationId, acknowledgedAt: filter === 'acknowledged' ? '2026-01-01T00:00:00.000Z' : null }]
+      const counts = { total: 11, pending: 7, acknowledged: 4 }
+      const total = filter === 'all' ? counts.total : filter === 'pending' ? counts.pending : counts.acknowledged
+      directoryMocks.listDirectorySyncAlerts.mockResolvedValue({ items, total, counts })
+
+      const response = await invokeRoute('get', alertPath, {
+        params: { integrationId },
+        query: { ...query, page: '2', pageSize: '3', limit: '1', offset: '999' },
+        user: admin,
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.listDirectorySyncAlerts.mock.calls).toEqual([[integrationId, { limit: 3, offset: 3 }, filter]])
+      expect(response.body).toEqual({
+        ok: true,
+        data: { items, counts, total, page: 2, pageSize: 3, filter, ack: filter },
+        meta: undefined,
+      })
+    })
+
+    it.each(invalidFilters)('rejects $label alert filter instead of falling back to all', async ({ value }) => {
+      const response = await invokeRoute('get', alertPath, {
+        params: { integrationId }, query: { filter: value }, user: admin,
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'DIRECTORY_ALERTS_FAILED', message: 'filter must be all, pending or acknowledged', details: undefined },
+      })
+      expect(directoryMocks.listDirectorySyncAlerts).not.toHaveBeenCalled()
+    })
+
+    it.each(invalidFilters.filter(({ value }) => value !== null))(
+      'rejects $label ack alias even when the lower-priority filter is valid',
+      async ({ value }) => {
+        const response = await invokeRoute('get', alertPath, {
+          params: { integrationId }, query: { ack: value, filter: 'pending' }, user: admin,
+        })
+
+        expect(response.statusCode).toBe(400)
+        expect(response.body).toEqual({
+          ok: false,
+          error: { code: 'DIRECTORY_ALERTS_FAILED', message: 'filter must be all, pending or acknowledged', details: undefined },
+        })
+        expect(directoryMocks.listDirectorySyncAlerts).not.toHaveBeenCalled()
+      },
+    )
+
+    it.each([runPath, alertPath])('uses only page/pageSize for %s pagination', async (path) => {
+      directoryMocks.listDirectorySyncRuns.mockResolvedValue({ items: [], total: 0 })
+      directoryMocks.listDirectorySyncAlerts.mockResolvedValue({ items: [], total: 0, counts: { total: 0, pending: 0, acknowledged: 0 } })
+      for (const [query, pageSize] of [
+        [{ limit: '1', offset: '999' }, 20],
+        [{ page: '0', pageSize: '999', limit: '1', offset: '999' }, 100],
+      ] as const) {
+        const response = await invokeRoute('get', path, { params: { integrationId }, query, user: admin })
+        expect(response.statusCode).toBe(200)
+        const service = path === runPath ? directoryMocks.listDirectorySyncRuns : directoryMocks.listDirectorySyncAlerts
+        expect(service).toHaveBeenLastCalledWith(...(path === runPath
+          ? [integrationId, { limit: pageSize, offset: 0 }]
+          : [integrationId, { limit: pageSize, offset: 0 }, 'all']))
+        expect(response.body).toEqual({
+          ok: true,
+          data: {
+            items: [], total: 0, page: 1, pageSize,
+            ...(path === alertPath ? { counts: { total: 0, pending: 0, acknowledged: 0 }, filter: 'all', ack: 'all' } : {}),
+          },
+          meta: undefined,
+        })
+      }
+    })
+
+    describe.each([runPath, alertPath])('platform-admin boundary for %s', (path) => {
+      it.each([
+        { label: 'unauthenticated', user: undefined, status: 401, code: 'UNAUTHENTICATED', message: 'Authentication required' },
+        { label: 'ordinary user', user: { id: 'observation-user', role: 'user' }, status: 403, code: 'FORBIDDEN', message: 'Admin access required' },
+        { label: 'tenant admin only', user: { id: 'observation-tenant-admin', role: 'tenant_admin' }, status: 403, code: 'FORBIDDEN', message: 'Admin access required' },
+      ])('denies $label before filters or service calls', async ({ user, status, code, message }) => {
+        rbacMocks.isRbacAdmin.mockResolvedValue(false)
+        for (const query of [{ status: 'failed', filter: 'pending' }, { status: '', ack: '' }]) {
+          const response = await invokeRoute('get', path, { params: { integrationId }, query, user })
+          expect(response.statusCode).toBe(status)
+          expect(response.body).toEqual({ ok: false, error: { code, message, details: undefined } })
+        }
+        expect(directoryMocks.listDirectorySyncRuns).not.toHaveBeenCalled()
+        expect(directoryMocks.listDirectorySyncAlerts).not.toHaveBeenCalled()
+        if (user === undefined) expect(rbacMocks.isRbacAdmin).not.toHaveBeenCalled()
+        else expect(rbacMocks.isRbacAdmin).toHaveBeenCalledWith(user.id)
+      })
+
+      it.each([
+        { role: 'admin' },
+        { roles: ['admin'] },
+        { permissions: ['*:*'] },
+        { perms: ['*:*'] },
+      ])('preserves legacy platform-admin claim %j without tenant scope', async (claim) => {
+        directoryMocks.listDirectorySyncRuns.mockResolvedValue({ items: [], total: 0 })
+        directoryMocks.listDirectorySyncAlerts.mockResolvedValue({ items: [], total: 0, counts: { total: 0, pending: 0, acknowledged: 0 } })
+        const response = await invokeRoute('get', path, {
+          params: { integrationId }, query: { status: 'failed', ack: 'pending' },
+          user: { id: 'observation-platform-admin', ...claim },
+        })
+
+        expect(response.statusCode).toBe(200)
+        expect(rbacMocks.isRbacAdmin).not.toHaveBeenCalled()
+        const service = path === runPath ? directoryMocks.listDirectorySyncRuns : directoryMocks.listDirectorySyncAlerts
+        expect(service.mock.calls).toEqual([[integrationId, { limit: 20, offset: 0 }, path === runPath ? 'failed' : 'pending']])
+      })
+
+      it('preserves the RBAC platform-admin fallback without tenant scope', async () => {
+        rbacMocks.isRbacAdmin.mockResolvedValue(true)
+        directoryMocks.listDirectorySyncRuns.mockResolvedValue({ items: [], total: 0 })
+        directoryMocks.listDirectorySyncAlerts.mockResolvedValue({ items: [], total: 0, counts: { total: 0, pending: 0, acknowledged: 0 } })
+        const response = await invokeRoute('get', path, {
+          params: { integrationId }, query: { status: 'aborted', filter: 'acknowledged' },
+          user: { id: 'observation-rbac-admin', role: 'user' },
+        })
+
+        expect(response.statusCode).toBe(200)
+        expect(rbacMocks.isRbacAdmin.mock.calls).toEqual([['observation-rbac-admin']])
+        const service = path === runPath ? directoryMocks.listDirectorySyncRuns : directoryMocks.listDirectorySyncAlerts
+        expect(service.mock.calls).toEqual([[integrationId, { limit: 20, offset: 0 }, path === runPath ? 'aborted' : 'acknowledged']])
+      })
+    })
+  })
+
   it('supports admin checks via RBAC fallback', async () => {
     rbacMocks.isRbacAdmin.mockResolvedValue(true)
     directoryMocks.listDirectorySyncRuns.mockResolvedValue({

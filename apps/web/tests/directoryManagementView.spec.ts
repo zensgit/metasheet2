@@ -1621,7 +1621,7 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
-    const nextPageButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('下一页'))
+    const nextPageButton = Array.from(findAccountsSection(container!).querySelectorAll('button')).find((button) => button.textContent?.includes('下一页'))
     expect(nextPageButton).toBeTruthy()
     nextPageButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await flushUi(6)
