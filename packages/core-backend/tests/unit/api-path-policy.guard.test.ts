@@ -33,6 +33,14 @@ const PATTERNS: readonly { name: string; re: RegExp }[] = [
  */
 const EXEMPTIONS: readonly { file: string; reason: string; allowed: readonly string[] }[] = [
   {
+    file: 'routes/welding.ts',
+    reason:
+      'Fully anchored csv/xlsx template-route selection after the shared apiPathHasPrefix check, ' +
+      'bound to GET; it is not an API-prefix classification or authentication exception. ' +
+      'The exact complete expression is pinned by welding-contract.test.ts.',
+    allowed: ['/^\\/api'],
+  },
+  {
     file: 'auth/api-path-policy.ts',
     reason: 'The policy itself — this is the one definition every other call site imports.',
     allowed: ['/^\\/api'],

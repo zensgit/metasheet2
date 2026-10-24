@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
@@ -10,6 +11,8 @@ const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), readTokenPayload: vi.fn(
 vi.mock('../../src/auth/AuthService', () => ({ authService: mocks }))
 vi.mock('../../src/db/pg', () => ({ query: mocks.query }))
 import { weldingPreflight, weldingPlanRawBody, weldingRouter } from '../../src/routes/welding'
+
+const pinned = usePinnedServer()
 
 const fixture = resolve('../../artifacts/welding-f02/resource-import-unit')
 mkdirSync(fixture, { recursive: true })
@@ -59,9 +62,9 @@ function app() {
   server.use(weldingRouter())
   return server
 }
-const post = (path: string, body: Buffer = bytes) => request(app()).post(path)
+const post = (path: string, body: Buffer = bytes) => (pinned.setApp(app()), request(pinned.url())).post(path)
   .set('Authorization', 'Bearer ms-session').set('Content-Type', 'application/octet-stream').send(body)
-const get = (path: string) => request(app()).get(path).set('Authorization', 'Bearer ms-session')
+const get = (path: string) => (pinned.setApp(app()), request(pinned.url())).get(path).set('Authorization', 'Bearer ms-session')
 async function until(ready: () => boolean) {
   for (let i = 0; i < 100; i++) {
     if (ready()) return

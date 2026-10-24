@@ -1,6 +1,8 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
+import type { AddressInfo } from 'node:net'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -22,6 +24,8 @@ vi.mock('node:fs/promises', async importOriginal => {
   } }
 })
 import { WELDING_CAD_PIN, weldingCadPreflight, weldingCadRawBody, weldingCadHostRouter } from '../../src/routes/welding-cad-host'
+
+const pinned = usePinnedServer()
 
 const fixture = mkdtempSync(join(tmpdir(), 'welding-cad-test-'))
 const key = join(fixture, 'key.pem')
@@ -104,7 +108,7 @@ const editor = { purpose: 'editor', plan_id: 'p', version_id: 'v', context_id: '
 const history = { purpose: 'history', plan_id: 'p', version_id: 'v', change_id: 'change', side: 'before' }
 const preparation = { purpose: 'preparation', plan_id: 'p', version_id: 'v', context_id: 'c', side: 'before' }
 const asset = (name: string) => `/welding-cad/${testPin}/${name}`
-const ticket = (server: ReturnType<typeof app>, body: unknown = editor) => request(server).post('/api/welding/cad-assets/tickets')
+const ticket = (server: ReturnType<typeof app>, body: unknown = editor) => (pinned.setApp(server), request(pinned.url())).post('/api/welding/cad-assets/tickets')
   .set('Authorization', 'Bearer ms-session').set('Content-Type', 'application/json').send(JSON.stringify(body))
 beforeEach(() => {
   vi.clearAllMocks(); vi.unstubAllEnvs(); fetchMock.mockReset()
@@ -130,10 +134,10 @@ describe('pinned welding CAD host', () => {
     expect(fetchMock.mock.calls[3][1].method).toBe('GET')
     const cookie = issued.headers['set-cookie'][0]
     upstream(prepared())
-    expect((await request(server).get(asset('welding-history.html')).set('Cookie', cookie)).status).toBe(200)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.html')).set('Cookie', cookie)).status).toBe(200)
     expect(fetchMock.mock.calls[7][0]).toBe(fetchMock.mock.calls[3][0])
-    expect((await request(server).get(asset('welding-frame.html')).set('Cookie', cookie)).status).toBe(403)
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-frame.html')).set('Cookie', cookie)).status).toBe(403)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
   })
   it.each([
     { ...preparation, side: 'other' }, { ...preparation, context_id: 'c/other' },
@@ -161,8 +165,8 @@ describe('pinned welding CAD host', () => {
     fetchMock.mockResolvedValueOnce(json({ state: 'state', nonce: 'nonce', expires_in: 300 }))
       .mockResolvedValueOnce(json({ access_token: 'y-secret', token_type: 'bearer', expires_in: 3600, tenant_id: 'yt', user_id: 71 }))
       .mockResolvedValueOnce(json(authority)).mockResolvedValueOnce(new Response('{}', { status, headers: { 'content-type': 'application/json' } }))
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(status)
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(status)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(4)
   })
   it.each(['owner', 'pin'])('drops a preparation ticket when its %s changes before asset delivery', async changed => {
@@ -178,8 +182,8 @@ describe('pinned welding CAD host', () => {
       value.source_change.after.sources.overlay_origin.rbac_user_id = 103
     } else value.source_change.before.document.view_bundle_sha256 = '0'.repeat(64)
     upstream(value, owner)
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(changed === 'owner' ? 403 : 502)
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(changed === 'owner' ? 403 : 502)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(8)
   })
   it.each([
@@ -220,8 +224,8 @@ describe('pinned welding CAD host', () => {
   it('read OFF denies ticket and static before authentication or upstream IO', async () => {
     vi.stubEnv('WELDING_READ_ENABLED', 'false'); const server = app()
     expect((await ticket(server)).status).toBe(503)
-    expect((await request(server).get(asset('welding-frame.html'))).status).toBe(503)
-    expect((await request(server).post('/api/welding/cad-assets/tickets/extra').send({})).status).toBe(503)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-frame.html'))).status).toBe(503)
+    expect((await (pinned.setApp(server), request(pinned.url())).post('/api/welding/cad-assets/tickets/extra').send({})).status).toBe(503)
     expect(fetchMock).not.toHaveBeenCalled(); expect(mocks.verifyToken).not.toHaveBeenCalled()
   })
   it('issues secure ticket and serves installed frame after a second personal SSO/source read', async () => {
@@ -233,10 +237,10 @@ describe('pinned welding CAD host', () => {
     expect(cookie).toMatch(/^welding_cad_ticket=[0-9a-f]{64};/)
     for (const property of [`Path=/welding-cad/${testPin}/`, 'HttpOnly', 'Secure', 'SameSite=Strict']) expect(cookie).toContain(property)
     expect(cookie).not.toContain('ms-session'); expect(cookie).not.toContain('y-secret')
-    expect((await request(server).get(asset('welding-frame.html'))).status).toBe(401)
-    expect((await request(server).get('/api/welding/authority').set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-frame.html'))).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get('/api/welding/authority').set('Cookie', cookie)).status).toBe(401)
     upstream()
-    const served = await request(server).get(asset('welding-frame.html')).set('Cookie', cookie)
+    const served = await (pinned.setApp(server), request(pinned.url())).get(asset('welding-frame.html')).set('Cookie', cookie)
     expect(served.status).toBe(200)
     expect(createHash('sha256').update(served.text).digest('hex')).toBe(createHash('sha256').update(readFileSync(join(bundleRoot, 'welding-frame.html'))).digest('hex'))
     expect(served.headers['content-security-policy']).toContain("connect-src 'none'")
@@ -257,8 +261,8 @@ describe('pinned welding CAD host', () => {
     expect(fetchMock.mock.calls[3][0]).toBe('https://welding.invalid/api/v1/plugins/welding/plans/p/versions/v/source-changes/change/documents/before')
     const cookie = issued.headers['set-cookie'][0]
     upstream(document())
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(200)
-    expect((await request(server).get(asset('welding-frame.html')).set('Cookie', cookie)).status).toBe(403)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(200)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-frame.html')).set('Cookie', cookie)).status).toBe(403)
     upstream({ ...document(), side: 'after' })
     const after = await ticket(server, { ...history, side: 'after' })
     expect(after.status).toBe(201)
@@ -271,10 +275,10 @@ describe('pinned welding CAD host', () => {
     expect(issued.status).toBe(201); expect(issued.body.asset_url).toBe(asset('welding-history.html'))
     const cookie = issued.headers['set-cookie'][0]
     upstream(value)
-    expect((await request(server).get(asset('welding-history.html')).set('Cookie', cookie)).status).toBe(200)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.html')).set('Cookie', cookie)).status).toBe(200)
     upstream({ ...value, view_bundle_sha256: '0'.repeat(64) })
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(502)
-    expect((await request(server).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(502)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('welding-history.js')).set('Cookie', cookie)).status).toBe(401)
   })
   it.each(['origin', 'viewer'])('refuses invalid historical %s pin before issuing a cookie', async damage => {
     const server = app(), value = { ...document(), origin: { ...origin, bundle_sha256: '9'.repeat(64) } }
@@ -290,40 +294,40 @@ describe('pinned welding CAD host', () => {
     for (const path of [asset('package.json'), asset('scripts/validate_welding_source.js'),
       `/welding-cad/${'0'.repeat(64)}/welding-frame.html`, `${asset('welding-frame.html')}?x=1`,
       asset('unknown.js'), asset('adapters%2Fwelding_source_adapter.js'), asset('..%2Fpackage.json')])
-      expect([400, 401, 404]).toContain((await request(server).get(path)).status)
-    expect((await request(server).post(asset('welding-frame.html'))).status).toBe(400)
+      expect([400, 401, 404]).toContain((await (pinned.setApp(server), request(pinned.url())).get(path)).status)
+    expect((await (pinned.setApp(server), request(pinned.url())).post(asset('welding-frame.html'))).status).toBe(400)
     expect((await ticket(server).query({ x: 1 })).status).toBe(400)
     expect((await ticket(server, { ...editor, padding: 'x'.repeat(1024) })).status).toBe(413)
-    expect((await request(server).post('/api/welding/cad-assets/tickets/extra').send({})).status).toBe(400)
+    expect((await (pinned.setApp(server), request(pinned.url())).post('/api/welding/cad-assets/tickets/extra').send({})).status).toBe(400)
     expect(fetchMock).not.toHaveBeenCalled(); expect(mocks.verifyToken).not.toHaveBeenCalled()
   })
   it('drops a ticket when owner changes, and does not re-exchange SSO for the dropped ticket', async () => {
     const server = app(); upstream()
     const cookie = (await ticket(server)).headers['set-cookie'][0]
     upstream({ ...context(), origin: { ...origin, rbac_user_id: 103 } }, { ...authority, owner: { ...authority.owner, rbac_user_id: 103 } })
-    expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(403)
-    expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(403)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(8)
   })
   it('rejects a changed source pin before bytes and drops the ticket', async () => {
     const server = app(); upstream()
     const cookie = (await ticket(server)).headers['set-cookie'][0]
     upstream({ ...context(), origin: { ...origin, bundle_sha256: '0'.repeat(64) }, editor_url: `/welding-cad/${'0'.repeat(64)}/welding-frame.html` })
-    expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(502)
-    expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(502)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
   })
   it('rejects revoked sid, changed target and read OFF without asset bytes', async () => {
     const server = app(); upstream()
     const cookie = (await ticket(server)).headers['set-cookie'][0]
     mocks.query.mockResolvedValue({ rows: [] })
-    expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
     mocks.query.mockResolvedValue({ rows: [{ id: 'sid1' }] })
     upstream()
     const second = (await ticket(server)).headers['set-cookie'][0]
     vi.stubEnv('WELDING_YUANTUS_ORG_ID', 'other')
-    expect((await request(server).get(asset('style.css')).set('Cookie', second)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', second)).status).toBe(401)
     vi.stubEnv('WELDING_READ_ENABLED', 'false')
-    expect((await request(server).get(asset('style.css')).set('Cookie', second)).status).toBe(503)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', second)).status).toBe(503)
   })
   it('expires a ticket lazily and does not exchange SSO after expiry', async () => {
     const server = app(); upstream()
@@ -331,7 +335,7 @@ describe('pinned welding CAD host', () => {
     const now = Date.now(), calls = fetchMock.mock.calls.length
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 61000)
     try {
-      expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
+      expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
       expect(fetchMock).toHaveBeenCalledTimes(calls)
     } finally { clock.mockRestore() }
   })
@@ -390,15 +394,15 @@ describe('pinned welding CAD host', () => {
       fetchMock.mockResolvedValueOnce(json({ state: 'state', nonce: 'nonce', expires_in: 300 }))
         .mockResolvedValueOnce(json({ access_token: 'y-secret', token_type: 'bearer', expires_in: 3600, tenant_id: 'yt', user_id: 71 }))
         .mockResolvedValueOnce(json(authority)).mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'private' }), { status }))
-      const denied = await request(server).get(asset('style.css')).set('Cookie', cookie)
+      const denied = await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)
       expect(denied.status).toBe(status)
       expect(denied.text).not.toContain('private')
-      expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
+      expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
     }
   })
   it('does not evict an existing ticket when process capacity reaches 256', async () => {
     const server = app().listen(0)
-    const issue = () => request(server).post('/api/welding/cad-assets/tickets')
+    const issue = () => request(`http://127.0.0.1:${(server.address() as AddressInfo).port}`).post('/api/welding/cad-assets/tickets')
       .set('Authorization', 'Bearer ms-session').set('Content-Type', 'application/json').send(JSON.stringify(editor))
     try {
       let first = ''
@@ -412,7 +416,7 @@ describe('pinned welding CAD host', () => {
       expect((await issue()).status).toBe(429)
       expect(fetchMock).toHaveBeenCalledTimes(calls)
       upstream()
-      expect((await request(server).get(asset('style.css')).set('Cookie', first)).status).toBe(200)
+      expect((await request(`http://127.0.0.1:${(server.address() as AddressInfo).port}`).get(asset('style.css')).set('Cookie', first)).status).toBe(200)
     } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
   }, 30000)
   it('rejects corrupt installed bytes before domain SSO', async () => {
@@ -449,7 +453,7 @@ describe('pinned welding CAD host', () => {
     const copy = mkdtempSync(join(fixture, 'reconfigured-'))
     cpSync(bundleRoot, copy, { recursive: true }); writable(copy)
     vi.stubEnv('WELDING_CAD_ASSET_ROOT', copy)
-    expect((await request(server).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
+    expect((await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)).status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(4)
   })
   it.each(['read-flag', 'provider', 'root'] as const)(
@@ -466,7 +470,7 @@ describe('pinned welding CAD host', () => {
         }
         return { rows: [{ id: 'sid1' }] }
       })
-      const response = await request(server).get(asset('style.css')).set('Cookie', cookie)
+      const response = await (pinned.setApp(server), request(pinned.url())).get(asset('style.css')).set('Cookie', cookie)
       expect(afterDomainChecks).toBe(2)
       expect(response.status).toBe(changed === 'read-flag' ? 503 : 401)
       expect(response.text).not.toBe(fixtureFiles['style.css'])
@@ -482,7 +486,7 @@ describe('pinned welding CAD host', () => {
     expect(issued.status).toBe(201)
     expect(issued.body.bundle_sha256).toBe(WELDING_CAD_PIN)
     upstream(actualContext)
-    const served = await request(server).get(`/welding-cad/${WELDING_CAD_PIN}/welding-frame.html`)
+    const served = await (pinned.setApp(server), request(pinned.url())).get(`/welding-cad/${WELDING_CAD_PIN}/welding-frame.html`)
       .set('Cookie', issued.headers['set-cookie'][0])
     expect(served.status).toBe(200)
     expect(createHash('sha256').update(readFileSync(join(installedRoot!, 'manifest.json'))).digest('hex')).toBe(WELDING_CAD_PIN)
@@ -494,7 +498,7 @@ describe('pinned welding CAD host', () => {
     expect(createHash('sha256').update(readFileSync(join(legacyInstalledRoot!, 'manifest.json'))).digest('hex'))
       .toBe('69b6adcc23c0123e64571242c70819be89ef0a6048235e4ffabcd48c7c5761bd')
     const server = app(WELDING_CAD_PIN)
-    const anonymous = await request(server).get(`/welding-cad/${WELDING_CAD_PIN}/welding-frame.html`)
+    const anonymous = await (pinned.setApp(server), request(pinned.url())).get(`/welding-cad/${WELDING_CAD_PIN}/welding-frame.html`)
     expect(anonymous.status).toBe(401)
     expect(anonymous.headers['set-cookie']).toBeUndefined()
     const issued = await ticket(server)

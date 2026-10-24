@@ -7,11 +7,11 @@ import { withGenerationOwnerLock } from '../src/services/welding/commandRecovery
 import { WELDING_CAD_PIN, WeldingPlanError, type WeldingPlanClient } from '../src/services/welding/planClient'
 import { summarizeWelds } from '../src/services/welding/measurements'
 const native = vi.hoisted(() => ({ ws: null as any, action: Promise.resolve(), options: null as any, context: null as any, mutate: null as null | ((value: any) => void) }))
-vi.mock('/welding-cad/b05b3684664f215ced015f09f23d300fcccf8ba49ea4e8826e1a373070083bb8/helpers/welding_measurement.js', async () => { const { createRequire } = await import('node:module'); return createRequire(import.meta.url)(`${process.env.WELDING_CAD_TEST_ROOT ?? '/Users/chouhua/.codex/worktrees/welding-f18c-representations/CADGameFusion'}/tools/web_viewer/helpers/welding_measurement.js`) })
+vi.mock('/welding-cad/b05b3684664f215ced015f09f23d300fcccf8ba49ea4e8826e1a373070083bb8/helpers/welding_measurement.js', async () => { const { createRequire } = await import('node:module'); return createRequire(import.meta.url)(`${(await import('./utils/weldingNativeOracle')).nativeOracleRoot()}/tools/web_viewer/helpers/welding_measurement.js`) })
 vi.mock('../src/services/welding/cadBridge', async () => {
   const actual = await vi.importActual<typeof import('../src/services/welding/cadBridge')>('../src/services/welding/cadBridge')
   const { createRequire } = await import('node:module')
-  const { workspace, context } = createRequire(import.meta.url)(`${process.env.WELDING_CAD_TEST_ROOT ?? '/Users/chouhua/.codex/worktrees/welding-f18c-representations/CADGameFusion'}/tools/web_viewer/tests/helpers/welding_entry_harness.js`); native.context = context
+  const { workspace, context } = createRequire(import.meta.url)(`${(await import('./utils/weldingNativeOracle')).nativeOracleRoot()}/tools/web_viewer/tests/helpers/welding_entry_harness.js`); native.context = context
   return { ...actual, createCadBridge(options: any) {
     const ws = workspace(); native.ws = ws; native.options = options
     ws.configureWeldingHost({ onAction(action: any) { const copy = structuredClone(action); native.mutate?.(copy); native.action = options.onAction({ ...copy, action_id: crypto.randomUUID(), base_local_seq: options.getLocalSeq() }).then(() => ws.acceptWeldingAction(action.native_ticket)); void native.action.catch(() => {}) }, onIntentCancelled: options.onIntentCancelled, onHistoryRequest: options.onHistoryRequest })

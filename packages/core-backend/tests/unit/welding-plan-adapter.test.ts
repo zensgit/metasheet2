@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type RequestHandler } from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
+import type { AddressInfo } from 'node:net'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import { mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs'
@@ -14,6 +16,8 @@ vi.mock('../../src/db/pg', () => ({ query: mocks.query }))
 import { weldingPreflight, weldingPlanRawBody, weldingRouter } from '../../src/routes/welding'
 import { weldingPlanDownload, weldingResourceDiagram } from '../../src/integrations/welding/client'
 import { readWeldingProvider } from '../../src/integrations/welding/provider'
+
+const pinned = usePinnedServer()
 
 const fixture = resolve('../../artifacts/welding-f15b/plan-adapter-unit')
 mkdirSync(fixture, { recursive: true })
@@ -163,7 +167,7 @@ afterAll(() => new Promise<void>((resolve, reject) => {
   relay.closeAllConnections()
   relay.close(error => error ? reject(error) : resolve())
 }))
-const auth = (method: 'get' | 'post' | 'put' | 'delete', path: string) => request(relay)[method](path).set('Authorization', 'Bearer ms-session')
+const auth = (method: 'get' | 'post' | 'put' | 'delete', path: string) => request(`http://127.0.0.1:${(relay.address() as AddressInfo).port}`)[method](path).set('Authorization', 'Bearer ms-session')
 const resourceHash = 'a'.repeat(64)
 const resourcePayload = { schema_version: 1, kind: 'material', suggested_fields: { material_a: 'steel' } }
 const resourceCreate = { resource_id: 'resource-1', name: 'Steel', number: 'M-1', request_id: 'create-1', payload: resourcePayload }
@@ -593,7 +597,7 @@ describe('F02 fixed joint diagram relay', () => {
       path.replace('resource-1/', 'resource%2F1/'), path.replace('resource-v1/', '%ZZ/')])
       expect((await auth('get', target)).status).toBe(400)
     for (const method of ['post', 'put', 'delete'] as const) expect((await auth(method, path)).status).toBe(400)
-    expect((await request(app()).head(path).set('Authorization', 'Bearer ms-session')).status).toBe(400)
+    expect((await (pinned.setApp(app()), request(pinned.url())).head(path).set('Authorization', 'Bearer ms-session')).status).toBe(400)
     expect((await auth('get', path).set('Content-Type', 'text/plain').send('body')).status).toBe(400)
     expect(mocks.verifyToken).not.toHaveBeenCalled(); expect(fetchMock).not.toHaveBeenCalled()
     vi.stubEnv('WELDING_READ_ENABLED', 'false')
@@ -821,7 +825,7 @@ describe('F02 fixed joint diagram relay', () => {
       // Start our server first so Supertest does not claim its automatic-close lifecycle.
       server.listen(0)
       expect(server.listening).toBe(true)
-      pending = request(server).get(path).set('Authorization', 'Bearer ms-session')
+      pending = request(`http://127.0.0.1:${(server.address() as AddressInfo).port}`).get(path).set('Authorization', 'Bearer ms-session')
       const settled = pending.then(() => {}, () => {})
       await Promise.race([waiting, expired]); pending.abort()
       await Promise.race([Promise.all([close, settled]), expired])
@@ -2175,7 +2179,7 @@ describe('finite welding plan adapter', () => {
       res.write = ((..._args: unknown[]) => { res.flushHeaders(); markStalled(); return false }) as typeof res.write
       next()
     })
-    const pending = request(server).get(`/api/welding/artifacts/${generationId}/files/pdf`)
+    const pending = (pinned.setApp(server), request(pinned.url())).get(`/api/welding/artifacts/${generationId}/files/pdf`)
       .set('Authorization', 'Bearer ms-session')
     const settled = pending.then(() => true, () => true)
     await stalled
@@ -2207,7 +2211,7 @@ describe('finite welding plan adapter', () => {
       res.write = ((..._args: unknown[]) => { res.flushHeaders(); markStalled(); return false }) as typeof res.write
       next()
     })
-    const pending = request(server).get(`/api/welding/artifacts/${generationId}/files/pdf`)
+    const pending = (pinned.setApp(server), request(pinned.url())).get(`/api/welding/artifacts/${generationId}/files/pdf`)
       .set('Authorization', 'Bearer ms-session')
     const settled = pending.then(() => true, () => true)
     let watchdog: ReturnType<typeof setTimeout> | undefined
@@ -2256,7 +2260,7 @@ describe('finite welding plan adapter', () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       let closed = false
       const server = app((_req, res, next) => { res.once('close', () => { closed = true }); next() })
-      const pending = request(server).get(`/api/welding/artifacts/${generationId}/files/pdf`)
+      const pending = (pinned.setApp(server), request(pinned.url())).get(`/api/welding/artifacts/${generationId}/files/pdf`)
         .set('Authorization', 'Bearer ms-session')
       const settled = pending.then(() => true, () => true)
       let watchdog: ReturnType<typeof setTimeout> | undefined

@@ -1,0 +1,132 @@
+{
+  "schema": "metasheet.welding_native_oracle/1",
+  "qualification": "exact source loan consumed by qualified build21",
+  "cad_bundle_sha256": "b05b3684664f215ced015f09f23d300fcccf8ba49ea4e8826e1a373070083bb8",
+  "files": [
+    {
+      "path": "tools/web_viewer/adapters/cadgf_document_adapter.js",
+      "bytes": 37155,
+      "sha256": "ade182d66d1bd698952aaf785570d7cec0c591ec79efbbf57b555d73bb21375b"
+    },
+    {
+      "path": "tools/web_viewer/adapters/welding_overlay_adapter.js",
+      "bytes": 47403,
+      "sha256": "8ac1d966ec61482ba00fc82ae342f3aa58f620918dc1ee30feb131af56bfb523"
+    },
+    {
+      "path": "tools/web_viewer/adapters/welding_source_adapter.js",
+      "bytes": 8663,
+      "sha256": "14888a8a4610092e34f8e665efd692a6c4b76c6bbf1e2f2c11addfd470273347"
+    },
+    {
+      "path": "tools/web_viewer/bridge/welding_message_bridge.js",
+      "bytes": 17550,
+      "sha256": "ab7885214944589223d158871f9bc09cbe8b2970c1700e377e99567f57c9b83e"
+    },
+    {
+      "path": "tools/web_viewer/commands/command_bus.js",
+      "bytes": 4217,
+      "sha256": "88a5426500ed4b263dfe16dcbd1cc436daa6d899c81f3fcb80c8d3cbe69ba78b"
+    },
+    {
+      "path": "tools/web_viewer/commands/command_registry.js",
+      "bytes": 217944,
+      "sha256": "26f9926114603fb898914f51fe4c2eca33459e3cc1930b20bf63d9bfbb01136b"
+    },
+    {
+      "path": "tools/web_viewer/commands/shared/selection.js",
+      "bytes": 1154,
+      "sha256": "9fb2f2bb2411bf2afa49c19a75c8c72067f1797e8be04d238f588b335d18c5c5"
+    },
+    {
+      "path": "tools/web_viewer/commands/shared/snapshot.js",
+      "bytes": 2441,
+      "sha256": "32cd3861b88b956b6dfee54e847e88e127aa7d0107950034f273143f45609877"
+    },
+    {
+      "path": "tools/web_viewer/commands/solver/bridge.js",
+      "bytes": 2738,
+      "sha256": "d3b009057a88a9c431c9fcc668c8099b3d5ce2ffe4ce84a02ddc9bb4db4d7241"
+    },
+    {
+      "path": "tools/web_viewer/entity_import_normalization.js",
+      "bytes": 13053,
+      "sha256": "83d0a6cceeaf6ce2aeabe8f760ae22bc83986a61b5a506ec8fd6b75fe5b3773a"
+    },
+    {
+      "path": "tools/web_viewer/helpers/welding_measurement.js",
+      "bytes": 4024,
+      "sha256": "9189b494874d6ca8b0aa8da57160ed2ee2cfe0a7883d93b48e5c52466e7eec47"
+    },
+    {
+      "path": "tools/web_viewer/import_normalization.js",
+      "bytes": 2296,
+      "sha256": "74074c6f8bbbc42ac96f8f3c7e93e08b320b94420095902d237eb4a32862e495"
+    },
+    {
+      "path": "tools/web_viewer/insert_group.js",
+      "bytes": 35961,
+      "sha256": "99e05c0eb22dd492b3690cec4032b073778ed273814dfdceb210da58e49ef67b"
+    },
+    {
+      "path": "tools/web_viewer/line_style.js",
+      "bytes": 5387,
+      "sha256": "771a2b28f3a4d6a1cba9c113fae87034741472da1df374aea06c84632c50e5a1"
+    },
+    {
+      "path": "tools/web_viewer/package.json",
+      "bytes": 80,
+      "sha256": "bac8077d350f4705b538797ea467f51bfba16fffe62ce7a30a5c0d8d0c37c0b8"
+    },
+    {
+      "path": "tools/web_viewer/space_layout.js",
+      "bytes": 4051,
+      "sha256": "e0cd4f807d4b439c64b10ffbe460e3c01e6020903685c2a614c181b77402b2a5"
+    },
+    {
+      "path": "tools/web_viewer/state/documentState.js",
+      "bytes": 34490,
+      "sha256": "ab771910ecb17138eddc3e03279e2e33e540a0c4a43ceaaa10817fce784bb421"
+    },
+    {
+      "path": "tools/web_viewer/state/selectionState.js",
+      "bytes": 2854,
+      "sha256": "c1fad2b56de82b6c925ad7f14ba9e794c0ec78fb2024b92ef7a45bafb81953ee"
+    },
+    {
+      "path": "tools/web_viewer/state/snapState.js",
+      "bytes": 2287,
+      "sha256": "07cb74ae78a45c2cc4469155fd86513cb6dffe7c3b48cdf66e3c675e55664d31"
+    },
+    {
+      "path": "tools/web_viewer/state/spatialIndex.js",
+      "bytes": 5929,
+      "sha256": "6a5523d02fd479eb72c56b4da4408606b6ec5610ea200e4981d6ec977b534bf4"
+    },
+    {
+      "path": "tools/web_viewer/state/viewState.js",
+      "bytes": 2870,
+      "sha256": "e407b6e44f74b1cf65d990c27545d9049f1ef15f1b7b6dbf0d81927bd67a8d73"
+    },
+    {
+      "path": "tools/web_viewer/tests/fixtures/welding_overlay_v1.json",
+      "bytes": 2350,
+      "sha256": "1ef71c1755af526907e39bfdf2d71f2065b2be8706f0002ec7140e232671566b"
+    },
+    {
+      "path": "tools/web_viewer/tests/helpers/welding_entry_harness.js",
+      "bytes": 2065,
+      "sha256": "f3d08463b8a06e251ae7d923162e0bf0ea64b1f3c87304fc1e689e60de5ed4cd"
+    },
+    {
+      "path": "tools/web_viewer/tools/geometry.js",
+      "bytes": 35408,
+      "sha256": "4730d52b776a4eefa3816daa51b2134ac79f9c721e38e1aebe282fce9557b4f7"
+    },
+    {
+      "path": "tools/web_viewer/tools/two_target_pick_tool_helpers.js",
+      "bytes": 10181,
+      "sha256": "b05407cdb0f0d2736ec18b50acafc1ee3d05ef7a17cd2a6c10843665c7e33188"
+    }
+  ]
+}

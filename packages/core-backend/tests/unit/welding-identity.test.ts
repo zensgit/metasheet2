@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import { generateKeyPairSync, createPublicKey } from 'node:crypto'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -18,6 +19,8 @@ import { weldingRouter, weldingPreflight } from '../../src/routes/welding'
 import { isGateException } from '../../src/auth/api-path-policy'
 import { readWeldingProvider, weldingSubject, signWeldingAssertion, weldingJwks } from '../../src/integrations/welding/provider'
 import { requireWeldingSession } from '../../src/integrations/welding/session'
+
+const pinned = usePinnedServer()
 
 const fixture = resolve('../../artifacts/welding-f15b/unit-runtime')
 mkdirSync(fixture, { recursive: true })
@@ -63,7 +66,7 @@ describe('finite welding identity routes', () => {
     vi.stubEnv('WELDING_READ_ENABLED', flag)
     vi.stubEnv('WELDING_SSO_PRIVATE_KEY_FILE', '/nonexistent')
     for (const path of ['/api/welding/authority', '/api/welding/jwks']) {
-      const result = await request(app()).get(path)
+      const result = await (pinned.setApp(app()), request(pinned.url())).get(path)
       expect(result.status).toBe(503)
       expect(result.headers['cache-control']).toBe('no-store')
     }
@@ -79,7 +82,7 @@ describe('finite welding identity routes', () => {
       for (const size of [1, 10 * 1024 * 1024 + 1]) {
         // Only headers and one byte are sent: refusal must precede body consumption,
         // otherwise the oversized declared body would hang waiting for its remainder.
-        const result = await request(app()).get(path).set('Content-Type', 'application/json').set('Content-Length', String(size)).send('{')
+        const result = await (pinned.setApp(app()), request(pinned.url())).get(path).set('Content-Type', 'application/json').set('Content-Length', String(size)).send('{')
         expect(result.status).toBe(flag === 'true' ? 400 : 503)
         expect(result.headers['cache-control']).toBe('no-store')
         expect(result.body).toEqual({ error: { code: flag === 'true' ? 'WELDING_INVALID_REQUEST' : 'WELDING_UNAVAILABLE' } })
@@ -94,25 +97,25 @@ describe('finite welding identity routes', () => {
     expect(isGateException('/API/WELDING/JWKS/')).toBe(true)
     for (const path of ['/api/welding/jwks/child', '/api/welding/jwksx', '/api/welding/authority', '/api/welding/%6awks']) {
       expect(isGateException(path)).toBe(false)
-      expect((await request(app()).get(path)).status).toBe(401)
+      expect((await (pinned.setApp(app()), request(pinned.url())).get(path)).status).toBe(401)
     }
     for (const path of ['/api/welding/jwks', '/API/WELDING/JWKS/']) {
-      const publicKey = await request(app()).get(path)
+      const publicKey = await (pinned.setApp(app()), request(pinned.url())).get(path)
       expect(publicKey.status).toBe(200)
       expect(Object.keys(publicKey.body.keys[0]).sort()).toEqual(['alg', 'e', 'kid', 'kty', 'n', 'use'])
     }
-    const result = await request(app()).get('/api/welding/authority')
+    const result = await (pinned.setApp(app()), request(pinned.url())).get('/api/welding/authority')
     expect(result.headers['cache-control']).toBe('no-store')
   })
   it.each(['?actor=1', '?path=../../auth/me', '?url=https://other.invalid', '?x=1&x=2', '?tenant=mt'])('rejects all query selectors %s before exchange', async (query) => {
-    const result = await request(app()).get(`/api/welding/authority${query}`).set('Authorization', 'Bearer session')
+    const result = await (pinned.setApp(app()), request(pinned.url())).get(`/api/welding/authority${query}`).set('Authorization', 'Bearer session')
     expect(result.status).toBe(400)
     expect(mocks.verifyToken).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
   })
   it('returns only a validated authority after five native session rechecks', async () => {
     upstream()
-    const result = await request(app()).get('/api/welding/authority').set('Authorization', 'Bearer session')
+    const result = await (pinned.setApp(app()), request(pinned.url())).get('/api/welding/authority').set('Authorization', 'Bearer session')
     expect(result.status).toBe(200)
     expect(result.body).toEqual(authority())
     expect(result.headers['cache-control']).toBe('no-store')
@@ -121,12 +124,12 @@ describe('finite welding identity routes', () => {
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer secret-bearer')
   })
   it('rejects header fallback even with a valid signed session in the verifier', async () => {
-    const result = await request(app('')).get('/api/welding/authority').set('Authorization', 'Bearer session').set('x-tenant-id', 'mt')
+    const result = await (pinned.setApp(app('')), request(pinned.url())).get('/api/welding/authority').set('Authorization', 'Bearer session').set('x-tenant-id', 'mt')
     expect(result.status).toBe(401)
     expect(fetchMock).not.toHaveBeenCalled()
   })
   it.each(['/api/welding/jwks/child', '/api/welding/jwks//', '/api/welding/%6awks', '/api/welding/authority/extra', '/api/welding/authority%2F..%2Fjwks'])('unrelated path does not run welding IO %s', async path => {
-    const result = await request(app()).get(path).set('Authorization', 'Bearer session')
+    const result = await (pinned.setApp(app()), request(pinned.url())).get(path).set('Authorization', 'Bearer session')
     expect(result.status).toBe(404)
     expect(keyStat).not.toHaveBeenCalled()
     expect(mocks.query).not.toHaveBeenCalled()
@@ -136,7 +139,7 @@ describe('finite welding identity routes', () => {
     upstream()
     let reads = 0
     mocks.query.mockImplementation(async () => ({ rows: ++reads > checkpoint ? [] : [{ id: 'sid1' }] }))
-    const result = await request(app()).get('/api/welding/authority').set('Authorization', 'Bearer session')
+    const result = await (pinned.setApp(app()), request(pinned.url())).get('/api/welding/authority').set('Authorization', 'Bearer session')
     expect(result.status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(hops)
     expect(JSON.stringify(result.body)).not.toContain('secret')
@@ -236,7 +239,7 @@ describe('dedicated RSA provider', () => {
 })
 
 describe('upstream DTO and transport fail closed', () => {
-  const get = () => request(app()).get('/api/welding/authority').set('Authorization', 'Bearer session')
+  const get = () => (pinned.setApp(app()), request(pinned.url())).get('/api/welding/authority').set('Authorization', 'Bearer session')
   it.each([
     { state: '', nonce: 'nonce', expires_in: 300 },
     { state: 'state', nonce: 'nonce', expires_in: '300' },
@@ -334,7 +337,7 @@ describe('upstream DTO and transport fail closed', () => {
       const actor = options.headers.Authorization === 'Bearer private-71' ? 71 : 72
       return json({ ...authority(), owner: { ...authority().owner, auth_user_id: actor } })
     })
-    const [first, second] = await Promise.all(['u1', 'u2'].map(token => request(app()).get('/api/welding/authority').set('Authorization', `Bearer ${token}`)))
+    const [first, second] = await Promise.all(['u1', 'u2'].map(token => (pinned.setApp(app()), request(pinned.url())).get('/api/welding/authority').set('Authorization', `Bearer ${token}`)))
     expect(first.status).toBe(200)
     expect(second.status).toBe(200)
     expect(first.body.owner.auth_user_id).toBe(71)

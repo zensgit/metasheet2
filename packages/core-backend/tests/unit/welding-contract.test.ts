@@ -6,6 +6,12 @@ const root = resolve('../..')
 const read = (path: string) => readFileSync(resolve(root, path), 'utf8')
 
 describe('welding finite integration registration', () => {
+  it('keeps the API-policy exemption limited to exact GET csv/xlsx template route selection', () => {
+    const source = read('packages/core-backend/src/routes/welding.ts')
+    expect(source).toContain(String.raw`const template = /^\/api\/welding\/resources\/import\/templates\/(csv|xlsx)$/.exec(req.path)`)
+    expect(source).toContain("if (template && req.method === 'GET')")
+    expect(source).toContain('if (!apiPathHasPrefix(req.path, RESOURCE_IMPORT_PREFIX)) return null')
+  })
   it('registers preflight before global authentication and finite router after it', () => {
     const source = read('packages/core-backend/src/index.ts')
     const preflight = source.indexOf('this.app.use(weldingPreflight)')
@@ -62,6 +68,7 @@ describe('welding finite integration registration', () => {
       '/api/welding/plans/{plan_id}/versions/{version_id}/source-changes/{change_id}',
       '/api/welding/plans/{plan_id}/versions/{version_id}/source-changes/{change_id}/documents/{side}',
       '/api/welding/plans/{plan_id}/versions/{version_id}/source-change-preparations',
+      '/api/welding/plans/{plan_id}/versions/{version_id}/source-change-preparations/{context_id}',
       '/api/welding/plans/{plan_id}/versions/{version_id}/cad-contexts',
       '/api/welding/plans/{plan_id}/versions/{version_id}/cad-contexts/{context_id}',
       '/api/welding/render-templates',

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRequire } from 'node:module'
+import { nativeOracleRoot } from './utils/weldingNativeOracle'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, unlinkSync, symlinkSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createCadBridge, loadReadOnlyCad, type CadWire } from '../src/services/welding/cadBridge'
 const schema = 'vemcad-weld-bridge/5'
 const overlay = () => ({ schema: 'vemcad-weld-overlay/1', snapshot: { meta: { unit: 'mm' }, entities: [] }, bindings: [] })
@@ -24,7 +28,7 @@ function fixture(source = '') {
   return { frame, peer, bridge, emit, reply, sent, opened, nativeAction, action, error, cancelled, setSeq: (value: number) => { seq = value }, invalidate: () => { current = false } }
 }
 async function nativeFixture(changeReply = (message: CadWire) => message, firstId = 101) {
-  const require = createRequire(import.meta.url), root = process.env.WELDING_CAD_TEST_ROOT ?? '/Users/chouhua/.codex/worktrees/welding-f18c-representations/CADGameFusion'
+  const require = createRequire(import.meta.url), root = nativeOracleRoot()
   const { workspace, context } = require(`${root}/tools/web_viewer/tests/helpers/welding_entry_harness.js`)
   const { installWeldingMessageBridge } = require(`${root}/tools/web_viewer/bridge/welding_message_bridge.js`)
   const f = fixture(), ws = workspace(), nativeWindow = new EventTarget() as EventTarget & CadWire, source = context()
@@ -134,5 +138,26 @@ describe('actual parent bridge/5 consumer', () => {
       receive('loaded', command.request_id, { unit })
       if (unit === 'mm') await expect(view.loaded).resolves.toBeUndefined(); else await expect(view.loaded).rejects.toThrow()
     }
+  })
+})
+
+
+describe('fixed native source oracle integrity', () => {
+  it('accepts the complete original source loan', () => {
+    expect(nativeOracleRoot()).toBeTruthy()
+  })
+  it.each(['bytes', 'manifest', 'missing', 'symlink'])('rejects an actual %s mutation before consuming native code', damage => {
+    const copy = mkdtempSync(join(tmpdir(), 'welding-native-oracle-'))
+    cleanups.push(() => rmSync(copy, { recursive: true, force: true }))
+    cpSync(nativeOracleRoot(), copy, { recursive: true })
+    const file = join(copy, 'tools/web_viewer/helpers/welding_measurement.js')
+    if (damage === 'bytes') writeFileSync(file, readFileSync(file, 'utf8') + '\n// changed input\n')
+    if (damage === 'manifest') {
+      const path = join(copy, 'manifest.json'), value = JSON.parse(readFileSync(path, 'utf8'))
+      value.files = value.files.slice(1); writeFileSync(path, JSON.stringify(value))
+    }
+    if (damage === 'missing') unlinkSync(file)
+    if (damage === 'symlink') { const original = readFileSync(file); unlinkSync(file); writeFileSync(file + '.real', original); symlinkSync(file + '.real', file) }
+    expect(() => nativeOracleRoot(copy)).toThrow()
   })
 })

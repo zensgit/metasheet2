@@ -190,7 +190,7 @@ describe('CAD action panel actual UI wiring and read-only history', () => {
     const f = await mount(); await click('读取复核义务'); await input('复核焊缝', 'gone'); await input('人工处置', 'remove_weld'); await input('复核解释', '人工核对')
     f.allowed.value = false; await nextTick(); await click('确认此焊缝复核并保存'); expect(f.session.confirmSourceReview).not.toHaveBeenCalled()
     f.allowed.value = true; f.session.state.dirty = true; await nextTick(); expect(button('确认此焊缝复核并保存').disabled).toBe(true)
-    f.session.state.dirty = false; f.session.state.draftSeq = 2; await nextTick(); expect(root.textContent).not.toContain('d'.repeat(64)); expect(root.querySelector('textarea')).toBeNull()
+    f.session.state.dirty = false; f.session.state.draftSeq = 2; await nextTick(); expect(root.textContent).not.toContain('d'.repeat(64)); expect([...root.querySelectorAll('label')].find(label => label.childNodes[0].textContent?.trim() === '复核解释')).toBeUndefined(); expect([...root.querySelectorAll('button')].find(button => button.textContent?.trim() === '确认此焊缝复核并保存')).toBeUndefined()
   })
   it('keeps a read-only obligation visible while disabling every confirmation control', async () => {
     const f = await mount(); f.client.sourceReview.mockResolvedValue({ ...await f.client.sourceReview(), can_write: false }); await click('读取复核义务')

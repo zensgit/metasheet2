@@ -1,0 +1,114 @@
+{
+  "schema": "vemcad-weld-overlay/1",
+  "snapshot": {
+    "nextEntityId": 104,
+    "nextLayerId": 1,
+    "nextConstraintId": 1,
+    "layers": [
+      {
+        "id": 0,
+        "name": "0",
+        "visible": true,
+        "locked": false,
+        "printable": true,
+        "frozen": false,
+        "construction": false,
+        "color": "#d0d7de",
+        "lineType": "CONTINUOUS",
+        "lineWeight": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": 101,
+        "type": "line",
+        "layerId": 0,
+        "visible": true,
+        "color": "#2c3e50",
+        "name": "",
+        "start": {
+          "x": 0,
+          "y": 0
+        },
+        "end": {
+          "x": 100,
+          "y": 0
+        },
+        "lineType": "CONTINUOUS",
+        "lineWeight": 0,
+        "lineWeightSource": "BYLAYER",
+        "lineTypeScale": 1,
+        "lineTypeScaleSource": "DEFAULT"
+      },
+      {
+        "id": 102,
+        "type": "arc",
+        "layerId": 0,
+        "visible": true,
+        "color": "#2c3e50",
+        "name": "",
+        "center": {
+          "x": 100,
+          "y": 100
+        },
+        "radius": 10,
+        "startAngle": 0,
+        "endAngle": 1.5707963267948966,
+        "cw": true,
+        "lineType": "CONTINUOUS",
+        "lineWeight": 0,
+        "lineWeightSource": "BYLAYER",
+        "lineTypeScale": 1,
+        "lineTypeScaleSource": "DEFAULT"
+      },
+      {
+        "id": 103,
+        "type": "polyline",
+        "layerId": 0,
+        "visible": true,
+        "color": "#2c3e50",
+        "name": "",
+        "closed": false,
+        "points": [
+          {
+            "x": 0,
+            "y": 20
+          },
+          {
+            "x": 20,
+            "y": 20
+          },
+          {
+            "x": 20,
+            "y": 40
+          }
+        ],
+        "lineType": "CONTINUOUS",
+        "lineWeight": 0,
+        "lineWeightSource": "BYLAYER",
+        "lineTypeScale": 1,
+        "lineTypeScaleSource": "DEFAULT"
+      }
+    ],
+    "constraints": [],
+    "meta": {
+      "label": "",
+      "author": "",
+      "comment": "",
+      "unit": "mm",
+      "schema": "vemcad-web-2d-v1",
+      "currentSpace": 0,
+      "currentLayout": "Model",
+      "unitDeclared": true,
+      "unitScale": 1
+    }
+  },
+  "bindings": [
+    {
+      "weld_id": "weld-1",
+      "entity_ids": [
+        101
+      ]
+    }
+  ]
+}
