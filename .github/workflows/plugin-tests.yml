@@ -2277,6 +2277,7 @@ jobs:
             tests/integration/attendance-makeup-punch-policy.test.ts \
             tests/integration/attendance-result-edit.test.ts \
             tests/integration/attendance-shift-segments-migration.db.test.ts \
+            tests/integration/attendance-shift-reference-capability.db.test.ts \
             tests/integration/attendance-shift-segments-writer-matrix.db.test.ts \
             tests/integration/attendance-w7-1am-provenance-widening.db.test.ts \
             tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts \
