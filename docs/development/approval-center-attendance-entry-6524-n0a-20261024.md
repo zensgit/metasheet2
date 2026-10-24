@@ -68,7 +68,7 @@
 | 12 | 点考勤行仍进入这张考勤申请（不变） | 绿（非回归守护） | 绿 |
 | 13 | 在考勤视图里另设筛选仍留在视图内；再点「清空筛选」退出 | 红：基线没有该按钮 | 绿 |
 | 14 | 列表地址查询参数变化（深链）退出考勤视图 | 红：基线没有该按钮 | 绿 |
-| 15 | 「正在只看考勤待审」提示是 `role="status"`、`aria-live="polite"` | 红：基线没有该按钮 | 绿 |
+| 15 | 「正在只看考勤待审」提示区域常驻（不随视图插入），是 `role="status"`、`aria-live="polite"`：进入前为空、进入后有字、退出后为空，始终是同一个元素。只断言结构，读屏下的实际播报未验证 | 红：基线没有该提示（本分支上一版也红：提示随视图插入，进入前不存在） | 绿 |
 | 16 | 列表重载时保留上次的「考勤待审 N」、按钮仍可点 | 红：基线没有该按钮（在提交 `23447ecc35` 之前的本分支上也红：每次重载都先回到「正在获取」） | 绿 |
 | 17 | `approvalApiErrorSurfacing`：`listApprovals` 把 `workflowKey`、`page=1`、`pageSize=1` 写进 `GET /api/approvals` 的查询串，同筛选的导出也带 `workflowKey` | 红：基线不写 `workflowKey` | 绿 |
 | 18 | `approval-store-detail-generation`：`loadPending` 把 `workflowKey` 原样交给 `listApprovals`，并强制 `tab=pending` | 绿（非回归守护：store 本来就展开查询对象） | 绿 |

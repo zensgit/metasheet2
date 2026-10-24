@@ -979,17 +979,29 @@ describe('ApprovalCenterView', () => {
       expect(showAllButton()).toBeNull()
     })
 
-    it('the attendance-view note is a polite status region, so the switch is announced', async () => {
+    it('the attendance-view note is one polite status region that stays in place; only its text changes', async () => {
       listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 2 })
 
       await mountView()
       await flushUi()
+
+      const region = activeNote()
+      expect(region, 'the status region is present before entering the attendance view').toBeTruthy()
+      expect(region!.getAttribute('role')).toBe('status')
+      expect(region!.getAttribute('aria-live')).toBe('polite')
+      expect(region!.textContent?.trim(), 'empty before entering').toBe('')
+
       filterButton()!.click()
       await flushUi()
+      expect(activeNote(), 'the same element, not a newly inserted one').toBe(region)
+      expect(region!.textContent?.trim()).toContain('只看考勤待审')
 
-      expect(activeNote(), 'the note renders inside the attendance view').toBeTruthy()
-      expect(activeNote()!.getAttribute('role')).toBe('status')
-      expect(activeNote()!.getAttribute('aria-live')).toBe('polite')
+      showAllButton()!.click()
+      await flushUi()
+      expect(activeNote(), 'still the same element after leaving').toBe(region)
+      expect(region!.textContent?.trim(), 'empty again after leaving').toBe('')
+      expect(region!.getAttribute('role')).toBe('status')
+      expect(region!.getAttribute('aria-live')).toBe('polite')
     })
 
     it('a list reload keeps the last 考勤待审 number on screen while the total is re-read', async () => {

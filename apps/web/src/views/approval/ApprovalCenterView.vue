@@ -282,17 +282,19 @@
             <p data-testid="attendance-approval-queue-body">
               {{ t.attendanceBody }}
             </p>
+            <!-- Always in the DOM so the polite status region exists before its text changes;
+                 outside the attendance-only view it is empty and taken out of the grid flow. -->
             <p
-              v-if="attendanceOnly"
               class="approval-center__attendance-entry-status"
+              :class="{ 'approval-center__attendance-entry-status--idle': !attendanceOnly }"
               role="status"
               aria-live="polite"
               data-testid="attendance-approval-queue-active"
             >
-              {{ attendanceActiveText }}
+              {{ attendanceOnly ? attendanceActiveText : '' }}
             </p>
             <p
-              v-else-if="attendanceEntryReason"
+              v-if="!attendanceOnly && attendanceEntryReason"
               id="attendance-approval-queue-reason"
               class="approval-center__attendance-entry-status"
               data-testid="attendance-approval-queue-reason"
@@ -2424,6 +2426,17 @@ onBeforeUnmount(() => {
 
 .approval-center__attendance-entry-copy .approval-center__attendance-entry-status {
   color: var(--ms-text-1);
+}
+
+/* Empty live region outside the attendance-only view: kept in the accessibility tree (no
+   display:none / visibility:hidden), but out of the grid so it adds no gap. */
+.approval-center__attendance-entry-copy .approval-center__attendance-entry-status--idle {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 @media (max-width: 1100px) {
