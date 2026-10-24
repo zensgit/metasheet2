@@ -1,5 +1,6 @@
 import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest'
+import type { WorkerGlobalState } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
@@ -411,7 +412,7 @@ attendanceIntegrationDescribe(
   attendanceIntegrationDbUrl
     ? 'Attendance Plugin Integration'
     : `Attendance Plugin Integration (${attendanceIntegrationMissingDbMessage})`,
-  () => {
+  async () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
   let importUploadDir: string | undefined
@@ -421,6 +422,59 @@ attendanceIntegrationDescribe(
   // suite (recorded W4 finding: shiftCompliance bleeding into attendance-schedule-dispatch).
   // Snapshot once, restore the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
   let settingsRowPool: Pool | undefined
+  type GroupPolicySnapshot = { allow_multiple_groups: boolean; version: number; updated_at: string }
+  let groupPolicySnapshot: GroupPolicySnapshot | null | undefined
+  let suiteGroupPolicySnapshot: GroupPolicySnapshot | null | undefined
+
+  async function snapshotGroupPolicyForTest(): Promise<GroupPolicySnapshot | null> {
+    if (!settingsRowPool) throw new Error('attendance integration policy fixture pool is unavailable')
+    const prior = await settingsRowPool.query<GroupPolicySnapshot>(
+      'SELECT allow_multiple_groups, version, updated_at::text AS updated_at FROM attendance_management_group_policies WHERE org_id = $1',
+      ['default'],
+    )
+    return prior.rows[0] ?? null
+  }
+
+  // These legacy scenarios intentionally add one subject to multiple groups.
+  // Opt in through the real policy route, then restore the exact fixture row.
+  async function enableMultipleGroupsForTest(token: string): Promise<void> {
+    groupPolicySnapshot = await snapshotGroupPolicyForTest()
+    const response = await requestJson(`${baseUrl}/api/attendance/group-membership-policy`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allowMultipleGroups: true, expectedVersion: groupPolicySnapshot?.version ?? 0 }),
+    })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      ok: true,
+      data: {
+        orgId: 'default',
+        allowMultipleGroups: true,
+        version: groupPolicySnapshot?.allow_multiple_groups
+          ? groupPolicySnapshot.version
+          : (groupPolicySnapshot?.version ?? 0) + 1,
+      },
+    })
+  }
+
+  async function restoreGroupPolicyForTest(snapshot = groupPolicySnapshot): Promise<void> {
+    if (snapshot === undefined || !settingsRowPool) return
+    if (snapshot === null) {
+      await settingsRowPool.query('DELETE FROM attendance_management_group_policies WHERE org_id = $1', ['default'])
+    } else {
+      await settingsRowPool.query(
+        `INSERT INTO attendance_management_group_policies (org_id, allow_multiple_groups, version, updated_at)
+         VALUES ($1, $2, $3, $4::timestamptz)
+         ON CONFLICT (org_id) DO UPDATE SET
+           allow_multiple_groups = EXCLUDED.allow_multiple_groups,
+           version = EXCLUDED.version,
+           updated_at = EXCLUDED.updated_at`,
+        ['default', snapshot.allow_multiple_groups, snapshot.version, snapshot.updated_at],
+      )
+    }
+    groupPolicySnapshot = undefined
+  }
+
   let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
   const seededImportIdentityIds = new Set<string>()
   const seededNeutralIdentityIds = new Set<string>()
@@ -525,21 +579,9 @@ attendanceIntegrationDescribe(
     return orgId
   }
 
-  beforeAll(async () => {
-    const canListen: boolean = await new Promise((resolve) => {
-      const s = net.createServer()
-      s.once('error', () => resolve(false))
-      s.listen(0, '127.0.0.1', () => s.close(() => resolve(true)))
-    })
-    if (!canListen) {
-      throw new Error('Attendance integration tests require an available loopback port.')
-    }
-
-    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
-    if (!dbUrl) {
-      throw new Error(attendanceIntegrationMissingDbMessage)
-    }
-
+  let integrationEnvironmentPrepared = false
+  function prepareIntegrationEnvironmentForTest(dbUrl: string): void {
+    if (integrationEnvironmentPrepared) return
     process.env.DATABASE_URL = dbUrl
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
@@ -575,6 +617,26 @@ attendanceIntegrationDescribe(
     if (!process.env.ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS) {
       process.env.ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS = '180000'
     }
+    integrationEnvironmentPrepared = true
+  }
+
+  beforeAll(async () => {
+    const canListen: boolean = await new Promise((resolve) => {
+      const s = net.createServer()
+      s.once('error', () => resolve(false))
+      s.listen(0, '127.0.0.1', () => s.close(() => resolve(true)))
+    })
+    if (!canListen) {
+      throw new Error('Attendance integration tests require an available loopback port.')
+    }
+
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) {
+      throw new Error(attendanceIntegrationMissingDbMessage)
+    }
+
+    prepareIntegrationEnvironmentForTest(dbUrl)
+    const repoRoot = path.join(__dirname, '../../../../')
 
     const pool = new Pool({ connectionString: dbUrl })
     try {
@@ -604,6 +666,7 @@ attendanceIntegrationDescribe(
 
     settingsRowPool = new Pool({ connectionString: dbUrl, max: 1 })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(settingsRowPool)
+    suiteGroupPolicySnapshot = await snapshotGroupPolicyForTest()
     await ensureActiveImportIdentitiesForTest(sharedImportUserId)
     const defaultRule = await settingsRowPool.query<{ id: string }>(
       `INSERT INTO attendance_rules
@@ -647,6 +710,7 @@ attendanceIntegrationDescribe(
   })
 
   afterEach(async () => {
+    await restoreGroupPolicyForTest()
     // Exact-restore the settings row after EVERY test (including failed ones): a test that PUT
     // settings and then failed before its own in-test restore must not leak state into the next
     // test here — or into any later suite sharing this Postgres. The beforeEach cache reset above
@@ -658,6 +722,9 @@ attendanceIntegrationDescribe(
 
   afterAll(async () => {
     if (settingsRowPool) {
+      await restoreGroupPolicyForTest()
+      // Normal admission checks can create a default-OFF row too; restore suite entry state.
+      await restoreGroupPolicyForTest(suiteGroupPolicySnapshot)
       const seededIdentityIds = [...new Set([...seededImportIdentityIds, ...seededNeutralIdentityIds])]
       // Only IDs returned by successful creates in this suite are removable.
       await settingsRowPool.query('DELETE FROM attendance_shift_assignments WHERE id=ANY($1::uuid[])',
@@ -720,6 +787,7 @@ attendanceIntegrationDescribe(
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
+    await enableMultipleGroupsForTest(token)
 
     const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
       method: 'POST',
@@ -4274,6 +4342,7 @@ attendanceIntegrationDescribe(
       await pool.end().catch(() => undefined)
       return
     }
+    await enableMultipleGroupsForTest(token)
     const headers = {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
@@ -20983,5 +21052,17 @@ attendanceIntegrationDescribe(
       await pool.end().catch(() => undefined)
     }
   }, 300_000)
+
+  // Prepare the same fixture environment before cold module acquisition.
+  // Database checks, fixture seeds and server.start remain in the original bounded hook.
+  // Name-filtered runs retain the hook path so skipped suites acquire no extra module resources.
+  // Vitest 1.6 exposes this worker state, but has no vi.getConfig() API.
+  const integrationWorker = (globalThis as typeof globalThis & {
+    __vitest_worker__: WorkerGlobalState
+  }).__vitest_worker__
+  if (attendanceIntegrationDbUrl && !integrationWorker.config.testNamePattern) {
+    prepareIntegrationEnvironmentForTest(attendanceIntegrationDbUrl)
+    await import('../../src/index')
+  }
 
 })

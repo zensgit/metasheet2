@@ -1,4 +1,5 @@
 import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
+import { up as groupMembershipPolicyUp } from '../../src/db/migrations/zzzz20261023120000_attendance_group_membership_policy'
 import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 /**
  * Test-only shared fixture for W4C-3a P08 candidate A/B.
@@ -201,6 +202,7 @@ export async function migrateP08Schema(connectionString: string): Promise<void> 
       .addColumn('id','uuid',column => column.primaryKey())
       .addColumn('timezone','text',column => column.notNull().defaultTo('UTC')).execute()
     await timezonePolicyUp(db)
+    await groupMembershipPolicyUp(db)
   } finally {
     // db.destroy() ends the underlying pool; do not call kyselyPool.end() again.
     await db.destroy()
