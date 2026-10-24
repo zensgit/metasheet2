@@ -16,6 +16,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import ApprovalCenterView from '../src/views/approval/ApprovalCenterView.vue'
 
 // ---------------------------------------------------------------------------
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — desktop master-detail pane.
@@ -481,7 +482,6 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
   })
 
   async function mountView() {
-    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalCenterView as any) })
     app = createApp(Host)
     app.component('ElTabs', ElTabs)
@@ -1427,7 +1427,6 @@ describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
   })
 
   async function mountAndSelect(id: string) {
-    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     app = createApp(defineComponent({ setup: () => () => h(ApprovalCenterView as any) }))
     app.component('ElTabs', ElTabs)
     app.component('ElTabPane', ElTabPane)

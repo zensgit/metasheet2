@@ -47,10 +47,17 @@ const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cj
 
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
-  applyStockPreparationAction,
-  dryRunStockPreparationAction,
+  applyStockPreparationAction: rawApplyStockPreparationAction,
+  dryRunStockPreparationAction: rawDryRunStockPreparationAction,
   __internals: tableActionInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+// Batch-refresh phase 0 step 1: apply requires the project write guard (the route holds the lease) and an
+// applicable dry-run binds its token to the plan generation. This suite predates that, so it calls the lib
+// through the REAL lock module (in memory, support/stock-preparation-project-write-lock-kit.cjs) exactly the way
+// the routes do: the dry-run with the generation binder, the apply inside the lease with the guard.
+const projectWriteLockHarness = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs')).createLibWriteLockHarness()
+const applyStockPreparationAction = projectWriteLockHarness.wrapApply(rawApplyStockPreparationAction)
+const dryRunStockPreparationAction = projectWriteLockHarness.wrapDryRun(rawDryRunStockPreparationAction)
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
@@ -164,6 +171,8 @@ function createMemoryStore() {
     async get(key) { return map.has(key) ? clone(map.get(key)) : null },
     async set(key, value) { map.set(key, clone(value)) },
     async delete(key) { map.delete(key) },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) { if (!map.has(key)) return null; const value = map.get(key); map.delete(key); return clone(value) },
   }
 }
 
@@ -254,8 +263,12 @@ function comparable(result) {
 function storedTokenRecord(store) {
   const entries = [...store.map.entries()]
   assert.equal(entries.length, 1, 'exactly one token record is stored by a ready dry-run')
-  const { createdAt, expiresAt, ...rest } = entries[0][1]
+  // The plan-generation binding (batch-refresh phase 0 step 1) is fresh on every applicable preview BY
+  // DESIGN — each one supersedes the last — so, like the two timestamps, it is set aside here; the scope
+  // it names stays in the compared record.
+  const { createdAt, expiresAt, writeGeneration, writeGenerationToken, ...rest } = entries[0][1]
   assert.ok(createdAt && expiresAt)
+  assert.ok(Number.isInteger(writeGeneration) && typeof writeGenerationToken === 'string', 'the token is bound to a plan generation')
   return rest
 }
 

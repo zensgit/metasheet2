@@ -80,6 +80,15 @@ function installTransaction(options: { failBackfill?: boolean; failRollback?: bo
           }],
         }
       }
+      if (/SELECT COALESCE\(role[\s\S]*FROM users/i.test(statement)) return { rows: [IDENTITY_USER] }
+      if (/SELECT enabled[\s\S]*FROM user_external_auth_grants/i.test(statement)) return { rows: [{ enabled: true }] }
+      if (/SELECT id,[\s\S]*FROM user_external_identities/i.test(statement)) {
+        const corpId = clientMocks.readDingTalkOauthConfig().corpId
+        return { rows: [{
+          id: 'identity-1', external_key: corpId ? `${corpId}:union-1` : 'union-1',
+          provider_union_id: 'union-1', provider_open_id: null, corp_id: corpId || null,
+        }] }
+      }
       if (/UPDATE users[\s\S]*access_generation/i.test(statement)) return { rows: [{ access_generation: 1 }] }
       if (/INSERT INTO user_external_identities/i.test(statement)) return { rows: [{ id: 'identity-new' }] }
       if (options.failSavepoint && /^SAVEPOINT /.test(statement)) {

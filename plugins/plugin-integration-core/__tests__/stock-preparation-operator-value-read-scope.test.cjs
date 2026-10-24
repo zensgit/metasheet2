@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE THREE VALUE-BEARING STOCK-PREP READS, ON ONE SCOPE.
 //
 // ---------------------------------------------------------------------------
@@ -650,7 +652,7 @@ function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
         },
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: { stockPreparationTableActions: [pullActionConfig()] },
   }
   const services = baseServices()

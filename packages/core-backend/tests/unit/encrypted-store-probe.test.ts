@@ -144,6 +144,8 @@ const YIDA_FIELDS = [
   ['integration_yida_approved_target', 'evidence_encrypted'],
   ['integration_yida_send_approvals', 'snapshot_encrypted'],
 ] as const
+/** maxRows per YiDa store: the two snapshot stores (largest rows) sample 20, the others 50. */
+const yidaCap = (store: string) => store === 'integration_yida_draft_operations' || store === 'integration_yida_send_approvals' ? 20 : 50
 
 const EXPECTED_STORE_FIELDS = [
   'data_sources.config.credentials.password',
@@ -341,7 +343,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
   function assertYidaCatalog(catalog: readonly EncryptedStoreCatalogEntry[]) {
     for (const [store, field] of YIDA_FIELDS) {
       expect(catalog.find((entry) => entry.store === store && entry.field === field)).toMatchObject({
-        store, field, scheme: 'platform-enc', prefixOn: 'raw', columns: [field],
+        store, field, scheme: 'platform-enc', prefixOn: 'raw', columns: [field], maxRows: yidaCap(store),
         sql: `SELECT ${field} AS value FROM ${store} WHERE ${field} <> '' LIMIT $1`,
       })
     }
@@ -359,6 +361,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
       for (const override of [
         { scheme: 'integration-credential' as const }, { prefixOn: 'trimmed' as const },
         { columns: ['other_column'] }, { sql: `SELECT ${field} AS value FROM ${store}` },
+        { maxRows: undefined }, { maxRows: 10_000 }, { maxRows: yidaCap(store) === 20 ? 50 : 20 },
       ]) {
         const mutated = ENCRYPTED_STORE_CATALOG.map((entry) => entry.store === store ? { ...entry, ...override } : entry)
         expect(() => assertYidaCatalog(mutated)).toThrow()
@@ -526,10 +529,13 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
       expect({ sql, forbidden: forbidden.exec(sql)?.[0] ?? null }).toEqual({ sql, forbidden: null })
       expect({ sql, statements: sql.includes(';') }).toEqual({ sql, statements: false })
     }
-    // Catalog reads are bounded by LIMIT $1 = rowLimit + 1; the precheck reads one table's columns,
-    // through to_regclass (NULL, not an ERROR, for a missing relation).
+    // Catalog reads are bounded by LIMIT $1 = rowLimit + 1 (YiDa: maxRows 50, or 20 for the two
+    // snapshot stores, + 1); the precheck reads one table's columns, through to_regclass (NULL, not
+    // an ERROR, for a missing relation).
     for (const s of db.catalogStatements()) {
-      expect({ sql: s.sql, bounded: /\sLIMIT \$1$/.test(s.sql), params: s.params }).toEqual({ sql: s.sql, bounded: true, params: [10_001] })
+      const entry = ENCRYPTED_STORE_CATALOG.find((e) => e.sql === s.sql) as EncryptedStoreCatalogEntry
+      const yida = s.sql.includes(' FROM integration_yida_')
+      expect({ sql: s.sql, bounded: /\sLIMIT \$1$/.test(s.sql), params: s.params }).toEqual({ sql: s.sql, bounded: true, params: [yida ? yidaCap(entry.store) + 1 : 10_001] })
     }
     expect(ENCRYPTED_STORE_COLUMNS_SQL).toBe('SELECT attname FROM pg_attribute WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped')
     expect(db.prechecks().every((s) => s.params?.length === 1 && CATALOG_TABLES.includes(String(s.params[0])))).toBe(true)
@@ -554,8 +560,36 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
     const db = fakeDatabase({ 'data_sources.config.credentials.password': rows })
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A, rowLimit: 2 })
     expect(db.catalogStatements()[0].params).toEqual([3])
-    expect(report.stores[0]).toMatchObject({ rows: 2, encrypted: 2, plaintext: 0, truncated: true })
+    expect(report.stores[0]).toMatchObject({ rows: 2, encrypted: 2, plaintext: 0, truncated: true, sampled: 2 })
     expect(report.stores[1].truncated).toBeUndefined()
+    expect(report.stores[1].sampled).toBeUndefined()
+  })
+
+  it('YiDa stores read at most maxRows (50; 20 for draft operations and send approvals): more rows are sampled with LIMIT maxRows + 1 and say `truncated`; other stores keep rowLimit', async () => {
+    expect(ENCRYPTED_STORE_CATALOG.filter((e) => e.maxRows !== undefined).map((e) => `${e.store}.${e.field}`))
+      .toEqual(YIDA_FIELDS.map(([store, field]) => `${store}.${field}`))
+    const many = (label: string) => Array.from({ length: 120 }, () => (fixture.rows[label] as string[])[0])
+    const rows: FixtureRows = { 'data_sources.config.credentials.password': many('data_sources.config.credentials.password') }
+    for (const [store, field] of YIDA_FIELDS) rows[`${store}.${field}`] = many(`${store}.${field}`)
+    const db = fakeDatabase(rows)
+    const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
+    for (const [store, field] of YIDA_FIELDS) {
+      const entry = ENCRYPTED_STORE_CATALOG.find((e) => e.store === store && e.field === field) as EncryptedStoreCatalogEntry
+      const cap = yidaCap(store)
+      expect({ store, params: db.catalogStatements().filter((s) => s.sql === entry.sql).map((s) => s.params) })
+        .toEqual({ store, params: [[cap + 1]] })
+      expect(report.stores.find((s) => s.store === store && s.field === field))
+        .toMatchObject({ status: 'ok', rows: cap, encrypted: cap, undecryptable: 0, plaintext: 0, truncated: true, sampled: cap })
+    }
+    expect(report.stores[0]).toMatchObject({ rows: 120, encrypted: 120 })
+    expect(report.stores[0].truncated).toBeUndefined()
+    // A smaller run rowLimit still wins over the entry's cap.
+    const small = fakeDatabase(rows)
+    const capped = await probeEncryptedStores({ query: small.query, env: ENV_A, rowLimit: 3 })
+    for (const [store, field] of YIDA_FIELDS) {
+      expect(capped.stores.find((s) => s.store === store && s.field === field)).toMatchObject({ rows: 3, truncated: true, sampled: 3 })
+    }
+    expect(small.catalogStatements().map((s) => s.params)).toEqual(ENCRYPTED_STORE_CATALOG.map(() => [4]))
   })
 })
 
@@ -897,9 +931,23 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     expect(logger.warn.mock.calls.map((call) => `${call[1].store}.${call[1].field}`)).toEqual(broken)
     for (const [message, meta] of logger.warn.mock.calls) {
       expect(message).toContain(ENCRYPTED_STORE_REENTER_HINT)
+      // Nothing was truncated here, so no warning claims a sample.
+      expect(message).not.toContain('Checked a sample')
       expect(meta).toEqual({ store: expect.any(String), field: expect.any(String), encrypted: expect.any(Number), undecryptable: expect.any(Number) })
       expect(meta.undecryptable).toBeGreaterThan(0)
     }
+  })
+
+  it('a truncated store field warns that only an unordered sample of N rows was checked (a count, never a value)', async () => {
+    const logger = captureLogger()
+    const label = 'integration_yida_send_approvals.snapshot_encrypted'
+    const rows: FixtureRows = { [label]: Array.from({ length: 30 }, () => (fixture.rows[label] as string[])[0]) }
+    await runEncryptedStoreProbeAtStartup({ resolvePool: () => fakeDatabase(rows), env: ENV_B, logger })
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    const [message, meta] = logger.warn.mock.calls[0]
+    expect(message).toBe(`Encrypted store probe: ${label} has 20 of 20 encrypted value(s) the current material cannot decrypt. ` +
+      `Checked a sample of 20 row(s) (unordered LIMIT); other rows were not checked. ${ENCRYPTED_STORE_REENTER_HINT}`)
+    expect(meta).toEqual({ store: 'integration_yida_send_approvals', field: 'snapshot_encrypted', encrypted: 20, undecryptable: 20 })
   })
 
   it('material intact: the info summary only, no warning', async () => {

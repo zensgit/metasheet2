@@ -64,6 +64,7 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
 import { grantStockPreparationOverviewRoleRead } from './services/stock-preparation-overview-grants'
+import { closeSheetGridExport, readSheetGridExportClosure } from './services/sheet-grid-export-closure-service'
 import { loadStockPreparationOverviewSheetIds } from './multitable/stock-preparation-overview-contract'
 import { createStockPrepMembersHostPort } from './services/stock-preparation-members-host'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
@@ -120,6 +121,7 @@ import {
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
+import { assertPluginWriteFence, refusePluginWriteFenceOnUnfencedSurface } from './multitable/plugin-write-fence'
 import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
@@ -1204,6 +1206,37 @@ export class MetaSheetServer {
               return grantStockPreparationOverviewRoleRead(txQuery, { sheetId, roleIds, actorId })
             })
           },
+          // 备料分批拉取第一期 step 3 (PR A): stamp one project sheet closed for generic grid export. ONE
+          // transaction (canonical writer fence → row lock + liveness → set-once UPDATE); refusals propagate
+          // unwrapped. The scope wrapper (plugin-scope.ts) already refused everything about WHICH sheet and hands
+          // this port to plugin-integration-core only. There is no reopen / unset counterpart.
+          closeSheetGridExport: async ({ sheetId, actorId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery = async (sql: string, params?: unknown[]) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return closeSheetGridExport(txQuery, { sheetId, actorId })
+            })
+          },
+          // Read-only twin: no transaction, no lock; column-tolerant.
+          getSheetGridExportClosure: async ({ sheetId }) => {
+            const readQuery = async (sql: string, params?: unknown[]) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+              }
+            }
+            return readSheetGridExportClosure(readQuery, { sheetId })
+          },
         },
         records: {
           // W9: this records surface routes `queryRecords` straight to the multitable query
@@ -1213,6 +1246,9 @@ export class MetaSheetServer {
           // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
           // only when the surface underneath declares it.
           supportsFilterValueLists: true,
+          // PR #6501: create / patch honour a plugin-scope-resolved `writeFence` INSIDE the write transaction
+          // (multitable/plugin-write-fence.ts). An unresolved fence is refused, never ignored.
+          supportsWriteFence: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -1254,7 +1290,7 @@ export class MetaSheetServer {
               offset,
             })
           },
-          createRecord: async ({ sheetId, data }) => {
+          createRecord: async ({ sheetId, data, writeFence }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1267,6 +1303,8 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              // FIRST statement of the write transaction: the fence's FOR SHARE is held until COMMIT.
+              await assertPluginWriteFence(txQuery, writeFence)
               return createMultitableRecord({
                 query: txQuery,
                 sheetId,
@@ -1292,7 +1330,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1305,6 +1343,7 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              await assertPluginWriteFence(txQuery, writeFence)
               return patchMultitableRecord({
                 query: txQuery,
                 sheetId,
@@ -1314,7 +1353,10 @@ export class MetaSheetServer {
               })
             })
           },
-          deleteRecord: async ({ sheetId, recordId }) => {
+          deleteRecord: async (input) => {
+            // PR #6501 round 6 (S2): delete implements no fence — a `writeFence` is refused, never dropped.
+            refusePluginWriteFenceOnUnfencedSurface(input, 'records.deleteRecord')
+            const { sheetId, recordId } = input
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -2559,16 +2601,24 @@ export class MetaSheetServer {
                       limit,
                       offset,
                     }),
-                  createRecord: ({ sheetId, data }) =>
-                    createMultitableRecord({ query: txQuery, sheetId, data }),
-                  patchRecord: ({ sheetId, recordId, changes, expectedVersion }) =>
-                    patchMultitableRecord({
+                  // PR #6501 round 6 (S2): the unit of work implements no fence — a `writeFence` on either
+                  // write is refused (the transaction rolls back), never dropped.
+                  createRecord: (recordInput) => {
+                    refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.createRecord')
+                    const { sheetId, data } = recordInput
+                    return createMultitableRecord({ query: txQuery, sheetId, data })
+                  },
+                  patchRecord: (recordInput) => {
+                    refusePluginWriteFenceOnUnfencedSurface(recordInput, 'runStockPreparationPersistUnitOfWork.patchRecord')
+                    const { sheetId, recordId, changes, expectedVersion } = recordInput
+                    return patchMultitableRecord({
                       query: txQuery,
                       sheetId,
                       recordId,
                       changes,
                       expectedVersion,
-                    }),
+                    })
+                  },
                 })
               })
             },
@@ -3040,7 +3090,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   }),
                 // Approval-change-request lock §3 C-1 — bind the boundary the plugin just built as
@@ -3364,7 +3414,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: (error?: Error) => client.release(error) }
                     },
                   })
                   return processor.processLegacyImportPlanV1(jobId)
@@ -3376,7 +3426,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: (error?: Error) => client.release(error) }
                     },
                   })
                   return host.reserveLegacyImportPlanV1(input)
@@ -3391,7 +3441,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   })
                   return host.commitSyncImportPlanV1(input)
@@ -3476,7 +3526,7 @@ export class MetaSheetServer {
             ? createAttendanceImportRollbackBoundaryV1({
                 acquireConnection: async () => {
                   const client = await poolManager.get().getInternalPool().connect()
-                  return { client, release: () => client.release() }
+                  return { client, release: (error?: Error) => client.release(error) }
                 },
               })
             : undefined,

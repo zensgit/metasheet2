@@ -233,7 +233,8 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
       '062_create_integration_read_source_configs.sql', '063_create_integration_read_source_composition_configs.sql',
       '066_create_integration_stock_prep_audit.sql',
       '076_create_integration_stock_prep_pack_installs.sql', '079_create_integration_stock_prep_source_binding.sql',
-      '080_extend_stock_prep_audit_source_binding_action.sql', '089_create_integration_stock_prep_read_plan_versions.sql']) {
+      '080_extend_stock_prep_audit_source_binding_action.sql', '089_create_integration_stock_prep_read_plan_versions.sql',
+      '100_create_integration_stock_prep_project_write_lock.sql']) {
       await fixturePool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
     }
     await createDataSources(fixtureDb)

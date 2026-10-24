@@ -58,6 +58,7 @@
             id="attendance-from-date"
             name="fromDate"
             v-model="fromDate"
+            @update:model-value="reportRangeCalendarBasis = 'manual'"
             :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
             :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
           />
@@ -68,6 +69,7 @@
             id="attendance-to-date"
             name="toDate"
             v-model="toDate"
+            @update:model-value="reportRangeCalendarBasis = 'manual'"
             :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
             :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
           />
@@ -80,12 +82,17 @@
             :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
             type="button"
             :data-report-filter-value="preset.id"
+            :disabled="reportRangePresetDisabled"
             @click="applyReportRangePreset(preset.id)"
           >
             {{ preset.label }}
           </button>
         </div>
         <small class="attendance__field-hint" data-report-period-label>{{ reportRangeLabel }}</small>
+        <small class="attendance__field-hint" data-report-calendar-basis>{{ reportRangeCalendarBasisLabel }}</small>
+        <small v-if="!resolvedAttendanceTimezone" class="attendance__field-hint" data-report-calendar-unavailable>
+          {{ tr('Choose dates manually. Shortcuts require one valid timezone across the loaded records.', '请手动选择日期。快捷区间需要已加载记录具有唯一有效时区。') }}
+        </small>
         <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
           {{ tr('Reload report', '重载报表') }}
         </button>
@@ -2828,6 +2835,7 @@
                     name="autoAbsenceRunAt"
                     v-model="settingsForm.autoAbsenceRunAt"
                   />
+                  <small>{{ tr('Runs in each organization’s default attendance timezone.', '按各组织默认考勤时区执行。') }}</small>
                 </label>
                 <label class="attendance__field attendance__field--compact-control" for="attendance-auto-absence-lookback">
                   <span>{{ tr('Lookback days', '回溯天数') }}</span>
@@ -10425,7 +10433,7 @@ import {
   type AttendanceRecordRequestPrefill,
 } from './attendance/attendanceRecordRequestPrefill'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
-import { isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
+import { attendanceReportDateRangeError, isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import { isAttendanceAdminEndpointUnavailable } from './attendance/attendanceAdminEndpointCompatibility'
@@ -10749,6 +10757,7 @@ import {
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
+import { buildAttendanceReportCalendarRange, type AttendanceReportRangePreset } from './attendance/attendanceReportCalendar'
 import {
   applyAdminPageContentSearch,
   clearAdminPageContentSearch,
@@ -10760,7 +10769,6 @@ import { attendanceDayTimezoneLabel, parseAttendanceDayTimeContext, type Attenda
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
-type AttendanceReportRangePreset = 'this-week' | 'this-month' | 'last-month' | 'this-quarter'
 const ATTENDANCE_OVERVIEW_SECTION_IDS = {
   requests: 'attendance-overview-requests',
   anomalies: 'attendance-overview-anomalies',
@@ -12871,6 +12879,30 @@ const requestReportTypeFilter = ref('all')
 const recordStatusFilter = ref('all')
 const reportsUnavailable = ref(false)
 const loadedReportsQueryKey = ref('')
+const reportsPartialDataStale = ref(false)
+let reportsInputVersion = 0
+let reportsBatchVersion = 0
+let reportsLocalVersion = 0
+let summaryLoadVersion = 0
+let requestReportLoadVersion = 0
+type ReportsBatch = { version: number; localVersion: number; queryKey: string }
+
+function isCurrentReportsBatch(batch: ReportsBatch): boolean {
+  return batch.version === reportsBatchVersion && batch.localVersion === reportsLocalVersion
+}
+
+function isCurrentReportLoad(batch: ReportsBatch | undefined, queryKey: string, inputVersion: number): boolean {
+  // Whole batches retain #6493's explicit stale snapshot while dates are edited. Local reads do not.
+  return batch ? isCurrentReportsBatch(batch)
+    : inputVersion === reportsInputVersion && queryKey === currentReportsQueryKey.value
+}
+
+function invalidateCrossRangePartialReport(): void {
+  reportsLocalVersion += 1
+  if (showReports.value && loadedReportsQueryKey.value !== currentReportsQueryKey.value) {
+    reportsPartialDataStale.value = true
+  }
+}
 const currentReportsQueryKey = computed(() =>
   buildQuery({
     from: fromDate.value,
@@ -12880,72 +12912,36 @@ const currentReportsQueryKey = computed(() =>
   }).toString()
 )
 const reportsDataStale = computed(() =>
-  loadedReportsQueryKey.value.length > 0 && loadedReportsQueryKey.value !== currentReportsQueryKey.value
+  reportsPartialDataStale.value || loadedReportsQueryKey.value !== currentReportsQueryKey.value
 )
 const reportsExportBlocked = computed(() =>
-  reportsUnavailable.value || reportsDataStale.value
+  reportsUnavailable.value || !loadedReportsQueryKey.value || reportsDataStale.value
 )
 
-function startOfWeek(date: Date): Date {
-  const next = new Date(date)
-  const day = next.getDay()
-  const delta = day === 0 ? -6 : 1 - day
-  next.setDate(next.getDate() + delta)
-  next.setHours(0, 0, 0, 0)
-  return next
-}
-
-function endOfWeek(date: Date): Date {
-  const next = startOfWeek(date)
-  next.setDate(next.getDate() + 6)
-  next.setHours(23, 59, 59, 999)
-  return next
-}
-
-function firstDayOfQuarter(date: Date): Date {
-  const month = Math.floor(date.getMonth() / 3) * 3
-  return new Date(date.getFullYear(), month, 1)
-}
-
-function lastDayOfQuarter(date: Date): Date {
-  const start = firstDayOfQuarter(date)
-  return new Date(start.getFullYear(), start.getMonth() + 3, 0)
-}
-
-function buildReportRangePreset(preset: AttendanceReportRangePreset): { from: string; to: string } {
-  if (preset === 'this-week') {
-    const now = new Date()
-    return {
-      from: toDateInput(startOfWeek(now)),
-      to: toDateInput(endOfWeek(now)),
-    }
+const reportRangeCalendarBasis = ref('browser')
+const reportRangeCalendarBasisLabel = computed(() => {
+  if (reportRangeCalendarBasis.value === 'browser') {
+    return tr('Initial range uses the browser calendar until a record timezone is available.', '初始区间暂按浏览器日历，获得记录时区后对齐。')
   }
-  if (preset === 'this-month') {
-    const now = new Date()
-    return {
-      from: toDateInput(firstDayOfMonth(now)),
-      to: toDateInput(lastDayOfMonth(now)),
-    }
-  }
-  if (preset === 'last-month') {
-    const now = new Date()
-    const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    return {
-      from: toDateInput(firstDayOfMonth(previousMonth)),
-      to: toDateInput(lastDayOfMonth(previousMonth)),
-    }
-  }
-  const now = new Date()
-  return {
-    from: toDateInput(firstDayOfQuarter(now)),
-    to: toDateInput(lastDayOfQuarter(now)),
-  }
+  if (reportRangeCalendarBasis.value === 'manual') return tr('Manually selected dates', '手动选择的日期')
+  return tr(`Range selected using record timezone: ${reportRangeCalendarBasis.value}`, `区间按记录时区选择：${reportRangeCalendarBasis.value}`)
+})
+const reportsRecordTargetStale = computed(() => {
+  const loaded = new URLSearchParams(loadedReportsQueryKey.value)
+  const current = new URLSearchParams(currentReportsQueryKey.value)
+  return ['orgId', 'userId'].some(key => loaded.get(key) !== current.get(key))
+})
+const reportRangePresetDisabled = computed(() => loading.value || reportLoading.value
+  || reportsUnavailable.value || reportsRecordTargetStale.value || !resolvedAttendanceTimezone.value)
+function buildReportRangePreset(preset: AttendanceReportRangePreset) {
+  return buildAttendanceReportCalendarRange(preset, new Date(), resolvedAttendanceTimezone.value)
 }
 
 function formatShortDate(value: string): string {
-  const date = new Date(`${value}T00:00:00`)
+  const date = new Date(`${value}T00:00:00Z`)
   if (Number.isNaN(date.getTime())) return value
   return new Intl.DateTimeFormat(locale.value, {
+    timeZone: 'UTC',
     month: 'short',
     day: 'numeric',
   }).format(date)
@@ -12961,7 +12957,7 @@ const reportRangePresetOptions = computed<Array<{ id: AttendanceReportRangePrese
 const activeReportRangePreset = computed<AttendanceReportRangePreset | ''>(() => {
   for (const preset of reportRangePresetOptions.value) {
     const range = buildReportRangePreset(preset.id)
-    if (range.from === fromDate.value && range.to === toDate.value) {
+    if (range && range.from === fromDate.value && range.to === toDate.value) {
       return preset.id
     }
   }
@@ -13232,7 +13228,7 @@ const advancedSchedulingWorkbenchTruncationWarning = computed(() => {
 })
 
 const reportRangeLabel = computed(() => {
-  if (!fromDate.value || !toDate.value) return tr('Range not set', '区间未设置')
+  if (!isAttendanceReportDateRangeValid(fromDate.value, toDate.value)) return tr('Range not set', '区间未设置')
   return tr(
     `Range: ${formatShortDate(fromDate.value)} - ${formatShortDate(toDate.value)}`,
     `区间：${formatShortDate(fromDate.value)} - ${formatShortDate(toDate.value)}`,
@@ -14112,13 +14108,15 @@ function clearReportsDataset(): void {
 }
 
 function beginReportsDatasetRefresh(): void {
+  loadedReportsQueryKey.value = ''
   reportsUnavailable.value = false
   clearReportsDataset()
 }
 
-function markReportsDatasetLoaded(): void {
+function markReportsDatasetLoaded(queryKey: string): void {
+  reportsPartialDataStale.value = false
   reportsUnavailable.value = false
-  loadedReportsQueryKey.value = currentReportsQueryKey.value
+  loadedReportsQueryKey.value = queryKey
 }
 
 function markReportsDatasetUnavailable(): void {
@@ -14128,7 +14126,10 @@ function markReportsDatasetUnavailable(): void {
 }
 
 async function applyReportRangePreset(preset: AttendanceReportRangePreset): Promise<void> {
+  if (reportRangePresetDisabled.value) return
   const range = buildReportRangePreset(preset)
+  if (!range) return
+  reportRangeCalendarBasis.value = resolvedAttendanceTimezone.value!
   fromDate.value = range.from
   toDate.value = range.to
   recordsPage.value = 1
@@ -23088,19 +23089,25 @@ async function retryPunchWithOutdoorNote() {
   await punch(eventType, note)
 }
 
-async function loadSummary() {
-  const query = buildQuery({
-    from: fromDate.value,
-    to: toDate.value,
-    orgId: normalizedOrgId(),
-    userId: normalizedUserId(),
-  })
-  const response = await apiFetch(`/api/attendance/summary?${query.toString()}`)
-  const data = await response.json()
-  if (!response.ok || !data.ok) {
-    throw createApiError(response, data, tr('Failed to load summary', '加载汇总失败'))
+async function loadSummary(batch?: ReportsBatch): Promise<boolean> {
+  const version = ++summaryLoadVersion
+  const inputVersion = reportsInputVersion
+  const queryKey = batch?.queryKey ?? currentReportsQueryKey.value
+  const isCurrent = () => version === summaryLoadVersion
+    && (!showReports.value || isCurrentReportLoad(batch, queryKey, inputVersion))
+  try {
+    const response = await apiFetch(`/api/attendance/summary?${queryKey}`)
+    const data = await response.json()
+    if (!isCurrent()) return false
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to load summary', '加载汇总失败'))
+    }
+    summary.value = data.data
+    return true
+  } catch (error) {
+    if (!isCurrent()) return false
+    throw error
   }
-  summary.value = data.data
 }
 
 async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
@@ -23159,16 +23166,21 @@ async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
   }
 }
 
-async function loadRecords() {
+async function loadRecords(batch?: ReportsBatch): Promise<boolean> {
   const recordsStartedAt = heroClockNow.value
   const version = ++historyRecordsLoadVersion
-  loadedHistoryScope = null
+  const inputVersion = reportsInputVersion
+  const queryKey = batch?.queryKey ?? currentReportsQueryKey.value
+  const params = new URLSearchParams(queryKey)
+  const isCurrent = () => version === historyRecordsLoadVersion
+    && (!showReports.value || isCurrentReportLoad(batch, queryKey, inputVersion))
+  if (!showReports.value) loadedHistoryScope = null
   const scope = {
-    from: fromDate.value,
-    to: toDate.value,
+    from: params.get('from') ?? '',
+    to: params.get('to') ?? '',
     page: recordsPage.value,
-    orgId: normalizedOrgId() ?? '',
-    userId: normalizedUserId(),
+    orgId: params.get('orgId') ?? '',
+    userId: params.get('userId') ?? undefined,
   }
   const query = buildQuery({
     ...scope,
@@ -23176,24 +23188,29 @@ async function loadRecords() {
     pageSize: String(recordsPageSize),
     orgId: scope.orgId || undefined,
   })
-  const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
-  const data = await response.json()
-  if (!response.ok || !data.ok) {
-    throw createApiError(response, data, tr('Failed to load records', '加载记录失败'))
-  }
-  if (version !== historyRecordsLoadVersion) return
-  resetRecordTimelineState()
-  records.value = data.data.items
-  recordsTotal.value = data.data.total
-  loadedHistoryScope = { ...scope, total: data.data.total }
-  recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
-  recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
-  if (showOverview.value && !loading.value) {
-    const reuseHistory = !recordsStartedAt || formatAttendanceDateKey(recordsStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
-    await loadTodayAttendanceRecord(reuseHistory)
+  try {
+    const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
+    const data = await response.json()
+    if (!isCurrent()) return false
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to load records', '加载记录失败'))
+    }
+    resetRecordTimelineState()
+    records.value = data.data.items
+    recordsTotal.value = data.data.total
+    loadedHistoryScope = { ...scope, total: data.data.total }
+    recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
+    recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
+    if (showOverview.value && !loading.value) {
+      const reuseHistory = !recordsStartedAt || formatAttendanceDateKey(recordsStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+      await loadTodayAttendanceRecord(reuseHistory)
+    }
+    return true
+  } catch (error) {
+    if (!isCurrent()) return false
+    throw error
   }
 }
-
 
 async function loadTodayAttendanceRecord(reuseHistory = true): Promise<boolean> {
   const version = ++todayRecordLoadVersion
@@ -23671,31 +23688,40 @@ async function setAnomalyFilter(filter: AttendanceAnomalyFilter): Promise<void> 
   }
 }
 
-async function loadRequestReport() {
+async function loadRequestReport(batch?: ReportsBatch): Promise<boolean> {
+  const version = ++requestReportLoadVersion
+  const inputVersion = reportsInputVersion
+  const queryKey = batch?.queryKey ?? currentReportsQueryKey.value
+  const isCurrent = () => version === requestReportLoadVersion
+    && (!showReports.value || isCurrentReportLoad(batch, queryKey, inputVersion))
   reportLoading.value = true
   try {
-    const query = buildQuery({
-      from: fromDate.value,
-      to: toDate.value,
-      orgId: normalizedOrgId(),
-      userId: normalizedUserId(),
-    })
-    const response = await apiFetch(`/api/attendance/reports/requests?${query.toString()}`)
+    const response = await apiFetch(`/api/attendance/reports/requests?${queryKey}`)
     const data = await response.json()
+    if (!isCurrent()) return false
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Failed to load request report', '加载申请报表失败'))
     }
     requestReport.value = data.data.items || []
+    return true
+  } catch (error) {
+    if (!isCurrent()) return false
+    throw error
   } finally {
-    reportLoading.value = false
+    if (version === requestReportLoadVersion) reportLoading.value = false
   }
 }
 
 function validateReportDateRange(): boolean {
-  if (isAttendanceReportDateRangeValid(fromDate.value, toDate.value)) return true
+  const error = attendanceReportDateRangeError(fromDate.value, toDate.value)
+  if (!error) return true
 
   setStatus(
-    tr('Start date must be on or before end date.', '开始日期不能晚于结束日期。'),
+    error === 'required'
+      ? tr('Choose both start and end dates.', '请填写开始日期和结束日期。')
+      : error === 'invalid'
+        ? tr('Use valid dates in YYYY-MM-DD format.', '请输入 YYYY-MM-DD 格式的真实日期。')
+        : tr('Start date must be on or before end date.', '开始日期不能晚于结束日期。'),
     'error',
   )
   return false
@@ -23703,6 +23729,19 @@ function validateReportDateRange(): boolean {
 
 function consumeDefaultHistoryRangeAlignment(): boolean {
   if (defaultHistoryRangeAligned) return false
+  if (showReports.value) {
+    const zone = resolvedAttendanceTimezone.value
+    const range = buildAttendanceReportCalendarRange('recent', new Date(), zone)
+    if (!range) return false
+    defaultHistoryRangeAligned = true
+    if (reportRangeCalendarBasis.value !== 'browser'
+      || fromDate.value !== initialHistoryFromDate || toDate.value !== initialHistoryToDate) return false
+    const changed = range.from !== fromDate.value || range.to !== toDate.value
+    fromDate.value = range.from
+    toDate.value = range.to
+    reportRangeCalendarBasis.value = zone!
+    return changed
+  }
   const todayKey = todayWorkDateKey.value
   if (!todayKey) return false
   defaultHistoryRangeAligned = true
@@ -23723,12 +23762,16 @@ function consumeDefaultHistoryRangeAlignment(): boolean {
 }
 
 async function refreshAll(): Promise<boolean> {
+  if (showReports.value && !validateReportDateRange()) return false
   if (!attendancePluginActive.value) return false
   const refreshStartedAt = heroClockNow.value
+  let reportsQueryKey = currentReportsQueryKey.value
+  const batch = showReports.value ? { version: ++reportsBatchVersion, localVersion: reportsLocalVersion, queryKey: reportsQueryKey } : undefined
   loading.value = true
   todayRecordLoadVersion += 1
   todayRecordState.value = 'loading'
   recordsPage.value = 1
+  if (batch) beginReportsDatasetRefresh()
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
   // PR2 review fix (Codex Blocking #1): commit the userId for the overview
   // calendar HERE — same moment summary/records/requests are refreshed —
@@ -23739,7 +23782,7 @@ async function refreshAll(): Promise<boolean> {
   committedCalendarUserId.value = normalizedUserId() ?? currentUserId.value ?? null
   let success = true
   try {
-    const tasks = [loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()]
+    const tasks = [loadSummary(batch), loadRecords(batch), loadRequests(), loadAnomalies(), loadRequestReport(batch), loadHolidays(batch)]
     if (showOverview.value) {
       tasks.push(loadSelfAttendanceRules())
     }
@@ -23752,27 +23795,32 @@ async function refreshAll(): Promise<boolean> {
       )
     }
     const results = await Promise.allSettled(tasks)
+    if (batch && (!isCurrentReportsBatch(batch) || results.some(result => result.status === 'fulfilled' && result.value === false))) return false
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
-    if (consumeDefaultHistoryRangeAlignment()) {
+    if ((!showReports.value || reportsQueryKey === currentReportsQueryKey.value) && consumeDefaultHistoryRangeAlignment()) {
+      reportsQueryKey = currentReportsQueryKey.value
+      if (batch) batch.queryKey = reportsQueryKey
       calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
       const reloaded = await Promise.allSettled([
-        loadSummary(),
-        loadRecords(),
+        loadSummary(batch),
+        loadRecords(batch),
         loadAnomalies(),
-        loadRequestReport(),
-        loadHolidays(),
+        loadRequestReport(batch),
+        loadHolidays(batch),
       ])
+      if (batch && (!isCurrentReportsBatch(batch) || reloaded.some(result => result.status === 'fulfilled' && result.value === false))) return false
       const reloadFailed = reloaded.find((result): result is PromiseRejectedResult => result.status === 'rejected')
       if (reloadFailed) throw reloadFailed.reason
     }
     if (showReports.value) {
-      markReportsDatasetLoaded()
+      markReportsDatasetLoaded(reportsQueryKey)
     }
     if (lastCalendarEffectiveRange.value) {
       void loadEffectiveCalendarForOverview(lastCalendarEffectiveRange.value, { force: true })
     }
   } catch (error: any) {
+    if (batch && !isCurrentReportsBatch(batch)) return false
     success = false
     if (showReports.value) {
       markReportsDatasetUnavailable()
@@ -23781,7 +23829,7 @@ async function refreshAll(): Promise<boolean> {
   } finally {
     const reuseHistory = !refreshStartedAt || formatAttendanceDateKey(refreshStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
     if (showOverview.value && !await loadTodayAttendanceRecord(reuseHistory)) success = false
-    loading.value = false
+    if (!batch || batch.version === reportsBatchVersion) loading.value = false
   }
   return success
 }
@@ -23796,15 +23844,27 @@ async function refreshOverviewWithStatus() {
 
 async function reloadReportsWithStatus() {
   if (!validateReportDateRange()) return
+  let reportsQueryKey = currentReportsQueryKey.value
+  const batch: ReportsBatch = { version: ++reportsBatchVersion, localVersion: reportsLocalVersion, queryKey: reportsQueryKey }
 
   loading.value = true
   recordsPage.value = 1
   beginReportsDatasetRefresh()
   try {
-    const results = await Promise.allSettled([loadSummary(), loadRequestReport(), loadRecords()])
+    const results = await Promise.allSettled([loadSummary(batch), loadRequestReport(batch), loadRecords(batch)])
+    if (!isCurrentReportsBatch(batch) || results.some(result => result.status === 'fulfilled' && result.value === false)) return
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
-    markReportsDatasetLoaded()
+    if ((!showReports.value || reportsQueryKey === currentReportsQueryKey.value) && consumeDefaultHistoryRangeAlignment()) {
+      reportsQueryKey = currentReportsQueryKey.value
+      batch.queryKey = reportsQueryKey
+      const reloaded = await Promise.allSettled([loadSummary(batch), loadRequestReport(batch), loadRecords(batch)])
+      if (!isCurrentReportsBatch(batch) || reloaded.some(result => result.status === 'fulfilled' && result.value === false)) return
+      const reloadFailed = reloaded.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (reloadFailed) throw reloadFailed.reason
+    }
+    markReportsDatasetLoaded(reportsQueryKey)
+    if (reportsQueryKey !== currentReportsQueryKey.value) return
     setStatus(
       appendStatusContext(
         tr(
@@ -23815,6 +23875,7 @@ async function reloadReportsWithStatus() {
       ),
     )
   } catch (error: any) {
+    if (!isCurrentReportsBatch(batch)) return
     markReportsDatasetUnavailable()
     setStatusFromErrorWithContext(
       error,
@@ -23823,7 +23884,7 @@ async function reloadReportsWithStatus() {
       'report-refresh',
     )
   } finally {
-    loading.value = false
+    if (batch.version === reportsBatchVersion) loading.value = false
   }
 }
 
@@ -23860,8 +23921,13 @@ async function reloadAnomaliesWithStatus() {
 async function reloadRequestReportWithStatus() {
   if (!validateReportDateRange()) return
 
+  invalidateCrossRangePartialReport()
+  const inputVersion = reportsInputVersion
+  const queryKey = currentReportsQueryKey.value
+  const version = requestReportLoadVersion + 1
+  const isCurrent = () => version === requestReportLoadVersion && isCurrentReportLoad(undefined, queryKey, inputVersion)
   try {
-    await loadRequestReport()
+    if (!await loadRequestReport() || !isCurrent()) return
     setStatus(
       appendStatusContext(
         tr(`Report loaded (${requestReport.value.length}).`, `报表已加载（${requestReport.value.length} 条）。`),
@@ -23869,6 +23935,7 @@ async function reloadRequestReportWithStatus() {
       ),
     )
   } catch (error: any) {
+    if (!isCurrent()) return
     setStatusFromErrorWithContext(
       error,
       tr('Failed to load request report', '加载申请报表失败'),
@@ -24186,11 +24253,30 @@ async function cancelRequest(id: string, requestType = '') {
 }
 
 async function changeRecordsPage(delta: number) {
+  if (showReports.value && !validateReportDateRange()) return
   const next = recordsPage.value + delta
   if (next < 1 || next > recordsTotalPages.value) return
+  const previousPage = recordsPage.value
+  const previousScope = loadedHistoryScope
+  invalidateCrossRangePartialReport()
+  const inputVersion = reportsInputVersion
+  const queryKey = currentReportsQueryKey.value
+  const version = historyRecordsLoadVersion + 1
+  const isCurrent = () => version === historyRecordsLoadVersion
+    && (!showReports.value || isCurrentReportLoad(undefined, queryKey, inputVersion))
+  const restoreDisplayedPage = () => {
+    if (showReports.value && version === historyRecordsLoadVersion) {
+      recordsPage.value = previousScope?.page ?? previousPage
+      loadedHistoryScope = previousScope
+    }
+  }
   recordsPage.value = next
   try {
-    await loadRecords()
+    if (!await loadRecords()) {
+      restoreDisplayedPage()
+      return
+    }
+    if (!isCurrent()) return
     setStatus(
       appendStatusContext(
         tr(`Records page ${recordsPage.value}/${recordsTotalPages.value} loaded.`, `记录页 ${recordsPage.value}/${recordsTotalPages.value} 已加载。`),
@@ -24198,6 +24284,8 @@ async function changeRecordsPage(delta: number) {
       ),
     )
   } catch (error: any) {
+    restoreDisplayedPage()
+    if (!isCurrent()) return
     setStatusFromErrorWithContext(
       error,
       tr('Failed to load records', '加载记录失败'),
@@ -24208,6 +24296,7 @@ async function changeRecordsPage(delta: number) {
 }
 
 async function exportCsv() {
+  if (!validateReportDateRange()) return
   if (reportsExportBlocked.value) {
     setStatus(
       appendStatusContext(
@@ -24293,6 +24382,7 @@ async function exportCsv() {
 // S5: same server report CSV (identical fields/filters/fingerprint) rendered to
 // a real .xlsx client-side — Excel opens it without the ANSI/GBK 乱码 guess.
 async function exportXlsx() {
+  if (!validateReportDateRange()) return
   if (reportsExportBlocked.value) {
     setStatus(
       appendStatusContext(
@@ -27226,10 +27316,10 @@ async function saveLeaveType() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/leave-types/${leaveTypeEditingId.value}`
+      ? `/api/attendance/leave-types/${leaveTypeEditingId.value}/update`
       : '/api/attendance/leave-types'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -27339,10 +27429,10 @@ async function saveOvertimeRule() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/overtime-rules/${overtimeRuleEditingId.value}`
+      ? `/api/attendance/overtime-rules/${overtimeRuleEditingId.value}/update`
       : '/api/attendance/overtime-rules'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -27453,10 +27543,10 @@ async function saveApprovalFlow() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/approval-flows/${approvalFlowEditingId.value}`
+      ? `/api/attendance/approval-flows/${approvalFlowEditingId.value}/update`
       : '/api/attendance/approval-flows'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -27690,10 +27780,10 @@ async function saveScheduleGroup() {
     const query = buildQuery({ orgId: normalizedOrgId() })
     const suffix = query.toString()
     const path = scheduleGroupEditingId.value
-      ? `/api/attendance/schedule-groups/${encodeURIComponent(scheduleGroupEditingId.value)}${suffix ? `?${suffix}` : ''}`
+      ? `/api/attendance/schedule-groups/${encodeURIComponent(scheduleGroupEditingId.value)}/update${suffix ? `?${suffix}` : ''}`
       : `/api/attendance/schedule-groups${suffix ? `?${suffix}` : ''}`
     const response = await apiFetch(path, {
-      method: scheduleGroupEditingId.value ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28108,10 +28198,10 @@ async function saveRotationRule() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/rotation-rules/${rotationRuleEditingId.value}`
+      ? `/api/attendance/rotation-rules/${rotationRuleEditingId.value}/update`
       : '/api/attendance/rotation-rules'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28235,13 +28325,13 @@ async function saveRotationAssignment(options: { asDraft?: boolean } = {}) {
     }
     const endpoint = saveAsDraft
       ? (isEditing
-          ? `/api/attendance/schedule-drafts/rotation-assignments/${rotationAssignmentEditingId.value}`
+          ? `/api/attendance/schedule-drafts/rotation-assignments/${rotationAssignmentEditingId.value}/update`
           : '/api/attendance/schedule-drafts/rotation-assignments')
       : (isEditing
-          ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}`
+          ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}/update`
           : '/api/attendance/rotation-assignments')
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28452,10 +28542,10 @@ async function saveShift() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/shifts/${shiftEditingId.value}`
+      ? `/api/attendance/shifts/${shiftEditingId.value}/update`
       : '/api/attendance/shifts'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28593,13 +28683,13 @@ async function saveAssignment(options: { asDraft?: boolean } = {}) {
     }
     const endpoint = saveAsDraft
       ? (isEditing
-          ? `/api/attendance/schedule-drafts/assignments/${assignmentEditingId.value}`
+          ? `/api/attendance/schedule-drafts/assignments/${assignmentEditingId.value}/update`
           : '/api/attendance/schedule-drafts/assignments')
       : (isEditing
-          ? `/api/attendance/assignments/${assignmentEditingId.value}`
+          ? `/api/attendance/assignments/${assignmentEditingId.value}/update`
           : '/api/attendance/assignments')
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -28947,7 +29037,7 @@ function editHoliday(holiday: AttendanceHoliday) {
   holidayForm.isWorkingDay = holiday.isWorkingDay
 }
 
-async function loadHolidays() {
+async function loadHolidays(reportBatch?: ReportsBatch) {
   holidayLoading.value = true
   try {
     const range = showAdmin.value
@@ -28965,6 +29055,7 @@ async function loadHolidays() {
     }
     holidays.value = data.data.items || []
   } catch (error: any) {
+    if (reportBatch && !isCurrentReportsBatch(reportBatch)) return
     setStatus(readErrorMessage(error, tr('Failed to load holidays', '加载节假日失败')), 'error')
   } finally {
     holidayLoading.value = false
@@ -28985,10 +29076,10 @@ async function saveHoliday() {
       orgId: normalizedOrgId(),
     }
     const endpoint = isEditing
-      ? `/api/attendance/holidays/${holidayEditingId.value}`
+      ? `/api/attendance/holidays/${holidayEditingId.value}/update`
       : '/api/attendance/holidays'
     const response = await apiFetch(endpoint, {
-      method: isEditing ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify(payload),
     })
     if (response.status === 403) {
@@ -29102,9 +29193,9 @@ async function saveRuleSet() {
     }
 
     const response = await apiFetch(
-      ruleSetEditingId.value ? `/api/attendance/rule-sets/${ruleSetEditingId.value}` : '/api/attendance/rule-sets',
+      ruleSetEditingId.value ? `/api/attendance/rule-sets/${ruleSetEditingId.value}/update` : '/api/attendance/rule-sets',
       {
-        method: ruleSetEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -29399,10 +29490,10 @@ async function saveAttendanceGroup() {
     }
     const response = await apiFetch(
       attendanceGroupEditingId.value
-        ? `/api/attendance/groups/${attendanceGroupEditingId.value}`
+        ? `/api/attendance/groups/${attendanceGroupEditingId.value}/update`
         : '/api/attendance/groups',
       {
-        method: attendanceGroupEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -30295,10 +30386,10 @@ async function savePayrollTemplate() {
 
     const response = await apiFetch(
       payrollTemplateEditingId.value
-        ? `/api/attendance/payroll-templates/${payrollTemplateEditingId.value}`
+        ? `/api/attendance/payroll-templates/${payrollTemplateEditingId.value}/update`
         : '/api/attendance/payroll-templates',
       {
-        method: payrollTemplateEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -30476,10 +30567,10 @@ async function savePayrollCycle() {
 
     const response = await apiFetch(
       payrollCycleEditingId.value
-        ? `/api/attendance/payroll-cycles/${payrollCycleEditingId.value}`
+        ? `/api/attendance/payroll-cycles/${payrollCycleEditingId.value}/update`
         : '/api/attendance/payroll-cycles',
       {
-        method: payrollCycleEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       }
     )
@@ -30773,10 +30864,10 @@ async function submitSchedulerScope() {
     // .strict() schema exactly — an extra key (incl. orgId) is a 400.
     const query = buildQuery({ orgId: normalizedOrgId() })
     const url = editingId
-      ? `/api/attendance/scheduler-scopes/${encodeURIComponent(editingId)}?${query.toString()}`
+      ? `/api/attendance/scheduler-scopes/${encodeURIComponent(editingId)}/update?${query.toString()}`
       : `/api/attendance/scheduler-scopes?${query.toString()}`
     const response = await apiFetch(url, {
-      method: editingId ? 'PUT' : 'POST',
+      method: 'POST',
       body: JSON.stringify({
         subjectType: schedulerScopeForm.subjectType,
         subjectRef,
@@ -31083,6 +31174,10 @@ watch(orgId, () => {
 watch([fromDate, toDate, targetUserId], () => {
   clearAttendanceResultEditTransientState()
 })
+
+watch([fromDate, toDate, targetUserId, orgId], () => {
+  reportsInputVersion += 1
+}, { flush: 'sync' })
 
 watch(requestReportStatusBreakdown, (items) => {
   if (requestReportStatusFilter.value === 'all') return

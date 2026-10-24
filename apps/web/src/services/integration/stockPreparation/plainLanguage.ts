@@ -588,6 +588,68 @@ export function stockPrepSourceVerdictPlain(verdict: string): StockPrepPlainText
  * — nothing here can break by ADDING a field to an object literal.
  */
 export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  // Batch-refresh phase 0 step 1 — the project write lock, as any surface that renders a server code
+  // through `stockPrepErrorPlain` sees it (the large-BOM pull panel among them). Short, and never the raw
+  // code as the headline.
+  STOCK_PREP_PROJECT_WRITE_LOCKED: Object.freeze({
+    zh: '这张备料表正忙(另一次同步正在写入,或系统一时繁忙)。',
+    en: 'This stock-prep sheet is busy (another run is writing it, or the system is momentarily busy).',
+    zhNext: '稍后再试一次。',
+    enNext: 'Try again shortly.',
+  }),
+  STOCK_PREP_PROJECT_PLAN_SUPERSEDED: Object.freeze({
+    zh: '已有更新的试算或批准,这份计划不再有效。',
+    en: 'A newer preview or approval exists, so this plan is no longer valid.',
+    zhNext: '请重新试算(大BOM请重新展开)后再写入。',
+    enNext: 'Preview again (expand again, for a large BOM) before writing.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LEASE_LOST: Object.freeze({
+    zh: '写入被另一次同步接管,这次已停止。',
+    en: 'Another run took over, so this one stopped.',
+    zhNext: '请重新试算;如果已写进一部分行,它们不会重复写。',
+    enNext: 'Preview again; any rows that already landed will not be written twice.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED: Object.freeze({
+    zh: '写入锁服务暂时不可用,写入没有继续。',
+    en: 'The write-lock service is unavailable, so writing did not continue.',
+    zhNext: '请联系平台管理员检查服务;如果已写进一部分行,它们不会重复写。',
+    enNext: 'Ask the platform admin to check the service; any rows that already landed will not be written twice.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务没有接通,什么都没有写。',
+    en: 'The write-lock service is not set up, so nothing was written.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  /**
+   * 备料分批拉取第一期 step 3 PR B — the pilot marker's own codes (plugin stock-preparation-pilot-gate.cjs). The
+   * large-lane refusal reads 「试点项目不走大 BOM 通道」 on every large route; the over-cap refusal on the dry run;
+   * NOT_READY lists the failing check ids beside the sentence (the board renders them); UNREADABLE fails closed.
+   */
+  STOCK_PREP_PILOT_LARGE_LANE_REFUSED: Object.freeze({
+    zh: '这是试点项目,第一期不走后台大 BOM 通道,什么都没有写。',
+    en: 'This is a pilot project: phase 1 never takes the background large-BOM channel, so nothing was written.',
+    zhNext: '试点项目只走小车道;超过上限时请联系负责人决定怎么处理。',
+    enNext: 'Pilot projects take the small lane only; if the cap is exceeded, ask the owner how to proceed.',
+  }),
+  STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED: Object.freeze({
+    zh: '这个试点项目的 BOM 超过了小车道上限,这次拉取被拒绝了;什么都没有改动。',
+    en: 'This pilot project’s BOM exceeds the small-lane cap, so this pull was refused; nothing was changed.',
+    zhNext: '试点项目不走后台大 BOM 通道,也不会截断数据。请联系负责人决定怎么处理。',
+    enNext: 'Pilot projects never take the background large-BOM channel and nothing is truncated. Ask the owner how to proceed.',
+  }),
+  STOCK_PREP_PILOT_STATE_UNREADABLE: Object.freeze({
+    zh: '没能读到这个项目是不是试点项目,这一步没有继续。',
+    en: 'Could not read whether this project is a pilot, so this step did not continue.',
+    zhNext: '请联系平台管理员检查服务;什么都没有改动。',
+    enNext: 'Ask the platform admin to check the service; nothing was changed.',
+  }),
+  STOCK_PREP_PILOT_NOT_READY: Object.freeze({
+    zh: '这个项目还没有达到试点启用条件,没有启用。',
+    en: 'This project does not meet the pilot readiness conditions yet, so it was not enabled.',
+    zhNext: '下面列出的每一项都通过后才能启用;什么都没有改动。',
+    enNext: 'Every listed check must pass before it can be enabled; nothing was changed.',
+  }),
   STOCK_PREPARATION_CONFIRM_REQUEST_FAILED: Object.freeze({
     zh: '这一步没有保存成功,数据没有变化。',
     en: 'That did not save; nothing was changed.',
@@ -983,6 +1045,51 @@ export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
 }
 
 /**
+ * The large-BOM pull panel's few lane-specific readings of a server code (PR #6501, Codex review P1-b).
+ * In the large lane a superseded plan can only be fixed by EXPANDING AGAIN: the generation is bound when
+ * the expansion reads its source, so neither re-planning nor re-approving the old expansion is accepted.
+ * Every other code reads exactly as `stockPrepErrorPlain`.
+ */
+export const STOCK_PREP_LARGE_BOM_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  STOCK_PREP_PROJECT_PLAN_SUPERSEDED: Object.freeze({
+    zh: 'BOM 已有更新的试算或写入，请重新展开后再规划。',
+    en: 'This BOM has a newer preview or write; expand it again before planning.',
+  }),
+  /**
+   * PR B: in the large lane the pilot refusal is final for this channel — not a retry, not 「重新展开」: the
+   * project is a pilot and phase 1 refuses the background channel on every large route, approved jobs included.
+   */
+  STOCK_PREP_PILOT_LARGE_LANE_REFUSED: Object.freeze({
+    zh: '这是试点项目，第一期不走后台大 BOM 通道；这个作业没有写入任何数据。',
+    en: 'This is a pilot project: phase 1 never takes the background large-BOM channel; this job wrote nothing.',
+  }),
+})
+
+/**
+ * PR #6501 round 6 (N1): the large lane's per-REASON readings of a code, keyed `<code>/<details.reason>`.
+ * `expansion_unbound` / `job_unbound` are not "a newer preview or write exists" — nothing newer happened;
+ * the expansion or job was made before the sheet write lock existed (or without it) and cannot be bound
+ * now. The remedy is the same (expand again), the sentence must not claim a newer write (same rule as the
+ * small lane's WRITE_TOKEN_UNBOUND, review round 2 F6).
+ */
+export const STOCK_PREP_LARGE_BOM_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  'STOCK_PREP_PROJECT_PLAN_SUPERSEDED/expansion_unbound': Object.freeze({
+    zh: '这个作业是旧版本留下的，需要重新展开后再规划。',
+    en: 'This job was left over by an older version; expand again before planning.',
+  }),
+  'STOCK_PREP_PROJECT_PLAN_SUPERSEDED/job_unbound': Object.freeze({
+    zh: '这个作业是旧版本留下的，需要重新展开后再规划。',
+    en: 'This job was left over by an older version; expand again before planning.',
+  }),
+})
+
+export function stockPrepLargeBomErrorPlain(code: string, reason?: string | null): StockPrepPlainEntry {
+  return (reason ? lookup(STOCK_PREP_LARGE_BOM_ERROR_REASON_PLAIN, `${code}/${reason}`) : undefined)
+    ?? lookup(STOCK_PREP_LARGE_BOM_ERROR_PLAIN, code)
+    ?? stockPrepErrorPlain(code)
+}
+
+/**
  * The export's TENANT-WALL refusals (server: PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES plus the
  * missing-port 501). A surface that otherwise answers every export failure with one generic
  * 「稍后再点一次」 line — 今天要处理's per-card export — must show these specific sentences instead,
@@ -1375,6 +1482,48 @@ export const STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT: StockPrepPlainText = Obj
   zh: '补好之后:回到上面点「同步一次」,系统会自己发现,不用在这里标记完成。',
   en: 'Once it is fixed: go back up and press 同步一次 — the system finds it on its own; there is no "mark done" button here.',
 })
+
+/**
+ * 客户反馈 2026-10-21 9a — the sentence beside the 项目接入 panel's (and the large-BOM channel's)
+ * open-the-multitable button when the parent holds NO sheet handle. Without a handle the shell pushes
+ * the plain `/multitable` route, which is the multitable HOME page: a 「新建 Base」 form and template
+ * cards. A customer reading those cards asked whether they had to choose a template for the project.
+ * They do not — one project, one sheet, set up from a fixed template — so this says where the button
+ * lands, that nothing there is theirs to choose, and where the reason for the missing link is shown.
+ *
+ * WHERE THE PANEL IS MOUNTED DECIDES THE LAST SENTENCE (review round 1). On 项目备料 (the only place a
+ * puller or operator ever sees this panel) the page's own fill area further down already explains the
+ * missing link next to its own 「打开多维表首页」 button — that explanation names the administrator and
+ * 「数据来源与体检」 — so the panel points DOWN at it rather than sending the reader to the page they are
+ * on. On 项目工作台 (platform-admin) it points at 项目备料. Neither tail promises that pulling again
+ * creates a link, and the first half says "the system or an administrator" because on a deployment
+ * without per-project sheets it is an administrator who builds the sheet.
+ */
+export type StockPrepNoSheetLinkHintContext = 'board' | 'workspace'
+
+const STOCK_PREP_NO_SHEET_LINK_HINT_LEAD: StockPrepPlainText = Object.freeze({
+  zh: '这个项目的备料表链接现在还拿不到,所以这个按钮只会打开多维表首页。备料表由系统或管理员按固定模板建立:不用在首页选模板,也不要在那里新建 Base。',
+  en: 'This project’s stock-preparation sheet link is not available yet, so this button only opens the multitable home. The stock-preparation sheet is set up from a fixed template by the system or an administrator — do not pick a template or create a Base there.',
+})
+
+const STOCK_PREP_NO_SHEET_LINK_HINT_TAIL: Readonly<Record<StockPrepNoSheetLinkHintContext, StockPrepPlainText>> = Object.freeze({
+  board: Object.freeze({
+    zh: '为什么还没有链接,见本页下方另一个「打开多维表首页」按钮旁的说明。',
+    en: 'Why there is no link yet is explained next to the other “Open the multitable home” button further down this page.',
+  }),
+  workspace: Object.freeze({
+    zh: '请在「项目备料」页打开这个项目:能跳就直接跳到备料表,不能会写明原因。',
+    en: 'Open this project on the Project Board page: it jumps straight to the sheet when it can, and says why when it cannot.',
+  }),
+})
+
+export function stockPrepNoSheetLinkHint(context: StockPrepNoSheetLinkHintContext): StockPrepPlainText {
+  const tail = STOCK_PREP_NO_SHEET_LINK_HINT_TAIL[context === 'board' ? 'board' : 'workspace']
+  return Object.freeze({
+    zh: `${STOCK_PREP_NO_SHEET_LINK_HINT_LEAD.zh}${tail.zh}`,
+    en: `${STOCK_PREP_NO_SHEET_LINK_HINT_LEAD.en} ${tail.en}`,
+  })
+}
 
 // ---------------------------------------------------------------------------
 // I-20 — field-level tooltips (native `title`, the existing 最近变更(来自 PLM) pattern)
@@ -1862,6 +2011,48 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '再点一次即可;什么都没有改动。',
     enNext: 'Press again; nothing was changed.',
   }),
+  /**
+   * Batch-refresh phase 0 step 1 — the project write lock. A trial is refused while another run is
+   * WRITING this project (a new plan would supersede the one being written); the store refusal is a
+   * server matter, so it names who can fix it instead of promising that a retry will.
+   */
+  PLAN_PROJECT_WRITE_LOCKED: Object.freeze({
+    zh: '另一次同步正在写入这张备料表',
+    en: 'Another run is writing this stock-prep sheet right now',
+    zhNext: '等它写完再试算一次;什么都没有改动。',
+    enNext: 'Try again once it finishes; nothing was changed.',
+  }),
+  PLAN_WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务暂时不可用',
+    en: 'The write-lock service is unavailable',
+    zhNext: '请联系平台管理员检查服务;什么都没有改动。',
+    enNext: 'Ask the platform admin to check the service; nothing was changed.',
+  }),
+  /** Review round 1: lost a race for the write lock while NO run holds it — busy, not "someone is writing". */
+  PLAN_WRITE_LOCK_BUSY: Object.freeze({
+    zh: '系统正忙,这次没有试算成',
+    en: 'The system is busy, so this trial did not run',
+    zhNext: '请稍后重试;什么都没有改动。',
+    enNext: 'Please try again shortly; nothing was changed.',
+  }),
+  /**
+   * 备料分批拉取第一期 step 3 PR B (plan §5.1 「超过小车道上限时明确拒绝,不自动转大车道、不截断数据」). A
+   * FAILURE, not the `large_bom_bounded` SKIP: the background channel is refused for pilot projects, so this
+   * sentence must not promise it, and the next step is a person's decision, not a retry.
+   */
+  PLAN_PILOT_OVER_SMALL_LANE_LIMIT: Object.freeze({
+    zh: '这个试点项目的 BOM 超过了小车道上限,这次拉取被拒绝了',
+    en: 'This pilot project’s BOM exceeds the small-lane cap, so this pull was refused',
+    zhNext: '试点项目不走后台大 BOM 通道,也不会截断数据;什么都没有改动。请联系负责人决定怎么处理。',
+    enNext: 'Pilot projects never take the background large-BOM channel and nothing is truncated; nothing was changed. Ask the owner how to proceed.',
+  }),
+  /** The server could not READ whether this project is a pilot — fail closed; a platform-admin matter. */
+  PLAN_PILOT_STATE_UNREADABLE: Object.freeze({
+    zh: '没能读到这个项目是不是试点项目,这次拉取没有继续',
+    en: 'Could not read whether this project is a pilot, so this pull did not continue',
+    zhNext: '请联系平台管理员检查服务;什么都没有改动。',
+    enNext: 'Ask the platform admin to check the service; nothing was changed.',
+  }),
   PLAN_NOT_APPLYABLE: Object.freeze({
     zh: '这次试算没能得出可以写入的计划',
     en: 'This plan cannot be written',
@@ -2030,6 +2221,66 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '可以再点一次同步;重复同步不会弄乱数据。',
     enNext: 'You can sync again — re-syncing cannot scramble your data.',
   }),
+  /** Batch-refresh phase 0 step 1 — the write refused or stopped by the project write lock. */
+  WRITE_PROJECT_LOCKED: Object.freeze({
+    zh: '另一次同步正在写入这张备料表,这次没有写',
+    en: 'Another run is writing this stock-prep sheet, so this one did not write',
+    zhNext: '等它写完再同步一次。',
+    enNext: 'Sync again once it finishes.',
+  }),
+  WRITE_PLAN_SUPERSEDED: Object.freeze({
+    zh: '已有更新的试算,这份计划不再有效,没有写入',
+    en: 'A newer preview exists, so this plan was not written',
+    zhNext: '请重新同步(重新试算)后再写入。',
+    enNext: 'Sync again so the newest preview is the one written.',
+  }),
+  WRITE_INTERRUPTED: Object.freeze({
+    zh: '写入中途被另一次同步接管,可能已写进一部分',
+    en: 'Another run took over part-way; some rows may already have landed',
+    zhNext: '请重新同步(重新试算);已写入的行不会重复写。',
+    enNext: 'Sync again; rows that landed will not be written twice.',
+  }),
+  /** Review round 1: taken over before the first write — nothing landed, so it must not say rows may have. */
+  WRITE_TAKEN_OVER: Object.freeze({
+    zh: '这次写入还没开始就被另一次同步接管,没有写入任何行',
+    en: 'Another run took over before this one wrote anything; no rows were written',
+    zhNext: '请重新同步(重新试算)。',
+    enNext: 'Sync again (preview again).',
+  }),
+  WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务不可用,这次没有写入',
+    en: 'The write-lock service is unavailable, so nothing was written',
+    zhNext: '请联系平台管理员检查服务后再同步。',
+    enNext: 'Ask the platform admin to check the service, then sync again.',
+  }),
+  /** Review round 1: the lock store failed AFTER some rows landed — never "nothing was written". */
+  WRITE_LOCK_FAILED_MIDWAY: Object.freeze({
+    zh: '写入锁服务中途出错,写入已停止,可能已写进一部分',
+    en: 'The write-lock service failed part-way; writing stopped and some rows may already have landed',
+    zhNext: '请联系平台管理员检查服务,恢复后重新同步;已写入的行不会重复写。',
+    enNext: 'Ask the platform admin to check the service, then sync again; rows that landed will not be written twice.',
+  }),
+  /** Review round 2 (F1): the stop did not report whether a host write was attempted — claim neither way. */
+  WRITE_STOPPED_UNCONFIRMED: Object.freeze({
+    zh: '写入被写入锁拦下或中途停止,无法确认是否已写进部分行',
+    en: 'Writing was stopped by the write lock; it is not known whether any rows landed',
+    zhNext: '请重新同步(重新试算);如果已写进一部分行,它们不会重复写。一直这样请联系平台管理员。',
+    enNext: 'Sync again (preview again); any rows that already landed will not be written twice. If it keeps happening, ask the platform admin.',
+  }),
+  /** Review round 2 (F6): the preview's token was unbound — its account cannot write (or it predates the lock). */
+  WRITE_TOKEN_UNBOUND: Object.freeze({
+    zh: '这次试算的账号没有写入权限,这份试算不能用来写入,没有写入',
+    en: 'This trial was run by an account without write rights, so it cannot be written; nothing was written',
+    zhNext: '请由有拉取权限的人重新试算后再写入。',
+    enNext: 'Have someone with pull rights run the trial again, then write.',
+  }),
+  /** Review round 1: lost a race for the write lock while NO run holds it — busy, not "someone is writing". */
+  WRITE_LOCK_BUSY: Object.freeze({
+    zh: '系统正忙,这次没有写入',
+    en: 'The system is busy, so nothing was written',
+    zhNext: '请稍后重试。',
+    enNext: 'Please try again shortly.',
+  }),
   // S2 (R-36, Q4): there is no 「撤销新建」 — the new sheet stays, empty, until somebody pulls into it.
   WRITE_NOT_CONFIRMED: Object.freeze({
     zh: '看完预览后您选择了先不写,这次什么都没写入',
@@ -2076,11 +2327,155 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '导入本身已经完成,可以照常用。留快照这一步由平台管理员来跑,少这一批只影响「差异对比」。',
     enNext: 'The import itself is done and usable. A platform administrator keeps the snapshot; missing this batch only affects the diff view.',
   }),
+  /**
+   * THE BUCKET FOR WHAT THE PAGE DOES NOT RECOGNISE. It used to end 「再同步一次通常就补上了」, which
+   * was false for most of what landed here (客户反馈 2026-10-21 9b): the page cannot know whether a
+   * reason it does not recognise clears on its own, so it no longer says so, and it points at the two
+   * tokens an administrator needs — the HTTP status is in the technical detail even when no code is.
+   */
   BATCH_ARCHIVE_FAILED: Object.freeze({
     zh: '数据已经写进去了,但这次的存档没成功',
     en: 'The data is in, but keeping a copy of this sync did not work',
-    zhNext: '导入本身不受影响,可以照常用。差异对比会少这一批,再同步一次通常就补上了。',
-    enNext: 'The import itself is fine and usable. The diff view will be missing this batch; syncing again usually adds it.',
+    zhNext: '导入本身不受影响,可以照常用,只是差异对比会少这一批。这个原因页面认不出来,再同步一次不一定能补上:请把技术详情里第④步的 HTTP 状态码(status)和错误码(code,有的话)交给平台管理员。',
+    enNext: 'The import itself is fine and usable; the diff view will just be missing this batch. The page does not recognise this reason, so syncing again may not add it: give step 4’s HTTP status (status) and error code (code, if there is one) from the technical details to a platform administrator.',
+  }),
+  /**
+   * #6475 — the archive's own refusals (projectSync.ts STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES). Every one
+   * of them opens with the same first clause as BATCH_ARCHIVE_FAILED — the rows are in — because that
+   * is what the operator most needs to hear; the second line is the step that actually unblocks the
+   * archive. Only TABLES_NOT_PROVISIONED is a SKIP; every other entry here is a FAIL and its first
+   * line says this sync was not kept. None of them promises that time alone fixes it: under the
+   * creation-hour batch rule the batch id is the newest material's CREATION hour, not the clock, so
+   * "wait for the next hour" is never a remedy this table may offer (#6475 review round 1).
+   */
+  BATCH_ARCHIVE_TABLES_NOT_PROVISIONED: Object.freeze({
+    zh: '数据已经写进去了;快照表还没建,这次没有存档',
+    en: 'The data is in; the snapshot tables have not been built yet, so nothing was kept',
+    // 9b: there is no 「建快照表」 button anywhere in the UI — the old quotes made it read like one.
+    zhNext: '页面上没有建表按钮,由平台管理员调用一次建快照表接口(给管理员看的接口名:mvp/ensure,每个租户一次),之后再同步就会存档。这套部署如果用不到批次存档,也可以请平台管理员把批次存档的部署开关关掉,这一步以后就显示「这套部署没有开启批次存档」。少这一批只影响「差异对比」。',
+    enNext: 'There is no button for this on the page: a platform administrator calls the snapshot-table build API once (the API name, for the administrator: mvp/ensure, once per tenant), and syncs after that keep their batch. A deployment that does not use batch archiving can instead have a platform administrator switch the batch-archive deployment flag off; this step then reads “This deployment does not keep snapshot batches”. Missing this one only affects the diff view.',
+  }),
+  BATCH_ARCHIVE_LEDGER_CONFLICT: Object.freeze({
+    zh: '数据已经写进去了;快照账本里已有的记录和这次要存的对不上,这次没有存档',
+    en: 'The data is in; records already in the snapshot ledger do not match what this sync would keep, so nothing was kept',
+    zhNext: '已存的记录不会被改写;在平台管理员处理之前,再同步通常也会停在这里。请把错误码和技术详情里的 target/reason 交给平台管理员。按物料创建时间分批时,同一个批次号下已经存过不同的内容也会这样:没有新增物料的更正,或者物料改回了更早一个批次的样子、而更新的批次已经存过。只改了备注这类人工填写的列,不会停在这里。',
+    enNext: 'Kept records are never rewritten; until a platform administrator looks at it, syncing again usually stops here too. Give the error code and the target/reason from the technical details to a platform administrator. When batches are split by material creation time, it also ends here when that batch is already kept with different lines: a correction that adds no newer material, or a BOM changed back to an earlier batch while a newer one is kept. Editing only the columns people fill in, such as notes, does not end here.',
+  }),
+  BATCH_ARCHIVE_PREVIOUS_INCOMPLETE: Object.freeze({
+    zh: '数据已经写进去了;这一批之前的存档没写完整,这次没有存档',
+    en: 'The data is in; an earlier copy of this batch was left incomplete, so nothing was kept this time',
+    zhNext: '系统不会自己补写已有的存档;物料没变时这一批的批次号也不变,所以再同步会一直停在这里。请把错误码交给平台管理员,由管理员按修复流程补全一次(不是页面上的操作)。',
+    enNext: 'The system never completes a kept copy on its own, and while the material is unchanged the batch stays the same, so syncing again keeps stopping here. Give the error code to a platform administrator, who completes it once through the repair procedure (not a page action).',
+  }),
+  BATCH_ARCHIVE_SCHEMA_INCOMPLETE: Object.freeze({
+    zh: '数据已经写进去了;快照表缺了列,这次的存档没成功',
+    en: 'The data is in; a snapshot table is missing columns, so keeping a copy did not work',
+    zhNext: '页面上没有修复按钮,由平台管理员调用一次修复快照表接口(给管理员看的接口名:mvp/repair,只补缺的列,不动数据),之后再同步一次。',
+    enNext: 'There is no repair button on the page: a platform administrator calls the snapshot-table repair API once (the API name, for the administrator: mvp/repair; it adds only the missing columns and touches no data), then sync again.',
+  }),
+  BATCH_ARCHIVE_SCHEMA_UNAVAILABLE: Object.freeze({
+    zh: '数据已经写进去了;暂时读不到快照表的结构,这次的存档没成功',
+    en: 'The data is in; the snapshot tables’ structure could not be read just now, so keeping a copy did not work',
+    zhNext: '稍后再同步一次;一直这样请平台管理员检查服务器的元数据连接。',
+    enNext: 'Sync again a little later; if it keeps happening, ask a platform administrator to check the server’s metadata connection.',
+  }),
+  /**
+   * Since #6475 round 1 the archive refuses a source split BEFORE it loads the source, so this answer
+   * is about the source step ③ itself read — which the trial and the write read even while disabled.
+   * Whether that source should be re-enabled or the binding moved off it is an administrator's call;
+   * the copy names both and refuses to tell anyone to revive a retired source just to get a batch.
+   */
+  BATCH_ARCHIVE_SOURCE_NOT_ACTIVE: Object.freeze({
+    zh: '数据已经写进去了;这个项目绑定的数据来源现在是停用状态,存档不读停用的来源',
+    en: 'The data is in; the data source this project is bound to is disabled, and the archive does not read a disabled source',
+    zhNext: '试算和写入照样读了它,只有存档要求来源是启用的。请管理员先确认它还该不该用:是误停的就重新启用;是已经换掉的旧来源,就在「数据从哪里来」把绑定改到现在用的来源 —— 不要为了存档把旧来源重新启用。之后再同步一次。',
+    enNext: 'The trial and the write still read it; only the archive requires an enabled source. Ask an administrator whether it should still be in use: if it was disabled by mistake, re-enable it; if it is a retired source, point the binding at the current one under “Where the data comes from” — do not re-enable a retired source just to get the archive to run. Then sync again.',
+  }),
+  /**
+   * The archive's tenant is the principal's `user.tenantId`: the verified claim, or — on a token with
+   * no tenant claim while the tenant-claim door is off (the default) — the `x-tenant-id` header the
+   * browser sends from its stored tenant hint. This answer means the request carried neither. It does
+   * NOT mean the page cannot influence the tenant, and the copy no longer says so.
+   */
+  BATCH_ARCHIVE_TENANT_REQUIRED: Object.freeze({
+    zh: '数据已经写进去了;存档这一步没拿到租户,跑不了',
+    en: 'The data is in; the archive step received no tenant, so it cannot run',
+    zhNext: '存档认的是这次请求的租户:账号自带所属租户就用它;账号没有所属租户时,在没开启「租户声明强制」的部署上会用浏览器随请求带上的租户 —— 这次两样都没有。请用归属这个租户的管理员账号来同步,或请管理员给当前账号设置所属租户。',
+    enNext: 'The archive uses the tenant this request is credited with: the account’s own tenant when it has one; for an account without one, on a deployment that does not enforce tenant claims, the tenant the browser sends along with the request — and this time there was neither. Sync with an administrator account that belongs to this tenant, or have an administrator give this account its tenant.',
+  }),
+  BATCH_ARCHIVE_SOURCE_BINDING_SPLIT: Object.freeze({
+    zh: '数据已经写进去了;存档会读到另一个数据来源,为了不存错,这次没有存档',
+    en: 'The data is in; the archive would have read a different data source, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '这个动作在不同工作区绑定的数据来源不一致(或一处绑了、另一处没绑),写入读的和存档读的不是同一个。请平台管理员把它们统一到同一个来源:「数据从哪里来」改的是当前工作区的绑定;交付时用脚本写的租户级绑定要用同一个脚本改。改好后再同步一次。绑定都一致却还这样,就是写入和存档认定的租户不同,请把错误码交给平台管理员。',
+    enNext: 'This action is bound to different data sources in different workspaces (or bound in one place and not another), so the write and the archive do not read the same one. Ask a platform administrator to point them all at the same source: “Where the data comes from” changes the current workspace’s binding; a tenant-wide binding written by the delivery script is changed with the same script. Then sync again. If every binding already agrees, the write and the archive were credited to different tenants; give the error code to a platform administrator.',
+  }),
+  BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND: Object.freeze({
+    zh: '数据已经写进去了;存档再读数据来源时没找到这个项目号,这次没有存档',
+    en: 'The data is in; when the archive read the data source again it did not find this project number, so nothing was kept',
+    zhNext: '写入时还读得到,说明这期间数据来源那边有变化。稍后再同步一次;如果第①步也说找不到这个项目号,就是来源里已经没有它了。一直这样请把错误码交给平台管理员核对数据来源。',
+    enNext: 'The write could still read it, so something changed in the data source in between. Sync again a little later; if step 1 also says the project number is not found, the source no longer has it. If it keeps happening, give the error code to a platform administrator to check the data source.',
+  }),
+  BATCH_ARCHIVE_PLAN_NOT_READY: Object.freeze({
+    zh: '数据已经写进去了;存档时重新算出的这批物料里还有没解决的冲突行,快照存不下,这次没有存档',
+    en: 'The data is in; when the archive recomputed this batch it still had unresolved conflict rows, which a snapshot cannot hold, so nothing was kept',
+    zhNext: '存档会自己重新算一遍,不沿用已经确认过的决定(比如保留多行的重复件),这样的行快照存不下。再同步一次;如果第①步也提示要确认,先去「确认队列」处理;一直这样请把错误码交给平台管理员。',
+    enNext: 'The archive recomputes on its own and does not reuse decisions already confirmed (such as keeping several rows of a duplicated part), and a snapshot cannot hold such rows. Sync again; if step 1 also asks for confirmation, work through the confirmation queue first; if it keeps happening, give the error code to a platform administrator.',
+  }),
+  /**
+   * #6475 round 2 — the archive re-reads the source after the write and refuses to keep anything that is
+   * not what step ③ wrote. The technical detail's `reason` says which half failed; the copy names both,
+   * because the next step is the same: one more sync, with any row step ③ keeps failing fixed first.
+   */
+  BATCH_ARCHIVE_SYNC_PARITY_MISMATCH: Object.freeze({
+    zh: '数据已经写进去了;这次要存档的内容和第③步写进表里的对不上,为了不存错,这次没有存档',
+    en: 'The data is in; what the archive would keep does not match what step 3 wrote to the sheet, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '要么写入之后数据来源那边又改了(技术详情 reason=source_changed_since_write),要么表里没有第③步读到的全部内容(reason=sheet_not_settled:有的行没写进去,或者写入之后有人手改了从 PLM 带过来的列)。再同步一次,让试算、写入和存档读到同一份数据;如果第③步一直有写不进去的行,先把那些行处理好。',
+    enNext: 'Either the data source changed after the write (technical detail reason=source_changed_since_write), or the sheet does not hold everything step 3 read (reason=sheet_not_settled: rows that could not be written, or a column that comes from PLM edited by hand since). Sync again so the plan, the write and the archive read the same data; if step 3 keeps reporting rows it could not write, fix those first.',
+  }),
+  /**
+   * 客户反馈 2026-10-21 9b — the refusals that used to fall through to BATCH_ARCHIVE_FAILED's re-sync
+   * promise (projectSync.ts STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES / classifyArchiveFailure). Each says
+   * what happened and who acts; none promises that a re-sync alone clears it.
+   */
+  BATCH_ARCHIVE_LARGE_BOM_BOUNDED: Object.freeze({
+    zh: '数据已经写进去了;这个项目的 BOM 太大,存档这一步当场展开不完,这次没有存档',
+    en: 'The data is in; this project’s BOM is too large for the archive step to expand on the spot, so nothing was kept',
+    zhNext: '存档会自己把 BOM 重新展开一遍,只能存当场展开得完的 BOM;同一份 BOM 再同步还会停在这里。导入本身不受影响,少这一批只影响「差异对比」。这个项目需要留历史批次的话,请把错误码交给平台管理员。',
+    enNext: 'The archive expands the BOM again on its own and can only keep a BOM it can expand on the spot; syncing the same BOM again stops here too. The import itself is unaffected; missing this batch only affects the diff view. If this project needs its batch history kept, give the error code to a platform administrator.',
+  }),
+  BATCH_ARCHIVE_POINTER_STALE: Object.freeze({
+    zh: '数据已经写进去了;快照账本里这个项目的「最新批次」记录和已存的批次对不上,为了不存错,这次没有存档',
+    en: 'The data is in; the snapshot ledger’s “latest batch” entry for this project does not agree with the batches kept, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '系统不会自己去改这条记录;物料没变时这一批的批次号也不变,所以再同步会一直停在这里。请把错误码和技术详情里的 reason 交给平台管理员,由管理员按修复流程处理一次(不是页面上的操作)。',
+    enNext: 'The system never corrects that entry on its own, and while the material is unchanged the batch stays the same, so syncing again keeps stopping here. Give the error code and the reason from the technical details to a platform administrator, who handles it once through the repair procedure (not a page action).',
+  }),
+  BATCH_ARCHIVE_VERSION_HISTORY: Object.freeze({
+    zh: '数据已经写进去了;这个项目已存批次的版本顺序核对不了,为了不存错,这次没有存档',
+    en: 'The data is in; the version order of this project’s kept batches could not be verified, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '存档要给新批次排一个比以前都大的版本号,这次以前的批次读不清或对不上(技术详情 reason=history_unprovable 或 not_monotonic)。再同步不会改动已存的记录。请把错误码和 reason 交给平台管理员核对快照账本。',
+    enNext: 'The archive gives a new batch a version above every earlier one, and this time the earlier batches could not be read or did not line up (technical detail reason=history_unprovable or not_monotonic). Syncing again does not change the kept records. Give the error code and the reason to a platform administrator to check the snapshot ledger.',
+  }),
+  BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND: Object.freeze({
+    zh: '数据已经写进去了;存档这一步没找到这个项目的 PLM 数据源,这次没有存档',
+    en: 'The data is in; the archive step could not find this project’s PLM data source, so nothing was kept',
+    zhNext: '服务器只回了「找不到」(技术详情 status=404),没有给错误码。最常见的原因是存档找数据源的范围和试算、写入不一样:存档不带页面上的工作区,数据源只建在某个工作区里时,它可能找不到。这是部署配置的问题,再同步一般不会改变:请平台管理员检查这个动作绑定的 PLM 数据源建在哪一级(租户级还是某个工作区),绑定还在不在。',
+    enNext: 'The server answered only “not found” (technical detail status=404) and sent no error code. The most common cause is that the archive looks for the data source in a different scope from the trial and the write: it does not carry the page’s workspace, so a data source that exists only inside a workspace may not be found. That is deployment configuration and syncing again usually does not change it: ask a platform administrator to check at which level the PLM data source bound to this action lives (tenant-wide or inside a workspace), and whether the binding is still there.',
+  }),
+  BATCH_ARCHIVE_SERVICE_UNAVAILABLE: Object.freeze({
+    zh: '数据已经写进去了;存档时服务器(或它前面的网关)没能正常答复,这次存档没有确认完成',
+    en: 'The data is in; the server (or a gateway in front of it) did not answer the archive step normally, so this batch is not confirmed as kept',
+    zhNext: '可以过一会儿再同步一次:如果其实已经存上了,会显示「这一批之前已经存过了」,不会重复存。如果每次都这样,多半是服务器缺少存档要用的功能或连接,等也等不好,请把技术详情里的 status 和错误码(有的话)交给平台管理员。少这一批只影响「差异对比」。',
+    enNext: 'You can sync again after a while: if the batch was in fact kept, the step says it was already kept and nothing is stored twice. If it happens every time, the server is most likely missing a feature or connection the archive needs and waiting will not fix it — give the status and error code (if any) from the technical details to a platform administrator. Missing this batch only affects the diff view.',
+  }),
+  /**
+   * #6475 round 2 — step ③ was partial, so step ④ was not attempted. A SKIP, and deliberately NOT
+   * BATCH_ARCHIVE_NOT_ATTEMPTED, whose sentence says nothing was written.
+   */
+  BATCH_ARCHIVE_WRITE_INCOMPLETE: Object.freeze({
+    zh: '有的行没写进去,所以这次没有存档',
+    en: 'Some rows could not be written, so this sync was not kept as a batch',
+    zhNext: '存档会把这次读到的整份数据存成一个批次,而表里现在只有其中一部分,存下来会和表对不上。先按第③步的提示把没写进去的行处理好,再同步一次:全部写进去以后,存档会照常留下。',
+    enNext: 'The archive keeps everything this sync read as one batch, and the sheet holds only part of it, so the batch would not match the sheet. Deal with the rows step 3 could not write, then sync again: once everything is written, the archive is kept as usual.',
   }),
 })
 
@@ -2299,10 +2694,31 @@ export const STOCK_PREP_AUDIT_ACTION_PLAIN: Record<string, StockPrepPlainText> =
   project_target_grant: Object.freeze({ zh: '给备料角色授了一个项目备料表的写权限', en: "Granted the 备料 roles write access to a project's sheet" }),
   project_fields_update: Object.freeze({ zh: '改了一个项目的项目级信息', en: "Updated a project's project-level fields" }),
   project_overview_refresh: Object.freeze({ zh: '刷新了项目总览表', en: 'Refreshed the project overview sheet' }),
+  // 备料分批拉取第一期 step 3 PR B (migration 101; register R-53 / R-54): the pilot enablement of one project sheet.
+  project_pilot_enable: Object.freeze({ zh: '为一个项目的备料表启用了分批拉取试点', en: "Enabled the batch-refresh pilot on a project's 备料 sheet" }),
 })
 
-export function stockPrepAuditActionPlain(action: string): StockPrepPlainText | null {
-  return lookup(STOCK_PREP_AUDIT_ACTION_PLAIN, action)
+// R68 (#6414 / #6454 follow-up): ONE action, two meanings. The options-sync REPAIR leg
+// (`POST …/options/sync` with `projectNo`, http-routes.cjs `repairProjectSheetContractOptions`) writes its
+// row under 088's `project_target_create` — a new action would need a new CHECK-constraint migration — with
+// the closed mode `contract_options_synced` (STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE); the
+// same row carries the #6454 PLM-column lock counts, there is no separate lock mode. Read by action alone it
+// said 「为一个项目建了备料表」 for a repair. So a row's sentence is chosen by (action, mode): an entry here
+// wins, anything else — the create modes `sheet_created` / `sheet_adopted` / `customer_pack_installed`, a
+// null or unknown mode, the action-only filter list — keeps the action's line above. Keyed by action, so
+// the 词表 mirror (`STOCK_PREP_AUDIT_ACTION_PLAIN` keys = the store's actions) is untouched.
+export const STOCK_PREP_AUDIT_ACTION_MODE_PLAIN: Record<string, Record<string, StockPrepPlainText>> = Object.freeze({
+  project_target_create: Object.freeze({
+    contract_options_synced: Object.freeze({
+      zh: '修补了一个项目的备料表（补齐选项 / 加锁 PLM 列）',
+      en: "Repaired a project's stock-preparation sheet (filled in option lists / locked PLM columns)",
+    }),
+  }),
+})
+
+export function stockPrepAuditActionPlain(action: string, mode?: string | null): StockPrepPlainText | null {
+  const byMode = lookup(STOCK_PREP_AUDIT_ACTION_MODE_PLAIN, action)
+  return (byMode ? lookup(byMode, mode) : null) ?? lookup(STOCK_PREP_AUDIT_ACTION_PLAIN, action)
 }
 
 // ---------------------------------------------------------------------------
@@ -2438,6 +2854,44 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
     en: 'One stock-preparation sheet per project.',
     zhNext: '在下面输入项目号打开;还没建表的项目,由拉取人员拉取时新建。',
     enNext: 'Open a project by its number below; a project without a sheet gets one when a pull operator pulls it.',
+  }),
+  // 备料分批拉取第一期 step 3 PR B (register R-53 / R-54) — the pilot line on 项目备料页 (ADMIN only). The
+  // enable is SET-ONCE: no sentence here offers a way back, because there is none in the product (a mistaken
+  // enable is an owner-approved runbook operation).
+  pilot_status_enabled: Object.freeze({
+    zh: '这张备料表已启用分批拉取试点:只走小车道,大 BOM 后台通道会被拒绝,通用网格导出(整表、选中行、CSV、Excel)已关闭。',
+    en: 'This sheet is in the batch-refresh pilot: small lane only, the background large-BOM channel is refused, and generic grid export (whole sheet, selected rows, CSV, Excel) is closed.',
+  }),
+  pilot_status_ready: Object.freeze({
+    zh: '这张备料表还没有启用分批拉取试点;启用条件已全部满足。',
+    en: 'This sheet is not in the batch-refresh pilot yet; every readiness condition is met.',
+  }),
+  pilot_status_not_enabled: Object.freeze({
+    zh: '这张备料表还没有启用分批拉取试点。',
+    en: 'This sheet is not in the batch-refresh pilot yet.',
+  }),
+  pilot_not_ready: Object.freeze({
+    zh: '还没有满足的启用条件:',
+    en: 'Readiness conditions still failing:',
+  }),
+  pilot_enable_action: Object.freeze({ zh: '启用分批拉取试点', en: 'Enable the batch-refresh pilot' }),
+  pilot_confirm_enable: Object.freeze({
+    zh: '启用后不能撤销:这个项目只走小车道,大 BOM 后台作业(包括已批准的)会被拒绝,通用网格导出会关闭。请输入项目号确认。',
+    en: 'Enabling cannot be undone: this project takes the small lane only, background large-BOM jobs (approved ones included) are refused, and generic grid export closes. Type the project number to confirm.',
+  }),
+  pilot_confirm_enable_action: Object.freeze({ zh: '确认启用试点', en: 'Enable the pilot' }),
+  pilot_confirm_enable_cancel: Object.freeze({ zh: '先不启用', en: 'Not now' }),
+  pilot_enabled_done: Object.freeze({
+    zh: '试点已启用;通用网格导出已关闭。',
+    en: 'The pilot is enabled; generic grid export is closed.',
+  }),
+  pilot_already_enabled: Object.freeze({
+    zh: '试点此前已经启用;这次只补齐了导出关闭,没有新的审计记录。',
+    en: 'The pilot was already enabled; this request only re-applied the export closure and wrote no new audit row.',
+  }),
+  pilot_not_permitted: Object.freeze({
+    zh: '只有备料管理员可以启用试点。',
+    en: 'Only a stock-prep administrator can enable the pilot.',
   }),
 })
 

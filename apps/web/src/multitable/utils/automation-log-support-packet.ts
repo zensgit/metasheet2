@@ -5,6 +5,7 @@ import {
   summarizeStepError,
   summarizeStepOutput,
 } from './automation-log-redact'
+import { automationStepErrorText } from './meta-automation-labels'
 
 export interface AutomationStepSupportPacket {
   index: number
@@ -52,14 +53,16 @@ export function buildAutomationLogSupportPacket(
       triggeredAt: redactString(execution.triggeredAt),
       completedAt: execution.completedAt ? redactString(execution.completedAt) : undefined,
       duration: execution.duration,
-      errorSummary: summarizeStepError(execution.error) || undefined,
+      // 客户反馈 2026-10-21 item 1 (review round 1): a legacy DingTalk error listed the skipped user ids — the
+      // packet carries the same values-free sentence the run log shows (English: a support artefact).
+      errorSummary: summarizeStepError(automationStepErrorText(execution.error, undefined, false)) || undefined,
       steps: (execution.steps ?? []).map((step, index) => ({
         index: index + 1,
         actionType: step.actionType,
         status: step.status,
         durationMs: step.durationMs,
         outputSummary: summarizeStepOutput(step.output) || undefined,
-        errorSummary: summarizeStepError(step.error) || undefined,
+        errorSummary: summarizeStepError(automationStepErrorText(step.error, step.output, false)) || undefined,
       })),
     },
   }

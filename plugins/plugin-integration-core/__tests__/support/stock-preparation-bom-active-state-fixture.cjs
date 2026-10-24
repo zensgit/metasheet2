@@ -6,6 +6,7 @@ const assert = require('node:assert/strict')
 const bom = require('../../lib/stock-preparation-bom-expansion.cjs')
 const actions = require('../../lib/stock-preparation-table-actions.cjs')
 const jobs = require('../../lib/stock-preparation-large-bom-jobs.cjs')
+const { createLibWriteLockHarness } = require('./stock-preparation-project-write-lock-kit.cjs')
 
 const PROJECT = 'SYN-SA01F-PROJECT'
 const SHEET = 'synthetic-sa01f-sheet'
@@ -72,6 +73,14 @@ function storage() {
     async get(key) { return map.has(key) ? clone(map.get(key)) : null },
     async set(key, value) { writes.push(['set', key]); map.set(key, clone(value)) },
     async delete(key) { writes.push(['delete', key]); map.delete(key) },
+    // The host's atomic consume (one DELETE ... RETURNING): the read and the removal are one synchronous step.
+    async consume(key) {
+      if (!map.has(key)) return null
+      const value = map.get(key)
+      writes.push(['consume', key])
+      map.delete(key)
+      return clone(value)
+    },
   }
 }
 
@@ -114,6 +123,26 @@ function inputFor(plan, sourceAdapter, target = recordsApi()) {
   return { action: actionFor(plan), parameters: { projectNo: PROJECT }, sourceAdapter, recordsApi: target, tokenStore: storage(), plannedAt: NOW }
 }
 
+// Local wrapped aliases over the real production functions (their exports are frozen). The real lock,
+// generation binders and fence-enforcing fake host come from the shared write-lock kit.
+function lockedActions(harness = createLibWriteLockHarness()) {
+  return {
+    harness,
+    dryRun: harness.wrapDryRun(actions.dryRunStockPreparationAction),
+    apply: harness.wrapApply(actions.applyStockPreparationAction),
+  }
+}
+
+function lockedJobs(harness = createLibWriteLockHarness()) {
+  return {
+    harness,
+    create: harness.wrapLargeExpansionStart(jobs.createLargeBomBackgroundExpansionJob),
+    plan: harness.wrapLargePlan(jobs.planLargeBomBackgroundExpansionJob),
+    approve: harness.wrapLargeApprove(jobs.createLargeBomCheckpointApplyJob),
+    chunk: harness.wrapLargeChunk(jobs.runLargeBomCheckpointApplyJobChunk),
+  }
+}
+
 function changeState(f, locus, value, mode) {
   const head = f.data[f.plan.bomHead.object][locus === 'recursive' ? 1 : 0]
   const field = f.plan.bomHead.activeField
@@ -130,24 +159,35 @@ async function assertBlocked({ second = false, locus = 'root', value, mode } = {
   assert.ok(child, 'positive source really reaches the descendant which could be wrongly inactivated')
   const target = recordsApi([{ ...child, active: true }])
   const before = clone(target.rows)
+  // Mint a genuine, write-bound token from a real dry-run on the valid original fixture, in its own store.
+  const locked = lockedActions()
+  const validInput = inputFor(f.plan, sourceFor(f.data), target)
+  const validDry = await locked.dryRun(validInput)
+  assert.equal(validDry.canApply, true, 'original valid fixture must yield an applyable dry-run')
+  assert.ok(validDry.dryRunToken, 'original valid dry-run must issue a real token')
+  assert.equal(validInput.tokenStore.map.size, 1, 'the real token lives in the original store')
   changeState(f, locus, value, mode)
   const source = sourceFor(f.data)
   const expansion = await bom.expandPlmProjectBom({ sourceAdapter: source, projectNo: PROJECT, readPlan: f.plan })
+  // Invalid dry-run uses a distinct, fresh, empty token store.
   const input = inputFor(f.plan, source, target)
-  const dry = await actions.dryRunStockPreparationAction(input)
+  assert.notEqual(input.tokenStore, validInput.tokenStore)
+  assert.equal(input.tokenStore.map.size, 0)
+  const dry = await locked.dryRun(input)
   const issued = input.tokenStore.map.size
   const planner = await actions.prepareStockPreparationConfirmationDecisions(input)
-  const token = dry.dryRunToken || await actions.__internals.createDryRunToken(input.tokenStore, {
-    actionId: input.action.actionId, parametersHash: actions.__internals.hashJson(input.parameters), revision: dry.revision, conflictPolicyReview: null,
-  })
   let failure
   try {
-    await actions.applyStockPreparationAction({ ...input, dryRunToken: token, permission: 'write', sandboxPolicy: POLICY,
+    // Apply the genuine original token from the original store against the now-invalid source.
+    await locked.apply({ ...input, tokenStore: validInput.tokenStore, dryRunToken: validDry.dryRunToken, permission: 'write', sandboxPolicy: POLICY,
       acceptManualConfirmHold: true, acceptDuplicateResolution: true })
   } catch (error) { failure = error }
   assert.equal(target.writes.length, 0, 'unknown head state reached actual create/patch')
   assert.deepEqual(target.rows, before, 'unknown state must not inactivate existing descendants')
-  assert.equal(failure && failure.code, 'TABLE_ACTION_DRY_RUN_NOT_APPLYABLE')
+  // A genuine token from the earlier valid source is now stale. Apply compares the
+  // recomputed revision before canApply; the invalid preview/planner assertions
+  // below independently pin the active-state refusal without minting a fake token.
+  assert.equal(failure && failure.code, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH')
   assert.equal(dry.canApply, false)
   assert.equal(dry.dryRunToken, null)
   assert.equal(issued, 0)
@@ -182,10 +222,11 @@ async function inactiveWrites(value, options) {
     const expansion = await bom.expandPlmProjectBom({ sourceAdapter: input.sourceAdapter, projectNo: PROJECT, readPlan: f.plan })
     assert.equal(expansion.rows.length, 0, 'inactive subtree heads must not become root rows')
   }
-  const dry = await actions.dryRunStockPreparationAction(input)
+  const locked = lockedActions()
+  const dry = await locked.dryRun(input)
   assert.equal(dry.canApply, true, 'known inactive state is normal reconciliation, not a global blocker')
   assert.ok(dry.dryRunToken)
-  await actions.applyStockPreparationAction({ ...input, dryRunToken: dry.dryRunToken, permission: 'write', sandboxPolicy: POLICY, acceptManualConfirmHold: true })
+  await locked.apply({ ...input, dryRunToken: dry.dryRunToken, permission: 'write', sandboxPolicy: POLICY, acceptManualConfirmHold: true })
   assert.equal(target.rows[0].data.active, false, 'actual writer must inactivate the existing child')
   assert.ok(target.writes.some(([kind, call]) => kind === 'patch' && call.changes.active === false))
 }
@@ -194,14 +235,15 @@ async function backgroundBlocked() {
   const f = fixture()
   changeState(f, 'recursive', 'SYN-SECRET-UNKNOWN')
   const store = storage()
+  const locked = lockedJobs()
   const action = actionFor(f.plan)
   const common = { storage: store, ...SCOPE, actionId: action.actionId, jobId: 'bad-head' }
-  await jobs.createLargeBomBackgroundExpansionJob({ ...common, action, parameters: { projectNo: PROJECT }, principal: 'synthetic-user', createJobId: () => common.jobId })
+  await locked.create({ ...common, action, parameters: { projectNo: PROJECT }, principal: 'synthetic-user', createJobId: () => common.jobId })
   const result = await jobs.runLargeBomBackgroundExpansionJob({ ...common, sourceAdapter: sourceFor(f.data), expansionOptions: { readPlan: f.plan } })
   assert.equal(result.status, 'failed')
   assert.equal(jobs.isAuthoritativeLargeBomExpansion(result), false)
   assert.equal(result.artifact, undefined)
-  await assert.rejects(() => jobs.planLargeBomBackgroundExpansionJob({ ...common, existingRows: [] }), { code: 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE' })
+  await assert.rejects(() => locked.plan({ ...common, existingRows: [] }), { code: 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE' })
 }
 
 async function membershipAndUndeclared() {
@@ -252,4 +294,4 @@ async function main() {
   await runCases(cases, 'SA01F active-state')
 }
 
-module.exports = { PROJECT, SHEET, SCOPE, NOW, fixture, sourceFor, storage, recordsApi, actionFor, runCases, clone, main }
+module.exports = { PROJECT, SHEET, SCOPE, NOW, fixture, sourceFor, storage, recordsApi, actionFor, lockedActions, lockedJobs, runCases, clone, main }

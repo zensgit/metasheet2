@@ -12,6 +12,8 @@ const { createStockPreparationTableActionRegistry } = require('../lib/stock-prep
 const { resolveStockPreparationReadPlanExecution } = require('../lib/stock-preparation-read-plan-runtime.cjs')
 const { createStockPreparationProjectTargetStore, PROJECT_TARGET_TABLE } = require('../lib/stock-preparation-project-target-store.cjs')
 const { deriveProjectSheetObjectId, PROJECT_SHEETS_ENABLED_ENV } = require('../lib/stock-preparation-project-targets.cjs')
+const { consumableMap } = require('./support/consumable-storage.cjs')
+const lockKit = require('./support/stock-preparation-project-write-lock-kit.cjs')
 
 // Only the module-local environment is synthetic. No process.env assignment,
 // .env read, network call, customer endpoint or persistent file write occurs.
@@ -179,6 +181,8 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
     },
   }
   const services = {
+    // Apply paths take the project write lease and fail closed 501 without a lock: the REAL in-memory lock, not a stub.
+    stockPreparationProjectWriteLock: lockKit.createInMemoryProjectWriteLock({ timers: 'real' }).lock,
     externalSystemRegistry: registry,
     stockPreparationSourceBindingStore: {
       async get(input) { calls.binding.push(clone(input)); return { externalSystemId: SYSTEM, matchedWorkspaceId, scopeFallback: matchedWorkspaceId === null ? 'tenant_null_row' : 'single_workspace_binding' } },
@@ -211,7 +215,7 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
   }
   if (storeMissing) delete services.stockPreparationReadPlanStore
   const records = []
-  const storage = Object.assign(new Map(), { durable: true })
+  const storage = consumableMap()
   const routes = new Map()
   const context = {
     storage, config: { stockPreparationTableActions: unconfigured ? [] : [action], stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['syntheticSandbox'] } },
@@ -234,6 +238,8 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
       },
     } },
   }
+  // The host side of the lease: the fake declares and enforces the write fence the apply paths hand it.
+  context.api.multitable.records = lockKit.withFakeHostWriteFence(context.api.multitable.records)
   register({ services, context, logger: { warn() {}, info() {} } })
   async function call(route, { body = {}, params = {}, query = {}, claimed = true, method = 'POST' } = {}) {
     const response = { statusCode: 200, status(code) { this.statusCode = code; return this }, json(value) { this.body = value; return this } }
@@ -656,6 +662,14 @@ test('route omission mutations are rejected by real-path assertions without edit
         await f.ledger.deactivate({ ...SCOPE, actionId: ACTION, actor: USER.id, expectedGeneration: 1 })
         const result = await f.call(`${JOBS}/:jobId/${stage}`, { params })
         assert.equal(result.statusCode, 409)
+        // Typed oracle for the plan stage: the healthy control is refused by the readPlan boundary
+        // (READ_PLAN_ACTIVATION_DISABLED). With the stored-snapshot recheck omitted it is still 409, but
+        // answered by the write-generation defense (STOCK_PREP_PROJECT_PLAN_SUPERSEDED). This proves readPlan
+        // boundary / code ownership only; that overlapping main guard still rejects the mutant, so it does NOT
+        // claim a single deletion makes the write path exploitable, and the guard is not removed or weakened.
+        if (stage === 'plan') {
+          assert.equal(result.body.error.code, 'READ_PLAN_ACTIVATION_DISABLED', JSON.stringify(result.body))
+        }
       },
     })),
     {
@@ -681,6 +695,12 @@ test('route omission mutations are rejected by real-path assertions without edit
       // This explicitly COMPOSITE probe removes all three, never credits a
       // surviving single deletion to an isolated guard, and keeps the healthy
       // control on the unmodified real route / runtime / ledger.
+      // Typed oracle: the healthy control is refused by the readPlan boundary
+      // (READ_PLAN_GENERATION_CONFLICT); the mutant is still 409, but only the write
+      // generation guard answers (STOCK_PREP_PROJECT_PLAN_SUPERSEDED). The code assertion
+      // proves readPlan boundary / code ownership only. That overlapping main guard still
+      // rejects the mutant, so this does NOT claim a single deletion makes the write
+      // path exploitable, and nothing here removes or weakens that guard.
       name: `omit both ${snapshot} apply comparisons and generation recheck`,
       transform: replace(`assertLargeBomActionExecutionContract(currentAction, ${snapshot})`, `void ${snapshot}`),
       dependencies: { './stock-preparation-read-plan-runtime.cjs': withoutSnapshotRuntimeRechecks() },
@@ -690,6 +710,7 @@ test('route omission mutations are rejected by real-path assertions without edit
         const suffix = snapshot === 'snapshotAction' ? '/apply-jobs' : '/apply-jobs/:applyJobId/run'
         const result = await f.call(`${JOBS}/:jobId${suffix}`, { params })
         assert.equal(result.statusCode, 409)
+        assert.equal(result.body.error.code, 'READ_PLAN_GENERATION_CONFLICT', JSON.stringify(result.body))
       },
     })),
     {

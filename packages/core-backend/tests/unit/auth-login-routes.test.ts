@@ -1456,6 +1456,41 @@ describe('auth login routes', () => {
     expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
   })
 
+  it('activation without configured corp cannot fall back to an unscoped identity', async () => {
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({ corpId: null })
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({
+      openId: 'wrong-open',
+      unionId: 'wrong-union',
+      nick: 'Wrong Person',
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-activate-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).code).toBe('activate_source_ineligible')
+    expect(activationMocks.activatePendingUser).not.toHaveBeenCalled()
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
   it('issues no session and hides internal details when activate commit fails', async () => {
     dingtalkOauthMocks.validateState.mockResolvedValue({
       valid: true,
@@ -1797,6 +1832,35 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data).toMatchObject({
       available: false,
       unavailableReason: 'corp_not_allowed',
+    })
+  })
+
+  it('#6467 anonymous probe passes missingEnv (variable names only) through unchanged', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(false)
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: false,
+      available: false,
+      corpId: null,
+      allowedCorpIds: [],
+      requireGrant: false,
+      autoLinkEmail: false,
+      autoProvision: false,
+      unavailableReason: 'missing_client_id',
+      missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_REDIRECT_URI'],
+    })
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        probe: '1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      available: false,
+      unavailableReason: 'missing_client_id',
+      missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_REDIRECT_URI'],
     })
   })
 

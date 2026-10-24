@@ -189,6 +189,27 @@ describe('大 BOM 后台通道 — the pull run', () => {
     expect(state.errorCode).toBe('TABLE_ACTION_SOURCE_NOT_ACTIVE')
   })
 
+  // PR #6501 round 6 (N1): the clamped `details.reason` rides beside the code, so the panel can read a
+  // superseded plan per reason; absent -> null, never invented.
+  it('L-3: a refusal\'s details.reason is carried as errorReason beside the code; absent -> null', async () => {
+    const withReason = makeApi({
+      planExpansion: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: 'expansion_unbound', detailPartial: false }),
+      ),
+    })
+    const stateWithReason = await runStockPreparationLargeBomPull(withReason, PROJECT_NO, { wait: instantWait() })
+    expect(stateWithReason.phase).toBe('failed')
+    expect(stateWithReason.errorCode).toBe('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+    expect(stateWithReason.errorReason).toBe('expansion_unbound')
+    const withoutReason = makeApi({
+      startApply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, 'apply-jobs', { code: 'TABLE_ACTION_SOURCE_NOT_ACTIVE' })),
+    })
+    const stateWithoutReason = await runStockPreparationLargeBomPull(withoutReason, PROJECT_NO, { wait: instantWait() })
+    expect(stateWithoutReason.errorReason).toBeNull()
+    const okState = await runStockPreparationLargeBomPull(makeApi(), PROJECT_NO, { wait: instantWait() })
+    expect(okState.errorReason).toBeNull()
+  })
+
   it('L-3: a malformed response is its own failure, values-free', async () => {
     const api = makeApi({
       startExpansion: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(200, 'expansion-jobs', { malformed: true })),

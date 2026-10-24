@@ -40,6 +40,12 @@ vi.mock('../../src/integration/db/connection-pool', () => ({
           const ids = (params[0] as string[]) ?? []
           return { rows: ids.filter((id) => id === 'sheet_0123456789abcdef01234567').map((id) => ({ id })) }
         }
+        // The resolvers' combined stamp statement (grid-export closure, review round 1 fix 2): same overview answer.
+        // (Matched by its alias: this factory is hoisted above the imports, so it cannot read the exported constant.)
+        if (q.startsWith('SELECT id, ((to_jsonb(meta_sheets) ->> \'system_kind\') = $2) AS stock_prep_overview,')) {
+          const ids = (params[0] as string[]) ?? []
+          return { rows: ids.filter((id) => id === 'sheet_0123456789abcdef01234567').map((id) => ({ id, stock_prep_overview: true, grid_export_closed: false })) }
+        }
         return { rows: [] }
       },
     }),

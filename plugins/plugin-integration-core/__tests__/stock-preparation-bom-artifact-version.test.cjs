@@ -5,7 +5,7 @@
 const assert = require('node:assert/strict')
 const bom = require('../lib/stock-preparation-bom-expansion.cjs')
 const jobs = require('../lib/stock-preparation-large-bom-jobs.cjs')
-const { PROJECT, SCOPE, NOW, fixture, sourceFor, storage, recordsApi, actionFor, runCases, clone } = require('./support/stock-preparation-bom-active-state-fixture.cjs')
+const { PROJECT, SCOPE, NOW, fixture, sourceFor, storage, recordsApi, actionFor, lockedJobs, runCases, clone } = require('./support/stock-preparation-bom-active-state-fixture.cjs')
 const VERSION = 'stock-preparation-bom.v3'
 const VERSION_ERROR = 'LARGE_BOM_EVALUATION_VERSION_UNSUPPORTED'
 const INVALID = [['missing'], ['old', 'stock-preparation-bom.v1'], ['old-dedupe', 'stock-preparation-bom.v2'], ['future', 'stock-preparation-bom.v999'], ['number', 2], ['null', null], ['object', { version: VERSION }], ['blank', ''], ['padded', ` ${VERSION} `]]
@@ -16,31 +16,32 @@ async function createReal(stage = 'planned') {
   const source = sourceFor(f.data)
   const target = recordsApi()
   const action = actionFor(f.plan)
+  const locked = lockedJobs()
   const common = { storage: store, ...SCOPE, actionId: action.actionId, jobId: 'synthetic-job', now: () => NOW }
-  const queued = await jobs.createLargeBomBackgroundExpansionJob({ ...common, action, parameters: { projectNo: PROJECT },
+  const queued = await locked.create({ ...common, action, parameters: { projectNo: PROJECT },
     principal: 'synthetic-user', bomEvaluationVersion: 'caller-must-not-bless', createJobId: () => common.jobId })
   const key = jobs.__internals.backgroundJobKey(common)
-  const result = { f, store, source, target, common, key, queued }
+  const result = { f, store, source, target, common, key, queued, locked }
   if (stage === 'queued') return result
   result.completed = await jobs.runLargeBomBackgroundExpansionJob({ ...common, sourceAdapter: source, expansionOptions: { readPlan: f.plan } })
   assert.equal(result.completed.status, 'completed', 'real expander succeeds before any storage downgrade')
   assert.equal(result.completed.artifact.rows.length, 3)
   assert.ok(source.calls.some((read) => read.object === f.plan.bomDetail.object), 'actual expansion read descendant details')
   if (stage === 'completed') return result
-  result.planned = await jobs.planLargeBomBackgroundExpansionJob({ ...common, existingRows: [], plannedAt: NOW, runId: 'synthetic-plan' })
+  result.planned = await locked.plan({ ...common, existingRows: [], plannedAt: NOW, runId: 'synthetic-plan' })
   assert.equal(result.planned.planArtifact.plan.counts.add, 3, 'actual conflict planner produced three adds')
   if (stage === 'planned') return result
   result.applyId = 'synthetic-checkpoint'
   result.applyCommon = { ...common, applyJobId: result.applyId, recordsApi: target }
-  result.checkpoint = await jobs.createLargeBomCheckpointApplyJob({ ...common, principal: 'synthetic-user', permission: 'write',
+  result.checkpoint = await locked.approve({ ...common, principal: 'synthetic-user', permission: 'write',
     bomEvaluationVersion: 'caller-must-not-bless', createApplyJobId: () => result.applyId })
   result.applyKey = jobs.__internals.checkpointApplyJobKey(result.applyCommon)
   if (stage === 'checkpoint') return result
-  result.paused = await jobs.runLargeBomCheckpointApplyJobChunk({ ...result.applyCommon, maxDecisionsPerChunk: 1 })
+  result.paused = await locked.chunk({ ...result.applyCommon, maxDecisionsPerChunk: 1 })
   assert.equal(result.paused.status, 'paused')
   assert.equal(target.writes.length, 1, 'a genuine first chunk applied before downgrade')
   if (stage === 'paused') return result
-  result.finished = await jobs.runLargeBomCheckpointApplyJobChunk({ ...result.applyCommon, maxDecisionsPerChunk: 10 })
+  result.finished = await locked.chunk({ ...result.applyCommon, maxDecisionsPerChunk: 10 })
   assert.equal(result.finished.status, 'succeeded')
   assert.equal(target.writes.length, 3)
   return result
@@ -108,9 +109,9 @@ async function rejectAuthority(path, value, missing, entry) {
   }
   assert.equal(jobs.isAuthoritativeLargeBomPlan(loaded), false)
   if (entry === 'plan') {
-    await expectNoEffects(c, () => jobs.planLargeBomBackgroundExpansionJob({ ...c.common, existingRows: [], bomEvaluationVersion: VERSION }), 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
+    await expectNoEffects(c, () => c.locked.plan({ ...c.common, existingRows: [], bomEvaluationVersion: VERSION }), 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
   } else {
-    await expectNoEffects(c, () => jobs.createLargeBomCheckpointApplyJob({ ...c.common, principal: 'synthetic-user', permission: 'write',
+    await expectNoEffects(c, () => c.locked.approve({ ...c.common, principal: 'synthetic-user', permission: 'write',
       bomEvaluationVersion: VERSION, createApplyJobId: () => 'not-created' }), 'LARGE_BOM_PLAN_ARTIFACT_NOT_AUTHORITATIVE')
   }
 }
@@ -130,7 +131,7 @@ async function rejectCheckpoint(stage, value, missing) {
   downgrade(c, c.applyKey, [], value, missing)
   const loaded = await jobs.loadLargeBomCheckpointApplyJob(c.applyCommon)
   assert.equal(loaded.status, stage === 'checkpoint' ? 'queued' : stage === 'finished' ? 'succeeded' : 'paused')
-  await expectNoEffects(c, () => jobs.runLargeBomCheckpointApplyJobChunk({ ...c.applyCommon, maxDecisionsPerChunk: 10,
+  await expectNoEffects(c, () => c.locked.chunk({ ...c.applyCommon, maxDecisionsPerChunk: 10,
     bomEvaluationVersion: VERSION }), VERSION_ERROR, 409)
 }
 
@@ -140,7 +141,7 @@ async function rejectSourceRevision(kind) {
   if (kind === 'missing') delete record.planArtifact.sourceArtifactRevision
   else record.planArtifact.sourceArtifactRevision = kind === 'wrong' ? 'unrelated-artifact-revision' : 42
   c.store.map.set(c.key, record)
-  await expectNoEffects(c, () => jobs.createLargeBomCheckpointApplyJob({ ...c.common, principal: 'synthetic-user', permission: 'write',
+  await expectNoEffects(c, () => c.locked.approve({ ...c.common, principal: 'synthetic-user', permission: 'write',
     createApplyJobId: () => 'not-created' }), 'LARGE_BOM_PLAN_ARTIFACT_NOT_AUTHORITATIVE')
 }
 

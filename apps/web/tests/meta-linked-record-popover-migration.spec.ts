@@ -33,8 +33,10 @@ function mount(props: Record<string, unknown>) {
   return container
 }
 
-const closeBtn = (container: HTMLDivElement) =>
-  container.querySelector('.meta-linked-record-popover__close') as HTMLButtonElement
+// The popover teleports to <body> (it is a full-screen fixed overlay rendered from inside the grid,
+// whose stacking context is isolated), so its DOM is looked up on the document, not the mount container.
+const closeBtn = (_container: HTMLDivElement) =>
+  document.querySelector('.meta-linked-record-popover__close') as HTMLButtonElement
 
 describe('MetaLinkedRecordPopover — close-× MtIconButton migration (UI-P2-1c T1 batch-1)', () => {
   it('renders the close control as a native <button> (MtIconButton) keeping the class + aria-label', () => {

@@ -320,10 +320,22 @@ check('C-13 finite mutations: execution project/purpose/wall and validation scop
   const dryEnd = CODE.indexOf('\n    },', dryStart)
   const dry = CODE.slice(dryStart, dryEnd)
   const project = 'projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),'
-  assert.equal(dry.split(project).length - 1, 1, 'the real execution project needle exists exactly once')
+  // The dry-run route spells that project line twice (the execution lookup and a pilot input), so both
+  // mutations below are scoped to the arguments of the ONE actual resolveTableActionExecution call.
+  const executions = getTableActionCalls(dry).filter((call) => call.method === 'resolveTableActionExecution')
+  assert.equal(executions.length, 1, 'the dry-run route has exactly one execution lookup')
+  const execution = executions[0]
+  const argsStart = execution.offset + execution.method.length + 1
+  const argsEnd = argsStart + execution.args.length
+  assert.equal(dry.slice(argsStart, argsEnd), execution.args, 'the located span is the execution lookup arguments')
+  const purpose = "targetPurpose: 'write'"
+  assert.equal(execution.args.split(project).length - 1, 1, 'the real execution project needle exists exactly once inside the execution lookup')
+  assert.equal(execution.args.split(purpose).length - 1, 1, 'the execution lookup declares its write purpose exactly once')
   const replaceDry = (next) => CODE.slice(0, dryStart) + next + CODE.slice(dryEnd)
-  assert.throws(() => assertProjectLookupArguments(replaceDry(dry.replace(project, ''))), assert.AssertionError)
-  assert.throws(() => assertWalledProjectLookups(replaceDry(dry.replace("targetPurpose: 'write'", "targetPurpose: 'read'"))), assert.AssertionError)
+  const mutateExecutionArgs = (mutate) => replaceDry(dry.slice(0, argsStart) + mutate(execution.args) + dry.slice(argsEnd))
+  // Project line only (purpose kept), then purpose only (project kept).
+  assert.throws(() => assertProjectLookupArguments(mutateExecutionArgs((args) => args.replace(project, ''))), assert.AssertionError)
+  assert.throws(() => assertWalledProjectLookups(mutateExecutionArgs((args) => args.replace(purpose, "targetPurpose: 'read'"))), assert.AssertionError)
   assert.throws(() => assertWalledProjectLookups(replaceDry(dry.replace('resolveTableActionExecution(', 'unreviewedExecutionLookup('))), assert.AssertionError)
   assert.throws(() => assertWalledProjectLookups(replaceDry(dry.replace('assertResolvedProjectTargetTenancy(', 'unreviewedTenantWall('))), assert.AssertionError)
   for (const [before, after] of [

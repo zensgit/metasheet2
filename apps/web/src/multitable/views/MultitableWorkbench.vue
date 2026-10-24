@@ -50,7 +50,7 @@
       <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" :aria-pressed="showDashboardView" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" @click="openApiTokenManager(null)"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
@@ -227,6 +227,14 @@
       <strong>{{ capabilityOriginNotice.title }}</strong>
       <span>{{ capabilityOriginNotice.message }}</span>
     </div>
+    <div
+      v-if="recordCreateBlockedByLock && caps.canCreateRecord.value"
+      class="mt-workbench__capability-banner mt-workbench__create-locked-note"
+      role="status"
+      data-testid="record-create-locked-note"
+    >
+      <span>{{ wb('notice.recordCreateBlockedByLock', isZh) }}</span>
+    </div>
     <MetaMentionPopover
       :visible="showMentionPopover"
       :items="mentionInboxState.summary.value?.items ?? []"
@@ -242,7 +250,8 @@
       :filter-groups="grid.filterGroups.value"
       :filter-conjunction="grid.filterConjunction.value"
       :sort-filter-dirty="grid.sortFilterDirty.value"
-      :can-create-record="caps.canCreateRecord.value" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :can-create-record="canCreateRecordByHand" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :export-closed-reason="gridExportClosedReason" :export-pending="capabilitiesStale"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
@@ -321,7 +330,7 @@
           :group-info="workbench.activeView.value?.groupInfo"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @patch-cell="onPatchCell" @create-record="onKanbanCreateRecord"
@@ -334,7 +343,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value"
+          :can-create="canCreateRecordByHand"
           :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -350,7 +359,7 @@
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :calendar-holidays="calendarHolidays"
           :calendar-holiday-notice="calendarHolidayNotice"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -365,7 +374,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -381,7 +390,7 @@
           :view-config="workbench.activeView.value?.config"
           :group-info="workbench.activeView.value?.groupInfo"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
           @patch-dates="onTimelinePatchDates"
           @update-view-config="onPersistActiveViewConfig"
@@ -390,7 +399,7 @@
           v-else-if="activeViewType === 'hierarchy'"
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
-          :can-create="caps.canCreateRecord.value"
+          :can-create="canCreateRecordByHand"
           :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -410,7 +419,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="canCreateRecordByHand" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :commit-range="grid.patchRange"
           :range-context-key="JSON.stringify([workbench.activeSheetId.value, workbench.activeViewId.value])"
@@ -419,6 +428,7 @@
           :group-fields="grid.groupFields.value"
           :search-text="searchText" :row-density="rowDensity"
           :can-load-more="gridCanLoadMore" :infinite-scroll="gridIsFlatPath"
+          :page-size="grid.pageSize?.value" :page-size-options="GRID_PAGE_SIZE_OPTIONS" @set-page-size="onSetGridPageSize"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
@@ -466,7 +476,7 @@
         :dispatch-binding="dispatchBinding"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
-        :can-create="caps.canCreateRecord.value"
+        :can-create="canCreateRecordByHand"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
@@ -694,7 +704,9 @@
       :fields="grid.fields.value"
       :client="workbench.client"
       :views="workbench.views.value"
+      :can-open-ding-talk-group-settings="true"
       @close="showAutomationManager = false"
+      @open-dingtalk-groups="openApiTokenManager('dingtalk-groups')"
     />
     <MetaFormShareManager
       v-if="showFormShareManager || workbench.activeSheetId.value"
@@ -710,6 +722,7 @@
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
       :can-manage-automation="caps.canManageAutomation.value"
+      :initial-tab="apiTokenManagerInitialTab"
       @close="showApiTokenManager = false"
     />
 
@@ -813,6 +826,7 @@ import {
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
@@ -1053,6 +1067,36 @@ onBeforeUnmount(() => {
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
+// R68 (#6454 judge note): /context sends `recordCreateBlockedByLock: true` when the sheet has a column people may
+// not write (the 备料 project sheet's PLM columns) that its own validation also marks required, so a record a
+// person creates can never pass. Every hand-create entry below (toolbar add / import, grid "+ row", the
+// duplicate action, kanban / gallery / calendar / timeline / gantt / hierarchy create, a new form submission)
+// reads `canCreateRecordByHand`, and the note under the capability banner says why. Same fail-closed read as
+// canDeleteSheet (`=== true` off the /context object): absent ⇒ exactly the old `caps.canCreateRecord`.
+const recordCreateBlockedByLock = computed(() => capabilitySource.value?.recordCreateBlockedByLock === true)
+const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value)
+// 备料分批拉取第一期 step 3: /context sends `gridExportClosure` ONLY on a sheet the host stamped closed for generic
+// grid export (canExport is then already false). The toolbar keeps its export buttons visible but disabled with
+// this reason, and every client-side export entry below re-checks `canRunGridExport()` before it builds a file.
+// Same fail-closed read as recordCreateBlockedByLock: absent ⇒ exactly the old behaviour.
+// Review round 1, fix 3 / round 2: `selectSheet` switches the active sheet at once, but the capabilities (and so the
+// closure marker) stay the PREVIOUS sheet's until its `/context` lands. In that window nothing about the active
+// sheet is known: no generic export may start (`canRunGridExport` refuses), the toolbar keeps its export pair
+// mounted but disabled (`exportPending`), and a closure reason is shown only when the capabilities belong to the
+// active sheet (no stale reason after closed -> open). Only a string owner can be stale: before any context it is
+// null. Typed through the composable's return type (no cast), so removing `capabilitiesSheetId` there is a type
+// error here; the `?.` only tolerates the many spec doubles of the composable that predate the ref.
+const capabilitiesStale = computed(() => {
+  const owner = workbench.capabilitiesSheetId?.value
+  return typeof owner === 'string' && owner !== workbench.activeSheetId.value
+})
+const gridExportClosed = computed(() => {
+  const marker = (capabilitySource.value as { gridExportClosure?: unknown } | null | undefined)?.gridExportClosure
+  return marker !== null && marker !== undefined && marker !== false
+})
+const gridExportClosedReason = computed(() => (
+  gridExportClosed.value && !capabilitiesStale.value ? wb('notice.gridExportClosed', isZh.value) : null
+))
 const featureFlags = useFeatureFlags()
 // The workflow designer lives at a route gated by the global `workflow` product
 // feature (appRoutes.ts requiredFeature). On deployments without that feature the
@@ -1068,10 +1112,16 @@ const canOpenWorkflowDesigner = computed(
 // its `isPersonalMode` getter can be threaded into useMultitableGrid's write-routing switch (G-FE-2).
 const personalViewsEnabled = computed(() => capabilitySource.value?.personalViewsEnabled === true)
 const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
+// Rows-per-page is a per-viewer choice kept in localStorage per user + sheet (客户反馈 2026-10-21). Its own ref,
+// declared before the grid: the grid's first load runs during useMultitableGrid() itself and reads it through
+// resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
+// the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
+const gridPageSizeUserId = ref<string | null>(null)
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
   isPersonalMode: personalView.isPersonalMode,
+  resolvePageSize: (sheetId) => readGridPageSize(gridPageSizeUserId.value, sheetId),
   // #6075 round 3 (S2): a rejected sort/filter write (403 for a viewer without canManageViews, 400 hidden-filter
   // mismatch, network) — the reload after it shows the view's stored rules again, so the edit would otherwise just
   // vanish. Shown with the toast the other grid write failures use; values-free copy (no rules, no server prose).
@@ -1515,6 +1565,12 @@ const templateCenterHref = computed<string | undefined>(() => {
 })
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
+// 客户反馈 2026-10-21 (c): the automation rule editor opens this dialog directly on its DingTalk Groups tab.
+const apiTokenManagerInitialTab = ref<'dingtalk-groups' | null>(null)
+function openApiTokenManager(tab: 'dingtalk-groups' | null) {
+  apiTokenManagerInitialTab.value = tab
+  showApiTokenManager.value = true
+}
 const showTrash = ref(false)
 const showHistory = ref(false)
 // W3-5: set by a commit toast's "view in history" action — deep-links the History Center straight to the
@@ -1838,8 +1894,8 @@ function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): vo
 }
 
 function ensureCanCreateRecord(): boolean {
-  if (caps.canCreateRecord.value) return true
-  showError(wb('toast.recordCreateBlocked', isZh.value))
+  if (canCreateRecordByHand.value) return true
+  showError(wb(recordCreateBlockedByLock.value ? 'notice.recordCreateBlockedByLock' : 'toast.recordCreateBlocked', isZh.value))
   return false
 }
 
@@ -2100,7 +2156,7 @@ const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() =>
   return resolvers
 })
 const formReadOnly = computed(() => {
-  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !caps.canCreateRecord.value
+  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !canCreateRecordByHand.value
 })
 const pageStartIndex = computed(() => grid.page.value.offset)
 // A1 infinite-scroll activation. The FLAT (ungrouped) grid path accumulates rows via scroll (loadMore)
@@ -2112,6 +2168,19 @@ const gridIsFlatPath = computed(() => grid.groupFields.value.length === 0)
 // composable says one exists (page.hasMore && !capped). The grid additionally re-checks flat/expanded
 // internally before emitting, so this is belt-and-suspenders.
 const gridCanLoadMore = computed(() => gridIsFlatPath.value && grid.canLoadMore.value)
+// Rows-per-page select (MetaGridTable footer): store the choice for this user + sheet, then reload page 1 at it.
+function onSetGridPageSize(size: number) {
+  const next = clampGridPageSize(size)
+  writeGridPageSize(gridPageSizeUserId.value, workbench.activeSheetId.value, next)
+  void grid.setPageSize(next)
+}
+// The user id arrives after the first load (which ran at the default size): apply this sheet's stored size now.
+function onGridPageSizeOwnerResolved(userId: string | null) {
+  gridPageSizeUserId.value = userId
+  const sheetId = workbench.activeSheetId.value
+  if (!userId || !sheetId) return
+  void grid.setPageSize?.(readGridPageSize(userId, sheetId) ?? DEFAULT_GRID_PAGE_SIZE)
+}
 const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[]>>(() => {
   const recordId = selectedRecordId.value
   if (!recordId) return {}
@@ -5252,7 +5321,22 @@ const activeSheetExportName = computed(() => {
 function onExportCsv() { openExportDialog('csv') }
 async function onExportXlsx() { openExportDialog('xlsx') }
 
+// 备料分批拉取第一期 step 3: the ONE client-side gate of generic grid export, run where a file can be started —
+// when the dialog opens AND again at confirm (the only caller of doExportCsv / doExportXlsx / exportAllRowsViaRoute),
+// because the sheet may be closed while the dialog is open. "Selected rows" are built in the browser from rows
+// already loaded, so the server's 403 cannot stop them — this re-check does, driven by the server-set
+// `gridExportClosure` marker. Refusing toasts the reason instead of failing silently. On an ordinary sheet it is
+// always true, so nothing there changes.
+function canRunGridExport(): boolean {
+  // Capabilities of another sheet (mid-switch): nothing is known about the active sheet yet — refuse quietly.
+  if (capabilitiesStale.value) return false
+  if (!gridExportClosed.value) return true
+  showError(wb('notice.gridExportClosed', isZh.value))
+  return false
+}
+
 function openExportDialog(initialFormat: 'csv' | 'xlsx') {
+  if (!canRunGridExport()) return
   if (!scopedGridFields.value.length) return
   exportInitialFormat.value = initialFormat
   exportDialogVisible.value = true
@@ -5260,6 +5344,8 @@ function openExportDialog(initialFormat: 'csv' | 'xlsx') {
 
 function onExportDialogConfirm(payload: ExportConfirmPayload) {
   exportDialogVisible.value = false
+  // Re-checked at confirm time: the sheet may have been closed (context reloaded) while the dialog was open.
+  if (!canRunGridExport()) return
   const selectedFieldIds = new Set(payload.fieldIds)
   // Preserve the on-screen column order; ignore unknown ids defensively.
   const fields = scopedGridFields.value.filter((f) => selectedFieldIds.has(f.id))
@@ -6077,6 +6163,7 @@ onMounted(async () => {
   window.addEventListener('resize', syncRailViewportState)
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
+    onGridPageSizeOwnerResolved(userId)
   }).catch(() => undefined)
   // A11: one values-free availability read per mount (one retry on network/5xx), off the critical
   // path (never awaited). Any throw — including a client without the method — settles on 'unknown'.

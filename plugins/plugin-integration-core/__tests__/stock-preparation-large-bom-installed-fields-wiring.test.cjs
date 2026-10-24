@@ -1,5 +1,12 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+// An equivalent remount of the SAME durable job storage must see the SAME persistent write lock (a real
+// lock row outlives a route remount). `null` = every mount gets its own fresh lock, as before.
+let sharedProjectWriteLock = null
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE WIRING, large-BOM side: `installedFieldProperties` through the real HTTP routes.
 //
 // `stock-preparation-pack-install-readback.test.cjs` pins the seam (ledger -> live host read ->
@@ -262,6 +269,8 @@ function inertService(methods) {
 
 function baseServices(sourceAdapter, ledger) {
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: sharedProjectWriteLock || freshProjectWriteLock(),
     // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
     stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
@@ -346,11 +355,11 @@ function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProd
       },
       multitable: {
         provisioning: createProvisioning(),
-        records: recordsApi.api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(recordsApi.api),
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job.
-    storage: storage || Object.assign(new Map(), { durable: true }),
+    storage: storage || consumableMap(),
     config: {
       stockPreparationTableActions: [action || actionConfig(objectId)],
       stockPreparationCustomerPacks: { [PACK_ID]: PACK },
@@ -1013,6 +1022,8 @@ async function actionDriftBlocksEachApplyChunkBeforeWrite() {
 
 async function equivalentActionDefaultsAndLabelCanComplete() {
   for (const changedAt of ['approval', 'chunk']) {
+    // One persistent lock for the first mount AND its equivalent remount; a fresh one per iteration.
+    sharedProjectWriteLock = freshProjectWriteLock()
     const first = mount()
     const { jobId } = await expandAndPlan(first.routes)
     const equivalent = remountWithAction(first, equivalentActionLabel())
@@ -1041,7 +1052,13 @@ async function main() {
   await run('the default deployment only rewrites rows the intake really changed', theDefaultDeploymentOnlyRewritesRowsTheIntakeReallyChanged)
   await run('execution-contract drift blocks large-BOM approval', actionDriftBlocksApprovalBeforeCheckpointCreation)
   await run('execution-contract drift blocks each large-BOM apply chunk', actionDriftBlocksEachApplyChunkBeforeWrite)
-  await run('equivalent defaults and an action label rename still complete', equivalentActionDefaultsAndLabelCanComplete)
+  await run('equivalent defaults and an action label rename still complete', async () => {
+    try {
+      await equivalentActionDefaultsAndLabelCanComplete()
+    } finally {
+      sharedProjectWriteLock = null
+    }
+  })
 
   if (failures.length > 0) {
     console.error(`stock-preparation-large-bom-installed-fields-wiring.test.cjs FAILED (${failures.length})`)

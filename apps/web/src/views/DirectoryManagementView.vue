@@ -231,6 +231,26 @@
           <div>
             <h2>{{ selectedIntegration ? '编辑集成' : '创建集成' }}</h2>
             <p class="directory-admin__hint">`appSecret` 在更新时可留空，系统会继续使用已保存的值。</p>
+            <p class="directory-admin__hint" data-testid="dingtalk-login-config-hint">
+              此处的 App Key / App Secret 是目录集成（通讯录拉取）的凭据，不会配置钉钉登录。钉钉登录（OAuth）走服务端环境变量
+              DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET / DINGTALK_REDIRECT_URI，两者互不相通。
+              <router-link class="directory-admin__link-button" to="/help/attendance/dingtalk-microapp#server-login">查看钉钉登录配置</router-link>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                data-testid="dingtalk-login-probe-button"
+                :disabled="dingtalkLoginProbeBusy"
+                @click="void checkDingTalkLoginProbe()"
+              >
+                检测钉钉登录状态
+              </button>
+              <span
+                v-if="dingtalkLoginProbeMessage"
+                class="directory-admin__hint-status"
+                data-testid="dingtalk-login-probe-status"
+                role="status"
+              >{{ dingtalkLoginProbeMessage }}</span>
+            </p>
           </div>
           <div class="directory-admin__summary" v-if="selectedIntegration">
             <span class="directory-admin__badge">{{ selectedIntegration.status }}</span>
@@ -2192,6 +2212,12 @@ import {
   type DirectoryRoleCatalogItem,
 } from './directoryConfigPickerOptions'
 import { apiFetch } from '../utils/api'
+import {
+  DINGTALK_REDIRECT_URI_REQUIREMENT,
+  formatDingTalkLoginEnvList,
+  readDingTalkMissingEnv,
+  requirementForDingTalkReason,
+} from '../utils/dingtalkLoginConfig'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type DirectoryIntegration = {
@@ -2593,9 +2619,51 @@ const reviewBatchProcessing = ref(false)
 const reviewBatchProgress = ref<ReviewBatchProgress | null>(null)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
+// #6467: on-demand check of the DingTalk login (OAuth) probe -- the same endpoint the login page
+// uses. Click-to-check rather than on mount, so opening this page sends no extra request.
+const dingtalkLoginProbeBusy = ref(false)
+const dingtalkLoginProbeMessage = ref('')
 const routeNavigationFailureNotice = ref<DirectoryRouteNavigationFailureNotice | null>(null)
 const routeNavigationFailureAction = ref<'retry' | 'clear' | ''>('')
 const testResult = ref<TestResult | null>(null)
+
+const DINGTALK_LOGIN_PROBE_FAILED = '当前钉钉登录：无法获取状态，请稍后重试。'
+
+function describeDingTalkLoginProbe(ok: boolean, payload: unknown): string {
+  const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
+  const data = envelope?.data && typeof envelope.data === 'object' ? envelope.data as Record<string, unknown> : null
+  if (!ok || envelope?.success !== true || !data) return DINGTALK_LOGIN_PROBE_FAILED
+  if (data.available === true) return '当前钉钉登录：可用。'
+  if (data.unavailableReason === 'corp_not_allowed') {
+    return '当前钉钉登录：不可用，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。'
+  }
+  const reported = readDingTalkMissingEnv(data.missingEnv)
+  const fromReason = requirementForDingTalkReason(data.unavailableReason)
+  const missing = reported.length > 0 ? reported : fromReason ? [fromReason] : []
+  if (missing.length === 0) return '当前钉钉登录：不可用。'
+  const redirectNote = missing.includes(DINGTALK_REDIRECT_URI_REQUIREMENT)
+    ? '；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致'
+    : ''
+  return `当前钉钉登录：不可用，缺少服务端环境变量 ${formatDingTalkLoginEnvList(missing, true)}${redirectNote}。`
+}
+
+async function checkDingTalkLoginProbe(): Promise<void> {
+  if (dingtalkLoginProbeBusy.value) return
+  dingtalkLoginProbeBusy.value = true
+  dingtalkLoginProbeMessage.value = '正在检测钉钉登录状态…'
+  try {
+    const response = await apiFetch('/api/auth/dingtalk/launch?probe=1', {
+      method: 'GET',
+      suppressUnauthorizedRedirect: true,
+    })
+    const payload = await response.json().catch(() => null)
+    dingtalkLoginProbeMessage.value = describeDingTalkLoginProbe(response.ok, payload)
+  } catch {
+    dingtalkLoginProbeMessage.value = DINGTALK_LOGIN_PROBE_FAILED
+  } finally {
+    dingtalkLoginProbeBusy.value = false
+  }
+}
 const departmentsLoaded = ref(false)
 const departmentLoadError = ref('')
 const departmentQuery = ref('')
@@ -6396,6 +6464,12 @@ onUnmounted(() => {
 .directory-admin__item small {
   margin: 0;
   color: #475569;
+}
+
+.directory-admin__hint-status {
+  display: block;
+  margin-top: 4px;
+  color: #0f172a;
 }
 
 .directory-admin__empty {

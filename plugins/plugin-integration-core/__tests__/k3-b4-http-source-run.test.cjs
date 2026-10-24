@@ -884,6 +884,35 @@ test('BL2 /read invalid numeric-id strings cause zero K3 calls and no result or 
   }
 })
 
+test('BL2 /read unsafe numeric keys are refused before vault, adapter and K3; safe number and exact digit string still query', async () => {
+  // Raw JSON 9007199254740993 parses to 9007199254740992 before any handler sees it.
+  const parsedUnsafe = JSON.parse('{"inputs":{"key":9007199254740993}}').inputs.key
+  assert.equal(parsedUnsafe, 9007199254740992)
+  for (const key of [parsedUnsafe, Number.MAX_SAFE_INTEGER + 2, 1e20]) {
+    const h = harness([bl2Raw([{ FBOMNumber: 'SYN-BOM-UNIQUE' }])])
+    const id = await h.mint(bl2Config())
+    const baseline = readBaseline(h)
+    const response = await h.lookup(id, key)
+    assert.equal(response.statusCode, 400, JSON.stringify(response.body))
+    assert.equal(response.body.error.code, 'READ_SOURCE_READ_CONTRACT_INVALID')
+    assertNoExternalRead(h)
+    assertNoReadWrites(h, baseline)
+  }
+  for (const [key, digits] of [
+    [31415, '31415'],
+    [Number.MAX_SAFE_INTEGER, '9007199254740991'],
+    ['9007199254740993', '9007199254740993'],
+  ]) {
+    const h = harness([bl2Raw([{ FBOMNumber: 'SYN-BOM-UNIQUE' }])])
+    const id = await h.mint(bl2Config())
+    const response = await h.lookup(id, key)
+    assert.equal(response.statusCode, 200, JSON.stringify(response.body))
+    assert.equal(response.body.data.evidence.ok, true)
+    assert.equal(h.fetchCalls.length, 1)
+    assert.equal(h.fetchCalls[0].body.Data.Filter, `[FPercentItemID] = ${digits}`)
+  }
+})
+
 test('BL2 /read uses current approved stored structure; drift cannot inherit successful earlier evidence', async () => {
   const h = harness(() => bl2Raw([{ FBOMNumber: 'SYN-BOM-UNIQUE' }]))
   const id = await h.mint(bl2Config())

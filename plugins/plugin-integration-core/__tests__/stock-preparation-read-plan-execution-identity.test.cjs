@@ -21,11 +21,18 @@ const {
   createLargeBomBackgroundExpansionJob,
   runLargeBomBackgroundExpansionJob,
 } = require('../lib/stock-preparation-large-bom-jobs.cjs')
+const { createLibWriteLockHarness } = require('./support/stock-preparation-project-write-lock-kit.cjs')
 
 const ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const SCOPE = Object.freeze({ tenantId: 'tenant-one', workspaceId: null })
 const SOURCE_REVISION = '11111111-1111-4111-8111-111111111111'
 const clone = (value) => structuredClone(value)
+
+// Local wrapped aliases over the real dry-run/apply (the production exports are frozen): the real lock,
+// generation binder, lease and fence-enforcing fake host come from the shared write-lock kit.
+const writeLock = createLibWriteLockHarness()
+const lockedDryRun = writeLock.wrapDryRun(dryRunStockPreparationAction)
+const lockedApply = writeLock.wrapApply(applyStockPreparationAction)
 
 function baseAction(overrides = {}) {
   return {
@@ -128,6 +135,13 @@ function storage() {
     async get(key) { return clone(rows.get(key) || null) },
     async set(key, value) { rows.set(key, clone(value)) },
     async delete(key) { rows.delete(key) },
+    // The host's atomic consume: the read and the removal are one synchronous step.
+    async consume(key) {
+      if (!rows.has(key)) return null
+      const value = rows.get(key)
+      rows.delete(key)
+      return clone(value)
+    },
   }
 }
 
@@ -157,7 +171,7 @@ function source() {
 async function dryRun(action) {
   const adapter = source()
   const tokenStore = storage()
-  const result = await dryRunStockPreparationAction({
+  const result = await lockedDryRun({
     action, parameters: { projectNo: 'P-001' }, sourceAdapter: adapter,
     recordsApi: { async queryRecords() { return [] } }, tokenStore,
     plannedAt: '2026-09-30T00:00:00.000Z', runId: 'synthetic-run',
@@ -282,13 +296,13 @@ test('actual apply rejects a token minted before same-content reactivation and p
     permission: 'write', sandboxPolicy: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
     plannedAt: '2026-09-30T00:00:00.000Z', runId: 'synthetic-run',
   }
-  await assert.rejects(applyStockPreparationAction({
+  await assert.rejects(lockedApply({
     ...applyInput, tokenStore: prepared.tokenStore, dryRunToken: prepared.result.dryRunToken,
   }), { code: 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH' })
   assert.equal(writes, 0)
   assert.ok(adapter.calls.length > 0, 'current contract permits source recomputation before token revision refusal')
   const fresh = await dryRun(second)
-  await applyStockPreparationAction({
+  await lockedApply({
     ...applyInput, tokenStore: fresh.tokenStore, dryRunToken: fresh.result.dryRunToken,
   })
   assert.equal(writes, 1, 'a current-generation token can reach the actual writer through the same path')

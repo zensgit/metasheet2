@@ -1,12 +1,14 @@
 'use strict'
 
-// Synthetic, offline draft compilation. No store, credentials, transport or ledger.
+// Synthetic, offline draft compilation. No store, credentials or ledger; the form
+// transport appears only disabled, as an offline input oracle whose fetch throws.
 const assert = require('node:assert/strict')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
 const { test } = require('node:test')
 const { pathToFileURL } = require('node:url')
 const { stableCanonicalStringify } = require('../lib/gip-canonical-json.cjs')
+const { createYidaFormTransport } = require('../lib/yida-form-transport.cjs')
 
 const modulePromise = import(pathToFileURL(path.join(__dirname, '../lib/yida-draft-plan.mjs')).href)
 const plannerPromise = import(pathToFileURL(path.join(__dirname, '../lib/yida-static-plan.mjs')).href)
@@ -318,6 +320,54 @@ test('missing, null and empty optional keys share the real planner empty-key bus
   assert.equal(new Set(variants.map((entry) => entry.rowSpecs[0].businessKeyDigest)).size, 1)
   assert.equal(new Set(variants.map((entry) => entry.planDigest)).size, 1)
   expectError(compileYidaDraft, YidaDraftPlanError, input([{ ...row(), parentCode: ' ' }]), 'YIDA_DRAFT_PLAN')
+})
+
+// The disabled transport reports DISABLED only after its input check passed.
+async function transportVerdict(data, intent = 'create') {
+  let fetched = 0
+  const transport = createYidaFormTransport({ fetch: () => { fetched += 1; throw new Error('synthetic-offline') } })
+  const error = await transport.send({ intent, data, accessToken: 'synthetic_access',
+    systemToken: 'synthetic_system', userId: 'synthetic_user' }, { signal: new AbortController().signal })
+    .then(() => null, (failure) => failure)
+  assert.equal(fetched, 0)
+  return error?.code
+}
+
+test('a planned row with no sendable field is refused before it can become an approvable draft', async () => {
+  const { compileYidaDraft, YidaDraftPlanError } = await modulePromise
+  const { buildYidaStaticPlan, validateYidaStaticConfig } = await plannerPromise
+  const layout = config({ businessKey: ['parentCode'], emptyKeyFields: ['parentCode'],
+    fieldCatalog: [{ id: 'parent', control: 'text', required: false }],
+    fieldMap: [{ source: 'parentCode', target: 'parent', type: 'string', required: false }] })
+  const normalized = validateYidaStaticConfig(layout).normalized
+  // Real planner oracle: every key may be empty and every field optional, so an
+  // all-empty row plans as a create whose payload has no key at all.
+  for (const empty of [{}, { parentCode: null }, { parentCode: '' }]) {
+    const planned = buildYidaStaticPlan({ config: normalized, rows: [empty] }).rows[0]
+    assert.equal(planned.status, 'planned_create')
+    assert.deepEqual(planned.payload, {})
+    assert.equal(await transportVerdict(planned.protocolPreview.data), 'YIDA_FORM_INPUT')
+    expectError(compileYidaDraft, YidaDraftPlanError, input([empty], layout), 'YIDA_DRAFT_PLAN')
+    expectError(compileYidaDraft, YidaDraftPlanError, input([{ parentCode: 'P-1' }, empty], layout), 'YIDA_DRAFT_PLAN')
+  }
+  const sendable = compileYidaDraft(input([{ parentCode: 'P-1' }], layout))
+  assert.deepEqual(sendable.plan.rows[0].payload, { parent: 'P-1' })
+  assert.equal(await transportVerdict(sendable.plan.rows[0].protocolPreview.data), 'YIDA_FORM_DISABLED')
+})
+
+test('target IDs carrying a control character the transport refuses never compile into a draft', async () => {
+  const { compileYidaDraft, YidaDraftPlanError } = await modulePromise
+  for (const control of ['\u0000', '\u001b', '\u007f', '\u0080', '\u0085', '\u009f']) {
+    for (const field of ['appType', 'formUuid']) {
+      const target = { ...config().target, [field]: `synthetic${control}draft` }
+      assert.equal(await transportVerdict({ ...target, formDataJson: '{"project":"P"}' }), 'YIDA_FORM_INPUT')
+      expectError(compileYidaDraft, YidaDraftPlanError, input([row()], config({ target })), 'YIDA_DRAFT_CONFIG')
+    }
+  }
+  // Surrounding whitespace is still normalized away and the sent value passes the transport.
+  const padded = compileYidaDraft(input([row()], config({ target: { appType: '\tsynthetic_draft_app\n', formUuid: 'synthetic_draft_form' } })))
+  assert.equal(padded.locator.appType, 'synthetic_draft_app')
+  assert.equal(await transportVerdict(padded.plan.rows[0].protocolPreview.data), 'YIDA_FORM_DISABLED')
 })
 
 test('update hashes canonical update data including instance identity and explicit form locator', async () => {

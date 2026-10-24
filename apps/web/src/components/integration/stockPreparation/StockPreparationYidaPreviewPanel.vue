@@ -91,9 +91,11 @@
     <section v-if="persistentInput" class="sp-yida-preview__owner-entry">
       <p>独立本地初始化可在发送开关 OFF 下使用；只由服务器预指定 owner 管理永久单槽，不交换令牌或授权发送。</p>
       <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked" @click="initializationOpen = true">打开本地初始化（不发送）</button>
-      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" />
-      <p>以下是独立服务器确认流程，默认关闭；仅当前人工登记目标的 owner 且具备集成管理员权限可用。它不会把上面的本地预演当发送许可。</p>
-      <button v-if="!ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="initializationLocked" @click="ownerSendOpen = true">打开单行 CREATE 确认（需服务器开通）</button>
+      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" @send-enabled-change="ownerSendEnabled = $event" />
+      <!-- Switch off means not visible: the entry appears only after the owner-authorized initialization GET
+           reported the server send switch ON. An already open panel stays mounted (never abort its request). -->
+      <p v-if="ownerSendEnabled || ownerSendOpen">以下是独立服务器确认流程；仅当前人工登记目标的 owner 且具备集成管理员权限可用。它不会把上面的本地预演当发送许可。</p>
+      <button v-if="ownerSendEnabled && !ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="initializationLocked" @click="ownerSendOpen = true">打开单行 CREATE 确认（服务器已开通）</button>
       <StockPreparationYidaOwnerSendPanel v-if="ownerSendOpen" :draft-input="persistentInput" @locked-change="ownerSendLocked = $event" />
     </section>
   </section>
@@ -117,6 +119,7 @@ const previewMode = ref<'mapping' | 'protocol'>('mapping')
 const persistentInput = ref<YidaOwnerDraftInput | null>(null)
 const ownerSendOpen = ref(false)
 const ownerSendLocked = ref(false)
+const ownerSendEnabled = ref(false)
 const initializationOpen = ref(false)
 const initializationLocked = ref(false)
 const fieldCatalog = reactive<CatalogEntry[]>([])
@@ -170,7 +173,7 @@ function candidateReasons(expandedIndex: number): string {
   return plan.value?.rows.find((row) => row.index === expandedIndex)?.issues.map(rowIssueReason).join(', ') ?? ''
 }
 function clearResults(): void {
-  persistentInput.value = null; ownerSendOpen.value = false; ownerSendLocked.value = false
+  persistentInput.value = null; ownerSendOpen.value = false; ownerSendLocked.value = false; ownerSendEnabled.value = false
   initializationOpen.value = false; initializationLocked.value = false
   plan.value = null; allocationPreview.value = null; errorCode.value = ''; configIssues.value = []
 }

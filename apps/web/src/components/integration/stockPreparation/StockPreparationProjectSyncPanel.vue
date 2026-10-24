@@ -421,12 +421,23 @@
       >
         <!-- THE LABEL NAMES THE DESTINATION IT ACTUALLY HAS. With a handle the parent lands the
              operator in the 备料主表 their run just wrote; without one there is no sheet this
-             deployment can prove is theirs, and the parent opens the multitable workbench. Saying
-             「打开备料多维表」 in that second case is the promise that made this button feel broken. -->
+             deployment can prove is theirs, and the parent pushes plain `/multitable` — the multitable
+             HOME page (「新建 Base」 + template cards), not a workbench. Saying 「打开备料多维表」 (or
+             「工作台」) in that second case is the promise that made this button feel broken. -->
         {{ fillTarget
           ? bi('打开备料多维表', 'Open the stock-preparation table')
-          : bi('打开多维表工作台', 'Open the multitable workbench') }}
+          : bi('打开多维表首页', 'Open the multitable home') }}
       </button>
+      <!-- 客户反馈 2026-10-21 9a: the home page's template cards read as "pick a template for this
+           project". Nothing there is the operator's to choose; this sentence says so, beside the
+           button, only when the button is the no-handle one. -->
+      <p
+        v-if="showsSheetLink && !fillTarget"
+        class="sp-sync__no-link-hint"
+        data-testid="stock-prep-project-sync-no-sheet-link-hint"
+      >
+        {{ bi(noSheetLinkHint.zh, noSheetLinkHint.en) }}
+      </p>
       <button
         v-if="report.pendingConfirmCount > 0"
         type="button"
@@ -498,6 +509,7 @@
       :api="largeBomApi"
       :wait="largeBomPollWait"
       :fill-target="fillTarget"
+      :no-link-hint-context="noLinkHintContext"
       @open-multitable="emit('open-multitable')"
       @synced="emit('synced', null)"
     />
@@ -588,12 +600,14 @@ import {
   STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
   STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
   stockPrepErrorPlain,
+  stockPrepNoSheetLinkHint,
   stockPrepProjectTargetPlain,
   stockPrepProjectTargetRowCountText,
   stockPrepProjectTargetWritePreviewText,
   stockPrepStepOutcomeText,
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
+  type StockPrepNoSheetLinkHintContext,
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import {
@@ -681,6 +695,12 @@ const props = withDefaults(
      * pre-S2 suite keeps its exact request set). No production mount injects either.
      */
     targetApi?: StockPreparationProjectTargetApi | null
+    /**
+     * Where this panel is mounted, for the no-link sentence only (review round 1 of 客户反馈 9a).
+     * `board` = 项目备料, whose own fill area further down explains the missing link; `workspace` =
+     * 项目工作台, which points the reader at 项目备料. Copy only — nothing routes on it.
+     */
+    noLinkHintContext?: StockPrepNoSheetLinkHintContext
   }>(),  {
     runEmphasis: 'primary',
     scope: () => ({}),
@@ -693,8 +713,11 @@ const props = withDefaults(
     runVariant: 'sync',
     fillTarget: null,
     targetApi: null,
+    noLinkHintContext: 'workspace',
   },
 )
+
+const noSheetLinkHint = computed(() => stockPrepNoSheetLinkHint(props.noLinkHintContext))
 
 const emit = defineEmits<{
   /** Reuses the shell's ONE tab-nav surface (the same event the dashboard's stepper emits). */
@@ -1693,6 +1716,15 @@ function onExportMissingComponents(): void {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ms-space-2);
+}
+
+/* A full-width line under the row of next-step buttons, so the other buttons stay on one row. */
+.sp-sync__no-link-hint {
+  flex-basis: 100%;
+  order: 99;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ms-text-3);
 }
 
 .sp-sync__link {

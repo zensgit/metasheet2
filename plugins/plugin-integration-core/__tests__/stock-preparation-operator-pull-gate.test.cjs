@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 // 拉取人员拉数据 — THE PULL GATE SPLIT (was 一线自己拉数据), across the routes it touches.
 //
 // THE RULING, AND ITS REVERSAL. The owner first ruled that a floor operator may self-serve the PLM
@@ -152,6 +154,8 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
     config: {},
   }
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
     stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
@@ -441,6 +445,8 @@ function mountWithSource({
     }
   }
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: registry,
     // RECORDS the principal each adapter is built for, then refuses the read — this suite is about
@@ -647,7 +653,10 @@ async function theOperatorPullReadsAsTheBindingOwner() {
   // 2. …and so does APPLY, which re-expands the source in its own right.
   {
     const { routes, adapterPrincipals } = mountWithSource()
-    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull })
+    // Batch-refresh phase 0 step 1: apply validates the project number FIRST (it names the write scope
+    // whose lease is held around the source load), so this call carries a well-formed synthetic one to
+    // reach the adapter load it is about. An empty body now refuses 400 before any IO.
+    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull, body: { parameters: { projectNo: 'SYN-SWL-0003' } } })
     assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-09: apply too')
   }
 
@@ -742,7 +751,8 @@ async function theDelegationReachesTheConnectionResolution() {
   // 3. APPLY re-expands the source in its own right, so it takes the same path.
   {
     const { routes, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
-    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull })
+    // A well-formed synthetic project number, for the reason P-09 gives (apply validates it first).
+    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull, body: { parameters: { projectNo: 'SYN-SWL-0003' } } })
     assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: apply too')
   }
 

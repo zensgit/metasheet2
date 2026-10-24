@@ -16,6 +16,7 @@ import {
 } from '../multitable/permission-derivation'
 import {
   carryHumanWriteLock,
+  hasHumanWriteLockedRequiredField,
   humanWriteLockRefusalBody,
   listHumanWriteLockedFieldIds,
   stripHumanWriteLockKey,
@@ -137,6 +138,10 @@ import {
   loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from '../multitable/stock-preparation-overview-contract'
+import {
+  GRID_EXPORT_CLOSED_REFUSAL,
+  GRID_EXPORT_CLOSURE_CONTEXT_MARKER,
+} from '../multitable/sheet-grid-export-closure'
 // #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
 // bound, never a grant: every call site below sits AFTER the unchanged canRead/liveness gate.
 import {
@@ -402,7 +407,7 @@ import { createRecoveryArchiveWorkerRecordEvents, enqueueRecoveryMutationEvent }
 import type { RecoveryArchiveWorkerApplyCallbacks } from '../multitable/recovery-archive-async-restore'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
-import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
+import { listAutomationDingTalkPersonDeliveries, parseDingTalkPersonDeliveryStatusFilter } from '../multitable/dingtalk-person-delivery-service'
 import {
   publishMultitableSheetRealtime as publishMultitableSheetRealtimeShared,
   type MultitableSheetRealtimePayload as SharedRealtimePayload,
@@ -9581,6 +9586,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             canDeleteSheet,
             // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
             canCopySheet,
+            // R68 (#6454 judge note): a sheet with a human-write-locked column that is ALSO required by its own
+            // validation rule (the 备料 project sheet's PLM columns) can never take a person-created record:
+            // empty fails the rule, filled is a locked write. Sent ONLY when true and only to an actor who could
+            // otherwise create, so every other sheet's capabilities object is unchanged; the web hides its
+            // create / duplicate entries on it. Display-only: the create routes keep their own refusals.
+            ...(capabilities.canCreateRecord === true && hasHumanWriteLockedRequiredField(activeFields)
+              ? { recordCreateBlockedByLock: true }
+              : {}),
+            // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): the effective sheet is stamped
+            // closed for generic grid export — `canExport` above is already false (the shared resolver's clamp).
+            // Sent ONLY on such a sheet, so every other sheet's capabilities object is byte-identical; the
+            // workbench renders its export buttons disabled with the reason and re-checks before it builds a
+            // selected-rows file in the browser. Display only: the export route refuses on its own.
+            ...(effectiveSheetResolution?.gridExportClosed === true
+              ? { gridExportClosure: GRID_EXPORT_CLOSURE_CONTEXT_MARKER }
+              : {}),
           },
           capabilityOrigin,
           fieldPermissions,
@@ -16811,11 +16832,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // not a page, not the unfiltered sheet), in the view's sort order.
       let view: SharedMultitableViewConfig | null = null
 
-      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness, gridExportClosed } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
+      if (!capabilities.canRead) return sendForbidden(res)
+      // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): the resolver already turned
+      // `canExport` off on a sheet stamped closed for generic grid export (xlsx AND csv — the format branch is far
+      // below). A READER of such a sheet is told why (values-free, fixed copy); a non-reader got the plain 403 one
+      // line above and learns nothing. Every other `canExport: false` keeps the plain 403, in today's order.
+      // Review round 1: on a CLOSED sheet liveness answers first — a reader of a soft-deleted (or vanished) stamped
+      // sheet gets the same values-free SHEET_DELETED / NOT_FOUND any reader gets, not the closure 403; the closure
+      // refusal is reserved for a live sheet. The caller already passed canRead, so no existence oracle opens.
+      if (!capabilities.canExport) {
+        if (!gridExportClosed) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+        return res.status(403).json(GRID_EXPORT_CLOSED_REFUSAL)
+      }
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       // #5807 — an export of the People system sheet is the whole roster in one file, and a TRUNCATED
       // export is worse than none (the file claims to be the sheet). Refuse instead, with the shared
@@ -21509,7 +21542,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const limit = parseDingTalkAutomationDeliveryLimit(req.query.limit)
-      const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
+      // 客户反馈 2026-10-21 item 1 (review round 2): optional server-side status filter (fixed value set,
+      // parameterized), so the run log's link to skipped deliveries is not limited to the latest page.
+      const status = parseDingTalkPersonDeliveryStatusFilter(req.query.status)
+      if (status === null) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'status must be one of success, failed, skipped, outcome_unknown' } })
+      }
+      const deliveries = status
+        ? await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit, { status })
+        : await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
       return res.json({ ok: true, data: { deliveries } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)

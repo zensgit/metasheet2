@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./consumable-storage.cjs')
+
 // 一个项目一张备料表 — ONE in-memory substrate for the project-sheet route suites (S2, R-36).
 //
 // Shared by `stock-preparation-project-target-pack-reinstall.test.cjs` and the permission matrix's
@@ -135,7 +139,7 @@ function makeMemoryDb() {
  * merges, and the DB-backed reads answer from exactly what landed. `state.failFieldWrite` makes the
  * additive write throw (a genuine mid-install host failure).
  */
-function makeProvisioning({ stampsSystemKind = false } = {}) {
+function makeProvisioning({ stampsSystemKind = false, fieldReads = false, gridExportClosure = false } = {}) {
   const calls = []
   const objects = new Map()
   const state = { failFieldWrite: false }
@@ -147,6 +151,53 @@ function makeProvisioning({ stampsSystemKind = false } = {}) {
     objects,
     state,
     sheetIdOf,
+    // PR B (OPT-IN, `fieldReads`): the per-field READ the PLM column lock and the pilot readiness probe
+    // use. Opt-in because `markProjectSheetPlmSystemColumns` reads-before-writes only when the host offers
+    // it, and the suites that predate it pin the host calls of a host WITHOUT it.
+    ...(fieldReads ? {
+      async getObjectField({ projectId, objectId, fieldId }) {
+        calls.push(['getObjectField', objectId, fieldId])
+        const object = objects.get(keyOf(projectId, objectId))
+        const field = object && object.fields.get(fieldId)
+        return field ? { id: fieldIdOf(objectId, fieldId), name: field.name, type: field.type, property: clone(field.property || {}) } : null
+      },
+    } : {}),
+    // PR B (OPT-IN, `gridExportClosure`): the host's #6507 grid-export closure port pair — set-once,
+    // idempotent, derived-sheet-checked the way plugin-scope.ts checks it. `gridExportClosures` is the
+    // host column (sheetId -> stamp); `gridExportClosureCalls` logs every stamp request with its ids.
+    gridExportClosures: new Map(),
+    gridExportClosureCalls: [],
+    ...(gridExportClosure ? {
+      async closeSheetGridExport({ projectId, sheetId, objectId, actorId }) {
+        calls.push(['closeSheetGridExport', sheetId])
+        api.gridExportClosureCalls.push({ projectId, sheetId, objectId, actorId: actorId ?? null })
+        if (sheetIdOf(projectId, objectId) !== sheetId) {
+          throw Object.assign(new Error('the sheet is not the one derived for this project and objectId'), { status: 422, code: 'MULTITABLE_GRID_EXPORT_CLOSURE_SHEET_MISMATCH' })
+        }
+        if (!objects.has(keyOf(projectId, objectId))) {
+          throw Object.assign(new Error('sheet not live'), { status: 404, code: 'MULTITABLE_SHEET_NOT_LIVE' })
+        }
+        const existing = api.gridExportClosures.get(sheetId)
+        if (existing) return { sheetId, present: true, closure: 'stock_prep_pilot', closedAt: existing.closedAt, closedBy: existing.closedBy, alreadyClosed: true }
+        const stamp = { closedAt: '2026-10-23T00:00:00.000Z', closedBy: actorId ?? null }
+        api.gridExportClosures.set(sheetId, stamp)
+        return { sheetId, present: true, closure: 'stock_prep_pilot', closedAt: stamp.closedAt, closedBy: stamp.closedBy, alreadyClosed: false }
+      },
+      async getSheetGridExportClosure({ projectId, sheetId, objectId }) {
+        calls.push(['getSheetGridExportClosure', sheetId])
+        if (sheetIdOf(projectId, objectId) !== sheetId) {
+          throw Object.assign(new Error('the sheet is not the one derived for this project and objectId'), { status: 422, code: 'MULTITABLE_GRID_EXPORT_CLOSURE_SHEET_MISMATCH' })
+        }
+        const existing = api.gridExportClosures.get(sheetId)
+        return {
+          sheetId,
+          present: objects.has(keyOf(projectId, objectId)),
+          closure: existing ? 'stock_prep_pilot' : null,
+          closedAt: existing ? existing.closedAt : null,
+          closedBy: existing ? existing.closedBy : null,
+        }
+      },
+    } : {}),
     // S3 fix round 1 (R8c): the host's declaration that it stamps `systemKind` at INSERT. OPT-IN here — a
     // mount without it is an OLDER host, on which the overview legs refuse before any IO, so every suite
     // that predates the overview sees exactly the host calls and audit rows it always saw.
@@ -379,6 +430,8 @@ function baseServices(sourceAdapter) {
     config: { dataSourceId: 'ds_synthetic', object: 'DN_PDM_PathExAttrInfo' },
   })
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },
@@ -420,6 +473,9 @@ function mountProjectSheetRoutes({
   switchOn = true,
   // S3 fix round 1: a host that declares the overview stamp (see makeProvisioning). Off = an older host.
   stampsSystemKind = false,
+  // PR B: a host with per-field reads / the #6507 grid-export closure port pair (see makeProvisioning).
+  fieldReads = false,
+  gridExportClosure = false,
   // S3 fix round 1: the route logger (default: silent) — a suite that pins a values-free warn passes its own.
   logger = { info() {}, warn() {}, error() {} },
   grantRoleIds = null,
@@ -436,7 +492,7 @@ function mountProjectSheetRoutes({
   const staging = `${tenantId}:integration-core`
   const routes = new Map()
   const auditAppends = []
-  const provisioning = makeProvisioning({ stampsSystemKind })
+  const provisioning = makeProvisioning({ stampsSystemKind, fieldReads, gridExportClosure })
   if (envObjectId) seedObject(provisioning, staging, envObjectId, envExtFieldIds)
   const records = makeRecordsApi({ provisioning })
   const source = makeSourceAdapter(projectNo)
@@ -444,9 +500,10 @@ function mountProjectSheetRoutes({
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning, records },
+      // P1-a: the fake host declares + enforces the write fence, as the real host does.
+      multitable: { provisioning, records: require('./stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records) },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [{
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
@@ -462,6 +519,16 @@ function mountProjectSheetRoutes({
   const services = Object.assign(baseServices(source.adapter), serviceExtras)
   services.stockPreparationAuditStore = {
     async append(entry) {
+      auditInternals.assertValuesFreeDetail(entry.detail)
+      assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes(entry.action), `audit action ${entry.action} is in the closed vocabulary`)
+      auditAppends.push(entry)
+      return { ok: true }
+    },
+    // Pre-enable hardening F-4(c): the in-transaction append (the real store inserts on `trx`). The memory db
+    // here does not roll back, so this records the row like `append` and pins that it was handed a TRANSACTION
+    // handle (one carrying the advisory lock the registry's transactions take) — atomicity itself is real-DB.
+    async appendWithin(trx, entry) {
+      assert.ok(trx && typeof trx.advisoryXactLock === 'function', 'appendWithin is handed a transaction handle')
       auditInternals.assertValuesFreeDetail(entry.detail)
       assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes(entry.action), `audit action ${entry.action} is in the closed vocabulary`)
       auditAppends.push(entry)
@@ -502,8 +569,13 @@ function mountProjectSheetRoutes({
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
+    // PR B: the service objects the routes captured at mount, so a suite can patch one in place (a registry
+    // that answers its list read, an audit store whose vocabulary probe refuses).
+    services,
     // S3 fix round 1: the REAL registry store the routes use, for suites that drive the overview module directly.
     projectTargetStore: services.stockPreparationProjectTargetStore,
+    // Codex review P1-b: the lock the routes use, so a suite can seed what an expansion observed.
+    projectWriteLock: services.stockPreparationProjectWriteLock || null,
     projectObjectId: (no = projectNo) => deriveProjectSheetObjectId(tenantId, no),
     registryRows: () => db.rowsOf(PROJECT_TARGET_TABLE),
     /**
@@ -559,6 +631,9 @@ module.exports = {
   makeMemoryDb,
   makeProvisioning,
   makeRecordsApi,
+  makeSourceAdapter,
+  baseServices,
+  inertService,
   seedObject,
   mountProjectSheetRoutes,
   call,

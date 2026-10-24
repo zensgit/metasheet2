@@ -574,6 +574,26 @@ describe('MetaCopySheetDialog', () => {
     expect(submitButton().disabled).toBe(false)
   })
 
+  // 备料分批拉取第一期 step 3 (PR A): a source the server stamped closed for generic grid export refuses only the
+  // WITH-DATA copy (403 COPY_SOURCE_GRID_EXPORT_CLOSED). The dialog treats it as a data-only refusal: its sentence
+  // while data is included, ONE structure-only re-probe, and a structure-only copy once 「包含数据」 is unticked.
+  it('grid-export-closed source (403, data-only): its sentence while data is included; structure-only re-probe; structure-only submit', async () => {
+    client.dryRunCopySheet
+      .mockRejectedValueOnce(copyErr(403, { code: 'COPY_SOURCE_GRID_EXPORT_CLOSED' }))
+      .mockResolvedValueOnce(dryRunOk({ rowCount: 0, ...STRUCTURAL }))
+    await mount()
+    expect(client.dryRunCopySheet.mock.calls[1]).toEqual(['sheet_orders', { withData: false, permissionMode: 'inherit' }])
+    expect(errorText()).toBe('这是试点备料表，数据不能复制。可取消勾选「包含数据」只复制结构。')
+    expect(submitButton().disabled).toBe(true)
+    q<HTMLInputElement>('copy-sheet-with-data')!.click()
+    await flush()
+    expect(errorText()).toBe('')
+    expect(submitButton().disabled).toBe(false)
+    submitButton().click()
+    await flush()
+    expect(client.copySheet).toHaveBeenCalledWith('sheet_orders', { name: '订单 副本', withData: false, permissionMode: 'inherit' })
+  })
+
   it('a data-only refusal whose structure-only re-probe also fails keeps EVERY submit blocked (disclosures never skipped)', async () => {
     client.dryRunCopySheet
       .mockRejectedValueOnce(copyErr(413, { code: 'COPY_TOO_LARGE', details: { rowCount: 2400, limit: 2000 } }))

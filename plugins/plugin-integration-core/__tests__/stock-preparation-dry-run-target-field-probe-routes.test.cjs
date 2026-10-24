@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // 目标表字段存在性探针 — THROUGH THE REAL ROUTE TABLE.
 //
 // The unit suite (stock-preparation-target-field-existence-probe.test.cjs) proves the probe inside
@@ -180,6 +184,8 @@ function inertService(methods) {
 
 function baseServices(sourceAdapter) {
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
     stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
@@ -253,10 +259,10 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [], derived
       },
       multitable: {
         provisioning: host.provisioning,
-        records: records.api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records.api),
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig()],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [OBJECT_ID] },
@@ -367,7 +373,7 @@ async function r2CompleteHostAndOldHostAnswerIdentically() {
 
 async function r3ApplyIsRefusedWhenColumnsVanishAfterTheDryRun() {
   const harness = mount()
-  const planned = await dryRun(harness.routes)
+  const planned = await dryRun(harness.routes, { user: ADMIN_USER }) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
   assert.ok(planned.body.data.dryRunToken)
   for (const id of MISSING_FIVE) harness.host.missing.add(id)

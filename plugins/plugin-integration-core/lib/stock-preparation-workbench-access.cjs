@@ -322,6 +322,25 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/project-overview/ensure',
     control: 'stock-prep-project-overview-ensure',
   }),
+  // 备料分批拉取第一期 step 3 PR B (plan §5.1 / §7 G5, G7; register R-53, R-54) — THE PILOT MARKER of a
+  // project sheet. Both ADMIN (R-53 owner default ②: enabling a pilot is an administrator's act; the
+  // readiness answer names infrastructure facts, so the read is ADMIN too). The read is the pilot
+  // status line on 项目备料页's sheet-state line, the enable its typed-confirmation button; both 404
+  // DISABLED while the project-sheets switch is off, after the gate. There is NO unset capability.
+  Object.freeze({
+    capability: 'projectTarget.pilotRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pilotEnable',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-enable',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

@@ -24,8 +24,22 @@ const {
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
   applyStockPreparationPlan,
+  assertHostFencedWriteSupported,
+  countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
+// Batch-refresh phase 0 step 1: the project write lock. An approval BUMPS the plan generation and binds the
+// job to it; every chunk runs inside the project write lease and refuses a job whose binding is not the
+// generation the lease grant observed.
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
+  assertWriteBindingMatchesGuard,
+  generationMatchesObservation,
+  normalizeGenerationExpectation,
+} = require('./stock-preparation-project-write-lock.cjs')
+
+const WRITE_BINDING_KEYS = Object.freeze(['writeScope', 'writeGeneration', 'writeGenerationToken'])
 
 const LARGE_BOM_BACKGROUND_EXPANSION_STATUSES = Object.freeze([
   'queued',
@@ -47,6 +61,15 @@ const LARGE_BOM_CHECKPOINT_APPLY_STATUSES = Object.freeze([
   'cancelled',
   'expired',
 ])
+
+// Pre-enable hardening F-3 (step-4 design §23.4): the checkpoint-apply statuses after which a job can
+// never write again. `runLargeBomCheckpointApplyJobChunk` returns `succeeded` / `partial` as they are and
+// refuses `cancelled` / `expired`; every OTHER status — `queued`, `paused`, `failed` (resumable after a
+// fenced stop), `running` (a run that died mid-chunk), and any token this build does not know — is OPEN:
+// the job may still land rows on its sheet.
+const LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES = Object.freeze(['succeeded', 'partial', 'cancelled', 'expired'])
+// Every checkpoint-apply job is stored under this prefix (`checkpointApplyJobKey` below).
+const LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX = 'stock-preparation:large-bom:apply:'
 
 const BACKGROUND_PROGRESS_FIELDS = Object.freeze([
   'rowsExpanded',
@@ -545,7 +568,60 @@ function checkpointApplyJobKey(input = {}) {
       { actionIdPresent: Boolean(safeActionId), applyJobIdPresent: Boolean(safeApplyJobId) },
     )
   }
-  return `stock-preparation:large-bom:apply:${tenantId}:${workspaceId}:${safeActionId}:${safeApplyJobId}`
+  return `${LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX}${tenantId}:${workspaceId}:${safeActionId}:${safeApplyJobId}`
+}
+
+/**
+ * PRE-ENABLE HARDENING F-3 (step-4 design §23.4): how many OPEN checkpoint-apply jobs target ONE sheet.
+ * Read by the pilot readiness check `no_open_large_job`: a large job half-landed across an enablement can
+ * be neither resumed (the pilot gate refuses every large route) nor closed (there is no apply-job cancel),
+ * so enabling is refused while one exists.
+ *
+ * WHOLE STORE, EVERY TENANT AND WORKSPACE: the write scope is the sheet (R-52) and sheet ids are globally
+ * unique, so a job is this sheet's when its stored target names it, whoever approved it. The answer is two
+ * integers — no job id, tenant or sheet leaves this function.
+ *
+ * FAIL CLOSED: a store that is not the durable one, or lacks `list` / `get`, or whose list / get throws,
+ * THROWS (the readiness check reads a throw as not ok). A stored value that is not an object, or an OPEN
+ * job whose target sheet cannot be read, counts as open (`unattributed`): nothing proves it is another
+ * sheet's. A terminal job is never counted, whatever its target.
+ *
+ * @returns {Promise<{ open: number, unattributed: number, scanned: number }>}
+ */
+async function countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId } = {}) {
+  const sheet = optionalString(sheetId)
+  if (!sheet) {
+    throw new StockPreparationLargeBomJobError('LARGE_BOM_APPLY_JOB_SCAN_INVALID', 'the open-job scan needs the sheet it is asked about', { field: 'sheetId' }, 500)
+  }
+  const store = ensureDurableJobStorage(storage)
+  if (typeof store.list !== 'function') {
+    throw new StockPreparationLargeBomJobError('LARGE_BOM_JOB_STORE_UNAVAILABLE', 'large-BOM job storage is missing list', { method: 'list' }, 501)
+  }
+  const keys = await store.list()
+  if (!Array.isArray(keys)) {
+    throw new StockPreparationLargeBomJobError('LARGE_BOM_JOB_STORE_UNAVAILABLE', 'large-BOM job storage list did not answer a key list', { method: 'list' }, 501)
+  }
+  let open = 0
+  let unattributed = 0
+  let scanned = 0
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key.startsWith(LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX)) continue
+    scanned += 1
+    const job = await store.get(key)
+    if (job === null || job === undefined) continue // deleted between the list and the read
+    if (!isPlainObject(job)) {
+      unattributed += 1
+      continue
+    }
+    if (LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES.includes(job.status)) continue
+    const jobSheet = isPlainObject(job.target) ? optionalString(job.target.sheetId) : ''
+    if (!jobSheet) {
+      unattributed += 1
+      continue
+    }
+    if (jobSheet === sheet) open += 1
+  }
+  return { open, unattributed, scanned }
 }
 
 function requiredPrincipal(value) {
@@ -609,6 +685,14 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     )
   }
   const parameters = isPlainObject(input.parameters) ? cloneJson(input.parameters) : {}
+  // EXPANSION-TIME GENERATION (Codex review P1-b): the route's observer reads the target sheet's write
+  // generation BEFORE the job exists (refused 409 while a live writer holds the sheet — then no job is
+  // created). Plan and approval later require it unchanged. Stored ALONGSIDE the job's fields, never in a
+  // revision or the public projection. No observer (no lock service wired) -> an UNOBSERVED job, which a
+  // lock-wired plan / approval refuses `expansion_unbound`.
+  const writeObservation = typeof input.writeGenerationObserver === 'function'
+    ? normalizeExpansionWriteObservation(await input.writeGenerationObserver())
+    : null
   const jobId = safeEvidenceToken((typeof input.createJobId === 'function' ? input.createJobId() : '') || defaultJobId(), 'jobId')
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   const job = {
@@ -640,9 +724,39 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     },
     createdAt: now,
     updatedAt: now,
+    ...(writeObservation ? { writeObservation } : {}),
   }
   await storage.set(backgroundJobKey({ ...scope, actionId, jobId }), job)
   return cloneJson(job)
+}
+
+function normalizeExpansionWriteObservation(observation) {
+  if (!isPlainObject(observation) || typeof observation.writeScope !== 'string' || !observation.writeScope) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the expansion write generation observer returned no usable observation', { reason: 'observation_malformed' })
+  }
+  const expectation = normalizeGenerationExpectation(observation)
+  return { writeScope: observation.writeScope, ...expectation }
+}
+
+function expansionUnbound() {
+  return new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'this large-BOM expansion predates the sheet write generation; expand again before planning', { reason: 'expansion_unbound', partial: false })
+}
+
+function expansionStale(currentGeneration) {
+  return new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'a newer preview or write of this stock-prep sheet exists since this expansion; expand again before planning', {
+    reason: 'expansion_stale',
+    ...(Number.isInteger(currentGeneration) ? { currentGeneration } : {}),
+    partial: false,
+  })
+}
+
+// The observation a job carries, or null when it carries none (an unobserved / legacy job).
+function storedWriteObservation(value) {
+  try {
+    return isPlainObject(value) ? normalizeExpansionWriteObservation(value) : null
+  } catch {
+    return null
+  }
 }
 
 async function loadLargeBomBackgroundExpansionJob(input = {}) {
@@ -1205,6 +1319,31 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     'applyJobId',
   )
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  // PLAN GENERATION (batch-refresh phase 0 step 1): approving a checkpoint job SUPERSEDES every earlier
+  // plan of this write scope (small tokens and earlier approved jobs alike). The route's binder bumps
+  // (a live writer's acquire moved the epoch, so with the expectation below it is refused 409
+  // PLAN_SUPERSEDED `expansion_stale` — then no job is created) and the job records the generation it was
+  // approved under, ALONGSIDE planRevision / targetRevision, never inside them.
+  // No binder (the lock service is not wired) creates an UNBOUND job, which no chunk will run.
+  //
+  // P1-b: the bump is CONDITIONAL on the generation the expansion observed and the plan re-checked (token
+  // AND fencing epoch unchanged — the binder passes it to the lock as `expect`, which pins it in the CAS).
+  // An expansion / plan carrying no observation is refused `expansion_unbound`; a stale one
+  // `expansion_stale` (from the lock). Both before any job exists.
+  let writeBinding = null
+  if (typeof input.writeGenerationBinder === 'function') {
+    const observed = storedWriteObservation(sourceJob.planWriteObservation)
+    const expansionObserved = storedWriteObservation(sourceJob.writeObservation)
+    if (!observed || !expansionObserved || JSON.stringify(observed) !== JSON.stringify(expansionObserved)) {
+      throw expansionUnbound()
+    }
+    // The whole observation — token, epoch and, when the expansion saw an expired lease, that lease's id
+    // and seq (review round 4) — is the bump's expectation.
+    writeBinding = normalizeLargeBomWriteBinding(await input.writeGenerationBinder({ ...observed }))
+    if (writeBinding.writeScope !== observed.writeScope) {
+      throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the approval bound a different sheet than the expansion observed', { reason: 'scope_changed', partial: false })
+    }
+  }
   const job = {
     jobId: applyJobId,
     ...scope,
@@ -1252,9 +1391,28 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     },
     createdAt: now,
     updatedAt: now,
+    // Present only when bound, so an unbound (lock-less) job is byte-identical to the pre-lock job.
+    ...(writeBinding || {}),
   }
   await storage.set(checkpointApplyJobKey({ ...scope, actionId: sourceJob.actionId, applyJobId }), job)
   return cloneJson(job)
+}
+
+function normalizeLargeBomWriteBinding(binding) {
+  if (!isPlainObject(binding)
+    || typeof binding.writeScope !== 'string' || !binding.writeScope
+    || typeof binding.writeGenerationToken !== 'string' || !binding.writeGenerationToken
+    || !Number.isInteger(binding.writeGeneration) || binding.writeGeneration < 0) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the project write generation binder returned no usable binding', { reason: 'binding_malformed' })
+  }
+  return Object.fromEntries(WRITE_BINDING_KEYS.map((key) => [key, binding[key]]))
+}
+
+function requireLargeBomProjectWriteGuard(guard) {
+  if (!guard || typeof guard.beforeWrite !== 'function' || typeof guard.scopeKey !== 'string' || typeof guard.generationToken !== 'string') {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'large-BOM checkpoint apply requires the project write lock; nothing is written without it')
+  }
+  return guard
 }
 
 async function loadLargeBomCheckpointApplyJob(input = {}) {
@@ -1355,6 +1513,28 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     }
     const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
     const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
+    // PILOT LANE CHECK (batch-refresh step 3 PR B; plan §5.1 / §9.4 L02): the route's pilot gate runs
+    // AGAIN here, inside the sheet write lease, BEFORE the generation binding is compared and BEFORE the
+    // job turns `running` — so a job approved before its project became a pilot is refused with the pilot
+    // code (never PLAN_SUPERSEDED, never a write), and the job is left exactly as it was (status, checkpoint,
+    // counts untouched; this request advanced nothing). The route always passes it; a direct lib caller
+    // without one keeps the pre-PR-B path.
+    if (typeof input.largeLanePilotCheck === 'function') {
+      await input.largeLanePilotCheck({ target: cloneJson(job.target), applyJobId: job.jobId })
+    }
+    // PROJECT WRITE GUARD (batch-refresh phase 0 step 1): the route holds the sheet write lease around
+    // this chunk. Required (501), and BEFORE any job write the job's approval binding must be the
+    // generation the lease grant observed — a newer preview or approval of this project since then
+    // refuses 409 PLAN_SUPERSEDED and leaves the job exactly as it was; a job approved before bindings
+    // existed is refused `job_unbound`. Its remedy is a NEW expansion (start -> run -> plan -> approve):
+    // re-approving the old expansion is refused `expansion_unbound`, since that expansion carries no
+    // write observation either. The orphaned job's landed rows are re-planned as existing rows by their
+    // idempotency keys (UPDATE / SKIP, never a second ADD), so nothing is written twice.
+    const projectWriteGuard = requireLargeBomProjectWriteGuard(input.projectWriteGuard)
+    assertWriteBindingMatchesGuard(job, projectWriteGuard, { unboundReason: 'job_unbound' })
+    // P1-a: the chunk's writes are host-fenced; a host that cannot honour the fence refuses here, before
+    // the job is touched (the writer re-checks).
+    assertHostFencedWriteSupported(recordsApi, projectWriteGuard)
     const start = nextDecisionIndex(job)
     const decisions = plan.decisions
     if (start >= decisions.length) {
@@ -1392,10 +1572,47 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
         ? job.installedFieldProperties
         : input.installedFieldProperties,
       recordsApi,
+      // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write, and the
+      // same lease + generation re-checked by the host inside every record write transaction (P1-a).
+      writeFence: projectWriteGuard,
+      writeFenceRequired: true,
     })
 
     job.counts = mergeCounts(job.counts, applyResult.counts)
     mergeApplyEvidence(job, applyResult)
+    if (applyResult.status === 'aborted') {
+      // FENCED STOP mid-chunk: decisions [start, start + k) ran, k did not. The checkpoint records exactly
+      // that, the job is `failed` (resumable from start + k by a later run that holds the lease and whose
+      // binding is current), and the stop's code joins the values-free evidence.
+      const stoppedAt = start + applyResult.abort.index
+      job.checkpoint = {
+        nextDecisionIndex: stoppedAt,
+        completedChunks: completedChunks(job),
+      }
+      job.evidence = {
+        ...job.evidence,
+        errorCodes: mergeTokenList(job.evidence && job.evidence.errorCodes, [applyResult.abort.code]),
+      }
+      job.status = 'failed'
+      job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+      await storage.set(key, job)
+      const source = applyResult.abort.error
+      throw new StockPreparationProjectWriteLockError(
+        source && Number.isInteger(source.status) ? source.status : 409,
+        applyResult.abort.code,
+        source && source.message ? source.message : 'the large-BOM chunk stopped before finishing',
+        {
+          ...(source && isPlainObject(source.details) ? source.details : {}),
+          // Rows may have landed whenever a host write was attempted (review round 2), not only when one
+          // was confirmed.
+          partial: countAttemptedHostWrites(applyResult) > 0,
+          written: Number(applyResult.written || 0),
+          attemptedWrites: countAttemptedHostWrites(applyResult),
+          counts: { ...applyResult.counts },
+          abortedAtDecisionIndex: stoppedAt,
+        },
+      )
+    }
     job.checkpoint = {
       nextDecisionIndex: end,
       completedChunks: completedChunks(job) + 1,
@@ -1422,6 +1639,22 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     )
   }
   assertAuthoritativeLargeBomExpansion(job)
+  // P1-b: a plan is made only while the sheet's write generation is still the one the expansion
+  // observed (token compared; the epoch is compared at approval, inside the bump's CAS). Stale ->
+  // 409 PLAN_SUPERSEDED `expansion_stale`; an unobserved (legacy) expansion -> `expansion_unbound`.
+  // Both before the plan is computed or the job is touched. The checked observation is recorded with the
+  // plan; approval requires it. No reader (no lock service wired) -> the pre-lock behaviour.
+  let planWriteObservation = null
+  if (typeof input.writeGenerationReader === 'function') {
+    const observed = storedWriteObservation(job.writeObservation)
+    if (!observed) throw expansionUnbound()
+    const current = await input.writeGenerationReader(observed.writeScope)
+    // Token, epoch and (when one was recorded) the expired lease's id + seq — the same rule as approval.
+    if (!generationMatchesObservation(current, observed)) {
+      throw expansionStale(current && Number.isInteger(current.generation) ? current.generation : undefined)
+    }
+    planWriteObservation = observed
+  }
   const artifact = isPlainObject(job.artifact) ? job.artifact : {}
   const expandedRows = Array.isArray(artifact.rows) ? artifact.rows.map(cloneJson) : []
   const existingRows = normalizeExistingRows(input.existingRows)
@@ -1468,6 +1701,10 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     plannedAt: plan.plannedAt,
   }
   job.planEvidence = summarizeConflictPlanForEvidence(plan)
+  // Replaced on every plan: a plan made without the reader carries none (and a lock-wired approval
+  // refuses it), never the observation an earlier plan recorded.
+  if (planWriteObservation) job.planWriteObservation = planWriteObservation
+  else delete job.planWriteObservation
   job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   await storage.set(key, job)
   return cloneJson(job)
@@ -1567,8 +1804,10 @@ module.exports = {
   LARGE_BOM_ARTIFACT_CHUNK_COUNT,
   LARGE_BOM_BACKGROUND_EXPANSION_STATUSES,
   LARGE_BOM_CHECKPOINT_APPLY_STATUSES,
+  LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES,
   StockPreparationLargeBomJobError,
   cancelLargeBomBackgroundExpansionJob,
+  countOpenLargeBomCheckpointApplyJobsForSheet,
   createLargeBomBackgroundExpansionJob,
   createLargeBomCheckpointApplyJob,
   loadLargeBomBackgroundExpansionJob,
@@ -1587,6 +1826,7 @@ module.exports = {
   __internals: {
     backgroundJobKey,
     checkpointApplyJobKey,
+    LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX,
     effectiveExpansionBudgets,
     ensureDurableJobStorage,
     attachReadFailureEvidence,

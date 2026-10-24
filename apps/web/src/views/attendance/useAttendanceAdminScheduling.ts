@@ -351,10 +351,10 @@ export function useAttendanceAdminScheduling({
         orgId: getOrgId(),
       }
       const endpoint = isEditing
-        ? `/api/attendance/rotation-rules/${rotationRuleEditingId.value}`
+        ? `/api/attendance/rotation-rules/${rotationRuleEditingId.value}/update`
         : '/api/attendance/rotation-rules'
       const response = await apiFetch(endpoint, {
-        method: isEditing ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       })
       if (response.status === 403) {
@@ -464,10 +464,10 @@ export function useAttendanceAdminScheduling({
         orgId: getOrgId(),
       }
       const endpoint = isEditing
-        ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}`
+        ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}/update`
         : '/api/attendance/rotation-assignments'
       const response = await apiFetch(endpoint, {
-        method: isEditing ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       })
       if (response.status === 403) {
@@ -605,10 +605,10 @@ export function useAttendanceAdminScheduling({
         orgId: getOrgId(),
       }
       const endpoint = isEditing
-        ? `/api/attendance/shifts/${shiftEditingId.value}`
+        ? `/api/attendance/shifts/${shiftEditingId.value}/update`
         : '/api/attendance/shifts'
       const response = await apiFetch(endpoint, {
-        method: isEditing ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       })
       if (response.status === 403) {
@@ -714,10 +714,10 @@ export function useAttendanceAdminScheduling({
         orgId: getOrgId(),
       }
       const endpoint = isEditing
-        ? `/api/attendance/assignments/${assignmentEditingId.value}`
+        ? `/api/attendance/assignments/${assignmentEditingId.value}/update`
         : '/api/attendance/assignments'
       const response = await apiFetch(endpoint, {
-        method: isEditing ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       })
       if (response.status === 403) {
@@ -822,10 +822,10 @@ export function useAttendanceAdminScheduling({
         orgId: getOrgId(),
       }
       const endpoint = isEditing
-        ? `/api/attendance/holidays/${holidayEditingId.value}`
+        ? `/api/attendance/holidays/${holidayEditingId.value}/update`
         : '/api/attendance/holidays'
       const response = await apiFetch(endpoint, {
-        method: isEditing ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       })
       if (response.status === 403) {

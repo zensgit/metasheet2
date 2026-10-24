@@ -1034,6 +1034,8 @@ required=(
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/data-adapters/MSSQLAdapter.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js"
+  "packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js"
   "packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/db/migration-provider.js"

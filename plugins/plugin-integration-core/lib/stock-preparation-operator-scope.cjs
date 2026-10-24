@@ -178,6 +178,15 @@
 //           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
 //           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
 //           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
+//       21. GET  …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotGet`
+//       22. POST …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotEnable`
+//           备料分批拉取第一期 step 3 PR B (register R-53 / R-54), ADMIN. The GET answers the pilot
+//           marker and a values-free readiness list about the proven tenant's registry row and sheet
+//           (the staging project the probes read is derived from this scope with no request
+//           projectId, in the shared readiness helper). The POST is a WRITE: it bumps the sheet's plan
+//           generation, asks the host to stamp the sheet closed for grid export and marks the registry
+//           row — keyed by the proven tenant; a header-fillable tenant here would mark another
+//           tenant's project pilot. Set-once; there is no unset surface.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

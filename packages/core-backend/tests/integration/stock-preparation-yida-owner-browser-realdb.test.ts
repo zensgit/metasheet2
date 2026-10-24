@@ -168,9 +168,11 @@ databaseSuite('SA05 owner browser — isolated real panel and actual HTTP/PG aut
     expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([0, 0])
   }, 45000)
 
-  it('real parent DOM captures local input, opens owner flow, and locks its editor after the one-row grant', async () => {
+  it('real parent DOM shows no single-row CREATE entry while no owner-authorized read reported the switch ON', async () => {
     // Keep the previous six owner-only cases unchanged. This case mounts the
     // actual parent with no props; only its public DOM config controls are used.
+    // The parent -> owner send chain (input capture, locked editor, one send) runs where the
+    // initialization GET is real: stock-preparation-yida-initialization-browser-realdb.test.ts.
     await ui!.cleanup(); ui = undefined
     ui = await createYidaOwnerBrowserFixture({ apiOrigin: host.origin, ownerToken: host.tokens.owner,
       otherToken: host.tokens.otherOwner, draftInput: input(), mode: 'parent' })
@@ -207,44 +209,29 @@ databaseSuite('SA05 owner browser — isolated real panel and actual HTTP/PG aut
     await page.getByTestId('sp-yida-allocation-project-field').selectOption('projectNo')
     await page.getByTestId('sp-yida-allocation-quantity-field').selectOption('quantity')
     await page.getByTestId('sp-yida-run').click()
-    await page.getByTestId('sp-yida-owner-open').waitFor()
+    await page.getByTestId('sp-yida-initialization-open').waitFor()
     expect(await page.getByTestId('sp-yida-summary').innerText()).toBe('共 3 行；计划创建 3；计划更新 0；无效 0；本地重复键 0。')
     expect(JSON.parse(await page.getByTestId('sp-yida-payload-2').innerText())).toEqual(host.compiledPayload(expected, 2))
     await ui.settled()
     expect(ui.requests).toEqual([]); expect(await host.proof()).toEqual(beforeLocal)
-    await page.getByTestId('sp-yida-owner-open').click()
-    await page.getByTestId('stock-prep-yida-owner-send-panel').waitFor()
-    await ui.settled(); expect(ui.requests).toEqual([])
-    const draft = await saveAndSelect()
-    expect(ui.requests[0].body).toEqual(expected)
-    const preview = await readPreview(draft)
-    expect(await page.getByTestId('sp-yida-app-type').isEnabled()).toBe(true)
-    const grant = await approve()
-    // The child's actual locked-change event must reach the actual parent.
-    expect(await page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
-    for (const id of ['sp-yida-app-type', 'sp-yida-form-uuid', 'sp-yida-rows', 'sp-yida-run',
-      'sp-yida-example-primary', 'sp-yida-allocation-mode']) expect(await page.getByTestId(id).isDisabled()).toBe(true)
-    const sentResponse = ui.waitApi('POST', '/submissions')
-    await page.getByTestId('sp-yida-owner-submit').click()
-    const sent = await realBrowserData(await sentResponse, 200)
-    await page.getByTestId('sp-yida-owner-acknowledged').waitFor()
-    expect(sent).toMatchObject({ status: 'acknowledged', businessVerified: false, externalWriteAttempted: true,
-      approval: { grantId: grant.grantId, remainingAttempts: 0 }, delivery: { status: 'acknowledged', durable: true } })
-    expect([host.tokenPayloads.length, host.formPayloads.length, host.tokenCommitted]).toEqual([1, 1, true])
-    expect(host.formPayloads[0]).toEqual(preview.payload)
-    expect((await host.proof()).counts).toEqual([1, 0, 1, 2, 1, 3])
-    expect(await page.getByTestId('sp-yida-owner-submit').isDisabled()).toBe(true)
-    const beforeHistory = await host.proof(), history = ui.waitApi('GET', '/approvals/' + grant.grantId)
-    await page.getByTestId('sp-yida-owner-refresh').click()
-    expect(await realBrowserData(await history, 200)).toMatchObject({ delivery: sent.delivery })
-    await refreshConsumed()
+    // The host switch is ON, but the client has not been told: no entry without a server read.
+    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+    await page.getByTestId('sp-yida-initialization-open').click()
+    await page.getByTestId('stock-prep-yida-initialization-panel').waitFor()
+    // This host serves no initialization port, so the only switch read fails closed.
+    const unavailable = ui.waitApi('GET', '/initialization')
+    await page.getByTestId('sp-yida-init-refresh').click()
+    expect(await realBrowserJson(await unavailable, 503)).toEqual({ ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } })
+    await page.getByTestId('sp-yida-init-error').filter({ hasText: 'YIDA_OWNER_HTTP_UNAVAILABLE' }).waitFor()
     await ui.settled()
-    expect(ui.requests.map(request => [request.method, request.path])).toEqual([
-      ['POST', prefix + '/drafts'], ['POST', prefix + '/preview'], ['POST', prefix + '/approvals'],
-      ['POST', prefix + '/submissions'], ['GET', prefix + '/approvals/' + grant.grantId],
-    ])
-    expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([1, 1])
-    expect(await host.proof()).toEqual(beforeHistory)
+    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+    expect(await page.getByTestId('stock-prep-yida-owner-send-panel').count()).toBe(0)
+    // A failed read is never an answer: the state stays unconfirmed and the parent editor stays locked.
+    expect(await page.getByTestId('sp-yida-init-uncertain').count()).toBe(1)
+    expect(await page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
+    expect(ui.requests.map(request => [request.method, request.path])).toEqual([['GET', prefix + '/initialization']])
+    expect(await host.proof()).toEqual(beforeLocal)
+    expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([0, 0])
   }, 60000)
 
   it('default OFF is visible in DOM and a clicked draft gets the real denial with no owner SQL/fetch', async () => {

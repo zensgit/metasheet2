@@ -225,6 +225,56 @@ test('update requires a bounded string instance ID; config intent and key/map cl
   for (const config of invalidConfigs) assert.equal(validateYidaStaticConfig(config).valid, false)
 })
 
+// Offline oracle: the disabled form transport answers DISABLED only after its
+// own input check passed, and its fetch is never reached either way.
+async function transportVerdict(intent, data) {
+  const { createYidaFormTransport } = require('../lib/yida-form-transport.cjs')
+  let fetched = 0
+  const transport = createYidaFormTransport({ fetch: () => { fetched += 1; throw new Error('synthetic-offline') } })
+  const error = await transport.send({ intent, data, accessToken: 'synthetic_access',
+    systemToken: 'synthetic_system', userId: 'synthetic_user' }, { signal: new AbortController().signal })
+    .then(() => null, (failure) => failure)
+  assert.equal(fetched, 0)
+  return error?.code
+}
+
+test('never accepts a target/instance ID the transport refuses', async () => {
+  const { validateYidaStaticConfig, buildYidaStaticPlan } = await modulePromise
+  const updateRow = { 项目号: 'P-1', 明细标识: 'L-1', 物料编号: 'B-17', 件数: 3, 启用: true }
+  for (const control of ['\u0000', '\u0009', '\u001f', '\u007f', '\u0080', '\u0085', '\u009f']) {
+    const id = `synthetic${control}id`
+    assert.equal(await transportVerdict('create', { appType: id, formUuid: 'synthetic-form', formDataJson: '{"project":"P"}' }), 'YIDA_FORM_INPUT')
+    assert.equal(await transportVerdict('update', { appType: 'synthetic-app', formInstanceId: id, updateFormDataJson: '{"project":"P"}' }), 'YIDA_FORM_INPUT')
+    for (const target of [{ appType: id, formUuid: 'synthetic-form' }, { appType: 'synthetic-app', formUuid: id }]) {
+      for (const config of [configA({ target }), protocolConfig(protocolSources, { target })]) {
+        assert.deepEqual(validateYidaStaticConfig(config), { valid: false,
+          issues: [{ code: 'CONFIG_TARGET_INVALID', field: 'target' }] })
+      }
+    }
+    const planned = buildYidaStaticPlan({ config: configUpdate(), rows: [{ ...updateRow, 实例ID: id }] }).rows[0]
+    assert.equal(planned.status, 'invalid')
+    assert.deepEqual(planned.issues.map((issue) => issue.code), ['INSTANCE_ID_MISSING'])
+  }
+  // Instance IDs are sent as supplied, so padding is refused rather than normalized.
+  for (const id of [' LOCAL-ID-17', 'LOCAL-ID-17 ', '\nLOCAL-ID-17']) {
+    assert.equal(await transportVerdict('update', { appType: 'synthetic-app', formInstanceId: id, updateFormDataJson: '{"project":"P"}' }), 'YIDA_FORM_INPUT')
+    const planned = buildYidaStaticPlan({ config: configUpdate(), rows: [{ ...updateRow, 实例ID: id }] }).rows[0]
+    assert.deepEqual(planned.issues.map((issue) => issue.code), ['INSTANCE_ID_MISSING'])
+  }
+  // Targets are sent trimmed: padding normalizes away and the sent IDs pass the transport.
+  const padded = validateYidaStaticConfig(protocolConfig(protocolSources,
+    { target: { appType: ' synthetic-app\t', formUuid: '\nsynthetic-form ' } }))
+  assert.equal(padded.valid, true)
+  assert.deepEqual(padded.normalized.target, { appType: 'synthetic-app', formUuid: 'synthetic-form' })
+  const created = buildYidaStaticPlan({ config: padded.normalized, rows: [protocolRow()] }).rows[0]
+  assert.equal(created.status, 'planned_create')
+  assert.equal(await transportVerdict('create', created.protocolPreview.data), 'YIDA_FORM_DISABLED')
+  const updated = buildYidaStaticPlan({ config: configUpdate(), rows: [{ ...updateRow, 实例ID: 'LOCAL-ID-17' }] }).rows[0]
+  assert.equal(updated.status, 'planned_update')
+  assert.equal(await transportVerdict('update', { appType: 'synthetic-app', formInstanceId: updated.instanceId,
+    updateFormDataJson: JSON.stringify(updated.payload) }), 'YIDA_FORM_DISABLED')
+})
+
 test('flat fields use own values: absent prototype-named optional/key/instance fields stay absent', async () => {
   const { buildYidaStaticPlan } = await modulePromise
   const optionalConfig = configA({ fieldMap: [

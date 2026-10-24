@@ -31,6 +31,7 @@ import {
   enqueueAttendanceResultEventOutboxV1,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
+  attendanceW4ConnectionDiscardV1,
 } from './w4c0-operation-registry'
 import { AttendanceW4OperationError } from './w4c0-operation-contract'
 import type { AttendanceW4OutboxEventKindV1 } from './w4c0-operation-contract'
@@ -290,7 +291,8 @@ export type AttendanceRequestOperationAdaptersV1 = Readonly<{
 
 export interface AttendanceRequestOperationBoundaryConnectionV1 {
   readonly client: AttendanceW4TransactionClientV1
-  release(): void
+  /** pg's `release(err?)`: a truthy error destroys the connection instead of returning it. */
+  release(error?: Error): void
 }
 
 export interface AttendanceRequestOperationBoundaryInputV1 {
@@ -680,6 +682,7 @@ export function createAttendanceRequestOperationBoundaryV1(
     async execute(rawInput) {
       const input = normalizeInput(rawInput)
       const connection = await deps.acquireConnection()
+      let discard: Error | undefined
       try {
         const result = await runAttendanceResultOperationTransactionV1(connection.client, async (trx) =>
           runRequestOperationProtocolV1(trx, deps.adapters, input))
@@ -690,8 +693,13 @@ export function createAttendanceRequestOperationBoundaryV1(
         // hand a refusal to an HTTP caller as if it were a result.
         if (result.kind === 'business_refused') fail('W4C3B_REQUEST_BUSINESS_REFUSAL_UNHANDLED', 500)
         return result
+      } catch (error) {
+        // Settlement coordination (r6.1 §1.1 P1-1): a connection whose state the runner could not vouch for is
+        // destroyed, not returned; every other error returns it as before. The error itself goes up unchanged.
+        discard = attendanceW4ConnectionDiscardV1(error)
+        throw error
       } finally {
-        connection.release()
+        connection.release(discard)
       }
     },
 

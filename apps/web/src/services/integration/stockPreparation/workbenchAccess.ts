@@ -370,6 +370,24 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/project-overview/ensure',
     control: 'stock-prep-project-overview-ensure',
   }),
+  // 备料分批拉取第一期 step 3 PR B (R-53 / R-54) — byte-equal to the plugin manifest's two PILOT rows. Both
+  // ADMIN. Their controls live on 项目备料页's sheet-state line (the pilot status line and the typed-
+  // confirmation enable button), rendered only once the server's pilot read answered — never on the
+  // confirmation-queue view; StockPreparationProjectArchive.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.pilotRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pilotEnable',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-enable',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
@@ -527,6 +545,24 @@ export function visibleStockPrepControls(snapshot: StockPrepAccessSnapshot): str
  * every control 403s, which is precisely the "visible but not actionable" half of R-11.
  */
 export function canUseLegacyMvpTabs(snapshot: StockPrepAccessSnapshot): boolean {
+  return holdsPlatformAdmin(snapshot)
+}
+
+/**
+ * 项目备料页's TWO 宜搭 ENTRIES (local preparation + static preview). Every server action behind them
+ * (initialization, drafts, preview, approval, sending) runs the core live gate
+ * (`automation-live-authority.ts`: the admin role, `role:admin`, or the literal `integration:admin`
+ * code — wildcards and `users:write` never qualify), so they render only for that same literal
+ * platform admin. Everyone else keeps main's disabled 「推送宜搭(暂未接入)」 placeholder: a
+ * stock-prep operator's page is unchanged. The client cannot see the server's namespace admission,
+ * tenant membership or anchor, so this mirror is WIDER than the server: it also shows the entries to a
+ * bare `integration:admin` holder without the admission, to an admin without active membership in the
+ * token tenant and to any admin who is not the anchored owner (they get the server's refusal code). It
+ * re-reads only on storage, focus or session events. The 单行 CREATE entry inside additionally waits for
+ * the server's own send-switch bit.
+ * Deliberately NOT in STOCK_PREP_WORKBENCH_CAPABILITIES, for the same reason as the install tab below.
+ */
+export function canOpenStockPrepYidaEntries(snapshot: StockPrepAccessSnapshot): boolean {
   return holdsPlatformAdmin(snapshot)
 }
 

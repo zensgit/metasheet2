@@ -1,5 +1,5 @@
 <template>
-  <div v-if="visible" class="meta-api-mgr__overlay" @click.self="$emit('close')">
+  <div v-if="visible" class="meta-api-mgr__overlay" :style="overlayStyle" @click.self="$emit('close')">
     <div class="meta-api-mgr">
       <div class="meta-api-mgr__header">
         <h4 class="meta-api-mgr__title">{{ managerTitle }}</h4>
@@ -442,6 +442,7 @@
 <script setup lang="ts">
 import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch } from 'vue'
+import { useZIndex } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import type {
   ApiToken,
@@ -479,8 +480,14 @@ const props = withDefaults(defineProps<{
   sheetId?: string
   client?: MultitableApiClient
   canManageAutomation?: boolean
+  /**
+   * 客户反馈 2026-10-21 (c): the tab to show when the dialog opens — the automation rule editor's empty
+   * DingTalk-group state opens this dialog straight on DingTalk Groups. Ignored for a tab the actor cannot see.
+   */
+  initialTab?: 'tokens' | 'webhooks' | 'dingtalk-groups' | null
 }>(), {
   canManageAutomation: true,
+  initialTab: null,
 })
 
 const emit = defineEmits<{
@@ -1185,10 +1192,21 @@ async function onDeleteDingTalkGroup(group: DingTalkGroupDestination) {
   }
 }
 
+// 客户反馈 2026-10-21 (c): when opened from inside the automation drawers (element-plus, z-index 2000+),
+// a fixed z-index of 1000 would put this dialog BEHIND the editor that opened it. Take the next
+// element-plus z-index at each open so it is always on top of whatever opened it.
+const { nextZIndex } = useZIndex()
+const overlayZIndex = ref<number | null>(null)
+const overlayStyle = computed(() => (overlayZIndex.value === null ? undefined : { zIndex: overlayZIndex.value }))
+
 watch(
   () => props.visible,
   (v) => {
     if (v) {
+      overlayZIndex.value = nextZIndex()
+      // An actor without automation management never stays on DingTalk Groups: loadDingTalkGroups() below
+      // runs clearDingTalkGroupState() synchronously, which moves the tab back to tokens.
+      if (props.initialTab) activeTab.value = props.initialTab
       error.value = null
       newTokenPlaintext.value = null
       void loadTokens()
