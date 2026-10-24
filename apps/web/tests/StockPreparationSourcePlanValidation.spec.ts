@@ -45,7 +45,11 @@ const DIAGNOSTICS = [
   { status: 409, code: 'READ_PLAN_VALIDATION_SOURCE_CHANGED', operation: 'confirm-sample', zh: '来源配置已变化', en: 'The source configuration changed', nextZh: '确认来源', nextEn: 'check the source' },
   { status: 409, code: 'READ_PLAN_VALIDATION_IN_PROGRESS', operation: 'validate', zh: '已有样本核对进行中', en: 'A sample check is already in progress', nextZh: '等待该次核对结束', nextEn: 'Wait for it to finish' },
   { status: 409, code: 'READ_PLAN_GENERATION_CONFLICT', operation: 'activate', zh: '激活记录已被其他操作更新', en: 'Another operation updated the activation record', nextZh: '激活状态', nextEn: 'activation status' },
+  { status: 409, code: 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE', operation: 'activate', zh: '当前部署读取规则不能由此配置完整表达，无法激活；保留原配置并联系管理员。', en: 'This configuration cannot fully express the current deployment read rules, so it cannot be activated; keep the original configuration and contact an administrator.', nextZh: '联系管理员', nextEn: 'contact an administrator' },
+  { status: 501, code: 'READ_PLAN_DEPLOYMENT_UNAVAILABLE', operation: 'activate', zh: '无法核实部署读取规则，未激活；联系管理员检查配置。', en: 'The deployment read rules could not be verified, so nothing was activated; contact an administrator to check the configuration.', nextZh: '联系管理员检查配置', nextEn: 'contact an administrator to check the configuration' },
 ] as const
+// Deployment refusals are not fixed by reloading or retrying; the only action is the administrator.
+const NO_RELOAD_CODES: readonly string[] = ['READ_PLAN_DEPLOYMENT_INCOMPATIBLE', 'READ_PLAN_DEPLOYMENT_UNAVAILABLE']
 
 function diagnosticRefusal(status: number, code: string, ok: unknown = false) {
   return new Response(JSON.stringify({ ok, error: { code, message: POISON, details: { object: POISON }, stack: POISON } }), { status })
@@ -54,6 +58,8 @@ function diagnosticRefusal(status: number, code: string, ok: unknown = false) {
 const GENERIC_FAILURES = [
   { label: 'unknown code', status: 409, respond: () => diagnosticRefusal(409, POISON) },
   { label: 'wrong status', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_VALIDATION_CATALOG_UNVERIFIED') },
+  { label: 'deployment incompatible wrong status', status: 501, respond: () => diagnosticRefusal(501, 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE') },
+  { label: 'deployment unavailable wrong status', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_DEPLOYMENT_UNAVAILABLE') },
   { label: 'ok true', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_VALIDATION_INCOMPLETE', true) },
   { label: 'ok string', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_VALIDATION_INCOMPLETE', 'false') },
   { label: '2xx refusal', status: 200, respond: () => diagnosticRefusal(200, 'READ_PLAN_VALIDATION_INCOMPLETE') },
@@ -396,7 +402,12 @@ describe('explicit sample confirmation in the source-binding editor', () => {
     const text = element('plan-error').textContent!
     expect(text).toContain(locale === 'zh-CN' ? zh : en)
     expect(text).toContain(locale === 'zh-CN' ? nextZh : nextEn)
-    expect(text.toLowerCase()).toContain(locale === 'zh-CN' ? '重新读取版本' : 'reload the versions')
+    if (NO_RELOAD_CODES.includes(code)) {
+      for (const forbidden of ['重新读取', '重试', 'reload', 'retry']) expect(text.toLowerCase()).not.toContain(forbidden)
+      expect(text).toContain(locale === 'zh-CN' ? '联系管理员' : 'contact an administrator')
+    } else {
+      expect(text.toLowerCase()).toContain(locale === 'zh-CN' ? '重新读取版本' : 'reload the versions')
+    }
     expect(text).toContain(`HTTP ${status}`)
     expect(text).not.toContain(code)
     expect(container.textContent).not.toContain(POISON)

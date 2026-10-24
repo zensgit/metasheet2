@@ -69,8 +69,14 @@ const USER = { id: 'synthetic-owner', tenantId: TENANT, roles: ['admin'], permis
 const BASE = '/api/integration/table-actions/:actionId'
 const JOBS = `${BASE}/large-bom/expansion-jobs`
 const PREFLIGHT = '/api/integration/stock-preparation/source-preflight'
+// Deploy-only readPlan blocks SA02 v1 cannot express (same fixture as the
+// management/bootstrap suites); tests self-check that the real normalizer keeps them.
+const DEPLOY_DECLARATIONS = Object.freeze({
+  projectSubtree: { pathInfo: { parentIdField: 'parent' }, bomHead: { pathIdField: 'path' } },
+  batchIdentity: { mode: 'material_create_hour' },
+})
 
-function config() {
+function config(readPlanExtra = {}) {
   return {
     schemaVersion: 1, actionId: ACTION, systemId: SYSTEM,
     readPlan: {
@@ -82,6 +88,7 @@ function config() {
       part: { object: 'SYN_Part', idField: 'id', codeField: 'code', nameField: 'name' },
       bomHead: { object: 'SYN_Bom', parentPartField: 'part', bomIdField: 'id' },
       bomDetail: { object: 'SYN_BomLine', bomParentField: 'bom', componentIdField: 'part', quantityField: 'qty' },
+      ...readPlanExtra,
     },
   }
 }
@@ -123,13 +130,14 @@ function memoryDb() {
 
 const inert = (methods) => Object.fromEntries(methods.map((name) => [name, async () => { throw new Error(`unexpected synthetic call: ${name}`) }]))
 
-async function mount({ active = true, storeMissing = false, sourceWorkspaceId = null, matchedWorkspaceId = null, register = registerIntegrationRoutes, unconfigured = false, projectSheets = false } = {}) {
+async function mount({ active = true, storeMissing = false, sourceWorkspaceId = null, matchedWorkspaceId = null, register = registerIntegrationRoutes, unconfigured = false, projectSheets = false, deployReadPlan,
+  readPlanExtra, sourceProject, sourceCaseInsensitive = false, projectRegistry, routeTransform, routeDependencies } = {}) {
   const { db, state } = memoryDb()
   let sequence = 0
   const ledger = createStockPreparationReadPlanStore({ db, idGenerator: () => `synthetic-${++sequence}` })
   let version
   if (active) {
-    version = await ledger.saveVersion({ ...SCOPE, actor: USER.id, config: config() })
+    version = await ledger.saveVersion({ ...SCOPE, actor: USER.id, config: config(readPlanExtra) })
     // Synthetic status fixture, NOT source-validation proof. The real store still
     // returns sourceValidation only when this confirmed receipt matches the current revision.
     const source = { connectionId: CONNECTION_ID, connectionRevision: CONNECTION_REVISION }
@@ -147,15 +155,20 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
   if (projectSheets) {
     projectTargets = createStockPreparationProjectTargetStore({ db, idGenerator: () => 'synthetic-project-target' })
     await projectTargets.create({ tenantId: TENANT, projectNo: PARAMS.projectNo, sheetId: projectSheetId, objectId: projectObjectId })
-    register = loadRoutes(undefined, undefined, { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }).registerIntegrationRoutes
+    register = loadRoutes(routeTransform, routeDependencies, { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }).registerIntegrationRoutes
   }
+  // Emulates a case-insensitive source column for the entry field only; every other field compares exactly.
+  const sourceMatches = (object, key, actual, wanted) => (sourceCaseInsensitive && object === 'SYN_PathLink' && key === 'project'
+    ? typeof actual === 'string' && typeof wanted === 'string' && actual.toLowerCase() === wanted.toLowerCase()
+    : actual === wanted)
   const data = {
-    SYN_PathLink: [{ project: PARAMS.projectNo, path: 'path-1' }], SYN_Path: [{ id: 'path-1' }],
+    SYN_PathLink: [{ project: sourceProject || PARAMS.projectNo, path: 'path-1' }], SYN_Path: [{ id: 'path-1' }],
     SYN_Order: [{ id: 'order-1', path: 'path-1' }], SYN_OrderLine: [{ order: 'order-1', part: 'part-1', qty: '2' }],
     SYN_Part: [{ id: 'part-1', code: 'SYN-001', name: 'Synthetic part' }], SYN_Bom: [], SYN_BomLine: [],
   }
   const action = {
-    source: { externalSystemId: SYSTEM, kind: 'data-source:sql-readonly', workspaceId: sourceWorkspaceId },
+    source: { externalSystemId: SYSTEM, kind: 'data-source:sql-readonly', workspaceId: sourceWorkspaceId,
+      ...(deployReadPlan ? { readPlan: clone(deployReadPlan) } : {}) },
     target: { sheetId: 'synthetic-sheet', objectId: 'syntheticSandbox', fieldIdMap: Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, field.id])) },
     rootSelection: { enabled: false },
   }
@@ -192,7 +205,7 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
       async getActiveForRuntime(input) { calls.ledger.push(clone(input)); return ledger.getActiveForRuntime(input) },
     },
     stockPreparationAuditStore: { async append() {} },
-    ...(projectTargets ? { stockPreparationProjectTargetStore: projectTargets } : {}),
+    ...(projectTargets ? { stockPreparationProjectTargetStore: projectRegistry ? projectRegistry(projectTargets) : projectTargets } : {}),
     stockPreparationConfirmationDecisionLease: { async acquire() { return 'synthetic-lease' }, async release() {} },
     tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
     adapterRegistry: { listAdapterKinds() { return [] }, createAdapter(system, deps = {}) {
@@ -202,7 +215,7 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
       }
       return { async read(input) {
         calls.read.push(clone(input))
-        return { records: clone((data[input.object] || []).filter((row) => Object.entries(input.filters || {}).every(([key, value]) => row[key] === value))), done: true, nextCursor: null }
+        return { records: clone((data[input.object] || []).filter((row) => Object.entries(input.filters || {}).every(([key, value]) => sourceMatches(input.object, key, row[key], value)))), done: true, nextCursor: null }
       } }
     } },
     pipelineRegistry: inert(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -300,6 +313,47 @@ test('real ledger -> HTTP dry-run -> token -> apply uses approved synthetic plan
   const applied = await f.call(`${BASE}/apply`, { body: { parameters: PARAMS, confirm: { dryRunToken: dry.body.data.dryRunToken } } })
   assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
   assert.equal(f.calls.write.length, 1)
+})
+
+test('active online plan refuses deploy-only projectSubtree/batchIdentity before adapter, reads and token writes', async () => {
+  for (const [key, block] of Object.entries(DEPLOY_DECLARATIONS)) {
+    const f = await mount({ deployReadPlan: { ...config().readPlan, [key]: clone(block) } })
+    const normalized = await createStockPreparationTableActionRegistry({ actions: [f.action] }).getTableAction({})
+    assert.ok(Object.hasOwn(normalized.source.readPlan, key), `${key} fixture must survive the real deploy normalizer`)
+    const before = clone([...f.storage])
+    for (const route of [`${BASE}/dry-run`, JOBS]) {
+      const result = await f.call(route, { body: { parameters: PARAMS } })
+      assert.equal(result.statusCode, 409, `${key} ${route}: ${JSON.stringify(result.body)}`)
+      assert.equal(result.body.error.code, 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE', JSON.stringify(result.body))
+      assert.doesNotMatch(JSON.stringify(result.body), /SYN_|projectSubtree|batchIdentity/)
+    }
+    assert.ok(f.calls.ledger.length > 0, 'the actual active pointer was consulted')
+    assert.equal(f.calls.adapter.length, 0)
+    assert.equal(f.calls.created.length, 0)
+    assert.equal(f.calls.read.length, 0)
+    assert.equal(f.calls.write.length, 0)
+    assert.deepEqual([...f.storage], before)
+  }
+})
+
+test('absent online plan preserves deploy legacy blocks; compatible inline deploy plan stays online', async () => {
+  for (const [key, block] of Object.entries(DEPLOY_DECLARATIONS)) {
+    const f = await mount({ active: false, deployReadPlan: { ...config().readPlan, [key]: clone(block) } })
+    const result = await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+    assert.notEqual(result.body && result.body.error && result.body.error.code, 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE', JSON.stringify(result.body))
+    assert.ok(f.calls.ledger.length > 0)
+    assert.ok(f.calls.adapter.length > 0, `${key}: legacy reached its source adapter; approved composition never ran`)
+    if (key === 'projectSubtree') {
+      assert.ok(f.calls.read.some((input) => input.object === 'SYN_Path' && input.filters.parent === 'path-1'),
+        'legacy executes the declared subtree read, not just the ordinary order path')
+    }
+  }
+  const online = await mount({ deployReadPlan: config().readPlan })
+  const dry = await online.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+  assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+  assert.ok(dry.body.data.dryRunToken)
+  assert.equal(online.calls.read[0].object, 'SYN_PathLink')
+  assertForwardedCurrentRevision(online.calls)
 })
 
 test('generation changed or pointer missing rejects token before adapter, reads, consume and writes', async () => {
@@ -782,6 +836,417 @@ test('route omission mutations are rejected by real-path assertions without edit
       const mutated = loadRoutes(entry.transform, entry.dependencies)
       const fixture = await mount({ ...entry.options, register: mutated.registerIntegrationRoutes })
       await assert.rejects(() => entry.oracle(fixture), { name: 'AssertionError' })
+    })
+  }
+})
+
+// ---- Registry ambiguity guard: sourceProjectComparison === 'case-insensitive' (opt-in only) ----
+const CI_PLAN = Object.freeze({ sourceProjectComparison: 'case-insensitive' })
+const CI_SOURCE = Object.freeze({ sourceProject: 'syn-project', sourceCaseInsensitive: true })
+const VARIANT = 'syn-project'
+const AMBIGUOUS = 'READ_PLAN_PROJECT_IDENTITY_AMBIGUOUS'
+const UNAVAILABLE = 'READ_PLAN_PROJECT_IDENTITY_UNAVAILABLE'
+const TARGET_REQUIRED = 'READ_PLAN_PROJECT_TARGET_REQUIRED'
+
+function loadRuntimeCopy(transform) {
+  const filename = require.resolve('../lib/stock-preparation-read-plan-runtime.cjs')
+  const copy = new Module(filename, module)
+  copy.filename = filename
+  copy.paths = Module._nodeModulePaths(path.dirname(filename))
+  copy._compile(transform(fs.readFileSync(filename, 'utf8').replaceAll('\r\n', '\n')), filename)
+  return copy.exports
+}
+
+const registryLog = () => ({ get: 0, list: 0, count: 0 })
+// Counting wrapper over the REAL registry. overrides[name](input, realStore, priorCalls) replaces a method; null removes it.
+function spyRegistry(log, overrides = {}) {
+  return (store) => {
+    const wrapped = { ...store }
+    for (const name of ['get', 'list', 'count']) {
+      if (overrides[name] === null) { delete wrapped[name]; continue }
+      wrapped[name] = async (input) => {
+        const prior = log[name]++
+        return overrides[name] ? overrides[name](input, store, prior) : store[name](input)
+      }
+    }
+    return wrapped
+  }
+}
+
+function ciMount(options = {}) {
+  return mount({ projectSheets: true, readPlanExtra: CI_PLAN, ...CI_SOURCE, ...options })
+}
+
+// A second registration whose project number differs from the canonical one only by case.
+function addCaseVariant(fixture, status = 'active') {
+  const row = clone(fixture.state[PROJECT_TARGET_TABLE][0])
+  Object.assign(row, { project_no: VARIANT, sheet_id: `synthetic-variant-sheet-${status}`, object_id: `synthetic-variant-object-${status}`, status })
+  if (Object.hasOwn(row, 'id')) row.id = `synthetic-variant-${status}`
+  if (status === 'archived') row.archived_at = '2026-01-01T00:00:00.000Z'
+  fixture.state[PROJECT_TARGET_TABLE].push(row)
+}
+
+function snapshotIo(fixture) {
+  const { calls } = fixture
+  return { adapter: calls.adapter.length, created: calls.created.length, read: calls.read.length, write: calls.write.length, storage: clone([...fixture.storage]) }
+}
+function assertNoIoSince(fixture, before, label) {
+  assert.deepEqual(snapshotIo(fixture), before, `${label}: no source adapter, source read, token, job or write`)
+}
+function assertRefused(result, status, code, label) {
+  assert.equal(result.statusCode, status, `${label}: ${JSON.stringify(result.body)}`)
+  assert.equal(result.body.error.code, code, `${label}: ${JSON.stringify(result.body)}`)
+  assert.doesNotMatch(JSON.stringify(result.body), /SYN-|syn-project|SYN_/, `${label}: values-free`)
+}
+
+function parametersHashes(fixture, token) {
+  const found = []
+  const walk = (value) => {
+    if (typeof value === 'string') {
+      let parsed = null
+      try { parsed = JSON.parse(value) } catch (error) { return }
+      if (parsed && typeof parsed === 'object') walk(parsed)
+    } else if (value && typeof value === 'object') {
+      for (const [key, inner] of Object.entries(value)) {
+        if (key === 'parametersHash') found.push(inner)
+        else walk(inner)
+      }
+    }
+  }
+  for (const [key, value] of fixture.storage) if (key.includes(token)) walk(value)
+  return found
+}
+
+// Direct runtime fixtures (no HTTP): exact control over what the registry returns.
+function fakeRegistry(rows) {
+  return {
+    calls: [],
+    async get({ tenantId, projectNo }) { this.calls.push('get'); return clone(rows.find((row) => row.tenantId === tenantId && row.projectNo === projectNo) || null) },
+    async list() { this.calls.push('list'); return clone(rows) },
+    async count() { this.calls.push('count'); return rows.length },
+  }
+}
+const targetRow = (projectNo = 'Abc', status = 'active') => ({ tenantId: TENANT, projectNo, sheetId: 'sheet-1', objectId: 'object-1', status })
+function unitResolved(comparison, projectNo = 'Abc') {
+  return {
+    action: {
+      actionId: ACTION,
+      source: { externalSystemId: SYSTEM, readPlan: comparison === undefined ? {} : { sourceProjectComparison: comparison } },
+      target: { sheetId: 'sheet-1', objectId: 'object-1' },
+      projectTarget: { projectNo, status: 'active' },
+    },
+    bindingScope: { tenantId: TENANT, workspaceId: null },
+    sourceScope: { tenantId: TENANT, workspaceId: null },
+  }
+}
+const noPointer = { async getActiveForRuntime() { return null } }
+const unitRun = (extra = {}) => resolveStockPreparationReadPlanExecution({
+  resolved: unitResolved('case-insensitive'), store: noPointer, verifyTenant: () => TENANT, projectNo: 'Abc', ...extra,
+})
+const refusal = (status, code) => ({ status, code, message: code })
+
+test('runtime: absent/case-sensitive modes and the server-internal exemption make no registry or verifyTenant call', async () => {
+  const claim = () => { throw new Error('no new tenant claim is demanded here') }
+  for (const comparison of [undefined, 'case-sensitive']) {
+    const registry = fakeRegistry([targetRow()])
+    const result = await resolveStockPreparationReadPlanExecution({ resolved: unitResolved(comparison), store: noPointer, verifyTenant: claim, projectTargetStore: registry })
+    assert.equal(result.action.source.externalSystemId, SYSTEM)
+    assert.deepEqual(registry.calls, [], String(comparison))
+  }
+  const registry = fakeRegistry([targetRow()])
+  await resolveStockPreparationReadPlanExecution({ resolved: unitResolved('case-insensitive'), store: noPointer, verifyTenant: claim, projectTargetStore: registry, projectIdentityRequired: false })
+  assert.deepEqual(registry.calls, [])
+})
+
+test('runtime: case-insensitive mode passes only for the sole exact canonical row, via count, get, list, count', async () => {
+  const registry = fakeRegistry([targetRow(), targetRow('Other')])
+  const result = await unitRun({ projectTargetStore: registry })
+  assert.equal(result.action.projectTarget.projectNo, 'Abc')
+  assert.deepEqual(registry.calls, ['count', 'get', 'list', 'count'])
+})
+
+test('runtime: absent or malformed projectNo and a missing or foreign marker cannot skip the default-on guard', async () => {
+  for (const projectNo of [undefined, null, '', 'Abc ', 123]) {
+    const registry = fakeRegistry([targetRow()])
+    await assert.rejects(unitRun({ projectNo, projectTargetStore: registry }), refusal(409, TARGET_REQUIRED), String(projectNo))
+    assert.deepEqual(registry.calls, [])
+  }
+  for (const mutate of [
+    (resolved) => { delete resolved.action.projectTarget },
+    (resolved) => { resolved.action.projectTarget.projectNo = 'abc' },
+    (resolved) => { resolved.action.projectTarget.status = 'unknown' },
+  ]) {
+    const resolved = unitResolved('case-insensitive')
+    mutate(resolved)
+    const registry = fakeRegistry([targetRow()])
+    await assert.rejects(unitRun({ resolved, projectTargetStore: registry }), refusal(409, TARGET_REQUIRED))
+    assert.deepEqual(registry.calls, [])
+  }
+})
+
+test('runtime: untrusted tenant and an unusable registry service are refused before any registry read', async () => {
+  for (const verifyTenant of [() => 'tenant-other', () => undefined, null]) {
+    const registry = fakeRegistry([targetRow()])
+    await assert.rejects(unitRun({ verifyTenant, projectTargetStore: registry }), refusal(403, 'READ_PLAN_EXECUTION_TENANT_MISMATCH'))
+    assert.deepEqual(registry.calls, [])
+  }
+  const complete = fakeRegistry([targetRow()])
+  for (const projectTargetStore of [undefined, null, {}, { get: complete.get, list: complete.list }, { get: complete.get, count: complete.count }]) {
+    await assert.rejects(unitRun({ projectTargetStore }), refusal(501, UNAVAILABLE))
+  }
+})
+
+test('runtime: equivalent-group ambiguity, target mismatch and incomplete or erroring registry reads fail closed', async () => {
+  const other = { sheetId: 'sheet-2', objectId: 'object-2' }
+  const boom = async () => { throw new Error('SYN-private-registry-detail') }
+  const cases = [
+    { name: 'live case variant', rows: [targetRow(), { ...targetRow('abc'), ...other }], status: 409, code: AMBIGUOUS },
+    { name: 'archived case variant', rows: [targetRow(), { ...targetRow('ABC', 'archived'), ...other }], status: 409, code: AMBIGUOUS },
+    { name: 'exact row absent', rows: [], status: 409, code: TARGET_REQUIRED },
+    { name: 'get names another sheet', rows: [targetRow()], patch: { get: async () => ({ ...targetRow(), sheetId: 'sheet-other' }) }, status: 409, code: TARGET_REQUIRED },
+    { name: 'get names another object', rows: [targetRow()], patch: { get: async () => ({ ...targetRow(), objectId: 'object-other' }) }, status: 409, code: TARGET_REQUIRED },
+    { name: 'get status differs from marker', rows: [targetRow()], patch: { get: async () => targetRow('Abc', 'archived') }, status: 409, code: TARGET_REQUIRED },
+    { name: 'get returns the wrong-case row', rows: [targetRow()], patch: { get: async () => targetRow('abc') }, status: 409, code: TARGET_REQUIRED },
+    { name: 'get returns a foreign tenant row', rows: [targetRow()], patch: { get: async () => ({ ...targetRow(), tenantId: 'tenant-foreign' }) }, status: 503, code: UNAVAILABLE },
+    { name: 'count over the cap', rows: [targetRow()], patch: { count: async () => 1001 }, status: 503, code: UNAVAILABLE },
+    { name: 'count negative', rows: [targetRow()], patch: { count: async () => -1 }, status: 503, code: UNAVAILABLE },
+    { name: 'count fractional', rows: [targetRow()], patch: { count: async () => 1.5 }, status: 503, code: UNAVAILABLE },
+    { name: 'count not a number', rows: [targetRow()], patch: { count: async () => '1' }, status: 503, code: UNAVAILABLE },
+    { name: 'list shorter than count', rows: [targetRow()], patch: { list: async () => [] }, status: 503, code: UNAVAILABLE },
+    { name: 'list not an array', rows: [targetRow()], patch: { list: async () => ({}) }, status: 503, code: UNAVAILABLE },
+    { name: 'count moves around list', rows: [targetRow()], patch: { count: (() => { let n = 0; return async () => (n++ === 0 ? 1 : 2) })() }, status: 503, code: UNAVAILABLE },
+    { name: 'foreign tenant list row', rows: [targetRow(), { ...targetRow('Other'), tenantId: 'tenant-foreign' }], status: 503, code: UNAVAILABLE },
+    { name: 'malformed list row', rows: [targetRow(), { ...targetRow('Other'), projectNo: 7 }], status: 503, code: UNAVAILABLE },
+    { name: 'blank list target', rows: [targetRow(), { ...targetRow('Other'), sheetId: '' }], status: 503, code: UNAVAILABLE },
+    { name: 'unknown list status', rows: [targetRow(), targetRow('Other', 'unknown')], status: 503, code: UNAVAILABLE },
+    { name: 'list lacks the exact row', rows: [targetRow('abc')], patch: { get: async () => targetRow() }, status: 503, code: UNAVAILABLE },
+    ...['get', 'list', 'count'].map((name) => ({ name: `${name} throws`, rows: [targetRow()], patch: { [name]: boom }, status: 503, code: UNAVAILABLE })),
+  ]
+  for (const entry of cases) {
+    const registry = Object.assign(fakeRegistry(entry.rows), entry.patch || {})
+    await assert.rejects(unitRun({ projectTargetStore: registry }), refusal(entry.status, entry.code), entry.name)
+  }
+})
+
+test('default and case-sensitive HTTP previews keep the existing exact lookup without registry scans', async () => {
+  for (const sourceProjectComparison of [undefined, 'case-sensitive']) {
+    const log = registryLog()
+    const f = await mount({ projectSheets: true, projectRegistry: spyRegistry(log),
+      readPlanExtra: sourceProjectComparison === undefined ? {} : { sourceProjectComparison } })
+    const dry = await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+    assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+    assert.ok(dry.body.data.dryRunToken)
+    assert.equal(log.get, 1, 'only the existing exact project-target lookup runs')
+    assert.equal(log.list, 0)
+    assert.equal(log.count, 0)
+  }
+})
+
+test('case-insensitive source-only HTTP preflight does not require a project registration', async () => {
+  const f = await ciMount({ projectSheets: false })
+  const response = await f.call(PREFLIGHT, { method: 'GET' })
+  assert.equal(response.statusCode, 200, JSON.stringify(response.body))
+  assert.equal(response.body.data.readPlanId, config().readPlan.id)
+  assert.ok(f.calls.adapter.length > 0)
+  assert.equal(f.storage.size, 0, 'source preflight issues no execution token')
+})
+
+test('opt-in HTTP: canonical registered project with a differently cased source keeps canonical token hash, rows and project fields', async () => {
+  const log = registryLog()
+  const f = await ciMount({ projectRegistry: spyRegistry(log) })
+  const control = await ciMount({ sourceProject: PARAMS.projectNo, sourceCaseInsensitive: true })
+  const dry = await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+  assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+  const controlDry = await control.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+  assert.equal(controlDry.statusCode, 200, JSON.stringify(controlDry.body))
+  assert.ok(f.calls.read.some((input) => input.object === 'SYN_PathLink'), 'the differently cased source row was actually read')
+  assert.ok(log.list >= 1 && log.count === 2 * log.list, 'the guard ran against the real registry')
+  const hashes = parametersHashes(f, dry.body.data.dryRunToken)
+  assert.ok(hashes.length > 0 && hashes.every((hash) => typeof hash === 'string'), 'the stored token carries a parametersHash')
+  assert.deepEqual(hashes, parametersHashes(control, controlDry.body.data.dryRunToken), 'a source spelling does not move the canonical parametersHash')
+  const applied = await f.call(`${BASE}/apply`, { body: { parameters: PARAMS, confirm: { dryRunToken: dry.body.data.dryRunToken } } })
+  assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
+  assert.equal(f.calls.write.length, 1)
+  assert.equal(f.calls.write[0].sheetId, f.projectSheetId)
+  assert.equal(f.calls.write[0].data.project_field_projectNo, PARAMS.projectNo)
+  assert.doesNotMatch(JSON.stringify(f.calls.write[0]), /syn-project/)
+  assert.deepEqual(f.state[PROJECT_TARGET_TABLE].map((row) => row.project_no), [PARAMS.projectNo], 'no alias registration appeared')
+})
+
+test('opt-in HTTP: real large-BOM chain runs the FULL guard once per stage and writes the canonical project', async () => {
+  const log = registryLog()
+  const f = await ciMount({ projectRegistry: spyRegistry(log) })
+  const params = await expanded(f)
+  const chunk = await f.call(`${JOBS}/:jobId/apply-jobs/:applyJobId/run`, { params })
+  assert.equal(chunk.statusCode, 200, JSON.stringify(chunk.body))
+  assert.equal(f.calls.write.length, 1)
+  assert.equal(f.calls.write[0].data.project_field_projectNo, PARAMS.projectNo)
+  assert.equal(log.list, 5, 'start, run, plan, approve and chunk each ran the guard once; the readiness prechecks did not')
+})
+
+test('opt-in HTTP: a live or archived case-variant registration is refused before adapter, read, token and job', async () => {
+  for (const status of ['active', 'archived']) {
+    const f = await ciMount()
+    addCaseVariant(f, status)
+    const before = snapshotIo(f)
+    for (const route of [`${BASE}/dry-run`, JOBS]) {
+      const result = await f.call(route, { body: { parameters: PARAMS } })
+      assertRefused(result, 409, AMBIGUOUS, `${status} ${route}`)
+      assertNoIoSince(f, before, `${status} ${route}`)
+    }
+    assert.ok(f.calls.ledger.length > 0, 'the effective readPlan was resolved before the guard')
+  }
+})
+
+test('opt-in HTTP: unavailable, mismatched or incomplete registry fails closed before source, token and job', async () => {
+  const boom = async () => { throw new Error('SYN-private-registry-detail') }
+  const cases = [
+    { name: 'registry service absent', options: { projectSheets: false }, status: 501, code: UNAVAILABLE },
+    { name: 'registry lacks list', registry: { list: null }, status: 501, code: UNAVAILABLE },
+    { name: 'registry lacks count', registry: { count: null }, status: 501, code: UNAVAILABLE },
+    { name: 'exact get names another sheet', registry: { get: async (input, store, prior) => (prior === 0 ? store.get(input) : { ...(await store.get(input)), sheetId: 'synthetic-other-sheet' }) }, status: 409, code: TARGET_REQUIRED },
+    { name: 'exact get throws', registry: { get: async (input, store, prior) => { if (prior === 0) return store.get(input); throw new Error('SYN-private-registry-detail') } }, status: 503, code: UNAVAILABLE },
+    { name: 'count over the cap', registry: { count: async () => 1001 }, status: 503, code: UNAVAILABLE },
+    { name: 'count errors', registry: { count: boom }, status: 503, code: UNAVAILABLE },
+    { name: 'list shorter than count', registry: { list: async () => [] }, status: 503, code: UNAVAILABLE },
+    { name: 'list errors', registry: { list: boom }, status: 503, code: UNAVAILABLE },
+    { name: 'count moves around list', registry: { count: async (input, store, prior) => (prior === 0 ? store.count(input) : 2) }, status: 503, code: UNAVAILABLE },
+    { name: 'list carries a foreign tenant row', registry: { list: async (input, store) => [{ ...(await store.list(input))[0], tenantId: 'tenant-foreign' }] }, status: 503, code: UNAVAILABLE },
+  ]
+  for (const entry of cases) {
+    for (const route of [`${BASE}/dry-run`, JOBS]) {
+      const f = await ciMount({ ...(entry.options || {}), ...(entry.registry ? { projectRegistry: spyRegistry(registryLog(), entry.registry) } : {}) })
+      const before = snapshotIo(f)
+      const result = await f.call(route, { body: { parameters: PARAMS } })
+      assertRefused(result, entry.status, entry.code, `${entry.name} ${route}`)
+      assert.doesNotMatch(JSON.stringify(result.body), /SYN-private/)
+      assertNoIoSince(f, before, `${entry.name} ${route}`)
+    }
+  }
+})
+
+test('opt-in HTTP: wrong-case project input is not alias-routed to the canonical registration', async () => {
+  const f = await ciMount()
+  const rows = clone(f.state[PROJECT_TARGET_TABLE])
+  const before = snapshotIo(f)
+  for (const route of [`${BASE}/dry-run`, JOBS]) {
+    const result = await f.call(route, { body: { parameters: { projectNo: VARIANT } } })
+    assert.equal(result.statusCode, 409, `${route}: ${JSON.stringify(result.body)}`)
+    assert.match(result.body.error.code, /^(READ_PLAN_PROJECT_TARGET_REQUIRED|STOCK_PREPARATION_PROJECT_)/, JSON.stringify(result.body))
+    assertNoIoSince(f, before, route)
+  }
+  assert.deepEqual(f.state[PROJECT_TARGET_TABLE], rows, 'the registry was neither read into an alias nor changed')
+})
+
+test('opt-in HTTP: absent or malformed projectNo never reaches the source (exact refusal codes are pinned by the runtime tests)', async () => {
+  const f = await ciMount()
+  const before = snapshotIo(f)
+  for (const parameters of [{}, { projectNo: 7 }, { projectNo: '   ' }, { projectNo: null }]) {
+    for (const route of [`${BASE}/dry-run`, JOBS]) {
+      const result = await f.call(route, { body: { parameters } })
+      assert.ok(result.statusCode >= 400, `${route} ${JSON.stringify(parameters)}: ${JSON.stringify(result.body)}`)
+      assertNoIoSince(f, before, `${route} ${JSON.stringify(parameters)}`)
+    }
+  }
+})
+
+test('opt-in HTTP: a deployed case-insensitive plan with no verified tenant claim is refused before any registry read', async () => {
+  const log = registryLog()
+  const f = await ciMount({ active: false, deployReadPlan: { ...config().readPlan, ...CI_PLAN }, projectRegistry: spyRegistry(log) })
+  const before = snapshotIo(f)
+  const result = await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS }, claimed: false })
+  assert.equal(result.statusCode, 403, JSON.stringify(result.body))
+  assert.equal(log.list, 0)
+  assert.equal(log.count, 0)
+  assertNoIoSince(f, before, 'claimless')
+})
+
+test('opt-in HTTP: forged projectIdentityRequired/targetPurpose in body or query cannot bypass the guard on dry-run and apply', async () => {
+  const f = await ciMount()
+  const dry = await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+  assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+  const token = dry.body.data.dryRunToken
+  addCaseVariant(f, 'archived')
+  const before = snapshotIo(f)
+  const forged = { projectIdentityRequired: false, targetPurpose: 'source' }
+  const requests = [
+    [`${BASE}/dry-run`, { parameters: PARAMS }],
+    [`${BASE}/apply`, { parameters: PARAMS, confirm: { dryRunToken: token } }],
+  ]
+  for (const [route, body] of requests) {
+    const viaBody = await f.call(route, { body: { ...body, ...forged } })
+    assert.ok(viaBody.statusCode >= 400, `${route} body: ${JSON.stringify(viaBody.body)}`)
+    const viaQuery = await f.call(route, { body, query: { projectIdentityRequired: 'false', targetPurpose: 'source' } })
+    assertRefused(viaQuery, 409, AMBIGUOUS, `${route} query`)
+    assertNoIoSince(f, before, route)
+  }
+})
+
+test('opt-in HTTP: duplicating the registry after real queued jobs is refused by the FULL stored-project recheck at run, approve and chunk', async () => {
+  for (const stage of ['run', 'approve', 'chunk']) {
+    const log = registryLog()
+    const f = await ciMount({ projectRegistry: spyRegistry(log) })
+    let request
+    if (stage === 'chunk') {
+      request = [`${JOBS}/:jobId/apply-jobs/:applyJobId/run`, { params: await expanded(f) }]
+    } else {
+      const start = await f.call(JOBS, { body: { parameters: PARAMS } })
+      assert.equal(start.statusCode, 202, JSON.stringify(start.body))
+      const params = { jobId: start.body.data.jobId }
+      if (stage === 'approve') {
+        assert.equal((await f.call(`${JOBS}/:jobId/run`, { params })).statusCode, 200)
+        assert.equal((await f.call(`${JOBS}/:jobId/plan`, { params })).statusCode, 200)
+        request = [`${JOBS}/:jobId/apply-jobs`, { params, body: { confirm: { acceptManualConfirmHold: true } } }]
+      } else {
+        request = [`${JOBS}/:jobId/run`, { params }]
+      }
+    }
+    addCaseVariant(f, stage === 'approve' ? 'archived' : 'active')
+    const before = snapshotIo(f)
+    const listBefore = log.list
+    const result = await f.call(...request)
+    // AMBIGUOUS (not TARGET_REQUIRED) shows the stored job's projectNo reached the guard; the
+    // readiness precheck, which carries no project, ran no registry check of its own.
+    assertRefused(result, 409, AMBIGUOUS, stage)
+    assertNoIoSince(f, before, stage)
+    assert.equal(log.list, listBefore + 1, `${stage}: exactly one registry check, the full stored-project one`)
+  }
+})
+
+test('registry-guard omission mutants are rejected by the real duplicate-registry oracle', async (t) => {
+  const replace = (needle, value) => (source) => {
+    assert.ok(source.includes(needle), `mutation seam is missing: ${needle}`)
+    return source.replace(needle, value)
+  }
+  const oracle = async (fixture) => {
+    addCaseVariant(fixture, 'active')
+    const result = await fixture.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+    assertRefused(result, 409, AMBIGUOUS, 'oracle')
+    assert.equal(fixture.calls.adapter.length, 0)
+  }
+  const cases = [
+    {
+      name: 'delete the guard call inside the runtime',
+      routeDependencies: { './stock-preparation-read-plan-runtime.cjs': loadRuntimeCopy(replace('await assertCaseInsensitiveProjectIdentity({', 'void ({')) },
+    },
+    {
+      name: 'force the server-fixed identity flag off',
+      routeTransform: replace(
+        `projectIdentityRequired: requireTarget && input.targetPurpose !== 'source' && input.targetPurpose !== 'readiness',`,
+        'projectIdentityRequired: false,',
+      ),
+    },
+    {
+      name: 'stop forwarding the registry',
+      routeTransform: replace('projectTargetStore: stockPreparationProjectTargets,', ''),
+    },
+  ]
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      // Healthy control on the unmodified route and runtime.
+      await oracle(await ciMount())
+      const mutated = await ciMount({ routeTransform: entry.routeTransform, routeDependencies: entry.routeDependencies })
+      await assert.rejects(() => oracle(mutated), { name: 'AssertionError' })
     })
   }
 })

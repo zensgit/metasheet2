@@ -107,12 +107,14 @@ function memoryDb(scope) {
   }
 }
 
-async function approved(maxReadCount = 100, scope = SCOPE, idPrefix = 'synthetic-id') {
+async function approved(maxReadCount = 100, scope = SCOPE, idPrefix = 'synthetic-id', planPatch = {}) {
   let nextId = 0
   const ledger = createStockPreparationReadPlanStore({
     db: memoryDb(scope), idGenerator: () => `${idPrefix}-${++nextId}`,
   })
-  const saved = await ledger.saveVersion({ ...scope, actor: 'binder-one', config: config(maxReadCount) })
+  const document = config(maxReadCount)
+  Object.assign(document.readPlan, planPatch)
+  const saved = await ledger.saveVersion({ ...scope, actor: 'binder-one', config: document })
   // Ledger fixture only: synthetic measured counts isolate downstream identity
   // and budget tests. This helper is not evidence of a catalog/sample read;
   // validation-runtime and real-DB HTTP suites exercise that producer.
@@ -400,3 +402,47 @@ test('unactivated action preserves frozen legacy JSON shape, revision and backgr
   assert.equal(largeBomBackgroundExpansionCaps({ maxReadCount: 100 }).maxReadCount, 2000)
   assert.deepEqual(largeBomBackgroundExpansionCaps(null), largeBomBackgroundExpansionCaps({}))
 })
+
+for (const [label, change] of [
+  ['case mode', (plan) => { plan.sourceProjectComparison = 'case-insensitive' }],
+  ['active set', (plan) => { plan.bomActiveState.activeValues = ['Y', true] }],
+  ['inactive set', (plan) => { plan.bomActiveState.inactiveValues = ['N', false] }],
+]) {
+  test(`source value semantics: ${label} survives composition and independently invalidates a real preview token`, async () => {
+    const patch = {
+      sourceProjectComparison: 'case-sensitive',
+      bomHead: { ...config().readPlan.bomHead, activeField: 'enabled_flag' },
+      bomActiveState: { activeValues: ['Y'], inactiveValues: ['N'] },
+    }
+    const first = composeStockPreparationReadPlanAction({ action: baseAction(), ...(await approved(100, SCOPE, 'synthetic-id', patch)) })
+    const changed = clone(patch)
+    change(changed)
+    const second = composeStockPreparationReadPlanAction({ action: baseAction(), ...(await approved(100, SCOPE, 'synthetic-id', changed)) })
+    assert.deepEqual(second.source.readPlan.bomActiveState, changed.bomActiveState)
+    assert.equal(second.source.readPlan.sourceProjectComparison, changed.sourceProjectComparison)
+    assert.equal(first.readPlanExecutionIdentity.versionId, second.readPlanExecutionIdentity.versionId)
+    assert.equal(first.readPlanExecutionIdentity.generation, second.readPlanExecutionIdentity.generation)
+    assert.notEqual(first.readPlanExecutionIdentity.contentKey, second.readPlanExecutionIdentity.contentKey)
+    assert.notEqual(revision(first), revision(second))
+    assert.throws(() => assertLargeBomActionExecutionContract(second, first), { code: 'TABLE_ACTION_LARGE_BOM_ACTION_CHANGED' })
+    const preview = await dryRun(first)
+    assert.equal(preview.result.canApply, true)
+    let writes = 0
+    const input = {
+      action: second, parameters: { projectNo: 'P-001' }, sourceAdapter: source(),
+      recordsApi: {
+        async queryRecords() { return [] },
+        async createRecord(row) { writes++; return { id: 'synthetic-row', ...row } },
+        async patchRecord(row) { writes++; return { id: 'synthetic-row', ...row } },
+      },
+      permission: 'write', sandboxPolicy: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
+      plannedAt: '2026-09-30T00:00:00.000Z', runId: 'synthetic-run',
+    }
+    await assert.rejects(lockedApply({ ...input, tokenStore: preview.tokenStore, dryRunToken: preview.result.dryRunToken }),
+      { code: 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH' })
+    assert.equal(writes, 0)
+    const fresh = await dryRun(second)
+    await lockedApply({ ...input, tokenStore: fresh.tokenStore, dryRunToken: fresh.result.dryRunToken })
+    assert.equal(writes, 1, 'fresh token reaches the same real in-memory fenced writer')
+  })
+}

@@ -810,6 +810,210 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     expect(posted).toEqual([])
   })
 
+  function setDraftControl(root: HTMLElement, testid: string, value: string): void {
+    const control = node(root, testid) as HTMLInputElement | HTMLSelectElement
+    control.value = value
+    control.dispatchEvent(new Event(control instanceof HTMLSelectElement ? 'change' : 'input'))
+  }
+
+  async function enableStateMapping(root: HTMLElement, active: string, inactive: string): Promise<void> {
+    const box = node(root, 'stock-prep-source-plan-draft-state-enabled') as HTMLInputElement
+    box.checked = true
+    box.dispatchEvent(new Event('change'))
+    await flush(2)
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-active-values', active)
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-inactive-values', inactive)
+  }
+
+  function previewedReadPlan(root: HTMLElement): Record<string, unknown> {
+    return (JSON.parse(text(root, 'stock-prep-source-plan-draft-json')) as { readPlan: Record<string, unknown> }).readPlan
+  }
+
+  async function previewNow(root: HTMLElement): Promise<void> {
+    ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+    await flush(2)
+  }
+
+  it('S-11a: a default draft previews neither optional key and shows the unset controls', async () => {
+    const root = await mountPanel()
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    await previewNow(root)
+    const readPlan = previewedReadPlan(root)
+    expect(Object.prototype.hasOwnProperty.call(readPlan, 'sourceProjectComparison')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(readPlan, 'bomActiveState')).toBe(false)
+    expect((node(root, 'stock-prep-source-plan-draft-project-comparison') as HTMLSelectElement).value).toBe('')
+    expect((node(root, 'stock-prep-source-plan-draft-state-enabled') as HTMLInputElement).checked).toBe(false)
+    expect(node(root, 'stock-prep-source-plan-draft-state-active-values')).toBeNull()
+    expect(text(root, 'stock-prep-source-plan-draft-state-note')).toContain('[1,"启用"]')
+    expect(text(root, 'stock-prep-source-plan-draft-comparison-note')).toContain('内部登记的项目号拼写不会改变')
+  })
+
+  it('S-11b: an enabled mapping and chosen comparison export with exact types and order', async () => {
+    const root = await mountPanel()
+    const callsAfterMount = h.apiFetch.mock.calls.length
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    setDraftControl(root, 'stock-prep-source-plan-draft-project-comparison', 'case-insensitive')
+    await enableStateMapping(root, '[1,"启用",null,true,0.5]', '[0,"停用","1",false]')
+    await previewNow(root)
+    const readPlan = previewedReadPlan(root)
+    expect(readPlan.sourceProjectComparison).toBe('case-insensitive')
+    expect(readPlan.bomActiveState).toEqual({
+      activeValues: [1, '启用', null, true, 0.5],
+      inactiveValues: [0, '停用', '1', false],
+    })
+    expect(JSON.stringify(readPlan.bomHead)).not.toContain('case-insensitive')
+    expect(h.apiFetch).toHaveBeenCalledTimes(callsAfterMount)
+    expect(posted).toEqual([])
+
+    // Back to "preserve existing behaviour" removes the key rather than writing a default.
+    setDraftControl(root, 'stock-prep-source-plan-draft-project-comparison', '')
+    await previewNow(root)
+    expect(Object.prototype.hasOwnProperty.call(previewedReadPlan(root), 'sourceProjectComparison')).toBe(false)
+    ;(node(root, 'stock-prep-source-plan-draft-state-enabled') as HTMLInputElement).click()
+    await previewNow(root)
+    expect(Object.prototype.hasOwnProperty.call(previewedReadPlan(root), 'bomActiveState')).toBe(false)
+  })
+
+  it('S-11c: unreadable or invalid state JSON blocks preview, stays editable, and never reuses the old mapping', async () => {
+    const root = await mountPanel()
+    const callsAfterMount = h.apiFetch.mock.calls.length
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    await enableStateMapping(root, '[1,"启用"]', '[0,"停用"]')
+    await previewNow(root)
+    expect(node(root, 'stock-prep-source-plan-draft-json')).not.toBeNull()
+
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-active-values', '[1, private_json_marker')
+    await flush(2)
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    await previewNow(root)
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    expect(node(root, 'stock-prep-source-plan-draft-download')).toBeNull()
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('启用状态值')
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('JSON')
+    expect(root.textContent).not.toContain('private_json_marker')
+    const activeInput = node(root, 'stock-prep-source-plan-draft-state-active-values') as HTMLInputElement
+    expect(activeInput.value).toBe('[1, private_json_marker')
+    expect(activeInput.getAttribute('aria-invalid')).toBe('true')
+
+    // Readable JSON that violates a value rule is refused by the compiler, also without a preview.
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-active-values', '[1,[2]]')
+    await previewNow(root)
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('嵌套')
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-active-values', '[1,1]')
+    await previewNow(root)
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('重复')
+
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-active-values', '[2]')
+    await previewNow(root)
+    expect((previewedReadPlan(root).bomActiveState as { activeValues: unknown[] }).activeValues).toEqual([2])
+    expect(h.apiFetch).toHaveBeenCalledTimes(callsAfterMount)
+    expect(posted).toEqual([])
+  })
+
+  it('S-11c-save: raw invalid mapping blocks the real save handler before any POST', async () => {
+    const bindingRoutes = h.apiFetch.getMockImplementation()!
+    h.apiFetch.mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('/stock-preparation/read-plan-configs')) {
+        if (init?.method === 'POST') return new Response('{}', { status: 400 })
+        return envelope({ versions: [], activation: null })
+      }
+      return bindingRoutes(url, init)
+    })
+    const root = await mountPanel()
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    ;(node(root, 'stock-prep-plan-management-toggle') as HTMLInputElement).click()
+    await flush(2)
+    setDraftControl(root, 'stock-prep-plan-system', 'sys_synthetic_owned')
+    await flush(2)
+    ;(node(root, 'stock-prep-plan-refresh') as HTMLButtonElement).click()
+    await flush()
+    const save = node(root, 'stock-prep-plan-save') as HTMLButtonElement
+    expect(save.disabled).toBe(false)
+    const posts = () => h.apiFetch.mock.calls.filter(([url, init]) => String(url).includes('/stock-preparation/read-plan-configs') && init?.method === 'POST')
+    await enableStateMapping(root, '[1]', '[0]')
+    await previewNow(root)
+    expect(node(root, 'stock-prep-source-plan-draft-json')).not.toBeNull()
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-active-values', '[1, private_json_marker')
+    save.click()
+    await flush()
+    expect(posts()).toHaveLength(0)
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('JSON')
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).not.toContain('private_json_marker')
+    expect((node(root, 'stock-prep-source-plan-draft-state-active-values') as HTMLInputElement).value).toBe('[1, private_json_marker')
+
+    // Positive control: the same enabled button reaches the real save client with typed values.
+    setDraftControl(root, 'stock-prep-source-plan-draft-state-active-values', '[2,"2",null]')
+    setDraftControl(root, 'stock-prep-source-plan-draft-project-comparison', 'case-insensitive')
+    save.click()
+    await flush()
+    expect(posts()).toHaveLength(1)
+    const payload = JSON.parse(String(posts()[0][1].body))
+    expect(payload.config.readPlan.bomActiveState).toEqual({ activeValues: [2, '2', null], inactiveValues: [0] })
+    expect(payload.config.readPlan.sourceProjectComparison).toBe('case-insensitive')
+  })
+
+  it('S-11d: import populates the editor, a refused import keeps it, and synthetic reset clears it', async () => {
+    const root = await mountPanel()
+    const compiled = compileSourcePlanDraft({
+      ...createSyntheticSourcePlanDraft(),
+      sourceProjectComparison: 'case-sensitive',
+      bomActiveState: { activeValues: [1, '启用'], inactiveValues: [0, '停用', null] },
+    })
+    expect(compiled.ok).toBe(true)
+    chooseDraftFile(root, JSON.stringify(compiled.envelope))
+    await flush()
+    expect((node(root, 'stock-prep-source-plan-draft-project-comparison') as HTMLSelectElement).value).toBe('case-sensitive')
+    expect((node(root, 'stock-prep-source-plan-draft-state-enabled') as HTMLInputElement).checked).toBe(true)
+    expect((node(root, 'stock-prep-source-plan-draft-state-active-values') as HTMLInputElement).value).toBe('[1,"启用"]')
+    expect((node(root, 'stock-prep-source-plan-draft-state-inactive-values') as HTMLInputElement).value).toBe('[0,"停用",null]')
+    await previewNow(root)
+    expect(previewedReadPlan(root)).toEqual((compiled.envelope as { readPlan: unknown }).readPlan)
+
+    const refused = JSON.parse(JSON.stringify(compiled.envelope)) as { readPlan: { bomActiveState: { activeValues: unknown[] } } }
+    refused.readPlan.bomActiveState.activeValues = [7, 7, 'private_value_marker']
+    chooseDraftFile(root, JSON.stringify(refused))
+    await flush()
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('重复')
+    expect(root.textContent).not.toContain('private_value_marker')
+    expect((node(root, 'stock-prep-source-plan-draft-state-active-values') as HTMLInputElement).value).toBe('[1,"启用"]')
+
+    // The click that follows in the same tick must already see the reset form.
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+    await flush(2)
+    const readPlan = previewedReadPlan(root)
+    expect(Object.prototype.hasOwnProperty.call(readPlan, 'sourceProjectComparison')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(readPlan, 'bomActiveState')).toBe(false)
+    expect((node(root, 'stock-prep-source-plan-draft-project-comparison') as HTMLSelectElement).value).toBe('')
+    expect((node(root, 'stock-prep-source-plan-draft-state-enabled') as HTMLInputElement).checked).toBe(false)
+    expect(node(root, 'stock-prep-source-plan-draft-state-active-values')).toBeNull()
+    expect(posted).toEqual([])
+  })
+
+  it('S-11e: a session reset leaves no hidden comparison or mapping behind', async () => {
+    const root = await mountPanel()
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    setDraftControl(root, 'stock-prep-source-plan-draft-project-comparison', 'case-insensitive')
+    await enableStateMapping(root, '[1]', '[0]')
+    h.permissions = ['stock-prep:admin']
+    notifyAuthPrincipalChange()
+    await flush()
+    h.permissions = ['integration:admin']
+    notifyAuthPrincipalChange()
+    await flush()
+    expect((node(root, 'stock-prep-source-plan-draft-project-comparison') as HTMLSelectElement).value).toBe('')
+    expect((node(root, 'stock-prep-source-plan-draft-state-enabled') as HTMLInputElement).checked).toBe(false)
+    expect(node(root, 'stock-prep-source-plan-draft-state-active-values')).toBeNull()
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    await previewNow(root)
+    const readPlan = previewedReadPlan(root)
+    expect(Object.prototype.hasOwnProperty.call(readPlan, 'sourceProjectComparison')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(readPlan, 'bomActiveState')).toBe(false)
+  })
+
   it('S-12: ignores an import whose FileReader finishes after a later local edit', async () => {
     type PendingReader = {
       result: string | ArrayBuffer | null

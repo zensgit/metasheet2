@@ -2,7 +2,17 @@
 
 const assert = require('node:assert/strict')
 const { test } = require('node:test')
+const managementModule = require('../lib/stock-preparation-read-plan-management.cjs')
+// Pass-through spy, never a stub: records the options the REAL bootstrap hands
+// the real factory, so an unwired deployment resolver fails here, not silently.
+const managementOptions = []
+const createManagement = managementModule.createStockPreparationReadPlanManagement
+managementModule.createStockPreparationReadPlanManagement = (options) => {
+  managementOptions.push(options)
+  return createManagement(options)
+}
 const entry = require('../index.cjs')
+const { assertStockPreparationReadPlanDeploymentCompatible } = require('../lib/stock-preparation-read-plan-execution.cjs')
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('../lib/stock-preparation-templates.cjs')
 const { FEATURE_FLAG } = require('../lib/sealed-export/stock-preparation-runtime-config.cjs')
 
@@ -11,11 +21,27 @@ const TENANT = 'synthetic-tenant'
 const SYSTEM = 'synthetic-plm'
 const OWNER = 'synthetic-owner'
 const ROOT = '/api/integration/stock-preparation/read-plan-configs'
+const READ_PLAN = Object.freeze({
+  id: 'plm.stock-preparation.bom-read.user-draft.v1', sourceKind: 'data-source:sql-readonly', matchField: 'project', maxReadCount: 100,
+  pathExAttr: { object: 'SYN_PathLink', matchField: 'project', pathIdField: 'path' },
+  pathInfo: { object: 'SYN_Path', idField: 'id' },
+  orderHead: { object: 'SYN_Order', idField: 'id', pathIdField: 'path' },
+  orderDetail: { object: 'SYN_OrderLine', orderIdField: 'order', componentIdField: 'part', quantityField: 'qty' },
+  part: { object: 'SYN_Part', idField: 'id', codeField: 'code', nameField: 'name' },
+  bomHead: { object: 'SYN_Bom', parentPartField: 'part', bomIdField: 'id' },
+  bomDetail: { object: 'SYN_BomLine', bomParentField: 'bom', componentIdField: 'part', quantityField: 'qty' },
+})
+// Deploy-only readPlan blocks SA02 v1 cannot express (same fixture as the
+// management/runtime suites); tests self-check that the real normalizer keeps them.
+const DEPLOY_DECLARATIONS = Object.freeze({
+  projectSubtree: { pathInfo: { parentIdField: 'parent' }, bomHead: { pathIdField: 'path' } },
+  batchIdentity: { mode: 'material_create_hour' },
+})
 
 // Real plugin bootstrap, route registration, public registry, scoped SQL builder
 // and ledger. Only host DB/metadata IO is synthetic. No socket or customer source
 // is used; transaction/lock guarantees belong to the separate PostgreSQL suite.
-function host() {
+function host({ actionsKey = 'stockPreparationTableActions', readPlan, unconfigured = false } = {}) {
   const routes = new Map()
   const namespaces = new Map()
   const queries = []
@@ -29,13 +55,14 @@ function host() {
     role: 'source', status: 'active', connection_id: 'synthetic-connection', config: {},
     validation_revision: BINDING_REVISION,
   }
+  const deployAction = {
+    actionId: ACTION,
+    source: { externalSystemId: SYSTEM, kind: 'data-source:sql-readonly', ...(readPlan ? { readPlan } : {}) },
+    target: { sheetId: 'synthetic-sheet', objectId: 'stockPreparationMain', fieldIdMap:
+      Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map(field => [field.id, `synthetic-${field.id}`])) },
+  }
   const context = {
-    config: { stockPreparationTableActions: [{
-      actionId: ACTION,
-      source: { externalSystemId: SYSTEM, kind: 'data-source:sql-readonly' },
-      target: { sheetId: 'synthetic-sheet', objectId: 'stockPreparationMain', fieldIdMap:
-        Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map(field => [field.id, `synthetic-${field.id}`])) },
-    }] },
+    config: unconfigured ? {} : { [actionsKey]: [deployAction] },
     api: {
       http: { addRoute(method, route, handler) { routes.set(`${method} ${route}`, handler) } },
       database: { async query(sql, params) {
@@ -154,4 +181,61 @@ test('real bootstrap injects private management/ledger and never exposes them cr
     if (previous === undefined) delete process.env[FEATURE_FLAG]
     else process.env[FEATURE_FLAG] = previous
   }
+})
+
+async function withActivated(options, run) {
+  const previous = process.env[FEATURE_FLAG]
+  process.env[FEATURE_FLAG] = 'false'
+  const h = host(options)
+  const start = managementOptions.length
+  try {
+    await entry.activate(h.context)
+    assert.ok(managementOptions.length > start, 'real bootstrap must build read-plan management')
+    await run(h, managementOptions[start])
+  } finally {
+    await entry.deactivate()
+    if (previous === undefined) delete process.env[FEATURE_FLAG]
+    else process.env[FEATURE_FLAG] = previous
+  }
+}
+
+test('real bootstrap injects a server-only deployment resolver from either table-action config key', async () => {
+  for (const actionsKey of ['stockPreparationTableActions', 'tableActions']) {
+    await withActivated({ actionsKey }, async (h, options) => {
+      assert.equal(typeof options.resolveDeploymentAction, 'function', `${actionsKey}: bootstrap must wire the resolver`)
+      const before = { queries: h.queries.length, facade: h.facadeCalls.length }
+      const deployed = await options.resolveDeploymentAction(ACTION)
+      assert.equal(deployed.actionId, ACTION)
+      assert.equal(deployed.source.externalSystemId, SYSTEM)
+      assert.equal(Object.hasOwn(deployed, 'projectTarget'), false)
+      assert.doesNotThrow(() => assertStockPreparationReadPlanDeploymentCompatible(deployed))
+      deployed.source.externalSystemId = 'caller-mutated'
+      assert.equal((await options.resolveDeploymentAction(ACTION)).source.externalSystemId, SYSTEM, 'immutable trusted config')
+      assert.deepEqual({ queries: h.queries.length, facade: h.facadeCalls.length }, before,
+        'pure config read: no metadata, binding or ledger IO')
+      const forged = await call(h, 'POST', `${ROOT}/:id/activate`, request({ params: { id: 'synthetic-version' },
+        body: { managementScope: 'tenant', systemId: SYSTEM, expectedGeneration: 0, resolveDeploymentAction: 'compatible' } }))
+      assert.equal(forged.statusCode, 400)
+      assert.equal(h.queries.length, before.queries, 'a request key is not a deployment resolver')
+    })
+  }
+})
+
+test('bootstrap resolver reflects declared and unconfigured deploy config, never a compatible default', async () => {
+  for (const [key, block] of Object.entries(DEPLOY_DECLARATIONS)) {
+    await withActivated({ readPlan: { ...structuredClone(READ_PLAN), [key]: structuredClone(block) } }, async (_h, options) => {
+      const deployed = await options.resolveDeploymentAction(ACTION)
+      assert.ok(Object.hasOwn(deployed.source.readPlan, key), `${key} fixture must survive the real deploy normalizer`)
+      assert.throws(() => assertStockPreparationReadPlanDeploymentCompatible(deployed), (error) => {
+        assert.equal(error.status, 409)
+        assert.equal(error.code, 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE')
+        assert.equal(error.message, 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE')
+        return true
+      })
+    })
+  }
+  await withActivated({ unconfigured: true }, async (_h, options) => {
+    assert.equal(typeof options.resolveDeploymentAction, 'function')
+    await assert.rejects(options.resolveDeploymentAction(ACTION))
+  })
 })

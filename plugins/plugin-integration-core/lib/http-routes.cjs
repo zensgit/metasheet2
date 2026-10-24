@@ -5040,6 +5040,9 @@ function requireStockPreparationAudit() {
       store: services.stockPreparationReadPlanStore,
       snapshotAction,
       verifyTenant: () => resolveVerifiedClaimTenantId(req, input),
+      projectNo: input.projectNo,
+      projectTargetStore: stockPreparationProjectTargets,
+      projectIdentityRequired: requireTarget && input.targetPurpose !== 'source' && input.targetPurpose !== 'readiness',
     })
     const action = requireTarget ? assertStockPreparationTargetReady(execution.action) : execution.action
     executionSourceScopes.set(action, execution.sourceScope)

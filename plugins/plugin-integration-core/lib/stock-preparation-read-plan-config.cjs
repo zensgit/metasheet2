@@ -3,6 +3,7 @@
 // Structure-only SA02 draft contract. This is deliberately narrower than the
 // generic BOM normalizer: no legacy defaults, executable blocks, or extensions.
 const { normalizeStockPreparationBomReadPlan } = require('./stock-preparation-bom-expansion.cjs')
+const { normalizeSourceValueSemantics } = require('./stock-preparation-source-value-semantics.cjs')
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require('./stock-preparation-source-binding.cjs')
 
 const READ_PLAN_ID = 'plm.stock-preparation.bom-read.user-draft.v1'
@@ -71,7 +72,7 @@ function validateStockPreparationReadPlanConfig(input) {
   }
   const systemId = requiredHandle(input.systemId)
   const plan = input.readPlan
-  exactKeys(plan, ['id', 'sourceKind', 'matchField', 'maxReadCount', ...Object.keys(ROLES)])
+  exactKeys(plan, ['id', 'sourceKind', 'matchField', 'maxReadCount', 'sourceProjectComparison', 'bomActiveState', ...Object.keys(ROLES)])
   if (plan.id !== READ_PLAN_ID || plan.sourceKind !== SOURCE_KIND) refuse('READ_PLAN_FIXED_VALUE_INVALID')
   if (!Number.isInteger(plan.maxReadCount) || plan.maxReadCount < 1 || plan.maxReadCount > 1000) {
     refuse('READ_PLAN_BUDGET_INVALID')
@@ -91,9 +92,20 @@ function validateStockPreparationReadPlanConfig(input) {
   const matchField = identifier(plan.matchField, 'field')
   if (matchField !== roles.pathExAttr.matchField) refuse('READ_PLAN_MATCH_FIELD_INVALID')
   if (roles.orderDetail.versionField && !roles.bomHead.versionField) refuse('READ_PLAN_VERSION_DEPENDENCY_INVALID')
+  // Optional value semantics: present keys only, cloned; the value sets are never physical columns.
+  let semantics
+  try {
+    semantics = normalizeSourceValueSemantics({
+      sourceProjectComparison: plan.sourceProjectComparison,
+      bomActiveState: plan.bomActiveState,
+      bomHead: roles.bomHead,
+    })
+  } catch (_error) {
+    refuse('READ_PLAN_SEMANTICS_INVALID')
+  }
   const readPlan = {
     id: READ_PLAN_ID, sourceKind: SOURCE_KIND, matchField,
-    ...roles, maxReadCount: plan.maxReadCount,
+    ...roles, maxReadCount: plan.maxReadCount, ...semantics,
   }
   try {
     const actual = normalizeStockPreparationBomReadPlan(readPlan)

@@ -502,3 +502,41 @@ test('explicit activation replaces corrupt old pointer content only from a reche
   assert.equal(loaded.version.id, version.id)
   assert.deepEqual(loaded.sourceValidation, STATUS_FIXTURE_SOURCE)
 })
+
+for (const [label, change] of [
+  ['project comparison', (plan) => { plan.sourceProjectComparison = 'case-insensitive' }],
+  ['active values', (plan) => { plan.bomActiveState.activeValues = ['Y', 'enabled'] }],
+  ['inactive values', (plan) => { plan.bomActiveState.inactiveValues = ['N', 'disabled'] }],
+]) {
+  test(`source value semantics: changing ${label} requires its own immutable version and confirmation`, async () => {
+    const db = eligibleDb()
+    const ledger = store(db)
+    const original = config()
+    original.readPlan.sourceProjectComparison = 'case-sensitive'
+    original.readPlan.bomHead.activeField = 'enabled_flag'
+    original.readPlan.bomActiveState = { activeValues: ['Y'], inactiveValues: ['N'] }
+    const first = await ledger.saveVersion({ ...tenantScope, actor: 'actor-one', config: original })
+    const proof = await seedConfirmedStatusFixture(ledger, first.id)
+    await ledger.approve({ ...tenantScope, id: first.id, actor: 'actor-one' })
+    await ledger.activate({ ...tenantScope, id: first.id, actor: 'actor-one', expectedGeneration: 0 })
+    const updated = clone(original)
+    change(updated.readPlan)
+    const second = await ledger.saveVersion({ ...tenantScope, actor: 'actor-one', config: updated })
+    assert.notEqual(second.id, first.id)
+    assert.notEqual(second.contentKey, first.contentKey)
+    assert.deepEqual(second.config, updated, 'saved version preserves optional policy fields')
+    assert.equal(second.status, 'draft')
+    assert.equal(second.validationId, null)
+    await assert.rejects(ledger.approve({ ...tenantScope, id: second.id, actor: 'actor-one', validationId: proof.validationId }),
+      { code: 'READ_PLAN_VALIDATION_REQUIRED' })
+    const before = await ledger.getActiveForRuntime({ ...tenantScope, actionId: original.actionId, systemId: original.systemId })
+    assert.equal(before.version.id, first.id)
+    await seedConfirmedStatusFixture(ledger, second.id)
+    await ledger.approve({ ...tenantScope, id: second.id, actor: 'actor-one' })
+    await ledger.activate({ ...tenantScope, id: second.id, actor: 'actor-one', expectedGeneration: 1 })
+    const after = await ledger.getActiveForRuntime({ ...tenantScope, actionId: original.actionId, systemId: original.systemId })
+    assert.equal(after.activation.generation, 2)
+    assert.deepEqual(after.version.config, updated)
+    assert.deepEqual((await ledger.get({ ...tenantScope, id: first.id })).config, original)
+  })
+}

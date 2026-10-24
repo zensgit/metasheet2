@@ -251,6 +251,94 @@
           </label>
         </fieldset>
 
+        <!-- Optional wire fields. Left at their defaults they add no key to the exported plan. -->
+        <fieldset
+          class="stock-prep-source__draft-section"
+          data-testid="stock-prep-source-plan-draft-section-options"
+        >
+          <legend>{{ bi('可选：来源项目比较与 BOM 状态值', 'Optional: source project comparison and BOM state values') }}</legend>
+          <label
+            class="stock-prep-source__draft-field"
+            for="stock-prep-source-plan-draft-project-comparison"
+          >
+            {{ bi('来源项目号比较方式', 'Source project comparison') }}
+            <select
+              id="stock-prep-source-plan-draft-project-comparison"
+              v-model="projectComparisonModel"
+              :aria-invalid="hasDraftIssue('sourceProjectComparison')"
+              :aria-describedby="hasDraftIssue('sourceProjectComparison') ? 'stock-prep-source-plan-draft-issues' : undefined"
+              data-testid="stock-prep-source-plan-draft-project-comparison"
+              @change="invalidateDraftPreview"
+            >
+              <option value="">{{ bi('保持现有行为（精确比较）', 'Preserve existing behaviour (exact comparison)') }}</option>
+              <option value="case-sensitive">{{ bi('区分大小写', 'Case-sensitive') }}</option>
+              <option value="case-insensitive">{{ bi('不区分大小写', 'Case-insensitive') }}</option>
+            </select>
+          </label>
+          <p class="stock-prep-source__draft-note" data-testid="stock-prep-source-plan-draft-comparison-note">
+            {{ bi(
+              '该比较方式只作用于来源库中的项目号与 MetaSheet 已登记项目号之间的比较，内部登记的项目号拼写不会改变。使用已登记项目号；大小写冲突须先处理。留空则保持现有的精确比较。',
+              'This comparison applies only between the source project number and the project number registered in MetaSheet. The internally registered spelling is unchanged. Use a registered project number; resolve case conflicts first. Leave it unset to keep the existing exact comparison.',
+            ) }}
+          </p>
+
+          <label
+            class="stock-prep-source__draft-field"
+            for="stock-prep-source-plan-draft-state-enabled"
+          >
+            <input
+              id="stock-prep-source-plan-draft-state-enabled"
+              v-model="stateMappingEnabled"
+              type="checkbox"
+              data-testid="stock-prep-source-plan-draft-state-enabled"
+              @change="invalidateDraftPreview"
+            >
+            {{ bi('启用 BOM 状态值映射', 'Enable BOM state value mapping') }}
+          </label>
+          <template v-if="stateMappingEnabled">
+            <label
+              class="stock-prep-source__draft-field"
+              for="stock-prep-source-plan-draft-state-active-values"
+            >
+              {{ bi('启用状态值（JSON 数组）', 'Active state values (JSON array)') }}
+              <input
+                id="stock-prep-source-plan-draft-state-active-values"
+                v-model="activeValuesText"
+                type="text"
+                autocomplete="off"
+                placeholder='[1,"启用"]'
+                :aria-invalid="hasDraftIssue('bomActiveState.activeValues') || hasDraftIssue('bomActiveState')"
+                :aria-describedby="hasDraftIssue('bomActiveState.activeValues') || hasDraftIssue('bomActiveState') ? 'stock-prep-source-plan-draft-issues' : undefined"
+                data-testid="stock-prep-source-plan-draft-state-active-values"
+                @input="invalidateDraftPreview"
+              >
+            </label>
+            <label
+              class="stock-prep-source__draft-field"
+              for="stock-prep-source-plan-draft-state-inactive-values"
+            >
+              {{ bi('停用状态值（JSON 数组）', 'Inactive state values (JSON array)') }}
+              <input
+                id="stock-prep-source-plan-draft-state-inactive-values"
+                v-model="inactiveValuesText"
+                type="text"
+                autocomplete="off"
+                placeholder='[0,"停用"]'
+                :aria-invalid="hasDraftIssue('bomActiveState.inactiveValues') || hasDraftIssue('bomActiveState')"
+                :aria-describedby="hasDraftIssue('bomActiveState.inactiveValues') || hasDraftIssue('bomActiveState') ? 'stock-prep-source-plan-draft-issues' : undefined"
+                data-testid="stock-prep-source-plan-draft-state-inactive-values"
+                @input="invalidateDraftPreview"
+              >
+            </label>
+          </template>
+          <p class="stock-prep-source__draft-note" data-testid="stock-prep-source-plan-draft-state-note">
+            {{ bi(
+              '启用映射前须先填写 BOM 头的「启用状态列」。状态值按类型精确匹配：数字 1 与文本 "1" 不同，文本不去空白、不折叠大小写；未列出的值会被拒绝；空值必须显式写 null。每个集合填写 1 至 32 个值的 JSON 数组。示例（仅供参考，不会自动填入）：启用 [1,"启用"]，停用 [0,"停用"]。',
+              'Fill in the BOM header active state field first. State values match by exact type: number 1 differs from text "1", and text is neither trimmed nor case-folded. Unlisted values are rejected, and an empty value must be written as null explicitly. Each set is a JSON array of 1 to 32 values. Example (illustration only, never filled in for you): active [1,"启用"], inactive [0,"停用"].',
+            ) }}
+          </p>
+        </fieldset>
+
         <ul
           v-if="draftIssues.length"
           class="stock-prep-source__draft-issues"
@@ -478,7 +566,9 @@ import {
   createEmptySourcePlanDraft,
   createSyntheticSourcePlanDraft,
   parseSourcePlanDraftJson,
+  parseBomActiveStateInputs,
   type SourcePlanDraft,
+  type SourcePlanDraftCompileResult,
   type SourcePlanDraftIssue,
 } from '../../../services/integration/stockPreparation/sourcePlanDraft'
 import {
@@ -551,6 +641,29 @@ const draftPreview = ref<string | null>(null)
 const draftGeneration = ref(0)
 let draftComponentMounted = true
 let sessionGeneration = 0
+
+// Optional state-value mapping. The editor keeps the two arrays as raw JSON text so a half-typed
+// value stays editable; compileCurrentDraft is the only place that turns them into compiler input,
+// so invalid text can never fall back to an earlier valid mapping.
+const stateMappingEnabled = ref(false)
+const activeValuesText = ref('')
+const inactiveValuesText = ref('')
+const projectComparisonModel = computed<string>({
+  get: () => draft.value.sourceProjectComparison ?? '',
+  set: (value) => {
+    if (value === 'case-sensitive' || value === 'case-insensitive') draft.value.sourceProjectComparison = value
+    else delete draft.value.sourceProjectComparison
+  },
+})
+// Every replacement of the draft (synthetic example, import, copy of a version, session/tenant
+// reset) re-derives the raw form synchronously, so nothing from the previous draft survives and a
+// click that follows in the same tick already compiles the new state.
+watch(draft, (next) => {
+  const mapping = next.bomActiveState
+  stateMappingEnabled.value = mapping !== undefined
+  activeValuesText.value = mapping ? JSON.stringify(mapping.activeValues) : ''
+  inactiveValuesText.value = mapping ? JSON.stringify(mapping.inactiveValues) : ''
+}, { flush: 'sync' })
 
 const planManagement = ref(false)
 const planTargetSystemId = ref('')
@@ -761,6 +874,10 @@ const planErrorText = computed(() => {
       return bi('已有样本核对进行中。请等待该次核对结束后手动重新读取版本，确认状态后再决定下一步。', 'A sample check is already in progress. Wait for it to finish, then reload the versions manually and check the status before choosing the next step.')
     case 'READ_PLAN_GENERATION_CONFLICT':
       return bi('激活记录已被其他操作更新。请重新读取版本和激活状态，再选择并确认操作。', 'Another operation updated the activation record. Reload the versions and activation status, then select and confirm the operation again.')
+    case 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE':
+      return bi('当前部署读取规则不能由此配置完整表达，无法激活；保留原配置并联系管理员。', 'This configuration cannot fully express the current deployment read rules, so it cannot be activated; keep the original configuration and contact an administrator.')
+    case 'READ_PLAN_DEPLOYMENT_UNAVAILABLE':
+      return bi('无法核实部署读取规则，未激活；联系管理员检查配置。', 'The deployment read rules could not be verified, so nothing was activated; contact an administrator to check the configuration.')
   }
   if (planErrorStatus.value === 401 || planErrorStatus.value === 403) {
     return bi('需要当前登录租户的平台管理权限及相关连接所有权。请重新确认登录身份和目标。', 'The signed-in tenant requires platform management permission and ownership of the relevant connections. Check the session and target.')
@@ -1012,7 +1129,7 @@ async function savePlanDraft(): Promise<void> {
   if (!context || planBusy.value || !planState.value) return
   pendingDraftCopy.value = null
   // Compile at the explicit click, never trust a prior preview or a mutable later form.
-  const result = compileSourcePlanDraft(draft.value)
+  const result = compileCurrentDraft()
   draftIssues.value = result.issues
   if (!result.ok || !result.envelope) return
   planBusy.value = true
@@ -1269,9 +1386,24 @@ function applyImportedDraftResult(
   if (result.ok && result.draft) draft.value = result.draft
 }
 
+// Shared by preview and save. The mapping is built from the raw text each time; unreadable JSON
+// yields issues and no envelope, which blocks both callers.
+function compileCurrentDraft(): SourcePlanDraftCompileResult {
+  const input: Record<string, unknown> = {
+    roles: draft.value.roles,
+    maxReadCount: draft.value.maxReadCount,
+  }
+  if (draft.value.sourceProjectComparison !== undefined) input.sourceProjectComparison = draft.value.sourceProjectComparison
+  if (!stateMappingEnabled.value) return compileSourcePlanDraft(input)
+  const mapping = parseBomActiveStateInputs(activeValuesText.value, inactiveValuesText.value)
+  if (mapping.value) return compileSourcePlanDraft({ ...input, bomActiveState: mapping.value })
+  const rest = compileSourcePlanDraft(input)
+  return { ok: false, issues: [...rest.issues, ...mapping.issues], envelope: null }
+}
+
 function previewDraft(): void {
   if (!captureContext()) return
-  const result = compileSourcePlanDraft(draft.value)
+  const result = compileCurrentDraft()
   draftIssues.value = result.issues
   draftPreview.value = result.ok && result.envelope
     ? JSON.stringify(result.envelope, null, 2)
@@ -1284,6 +1416,10 @@ function hasDraftIssue(path: string): boolean {
 
 function issueLabel(item: SourcePlanDraftIssue): string {
   if (item.path === 'maxReadCount') return bi('读取调用预算（次）', 'Read-call budget')
+  if (item.path === 'sourceProjectComparison') return bi('来源项目号比较方式', 'Source project comparison')
+  if (item.path === 'bomActiveState') return bi('BOM 状态值映射', 'BOM state value mapping')
+  if (item.path === 'bomActiveState.activeValues') return bi('启用状态值', 'Active state values')
+  if (item.path === 'bomActiveState.inactiveValues') return bi('停用状态值', 'Inactive state values')
   const parts = item.path.split('.')
   if (parts[0] === 'roles' && parts.length >= 2) {
     const section = SOURCE_PLAN_DRAFT_SECTIONS.find((candidate) => candidate.key === parts[1])

@@ -6,7 +6,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const Module = require('node:module')
 const { validateStockPreparationReadPlanSample: validate, StockPreparationReadPlanValidationReadError } = require('../lib/stock-preparation-read-plan-validation-read.cjs')
-const { READ_PLAN_ID, SOURCE_KIND } = require('../lib/stock-preparation-read-plan-config.cjs')
+const { READ_PLAN_ID, SOURCE_KIND, ROLES } = require('../lib/stock-preparation-read-plan-config.cjs')
 const {
   createB2aRegistry, createB2aOperationClaim, assertB2aReadAuthorization,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION, SCHEMA_CONTRACT_KEY_PREFIX,
@@ -91,7 +91,7 @@ async function rejects(input, code, run = validate) {
 }
 async function arm(input, extraObjects = []) {
   const now = Date.parse('2026-09-01T12:00:00Z')
-  const objects = [...Object.values(input.config.readPlan).filter((value) => value && typeof value === 'object').map((role) => role.object), ...extraObjects]
+  const objects = [...Object.keys(ROLES).map((role) => input.config.readPlan[role].object), ...extraObjects]
   const store = new Map()
   const claimRows = new Map()
   const operationClaim = createB2aOperationClaim({ db: {
@@ -158,6 +158,32 @@ test('legacy sample omits order BOM version instead of inventing the material ve
   assert.ok(result.sample.rows.every(row => !Object.hasOwn(row, 'orderBomVersion')))
   assert.equal(result.sample.rows[0].sourceVersion, 'P1')
 })
+
+test('approved draft typed active state, not the legacy vocabulary, drives the real sample', async () => {
+  const { input, state } = fixture()
+  Object.assign(input.config.readPlan, {
+    sourceProjectComparison: 'case-insensitive',
+    bomActiveState: { activeValues: ['启用'], inactiveValues: ['停用'] },
+  })
+  state.data['syn.bomheads'][0].active = '启用'
+  const result = await validate(input)
+  assert.equal(result.status, 'sample_ready')
+  assert.equal(result.sample.totalRows, 2)
+  assert.equal(result.sample.rows[1].totalQuantity, 6)
+  assert.deepEqual(state.schemas.map((read) => read.object), Object.keys(PHYSICAL), 'no extra schema probe for the value sets')
+  assert.equal(state.writes, 0)
+})
+
+for (const [label, value] of [['legacy true', true], ['legacy one', 1], ['null not listed', null], ['unnormalized text', ' 启用'], ['private unknown', PRIVATE]]) {
+  test(`configured state rejects ${label} without any target write`, async () => {
+    const { input, state } = fixture()
+    input.config.readPlan.bomActiveState = { activeValues: ['启用'], inactiveValues: ['停用'] }
+    state.data['syn.bomheads'][0].active = value
+    await rejects(input, 'READ_PLAN_VALIDATION_INCOMPLETE')
+    assert.equal(state.writes, 0)
+    assert.equal(state.schemas.length, Object.keys(PHYSICAL).length)
+  })
+}
 
 for (const version of [0, '0', ' V02 ']) test(`sample preserves the declared order version type: ${JSON.stringify(version)}`, async () => {
   const { input, state } = fixture()

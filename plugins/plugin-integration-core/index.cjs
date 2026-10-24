@@ -25,6 +25,7 @@ const { createStockPreparationAuditStore } = require('./lib/stock-preparation-au
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
 const { createStockPreparationReadPlanStore } = require('./lib/stock-preparation-read-plan-store.cjs')
 const { createStockPreparationReadPlanManagement } = require('./lib/stock-preparation-read-plan-management.cjs')
+const { createStockPreparationTableActionRegistry } = require('./lib/stock-preparation-table-actions.cjs')
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
@@ -347,8 +348,25 @@ module.exports = {
     stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
     // Always wire the real ledger: an unavailable migration must fail closed.
     stockPreparationReadPlanStore = createStockPreparationReadPlanStore({ db })
+    // FP-7: read-plan activation must see the DEPLOY action, from the same server
+    // config the routes read. A separate registry with NO source-binding or
+    // project-target resolver: no request fields, no I/O. A config it cannot
+    // normalize leaves plan activation fail-closed (501) without hiding the gate.
+    const tableActionConfig = context.config || {}
+    let deploymentActionRegistry = null
+    try {
+      deploymentActionRegistry = createStockPreparationTableActionRegistry({
+        actions: tableActionConfig.stockPreparationTableActions || tableActionConfig.tableActions,
+      })
+    } catch (_error) {
+      deploymentActionRegistry = null
+    }
     stockPreparationReadPlanManagement = createStockPreparationReadPlanManagement({
       store: stockPreparationReadPlanStore, externalSystemRegistry, connectionRegistration: dataSourceFacade,
+      async resolveDeploymentAction(actionId) {
+        if (!deploymentActionRegistry) throw new Error('READ_PLAN_DEPLOYMENT_UNAVAILABLE')
+        return deploymentActionRegistry.getTableAction({ actionId })
+      },
     })
     // 通知下一步 (migration 084): the per-(tenant,projectNo) cursor saying whose turn it is
     // on a 备料 project. Built here so both handoff routes can compare-and-set it in one transaction —

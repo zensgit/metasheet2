@@ -70,6 +70,50 @@ test('minimum roles do not introduce implicit optional defaults', () => {
   assert.deepEqual(inspect(input), expected())
 })
 
+test('optional source value semantics are preserved by strict validation and never become physical columns', () => {
+  assert.deepEqual(ROLES.bomHead.optional, ['versionField', 'activeField'])
+  const semantics = {
+    sourceProjectComparison: 'case-insensitive',
+    bomActiveState: { activeValues: [1, '启用', null], inactiveValues: [0, '停用'] },
+  }
+  const input = fixture()
+  const plain = validateStockPreparationReadPlanConfig(input.config)
+  assert.equal(Object.hasOwn(plain.readPlan, 'sourceProjectComparison'), false)
+  assert.equal(Object.hasOwn(plain.readPlan, 'bomActiveState'), false)
+  Object.assign(input.config.readPlan, clone(semantics))
+  // Only bomHead.activeField is checked as a column; the value sets add no catalog requirement.
+  assert.deepEqual(inspect(input), expected())
+  const validated = validateStockPreparationReadPlanConfig(input.config)
+  assert.equal(validated.readPlan.sourceProjectComparison, 'case-insensitive')
+  assert.deepEqual(validated.readPlan.bomActiveState, semantics.bomActiveState)
+  input.config.readPlan.bomActiveState.activeValues.push('mutated')
+  assert.deepEqual(validated.readPlan.bomActiveState, semantics.bomActiveState, 'validated copy is not aliased to the input')
+  const modeOnly = fixture()
+  modeOnly.config.readPlan.sourceProjectComparison = 'case-sensitive'
+  assert.deepEqual(inspect(modeOnly), expected())
+})
+
+test('malformed or unanchored source value semantics fail the strict validator', () => {
+  const semantics = { sourceProjectComparison: 'case-insensitive', bomActiveState: { activeValues: [1], inactiveValues: [0] } }
+  for (const change of [
+    (readPlan) => { readPlan.sourceProjectComparison = 'Case-Insensitive' },
+    (readPlan) => { readPlan.sourceProjectComparison = null },
+    (readPlan) => { readPlan.bomActiveState = { activeValues: [1], inactiveValues: [1] } },
+    (readPlan) => { readPlan.bomActiveState = { activeValues: [1], inactiveValues: [0], extra: true } },
+    (readPlan) => { readPlan.bomActiveState = { activeValues: [[1]], inactiveValues: [0] } },
+    (readPlan) => { delete readPlan.bomHead.activeField },
+  ]) {
+    const input = fixture()
+    Object.assign(input.config.readPlan, clone(semantics))
+    change(input.config.readPlan)
+    assert.throws(() => validateStockPreparationReadPlanConfig(input.config))
+    assert.deepEqual(inspect(input), expected([{ path: 'config', code: 'CONFIG_INVALID' }]))
+  }
+  const minimal = fixture({ optional: false })
+  minimal.config.readPlan.bomActiveState = clone(semantics.bomActiveState)
+  assert.throws(() => validateStockPreparationReadPlanConfig(minimal.config))
+})
+
 test('one shared descriptor checks the union of all seven role requirements', () => {
   const input = fixture({ reused: true })
   assert.equal(input.catalog.length, 1)

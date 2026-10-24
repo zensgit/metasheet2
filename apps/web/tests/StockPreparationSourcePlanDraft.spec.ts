@@ -6,6 +6,7 @@ import {
   createEmptySourcePlanDraft,
   createSyntheticSourcePlanDraft,
   parseSourcePlanDraftJson,
+  parseBomActiveStateInputs,
   SOURCE_PLAN_DRAFT_MAX_JSON_BYTES,
   type SourcePlanDraft,
 } from '../src/services/integration/stockPreparation/sourcePlanDraft'
@@ -307,6 +308,249 @@ describe('local stock preparation source role draft', () => {
       expect(result.issues.every((problem) => problem.zh.length > 0 && problem.en.length > 0)).toBe(true)
       if (entry.sentinel) expect(JSON.stringify(result.issues)).not.toContain(entry.sentinel)
     }
+  })
+
+  // ---- Optional sourceProjectComparison / bomActiveState (frontend-only; no backend consumption) ----
+  const MAX_SAFE = Number.MAX_SAFE_INTEGER
+
+  function stateDraft(active: unknown, inactive: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return { ...createSyntheticSourcePlanDraft(), bomActiveState: { activeValues: active, inactiveValues: inactive }, ...extra }
+  }
+
+  function expectRejected(input: unknown, path: string, code: string, sentinel?: string): void {
+    const result = compileSourcePlanDraft(input)
+    expect(result.ok).toBe(false)
+    expect(result.envelope).toBeNull()
+    expect(result.issues).toContainEqual(expect.objectContaining({ path, code }))
+    expect(result.issues.every((problem) => problem.zh.length > 0 && problem.en.length > 0)).toBe(true)
+    if (sentinel) expect(JSON.stringify(result.issues)).not.toContain(sentinel)
+  }
+
+  it('adds neither optional key by default and never puts them in the role/column list', () => {
+    const empty = createEmptySourcePlanDraft()
+    const synthetic = createSyntheticSourcePlanDraft()
+    expect(Object.keys(empty)).toEqual(['roles', 'maxReadCount'])
+    expect(Object.keys(synthetic)).toEqual(['roles', 'maxReadCount'])
+    const plain = compileSourcePlanDraft(synthetic).envelope!.readPlan
+    expect(Object.keys(plain)).toEqual([
+      'id', 'sourceKind', 'matchField', 'maxReadCount', ...SOURCE_PLAN_DRAFT_SECTIONS.map((section) => section.key),
+    ])
+    // An explicit undefined is "absent", not a default.
+    const undefinedKeys = compileSourcePlanDraft({ ...synthetic, sourceProjectComparison: undefined, bomActiveState: undefined })
+    expect(undefinedKeys.ok).toBe(true)
+    expect(JSON.stringify(undefinedKeys.envelope)).toBe(JSON.stringify(compileSourcePlanDraft(synthetic).envelope))
+
+    const configured = compileSourcePlanDraft(stateDraft([1], [0], { sourceProjectComparison: 'case-insensitive' })).envelope!.readPlan
+    for (const section of SOURCE_PLAN_DRAFT_SECTIONS) {
+      expect(configured[section.key]).toEqual(plain[section.key])
+    }
+    expect(JSON.stringify(configured.bomHead)).not.toContain('case-insensitive')
+  })
+
+  it('round-trips both optional fields with exact scalar types and input order', () => {
+    const draft: SourcePlanDraft = {
+      ...createSyntheticSourcePlanDraft(),
+      sourceProjectComparison: 'case-insensitive',
+      bomActiveState: {
+        activeValues: [true, 1, '1', null, 0.5, MAX_SAFE, ' padded ', '启用', 'A', 'a'],
+        inactiveValues: [false, 0, '0', -MAX_SAFE, '停用', -1.25],
+      },
+    }
+    const before = JSON.stringify(draft)
+    const compiled = compileSourcePlanDraft(draft)
+    expect(compiled.ok).toBe(true)
+    const plan = compiled.envelope!.readPlan
+    expect(plan.sourceProjectComparison).toBe('case-insensitive')
+    expect(plan.bomActiveState).toEqual(draft.bomActiveState)
+    expect(plan.bomActiveState!.activeValues).not.toBe(draft.bomActiveState!.activeValues)
+    expect(JSON.stringify(draft)).toBe(before)
+
+    const imported = parseSourcePlanDraftJson(JSON.stringify(compiled.envelope))
+    expect(imported).toEqual({ ok: true, issues: [], draft })
+    expect(compileSourcePlanDraft(imported.draft)).toEqual(compiled)
+
+    for (const only of [
+      { sourceProjectComparison: 'case-sensitive' },
+      { bomActiveState: { activeValues: [null], inactiveValues: [0] } },
+    ]) {
+      const single: SourcePlanDraft = { ...createSyntheticSourcePlanDraft(), ...only } as SourcePlanDraft
+      const result = parseSourcePlanDraftJson(JSON.stringify(exportedEnvelope(single)))
+      expect(result).toEqual({ ok: true, issues: [], draft: single })
+      const keys = Object.keys(result.draft!)
+      expect(keys).toEqual(['roles', 'maxReadCount', ...Object.keys(only)])
+    }
+
+    const legacy = parseSourcePlanDraftJson(JSON.stringify(exportedEnvelope()))
+    expect(legacy.ok).toBe(true)
+    expect(Object.keys(legacy.draft!)).toEqual(['roles', 'maxReadCount'])
+  })
+
+  it('accepts boundary scalars without trimming or folding and allows 32 entries', () => {
+    const boundary = [MAX_SAFE, -MAX_SAFE, 0.1, 1e-7, 'a'.repeat(128), ' x', 'ＡＢ', ' x ', 'null', 'x', 'X', null, true, '1', 1]
+    const result = compileSourcePlanDraft(stateDraft(boundary, [0, false]))
+    expect(result.ok).toBe(true)
+    expect(result.envelope!.readPlan.bomActiveState!.activeValues).toEqual(boundary)
+    const thirtyTwo = Array.from({ length: 32 }, (_, index) => index + 100)
+    expect(compileSourcePlanDraft(stateDraft(thirtyTwo, [0])).ok).toBe(true)
+  })
+
+  it.each([
+    'Case-Insensitive', 'CASE-SENSITIVE', 'insensitive', ' case-sensitive', '', null, true, 1, ['case-sensitive'], {}, 'private_enum_marker',
+  ])('rejects malformed sourceProjectComparison %#', (value) => {
+    expectRejected({ ...createSyntheticSourcePlanDraft(), sourceProjectComparison: value }, 'sourceProjectComparison', 'invalid-comparison', 'private_enum_marker')
+  })
+
+  it('rejects a malformed mapping object without echoing keys or values', () => {
+    const bad: unknown[] = [
+      null, [], 'x', 5, true, new Map(), {},
+      { activeValues: [1] },
+      { inactiveValues: [0] },
+      { activeValues: [1], inactiveValues: [0], extra: [2] },
+      { activeValues: [1], inactiveValues: [0], private_key_marker: 'private_value_marker' },
+      Object.assign(Object.create({ inherited: 1 }), { activeValues: [1], inactiveValues: [0] }),
+    ]
+    for (const mapping of bad) {
+      const input = { ...createSyntheticSourcePlanDraft(), bomActiveState: mapping }
+      const result = compileSourcePlanDraft(input)
+      expect(result.ok).toBe(false)
+      expect(result.envelope).toBeNull()
+      expect(result.issues).toContainEqual(expect.objectContaining({ path: 'bomActiveState', code: 'invalid-state-mapping' }))
+      expect(JSON.stringify(result.issues)).not.toContain('private_key_marker')
+      expect(JSON.stringify(result.issues)).not.toContain('private_value_marker')
+    }
+    expectRejected({ ...createSyntheticSourcePlanDraft(), bomActiveState: null }, 'bomActiveState', 'invalid-state-mapping')
+  })
+
+  it('rejects value arrays that are not 1 to 32 entries', () => {
+    const sparse: unknown[] = new Array(2)
+    const cases: unknown[] = ['x', null, undefined, 1, {}, [], Array.from({ length: 33 }, (_, index) => index + 100), sparse]
+    for (const value of cases) {
+      const isSparse = value === sparse
+      expectRejected(stateDraft(value, [0]), 'bomActiveState.activeValues', isSparse ? 'invalid-state-value' : 'invalid-state-values')
+      expectRejected(stateDraft([1], value), 'bomActiveState.inactiveValues', isSparse ? 'invalid-state-value' : 'invalid-state-values')
+    }
+  })
+
+  it('rejects invalid scalars, nested values, and malformed direct JS numbers without echoing them', () => {
+    const invalid: unknown[] = [
+      Number.NaN, Infinity, -Infinity, MAX_SAFE + 1, -(MAX_SAFE + 1), 1e308 * 10,
+      undefined, {}, { private_key_marker: 1 }, [], [1], [[1]], 1n, Symbol('private_value_marker'), () => 1, new Date(0),
+      '', '   ', ' ', '　', '\t',
+      '\u0000', '\u001f', '\u007f', '\u0080', '\u009f', 'a\tb', 'a\nb', 'private_value_marker\u0000',
+      'a'.repeat(129),
+    ]
+    for (const value of invalid) {
+      expectRejected(stateDraft([value], [0]), 'bomActiveState.activeValues', 'invalid-state-value', 'private_value_marker')
+      expectRejected(stateDraft([1], [value]), 'bomActiveState.inactiveValues', 'invalid-state-value', 'private_value_marker')
+      expectRejected(stateDraft([1, value], [0, value === 1 ? 2 : 3]), 'bomActiveState.activeValues', 'invalid-state-value')
+    }
+  })
+
+  it('treats types as distinct, 0 and -0 as equal, and rejects duplicates and overlap', () => {
+    for (const distinct of [[1, '1'], [1, true], [0, false], [null, 'null'], ['A', 'a'], ['x', ' x'], [0.5, '0.5']]) {
+      expect(compileSourcePlanDraft(stateDraft(distinct, [42, 'z'])).ok).toBe(true)
+    }
+    for (const duplicated of [[0, -0], ['a', 'a'], [0.5, 0.5], [null, null], [true, true], [1, 2, 1]]) {
+      expectRejected(stateDraft(duplicated, [42]), 'bomActiveState.activeValues', 'duplicate-state-value')
+      expectRejected(stateDraft([42], duplicated), 'bomActiveState.inactiveValues', 'duplicate-state-value')
+    }
+    for (const [active, inactive] of [[[1], [1]], [[null], [null]], [[0], [-0]], [['a'], ['x', 'a']], [[true], [true]]]) {
+      expectRejected(stateDraft(active, inactive), 'bomActiveState', 'overlapping-state-values')
+    }
+    expect(compileSourcePlanDraft(stateDraft([1], ['1'])).ok).toBe(true)
+    expect(compileSourcePlanDraft(stateDraft([true], [1])).ok).toBe(true)
+  })
+
+  it('requires a normalized nonblank BOM header active field only when the mapping is present', () => {
+    for (const blank of ['', '   ']) {
+      const draft = stateDraft([1], [0]) as { roles: SourcePlanDraft['roles'] }
+      draft.roles.bomHead.activeField = blank
+      expectRejected(draft, 'roles.bomHead.activeField', 'state-field-required')
+    }
+    const padded = stateDraft([1], [0]) as { roles: SourcePlanDraft['roles'] }
+    padded.roles.bomHead.activeField = '  bom_able  '
+    const ok = compileSourcePlanDraft(padded)
+    expect(ok.ok).toBe(true)
+    expect(ok.envelope!.readPlan.bomHead.activeField).toBe('bom_able')
+
+    const legacy = createSyntheticSourcePlanDraft()
+    legacy.roles.bomHead.activeField = ''
+    const result = compileSourcePlanDraft(legacy)
+    expect(result.ok).toBe(true)
+    expect(result.envelope!.readPlan.bomHead).not.toHaveProperty('activeField')
+  })
+
+  it('imports only exact, valid optional fields and never echoes rejected content', () => {
+    const configured: SourcePlanDraft = {
+      ...createSyntheticSourcePlanDraft(),
+      sourceProjectComparison: 'case-sensitive',
+      bomActiveState: { activeValues: [1, '启用'], inactiveValues: [0, '停用'] },
+    }
+    const cases: Array<{ edit: (plan: Record<string, unknown>) => void; path: string; code: string }> = [
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).private_key_marker = [3] }, path: 'bomActiveState', code: 'invalid-state-mapping' },
+      { edit: (p) => { delete (p.bomActiveState as Record<string, unknown>).inactiveValues }, path: 'bomActiveState', code: 'invalid-state-mapping' },
+      { edit: (p) => { p.bomActiveState = null }, path: 'bomActiveState', code: 'invalid-state-mapping' },
+      { edit: (p) => { p.bomActiveState = [] }, path: 'bomActiveState', code: 'invalid-state-mapping' },
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).activeValues = [[1]] }, path: 'bomActiveState.activeValues', code: 'invalid-state-value' },
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).activeValues = [{ private_key_marker: 1 }] }, path: 'bomActiveState.activeValues', code: 'invalid-state-value' },
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).activeValues = [''] }, path: 'bomActiveState.activeValues', code: 'invalid-state-value' },
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).activeValues = [2, 2] }, path: 'bomActiveState.activeValues', code: 'duplicate-state-value' },
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).activeValues = [] }, path: 'bomActiveState.activeValues', code: 'invalid-state-values' },
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).inactiveValues = 'private_value_marker' }, path: 'bomActiveState.inactiveValues', code: 'invalid-state-values' },
+      { edit: (p) => { (p.bomActiveState as Record<string, unknown>).inactiveValues = [1] }, path: 'bomActiveState', code: 'overlapping-state-values' },
+      { edit: (p) => { p.sourceProjectComparison = 'CASE-SENSITIVE' }, path: 'sourceProjectComparison', code: 'invalid-comparison' },
+      { edit: (p) => { p.sourceProjectComparison = null }, path: 'sourceProjectComparison', code: 'invalid-comparison' },
+      { edit: (p) => { p.sourceProjectComparison = ['case-sensitive'] }, path: 'sourceProjectComparison', code: 'invalid-comparison' },
+      { edit: (p) => { delete (p.bomHead as Record<string, unknown>).activeField }, path: 'roles.bomHead.activeField', code: 'state-field-required' },
+    ]
+    for (const entry of cases) {
+      const envelope = exportedEnvelope(configured)
+      entry.edit(envelope.readPlan as Record<string, unknown>)
+      const result = parseSourcePlanDraftJson(JSON.stringify(envelope))
+      expect(result.ok).toBe(false)
+      expect(result.draft).toBeNull()
+      expect(result.issues).toContainEqual(expect.objectContaining({ path: entry.path, code: entry.code }))
+      expect(result.issues.every((problem) => problem.zh.length > 0 && problem.en.length > 0)).toBe(true)
+      expect(JSON.stringify(result.issues)).not.toContain('private_key_marker')
+      expect(JSON.stringify(result.issues)).not.toContain('private_value_marker')
+    }
+
+    // A top-level key that is not an allowlisted optional field is still refused.
+    const unknownKey = exportedEnvelope(configured)
+    ;(unknownKey.readPlan as Record<string, unknown>).sourceProjectComparisonMode = 'case-insensitive'
+    expect(parseSourcePlanDraftJson(JSON.stringify(unknownKey)).issues).toContainEqual(
+      expect.objectContaining({ path: 'readPlan', code: 'unknown-key' }),
+    )
+    // Preserve the overflowing JSON number; JSON.stringify(Infinity) would silently produce null.
+    const overflow = JSON.stringify(exportedEnvelope(configured)).replace('"activeValues":[1,', '"activeValues":[1e400,')
+    expect(parseSourcePlanDraftJson(overflow).issues).toContainEqual(
+      expect.objectContaining({ path: 'bomActiveState.activeValues', code: 'invalid-state-value' }),
+    )
+  })
+
+  it('parses the editor’s two JSON texts without validating or echoing them', () => {
+    const ok = parseBomActiveStateInputs('[1,"启用",null]', '[0,"停用"]')
+    expect(ok).toEqual({ issues: [], value: { activeValues: [1, '启用', null], inactiveValues: [0, '停用'] } })
+    expect(compileSourcePlanDraft({ ...createSyntheticSourcePlanDraft(), bomActiveState: ok.value }).ok).toBe(true)
+
+    // Readable JSON of the wrong shape is the compiler's decision, not the parser's.
+    const wrongShape = parseBomActiveStateInputs('{"private_key_marker":1}', '5')
+    expect(wrongShape.issues).toEqual([])
+    expectRejected({ ...createSyntheticSourcePlanDraft(), bomActiveState: wrongShape.value }, 'bomActiveState.activeValues', 'invalid-state-values', 'private_key_marker')
+
+    for (const [active, inactive, paths] of [
+      ['[1, private_json_marker', '[0]', ['bomActiveState.activeValues']],
+      ['[1]', '', ['bomActiveState.inactiveValues']],
+      ['', 'undefined', ['bomActiveState.activeValues', 'bomActiveState.inactiveValues']],
+    ] as const) {
+      const result = parseBomActiveStateInputs(active, inactive)
+      expect(result.value).toBeNull()
+      expect(result.issues.map((problem) => problem.path)).toEqual(paths)
+      expect(result.issues.every((problem) => problem.code === 'invalid-state-json' && problem.zh.length > 0 && problem.en.length > 0)).toBe(true)
+      expect(JSON.stringify(result.issues)).not.toContain('private_json_marker')
+    }
+    expect(parseBomActiveStateInputs('1e400', '[0]').value).not.toBeNull()
+    expectRejected(stateDraft(JSON.parse('[1e400]'), [0]), 'bomActiveState.activeValues', 'invalid-state-value')
   })
 
   it('requires the serialized matchField to agree with the role it purports to describe', () => {

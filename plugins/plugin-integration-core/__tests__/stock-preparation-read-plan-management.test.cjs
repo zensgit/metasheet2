@@ -11,6 +11,8 @@ const { VERSION_TABLE, ACTIVATION_TABLE, AUDIT_TABLE, VALIDATION_TABLE, createSt
 const { SOURCE_REVISION_TABLE } = require('../lib/stock-preparation-read-plan-validation-ledger.cjs')
 const { READ_PLAN_MANAGEMENT_ROUTES, createStockPreparationReadPlanManagement,
   createStockPreparationReadPlanManagementHandlers } = require('../lib/stock-preparation-read-plan-management.cjs')
+const { createStockPreparationTableActionRegistry } = require('../lib/stock-preparation-table-actions.cjs')
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('../lib/stock-preparation-templates.cjs')
 
 const ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const SCOPE = { tenantId: 'synthetic-tenant', workspaceId: null }
@@ -29,6 +31,25 @@ function config(systemId = 'synthetic-source') {
     bomHead: role('SYN_Bom', ['parentPartField', 'bomIdField']),
     bomDetail: role('SYN_BomLine', ['bomParentField', 'componentIdField', 'quantityField']),
   } }
+}
+// Deploy-only readPlan blocks SA02 v1 cannot express. Shapes must be accepted by
+// the real deploy normalizer; each negative test self-checks that they survive it.
+const DEPLOY_DECLARATIONS = Object.freeze({
+  projectSubtree: { pathInfo: { parentIdField: 'parent' }, bomHead: { pathIdField: 'path' } },
+  batchIdentity: { mode: 'material_create_hour' },
+})
+function deployAction(readPlan) {
+  return { actionId: ACTION_ID,
+    source: { externalSystemId: 'synthetic-source', kind: 'data-source:sql-readonly', ...(readPlan ? { readPlan } : {}) },
+    target: { sheetId: 'synthetic-sheet', objectId: 'stockPreparationMain', fieldIdMap:
+      Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `synthetic-${field.id}`])) } }
+}
+// Server-side deploy config through the real registry, never a fixed answer.
+function deploymentResolver(actions = [deployAction()]) {
+  const registry = createStockPreparationTableActionRegistry({ actions })
+  const calls = []
+  const resolve = async (actionId) => { calls.push(actionId); return registry.getTableAction({ actionId }) }
+  return Object.assign(resolve, { calls })
 }
 function bindSource(id = 'synthetic-source', connectionId = 'synthetic-connection', type = 'sqlserver', owner = 'synthetic-owner') {
   const bindingRevision = randomUUID()
@@ -105,7 +126,7 @@ function memoryDb(bound = bindSource()) {
     },
   }
 }
-function harness(factory = createStockPreparationReadPlanStore) {
+function harness(factory = createStockPreparationReadPlanStore, { deployment } = {}) {
   const bound = bindSource()
   const db = memoryDb(bound)
   let sequence = 0
@@ -128,7 +149,9 @@ function harness(factory = createStockPreparationReadPlanStore) {
     getSchema() { assert.fail('management must not inspect source schema') },
     select() { assert.fail('management must not execute a read') },
   }
-  const management = createStockPreparationReadPlanManagement({ store, externalSystemRegistry, connectionRegistration })
+  // null omits the server resolver entirely; undefined uses the real registry.
+  const resolveDeploymentAction = deployment === undefined ? deploymentResolver() : deployment === null ? undefined : deployment
+  const management = createStockPreparationReadPlanManagement({ store, externalSystemRegistry, connectionRegistration, resolveDeploymentAction })
   const helpers = {
     requireAccess: __internals.requireAccess,
     resolveVerifiedClaimTenantId: __internals.resolveVerifiedClaimTenantId,
@@ -161,7 +184,8 @@ function harness(factory = createStockPreparationReadPlanStore) {
     connections.set(connectionId, added.registration)
     return added
   }
-  return { db, store, management, handlers, helpers, call, save, mutate, connections, registrationCalls, sourceReads, installBound }
+  return { db, store, management, handlers, helpers, call, save, mutate, connections, registrationCalls, sourceReads, installBound,
+    deploymentCalls: resolveDeploymentAction && resolveDeploymentAction.calls }
 }
 // Synthetic status fixture, NOT source-validation proof. The PostgreSQL host suite
 // owns the measured gate. This only plants a confirmed receipt for the current revision.
@@ -539,4 +563,93 @@ test('missing metadata boundary fails closed without ledger access', async () =>
   await rejectsCode(handlers.stockPreparationReadPlanConfigsList({ user: { id: 'synthetic-owner', permissions: ['integration:admin'] },
     authenticatedTenantId: SCOPE.tenantId, query: { managementScope: 'tenant', systemId: 'synthetic-source' } }, {}), 'READ_PLAN_MANAGEMENT_UNAVAILABLE', 501)
   assert.deepEqual(h.db.trace, [])
+})
+
+async function approvedDraft(h) {
+  const draft = await h.save()
+  await seedConfirmedStatusFixture(h.store, h.db, { id: draft.id, connectionId: 'synthetic-connection' })
+  await h.mutate('Approve', draft.id)
+  return draft
+}
+
+test('activation consults the server deployment action once and keeps compatible deployments activatable', async () => {
+  for (const actions of [[deployAction()], [deployAction(config().readPlan)]]) {
+    const deployment = deploymentResolver(actions)
+    const h = harness(undefined, { deployment })
+    const draft = await approvedDraft(h)
+    assert.deepEqual(deployment.calls, [], 'save/approve never need deployment config')
+    const active = await h.mutate('Activate', draft.id, undefined, { expectedGeneration: 0 })
+    assert.equal(active.generation, 1)
+    assert.deepEqual(deployment.calls, [ACTION_ID])
+  }
+})
+
+test('activation refuses deploy-only projectSubtree and batchIdentity before pointer or audit changes', async () => {
+  for (const [key, block] of Object.entries(DEPLOY_DECLARATIONS)) {
+    const deployment = deploymentResolver([deployAction({ ...config().readPlan, [key]: clone(block) })])
+    const declared = await deployment(ACTION_ID)
+    assert.ok(Object.hasOwn(declared.source.readPlan, key), `${key} fixture must survive the real deploy normalizer`)
+    deployment.calls.length = 0
+    const h = harness(undefined, { deployment })
+    const draft = await approvedDraft(h)
+    const before = JSON.stringify(h.db.state)
+    h.db.trace.length = 0
+    await rejectsCode(h.mutate('Activate', draft.id, undefined, { expectedGeneration: 0 }), 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE', 409)
+    assert.deepEqual(deployment.calls, [ACTION_ID])
+    assert.equal(JSON.stringify(h.db.state), before)
+    assert.equal(h.db.trace.some((event) => /^(insert|update):/.test(event)), false)
+    assert.deepEqual(h.db.state[ACTIVATION_TABLE], [])
+    assert.equal(h.sourceReads.length, 0)
+  }
+})
+
+test('missing, throwing, malformed or unconfigured deployment resolver refuses activation with sanitized 501', async () => {
+  const deployments = [
+    null,
+    'not-a-function',
+    async () => { throw new Error('synthetic-private-deployment-detail') },
+    async () => null,
+    async () => ({ actionId: 'other.action', source: { externalSystemId: 'synthetic-source' } }),
+    async () => ({ actionId: ACTION_ID }),
+    async () => ({ actionId: ACTION_ID, source: {} }),
+    async () => ({ actionId: ACTION_ID, source: { readPlan: null } }),
+    async () => ({ actionId: ACTION_ID, source: { readPlan: [] } }),
+    deploymentResolver([]),
+  ]
+  for (const deployment of deployments) {
+    const h = harness(undefined, { deployment })
+    const draft = await approvedDraft(h)
+    const before = JSON.stringify(h.db.state)
+    await rejectsCode(h.mutate('Activate', draft.id, undefined, { expectedGeneration: 0 }), 'READ_PLAN_DEPLOYMENT_UNAVAILABLE', 501)
+    assert.equal(JSON.stringify(h.db.state), before)
+  }
+})
+
+test('deployment resolver is server-only: request fields cannot supply or replace it', async () => {
+  const h = harness()
+  const draft = await approvedDraft(h)
+  const before = JSON.stringify(h.db.state)
+  const body = { managementScope: 'tenant', systemId: 'synthetic-source', expectedGeneration: 0 }
+  for (const overrides of [
+    { body: { ...body, resolveDeploymentAction: 'compatible' } },
+    { body: { ...body, deploymentAction: { actionId: ACTION_ID, source: {} } } },
+    { body, query: { resolveDeploymentAction: 'compatible' } },
+  ]) {
+    await rejectsCode(h.call('Activate', { params: { id: draft.id }, ...overrides }), 'READ_PLAN_REQUEST_INVALID', 400)
+  }
+  assert.deepEqual(h.deploymentCalls, [])
+  assert.equal(JSON.stringify(h.db.state), before)
+})
+
+test('activation checks identity, ownership, version and generation before deployment compatibility', async () => {
+  const h = harness()
+  const draft = await approvedDraft(h)
+  await rejectsCode(h.mutate('Activate', draft.id, undefined, { expectedGeneration: 0 },
+    { authenticatedTenantId: undefined }), 'TENANT_CLAIM_REQUIRED', 403)
+  await rejectsCode(h.mutate('Activate', draft.id, undefined, { expectedGeneration: 0 },
+    { user: { id: 'synthetic-other', permissions: ['integration:admin'] } }), 'READ_PLAN_SOURCE_UNAVAILABLE', 403)
+  await rejectsCode(h.mutate('Activate', 'synthetic-missing', undefined, { expectedGeneration: 0 }), 'READ_PLAN_NOT_FOUND', 404)
+  await rejectsCode(h.mutate('Activate', draft.id, undefined, { expectedGeneration: 1 }), 'READ_PLAN_GENERATION_CONFLICT', 409)
+  assert.deepEqual(h.deploymentCalls, [])
+  assert.deepEqual(h.db.state[ACTIVATION_TABLE], [])
 })

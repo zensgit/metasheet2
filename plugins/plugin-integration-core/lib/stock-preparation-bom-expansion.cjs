@@ -14,6 +14,12 @@ const {
 // Batch-refresh step 2b. Held as a namespace (not destructured) so the capture seam stays the
 // module's own export — see `openDemandEvidenceCapture`.
 const demandEvidenceCapture = require('./stock-preparation-demand-evidence.cjs')
+const {
+  SourceValueSemanticsError,
+  normalizeSourceValueSemantics,
+  sameSourceProject,
+  resolveConfiguredBomActive,
+} = require('./stock-preparation-source-value-semantics.cjs')
 
 const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
@@ -574,6 +580,18 @@ function normalizeStockPreparationBomReadPlan(input = PLM_STOCK_PREPARATION_BOM_
   // existing budget" a statement about a budget of nothing (see the projectSubtree banner).
   const planMaxReadCount = strictOptionalPositiveInteger(plan.maxReadCount, 'readPlan.maxReadCount')
   if (planMaxReadCount !== undefined) out.maxReadCount = planMaxReadCount
+  // OPTIONAL top-level source value semantics. Absent stays absent: no default key is ever added, so
+  // an existing plan normalizes to the same bytes. The state value sets are not column roles.
+  try {
+    Object.assign(out, normalizeSourceValueSemantics({
+      sourceProjectComparison: plan.sourceProjectComparison,
+      bomActiveState: plan.bomActiveState,
+      bomHead: out.bomHead,
+    }))
+  } catch (err) {
+    if (!(err instanceof SourceValueSemanticsError)) throw err
+    throw new StockPreparationBomExpansionError(err.code, { field: 'readPlan', reason: err.code })
+  }
 
   // THE OPTIONAL PROJECT-SUBTREE BLOCK. Absent (the shipped default) => NO KEY AT ALL, so every
   // consumer of a normalized plan sees byte-for-byte what it saw before this feature existed.
@@ -1229,6 +1247,16 @@ function matchesByField(rows, field, value) {
   return rows.filter((row) => sameFilterValue(readField(row, field), value))
 }
 
+// Exact root/discovery identity (frozen main semantics): `toKey` equality only — no case folding and no
+// numeric canonicalisation — so a row that merely SQL-equals the key ('ABC' vs 'abc', '0010' vs '10')
+// is never taken for the same project, path node or part. Number 100 and string '100' (and transport
+// spaces) still share a key through `toKey`; a blank/absent key matches nothing.
+function matchesByExactField(rows, field, value) {
+  const key = toKey(value)
+  if (key === null) return []
+  return rows.filter((row) => toKey(readField(row, field)) === key)
+}
+
 function parseQuantity(value, context) {
   // Hold-not-zero: a SQL NULL or blank/whitespace-only string is an ABSENT
   // quantity, not a measured one — Number(null) === 0 and Number('') === 0
@@ -1252,19 +1280,42 @@ function parseQuantity(value, context) {
   return { ok: true, value: numeric }
 }
 
-function isActiveBomHead(row, activeField) {
+function bomHeadActiveValueInvalid(activeField) {
+  const error = new StockPreparationBomExpansionError('BOM_HEAD_ACTIVE_VALUE_INVALID', { field: activeField })
+  error.code = 'BOM_HEAD_ACTIVE_VALUE_INVALID'
+  return error
+}
+
+function isActiveBomHead(row, activeField, policy) {
+  // A PRESENT policy (readPlan.bomActiveState) never falls back to the legacy interpretation below.
+  const configured = policy !== undefined
   // An undeclared role explicitly opts out. A declared-but-missing field is NOT
   // SQL NULL: it cannot establish which BOM heads the source considers active.
-  if (!activeField) return true
+  if (!activeField && !configured) return true
   // State is authority-bearing: even an exact key cannot win over a conflicting
   // case variant. Keep this stricter uniqueness rule local, not in readField.
-  const matches = isPlainObject(row)
+  const matches = activeField && isPlainObject(row)
     ? Object.keys(row).filter((key) => key.toLowerCase() === activeField.toLowerCase())
     : []
   const value = matches.length === 1 ? readField(row, activeField) : undefined
+  if (configured) {
+    // A missing/ambiguous physical field is refused BEFORE the helper decides typed membership.
+    if (matches.length !== 1) throw bomHeadActiveValueInvalid(activeField)
+    try {
+      return resolveConfiguredBomActive(value, policy)
+    } catch (err) {
+      if (err && err.code === 'BOM_HEAD_ACTIVE_VALUE_INVALID') throw bomHeadActiveValueInvalid(activeField)
+      throw err
+    }
+  }
   if (value === null) return true
   if (typeof value === 'boolean') return value
-  if (typeof value === 'number' && Number.isFinite(value)) return value === 1
+  // Numeric state is a closed vocabulary like the strings: only 0 and 1 are known.
+  // Any other number (2, -1, fractions, NaN, Infinity) is unknown and must reach the throw below.
+  if (typeof value === 'number') {
+    if (value === 1) return true
+    if (value === 0) return false
+  }
   if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase()
     if (normalized === '1') return true
@@ -1273,9 +1324,7 @@ function isActiveBomHead(row, activeField) {
   // Unknown is neither active nor inactive: filtering it away would let a bad
   // mapping silently inactivate existing children. Both consumers interpret state
   // only AFTER membership filtering and catch this as a global read_failed.
-  const error = new StockPreparationBomExpansionError('BOM_HEAD_ACTIVE_VALUE_INVALID', { field: activeField })
-  error.code = 'BOM_HEAD_ACTIVE_VALUE_INVALID'
-  throw error
+  throw bomHeadActiveValueInvalid(activeField)
 }
 
 // ---------------------------------------------------------------------------
@@ -2343,7 +2392,7 @@ async function walkPlmProjectBom(input, run) {
       const keys = new Set()
       let previous = Promise.resolve()
       return outcome.rows
-        .filter((row) => isActiveBomHead(row, plan.bomHead.activeField))
+        .filter((row) => isActiveBomHead(row, plan.bomHead.activeField, plan.bomActiveState))
         .map((row, headIndex) => {
           const bomId = readField(row, plan.bomHead.bomIdField)
           if (isBlank(bomId)) return undefined
@@ -2396,7 +2445,7 @@ async function walkPlmProjectBom(input, run) {
           live = false
           return null
         }
-        const candidates = matchesByField(outcome.rows, plan.part.idField, childSourceId)
+        const candidates = matchesByExactField(outcome.rows, plan.part.idField, childSourceId)
         if (candidates.length !== 1) return null
         const partRow = candidates[0]
         const dedupeKey = siblingDedupeKey({
@@ -2566,7 +2615,12 @@ async function walkPlmProjectBom(input, run) {
     // change — is closed by the same line. Against a source that applies its filters, this is a
     // no-op; the behaviour only differs against a source that lied.
     const pathExAttrRows = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
-    pathMatches = matchesByField(pathExAttrRows, plan.pathExAttr.matchField, projectNo)
+    // Only the SOURCE PROJECT ENTRY compares per plan.sourceProjectComparison (absent => exact, as
+    // before). Every other identity below stays exact; the read filter above is unchanged.
+    pathMatches = plan.sourceProjectComparison === undefined
+      ? matchesByExactField(pathExAttrRows, plan.pathExAttr.matchField, projectNo)
+      : pathExAttrRows.filter((row) => sameSourceProject(
+        readField(row, plan.pathExAttr.matchField), projectNo, plan.sourceProjectComparison))
   } catch (err) {
     addReadError(err, plan.pathExAttr.object)
     // X5: materialised ONCE and threaded on, so the result and the summary built from it are the
@@ -2639,7 +2693,7 @@ async function walkPlmProjectBom(input, run) {
   async function readPart(componentSourceId, depth, locus = {}, entry) {
     lastPartOutcome = undefined
     const matches = await read(plan.part.object, { [plan.part.idField]: componentSourceId }, entry)
-    const candidates = matchesByField(matches, plan.part.idField, componentSourceId)
+    const candidates = matchesByExactField(matches, plan.part.idField, componentSourceId)
     if (candidates.length > 1) {
       lastPartOutcome = 'part_ambiguous'
       addRowError({ type: 'ambiguous_component', field: plan.part.idField, depth })
@@ -2687,7 +2741,7 @@ async function walkPlmProjectBom(input, run) {
         // Legacy/recursive reads use only the version actually sent for this parent, not the root's.
         heads = matchesByField(heads, plan.bomHead.versionField, headFilters[plan.bomHead.versionField])
       }
-      heads = heads.filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
+      heads = heads.filter((head) => isActiveBomHead(head, plan.bomHead.activeField, plan.bomActiveState))
     } catch (err) {
       addReadError(err, plan.bomHead.object)
       return
@@ -2886,8 +2940,8 @@ async function walkPlmProjectBom(input, run) {
       // asked; every deeper node always is.
       if (depth > 0 || subtree.includeSelf) {
         const headRows = await read(plan.bomHead.object, { [subtree.bomHead.pathIdField]: nodeId })
-        const heads = matchesByField(headRows, subtree.bomHead.pathIdField, nodeId)
-          .filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
+        const heads = matchesByExactField(headRows, subtree.bomHead.pathIdField, nodeId)
+          .filter((head) => isActiveBomHead(head, plan.bomHead.activeField, plan.bomActiveState))
         for (const head of heads) {
           const rootSourceId = toKey(readField(head, plan.bomHead.parentPartField))
           if (rootSourceId === null) continue
@@ -2911,7 +2965,7 @@ async function walkPlmProjectBom(input, run) {
 
       if (depth >= subtree.maxSubtreeDepth) continue
       const childRows = await read(plan.pathInfo.object, { [subtree.pathInfo.parentIdField]: nodeId })
-      const children = matchesByField(childRows, subtree.pathInfo.parentIdField, nodeId)
+      const children = matchesByExactField(childRows, subtree.pathInfo.parentIdField, nodeId)
       const childAncestors = ancestors.concat(nodeId)
       for (const child of children) {
         const childId = toKey(readField(child, plan.pathInfo.idField))
@@ -2963,7 +3017,7 @@ async function walkPlmProjectBom(input, run) {
         continue
       }
       const pathInfoMatches = await read(plan.pathInfo.object, { [plan.pathInfo.idField]: pathId })
-      const pathInfoCandidates = matchesByField(pathInfoMatches, plan.pathInfo.idField, pathId)
+      const pathInfoCandidates = matchesByExactField(pathInfoMatches, plan.pathInfo.idField, pathId)
       if (pathInfoCandidates.length > 1) {
         if (demand) demand.pathNode(pathId, 'ambiguous_path')
         addRowError({ type: 'ambiguous_path', field: plan.pathInfo.idField, depth: 0 })

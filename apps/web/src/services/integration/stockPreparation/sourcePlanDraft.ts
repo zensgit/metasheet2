@@ -65,9 +65,19 @@ export const SOURCE_PLAN_DRAFT_SECTIONS = [
 ] as const
 
 export type SourcePlanDraftSectionKey = (typeof SOURCE_PLAN_DRAFT_SECTIONS)[number]['key']
+// Optional wire fields. Both are absent by default: absence keeps the legacy exact project
+// comparison and the legacy state interpretation, so neither is ever defaulted in a draft or plan.
+export type SourceProjectComparison = 'case-sensitive' | 'case-insensitive'
+export type BomActiveStateScalar = boolean | number | string | null
+export type BomActiveStateMapping = {
+  activeValues: BomActiveStateScalar[]
+  inactiveValues: BomActiveStateScalar[]
+}
 export type SourcePlanDraft = {
   roles: Record<SourcePlanDraftSectionKey, Record<string, string>>
   maxReadCount: number
+  sourceProjectComparison?: SourceProjectComparison
+  bomActiveState?: BomActiveStateMapping
 }
 export type SourcePlanDraftIssue = { path: string; code: string; zh: string; en: string }
 export type SourcePlanReadPlan = {
@@ -75,6 +85,8 @@ export type SourcePlanReadPlan = {
   sourceKind: 'data-source:sql-readonly'
   matchField: string
   maxReadCount: number
+  sourceProjectComparison?: SourceProjectComparison
+  bomActiveState?: BomActiveStateMapping
 } & Record<SourcePlanDraftSectionKey, Record<string, string>>
 export type SourcePlanDraftCompileResult = {
   ok: boolean
@@ -97,6 +109,13 @@ export type SourcePlanDraftParseResult = {
 const DRAFT_PLAN_ID = 'plm.stock-preparation.bom-read.user-draft.v1'
 const DRAFT_ENVELOPE_KIND = 'stock-preparation-plm-role-draft'
 export const SOURCE_PLAN_DRAFT_MAX_JSON_BYTES = 128 * 1024
+const OPTIONAL_READ_PLAN_KEYS = ['sourceProjectComparison', 'bomActiveState'] as const
+const DRAFT_INPUT_KEYS: readonly string[] = ['roles', 'maxReadCount', ...OPTIONAL_READ_PLAN_KEYS]
+const STATE_VALUE_MAX_COUNT = 32
+const STATE_STRING_MAX_LENGTH = 128
+// C0 controls U+0000..U+001F and DEL plus C1 controls U+007F..U+009F.
+// eslint-disable-next-line no-control-regex
+const STATE_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
 const FIELD_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 const DISALLOWED_SEGMENT = /^(?:select|from|where|join|union|drop|delete|insert|update|exec|execute|script|javascript|http|https|url|password|passwd|pwd|secret|token|credential|credentials|apikey|appkey|authoritycode|tenant|identity|principal|constructor|prototype|proto)$/i
 
@@ -128,6 +147,38 @@ function issue(path: string, code: string): SourcePlanDraftIssue {
     'unexpected-value': { zh: '待审草稿的固定标识不匹配', en: 'Review draft fixed identifier does not match' },
     'invalid-status': { zh: '待审草稿状态必须是待确认', en: 'Review draft status must be confirm-required' },
     'inconsistent-read-plan': { zh: '待审草稿的字段角色不一致', en: 'Review draft field roles are inconsistent' },
+    'invalid-comparison': {
+      zh: '来源项目比较方式只能是 case-sensitive 或 case-insensitive；留空表示保持现有精确比较',
+      en: 'Source project comparison must be case-sensitive or case-insensitive; leave it unset to keep the existing exact comparison',
+    },
+    'invalid-state-mapping': {
+      zh: '状态值映射必须恰好包含 activeValues 与 inactiveValues 两个数组，不能有其他键',
+      en: 'The state mapping must contain exactly the activeValues and inactiveValues arrays and no other keys',
+    },
+    'invalid-state-values': {
+      zh: '状态值集合必须是包含 1 至 32 项的 JSON 数组',
+      en: 'A state value set must be an array of 1 to 32 entries',
+    },
+    'invalid-state-value': {
+      zh: '状态值只能是布尔值、绝对值不超过 9007199254740991 的有限数字、非空且不含控制字符的字符串（最长 128 字符）或 null；不允许嵌套数组或对象',
+      en: 'A state value must be a boolean, a finite number with absolute value at most 9007199254740991, a nonblank string without control characters (at most 128 characters), or null; nested arrays and objects are not allowed',
+    },
+    'duplicate-state-value': {
+      zh: '同一状态值集合内含重复值（类型严格区分：数字 1 与文本 "1" 不同，文本不去空白也不折叠大小写）',
+      en: 'A state value set contains a duplicate (types are exact: number 1 differs from text "1"; text is neither trimmed nor case-folded)',
+    },
+    'overlapping-state-values': {
+      zh: '启用与停用集合含有相同的值，同一个值不能同时代表两种状态',
+      en: 'The active and inactive sets share a value; one value cannot mean both states',
+    },
+    'state-field-required': {
+      zh: '状态值映射需要先填写 BOM 头的「启用状态列」',
+      en: 'The state value mapping requires the BOM header active state field to be filled in',
+    },
+    'invalid-state-json': {
+      zh: '状态值必须是可读取的 JSON 数组文本，例如 [1,"启用"]',
+      en: 'State values must be readable JSON array text, for example [1,"启用"]',
+    },
   }
   return { path, code, ...messages[code] }
 }
@@ -135,6 +186,64 @@ function issue(path: string, code: string): SourcePlanDraftIssue {
 function isSafeIdentifier(value: string, kind: 'object' | 'field'): boolean {
   if (value.length > 128 || !(kind === 'object' ? isObjectIdentifier(value) : FIELD_IDENTIFIER.test(value))) return false
   return !value.split(/[._]/).some((segment) => DISALLOWED_SEGMENT.test(segment))
+}
+
+function isStateScalar(value: unknown): value is BomActiveStateScalar {
+  if (value === null || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER
+  if (typeof value === 'string') {
+    return value.trim() !== '' && value.length <= STATE_STRING_MAX_LENGTH && !STATE_CONTROL_CHARACTERS.test(value)
+  }
+  return false
+}
+
+// Typed identity: 1 and "1" are different, strings compare exactly, and 0 equals -0 (String(-0) is "0").
+function stateValueKey(value: BomActiveStateScalar): string {
+  return value === null ? 'null' : `${typeof value}:${String(value)}`
+}
+
+function collectStateValues(path: string, value: unknown, issues: SourcePlanDraftIssue[]): BomActiveStateScalar[] | null {
+  if (!Array.isArray(value) || value.length < 1 || value.length > STATE_VALUE_MAX_COUNT) {
+    issues.push(issue(path, 'invalid-state-values'))
+    return null
+  }
+  const seen = new Set<string>()
+  const copy: BomActiveStateScalar[] = []
+  let invalid = false
+  let duplicate = false
+  for (let index = 0; index < value.length; index += 1) {
+    const item: unknown = value[index]
+    if (!isStateScalar(item)) {
+      invalid = true
+      continue
+    }
+    const key = stateValueKey(item)
+    if (seen.has(key)) duplicate = true
+    seen.add(key)
+    copy.push(item)
+  }
+  if (invalid) issues.push(issue(path, 'invalid-state-value'))
+  if (duplicate) issues.push(issue(path, 'duplicate-state-value'))
+  return invalid || duplicate ? null : copy
+}
+
+// Sets are unordered semantically, but the accepted order is preserved in the output.
+function compileBomActiveState(value: unknown, issues: SourcePlanDraftIssue[]): BomActiveStateMapping | null {
+  if (!isRecord(value) || Object.keys(value).length !== 2
+    || !Object.prototype.hasOwnProperty.call(value, 'activeValues')
+    || !Object.prototype.hasOwnProperty.call(value, 'inactiveValues')) {
+    issues.push(issue('bomActiveState', 'invalid-state-mapping'))
+    return null
+  }
+  const activeValues = collectStateValues('bomActiveState.activeValues', value.activeValues, issues)
+  const inactiveValues = collectStateValues('bomActiveState.inactiveValues', value.inactiveValues, issues)
+  if (!activeValues || !inactiveValues) return null
+  const activeKeys = new Set(activeValues.map(stateValueKey))
+  if (inactiveValues.some((item) => activeKeys.has(stateValueKey(item)))) {
+    issues.push(issue('bomActiveState', 'overlapping-state-values'))
+    return null
+  }
+  return { activeValues, inactiveValues }
 }
 
 export function createEmptySourcePlanDraft(): SourcePlanDraft {
@@ -162,7 +271,7 @@ export function createSyntheticSourcePlanDraft(): SourcePlanDraft {
 export function compileSourcePlanDraft(input: unknown): SourcePlanDraftCompileResult {
   const issues: SourcePlanDraftIssue[] = []
   if (!isRecord(input)) return { ok: false, issues: [issue('draft', 'invalid-shape')], envelope: null }
-  if (Object.keys(input).some((key) => key !== 'roles' && key !== 'maxReadCount')) {
+  if (Object.keys(input).some((key) => !DRAFT_INPUT_KEYS.includes(key))) {
     issues.push(issue('draft', 'unknown-key'))
   }
   if (!Number.isInteger(input.maxReadCount) || (input.maxReadCount as number) < 1 || (input.maxReadCount as number) > 1000) {
@@ -210,6 +319,22 @@ export function compileSourcePlanDraft(input: unknown): SourcePlanDraftCompileRe
   if (roles.orderDetail?.versionField && !roles.bomHead?.versionField) {
     issues.push(issue('roles.bomHead.versionField', 'version-dependency'))
   }
+  // Both optional fields are validated only when supplied; undefined means absent, null does not.
+  let comparison: SourceProjectComparison | undefined
+  const requestedComparison = input.sourceProjectComparison
+  if (requestedComparison !== undefined) {
+    if (requestedComparison === 'case-sensitive' || requestedComparison === 'case-insensitive') {
+      comparison = requestedComparison
+    } else {
+      issues.push(issue('sourceProjectComparison', 'invalid-comparison'))
+    }
+  }
+  let stateMapping: BomActiveStateMapping | null = null
+  if (input.bomActiveState !== undefined) {
+    stateMapping = compileBomActiveState(input.bomActiveState, issues)
+    // The mapping interprets the BOM header's physical state column; without one it has no meaning.
+    if (!roles.bomHead?.activeField) issues.push(issue('roles.bomHead.activeField', 'state-field-required'))
+  }
   if (issues.length > 0) return { ok: false, issues, envelope: null }
 
   const readPlan: SourcePlanReadPlan = {
@@ -219,6 +344,9 @@ export function compileSourcePlanDraft(input: unknown): SourcePlanDraftCompileRe
     maxReadCount: input.maxReadCount as number,
     ...roles,
   }
+  // Appended only when configured, so a default draft keeps its exact legacy key set and bytes.
+  if (comparison !== undefined) readPlan.sourceProjectComparison = comparison
+  if (stateMapping) readPlan.bomActiveState = stateMapping
   return {
     ok: true,
     issues: [],
@@ -263,7 +391,7 @@ export function parseSourcePlanDraftJson(text: string): SourcePlanDraftParseResu
   if (!isRecord(parsed.readPlan)) return invalidEnvelope('readPlan')
 
   const readPlan = parsed.readPlan
-  const allowedReadPlanKeys = ['id', 'sourceKind', 'matchField', 'maxReadCount', ...SOURCE_PLAN_DRAFT_SECTIONS.map((section) => section.key)]
+  const allowedReadPlanKeys = ['id', 'sourceKind', 'matchField', 'maxReadCount', ...OPTIONAL_READ_PLAN_KEYS, ...SOURCE_PLAN_DRAFT_SECTIONS.map((section) => section.key)]
   if (Object.keys(readPlan).some((key) => !allowedReadPlanKeys.includes(key))) {
     return { ok: false, issues: [issue('readPlan', 'unknown-key')], draft: null }
   }
@@ -292,7 +420,13 @@ export function parseSourcePlanDraftJson(text: string): SourcePlanDraftParseResu
     return { ok: false, issues: [issue('readPlan.matchField', 'inconsistent-read-plan')], draft: null }
   }
 
-  const compiled = compileSourcePlanDraft({ roles: draft.roles, maxReadCount: readPlan.maxReadCount })
+  // Optional fields are handed to the compiler exactly as serialized (a present null is invalid,
+  // not absent), so the compiler alone decides what they mean.
+  const optionalInput: Record<string, unknown> = {}
+  for (const key of OPTIONAL_READ_PLAN_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(readPlan, key)) optionalInput[key] = readPlan[key]
+  }
+  const compiled = compileSourcePlanDraft({ roles: draft.roles, maxReadCount: readPlan.maxReadCount, ...optionalInput })
   if (!compiled.ok || !compiled.envelope) {
     return { ok: false, issues: compiled.issues, draft: null }
   }
@@ -302,6 +436,12 @@ export function parseSourcePlanDraftJson(text: string): SourcePlanDraftParseResu
     return { ok: false, issues: [issue('readPlan', 'inconsistent-read-plan')], draft: null }
   }
   draft.maxReadCount = compiled.envelope.readPlan.maxReadCount
+  if (compiled.envelope.readPlan.sourceProjectComparison !== undefined) {
+    draft.sourceProjectComparison = compiled.envelope.readPlan.sourceProjectComparison
+  }
+  if (compiled.envelope.readPlan.bomActiveState !== undefined) {
+    draft.bomActiveState = compiled.envelope.readPlan.bomActiveState
+  }
   return { ok: true, issues: [], draft }
 }
 
@@ -321,5 +461,36 @@ function sameRecord(left: unknown, right: unknown): boolean {
 function sameRecordValue(left: unknown, right: unknown): boolean {
   if (left === right) return true
   if (isRecord(left) && isRecord(right)) return sameRecord(left, right)
+  if (Array.isArray(left) && Array.isArray(right)) {
+    if (left.length !== right.length) return false
+    for (let index = 0; index < left.length; index += 1) {
+      if (!sameRecordValue(left[index], right[index])) return false
+    }
+    return true
+  }
   return false
+}
+
+export type BomActiveStateInputResult = {
+  issues: SourcePlanDraftIssue[]
+  // Parsed but NOT yet validated; pass it to compileSourcePlanDraft as `bomActiveState`.
+  value: { activeValues: unknown; inactiveValues: unknown } | null
+}
+
+/**
+ * Turns the editor's two raw JSON array texts into the compiler's `bomActiveState` input. Only JSON
+ * readability is checked here; every value rule lives in the compiler. Issues never echo the text.
+ */
+export function parseBomActiveStateInputs(activeText: string, inactiveText: string): BomActiveStateInputResult {
+  const issues: SourcePlanDraftIssue[] = []
+  const parsed: Record<string, unknown> = {}
+  for (const [key, text] of [['activeValues', activeText], ['inactiveValues', inactiveText]] as const) {
+    try {
+      parsed[key] = JSON.parse(text)
+    } catch {
+      issues.push(issue(`bomActiveState.${key}`, 'invalid-state-json'))
+    }
+  }
+  if (issues.length > 0) return { issues, value: null }
+  return { issues, value: { activeValues: parsed.activeValues, inactiveValues: parsed.inactiveValues } }
 }

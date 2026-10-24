@@ -16,6 +16,8 @@ const {
 const IDENTITY_KEYS = Object.freeze([
   'tenantId', 'workspaceId', 'actionId', 'systemId', 'versionId', 'contentKey', 'generation',
 ])
+// Deploy-time readPlan blocks the SA02 v1 schema cannot express.
+const DEPLOYMENT_ONLY_READ_PLAN_KEYS = Object.freeze(['projectSubtree', 'batchIdentity'])
 const MAX_GENERATION = 2147483647
 
 class StockPreparationReadPlanExecutionError extends Error {
@@ -62,6 +64,20 @@ function checkedConfig(config) {
 }
 function contentKey(config) { return crypto.createHash('sha256').update(stable(config)).digest('hex') }
 
+// Approved execution replaces the WHOLE deploy readPlan. A deploy block that v1
+// cannot carry would be silently dropped, and merging it into the approved
+// content would execute config nobody validated online. Refuse instead. Pure and
+// presence-based; the refusal names no key or value.
+function assertStockPreparationReadPlanDeploymentCompatible(action) {
+  const source = isRecord(action) ? action.source : undefined
+  const readPlan = isRecord(source) ? source.readPlan : undefined
+  if (readPlan === undefined || readPlan === null) return
+  if (!isRecord(readPlan) || DEPLOYMENT_ONLY_READ_PLAN_KEYS.some((key) =>
+    Object.prototype.hasOwnProperty.call(readPlan, key) && readPlan[key] !== undefined)) {
+    refuse('READ_PLAN_DEPLOYMENT_INCOMPATIBLE')
+  }
+}
+
 function normalizeReadPlanExecutionIdentity(input, action) {
   exactKeys(input, IDENTITY_KEYS)
   const identity = {
@@ -106,6 +122,7 @@ function approvedReadPlanExecution({ action, scope, activation, version } = {}) 
     || activation.systemId !== version.systemId || activation.contentKey !== version.contentKey
     || config.actionId !== version.actionId || config.systemId !== version.systemId
     || contentKey(config) !== version.contentKey) refuse('READ_PLAN_EXECUTION_CONTENT_INVALID')
+  assertStockPreparationReadPlanDeploymentCompatible(action)
   const effective = { ...action, source: { ...action.source, readPlan: config.readPlan } }
   const identity = normalizeReadPlanExecutionIdentity({
     tenantId, workspaceId, actionId: activation.actionId, systemId: activation.systemId,
@@ -123,6 +140,7 @@ function readPlanExecutionBudget(action) {
 module.exports = {
   StockPreparationReadPlanExecutionError,
   approvedReadPlanExecution,
+  assertStockPreparationReadPlanDeploymentCompatible,
   normalizeReadPlanExecutionIdentity,
   readPlanExecutionBudget,
 }

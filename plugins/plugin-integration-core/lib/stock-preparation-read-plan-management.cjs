@@ -7,12 +7,18 @@
 // Validation reads only occur on the explicit validate operation. The ledger
 // independently fences source revisions/ownership with mutation + audit, so a
 // stale request-time metadata check cannot authorize approval or activation.
+// Activation alone also consults a server-owned deployment action resolver
+// (trusted config, never request input) and refuses deploy-only readPlan blocks.
 const { PLM_STOCK_PREPARATION_ACTION_ID: ACTION_ID } = require('./stock-preparation-source-binding.cjs')
 const { DEFAULT_SQL_CONNECTION_TYPES } = require('./connection-resolver.cjs')
 const { validateStockPreparationReadPlanConfig, StockPreparationReadPlanConfigError } = require('./stock-preparation-read-plan-config.cjs')
 const { StockPreparationReadPlanStoreError } = require('./stock-preparation-read-plan-store.cjs')
 const { StockPreparationReadPlanValidationReadError } = require('./stock-preparation-read-plan-validation-read.cjs')
 const { B2aReadAuthorizationError, B2A_ERROR_CODES } = require('./b2a-trial-registry.cjs')
+const {
+  StockPreparationReadPlanExecutionError,
+  assertStockPreparationReadPlanDeploymentCompatible,
+} = require('./stock-preparation-read-plan-execution.cjs')
 
 const BASE_PATH = '/api/integration/stock-preparation/read-plan-configs'
 const READ_PLAN_MANAGEMENT_ROUTES = Object.freeze([
@@ -80,7 +86,7 @@ function checkedFamily(row, identity, systemId) {
   return row
 }
 
-function createStockPreparationReadPlanManagement({ store, externalSystemRegistry, connectionRegistration } = {}) {
+function createStockPreparationReadPlanManagement({ store, externalSystemRegistry, connectionRegistration, resolveDeploymentAction } = {}) {
   function requireDependencies() {
     if (!store || ['saveVersion', 'list', 'get', 'approve', 'retire', 'getActivation', 'activate', 'deactivate']
       .some((key) => typeof store[key] !== 'function')
@@ -131,6 +137,16 @@ function createStockPreparationReadPlanManagement({ store, externalSystemRegistr
     if (activation && (activation.tenantId !== identity.tenantId || activation.workspaceId !== null
       || activation.actionId !== ACTION_ID)) fail(409, 'READ_PLAN_ACTIVATION_INVALID')
     return activation
+  }
+  async function deploymentAction() {
+    if (typeof resolveDeploymentAction !== 'function') fail(501, 'READ_PLAN_DEPLOYMENT_UNAVAILABLE')
+    let action
+    try { action = await resolveDeploymentAction(ACTION_ID) } catch (_error) { action = undefined }
+    if (!record(action) || action.actionId !== ACTION_ID || !record(action.source)
+      || !record(action.source.readPlan)) {
+      fail(501, 'READ_PLAN_DEPLOYMENT_UNAVAILABLE')
+    }
+    return action
   }
   async function list(identityInput, { systemId } = {}) {
     const identity = identityOf(identityInput)
@@ -216,6 +232,9 @@ function createStockPreparationReadPlanManagement({ store, externalSystemRegistr
     const current = await activationOf(identity)
     if ((current ? current.generation : 0) !== generation) fail(409, 'READ_PLAN_GENERATION_CONFLICT')
     if (current && current.systemId !== systemId) await authorizeSource(identity, current.systemId, false)
+    // The deploy source may legitimately be rebound, so only its readPlan blocks
+    // are compared. Refuse before the pointer, audit or validation link moves.
+    assertStockPreparationReadPlanDeploymentCompatible(await deploymentAction())
     // The store repeats the generation comparison while holding its pointer lock.
     return store.activate({ ...identity, id, expectedGeneration: generation })
   }
@@ -246,6 +265,9 @@ function createStockPreparationReadPlanManagementHandlers({ management, readSamp
     if (error instanceof StockPreparationReadPlanValidationReadError) return new HttpRouteError(error.status, error.code, error.code)
     if (error instanceof B2aReadAuthorizationError && B2A_ERROR_CODES.includes(error.code)) {
       return new HttpRouteError(error.status, error.code, error.code)
+    }
+    if (error instanceof StockPreparationReadPlanExecutionError && error.code === 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE') {
+      return new HttpRouteError(409, error.code, error.code)
     }
     if (error instanceof StockPreparationReadPlanStoreError && STORE_ERROR_CODES.has(error.code)) {
       return new HttpRouteError(error.status, error.code, error.code)
