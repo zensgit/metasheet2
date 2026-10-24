@@ -72,4 +72,4 @@ jobs:
         working-directory: packages/core-backend
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for snapshot DB guards}"
-          node node_modules/vitest/vitest.mjs run --config vitest.plm-collaboration-snapshot.config.ts
+          node node_modules/vitest/vitest.mjs run --config vitest.plm-collaboration-snapshot.config.ts tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts tests/integration/plm-collaboration-snapshot-service.realdb.test.ts tests/integration/plm-collaboration-readiness-snapshot.realdb.test.ts
