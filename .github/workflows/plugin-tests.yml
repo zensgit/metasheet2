@@ -160,6 +160,9 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: Run Windows-native gateway HTTP regression tests
+        run: node --test scripts/ops/attendance-windows-native-gateway.test.mjs
+
       - name: GitHub-hosted runner routing contract
         run: node --test scripts/ops/github-hosted-runner-routing.test.mjs
 

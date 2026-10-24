@@ -1,0 +1,105 @@
+{
+  "recorded_at": "2026-10-24T06:16:54.938065+00:00",
+  "base_main": "771a9a04b328f2ecf19e2c16110432c8507ee0a0",
+  "source_provenance": {
+    "original_file_operator_reported_sha256": "f166b05f758c839476c684eb1156f641da6bb2f62df18896c69e2094652b73da",
+    "original_file_operator_reported_bytes": 9797,
+    "received_text_sha256": "be9c27a9a4fe61a2c168657e8899545e89eeff5b1165ea2e635a4e9fa73a610c",
+    "received_text_bytes": 9799,
+    "received_text_not_claimed_byte_identical_to_original": true,
+    "fixed_source_sha256": "72eacc7d465c3e956e0b1bddae8491eee38b71d345680150bc4e8f35a6c987c0",
+    "prior_isolated_candidate_sha256": "991ccf76d6d195ecf3ba9cd09be99446088dd94c5d5a6dd645aecf1e19a528ce",
+    "staged_normalization": "Trailing blank lines normalized to one final newline; all executable text identical to the validated candidate."
+  },
+  "runtime": {
+    "node": "v20.20.2",
+    "pnpm": "9.15.9",
+    "platform": "darwin arm64",
+    "backend": "isolated synthetic loopback HTTP server",
+    "not_windows_or_demo_acceptance": true
+  },
+  "regression": {
+    "command": "node --test --test-reporter=tap scripts/ops/attendance-windows-native-gateway.test.mjs",
+    "exit_code": 0,
+    "actual_tap": {
+      "tests": 8,
+      "pass": 8,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    }
+  },
+  "red_original": {
+    "module_override": "received unmodified source",
+    "filter": "^closes a partial upstream response without waiting for the cutoff$",
+    "exit_code": 1,
+    "actual_tap": {
+      "tests": 8,
+      "pass": 0,
+      "fail": 1,
+      "cancelled": 0,
+      "skipped": 7,
+      "todo": 0
+    },
+    "skipped_are_filter_exclusions_not_passes": true
+  },
+  "red_listener_mutation": {
+    "change": "Remove only proxyRes.on(error,onProxyError)",
+    "exit_code": 1,
+    "actual_tap": {
+      "tests": 8,
+      "pass": 0,
+      "fail": 1,
+      "cancelled": 0,
+      "skipped": 7,
+      "todo": 0
+    },
+    "skipped_are_filter_exclusions_not_passes": true
+  },
+  "observation_cutoff_ms": 1500,
+  "cutoff_is_not_a_gateway_timeout": true,
+  "earlier_observation_probe": {
+    "raw_cases": 6,
+    "normal_controls": 5,
+    "reproduced_pending_response_defects": 1,
+    "candidate_cases": 4,
+    "negative_matching_failures": 1,
+    "partial_abort_fixed_elapsed_ms": 46,
+    "scope": "Separate pre-PR candidate observation, not execution of the8repository regression tests"
+  },
+  "incident": {
+    "historical_failure_build": "run225",
+    "historical_commit": "42984091d7fe0e4f81ac026243200840c314bb79",
+    "gateway_causality_established": false,
+    "middlebox_causality_established": false,
+    "backend_request_log_is_full_ingress": false,
+    "original_request_and_later_probes_not_conflated": true
+  },
+  "boundary": {
+    "draft_only": true,
+    "deployment": false,
+    "online_config_change": false,
+    "release_change": false,
+    "stream_lifecycle": "OFF",
+    "real_uat": false,
+    "excluded_business_error": "50004"
+  },
+  "quality": {
+    "command": "pnpm validate:all",
+    "exit_code": 0,
+    "started_at": "2026-10-24T06:19:11.741141+00:00",
+    "finished_at": "2026-10-24T06:21:11.722417+00:00",
+    "plugin_manifests_valid": 13,
+    "existing_manifest_warnings": 9
+  },
+  "required_ci_wiring": {
+    "job": "test",
+    "matrix_node": [
+      "20.x"
+    ],
+    "whole_file_command": "node --test scripts/ops/attendance-windows-native-gateway.test.mjs",
+    "exact_occurrences_in_job": 1,
+    "terminal_ci_result": "pending_new_pr"
+  }
+}
