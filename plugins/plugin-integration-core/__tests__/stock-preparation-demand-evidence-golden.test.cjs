@@ -24,6 +24,20 @@
 // directory, and over this branch; the two outputs were byte-identical, and against the previous
 // literals exactly the 21 keys above differed (`large.status` and everything outside `large` did not).
 //
+// STOCK-PREPARATION-BOM.V3 — NOT A RECAPTURE. PLM version identity stamps `bomEvaluationVersion`
+// (literal `stock-preparation-bom.v3`) on the large job, its artifact and its plan artifact, links the
+// plan artifact to its artifact (`sourceArtifactRevision`) and hashes the version into the artifact and
+// plan revisions. On every leg that moves exactly `large.artifactRevision`, `artifactDigest`,
+// `planRevision`, `planArtifactDigest` and `storedJobDigest` of the three large scenarios, and no
+// literal above was changed for it. `observed.large` keeps recording the REAL v3 results; this suite
+// (a) asserts the v3 contract on the real objects — the literal on job / artifact / plan artifact /
+// apply job, the source link, both revisions recomputed with the version from the raw expansion and the
+// stored plan — and that the unprojected large lane moved exactly those five keys; (b) compares GOLDEN
+// through the harness's `projectLargeToLegacyMain771`, which drops only the four version keys and
+// re-mints the two revisions with main 771170234's frozen recipes; (c) compares the UNPROJECTED ON /
+// THROWING legs to OFF in full; (d) calibrates that row or plan drift fails the projection and a
+// version-free hash input or a wrong / missing link or version fails the contract.
+//
 // THE MATRIX. The same scenarios are replayed with the expander's demand-evidence capture OFF, ON,
 // and ON with a recorder that throws from every hook (the harness adds `demandEvidence` to the
 // expander input without wiring any production caller). All three legs must reproduce GOLDEN
@@ -52,11 +66,17 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const {
+  LEGACY_MAIN771_RECIPES,
   MODES,
   SCENARIOS,
+  STOCK_PREPARATION_BOM_V3,
   actionFor,
+  assertLargeV3Contract,
   installExpansionCaptureSwitch,
+  largeObservation,
   observeAll,
+  projectLargeToLegacyMain771,
+  resealLargeCapture,
   routeShapedLargeExpansionOptions,
   stripHarnessKeys,
 } = require('./support/stock-preparation-demand-evidence-golden-harness.cjs')
@@ -64,6 +84,9 @@ const {
 const { DEMAND_EVIDENCE_SCHEME } = require('../lib/stock-preparation-demand-evidence.cjs')
 
 const GOLDEN_BASE_SHA = 'fae8946d19efaadc615b50758cd6f4a50d43a14e'
+
+// The large keys the v3 version identity moves (see the header); every other key stays as GOLDEN.
+const V3_MOVED_LARGE_KEYS = Object.freeze(['artifactRevision', 'artifactDigest', 'planRevision', 'planArtifactDigest', 'storedJobDigest'])
 
 // How many expansions each scenario performs (dry-run, ledger reconcile, mvp-persist, apply's
 // dry-run + recompute, large lane). Asserted so a scenario that silently stopped reaching a path —
@@ -454,6 +477,26 @@ async function run(name, fn) {
 async function main() {
   assert.match(GOLDEN_BASE_SHA, /^[0-9a-f]{40}$/)
   const harness = installExpansionCaptureSwitch()
+  // Production's hash function; the revision inputs are restated independently in the harness.
+  const hashJson = harness.largeBomJobs.__internals && harness.largeBomJobs.__internals.hashJson
+
+  await run('the large-BOM evaluation version is the literal stock-preparation-bom.v3', () => {
+    assert.equal(STOCK_PREPARATION_BOM_V3, 'stock-preparation-bom.v3')
+    assert.equal(harness.expansionModule.STOCK_PREPARATION_BOM_EVALUATION_VERSION, 'stock-preparation-bom.v3')
+    assert.equal(typeof hashJson, 'function', 'stock-preparation-large-bom-jobs.cjs still exposes __internals.hashJson')
+    assert.deepEqual([...MODES], ['off', 'on', 'throwing'])
+  })
+
+  // The historical lens: a large scenario goes through the main771 legacy projection (which asserts the
+  // v3 contract first, so a missing version or link fails instead of being stripped); every other
+  // scenario is compared exactly as observed.
+  const historical = (name, entry, large) => {
+    if (!GOLDEN[name].large) {
+      assert.equal(large, undefined, `${name}: no large capture for a scenario without a large lane`)
+      return entry
+    }
+    return projectLargeToLegacyMain771(entry, large, { hashJson })
+  }
 
   await run('the large lane is route-shaped: the harness builds the run route\'s expansion options', () => {
     const routeHelper = routeLargeExpansionOptionsHelper(harness.tableActions.largeBomBackgroundExpansionCaps)
@@ -472,17 +515,36 @@ async function main() {
     assert.ok(routes.includes('requireCompleteBatch: Boolean(largeBomB2aAuthorization),'), 'run route arms the batch check only under B2a')
   })
 
+  const observedByMode = {}
+  const strippedByMode = {}
   for (const mode of MODES) {
     const observed = await observeAll(harness, mode)
     const stripped = stripHarnessKeys(observed)
+    observedByMode[mode] = observed
+    strippedByMode[mode] = stripped
 
     await run(`[${mode}] every golden scenario was observed`, () => {
       assert.deepEqual(Object.keys(stripped).sort(), Object.keys(GOLDEN).sort())
     })
 
     for (const name of Object.keys(GOLDEN)) {
+      if (GOLDEN[name].large) {
+        await run(`[${mode}] ${name}: the large lane carries the literal ${STOCK_PREPARATION_BOM_V3} on job / artifact / plan artifact / apply job, linked and recomputable`, () => {
+          assertLargeV3Contract(observed[name].__large, { hashJson })
+        })
+        await run(`[${mode}] ${name}: unprojected, the v3 identity moves exactly the version-bearing large keys`, () => {
+          const { large: actualLarge, ...actualRest } = stripped[name]
+          const { large: goldenLarge, ...goldenRest } = GOLDEN[name]
+          assert.deepEqual(actualRest, goldenRest)
+          assert.deepEqual(Object.keys(actualLarge).sort(), Object.keys(goldenLarge).sort())
+          for (const key of Object.keys(goldenLarge)) {
+            if (V3_MOVED_LARGE_KEYS.includes(key)) assert.notEqual(actualLarge[key], goldenLarge[key], `large.${key} carries the version identity`)
+            else assert.equal(actualLarge[key], goldenLarge[key], `large.${key} is version-free`)
+          }
+        })
+      }
       await run(`[${mode}] ${name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
-        assert.deepEqual(stripped[name], GOLDEN[name])
+        assert.deepEqual(historical(name, stripped[name], observed[name].__large), GOLDEN[name])
       })
       await run(`[${mode}] ${name}: the switch carried every expansion of the scenario`, () => {
         assert.equal(observed[name].__expansionCalls, EXPECTED_EXPANSIONS[name])
@@ -531,6 +593,134 @@ async function main() {
           assert.equal(entry.archive.archiveRevision, entry.archive.revision, `${name}: archive vs dry-run revision on an empty sheet`)
           assert.equal(entry.archive.expansionResultDigest, entry.dryRun.rowsDigest, `${name}: mvp-persist archives the dry-run rows`)
         }
+      }
+    })
+  }
+
+  // The ON / THROWING legs against OFF, UNPROJECTED and in full: the projection is a historical lens
+  // only and never stands between the legs.
+  for (const mode of MODES) {
+    if (mode === 'off') continue
+    await run(`[${mode}] the full unprojected observation equals the off leg`, () => {
+      assert.ok(strippedByMode.off, 'the off leg ran')
+      assert.deepEqual(strippedByMode[mode], strippedByMode.off)
+    })
+  }
+
+  // NEGATIVE CALIBRATION over the off leg's real captures. `resealLargeCapture` re-mints a mutated capture
+  // with the chosen recipes, so each case is self-consistent except for the one thing it breaks.
+  const isAssertion = (pattern) => (error) => error instanceof assert.AssertionError && pattern.test(error.message)
+  for (const name of Object.keys(GOLDEN).filter((key) => GOLDEN[key].large)) {
+    const large = observedByMode.off && observedByMode.off[name].__large
+    const resealed = (options = {}) => {
+      const next = resealLargeCapture(large, { hashJson, ...options })
+      return { next, entry: { ...strippedByMode.off[name], large: largeObservation(harness.largeBomJobs, next) } }
+    }
+    await run(`[calibration] ${name}: an unmutated reseal reproduces the real capture and the golden`, () => {
+      const { next, entry } = resealed()
+      assertLargeV3Contract(next, { hashJson })
+      assert.deepEqual(entry, strippedByMode.off[name])
+      assert.deepEqual(projectLargeToLegacyMain771(entry, next, { hashJson }), GOLDEN[name])
+    })
+    await run(`[calibration] ${name}: a drifted large row fails the historical projection`, () => {
+      const { next, entry } = resealed({
+        mutate(capture) {
+          const holders = [capture.rawExpansion, capture.ran.artifact]
+          if (Array.isArray(capture.planned.artifact && capture.planned.artifact.rows)) holders.push(capture.planned.artifact)
+          for (const holder of holders) {
+            assert.ok(Array.isArray(holder.rows) && holder.rows.length > 0, 'the large lane expanded rows')
+            holder.rows[0] = { ...holder.rows[0], calibrationDrift: 'synthetic' }
+          }
+        },
+      })
+      assertLargeV3Contract(next, { hashJson })
+      const projected = projectLargeToLegacyMain771(entry, next, { hashJson })
+      assert.notEqual(projected.large.artifactRevision, GOLDEN[name].large.artifactRevision)
+      assert.notDeepEqual(projected, GOLDEN[name])
+    })
+    await run(`[calibration] ${name}: a drifted plan decision count fails the historical projection`, () => {
+      const { next, entry } = resealed({
+        mutate(capture) {
+          const counts = capture.planned.planArtifact.plan.counts || {}
+          const key = Object.keys(counts).find((field) => typeof counts[field] === 'number')
+          assert.ok(key, 'the plan carries numeric counts')
+          counts[key] += 1
+        },
+      })
+      assertLargeV3Contract(next, { hashJson })
+      const projected = projectLargeToLegacyMain771(entry, next, { hashJson })
+      assert.equal(projected.large.artifactRevision, GOLDEN[name].large.artifactRevision, 'the row side did not move')
+      assert.notEqual(projected.large.planRevision, GOLDEN[name].large.planRevision)
+      assert.notDeepEqual(projected, GOLDEN[name])
+    })
+    await run(`[calibration] ${name}: an artifact revision minted without the version fails the v3 contract`, () => {
+      const { next, entry } = resealed({ artifactRevisionOf: LEGACY_MAIN771_RECIPES.artifactRevision })
+      assert.throws(() => assertLargeV3Contract(next, { hashJson }), isAssertion(/v3 artifact revision/))
+      assert.throws(() => projectLargeToLegacyMain771(entry, next, { hashJson }), isAssertion(/v3 artifact revision/))
+    })
+    await run(`[calibration] ${name}: a plan revision minted without the version fails the v3 contract`, () => {
+      const { next, entry } = resealed({ planRevisionOf: LEGACY_MAIN771_RECIPES.planRevision })
+      assert.throws(() => assertLargeV3Contract(next, { hashJson }), isAssertion(/v3 plan revision/))
+      assert.throws(() => projectLargeToLegacyMain771(entry, next, { hashJson }), isAssertion(/v3 plan revision/))
+    })
+    await run(`[calibration] ${name}: a missing or wrong plan-artifact source link fails the v3 contract`, () => {
+      for (const mutate of [
+        (capture) => { delete capture.planned.planArtifact.sourceArtifactRevision },
+        (capture) => { capture.planned.planArtifact.sourceArtifactRevision = '0'.repeat(64) },
+      ]) {
+        const { next, entry } = resealed({ mutate })
+        assert.throws(() => assertLargeV3Contract(next, { hashJson }), isAssertion(/sourceArtifactRevision/))
+        assert.throws(() => projectLargeToLegacyMain771(entry, next, { hashJson }), isAssertion(/sourceArtifactRevision/))
+      }
+    })
+    await run(`[calibration] ${name}: a missing or wrong version on any holder fails the v3 contract and the projection`, () => {
+      const holders = {
+        runJob: (capture) => capture.ran,
+        runArtifact: (capture) => capture.ran.artifact,
+        plannedJob: (capture) => capture.planned,
+        plannedArtifact: (capture) => capture.planned.artifact,
+        planArtifact: (capture) => capture.planned.planArtifact,
+        applyJob: (capture) => capture.applyJob,
+      }
+      for (const [label, holderOf] of Object.entries(holders)) {
+        for (const breakVersion of [
+          (holder) => { delete holder.bomEvaluationVersion },
+          (holder) => { holder.bomEvaluationVersion = 'stock-preparation-bom.v4' },
+        ]) {
+          const { next, entry } = resealed({ mutate: (capture) => breakVersion(holderOf(capture)) })
+          assert.throws(() => assertLargeV3Contract(next, { hashJson }), isAssertion(/bomEvaluationVersion/), label)
+          assert.throws(() => projectLargeToLegacyMain771(entry, next, { hashJson }), isAssertion(/bomEvaluationVersion/), label)
+        }
+      }
+    })
+    await run(`[calibration] ${name}: an artifact revision alias downgraded to its old revision fails the v3 contract and the projection`, () => {
+      // Old (version-free) revisions from a real reseal; each case downgrades exactly one alias of an otherwise v3 capture.
+      const old = resealLargeCapture(large, {
+        hashJson,
+        artifactRevisionOf: LEGACY_MAIN771_RECIPES.artifactRevision,
+        planRevisionOf: LEGACY_MAIN771_RECIPES.planRevision,
+      })
+      const oldArtifactRevision = old.ran.artifactRevision
+      const oldPlanRevision = old.planned.planRevision
+      const cases = [
+        { label: 'ran.artifact.revision', pattern: /run job artifact\.revision alias/,
+          downgrade: (capture) => { capture.ran.artifact.revision = oldArtifactRevision } },
+        { label: 'planned.artifact.revision', pattern: /planned job artifact\.revision alias/,
+          downgrade: (capture) => { capture.planned.artifact.revision = oldArtifactRevision } },
+        { label: 'planned.planArtifact.revision', pattern: /plan artifact revision alias/,
+          downgrade: (capture) => { capture.planned.planArtifact.revision = oldPlanRevision } },
+        { label: 'planned.planArtifact.artifactRevision', pattern: /plan artifact artifactRevision alias/,
+          downgrade: (capture) => { capture.planned.planArtifact.artifactRevision = oldArtifactRevision } },
+      ]
+      assert.notEqual(oldArtifactRevision, large.ran.artifactRevision, 'the old artifact revision differs from the v3 one')
+      assert.notEqual(oldPlanRevision, large.planned.planRevision, 'the old plan revision differs from the v3 one')
+      for (const { label, pattern, downgrade } of cases) {
+        // Downgrade after the reseal so the reseal cannot rewrite the alias back; observe the downgraded capture.
+        const { next } = resealed()
+        downgrade(next)
+        const entry = { ...strippedByMode.off[name], large: largeObservation(harness.largeBomJobs, next) }
+        assert.throws(() => assertLargeV3Contract(next, { hashJson }), isAssertion(pattern), label)
+        assert.throws(() => projectLargeToLegacyMain771(entry, next, { hashJson }), isAssertion(pattern), label)
       }
     })
   }

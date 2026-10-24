@@ -67,8 +67,8 @@ const {
   STOCK_PREP_PULL,
   STOCK_PREP_READ,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
-const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
-const { PROJECT_SHEETS_ENABLED_ENV, PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID, createStockPreparationTableActionRegistry } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const { PROJECT_SHEETS_ENABLED_ENV, PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS, resolveProjectTargetForAction } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { templateContractOptionFields } = require(path.join(LIB, 'stock-preparation-option-sync.cjs'))
 const { PILOT_ERROR_CODES } = require(path.join(LIB, 'stock-preparation-pilot-gate.cjs'))
@@ -76,6 +76,7 @@ const { CUSTOMER_PACK_NOT_APPLICABLE, PILOT_READINESS_CHECK_IDS, PILOT_READINESS
 const continuationSupport = require(path.join(LIB, 'stock-preparation-continuation-support.cjs'))
 const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
 const swlLockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+assert.equal(typeof resolveProjectTargetForAction, 'function', 'the real project-target resolver is the one the registry producer path uses')
 
 const HTTP_ROUTES_SOURCE = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
 
@@ -178,37 +179,89 @@ function markPilotDirectly(h, projectNo = PROJECT, { tenant = TENANT } = {}) {
   return row
 }
 
-/** A planned, authoritative expansion job stored the way the routes store it (copied from the S4 suites). */
-async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT, status = 'completed' }) {
+/**
+ * A planned, authoritative expansion job minted by the REAL producers (create -> run -> plan), so it carries the
+ * producer's own v3 identity and revisions — none is filled by hand. `status: 'queued'` stops after create (the
+ * run route's input). Only what the routes record around the producers is stamped on: the target sheet's write
+ * generation observed from the mounted lock. `deliberateTargetSplit` is the L-04 fixture alone: a job whose
+ * snapshot names a sheet the registry would not resolve for this project number; the target is then an explicit
+ * producer INPUT, the minted identity is still the producer's.
+ */
+async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT, status = 'completed', deliberateTargetSplit = false }) {
+  assert.ok(['completed', 'queued'].includes(status), `unsupported seed status ${status}`)
+  const actionId = ACTION_ID
   const at = '2026-10-23T00:00:00.000Z'
   const seedLock = h.projectWriteLock
   const writeObservation = seedLock && target && typeof target.sheetId === 'string'
     ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
     : null
-  const job = {
-    jobId, ...JOB_SCOPE, actionId: ACTION_ID,
-    status, authoritative: status === 'completed', projectNoPresent: true,
-    parameters: { projectNo },
-    principal: PLATFORM_ADMIN.id,
-    actor: PLATFORM_ADMIN.id,
-    actionSnapshot: {
-      actionId: ACTION_ID,
-      source: { externalSystemId: 'plm_sql_source_synthetic', kind: 'data-source:sql-readonly' },
-      target,
-    },
-    sourceKind: 'data-source:sql-readonly',
-    artifactRevision: 'artifact-pb-1',
-    artifact: { revision: 'artifact-pb-1', status: 'expanded', rows: [], summary: {}, sealedAt: at },
-    planRevision: 'plan-pb-1',
-    planArtifact: { revision: 'plan-pb-1', artifactRevision: 'artifact-pb-1', plan: { revision: 'plan-pb-1', decisions: [], plannedAt: at }, existingRowCount: 0, plannedAt: at },
-    progress: { rowsExpanded: 0, readCount: 0, frontierRemaining: 0, completedChunks: 1 },
-    budgets: {},
-    evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
-    createdAt: at, updatedAt: at,
-    ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
+  const registry = createStockPreparationTableActionRegistry({
+    actions: h.context.config.stockPreparationTableActions,
+    resolveProjectTarget: (input) => resolveProjectTargetForAction({
+      ...input, store: h.projectTargetStore, provisioning: h.provisioning, projectId: h.staging, env: process.env,
+    }),
+  })
+  const resolved = await registry.getTableAction({ ...JOB_SCOPE, actionId, projectNo, targetPurpose: 'write' })
+  let action = resolved
+  if (deliberateTargetSplit) {
+    action = { ...resolved, target: { ...resolved.target, sheetId: target.sheetId, objectId: target.objectId } }
+  } else {
+    assert.equal(resolved.target.sheetId, target.sheetId, 'producer uses the actual resolved sheet')
+    assert.equal(resolved.target.objectId, target.objectId, 'producer uses the actual resolved object')
   }
-  await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, jobId }), job)
-  return job
+  await largeBomJobs.createLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, action,
+    parameters: { projectNo },
+    principal: PLATFORM_ADMIN.id, actor: PLATFORM_ADMIN.id, createJobId: () => jobId, now: () => at,
+  })
+  const jobKey = largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId, jobId })
+  if (status === 'queued') {
+    const queued = await h.context.storage.get(jobKey)
+    assert.equal(queued && queued.status, 'queued', 'the real create leaves the job queued')
+    if (!writeObservation) return queued
+    const observedQueued = { ...queued, writeObservation }
+    await h.context.storage.set(jobKey, observedQueued)
+    return observedQueued
+  }
+  let reads = 0
+  const expanded = await largeBomJobs.runLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId, jobId, now: () => at,
+    sourceAdapter: {
+      async read(input) {
+        reads += 1
+        assert.equal(input.object, 'DN_PDM_PathExAttrInfo')
+        assert.deepEqual(input.filters, { FileCode: projectNo })
+        return { records: [], done: true, nextCursor: null, metadata: { filtersApplied: true } }
+      },
+    },
+  })
+  assert.equal(reads, 1, 'the real expander read the synthetic source')
+  assert.equal(expanded.status, 'completed')
+  largeBomJobs.assertAuthoritativeLargeBomExpansion(expanded)
+  assert.deepEqual(expanded.artifact.rows, [])
+  // Independent negative controls: neither producer identity may be omitted, even when the
+  // other identity and the computed revision are intact. Never backfill a fixture stamp.
+  const noJobIdentity = { ...expanded }
+  delete noJobIdentity.bomEvaluationVersion
+  const noArtifactIdentity = { ...expanded, artifact: { ...expanded.artifact } }
+  delete noArtifactIdentity.artifact.bomEvaluationVersion
+  for (const stale of [noJobIdentity, noArtifactIdentity]) {
+    assert.throws(() => largeBomJobs.assertAuthoritativeLargeBomExpansion(stale),
+      (error) => error.code === 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
+  }
+  const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId, jobId, existingRows: [], plannedAt: at,
+  })
+  largeBomJobs.assertAuthoritativeLargeBomPlan(planned)
+  assert.deepEqual(planned.planArtifact.plan.decisions, [])
+  if (!writeObservation) return planned
+  // The producers ran outside the routes, so the write generation the routes would have recorded is stamped
+  // onto the stored job — only that; the producer-minted identity and revisions stay exactly as minted.
+  const stored = await h.context.storage.get(jobKey)
+  assert.equal(stored && stored.jobId, jobId, 'the planned job is stored under its background-job key')
+  const observed = { ...stored, writeObservation, planWriteObservation: writeObservation }
+  await h.context.storage.set(jobKey, observed)
+  return observed
 }
 
 const checkpointKey = (applyJobId) => largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, applyJobId })
@@ -975,7 +1028,7 @@ test('L-04 split / re-entry: the pilot project through another sheet is refused 
     assert.equal(viaEnv.statusCode, 409, JSON.stringify(viaEnv.body))
     assert.equal(viaEnv.body.error.code, PILOT_ERROR_CODES.LARGE_LANE_REFUSED)
     assert.deepEqual(details(viaEnv), { lane: 'large_plan', reason: 'pilot_project', byProject: true, bySheet: false, partial: false })
-    await seedPlannedExpansionJob(off, { jobId: 'job-pb-off-sheet', target: { sheetId, objectId, fieldIdMap: {} }, projectNo: OTHER_PROJECT })
+    await seedPlannedExpansionJob(off, { jobId: 'job-pb-off-sheet', target: { sheetId, objectId, fieldIdMap: {} }, projectNo: OTHER_PROJECT, deliberateTargetSplit: true })
     const viaSheet = await plan(off, 'job-pb-off-sheet')
     assert.equal(viaSheet.statusCode, 409, JSON.stringify(viaSheet.body))
     assert.deepEqual(details(viaSheet), { lane: 'large_plan', reason: 'pilot_project', byProject: false, bySheet: true, partial: false })

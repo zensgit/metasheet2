@@ -285,6 +285,8 @@ function createMockServices(overrides = {}) {
   const services = {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
     stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       async listExternalSystems(input) {
         calls.push(['listExternalSystems', input])

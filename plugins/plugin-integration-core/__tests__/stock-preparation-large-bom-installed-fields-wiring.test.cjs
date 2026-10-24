@@ -1,6 +1,9 @@
 'use strict'
 
 const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+// An equivalent remount of the SAME durable job storage must see the SAME persistent write lock (a real
+// lock row outlives a route remount). `null` = every mount gets its own fresh lock, as before.
+let sharedProjectWriteLock = null
 
 const { consumableMap } = require('./support/consumable-storage.cjs')
 
@@ -68,6 +71,10 @@ const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
 } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const {
+  DEFAULT_ROOT_SELECTION,
+  PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+} = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
@@ -263,7 +270,9 @@ function inertService(methods) {
 function baseServices(sourceAdapter, ledger) {
   const services = {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
-    stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    stockPreparationProjectWriteLock: sharedProjectWriteLock || freshProjectWriteLock(),
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
@@ -334,7 +343,7 @@ function actionConfig(objectId = OBJECT_ID) {
   }
 }
 
-function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProduction } = {}) {
+function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProduction, storage, action } = {}) {
   const routes = new Map()
   const recordsApi = records || createRecordsApi()
   const context = {
@@ -350,9 +359,9 @@ function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProd
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job.
-    storage: consumableMap(),
+    storage: storage || consumableMap(),
     config: {
-      stockPreparationTableActions: [actionConfig(objectId)],
+      stockPreparationTableActions: [action || actionConfig(objectId)],
       stockPreparationCustomerPacks: { [PACK_ID]: PACK },
       // Left in place even on the production mount below: with a production policy present the gate
       // never consults it, so a 403 carrying the SANDBOX code would prove the production branch was
@@ -920,6 +929,120 @@ async function theDefaultDeploymentOnlyRewritesRowsTheIntakeReallyChanged() {
   )
 }
 
+function remountWithAction(previous, action) {
+  return mount({
+    records: previous.records,
+    storage: previous.context.storage,
+    action,
+  })
+}
+
+function changedExecutionAction(kind) {
+  const action = actionConfig()
+  if (kind === 'source') action.source.externalSystemId = 'plm_sql_other'
+  else if (kind === 'sourceKind') action.source.kind = 'bridge:legacy-sql-readonly'
+  else if (kind === 'workspace') action.source.workspaceId = 'ws_other'
+  else if (kind === 'targetMap') action.target.fieldIdMap.componentCode = 'fld_otherComponentCode'
+  else if (kind === 'rootSelection') action.rootSelection = { enabled: false }
+  else if (kind === 'maxRows') action.maxRows = 5000
+  else if (kind === 'maxReadCount') action.maxReadCount = 200
+  else if (kind === 'largeBom') action.largeBom = { maxRows: 50000 }
+  else if (kind === 'conflictStrategy') action.conflictStrategy = { addMissing: false }
+  else if (kind === 'template') {
+    action.template = clone(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+    action.template.label = 'Renamed Synthetic Main Table'
+  } else if (kind === 'carryPolicy') action.carryPolicy = { carryKey: 'component_source_id' }
+  else {
+    action.source.readPlan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+    action.source.readPlan.part.codeField = 'AlternateCode'
+  }
+  return action
+}
+
+function equivalentActionLabel() {
+  const action = actionConfig()
+  action.label = 'Renamed synthetic pull'
+  action.source.readPlan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  action.target.keyField = 'idempotencyKey'
+  action.rootSelection = clone(DEFAULT_ROOT_SELECTION)
+  return action
+}
+
+function assertActionDriftRefusal(response) {
+  assert.equal(response.statusCode, 409)
+  assert.deepEqual(JSON.parse(JSON.stringify(response.body.error)), {
+    code: 'TABLE_ACTION_LARGE_BOM_ACTION_CHANGED',
+    message: 'large-BOM action execution contract changed',
+    details: {},
+  }, 'the refusal has one fixed values-free response')
+}
+
+async function actionDriftBlocksApprovalBeforeCheckpointCreation() {
+  for (const kind of ['source', 'sourceKind', 'workspace', 'readPlan', 'targetMap', 'rootSelection', 'maxRows', 'maxReadCount', 'largeBom', 'conflictStrategy', 'template', 'carryPolicy']) {
+    const first = mount()
+    const { jobId } = await expandAndPlan(first.routes)
+    const changed = remountWithAction(first, changedExecutionAction(kind))
+    const storageBefore = structuredClone([...first.context.storage.entries()])
+    const response = await call(changed.routes, 'POST', APPLY_START_ROUTE, {
+      user: ADMIN_USER,
+      params: { actionId: ACTION_ID, jobId },
+      body: { confirm: { acceptManualConfirmHold: true } },
+    })
+    assertActionDriftRefusal(response)
+    assert.deepEqual([...first.context.storage.entries()], storageBefore, 'a refused approval changes no durable job state')
+    assert.equal(first.records.payloads('createRecord').length, 0)
+    assert.equal(first.records.payloads('patchRecord').length, 0)
+    assert.equal([...first.context.storage.values()].some((value) => value && value.kind === 'checkpoint-apply'), false)
+  }
+}
+
+async function actionDriftBlocksEachApplyChunkBeforeWrite() {
+  for (const kind of ['source', 'sourceKind', 'workspace', 'readPlan', 'targetMap', 'rootSelection', 'maxRows', 'maxReadCount', 'largeBom', 'conflictStrategy', 'template', 'carryPolicy']) {
+    const first = mount()
+    const { jobId } = await expandAndPlan(first.routes)
+    const approved = await call(first.routes, 'POST', APPLY_START_ROUTE, {
+      user: ADMIN_USER,
+      params: { actionId: ACTION_ID, jobId },
+      body: { confirm: { acceptManualConfirmHold: true } },
+    })
+    assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+    const applyJobId = approved.body.data.jobId
+    const changed = remountWithAction(first, changedExecutionAction(kind))
+    const storageBefore = structuredClone([...first.context.storage.entries()])
+    const response = await call(changed.routes, 'POST', APPLY_RUN_ROUTE, {
+      user: ADMIN_USER,
+      params: { actionId: ACTION_ID, jobId, applyJobId },
+    })
+    assertActionDriftRefusal(response)
+    assert.deepEqual([...first.context.storage.entries()], storageBefore, 'a refused chunk advances no checkpoint')
+    assert.equal(first.records.payloads('createRecord').length, 0)
+    assert.equal(first.records.payloads('patchRecord').length, 0)
+  }
+}
+
+async function equivalentActionDefaultsAndLabelCanComplete() {
+  for (const changedAt of ['approval', 'chunk']) {
+    // One persistent lock for the first mount AND its equivalent remount; a fresh one per iteration.
+    sharedProjectWriteLock = freshProjectWriteLock()
+    const first = mount()
+    const { jobId } = await expandAndPlan(first.routes)
+    const equivalent = remountWithAction(first, equivalentActionLabel())
+    const approvalRoutes = changedAt === 'approval' ? equivalent.routes : first.routes
+    const approved = await call(approvalRoutes, 'POST', APPLY_START_ROUTE, {
+      user: ADMIN_USER,
+      params: { actionId: ACTION_ID, jobId },
+      body: { confirm: { acceptManualConfirmHold: true } },
+    })
+    assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+    const ran = await call(equivalent.routes, 'POST', APPLY_RUN_ROUTE, {
+      user: ADMIN_USER,
+      params: { actionId: ACTION_ID, jobId, applyJobId: approved.body.data.jobId },
+    })
+    assert.equal(ran.statusCode, 200, JSON.stringify(ran.body))
+    assert.equal(first.records.payloads('createRecord').length, 1)
+  }
+}
+
 async function main() {
   await run('degraded resolution plans exactly what it always planned', degradedResolutionPlansExactlyWhatItAlwaysPlanned)
   await run('an installed pack widens the large-BOM plan band', installedPackWidensTheLargeBomPlanBand)
@@ -927,6 +1050,15 @@ async function main() {
   await run('a pack-aware band never blanks an ext_ value', aPackAwareBandNeverBlanksAnExtValueTheSmallPathWrote)
   await run('the production clean-row bound is not moved by the pack-aware band', theProductionCleanRowBoundIsNotMovedByThePackAwareBand)
   await run('the default deployment only rewrites rows the intake really changed', theDefaultDeploymentOnlyRewritesRowsTheIntakeReallyChanged)
+  await run('execution-contract drift blocks large-BOM approval', actionDriftBlocksApprovalBeforeCheckpointCreation)
+  await run('execution-contract drift blocks each large-BOM apply chunk', actionDriftBlocksEachApplyChunkBeforeWrite)
+  await run('equivalent defaults and an action label rename still complete', async () => {
+    try {
+      await equivalentActionDefaultsAndLabelCanComplete()
+    } finally {
+      sharedProjectWriteLock = null
+    }
+  })
 
   if (failures.length > 0) {
     console.error(`stock-preparation-large-bom-installed-fields-wiring.test.cjs FAILED (${failures.length})`)

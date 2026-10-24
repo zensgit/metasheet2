@@ -32,6 +32,7 @@
 // VALUES-FREE: every project number, part id and drawing number below is synthetic and invented for
 // this file.
 
+const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const path = require('node:path')
 
@@ -678,6 +679,9 @@ async function observeScenario(harness, scenario) {
       storage, ...scope, action: normalizedAction, parameters, principal: 'principal_sde_golden', createJobId: () => 'job_sde_golden', now,
     })
     const runAction = tableActions.assertStockPreparationTargetReady(queued.actionSnapshot)
+    // The run's ONE expansion as the switch captured it: the raw producer object the artifact revision
+    // hashed (the stored artifact went through JSON and lost its undefined keys).
+    const callsBeforeRun = harness.calls.length
     const ran = await largeBomJobs.runLargeBomBackgroundExpansionJob({
       storage,
       ...scope,
@@ -687,6 +691,8 @@ async function observeScenario(harness, scenario) {
       expansionOptions: { ...routeShapedLargeExpansionOptions(tableActions, runAction), requireCompleteBatch: false },
       now,
     })
+    if (harness.calls.length !== callsBeforeRun + 1) throw new Error('golden harness: the large run must expand exactly once')
+    const rawLargeExpansion = harness.calls[callsBeforeRun].result
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_sde_golden', existingRows: [], plannedAt: PLANNED_AT, now,
     })
@@ -701,16 +707,11 @@ async function observeScenario(harness, scenario) {
       createApplyJobId: () => 'apply_job_sde_golden',
       now,
     })
-    observed.large = {
-      status: ran.status,
-      artifactRevision: ran.artifactRevision,
-      artifactDigest: digest(ran.artifact),
-      planRevision: planned.planRevision,
-      planArtifactDigest: digest(planned.planArtifact),
-      targetRevision: applyJob.targetRevision,
-      publicJobDigest: digest(largeBomJobs.publicBackgroundExpansionJob(planned)),
-      storedJobDigest: digest(planned),
-    }
+    if (harness.calls.length !== callsBeforeRun + 1) throw new Error('golden harness: planning and approval must not expand')
+    observed.large = largeObservation(largeBomJobs, { ran, planned, applyJob })
+    // Test-only and stripped by `stripHarnessKeys`: the raw objects behind `large`, for the v3 contract
+    // and the main771 legacy projection below. `existingRows` is what the plan call above passed.
+    observed.__large = { ran, planned, applyJob, rawExpansion: rawLargeExpansion, existingRows: [] }
   }
   return observed
 }
@@ -733,23 +734,267 @@ function stripHarnessKeys(observations) {
     const copy = { ...entry }
     delete copy.__expansionCalls
     delete copy.__calls
+    delete copy.__large
     out[name] = copy
   }
   return out
 }
 
+// ── the large lane's v3 version identity, and the main771 legacy projection (test-only) ───────
+//
+// PLM version identity (`stock-preparation-bom.v3`) put `bomEvaluationVersion` on the large job, its
+// artifact and its plan artifact, linked the plan artifact to its artifact (`sourceArtifactRevision`),
+// and added the version to the artifact and plan revision inputs. `observed.large` keeps recording the
+// REAL v3 results; the GOLDEN literals predate the version. These helpers bridge the two without
+// touching either:
+//
+//   assertLargeV3Contract        the literal on job / artifact / plan artifact / apply job, the source
+//                                link, and both revisions recomputed WITH the version from the RAW
+//                                expansion the switch captured and from the stored plan.
+//   projectLargeToLegacyMain771  after that contract: drop exactly the four version keys, re-mint the two
+//                                revisions with main 771170234's frozen recipes, rewrite every reference
+//                                to them. status / targetRevision / publicJobDigest stay as observed.
+//   resealLargeCapture           negative calibration only: re-mint a mutated capture with chosen recipes.
+//
+// The revision INPUTS are restated here, not taken from the producer; only `hashJson` is production's.
+
+const STOCK_PREPARATION_BOM_V3 = 'stock-preparation-bom.v3'
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+// stock-preparation-large-bom-jobs.cjs at main 771170234 — FROZEN; the GOLDEN literals were minted with these.
+const LEGACY_MAIN771_RECIPES = Object.freeze({
+  artifactRevision(hashJson, { job, rawExpansion }) {
+    return hashJson({
+      action: job.actionSnapshot || { actionId: job.actionId },
+      parameters: job.parameters || {},
+      principal: job.principal,
+      expansion: {
+        rows: Array.isArray(rawExpansion.rows) ? rawExpansion.rows : [],
+        summary: rawExpansion.summary || {},
+      },
+    })
+  },
+  planRevision(hashJson, { artifactRevision, plan, existingRows, conflictPolicyReview }) {
+    return hashJson({
+      artifactRevision,
+      existingRows,
+      conflictPolicyReview: conflictPolicyReview || null,
+      plan: {
+        valid: plan.valid === true,
+        counts: plan.counts || {},
+        conflictTypes: plan.summary && plan.summary.conflictTypes,
+        duplicateExpandedKeyDiagnostics: plan.summary && plan.summary.duplicateExpandedKeyDiagnostics,
+        duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+      },
+    })
+  },
+})
+
+// The current v3 recipes, with the version as the LITERAL (not read back off the job it is checking).
+const V3_RECIPES = Object.freeze({
+  artifactRevision(hashJson, { job, rawExpansion }) {
+    return hashJson({
+      bomEvaluationVersion: STOCK_PREPARATION_BOM_V3,
+      action: job.actionSnapshot || { actionId: job.actionId },
+      parameters: job.parameters || {},
+      principal: job.principal,
+      expansion: {
+        rows: Array.isArray(rawExpansion.rows) ? rawExpansion.rows : [],
+        summary: rawExpansion.summary || {},
+      },
+    })
+  },
+  planRevision(hashJson, { artifactRevision, plan, existingRows, conflictPolicyReview }) {
+    return hashJson({
+      bomEvaluationVersion: STOCK_PREPARATION_BOM_V3,
+      artifactRevision,
+      existingRows,
+      conflictPolicyReview: conflictPolicyReview || null,
+      plan: {
+        valid: plan.valid === true,
+        counts: plan.counts || {},
+        conflictTypes: plan.summary && plan.summary.conflictTypes,
+        duplicateExpandedKeyDiagnostics: plan.summary && plan.summary.duplicateExpandedKeyDiagnostics,
+        duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+      },
+    })
+  },
+})
+
+// What `observed.large` records, from the real objects (the digests GOLDEN pins).
+function largeObservation(largeBomJobs, { ran, planned, applyJob }) {
+  return {
+    status: ran.status,
+    artifactRevision: ran.artifactRevision,
+    artifactDigest: digest(ran.artifact),
+    planRevision: planned.planRevision,
+    planArtifactDigest: digest(planned.planArtifact),
+    targetRevision: applyJob.targetRevision,
+    publicJobDigest: digest(largeBomJobs.publicBackgroundExpansionJob(planned)),
+    storedJobDigest: digest(planned),
+  }
+}
+
+// A deep copy that keeps undefined-valued keys (they are in every digest here) and swaps every string
+// equal to a replaced revision. An empty map is a faithful copy.
+function replaceRevisionReferences(value, replacements) {
+  if (typeof value === 'string') return replacements.has(value) ? replacements.get(value) : value
+  if (Array.isArray(value)) return value.map((item) => replaceRevisionReferences(item, replacements))
+  if (value instanceof Date) return new Date(value.getTime())
+  if (value && typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) throw new Error('golden harness: a large capture holds a non-plain object')
+    const out = {}
+    for (const key of Object.keys(value)) out[key] = replaceRevisionReferences(value[key], replacements)
+    return out
+  }
+  return value
+}
+
+function assertLiteralV3(holder, label) {
+  assert.ok(holder && typeof holder === 'object' && !Array.isArray(holder), `${label} is present (bomEvaluationVersion holder)`)
+  assert.ok(hasOwn(holder, 'bomEvaluationVersion'), `${label}.bomEvaluationVersion is present`)
+  assert.equal(holder.bomEvaluationVersion, STOCK_PREPARATION_BOM_V3, `${label}.bomEvaluationVersion is the literal ${STOCK_PREPARATION_BOM_V3}`)
+}
+
+function assertLargeV3Contract(large, { hashJson } = {}) {
+  assert.equal(typeof hashJson, 'function', 'the v3 contract needs the production hashJson')
+  assert.ok(large && large.ran && large.planned && large.applyJob && large.rawExpansion && Array.isArray(large.existingRows),
+    'the large capture (run job, planned job, apply job, raw expansion, existing rows) is present')
+  const { ran, planned, applyJob, rawExpansion } = large
+  assertLiteralV3(ran, 'run job')
+  assertLiteralV3(ran.artifact, 'run job artifact')
+  assertLiteralV3(planned, 'planned job')
+  assertLiteralV3(planned.artifact, 'planned job artifact')
+  assertLiteralV3(planned.planArtifact, 'plan artifact')
+  assertLiteralV3(applyJob, 'checkpoint apply job')
+  assert.equal(ran.planArtifact, undefined, 'the run job carries no plan artifact')
+  assert.match(String(ran.artifactRevision), /^[0-9a-f]{64}$/, 'the run job carries a 64-hex artifact revision')
+  assert.equal(planned.artifactRevision, ran.artifactRevision, 'planning kept the artifact revision')
+  // The revision aliases stored inside the artifacts must agree with the job-level revisions, else the
+  // artifact digests move while the legacy projection (which rewrites every reference) stays unchanged.
+  assert.equal(ran.artifact.revision, ran.artifactRevision,
+    'run job artifact.revision alias equals the run job artifactRevision')
+  assert.equal(planned.artifact.revision, planned.artifactRevision,
+    'planned job artifact.revision alias equals the planned job artifactRevision')
+  assert.equal(planned.planArtifact.revision, planned.planRevision,
+    'plan artifact revision alias equals the planned job planRevision')
+  assert.equal(planned.planArtifact.artifactRevision, planned.artifactRevision,
+    'plan artifact artifactRevision alias equals the planned job artifactRevision')
+  assert.ok(hasOwn(planned.planArtifact, 'sourceArtifactRevision'), 'plan artifact sourceArtifactRevision is present')
+  assert.equal(planned.planArtifact.sourceArtifactRevision, ran.artifactRevision, 'plan artifact sourceArtifactRevision is the artifact revision')
+  // The captured raw expansion is this artifact's expansion (compared JSON-clean, as the producer test does).
+  assert.deepEqual(clone(rawExpansion.rows), clone(ran.artifact.rows), 'the raw expansion rows are the artifact rows')
+  assert.deepEqual(clone(rawExpansion.summary), clone(ran.artifact.summary), 'the raw expansion summary is the artifact summary')
+  const artifactInput = { job: ran, rawExpansion }
+  assert.equal(ran.artifactRevision, V3_RECIPES.artifactRevision(hashJson, artifactInput),
+    'the v3 artifact revision recomputes from the raw expansion with the version in')
+  assert.notEqual(ran.artifactRevision, LEGACY_MAIN771_RECIPES.artifactRevision(hashJson, artifactInput),
+    'the v3 artifact revision is not the version-free one')
+  assert.ok(planned.planArtifact.plan && typeof planned.planArtifact.plan === 'object', 'the plan artifact carries its plan')
+  const planInput = { artifactRevision: ran.artifactRevision, plan: planned.planArtifact.plan, existingRows: large.existingRows, conflictPolicyReview: null }
+  assert.equal(planned.planRevision, V3_RECIPES.planRevision(hashJson, planInput),
+    'the v3 plan revision recomputes from the stored plan with the version in')
+  assert.notEqual(planned.planRevision, LEGACY_MAIN771_RECIPES.planRevision(hashJson, planInput),
+    'the v3 plan revision is not the version-free one')
+}
+
+// Exactly the four keys the version identity added; nothing else is removed.
+function withoutV3Identity(job) {
+  delete job.bomEvaluationVersion
+  if (job.artifact) delete job.artifact.bomEvaluationVersion
+  if (job.planArtifact) {
+    delete job.planArtifact.bomEvaluationVersion
+    delete job.planArtifact.sourceArtifactRevision
+  }
+  return job
+}
+
+function projectLargeToLegacyMain771(entry, large, { hashJson } = {}) {
+  assertLargeV3Contract(large, { hashJson })
+  assert.ok(entry && entry.large, 'the scenario has a large observation')
+  const { ran, planned } = large
+  // The observation and the capture are the same run, and the copy below is faithful.
+  assert.equal(entry.large.artifactRevision, ran.artifactRevision, 'observed large.artifactRevision is the captured run')
+  assert.equal(entry.large.artifactDigest, digest(ran.artifact), 'observed large.artifactDigest is the captured artifact')
+  assert.equal(entry.large.planRevision, planned.planRevision, 'observed large.planRevision is the captured plan')
+  assert.equal(entry.large.planArtifactDigest, digest(planned.planArtifact), 'observed large.planArtifactDigest is the captured plan artifact')
+  assert.equal(entry.large.storedJobDigest, digest(planned), 'observed large.storedJobDigest is the captured job')
+  assert.equal(digest(replaceRevisionReferences(planned, new Map())), digest(planned), 'the projection copy is faithful')
+  const legacyArtifactRevision = LEGACY_MAIN771_RECIPES.artifactRevision(hashJson, { job: ran, rawExpansion: large.rawExpansion })
+  const legacyPlanRevision = LEGACY_MAIN771_RECIPES.planRevision(hashJson, {
+    artifactRevision: legacyArtifactRevision, plan: planned.planArtifact.plan, existingRows: large.existingRows, conflictPolicyReview: null,
+  })
+  const replacements = new Map([[ran.artifactRevision, legacyArtifactRevision], [planned.planRevision, legacyPlanRevision]])
+  const legacyRun = withoutV3Identity(replaceRevisionReferences(ran, replacements))
+  const legacyPlanned = withoutV3Identity(replaceRevisionReferences(planned, replacements))
+  assert.equal(legacyRun.artifactRevision, legacyArtifactRevision)
+  assert.equal(legacyPlanned.artifactRevision, legacyArtifactRevision)
+  assert.equal(legacyPlanned.planRevision, legacyPlanRevision)
+  return {
+    ...entry,
+    large: {
+      ...entry.large,
+      artifactRevision: legacyRun.artifactRevision,
+      artifactDigest: digest(legacyRun.artifact),
+      planRevision: legacyPlanned.planRevision,
+      planArtifactDigest: digest(legacyPlanned.planArtifact),
+      storedJobDigest: digest(legacyPlanned),
+    },
+  }
+}
+
+// Negative calibration only: copy a real capture, mutate it, re-mint both revisions with the given
+// recipes and rewrite every reference — self-consistent except for what the caller broke.
+function resealLargeCapture(large, {
+  hashJson,
+  mutate = () => {},
+  artifactRevisionOf = V3_RECIPES.artifactRevision,
+  planRevisionOf = V3_RECIPES.planRevision,
+} = {}) {
+  assert.ok(large && large.ran && large.planned && large.applyJob && large.rawExpansion, 'a real large capture to reseal')
+  const copy = (value) => replaceRevisionReferences(value, new Map())
+  const next = {
+    ran: copy(large.ran),
+    planned: copy(large.planned),
+    applyJob: copy(large.applyJob),
+    rawExpansion: { rows: copy(large.rawExpansion.rows), summary: copy(large.rawExpansion.summary) },
+    existingRows: copy(large.existingRows),
+  }
+  mutate(next)
+  const artifactRevision = artifactRevisionOf(hashJson, { job: next.ran, rawExpansion: next.rawExpansion })
+  const planRevision = planRevisionOf(hashJson, {
+    artifactRevision, plan: next.planned.planArtifact.plan, existingRows: next.existingRows, conflictPolicyReview: null,
+  })
+  const replacements = new Map([[large.ran.artifactRevision, artifactRevision], [large.planned.planRevision, planRevision]])
+  next.ran = replaceRevisionReferences(next.ran, replacements)
+  next.planned = replaceRevisionReferences(next.planned, replacements)
+  return next
+}
+
 module.exports = {
   ACTION_ID,
+  LEGACY_MAIN771_RECIPES,
   MODES,
   SCENARIOS,
+  STOCK_PREPARATION_BOM_V3,
   TENANT_ID,
+  V3_RECIPES,
+  assertLargeV3Contract,
   createMemoryStorage,
   createRecordsApi,
   createSourceAdapter,
   digest,
   installExpansionCaptureSwitch,
+  largeObservation,
   observeAll,
   observeScenario,
+  projectLargeToLegacyMain771,
+  replaceRevisionReferences,
+  resealLargeCapture,
   routeShapedLargeExpansionOptions,
   actionFor,
   stableStringify,

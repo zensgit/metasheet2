@@ -382,6 +382,8 @@ function mount({ systems, withBindingStore = true, withAuditStore = true, withDa
   }
 
   const services = {
+    // SA-02: a reachable ledger with no activation retains this suite's legacy contract.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry,
     adapterRegistry,
     // The 对接总览 join (R-18) reads these three lists alongside the external systems. They return

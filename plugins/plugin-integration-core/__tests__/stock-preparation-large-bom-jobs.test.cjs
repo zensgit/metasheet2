@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
+const { STOCK_PREPARATION_BOM_EVALUATION_VERSION, expandPlmProjectBom } = require('../lib/stock-preparation-bom-expansion.cjs')
 
 const {
   LARGE_BOM_ARTIFACT_CHUNK_COUNT,
@@ -292,6 +293,9 @@ async function seedPlannedLargeBomJob({
     actionId,
     status: 'completed',
     authoritative: true,
+    // Synthetic current trusted-store fixture for writer tests; the generation
+    // migration tests below instead produce real expansion/plan artifacts.
+    bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION,
     projectNoPresent: true,
     parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
     principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
@@ -303,6 +307,7 @@ async function seedPlannedLargeBomJob({
     sourceKind: 'data-source:sql-readonly',
     artifactRevision: 'artifact-revision-1',
     artifact: {
+      bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION,
       revision: 'artifact-revision-1',
       status: 'expanded',
       rows: [],
@@ -311,6 +316,8 @@ async function seedPlannedLargeBomJob({
     },
     planRevision: 'plan-revision-1',
     planArtifact: {
+      bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION,
+      sourceArtifactRevision: 'artifact-revision-1',
       revision: 'plan-revision-1',
       artifactRevision: 'artifact-revision-1',
       plan: clone(plan),
@@ -485,6 +492,8 @@ function testAuthoritativeExpansionGate() {
   const completed = {
     status: 'completed',
     authoritative: true,
+    bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION,
+    artifact: { bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION },
     artifactRevision: 'revision-1',
   }
   assert.equal(isAuthoritativeLargeBomExpansion(completed), true)
@@ -2462,6 +2471,8 @@ async function testApplyJobWithoutABandIsShapedExactlyAsBefore() {
 const swlKit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
 const swlLock = require(path.join(__dirname, '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
 const swlTableActions = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+// Read-only pure recipe helpers from the golden harness; nothing else from it is used (no capture switch is installed).
+const { LEGACY_MAIN771_RECIPES, V3_RECIPES } = require(path.join(__dirname, 'support', 'stock-preparation-demand-evidence-golden-harness.cjs'))
 const SWL_SCOPE = Object.freeze({ tenantId: 'tenant-swl', workspaceId: 'workspace-swl' })
 // Captured on the CLEAN origin/main (4c78e75a0) with the same fixture and calls (see the guard-apply suite).
 const SWL_LARGE_GOLDEN = Object.freeze({
@@ -2511,12 +2522,49 @@ function swlHolderCasFault(db, failAt) {
   }
 }
 
+// The shared PLM version identity (`stock-preparation-bom.v3`) went into the artifact and plan revision inputs, so
+// the version-free GOLDEN literals are no longer what the real flow mints. They stay untouched: B1 re-derives them
+// from the frozen main-771 recipes over the real expander's raw expansion, and checks the actual revisions against
+// the v3 recipes (golden harness, pure read-only helpers only).
+function swlHashJson() {
+  const hashJson = __internals.hashJson || swlTableActions.__internals.hashJson
+  assert.equal(typeof hashJson, 'function', 'B1: the production hashJson is reachable')
+  return hashJson
+}
+
+// The real expander over a FRESH adapter on the same synthetic fixture, with the project and root selection the run
+// used. swlApprovedLargeJob passes the run no expansionOptions, so the expander's own default budgets are the
+// effective ones. Taken independently of the job under test: the raw rows keep undefined-valued keys, which the
+// hashes include and a JSON artifact has lost.
+async function swlRawLargeExpansion(flow) {
+  const source = swlKit.createSourceAdapter(swlKit.goldenPlmData())
+  return expandPlmProjectBom({
+    sourceAdapter: source.adapter,
+    projectNo: flow.parameters.projectNo,
+    rootSelection: flow.ran.actionSnapshot && flow.ran.actionSnapshot.rootSelection,
+  })
+}
+
 async function testSwlB1ApprovalBindsWithoutMovingAnyRevision() {
   const harness = swlKit.createLibWriteLockHarness()
   const flow = await swlApprovedLargeJob(harness)
-  assert.equal(flow.ran.artifactRevision, SWL_LARGE_GOLDEN.artifactRevision, 'B1: artifactRevision is the clean-tree literal')
-  assert.equal(flow.planned.planRevision, SWL_LARGE_GOLDEN.planRevision, 'B1: planRevision is the clean-tree literal')
-  assert.equal(flow.job.planRevision, SWL_LARGE_GOLDEN.planRevision)
+  const hashJson = swlHashJson()
+  const raw = await swlRawLargeExpansion(flow)
+  const plan = flow.planned.planArtifact.plan
+  // JSON-clean comparison against the actual artifact; the raw expansion itself is never rebuilt from that artifact.
+  assert.deepEqual(clone(raw.rows), clone(flow.ran.artifact.rows), 'B1: the independently expanded rows are the artifact rows')
+  assert.deepEqual(clone(raw.summary), clone(flow.ran.artifact.summary), 'B1: the independently expanded summary is the artifact summary')
+  // The GOLDEN literals are the main-771 identity: the frozen recipes recompute the ORIGINAL hashes exactly.
+  const legacyArtifactRevision = LEGACY_MAIN771_RECIPES.artifactRevision(hashJson, { job: flow.ran, rawExpansion: raw })
+  assert.equal(legacyArtifactRevision, SWL_LARGE_GOLDEN.artifactRevision, 'B1: the frozen main-771 recipe recomputes the artifactRevision literal')
+  assert.equal(LEGACY_MAIN771_RECIPES.planRevision(hashJson, { artifactRevision: legacyArtifactRevision, plan, existingRows: [], conflictPolicyReview: null }), SWL_LARGE_GOLDEN.planRevision, 'B1: the frozen main-771 recipe recomputes the planRevision literal')
+  // The real flow mints the v3 identity: the literal version is in both revision inputs.
+  assert.equal(flow.ran.bomEvaluationVersion, 'stock-preparation-bom.v3', 'B1: the run carries the v3 version literal')
+  assert.equal(flow.ran.artifactRevision, V3_RECIPES.artifactRevision(hashJson, { job: flow.ran, rawExpansion: raw }), 'B1: the actual artifactRevision is the v3 recipe over the raw expansion')
+  assert.equal(flow.planned.planRevision, V3_RECIPES.planRevision(hashJson, { artifactRevision: flow.ran.artifactRevision, plan, existingRows: [], conflictPolicyReview: null }), 'B1: the actual planRevision is the v3 recipe over the actual plan')
+  assert.notEqual(flow.ran.artifactRevision, SWL_LARGE_GOLDEN.artifactRevision, 'B1: the v3 artifactRevision is not the version-free literal')
+  assert.notEqual(flow.planned.planRevision, SWL_LARGE_GOLDEN.planRevision, 'B1: the v3 planRevision is not the version-free literal')
+  assert.equal(flow.job.planRevision, flow.planned.planRevision, 'B1: the approved job carries the actual planned planRevision')
   assert.equal(flow.job.targetRevision, SWL_LARGE_GOLDEN.targetRevision, 'B1: targetRevision is the clean-tree literal')
   assert.equal(flow.job.writeScope, flow.scope)
   assert.equal(flow.job.writeGeneration, 1)
@@ -3050,6 +3098,10 @@ async function main() {
   await testSwlB13ALeaseInItsGraceWindowRefusesTheExpansion()
   await testSwlPbInLeasePilotCheckRefusesBeforeBindingAndRunning()
   await testPeh3OpenCheckpointApplyJobScan()
+  await testLegacyRealCheckpointCannotResume()
+  await testEvaluationVersionProducerChainAndRevisions()
+  await testStoredJobVersionsRefuseBeforeReadsAndStateChanges()
+  await testExpansionRetryDropsPreviousPlanBeforeReading()
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
   testBackgroundEvidenceRejectsUnsafeTokens()
@@ -3093,6 +3145,171 @@ async function main() {
   await testPlanBandReachesThePlannerThroughTheJobLayer()
   await testApplyBandIsFrozenAtApprovalAndEveryChunkReadsTheSnapshot()
   await testApplyJobWithoutABandIsShapedExactlyAsBefore()
+}
+
+// SA01F: this is a real producer chain, not a hand-built plan accepted as proof
+// of a current expansion. Downgrade only the persisted generation after the
+// first real chunk, then demand that no second write or checkpoint advance occurs.
+async function testLegacyRealCheckpointCannotResume() {
+  const { storage, jobId } = await completedJobWithArtifact({ jobId: 'job-generation-resume' })
+  const scope = { storage, ...TEST_SCOPE, actionId: 'plm.stock-preparation.pull-bom.v1', jobId }
+  const planned = await planLargeBomBackgroundExpansionJob({ ...scope, existingRows: [] })
+  assert.equal(planned.planArtifact.plan.counts.add, 2)
+  const approved = await createLargeBomCheckpointApplyJob({
+    ...scope, principal: 'user-1', permission: 'write', createApplyJobId: () => 'apply-generation-resume',
+  })
+  const api = createTargetRecordsApi()
+  const runInput = { ...scope, applyJobId: approved.jobId, recordsApi: api.recordsApi, maxDecisionsPerChunk: 1 }
+  const first = await runLargeBomCheckpointApplyJobChunk(runInput)
+  assert.equal(first.status, 'paused')
+  assert.equal(first.counts.created, 1)
+  const key = __internals.checkpointApplyJobKey(runInput)
+  const legacy = clone(await storage.get(key))
+  delete legacy.bomEvaluationVersion
+  await storage.set(key, legacy)
+  const before = clone(legacy)
+  const writesBefore = api.calls.filter(([method]) => ['createRecord', 'patchRecord'].includes(method)).length
+  let stateWrites = 0
+  const set = storage.set.bind(storage)
+  storage.set = async (...args) => { stateWrites += 1; return set(...args) }
+  await assert.rejects(
+    () => runLargeBomCheckpointApplyJobChunk({ ...runInput, bomEvaluationVersion: 'stock-preparation-bom.v3' }),
+    (error) => error.code === 'LARGE_BOM_EVALUATION_VERSION_UNSUPPORTED' && error.status === 409,
+    'a real legacy paused checkpoint must not be rescued by a caller-supplied generation',
+  )
+  assert.equal(stateWrites, 0)
+  assert.deepEqual(await storage.get(key), before)
+  assert.equal(api.calls.filter(([method]) => ['createRecord', 'patchRecord'].includes(method)).length, writesBefore)
+}
+
+async function testEvaluationVersionProducerChainAndRevisions() {
+  assert.equal(STOCK_PREPARATION_BOM_EVALUATION_VERSION, 'stock-preparation-bom.v3')
+  const storage = createStorage()
+  const scope = { storage, ...TEST_SCOPE, actionId: 'plm.stock-preparation.pull-bom.v1', jobId: 'job-producer-version' }
+  const created = await createLargeBomBackgroundExpansionJob({
+    ...scope,
+    action: { actionId: scope.actionId, target: targetBinding() },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'user-1',
+    bomEvaluationVersion: 'caller-cannot-select-generation',
+    createJobId: () => scope.jobId,
+  })
+  assert.equal(created.bomEvaluationVersion, STOCK_PREPARATION_BOM_EVALUATION_VERSION)
+  assert.equal(created.artifact, undefined, 'enqueue does not pretend an expansion has happened')
+  const source = createSourceAdapter(plmData())
+  const completed = await runLargeBomBackgroundExpansionJob({
+    ...scope, sourceAdapter: source.adapter,
+    bomEvaluationVersion: 'caller-cannot-select-generation',
+    expansionOptions: { bomEvaluationVersion: 'caller-cannot-select-generation' },
+  })
+  assert.ok(source.calls.length > 0)
+  assert.equal(completed.artifact.bomEvaluationVersion, STOCK_PREPARATION_BOM_EVALUATION_VERSION)
+  // The revision hashes the raw producer object before JSON persistence drops
+  // undefined keys. Replay this deterministic memory source through the actual
+  // expander, rather than inventing the missing keys on the stored artifact.
+  const rawExpansion = await expandPlmProjectBom({ sourceAdapter: source.adapter, projectNo: created.parameters.projectNo })
+  assert.deepEqual(clone(rawExpansion.rows), completed.artifact.rows)
+  assert.deepEqual(clone(rawExpansion.summary), completed.artifact.summary)
+  const expansionRevisionInput = {
+    bomEvaluationVersion: completed.bomEvaluationVersion,
+    action: completed.actionSnapshot,
+    parameters: completed.parameters,
+    principal: completed.principal,
+    expansion: { rows: rawExpansion.rows, summary: rawExpansion.summary },
+  }
+  assert.equal(completed.artifactRevision, __internals.hashJson(expansionRevisionInput))
+  assert.notEqual(completed.artifactRevision, __internals.hashJson({ ...expansionRevisionInput, bomEvaluationVersion: 'stock-preparation-bom.v1' }))
+  const planned = await planLargeBomBackgroundExpansionJob({ ...scope, existingRows: [], bomEvaluationVersion: 'caller-value' })
+  const artifact = planned.planArtifact
+  assert.equal(artifact.bomEvaluationVersion, completed.artifact.bomEvaluationVersion)
+  assert.equal(artifact.sourceArtifactRevision, completed.artifactRevision)
+  const plan = artifact.plan
+  const planRevisionInput = {
+    bomEvaluationVersion: artifact.bomEvaluationVersion,
+    artifactRevision: completed.artifactRevision,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: {
+      valid: plan.valid === true,
+      counts: plan.counts || {},
+      conflictTypes: plan.summary && plan.summary.conflictTypes,
+      duplicateExpandedKeyDiagnostics: plan.summary && plan.summary.duplicateExpandedKeyDiagnostics,
+      duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+    },
+  }
+  assert.equal(planned.planRevision, __internals.hashJson(planRevisionInput))
+  assert.notEqual(planned.planRevision, __internals.hashJson({ ...planRevisionInput, bomEvaluationVersion: 'stock-preparation-bom.v1' }))
+  const approved = await createLargeBomCheckpointApplyJob({
+    ...scope, principal: 'user-1', permission: 'write', bomEvaluationVersion: 'caller-value',
+    createApplyJobId: () => 'apply-producer-version',
+  })
+  assert.equal(approved.bomEvaluationVersion, artifact.bomEvaluationVersion)
+  const api = createTargetRecordsApi()
+  const applied = await runLargeBomCheckpointApplyJobChunk({ ...scope, applyJobId: approved.jobId, recordsApi: api.recordsApi })
+  assert.equal(applied.status, 'succeeded')
+  assert.equal(applied.counts.created, 2, 'current generation still completes the real writer chain')
+}
+
+async function testStoredJobVersionsRefuseBeforeReadsAndStateChanges() {
+  const { storage, jobId } = await completedJobWithArtifact({ jobId: 'job-unsupported-version' })
+  const scope = { storage, ...TEST_SCOPE, actionId: 'plm.stock-preparation.pull-bom.v1', jobId }
+  const key = __internals.backgroundJobKey(scope)
+  const produced = clone(await storage.get(key))
+  const source = createSourceAdapter(plmData())
+  for (const status of ['queued', 'running', 'paused', 'failed', 'completed']) {
+    for (const version of [undefined, 'stock-preparation-bom.v1', 'stock-preparation-bom.v999', 2, null]) {
+      const old = { ...clone(produced), status }
+      if (version === undefined) delete old.bomEvaluationVersion
+      else old.bomEvaluationVersion = version
+      await storage.set(key, old)
+      const before = clone(await storage.get(key))
+      let stateWrites = 0
+      const set = storage.set.bind(storage)
+      storage.set = async (...args) => { stateWrites += 1; return set(...args) }
+      try {
+        await assert.rejects(
+          () => runLargeBomBackgroundExpansionJob({ ...scope, sourceAdapter: source.adapter, bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION }),
+          (error) => error.code === 'LARGE_BOM_EVALUATION_VERSION_UNSUPPORTED' && error.status === 409 && Object.keys(error.details).length === 0,
+        )
+        assert.equal(stateWrites, 0, 'unsupported generations do not even update job state')
+        assert.equal(source.calls.length, 0)
+        assert.deepEqual(await loadLargeBomBackgroundExpansionJob(scope), before, 'history remains readable and unchanged')
+        assert.equal(publicBackgroundExpansionJob(before).authoritative, false)
+      } finally {
+        storage.set = set
+      }
+    }
+  }
+}
+
+async function testExpansionRetryDropsPreviousPlanBeforeReading() {
+  for (const failure of ['read', 'options']) {
+    const { storage, jobId } = await completedJobWithArtifact({ jobId: `job-retry-${failure}` })
+    const scope = { storage, ...TEST_SCOPE, actionId: 'plm.stock-preparation.pull-bom.v1', jobId }
+    const previous = await planLargeBomBackgroundExpansionJob({ ...scope, existingRows: [] })
+    assert.ok(previous.planArtifact && previous.planRevision && previous.planEvidence)
+    const key = __internals.backgroundJobKey(scope)
+    await storage.set(key, { ...previous, status: 'failed' })
+    let sourceReads = 0
+    const absent = ['artifact', 'artifactRevision', 'planArtifact', 'planRevision', 'planEvidence']
+    const sourceAdapter = { async read() {
+      sourceReads += 1
+      for (const field of absent) assert.equal((await storage.get(key))[field], undefined, `${field} must be gone before the first source read`)
+      throw new Error('synthetic_read_failure')
+    } }
+    const failed = await runLargeBomBackgroundExpansionJob({
+      ...scope, sourceAdapter, ...(failure === 'options' ? { expansionOptions: { maxRows: -1 } } : {}),
+    })
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.authoritative, false)
+    assert.equal(sourceReads, failure === 'read' ? 1 : 0)
+    for (const field of absent) assert.equal(failed[field], undefined, `${field} must remain absent after failed retry`)
+    const source = createSourceAdapter(plmData())
+    const retried = await runLargeBomBackgroundExpansionJob({ ...scope, sourceAdapter: source.adapter })
+    assert.equal(retried.status, 'completed')
+    assert.equal(retried.artifact.bomEvaluationVersion, STOCK_PREPARATION_BOM_EVALUATION_VERSION)
+    for (const field of ['planArtifact', 'planRevision', 'planEvidence']) assert.equal(retried[field], undefined)
+  }
 }
 
 // 规格 P(owner 2026-09-15)— 后台大 BOM 链上,已撤的 父组件图号 / 父组件名称 包列

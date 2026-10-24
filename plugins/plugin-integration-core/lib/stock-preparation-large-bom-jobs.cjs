@@ -15,6 +15,7 @@ const {
   DEFAULT_MAX_ROWS,
   expandPlmProjectBom,
   LARGE_BOM_BOUNDED_ERROR_TYPES,
+  STOCK_PREPARATION_BOM_EVALUATION_VERSION,
   summarizeBomExpansionForEvidence,
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
@@ -635,6 +636,21 @@ function requiredPrincipal(value) {
   return principal
 }
 
+function hasCurrentBomEvaluationVersion(record) {
+  return isPlainObject(record) && record.bomEvaluationVersion === STOCK_PREPARATION_BOM_EVALUATION_VERSION
+}
+
+function assertCurrentBomEvaluationVersion(record) {
+  if (!hasCurrentBomEvaluationVersion(record)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_EVALUATION_VERSION_UNSUPPORTED',
+      'large-BOM job requires the current server BOM evaluation version',
+      {},
+      409,
+    )
+  }
+}
+
 function publicBackgroundExpansionJob(job) {
   return {
     jobId: safeEvidenceToken(job && job.jobId, 'jobId'),
@@ -684,6 +700,8 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     ...scope,
     actionId,
     status: 'queued',
+    // This is producer identity, never a caller-supplied or backfilled default.
+    bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION,
     authoritative: false,
     projectNoPresent: optionalString(parameters.projectNo) !== '',
     parameters,
@@ -800,6 +818,7 @@ function requireSourceAdapter(adapter) {
 
 function expansionArtifactRevision({ job, expansion }) {
   return hashJson({
+    bomEvaluationVersion: job.bomEvaluationVersion,
     action: job.actionSnapshot || { actionId: job.actionId },
     parameters: job.parameters || {},
     principal: job.principal,
@@ -980,6 +999,7 @@ function updateJobFromExpansion(job, expansion, now, logger) {
     job.authoritative = true
     job.artifactRevision = revision
     job.artifact = {
+      bomEvaluationVersion: job.bomEvaluationVersion,
       revision,
       status: expansion.status,
       rows: cloneJson(expansion.rows || []),
@@ -1032,7 +1052,13 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
       404,
     )
   }
-  if (job.status === 'completed') return cloneJson(job)
+  // Even the terminal shortcut must refuse a pre-upgrade stored result.
+  // Keep this before source reads and before mutating the stored object.
+  assertCurrentBomEvaluationVersion(job)
+  if (job.status === 'completed') {
+    assertAuthoritativeLargeBomExpansion(job)
+    return cloneJson(job)
+  }
   if (!['queued', 'running', 'paused', 'failed'].includes(job.status)) {
     throw new StockPreparationLargeBomJobError(
       'LARGE_BOM_JOB_RUN_REJECTED',
@@ -1046,6 +1072,13 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
   const runningAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   job.status = 'running'
   job.authoritative = false
+  // A retry is a new evaluation. Neither failure nor success can retain a plan
+  // (or its approval revision/evidence) from the previous evaluation.
+  delete job.artifact
+  delete job.artifactRevision
+  delete job.planArtifact
+  delete job.planRevision
+  delete job.planEvidence
   // The caps this run enforces, recorded BEFORE the first source read — see
   // `effectiveExpansionBudgets`. `updateJobFromExpansion` rewrites the same
   // stanza from the expansion summary afterwards; the two agree by
@@ -1130,6 +1163,7 @@ function normalizeExistingRows(rows) {
 
 function largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview }) {
   return hashJson({
+    bomEvaluationVersion: job.artifact.bomEvaluationVersion,
     artifactRevision: job.artifactRevision || (job.artifact && job.artifact.revision),
     existingRows,
     conflictPolicyReview: conflictPolicyReview || null,
@@ -1148,6 +1182,8 @@ function isAuthoritativeLargeBomPlan(job = {}) {
   const planArtifact = isPlainObject(job.planArtifact) ? job.planArtifact : {}
   const plan = isPlainObject(planArtifact.plan) ? planArtifact.plan : {}
   return Boolean(optionalString(job.planRevision || planArtifact.revision)) &&
+    hasCurrentBomEvaluationVersion(planArtifact) &&
+    planArtifact.sourceArtifactRevision === (job.artifactRevision || job.artifact.revision) &&
     Array.isArray(plan.decisions)
 }
 
@@ -1314,6 +1350,7 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     actionId: sourceJob.actionId,
     sourceJobId: sourceJob.jobId,
     status: 'queued',
+    bomEvaluationVersion: planArtifact.bomEvaluationVersion,
     planRevision: sourceJob.planRevision || planArtifact.revision,
     targetRevision: hashJson(target),
     approvalPresent: true,
@@ -1448,6 +1485,7 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
         404,
       )
     }
+    assertCurrentBomEvaluationVersion(job)
     if (['succeeded', 'partial'].includes(job.status)) return cloneJson(job)
     if (job.status === 'running') {
       throw new StockPreparationLargeBomJobError(
@@ -1654,6 +1692,8 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
   const revision = largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview })
   job.planRevision = revision
   job.planArtifact = {
+    bomEvaluationVersion: artifact.bomEvaluationVersion,
+    sourceArtifactRevision: job.artifactRevision || artifact.revision,
     revision,
     artifactRevision: job.artifactRevision || artifact.revision,
     plan: cloneJson(plan),
@@ -1700,7 +1740,7 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     actionId: safeEvidenceToken(job.actionId, 'actionId') || undefined,
     status,
     largeBom: true,
-    authoritative: status === 'completed' && job.authoritative === true,
+    authoritative: isAuthoritativeLargeBomExpansion(job),
     artifactRevisionPresent: Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision))),
     planRevisionPresent: Boolean(optionalString(job.planRevision || (job.planArtifact && job.planArtifact.revision))),
     projectNoPresent: job.projectNoPresent === true,
@@ -1714,6 +1754,8 @@ function isAuthoritativeLargeBomExpansion(job = {}) {
   if (!isPlainObject(job)) return false
   return job.status === 'completed' &&
     job.authoritative === true &&
+    hasCurrentBomEvaluationVersion(job) &&
+    hasCurrentBomEvaluationVersion(job.artifact) &&
     Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision)))
 }
 

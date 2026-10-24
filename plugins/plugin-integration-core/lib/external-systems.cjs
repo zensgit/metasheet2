@@ -82,6 +82,7 @@ const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
 // lock is the hole, not the fix.
 const STOCK_PREP_SOURCE_BINDING_TABLE = 'integration_stock_prep_source_binding'
 const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
+const STOCK_PREP_READ_PLAN_TABLE = 'integration_stock_prep_read_plan_versions'
 const SEALED_EXPORT_STOCK_PREP_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
 // 062's lifecycle is draft -> approved -> retired (`lib/read-source-config-store.cjs:24-29`).
 // `retired` is the terminal, deliberately non-consumable state: a retired version can never go back
@@ -105,6 +106,9 @@ const SEALED_EXPORT_STOCK_PREP_BINDING_TABLE = 'integration_sealed_export_stock_
 // the next), so this order never rests on how a driver queues concurrent queries on one connection.
 // Adding a status here, or a transition that moves a 062 row BACKWARDS in this list, reopens it.
 const LIVE_READ_SOURCE_CONFIG_STATUSES = Object.freeze(['draft', 'approved'])
+// 087 uses the same strictly forward lifecycle, but is a separate BOM configuration domain.
+// Its own pair must also remain draft BEFORE approved, never parallelized or mixed into 062's count.
+const LIVE_STOCK_PREP_READ_PLAN_STATUSES = Object.freeze(['draft', 'approved'])
 // 073's status vocabulary is ACTIVE / RETIRED (`migrations/073_..._runtime_authority.sql:32`), and the
 // reader qualifies a binding ONLY while it is ACTIVE and unexpired
 // (`lib/sealed-export/stock-preparation-runtime-store.cjs:113-125`, status at `:120`). RETIRED is therefore read the
@@ -320,6 +324,8 @@ function rowToAdapterExternalSystem(row, credentials = undefined) {
   const system = {
     id: row.id,
     connectionId: row.connection_id ?? null,
+    // Internal nonce from this exact row; omitted from public projections.
+    bindingValidationRevision: row.validation_revision ?? null,
     // Server-owned cutover evidence. It is adapter-policy input only and is intentionally omitted
     // from public create/get/list responses.
     legacyConnectionFallbackEligible: row.legacy_connection_fallback_eligible === true,
@@ -1309,11 +1315,16 @@ function createExternalSystemRegistry({
         system_id: id,
         status,
       }]),
+      ...LIVE_STOCK_PREP_READ_PLAN_STATUSES.map((status) => [STOCK_PREP_READ_PLAN_TABLE, {
+        tenant_id: tenantId,
+        system_id: id,
+        status,
+      }]),
     ]
   }
 
   /**
-   * Which of the three dependent tables this deployment does NOT have — decided by SQLSTATE 42P01
+   * Which dependent tables this deployment does NOT have — decided by SQLSTATE 42P01
    * on an autocommit COUNT, BEFORE the delete transaction opens. The counts this probe produces are
    * DISCARDED on purpose: they were taken with no row lock and are exactly the unprotected snapshot
    * the lock protocol exists to replace. Only the absence set is kept; the authoritative counts are
@@ -1331,7 +1342,8 @@ function createExternalSystemRegistry({
 
   /**
    * Second-order references at this system: stock-prep source bindings (079), read-source
-   * configs (062) and sealed-export stock-prep bindings (073). All three are tenant-scoped pointers
+   * configs (062), BOM read-plan versions (087), and sealed-export stock-prep bindings (073).
+   * All are tenant-scoped pointers
    * by external-system id (073's is compared against `external_systems.id` itself at
    * `lib/sealed-export/stock-preparation-sqlserver-source-authority.cjs:254`).
    *
@@ -1387,12 +1399,16 @@ function createExternalSystemRegistry({
     const [
       stockPrepSourceBindingMatches,
       sealedExportBindingMatches,
-      ...readSourceConfigMatches
+      readSourceDraftMatches,
+      readSourceApprovedMatches,
+      stockPrepReadPlanDraftMatches,
+      stockPrepReadPlanApprovedMatches,
     ] = counts
     return {
       stockPrepSourceBindingCount: stockPrepSourceBindingMatches,
       sealedExportBindingCount: sealedExportBindingMatches,
-      readSourceConfigCount: readSourceConfigMatches.reduce((sum, count) => sum + count, 0),
+      readSourceConfigCount: readSourceDraftMatches + readSourceApprovedMatches,
+      stockPrepReadPlanCount: stockPrepReadPlanDraftMatches + stockPrepReadPlanApprovedMatches,
     }
   }
 
@@ -1472,6 +1488,7 @@ function createExternalSystemRegistry({
       const referencedBindingCount = dependents.stockPrepSourceBindingCount
         + dependents.sealedExportBindingCount
         + dependents.readSourceConfigCount
+        + dependents.stockPrepReadPlanCount
       if (referencedPipelineCount > 0 || referencedBindingCount > 0) {
         throw new ExternalSystemConflictError(
           // The pipeline wording is preserved EXACTLY when pipelines are what refuse, because it is

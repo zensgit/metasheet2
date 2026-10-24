@@ -326,8 +326,7 @@ test('J-03 the guard sequence, enumerated from the source, is the same list on b
     'requireTableActionAccess(',
     'normalizeTableActionBody(',
     'resolveOperatorValueScope(',
-    'assertStockPreparationTargetReady(',
-    'getTableAction(',
+    'resolveTableActionExecution(',
     'resolveTenantId(',
     'assertResolvedProjectTargetTenancy(',
     // Batch-refresh phase 0 step 1: the sheet write-lock precheck (refuses while another run writes the sheet).
@@ -350,6 +349,25 @@ test('J-03 the guard sequence, enumerated from the source, is the same list on b
   }
   const dryRun = bodyOf('tableActionDryRun')
   const start = bodyOf('tableActionDryRunJobStart')
+  // SA01 moved the target lookup into the approved read-plan resolver. Pin its
+  // nested guards as well: replacing the old two names must not hide a missing gate.
+  const resolverStart = code.indexOf('  async function resolveTableActionExecution(req, input, snapshotAction, requireTarget = true) {')
+  assert.notEqual(resolverStart, -1, 'target readiness remains enabled by default')
+  const resolver = code.slice(resolverStart, code.indexOf('\n  async function ', resolverStart + 1))
+  const nestedGuards = [
+    'await tableActions.getTableActionForExecution(scope)',
+    'await resolveStockPreparationReadPlanExecution({',
+    'verifyTenant: () => resolveVerifiedClaimTenantId(req, input)',
+    'requireTarget ? assertStockPreparationTargetReady(execution.action) : execution.action',
+  ]
+  let previous = -1
+  for (const guard of nestedGuards) {
+    const at = resolver.indexOf(guard)
+    assert.ok(at > previous, 'the execution resolver retains its ordered lookup, approval, tenant and target guards')
+    previous = at
+  }
+  assert.match(dryRun, /const action = await resolveTableActionExecution\(req, \{[\s\S]*?targetPurpose: 'write',\s*\}\)/,
+    'both lanes require the target-ready execution path, with no override')
 
   // The synchronous lane: every guard before `runDryRun()` is awaited.
   const syncSequence = sequence(dryRun, 'return sendOk(res, await runDryRun())')

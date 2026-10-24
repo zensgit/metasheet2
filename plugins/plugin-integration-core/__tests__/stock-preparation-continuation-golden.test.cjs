@@ -30,6 +30,16 @@
 // `git -c core.autocrlf=false archive` copy of that commit's plugin directory, this file added): the
 // SCC_CAPTURE output was BYTE-IDENTICAL to the 1638ab91c capture, so GOLDEN holds on both bases.
 //
+// THE LARGE LANE AFTER PLM VERSION IDENTITY (`stock-preparation-bom.v3`). The large job, its artifact and
+// its plan artifact now carry `bomEvaluationVersion`, and the version is an input of the artifact and
+// plan revisions, so the REAL large.artifactRevision / planRevision / planArtifactDigest / storedJobDigest
+// of second_pull_dash moved. The GOLDEN literals did not: they are main 771170234's version-free values.
+// The lane (a) captures the run's raw expansion, takes a REAL metadata-only checkpoint approval of the
+// planned job (no run, no write) and proves the v3 contract with the primary harness over the non-empty
+// existing rows the plan was given; (b) projects the real observation back with the harness's frozen
+// main771 recipes and compares ONLY the five keys GOLDEN records; (c) keeps the unprojected v3
+// observation for the off / on comparison. No GOLDEN literal was re-pinned.
+//
 // After PR-1 the same legs must reproduce GOLDEN exactly AND the rows the reader returned must carry
 // the record reference (otherwise the identity would be vacuous: nothing would have been attached).
 //
@@ -40,11 +50,16 @@ const crypto = require('node:crypto')
 const path = require('node:path')
 
 const {
+  LEGACY_MAIN771_RECIPES,
+  assertLargeV3Contract,
   createMemoryStorage,
   createRecordsApi,
   createSourceAdapter,
   digest,
   installExpansionCaptureSwitch,
+  largeObservation,
+  projectLargeToLegacyMain771,
+  resealLargeCapture,
   routeShapedLargeExpansionOptions,
   stableStringify,
 } = require('./support/stock-preparation-demand-evidence-golden-harness.cjs')
@@ -230,6 +245,59 @@ function recordRefsOf(rows) {
   return rows.map((row) => (row && row[RECORD_REF] ? { id: row[RECORD_REF].id, version: row[RECORD_REF].version } : null))
 }
 
+// The five keys GOLDEN records for the large lane (main771's shape; the real v3 observation has more).
+const GOLDEN_LARGE_KEYS = Object.freeze(['status', 'artifactRevision', 'planRevision', 'planArtifactDigest', 'storedJobDigest'])
+// The four of them the version identity moved; the GOLDEN literals keep main771's version-free values.
+const V3_MOVED_LARGE_KEYS = Object.freeze(['artifactRevision', 'planRevision', 'planArtifactDigest', 'storedJobDigest'])
+
+// Production's own hashJson: the harness restates the revision INPUTS, never the hash.
+function productionHashJson(...holders) {
+  for (const holder of holders) {
+    if (holder && typeof holder.hashJson === 'function') return holder.hashJson
+    if (holder && holder.__internals && typeof holder.__internals.hashJson === 'function') return holder.__internals.hashJson
+  }
+  throw new Error('continuation golden: production hashJson is not exported by the large-BOM jobs or table-actions module')
+}
+
+function storageDigests(storage) {
+  return new Map([...storage.map].map(([storageKey, value]) => [storageKey, digest(value)]))
+}
+
+// Negative calibration of the v3 proof, reusing the primary harness: the real capture passes the
+// contract, and every break below must make the contract, and the projection built on it, throw.
+function assertLargeV3Calibration({ full, largeProof, golden }) {
+  const { capture, hashJson } = largeProof
+  assert.ok(capture.existingRows.length > 0, 'the large plan was given the non-empty seeded existing rows')
+  assertLargeV3Contract(capture, { hashJson })
+  for (const field of V3_MOVED_LARGE_KEYS) {
+    assert.notEqual(full.large[field], golden.large[field], `the real v3 large.${field} is not the version-free golden value`)
+  }
+  const reseal = (options) => resealLargeCapture(capture, { hashJson, ...options })
+  // Control: an unmutated v3 reseal is faithful, so each break below fails for its own mutation only.
+  assertLargeV3Contract(reseal({}), { hashJson })
+  const tamper = (mutate) => reseal({ mutate })
+  const breaks = [
+    ['existing rows left out of the plan revision', { ...capture, existingRows: [] }],
+    ['version-free artifact and plan revisions', reseal({ artifactRevisionOf: LEGACY_MAIN771_RECIPES.artifactRevision, planRevisionOf: LEGACY_MAIN771_RECIPES.planRevision })],
+    ['version-free plan revision', reseal({ planRevisionOf: LEGACY_MAIN771_RECIPES.planRevision })],
+    ['run job without the version', tamper((c) => { delete c.ran.bomEvaluationVersion })],
+    ['plan artifact without the version', tamper((c) => { delete c.planned.planArtifact.bomEvaluationVersion })],
+    ['checkpoint apply job without the version', tamper((c) => { delete c.applyJob.bomEvaluationVersion })],
+    ['checkpoint apply job on another version', tamper((c) => { c.applyJob.bomEvaluationVersion = 'stock-preparation-bom.v2' })],
+    ['run job artifact.revision alias', tamper((c) => { c.ran.artifact.revision = 'tampered' })],
+    ['planned job artifact.revision alias', tamper((c) => { c.planned.artifact.revision = 'tampered' })],
+    ['plan artifact revision alias', tamper((c) => { c.planned.planArtifact.revision = 'tampered' })],
+    ['plan artifact artifactRevision alias', tamper((c) => { c.planned.planArtifact.artifactRevision = 'tampered' })],
+    ['plan artifact source link dropped', tamper((c) => { delete c.planned.planArtifact.sourceArtifactRevision })],
+    ['plan artifact source link pointing elsewhere', tamper((c) => { c.planned.planArtifact.sourceArtifactRevision = 'f'.repeat(64) })],
+    ['raw expansion that is not the artifact expansion', tamper((c) => { c.rawExpansion.summary = { ...c.rawExpansion.summary, tampered: true } })],
+  ]
+  for (const [label, broken] of breaks) {
+    assert.throws(() => assertLargeV3Contract(broken, { hashJson }), assert.AssertionError, `${label}: the v3 contract must throw`)
+    assert.throws(() => projectLargeToLegacyMain771({ large: full.large }, broken, { hashJson }), assert.AssertionError, `${label}: the legacy projection must throw`)
+  }
+}
+
 async function observeScenario(harness, scenario) {
   const { tableActions, largeBomJobs } = harness
   // The lanes the way the routes drive them since #6501 (the same wrapping the #6502 golden harness's
@@ -258,6 +326,7 @@ async function observeScenario(harness, scenario) {
   const sourceAdapter = createSourceAdapter(scenario.data)
   const observed = {}
   const refs = {}
+  let largeProof = null
 
   // 1. Small dry-run against the seeded sheet.
   const tokenStore = createTokenStore()
@@ -385,6 +454,9 @@ async function observeScenario(harness, scenario) {
       storage, ...scope, action: normalizedAction, parameters, principal: 'principal_scc_golden', createJobId: () => 'job_scc_golden', now,
     })
     const runAction = tableActions.assertStockPreparationTargetReady(queued.actionSnapshot)
+    // The run's ONE expansion as the capture switch saw it: the raw producer object the artifact
+    // revision hashed (the stored artifact went through JSON and lost its undefined keys).
+    const callsBeforeRun = harness.calls.length
     const ran = await largeBomJobs.runLargeBomBackgroundExpansionJob({
       storage,
       ...scope,
@@ -394,20 +466,55 @@ async function observeScenario(harness, scenario) {
       expansionOptions: { ...routeShapedLargeExpansionOptions(tableActions, runAction), requireCompleteBatch: false },
       now,
     })
+    if (harness.calls.length !== callsBeforeRun + 1) throw new Error('continuation golden: the large run must expand exactly once')
+    const rawLargeCall = harness.calls[callsBeforeRun]
     const largeExistingRows = await tableActionInternals.readExistingStockPreparationRows(seededRecordsApi(scenario), runAction.target, scenario.projectNo)
     refs.large = recordRefsOf(largeExistingRows)
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_scc_golden', existingRows: largeExistingRows, plannedAt: PLANNED_AT, now,
     })
-    observed.large = {
-      status: ran.status,
-      artifactRevision: ran.artifactRevision,
-      planRevision: planned.planRevision,
-      planArtifactDigest: digest(planned.planArtifact),
-      storedJobDigest: digest(planned),
+    if (harness.calls.length !== callsBeforeRun + 1) throw new Error('continuation golden: planning must not expand the source')
+    // The REAL metadata-only checkpoint approval of the planned job (same store and principal; no run,
+    // no write): the apply job the v3 contract needs. It must not touch the planned record, the stored
+    // records or the source.
+    const plannedDigestBeforeApproval = digest(planned)
+    const storedBeforeApproval = storageDigests(storage)
+    const applyJob = await largeBomJobs.createLargeBomCheckpointApplyJob({
+      storage,
+      ...scope,
+      actionId: action.actionId,
+      jobId: 'job_scc_golden',
+      principal: 'principal_scc_golden',
+      permission: 'write',
+      acceptManualConfirmHold: true,
+      createApplyJobId: () => 'apply_job_scc_golden',
+      now,
+    })
+    if (harness.calls.length !== callsBeforeRun + 1 || harness.calls[callsBeforeRun] !== rawLargeCall) {
+      throw new Error('continuation golden: the checkpoint approval must not re-expand the source')
     }
+    if (digest(planned) !== plannedDigestBeforeApproval) throw new Error('continuation golden: the checkpoint approval changed the planned job')
+    const storedAfterApproval = storageDigests(storage)
+    for (const [storageKey, storedDigest] of storedBeforeApproval) {
+      if (storedAfterApproval.get(storageKey) !== storedDigest) {
+        throw new Error(`continuation golden: the checkpoint approval rewrote the stored record ${storageKey}`)
+      }
+    }
+    const hashJson = productionHashJson(largeBomJobs, tableActions)
+    const capture = { ran, planned, applyJob, rawExpansion: rawLargeCall.result, existingRows: largeExistingRows }
+    // The v3 contract first (literal version on every holder, the four aliases, the source link, both
+    // revisions recomputed), then the projection back to main771; GOLDEN sees the five keys it records.
+    assertLargeV3Contract(capture, { hashJson })
+    const fullLarge = largeObservation(largeBomJobs, { ran, planned, applyJob })
+    const projected = projectLargeToLegacyMain771({ large: fullLarge }, capture, { hashJson })
+    observed.large = Object.fromEntries(GOLDEN_LARGE_KEYS.map((field) => {
+      if (!Object.prototype.hasOwnProperty.call(projected.large, field)) throw new Error(`continuation golden: the projected large lane lacks ${field}`)
+      return [field, projected.large[field]]
+    }))
+    largeProof = { capture, hashJson, full: fullLarge }
   }
-  return { observed, refs }
+  const full = largeProof ? { ...observed, large: largeProof.full } : { ...observed }
+  return { observed, full, refs, largeProof }
 }
 
 // CAPTURED on GOLDEN_BASE_SHA with SCC_CAPTURE=1 (the ON leg; the OFF leg is identical minus
@@ -536,15 +643,23 @@ async function main() {
   assert.match(GOLDEN_RECAPTURE_SHA, /^[0-9a-f]{40}$/)
   const harness = installExpansionCaptureSwitch()
   const captured = {}
+  const fullByMode = { off: {}, on: {} }
 
   for (const mode of ['off', 'on']) {
     for (const build of SCENARIOS) {
       const scenario = build()
       harness.setMode(mode)
-      const { observed, refs } = await observeScenario(harness, scenario)
-      if (mode === 'off') delete observed.demandEvidenceFingerprint
+      const { observed, full, refs, largeProof } = await observeScenario(harness, scenario)
+      if (mode === 'off') {
+        delete observed.demandEvidenceFingerprint
+        delete full.demandEvidenceFingerprint
+      }
+      fullByMode[mode][scenario.name] = full
       if (CAPTURE) {
-        captured[`${mode}:${scenario.name}`] = observed
+        // Capture remains a record of the real producer, never the historical projection.
+        captured[`${mode}:${scenario.name}`] = full.large
+          ? { ...full, large: Object.fromEntries(GOLDEN_LARGE_KEYS.map((field) => [field, full.large[field]])) }
+          : full
         continue
       }
       const expected = { ...GOLDEN[scenario.name] }
@@ -557,6 +672,11 @@ async function main() {
         assert.deepEqual(refs.reader, expectedRefs)
         if (scenario.large) assert.deepEqual(refs.large, expectedRefs)
       })
+      if (largeProof) {
+        await run(`[${mode}] ${scenario.name}: the large lane is the real v3 identity, projected to the main771 golden (contract + negative calibration)`, () => {
+          assertLargeV3Calibration({ full, largeProof, golden: GOLDEN[scenario.name] })
+        })
+      }
     }
   }
 
@@ -564,6 +684,16 @@ async function main() {
     console.log(stableStringify(captured))
     console.log('SCC_CAPTURE: printed, no assertions run')
     return
+  }
+
+  for (const build of SCENARIOS) {
+    const name = build().name
+    await run(`${name}: the full unprojected observation (real v3 large lane included) is identical off and on, except the demand-evidence fingerprint`, () => {
+      const on = { ...fullByMode.on[name] }
+      assert.equal(typeof on.demandEvidenceFingerprint, 'string', 'the on leg carries the fingerprint (the comparison is not vacuous)')
+      delete on.demandEvidenceFingerprint
+      assert.deepEqual(on, fullByMode.off[name])
+    })
   }
 
   await run('the record reference is the planner\'s exported Symbol.for key', () => {
