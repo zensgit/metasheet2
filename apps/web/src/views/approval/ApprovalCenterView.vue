@@ -1917,18 +1917,17 @@ const attendanceEntryReason = computed<string>(() => {
   return ''
 })
 
+// Both texts read their zh/en copy from approvalCenterLabels.ts; the view only adds the number.
 const attendanceFilterButtonText = computed(() => {
   const total = attendancePendingState.value === 'ready' ? attendancePendingTotal.value : null
-  if (total === null) return isZh.value ? '考勤待审' : 'Attendance pending'
-  return isZh.value ? `考勤待审 ${total}` : `Attendance pending ${total}`
+  if (total === null) return t.value.attendanceFilterLabel
+  return `${t.value.attendanceFilterLabel} ${total}`
 })
 
 const attendanceActiveText = computed(() => {
   const total = attendancePendingState.value === 'ready' ? attendancePendingTotal.value : null
-  if (total === null) return isZh.value ? '正在只看考勤待审。' : 'Showing attendance requests only.'
-  return isZh.value
-    ? `正在只看考勤待审。考勤待审共 ${total} 条。`
-    : `Showing attendance requests only. Attendance requests pending: ${total}.`
+  if (total === null) return t.value.attendanceActiveNote
+  return t.value.attendanceActiveNoteWithTotal.replace('{total}', String(total))
 })
 
 function resetListFilterValues() {
