@@ -1,0 +1,285 @@
+{
+  "nonce": "83669666515c4c7fb77b11a616f48344",
+  "session": "gbt-d5a9-1a169a37722-bd",
+  "actor": "ACTUAL_GROK47_XHIGH",
+  "base": "3ba3559c27c2887994ad459562df934a6325a6de",
+  "head": "3ba3559c27c2887994ad459562df934a6325a6de",
+  "branch": "codex/plm-w23-readiness-db-admission-20261024",
+  "slice": "READINESS_FORWARD_DB_ADMISSION_LOCAL_ACCEPTED",
+  "review_sha256": "641d50d1ba66ff538c04fa49788b9d4b3061c7c723d10bae6309b6a79254f0eb",
+  "wire_sha256": "87a547b7d9915ed10dc48ba5498c9bb16f58d88aaa663e74b6a1d658d705576a",
+  "foundation_sha256": "df125b0fa4dd3eb652507d116b0005b1afe5a66a038699f7747ee5dc8fc20714",
+  "disk_floor_bytes": 4563402752,
+  "disk_free_bytes_before_checks": 12796710912,
+  "pin_count": 49,
+  "pin_mismatches": 0,
+  "ignored_by": "artifacts/ in .git/info/exclude",
+  "postgresql": "ROOT_ACTUAL_OWNED_PG16_15_REQUIRED_51PASS_ZERO_FAIL_ERROR_SKIP",
+  "vitest": "ROOT_ACTUAL_THREE_REGISTERED_PG_FILES_51PASS",
+  "source_http": "NOT_RUN",
+  "ui": "NOT_RUN",
+  "install_acceptance": "NOT_RUN",
+  "docker": "NOT_RUN",
+  "publication": "SOURCE_PLUS_ONE_PENDING_DRAFT_CHILD_AFTER_FRESH_PARENT6521_CHECK",
+  "function_replacements": 4,
+  "helper_creates": 4,
+  "helper_drops": 4,
+  "check_replacements": 11,
+  "inventory_correction": {
+    "file": "/tmp/plm-w23-readiness-db-admission-root-inventory-correction-20261024.json",
+    "status": "ROOT_STATIC_INVENTORY_CORRECTION_ONLY",
+    "existing_function_replacements": [
+      "meta_plm_collaboration_accepted_sync(text,uuid)",
+      "meta_plm_collaboration_preview_guard()",
+      "meta_plm_collaboration_binding_guard()",
+      "meta_plm_collaboration_sync_guard()"
+    ],
+    "existing_function_replacement_count": 4,
+    "new_helpers": 4,
+    "CHECK_replacements": 11,
+    "summary_count_five": "review typo",
+    "runtime": "NOT_RUN"
+  },
+  "r2": {
+    "nonce": "5c255b7b9223467fab5971e57b509bbe",
+    "phase": "GROK47_READINESS_D_R2_EXECUTED_SYNTAX_AND_CONCRETE_SCALAR_FIXTURE_REPAIR",
+    "root_r5": "EXECUTED_PRODUCT_SYNTAX_RED",
+    "root_r5_sqlstate": "42601",
+    "root_r5_detail": "first helper, near FROM, position 352, 0 pass / 4 fail, after config revisions and foundation on PG 16.15",
+    "root_r4": "SETUP_REFUSAL",
+    "repairs": [
+      "pg_catalog.substr boundaries",
+      "nine pg_catalog.to_jsonb(text)::text scalars",
+      "D03 commit binding after lock probes",
+      "D06 four planted fixtures admit before corruption",
+      "D10 statement-anchored skip calls"
+    ],
+    "hold": [
+      "exact predecessor catalog",
+      "canonical record orphan"
+    ],
+    "root_r6": "private Root controls, not edited",
+    "postgresql_by_grok": "NOT_RUN",
+    "vitest_by_grok": "NOT_RUN"
+  },
+  "files": {
+    "packages/core-backend/src/db/migrations/zzzz20261024020000_admit_plm_readiness_snapshots.ts": {
+      "sha256": "e79ff2f106611569c6e27e8a86bcd86ecd8590387db86209b80bc1fff9de7597",
+      "bytes": 111079
+    },
+    "packages/core-backend/tests/integration/plm-collaboration-readiness-snapshot.realdb.test.ts": {
+      "sha256": "6e0ec0b946efbee57003f8590f258cc075e9a7e238de53033f35c921bf6cda3b",
+      "bytes": 105660
+    },
+    "packages/core-backend/vitest.plm-collaboration-snapshot.config.ts": {
+      "sha256": "0060c824bdb524c14a7a1125f283e31f6f769d7ffb5ff36ff7518b425b259793",
+      "bytes": 509
+    },
+    "packages/core-backend/vitest.config.ts": {
+      "sha256": "3e241322ab66f1348e1dcc43e853ae326b50eddfa87ded2d9ec3447d5c63e150",
+      "bytes": 184782
+    },
+    ".github/workflows/plm-bom-listener.yml": {
+      "sha256": "2cbb5f46fd339838d0ce483cf15ce997031bfcd1162335698cb53bcd04021dd3",
+      "bytes": 3684
+    },
+    "docs/development/PLM_W23_READINESS_DB_ADMISSION_DESIGN_VALIDATION_20261024.md": {
+      "sha256": "fa1743068f37c06da6d09c28ed7e81145ee60b7e13e02cd70a25526a824e546f",
+      "bytes": 28533
+    }
+  },
+  "checks": {
+    "tsc": {
+      "cwd": "packages/core-backend",
+      "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+      "typescript": "5.8.3",
+      "exit": 0,
+      "diagnostics": "none",
+      "log": "/tmp/plm-w23-readiness-db-admission-r4-tsc-20261024.log",
+      "log_sha256": "194ff5bca66278888f0f00be5c7ca523d15098ece958b14952533811089f6106",
+      "log_bytes": 7,
+      "log_text": "EXIT:0\n"
+    },
+    "transpile": {
+      "cwd": "packages/core-backend",
+      "command": "typescript createSourceFile parseDiagnostics plus transpileModule reportDiagnostics on the realdb test text",
+      "node": "v24.14.1",
+      "typescript": "5.8.3",
+      "syntactic_diagnostics": 0,
+      "transpile_diagnostics": 0,
+      "imports_executed": false,
+      "log": "/tmp/plm-w23-readiness-db-admission-r4-transpile-20261024.log",
+      "log_sha256": "38491e23f3f81ecc90979baa806e2965ef0750f91a9ab0cdfade028f0e626732",
+      "log_bytes": 78,
+      "shell_exit": 0
+    }
+  },
+  "r3": {
+    "nonce": "b33b16f9ed1149278b37be5df2588b90",
+    "phase": "GROK47_FINITE_EXACT_READINESS_CATALOG_AND_CANONICAL_ORPHAN_REPAIR",
+    "baseline_migration_sha256": "413964f71684c4e914d8445c35856b7bbfdf1292bf8d2e1fae8e033d5dff3e92",
+    "baseline_test_sha256": "4d21d4bc41800d6f0722d1489f9e7dfe1c116765a4707002b5188f92a4750f58",
+    "foundation_inventory_sha256": "1ebc483009ee811206236001d8640233e9a2da7a3dfe1e3bcb6270827ef56c76",
+    "admitted_inventory_sha256": "8e7efcb426621f5c59d20d8fc7429044fdcc7e087fce1c953b1fc5a03596734f",
+    "root_r6": "CHECK(true) and missing meta_plm_collaboration_record_guard accepted by the previous shape",
+    "root_f7": "replica-deleted canonical record, control row 1, canonical 0, down succeeded",
+    "root_f7_manifest_sha256": "58c1966560d59ef3155513a6a6cf9cefd5ac960b492440b701a564d8c8bb1f6a",
+    "repairs": [
+      "finite 14/18 function metadata and kept body hashes",
+      "template $fn$ bodies hashed in SQL",
+      "11 foundation and 11 admitted check definitions",
+      "19 trigger definitions and enabled state",
+      "canonical meta_records id and sheet_id predicate",
+      "meta_records sheet_id prerequisite count 3",
+      "D11 refusal and orphan fixtures"
+    ],
+    "preserved": [
+      "two COALESCE null scalars",
+      "nine to_jsonb scalars",
+      "two marker parentheses",
+      "test relkind::text",
+      "four CREATE OR REPLACE",
+      "four DROP FUNCTION"
+    ],
+    "unallowed_import": "NONE",
+    "unallowed_import_detail": "No tsx, no temporary export, no import or execution of the migration or product modules before or after the interruption.",
+    "template_hash_vs_oracle": "NOT_RUN_HANDOFF_TO_ROOT",
+    "postgresql_by_grok": "NOT_RUN",
+    "vitest_by_grok": "NOT_RUN",
+    "qualification": "UNQUALIFIED"
+  },
+  "r4": {
+    "nonce": "f9d8eea37cc347d5b5ae641e8a12089f",
+    "phase": "GROK_R4_CANONICAL_QUALIFIER_AND_SENTINEL_COLLISION_REPAIR",
+    "baseline_migration_sha256": "8f94c2928b4bfa89784456332bccfcd78f8d36a4595e22501f7b91157527afe5",
+    "baseline_migration_bytes": 109226,
+    "baseline_test_sha256": "b7d2876cca4e77b3fb864ac2605aceb66f26a60cfb0641f120f0b9fe2e712ccb",
+    "baseline_design_sha256": "cd9653d3c3b0e4b46daaa63ef4671c5627811ee9b0f7eee477513c2e24594228",
+    "baseline_verification_sha256": "b7125b2690ab3dd71d8c187ea1255e3055860d681d4278415220c83c830cdd6d",
+    "root_r9": "3 PASS / 4 filtered; closes CHECK(true), missing record_guard trigger, and the positive; not all-7 green",
+    "root_f7_frozen": "1 PASS across 2 cases; closes the missing canonical record with the intact ECO positive",
+    "sentinel_r2": "BAD_ACCEPT_RED",
+    "sentinel_r2_detail": "valid foundation positive passes; a kept record_guard body whose schema qualifiers were replaced by the literal __PLM_SERVING_SCHEMA__. is accepted on up and helpers become 4",
+    "sentinel_manifest_sha256": "665b5fede4c1e2107988cfa185861db68dda19ae1ed721cac66cd59cf574f6ac",
+    "sentinel_evidence_dir": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/readiness-R3-catalog-orphan-green-sentinel-red-20261024",
+    "repair": "Normalize only quote_ident(current_schema()) || '.'. After that qualifier is removed, leftover __PLM_SERVING_SCHEMA__ refuses. Generated bodies use the same rule.",
+    "preserved": [
+      "finite 14/18 body and metadata",
+      "11 checks",
+      "19 triggers",
+      "four helpers",
+      "four replacements",
+      "two COALESCE null scalars",
+      "two marker parentheses",
+      "four is_deferrable aliases",
+      "test relkind::text",
+      "transaction, locks, evidence, and dependency refusals"
+    ],
+    "unallowed_import": "NONE",
+    "template_hash_vs_oracle": "NOT_RUN_HANDOFF_TO_ROOT",
+    "postgresql_by_grok": "NOT_RUN",
+    "vitest_by_grok": "NOT_RUN",
+    "qualification": "UNQUALIFIED",
+    "outside_pins": 5118,
+    "outside_pin_mismatches": 0,
+    "outside_pin_missing": 0,
+    "old49_mismatches": 0,
+    "old49_missing": 0
+  },
+  "root_final": {
+    "at": "2026-10-24T04:16:17.655639+00:00",
+    "actor": "ROOT",
+    "source_base": "3ba3559c27c2887994ad459562df934a6325a6de",
+    "head_semantics": "Top-level head records author preparation base; delivery SOURCE and ONE are recorded in separate closeout.",
+    "qualification": "LOCAL_DB_ADMISSION_SLICE_ONLY",
+    "required_PG": {
+      "counts": {
+        "passed": 51,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "files": {
+        "db_guards": 17,
+        "eco_service": 7,
+        "readiness_D01_D11": 27
+      },
+      "log_sha256": "c2a89867b312c9b39ba8e4ae4175e7af5a4a1300c178363b2dd7747a0ba789fa"
+    },
+    "independent_controls": [
+      {
+        "name": "sentinel-r3",
+        "counts": {
+          "passed": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 6
+        },
+        "log_sha256": "9fb148be5c9380501d6c685ce38cc9ba4b736b5eb32455d49e926a50250ef50d"
+      },
+      {
+        "name": "mixedcase-r1",
+        "counts": {
+          "passed": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "ac3b0b8891660d7fa79fdf529783bf78f546c848cc7f3199373307fd0f71ca79"
+      },
+      {
+        "name": "marker-schema-r1",
+        "counts": {
+          "passed": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "log_sha256": "d9a4bb7b4482fac39554eb40717d048a6ba07bf6de0d8245541048d5e771214b"
+      }
+    ],
+    "missing_url_guard": {
+      "exit": 1,
+      "collected_tests": 0,
+      "JUnit_synthetic_failed_suite_case": 1,
+      "log_sha256": "23dbbd45061d06537939d83065c91f4314b8ea403328622732edc18361744725",
+      "Root_postprocessor_assumption_corrected_without_rerun": true
+    },
+    "caught_minimal_fixture_subscription_warnings": 3,
+    "unhandled_diagnostics": 0,
+    "green_packet": {
+      "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/readiness-D-final-R4-root51-and5-controls-PG-green-20261024",
+      "manifest_sha256": "8ef60c45daa0824b68221af6f40955e1d03fe6402357335069626063f26db169",
+      "files": 32,
+      "migration_sha256": "e79ff2f106611569c6e27e8a86bcd86ecd8590387db86209b80bc1fff9de7597",
+      "test_sha256": "6e0ec0b946efbee57003f8590f258cc075e9a7e238de53033f35c921bf6cda3b"
+    },
+    "review": {
+      "path": "/tmp/plm-w23-readiness-db-admission-r4-astra-review-20261024.json",
+      "sha256": "17016c43db701385d97e7b69e8dfa17a2097ba008b18abca6cdbc6d7c99eb0de",
+      "new_findings": []
+    },
+    "outside5118_and_original49_stable": true,
+    "cleanup": {
+      "nonce": "b2c4b2572ae0435ca0e867d3a7382638",
+      "database_only_own_dropped": true,
+      "cluster_catalog_baseline_restored": true,
+      "active": false,
+      "pg_ctl_status_exit": 3,
+      "PID_absent": true,
+      "no_open_files": true,
+      "copied_runtime_root_and_lock_removed": true,
+      "receipt": "/tmp/plm-w23-eco-persistence-root-pg-20261024-lifecycle-b2c4b2572ae0435ca0e867d3a7382638/cleanup-receipt.json"
+    },
+    "historical_r2_r3_r4_worker_UNQUALIFIED": "Historical worker-only source-preparation state retained; superseded for this local DB slice by actual Root acceptance.",
+    "not_qualified": [
+      "Readiness shared service/routes/UI",
+      "source HTTP",
+      "cross-process browser",
+      "installed package",
+      "new exact-head CI",
+      "Docker/MinIO recovery",
+      "whole master goal"
+    ]
+  }
+}

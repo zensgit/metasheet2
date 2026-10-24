@@ -4,6 +4,7 @@ export default defineConfig({
     include: [
       'tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts',
       'tests/integration/plm-collaboration-snapshot-service.realdb.test.ts',
+      'tests/integration/plm-collaboration-readiness-snapshot.realdb.test.ts',
     ],
     environment: 'node',
     pool: 'forks',
