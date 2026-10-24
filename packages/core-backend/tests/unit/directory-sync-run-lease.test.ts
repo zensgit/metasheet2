@@ -496,9 +496,16 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       dingtalkMocks.getDingTalkDepartmentDetail.mockResolvedValue({ deptManagerUserIdList: [] })
       dingtalkMocks.listDingTalkDepartmentUsers.mockResolvedValue({ users: [], hasMore: false, nextCursor: null })
 
+      const snapshotQuery = vi.fn((sql: string, params?: unknown[]) => pgMocks.query(sql, params))
+      pgMocks.transaction.mockImplementationOnce(
+        async (callback: (client: { query: typeof snapshotQuery }) => Promise<unknown>) => callback({ query: snapshotQuery }),
+      )
+
       const preview = await previewDirectorySyncIntegration('dir-1')
 
       expect(preview.integrationId).toBe('dir-1')
+      expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+      expect(snapshotQuery.mock.calls[0]).toEqual(['SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'])
       // No active run this time — the pull proceeds.
       expect(dingtalkMocks.fetchDingTalkAppAccessToken).toHaveBeenCalled()
     })
