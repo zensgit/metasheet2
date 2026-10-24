@@ -10,7 +10,7 @@ import { resourcePath, validateResourceAck, validateResourceOriginal, validateRe
 import { clone, equal, jsonBytes, type WeldingOwner } from '../src/services/welding/planRecovery'
 import type { ApiFetchOptions } from '../src/utils/api'
 import { EXPLICIT_SESSION_ORG_KEY, beginExplicitSessionOrgChange, installExplicitSessionOrg } from '../src/utils/explicitSessionOrg'
-import { webcrypto } from 'node:crypto'
+import { importCrypto } from './utils/weldingResourceImportFixtures'
 import { importHarness } from './utils/weldingResourceImportHarness'
 
 const owner = { tenant_id: 'tenant', org_id: 'org', auth_user_id: 7, rbac_user_id: 19 }
@@ -84,7 +84,7 @@ afterEach(() => {
 
 describe('single enterprise resource contracts', () => {
   it('mounted bulk import preserves the single-editor form, fixed record, comparison and original through preview, unknown, replay and fixed read', async () => {
-    vi.stubGlobal('crypto', webcrypto); vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.stubGlobal('crypto', importCrypto); vi.spyOn(window, 'confirm').mockReturnValue(true)
     const single = setup(); await single.session.initialize(); await single.session.read('existing', 'existing-v1')
     single.session.state.form.name = 'unsaved editor name'; single.session.compare()
     const original = validateResourcePending({ schema: 'metasheet.welding_command_pending/1', kind: 'resource', owner, action: 'create', resource_id: 'other-resource', source: null,
