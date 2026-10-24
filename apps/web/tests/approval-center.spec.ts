@@ -66,6 +66,10 @@ const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 // B3-03: the filter bar's template dropdown fetches options via listTemplates() on mount.
 const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
 
+// #6524 N0-a: the 考勤审批 entry reads its 「考勤待审 N」 total from the shared pending list query
+// filtered to the attendance workflow (`listApprovals`), never from the rows loaded on the page.
+const listApprovalsSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
+
 // F3-E1: the 导出 CSV button's one call. The view also imports the error class and the client-side
 // "not a CSV" code from the same module to classify a failure, so both are part of this mock; the
 // class is a structural stand-in (the real one's wire behaviour is covered in
@@ -91,6 +95,7 @@ vi.mock('../src/approvals/api', () => ({
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
   resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
+  listApprovals: (...args: unknown[]) => listApprovalsSpy(...args),
   exportApprovalsCsv: (...args: unknown[]) => exportApprovalsCsvSpy(...args),
   ApprovalApiError: MockApprovalApiError,
   APPROVAL_EXPORT_UNEXPECTED_RESPONSE: MOCK_EXPORT_UNEXPECTED_RESPONSE,
@@ -498,6 +503,8 @@ describe('ApprovalCenterView', () => {
     getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
     listTemplatesSpy.mockClear()
     listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalsSpy.mockReset()
+    listApprovalsSpy.mockResolvedValue({ data: [], total: 0 })
     exportApprovalsCsvSpy.mockReset()
     mockRoute.name = 'approval-list'
     mockRoute.query = {}
@@ -760,58 +767,252 @@ describe('ApprovalCenterView', () => {
     expect(getPendingCountSpy).toHaveBeenCalledWith('all')
   })
 
-  it('routes the attendance approval queue entry to the first pending attendance request', async () => {
-    mockPendingApprovals.value = [
-      {
-        id: 'apv_attendance_1',
-        requestNo: 'ATT-100001',
-        title: '补卡申请',
+  // ---------------------------------------------------------------------------
+  // #6524 N0-a — the 考勤审批 entry on 待我处理. It used to look for an attendance row on the page
+  // already loaded and, finding none, route to the attendance module with only the Summary
+  // section — the employee's own request form. The entry now stays in the approval center: it
+  // shows 「考勤待审 N」 from the shared pending query filtered to `workflowKey=attendance.request`
+  // (independent of paging), narrows the center's own pending list to those rows on click, and is
+  // disabled with a written reason when there is nothing to show or the total cannot be read.
+  // Opening a row is unchanged (it still routes to that attendance request).
+  // ---------------------------------------------------------------------------
+  describe('attendance pending entry (#6524 N0-a)', () => {
+    const ATTENDANCE_COUNT_QUERY = {
+      tab: 'pending',
+      sourceSystem: 'all',
+      workflowKey: 'attendance.request',
+      page: 1,
+      pageSize: 1,
+    }
+
+    function attendanceRow(id: string, requestId: string) {
+      return {
+        id,
+        requestNo: `ATT-${id}`,
+        title: '考勤审批 · 漏打上班卡 · 2026-06-08',
         status: 'pending',
         requester: { name: '王五' },
         createdAt: '2026-06-08T08:00:00Z',
         workflowKey: 'attendance.request',
-        formSnapshot: { attendanceRequestId: 'request-att-1' },
+        formSnapshot: { attendanceRequestId: requestId },
         assignments: [],
-      },
-    ]
+      }
+    }
 
-    await mountView()
+    function platformRow(id: string) {
+      return {
+        id,
+        requestNo: `AP-${id}`,
+        title: '采购申请',
+        status: 'pending',
+        requester: { name: '张三' },
+        createdAt: '2026-06-08T08:00:00Z',
+        workflowKey: 'platform.template',
+        assignments: [],
+      }
+    }
 
-    const entry = container!.querySelector('[data-testid="attendance-approval-queue-entry"]')
-    expect(entry?.textContent).toContain('考勤审批')
-    expect(entry?.textContent).toContain('待处理考勤审批')
+    const entry = () => container!.querySelector<HTMLElement>('[data-testid="attendance-approval-queue-entry"]')
+    const filterButton = () => container!.querySelector<HTMLButtonElement>('[data-testid="attendance-approval-queue-filter"]')
+    const reason = () => container!.querySelector<HTMLElement>('[data-testid="attendance-approval-queue-reason"]')
+    const showAllButton = () => container!.querySelector<HTMLButtonElement>('[data-testid="attendance-approval-queue-show-all"]')
+    const activeNote = () => container!.querySelector<HTMLElement>('[data-testid="attendance-approval-queue-active"]')
 
-    const button = Array.from(container!.querySelectorAll('button')).find(candidate =>
-      candidate.textContent?.includes('待处理考勤审批'),
-    )
-    expect(button).toBeTruthy()
+    function attendanceRouteCalls() {
+      return pushSpy.mock.calls.filter((call) => (call[0] as { name?: string } | undefined)?.name === 'attendance')
+    }
 
-    button!.click()
-    await flushUi()
+    it('reads 考勤待审 N from the attendance-filtered pending query, not from the rows on the page', async () => {
+      // The loaded page holds no attendance row at all; the server total says 7.
+      mockPendingApprovals.value = [platformRow('apv_p1'), platformRow('apv_p2')]
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 7 })
 
-    expect(pushSpy).toHaveBeenCalledWith({
-      name: 'attendance',
-      query: {
-        section: 'attendance-overview-requests',
-        requestId: 'request-att-1',
-      },
+      await mountView()
+      await flushUi()
+
+      expect(listApprovalsSpy).toHaveBeenCalledWith(ATTENDANCE_COUNT_QUERY)
+      expect(filterButton(), 'the 考勤待审 button renders').toBeTruthy()
+      expect(filterButton()!.textContent).toContain('考勤待审 7')
+      expect(filterButton()!.disabled).toBe(false)
     })
-  })
 
-  it('keeps the attendance approval queue entry fallback when no request id is available', async () => {
-    await mountView()
+    it('counts beyond the loaded page: two attendance rows on screen, twelve pending in total', async () => {
+      mockPendingApprovals.value = [attendanceRow('apv_a1', 'req-a1'), attendanceRow('apv_a2', 'req-a2')]
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 12 })
 
-    const button = Array.from(container!.querySelectorAll('button')).find(candidate =>
-      candidate.textContent?.includes('待处理考勤审批'),
-    )
-    expect(button).toBeTruthy()
+      await mountView()
+      await flushUi()
 
-    button!.click()
-    await flushUi()
+      expect(filterButton()!.textContent).toContain('考勤待审 12')
+    })
 
-    expect(pushSpy).toHaveBeenCalledWith({
-      name: 'attendance',
-      query: { section: 'attendance-overview-requests' },
+    it('never routes to the attendance module (no request form), even with an attendance row on the page', async () => {
+      mockPendingApprovals.value = [attendanceRow('apv_a1', 'req-a1')]
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 3 })
+
+      await mountView()
+      await flushUi()
+      // A non-default filter first: entering the attendance view resets it so the rows shown are
+      // exactly the ones counted.
+      const source = container!.querySelector('[data-testid="approval-source-filter"]') as HTMLSelectElement
+      source.value = 'platform'
+      source.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      loadPendingSpy.mockClear()
+      pushSpy.mockClear()
+      filterButton()!.click()
+      await flushUi()
+
+      expect(pushSpy).not.toHaveBeenCalled()
+      expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        workflowKey: 'attendance.request',
+        sourceSystem: 'all',
+        page: 1,
+      }))
+      expect(activeNote()?.textContent).toContain('只看考勤待审')
+      expect(activeNote()?.textContent).toContain('3')
+    })
+
+    it('never routes to the attendance module when the page has no attendance row (the reported case)', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 1 })
+
+      await mountView()
+      await flushUi()
+      pushSpy.mockClear()
+      filterButton()!.click()
+      await flushUi()
+
+      expect(attendanceRouteCalls()).toHaveLength(0)
+      expect(pushSpy).not.toHaveBeenCalled()
+    })
+
+    it('show-all leaves the attendance view and reloads the unfiltered pending list', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 2 })
+
+      await mountView()
+      await flushUi()
+      filterButton()!.click()
+      await flushUi()
+      expect(showAllButton(), 'show-all renders while the attendance view is on').toBeTruthy()
+
+      loadPendingSpy.mockClear()
+      showAllButton()!.click()
+      await flushUi()
+
+      expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+      expect(loadPendingSpy.mock.lastCall?.[0]).not.toHaveProperty('workflowKey')
+      expect(showAllButton()).toBeNull()
+      expect(filterButton()).toBeTruthy()
+    })
+
+    it('switching tabs leaves the attendance view', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 2 })
+
+      await mountView()
+      await flushUi()
+      filterButton()!.click()
+      await flushUi()
+
+      ;(container!.querySelector('[data-testid="test-switch-tab-mine"]') as HTMLButtonElement).click()
+      await flushUi()
+      loadPendingSpy.mockClear()
+      ;(container!.querySelector('[data-testid="test-switch-tab-pending"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+      expect(loadPendingSpy.mock.lastCall?.[0]).not.toHaveProperty('workflowKey')
+    })
+
+    it('nothing pending: the button is disabled and says why', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [], total: 0 })
+
+      await mountView()
+      await flushUi()
+
+      expect(filterButton()!.textContent).toContain('考勤待审 0')
+      expect(filterButton()!.disabled).toBe(true)
+      expect(reason()?.textContent).toContain('目前没有轮到你审批的考勤申请')
+
+      loadPendingSpy.mockClear()
+      pushSpy.mockClear()
+      filterButton()!.click()
+      await flushUi()
+      expect(pushSpy).not.toHaveBeenCalled()
+      expect(loadPendingSpy).not.toHaveBeenCalled()
+    })
+
+    it('total not readable (e.g. refused): disabled with a reason, no number, no route', async () => {
+      listApprovalsSpy.mockRejectedValue(new Error('API error: 403'))
+
+      await mountView()
+      await flushUi()
+
+      expect(filterButton()!.disabled).toBe(true)
+      expect(reason()?.textContent).toContain('暂时无法获取考勤待审数量')
+      expect(entry()!.textContent).not.toMatch(/考勤待审 \d/)
+
+      pushSpy.mockClear()
+      filterButton()!.click()
+      await flushUi()
+      expect(pushSpy).not.toHaveBeenCalled()
+    })
+
+    it('while the total is loading the button is disabled and says so', async () => {
+      listApprovalsSpy.mockReturnValue(new Promise(() => {}))
+
+      await mountView()
+      await flushUi()
+
+      expect(filterButton()!.disabled).toBe(true)
+      expect(reason()?.textContent).toContain('正在获取考勤待审数量')
+    })
+
+    it('banner tells the truth: attendance requests are already in 待我处理 (zh)', async () => {
+      await mountView()
+      const text = entry()!.textContent ?? ''
+      expect(text).toContain('考勤审批')
+      expect(text).toContain('「待我处理」已包含轮到你审批的考勤申请')
+      expect(text).not.toContain('不计入')
+      expect(text).not.toContain('待处理考勤审批')
+    })
+
+    it('banner and button copy follow the UI locale (en)', async () => {
+      useLocale().setLocale('en')
+      listApprovalsSpy.mockResolvedValue({ data: [], total: 0 })
+
+      await mountView()
+      await flushUi()
+
+      const text = entry()!.textContent ?? ''
+      expect(text).toContain('Attendance approvals')
+      expect(text).toContain('already includes attendance requests waiting for your approval')
+      expect(text).not.toContain('are not counted')
+      expect(filterButton()!.textContent).toContain('Attendance pending 0')
+      expect(reason()?.textContent).toContain('No attendance requests are waiting for your approval')
+      expect(text).not.toMatch(/[一-鿿]/)
+    })
+
+    // Non-regression guard (green before and after N0-a): opening an attendance row keeps the
+    // existing route into that attendance request.
+    it('opening an attendance row still routes to that attendance request (unchanged)', async () => {
+      mockPendingApprovals.value = [attendanceRow('apv_a1', 'req-a1')]
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 1 })
+
+      await mountView()
+      await flushUi()
+      pushSpy.mockClear()
+      ;(container!.querySelector('[data-el-row="apv_a1"]') as HTMLElement).click()
+      await flushUi()
+
+      expect(pushSpy).toHaveBeenCalledWith({
+        name: 'attendance',
+        query: {
+          section: 'attendance-overview-requests',
+          requestId: 'req-a1',
+        },
+      })
     })
   })
 
