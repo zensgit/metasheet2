@@ -121,24 +121,12 @@ export interface AttendanceScheduledRunSweepTickResultV1 {
    *    and there is more than one known mechanism (this list is not claimed closed):
    *     1. A held row lock excludes the row from `FOR UPDATE SKIP LOCKED` on every subsequent
    *        scan (the discriminating-leg fixture above constructs exactly this case).
-   *     2. Sustained NULLS-FIRST arrival starvation, WITH NO LOCK HELD AT ALL: the scan's own
-   *        `ORDER BY last_attempt_at ASC NULLS FIRST` (`w4c2-scheduled-run.ts`'s scan docstring:
-   *        "keeps never-attempted rows — including brand-new ones — ahead of anything already
-   *        attempted") means a sustained stream of brand-new `running` rows preempts an
-   *        already-stamped row for every scan slot, indefinitely. Empirically reproduced at the
-   *        production default `limit=25` (owner-review P2 on #4779, 2026-08-05): with a flat
-   *        backlog and >=25 fresh never-attempted arrivals injected before each tick, a
-   *        previously-stamped victim row's `last_attempt_at` freezes at its one scan while
-   *        `scanned`/`backlogRemaining`/`neverAttemptedRunning` all stay flat — the IDENTICAL
-   *        stuck signature this field exists to surface, produced with no lock anywhere.
-   *    An earlier version of this comment claimed the `NULLS FIRST` rotation "guarantees every
-   *    row is eventually re-selected" in the congested-healthy regime, and attributed
-   *    UNBOUNDED-GROWTH solely to a held lock. RETRACTED (owner-review, fresh-gate pass,
-   *    2026-08-05) — both claims are false and contradict `w4c2-scheduled-run.ts`'s own scan
-   *    docstring, which mechanism 2 above exploits directly. Do NOT use "no lock found" to
-   *    dismiss a climbing reading. Eliminating mechanism 2 (e.g. guaranteeing every row is
-   *    re-selected within some bounded number of ticks) is a candidate fix to #4774's rotation —
-   *    tracked as an owner-deferred #4770 follow-up, OUT OF SCOPE for this field and this PR.
+   *     2. A growing or older-priority backlog, even with no held lock. Queue age now uses
+   *        creation time before the first scan and the last attempt thereafter (#4770,
+   *        owner-authorized 2026-10-24), removing absolute priority for every fresh arrival.
+   *        This does not bound backlog size or guarantee a fixed retry interval: older/equal
+   *        timestamps and database-clock changes remain relevant. Do not use "no lock found"
+   *        to dismiss a climbing reading or infer the cause from this counter alone.
    * `neverAttemptedRunning`'s own doc comment enumerates two regimes (steady state / congested)
    * for ITS OWN reading, not three — that pair is about whether IT reaches zero; this field's own
    * three-way split above is about whether IT plateaus or keeps climbing. Do not conflate the two
