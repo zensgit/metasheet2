@@ -62,6 +62,11 @@
 //         positions, one shared child claim of each kind, every record with one old key re-keyed, every key with
 //         one old record replaced (each half of the rule pinned on its own); all refused before the bump and any
 //         write. Only the full takeover (every old row and key, another parent) supersedes.
+//   ST-17 THE REVIEWER'S ANCESTOR COUNTEREXAMPLE (review round 2): an independent P-001 subtree inserted beside the
+//         confirmed relationship; over the FULL sheet and the current projection the REAL planner emits a five-member
+//         ancestor candidate — 0 old-row overlap, 4 new-position overlap. Superseding with it is
+//         `supersedes_incomplete` { 4, 4 }, deliberately not `supersedes_unrelated` (related through the positions,
+//         a takeover of none of the rows); the next plan, pilot on and off, leaves the four old rows alone.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -72,6 +77,7 @@ const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store
 const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
 const { readProjectRefreshState } = require(path.join(LIB, 'stock-preparation-refresh-state.cjs'))
 const { sheetWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+const { plannerSlice } = require(path.join(LIB, 'stock-preparation-refresh-governance.cjs'))
 
 const {
   REFRESH_STORE_TABLES: T,
@@ -1117,6 +1123,59 @@ test('ST-16 supersede admissibility (review X-3 + round 2, design §8.4): a cand
   assert.equal(v.db.rows(T.continuation).filter((row) => row.claim_active).length, 1)
   assert.deepEqual(liveMembers.map((row) => row.old_record_id).sort(), v.hold.detail.pairs.map((pair) => pair.oldRecordId).sort(), 'every old row is still claimed — by the replacing relationship')
   assert.deepEqual(liveMembers.map((row) => row.old_key_digest).sort(), v.hold.detail.pairs.map((pair) => storeModule.keyDigest(pair.oldKey)).sort(), 'and still protected by its old key')
+})
+
+// ── ST-17 the reviewer's ANCESTOR counterexample (review round 2) ────────────────────────────────
+
+test('ST-17 the reviewer\'s ANCESTOR counterexample (review round 2): over the FULL sheet and the current projection the REAL planner emits a five-member ancestor candidate — 0 of the relationship\'s old rows, 4 of its new positions; superseding with it is 409 supersedes_incomplete { uncoveredOldRecords: 4, uncoveredOldKeys: 4 }, deliberately NOT supersedes_unrelated (it shares the relationship\'s positions, so it is related, but takes over none of its rows); refused before the bump and any write; the next plan, pilot on and off, leaves the four old rows alone', async () => {
+  const w = await world()
+  const { store, db, bump, scope } = w
+  const scenario = await kit.ancestorScenario()
+  const F = scenario.fixtures
+  const sheet = w.fixture.sheet
+  const demandEvidence = scenario.expansion.demandEvidence
+  // The relationship: the four first-pull rows paired with S-001 nested under Q-001 > P-001 (the real planner).
+  const original = F.plan(scenario.expansion, sheet, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry) => entry.kind === 'continuation_candidate')
+  assert.ok(original, 'the real planner pairs the old subtree with its nested position')
+  assert.equal(original.detail.pairs.length, 4)
+  await seedHolds(w, [original])
+  const first = await confirmHold(w, original)
+  // The FULL current sheet (the four old rows + the five inserted independent rows) and the CURRENT projection.
+  const rows = await store.readGovernanceRows(scope)
+  const slice = plannerSlice({ ok: true, continuations: rows.continuations.map((entry) => ({ ...entry, memberCount: rows.members.filter((member) => member.continuationId === entry.id).length })), members: rows.members })
+  const complete = sheet.concat(scenario.independentRows)
+  const replacement = F.plan(scenario.expansion, complete, { continuation: F.continuationInput({ pilot: true, demandEvidence, ...slice }) })
+  const candidate = replacement.holds.find((entry) => entry.kind === 'continuation_candidate')
+  assert.ok(candidate, 'the real planner emits the ancestor candidate over the full sheet and current projection')
+  assert.equal(candidate.detail.pairs.length, 5)
+  const oldRecordIds = new Set(original.detail.pairs.map((pair) => pair.oldRecordId))
+  const oldNewKeys = new Set(original.detail.pairs.map((pair) => pair.newKey))
+  assert.equal(candidate.detail.pairs.filter((pair) => oldRecordIds.has(pair.oldRecordId)).length, 0, '0 old-row overlap')
+  assert.equal(candidate.detail.pairs.filter((pair) => oldNewKeys.has(pair.newKey)).length, 4, '4 new-position overlap')
+  // The reason is DELIBERATE: related (it shares the relationship's new positions) but not a takeover (none of its rows).
+  const header = db.rows(T.continuation).find((row) => row.id === first.continuationId)
+  const members = db.rows(T.member).filter((row) => row.continuation_id === first.continuationId)
+  const candidateMembers = candidate.detail.pairs.map((pair) => ({ oldRecordId: pair.oldRecordId, oldKey: pair.oldKey, newKey: pair.newKey }))
+  assert.equal(storeModule.__internals.claimsOverlap(header, members, candidateMembers), true, 'related: it shares the relationship\'s new positions')
+  assert.deepEqual(storeModule.__internals.takeoverGaps(header, members, candidateMembers), { uncoveredOldRecords: 4, uncoveredOldKeys: 4 }, 'but takes over none of its rows')
+  await seedHolds(w, [candidate], { decisionVersionObserved: 1 })
+  const before = tablesSnapshot(db)
+  const bumpsBefore = bump.calls.length
+  db.log.length = 0
+  const refused = await expectError(confirmHold(w, candidate, { input: { supersedes: { continuationId: first.continuationId, revision: 1 } } }), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'supersedes_incomplete' })
+  assert.deepEqual(refused.details, { reason: 'supersedes_incomplete', outcome: 'superseded_by_new_confirmation', uncoveredOldRecords: 4, uncoveredOldKeys: 4 })
+  assertValuesFree(refused)
+  assert.deepEqual(statementsOf(db), ['trx.selectOneForUpdate:refresh_state', 'trx.selectOne:refresh_hold', 'trx.selectOneForUpdate:continuation', 'trx.select:continuation_member'])
+  assert.equal(db.log[db.log.length - 1][0], 'rollback')
+  assert.equal(bump.calls.length, bumpsBefore, 'no bump')
+  assert.equal(tablesSnapshot(db), before, 'nothing persisted: the relationship keeps all four claims')
+  // The relationship still protects its rows: the next plan over the full sheet, pilot ON and OFF, writes none of them.
+  const oldKeys = new Set(sheet.map((row) => row.idempotencyKey))
+  for (const pilot of [true, false]) {
+    const next = F.plan(scenario.expansion, complete, { continuation: F.continuationInput({ pilot, demandEvidence, ...slice }) })
+    const touched = next.decisions.filter((decision) => oldKeys.has(decision.idempotencyKey) && ['add', 'update', 'inactive'].includes(decision.decision))
+    assert.deepEqual(touched.map((decision) => decision.decision), [], `pilot ${pilot}: no write to the four old rows`)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-continuation-store.test.cjs', tests)

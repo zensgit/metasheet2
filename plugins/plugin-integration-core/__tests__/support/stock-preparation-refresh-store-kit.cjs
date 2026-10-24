@@ -713,6 +713,25 @@ async function partialTakeoverCandidate({ idPrefix = 'rec_independent_a' } = {})
 }
 
 /**
+ * Review round 2: the reviewer's ANCESTOR counterexample, as REAL-planner inputs. The source orders Q-001 > P-001 >
+ * S-001 > {PART-A > PART-C, PART-B}, so the canonical first-pull sheet's four rows pair with the S-001 subtree NESTED
+ * under Q-001 > P-001 (the relationship). An independent P-001 order (P-001 > S-001 > …, five rows) is then written
+ * beside them — the synthetic step: inserted after the confirm, not produced by a pull. Planned over the FULL nine-row
+ * sheet and the current projection, the planner emits a five-member ANCESTOR candidate rooted at P-001: zero of the
+ * relationship's old rows, four of its new positions. Returns the expansion, the independent rows (record refs under
+ * `idPrefix`) and the fixtures module.
+ */
+async function ancestorScenario({ idPrefix = 'rec_independent_p' } = {}) {
+  const base = await candidateHoldFixture()
+  const F = base.fixtures
+  const outer = F.part('Q-001', 'Q800', 'Synthetic outer parent')
+  const expansion = await F.expand(F.project({ orders: [{ part: 'Q-001', qty: 5 }], parts: [...F.PARTS, outer], boms: { 'Q-001': [{ part: 'P-001', usage: 1 }], 'P-001': [{ part: 'S-001', usage: 2 }], ...F.S_BOMS } }))
+  const independent = await F.expand(F.project({ orders: [{ part: 'P-001', qty: 5 }], parts: F.PARTS.slice(), boms: { 'P-001': [{ part: 'S-001', usage: 2 }], ...F.S_BOMS } }))
+  const independentRows = F.applyToSheet(F.plan(independent, []), [], { idPrefix })
+  return Object.freeze({ expansion, independentRows, fixtures: F })
+}
+
+/**
  * A FULL-RECORD takeover with one old key re-keyed: every old record id of `base` (same rows, re-rooted under another
  * parent like `competingCandidateHold`) but ONE child's old key replaced by a fresh one — a covered record whose key
  * the replacement would not protect. Review round 2: a takeover must cover the old keys too (the planner's sweep
@@ -831,6 +850,7 @@ module.exports = {
   REGISTRY_TABLE,
   SHAPE_CHECKS,
   UNIQUE_INDEXES,
+  ancestorScenario,
   candidateHoldFixture,
   clone,
   competingCandidateHold,

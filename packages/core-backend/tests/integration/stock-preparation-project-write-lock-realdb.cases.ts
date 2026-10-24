@@ -1878,7 +1878,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     //    complete; S2-10 (X-2) the end admissibility; S2-11 (X-3) the supersede relatedness. Review round 2 adds
     //    S2-12: a PARTIAL takeover cannot supersede — the reviewer's real-planner shape, refused with every row
     //    unchanged, and after a pilot exit the real planner and the REAL host writer still leave all four old rows
-    //    alone; a full takeover supersedes and keeps them protected.
+    //    alone; a full takeover supersedes and keeps them protected. S2-13: the reviewer's ANCESTOR counterexample —
+    //    an independent subtree inserted beside the relationship (a synthetic starting state), the real planner's
+    //    candidate over the full sheet and current projection (0 old rows, 4 new positions) refused; the next pull,
+    //    pilot on and off, the real host writer and the third pull never write the four old rows.
     //    Cases are prefixed S2- (PR-0 / PR B own D17-D21, the pre-enable hardening H-01 / H-02). Every value is
     //    synthetic and per-run.
     describe('S2 continuation / refresh-state stores + governance reader (real Postgres, migrations 102 / 103)', () => {
@@ -2686,6 +2689,104 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           oldRowWrites: [],
         })
       }, 90000)
+
+      test('S2-13 (review round 2, the reviewer\'s ANCESTOR counterexample) on a real sheet: an independent P-001 subtree inserted beside the confirmed relationship; over the FULL sheet and the current projection the REAL planner emits a five-member ancestor candidate (0 old rows, 4 new positions); the supersede is refused 409 supersedes_incomplete (uncoveredOldRecords 4) with every step-4 row and the lock row byte-identical; the next pull with the pilot ON (the real writer refuses the suspended plan) and OFF (the real writer applies it), and the third pull over the rows the host now holds, never write the four old rows', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const scenario = await refreshKit.ancestorScenario({ idPrefix: 's2_13_independent_p' })
+        const F = scenario.fixtures
+        const demandEvidence = scenario.expansion.demandEvidence
+        const RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+        const writesTouching = (planned: any, keys: Set<string>) => planned.decisions
+          .filter((decision: any) => keys.has(decision.idempotencyKey) && ['add', 'update', 'inactive'].includes(decision.decision))
+          .map((decision: any) => decision.decision)
+        const planWith = (rows: any[], consult: any, pilot: boolean) => F.plan(scenario.expansion, rows, { continuation: F.continuationInput({ pilot, demandEvidence, ...governanceModule.plannerSlice(consult) }) })
+        const writer = require(path.join(PLUGIN_LIB, 'stock-preparation-apply-writer.cjs'))
+        const writeLock = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+        // One observed table, asserted once (a regression shows the reviewer's whole outcome).
+        const observed: Record<string, unknown> = {}
+        const sb = await sandboxSheet('s2_13')
+        try {
+          const scope = { tenantId: tenantFor('s2_13'), sheetId: sb.sheetId, projectNo: fixture.projectNo }
+          const fields = sb.target.fieldIdMap
+          const seedRows = async (rows: any[]) => {
+            const out: any[] = []
+            for (const row of rows) {
+              const data = Object.fromEntries(Object.entries(row).map(([name, value]) => [fields[name] || name, value]))
+              const record = await sb.multitable.records.createRecord({ sheetId: sb.sheetId, data })
+              out.push(F.withRecordRef(row, record.id, record.version))
+            }
+            return out
+          }
+          const applyThroughHost = async (planned: any, runId: string) => {
+            const outcome = await settle(writeLock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId }, (guard: any) => writer.applyStockPreparationPlan({ permission: 'write', plan: planned, target: sb.target, recordsApi: sb.multitable.records, writeFence: guard, writeFenceRequired: true })))
+            if (outcome.ok) return String((outcome as any).value.status)
+            const error = (outcome as any).error
+            return String(error && (error.code === 'plan_suspended' || (error.details && error.details.code === 'plan_suspended')) ? 'plan_suspended' : `threw ${error && error.code}`)
+          }
+          await registerProject(scope, { pilot: true })
+          const oldRows = await seedRows(fixture.sheet)
+          const oldKeys = new Set<string>(oldRows.map((row: any) => row.idempotencyKey))
+          const oldIds = oldRows.map((row: any) => row[RECORD_REF].id)
+          const oldRowsNow = async () => (await q('SELECT id, version, data FROM meta_records WHERE id = ANY($1::text[]) ORDER BY id', [oldIds])).rows
+          const changedSince = (before: any[], after: any[]) => after.filter((row: any, index: number) => JSON.stringify(row) !== JSON.stringify(before[index])).length
+          // The relationship: the real planner pairs the four old rows with S-001 nested under Q-001 > P-001.
+          const original = F.plan(scenario.expansion, oldRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const idOf = await seedOpenHolds(storeA, scope, [original])
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin })
+          // The reviewer's SYNTHETIC step: five independent P-001 rows written to the same sheet after the confirm.
+          const independentRows = await seedRows(scenario.independentRows)
+          const complete = oldRows.concat(independentRows)
+          // The real planner over the FULL sheet and the CURRENT projection (the real consult) emits the ancestor candidate.
+          const consult0 = await pilotReaderOn().consult(scope)
+          const candidate = planWith(complete, consult0, true).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const oldRecordIds = new Set<string>(original.detail.pairs.map((pair: any) => pair.oldRecordId))
+          const oldNewKeys = new Set<string>(original.detail.pairs.map((pair: any) => pair.newKey))
+          observed.sheetRows = complete.length
+          observed.candidate = candidate ? {
+            members: candidate.detail.pairs.length,
+            oldRecordOverlap: candidate.detail.pairs.filter((pair: any) => oldRecordIds.has(pair.oldRecordId)).length,
+            newPositionOverlap: candidate.detail.pairs.filter((pair: any) => oldNewKeys.has(pair.newKey)).length,
+          } : null
+          const idOf2 = await seedOpenHolds(storeA, scope, [candidate], consult0.decisionVersionObserved)
+          // (a) the supersede.
+          const before = await sheetFingerprint(scope.sheetId)
+          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(candidate), candidate, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin }))
+          observed.supersede = supersede.ok ? 'admitted' : `${(supersede as any).error.code}:${(supersede as any).error.details.reason}`
+          observed.supersedeDetails = supersede.ok ? null : (supersede as any).error.details
+          observed.stepFourRowsAndLockRowUnchanged = (await sheetFingerprint(scope.sheetId)) === before
+          // (b) the next pull with the pilot ON, then (pilot exit) OFF — the real planner over the persisted state, the real host writer.
+          const nextOn = planWith(complete, await pilotReaderOn().consult(scope), true)
+          let rowsBefore = await oldRowsNow()
+          observed.nextPilotOn = { suspended: nextOn.suspended === true, oldRowWrites: writesTouching(nextOn, oldKeys), writer: await applyThroughHost(nextOn, 's2_13_on'), oldRowsChangedByWriter: changedSince(rowsBefore, await oldRowsNow()) }
+          await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE id = $1', [`pt_${scope.sheetId}`])
+          const consultOff = await pilotReaderOn().consult(scope)
+          const nextOff = planWith(complete, consultOff, false)
+          rowsBefore = await oldRowsNow()
+          observed.nextPilotOff = { pilot: consultOff.pilot ? consultOff.pilot.enabled : null, suspended: nextOff.suspended === true, oldRowWrites: writesTouching(nextOff, oldKeys), writer: await applyThroughHost(nextOff, 's2_13_off'), oldRowsChangedByWriter: changedSince(rowsBefore, await oldRowsNow()) }
+          // (c) the third pull over the sheet AS THE HOST NOW HOLDS IT (read back through the real reader), pilot on and off.
+          const landed = await tableActions.__internals.readExistingStockPreparationRows(sb.multitable.records, sb.target, scope.projectNo)
+          const consult3 = await pilotReaderOn().consult(scope)
+          observed.thirdPull = {
+            pilotOn: writesTouching(planWith(landed, consult3, true), oldKeys),
+            pilotOff: writesTouching(planWith(landed, consult3, false), oldKeys),
+            oldRowsStillActive: (await oldRowsNow()).filter((row: any) => row.data[fields.active || 'active'] !== false).length,
+          }
+        } finally {
+          await dropSheet(sb.sheetId)
+        }
+        console.log(`[S2-13] ancestor ${JSON.stringify(observed)}`)
+        expect(observed).toEqual({
+          sheetRows: 9,
+          candidate: { members: 5, oldRecordOverlap: 0, newPositionOverlap: 4 },
+          supersede: `${RC.END_OUTCOME_NOT_ADMISSIBLE}:supersedes_incomplete`,
+          supersedeDetails: { reason: 'supersedes_incomplete', outcome: 'superseded_by_new_confirmation', uncoveredOldRecords: 4, uncoveredOldKeys: 4 },
+          stepFourRowsAndLockRowUnchanged: true,
+          nextPilotOn: { suspended: true, oldRowWrites: [], writer: 'plan_suspended', oldRowsChangedByWriter: 0 },
+          nextPilotOff: { pilot: false, suspended: false, oldRowWrites: [], writer: 'succeeded', oldRowsChangedByWriter: 0 },
+          thirdPull: { pilotOn: [], pilotOff: [], oldRowsStillActive: 4 },
+        })
+      }, 120000)
     })
   })
 }
