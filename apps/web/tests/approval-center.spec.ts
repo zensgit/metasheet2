@@ -814,6 +814,10 @@ describe('ApprovalCenterView', () => {
 
     const entry = () => container!.querySelector<HTMLElement>('[data-testid="attendance-approval-queue-entry"]')
     const filterButton = () => container!.querySelector<HTMLButtonElement>('[data-testid="attendance-approval-queue-filter"]')
+    // The entry's own button, found without the new test id, so the routing / disabled assertions
+    // below fail on the old entry for the behaviour itself (it routed and was always enabled),
+    // not merely because a selector is missing.
+    const entryButton = () => entry()!.querySelector<HTMLButtonElement>('button')!
     const reason = () => container!.querySelector<HTMLElement>('[data-testid="attendance-approval-queue-reason"]')
     const showAllButton = () => container!.querySelector<HTMLButtonElement>('[data-testid="attendance-approval-queue-show-all"]')
     const activeNote = () => container!.querySelector<HTMLElement>('[data-testid="attendance-approval-queue-active"]')
@@ -861,7 +865,7 @@ describe('ApprovalCenterView', () => {
 
       loadPendingSpy.mockClear()
       pushSpy.mockClear()
-      filterButton()!.click()
+      entryButton().click()
       await flushUi()
 
       expect(pushSpy).not.toHaveBeenCalled()
@@ -881,7 +885,7 @@ describe('ApprovalCenterView', () => {
       await mountView()
       await flushUi()
       pushSpy.mockClear()
-      filterButton()!.click()
+      entryButton().click()
       await flushUi()
 
       expect(attendanceRouteCalls()).toHaveLength(0)
@@ -931,13 +935,13 @@ describe('ApprovalCenterView', () => {
       await mountView()
       await flushUi()
 
-      expect(filterButton()!.textContent).toContain('考勤待审 0')
-      expect(filterButton()!.disabled).toBe(true)
+      expect(entryButton().disabled).toBe(true)
+      expect(entryButton().textContent).toContain('考勤待审 0')
       expect(reason()?.textContent).toContain('目前没有轮到你审批的考勤申请')
 
       loadPendingSpy.mockClear()
       pushSpy.mockClear()
-      filterButton()!.click()
+      entryButton().click()
       await flushUi()
       expect(pushSpy).not.toHaveBeenCalled()
       expect(loadPendingSpy).not.toHaveBeenCalled()
@@ -949,12 +953,12 @@ describe('ApprovalCenterView', () => {
       await mountView()
       await flushUi()
 
-      expect(filterButton()!.disabled).toBe(true)
+      expect(entryButton().disabled).toBe(true)
       expect(reason()?.textContent).toContain('暂时无法获取考勤待审数量')
       expect(entry()!.textContent).not.toMatch(/考勤待审 \d/)
 
       pushSpy.mockClear()
-      filterButton()!.click()
+      entryButton().click()
       await flushUi()
       expect(pushSpy).not.toHaveBeenCalled()
     })
@@ -965,7 +969,7 @@ describe('ApprovalCenterView', () => {
       await mountView()
       await flushUi()
 
-      expect(filterButton()!.disabled).toBe(true)
+      expect(entryButton().disabled).toBe(true)
       expect(reason()?.textContent).toContain('正在获取考勤待审数量')
     })
 
