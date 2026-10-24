@@ -14,6 +14,10 @@ const require = createRequire(import.meta.url)
 const configServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs') as {
   ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED: string
   createAttendanceGroupFixedScheduleConfigService(input: Record<string, unknown>): {
+    upsertConfig(
+      trx: { query(text: string, values?: unknown[]): Promise<Array<Record<string, unknown>>> },
+      input: Record<string, unknown>,
+    ): Promise<{ shiftId: string; revision: number; updatedAt: unknown }>
     resolveConfigForApplyRebuild(
       trx: { query(text: string, values?: unknown[]): Promise<Array<Record<string, unknown>>> },
       input: Record<string, unknown>,
@@ -222,5 +226,84 @@ describeDb('FSER-3 apply/rebuild config consumption (real DB)', () => {
     )
     expect(stored.rows).toHaveLength(1)
     expect(stored.rows[0].effect_shift).toBe(stored.rows[0].config_shift)
+  })
+
+  async function save(desired: Record<string, unknown>, barrier?: ReturnType<typeof createFirstReadBarrier>) {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const result = await service.upsertConfig(transactionClient(client, barrier), desired)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async function storedConfig() {
+    return (await pool.query('SELECT * FROM attendance_group_fixed_schedule_configs')).rows
+  }
+
+  it('saves an absent config, preserves no-op revision, then updates values with the current revision', async () => {
+    const first = await save({ ...candidate(), expectedConfigRevision: 0 })
+    expect(first.revision).toBe(1)
+    const beforeNoOp = await storedConfig()
+    const same = await save({ ...candidate(), updatedBy: 'another-admin', expectedConfigRevision: 1 })
+    expect(same.revision).toBe(1)
+    expect(same.updatedAt).toEqual(first.updatedAt)
+    expect(await storedConfig()).toEqual(beforeNoOp)
+    const changed = await save({ ...candidate(shiftB), expectedConfigRevision: 1 })
+    expect(changed).toMatchObject({ shiftId: shiftB, revision: 2 })
+    expect(await counts()).toEqual({ configs: 1, effects: 0 })
+  })
+
+  it('rejects an absent positive-revision save and stale existing saves without changing any stored field', async () => {
+    await expect(save({ ...candidate(), expectedConfigRevision: 1 }))
+      .rejects.toMatchObject({ status: 409, code: configServiceLib.ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED })
+    expect(await counts()).toEqual({ configs: 0, effects: 0 })
+    await save({ ...candidate(), expectedConfigRevision: 0 })
+    const before = await storedConfig()
+    for (const expectedConfigRevision of [0, 2]) {
+      await expect(save({ ...candidate(shiftB), expectedConfigRevision }))
+        .rejects.toMatchObject({ status: 409, code: configServiceLib.ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED })
+      expect(await storedConfig()).toEqual(before)
+    }
+  })
+
+  it('allows exactly one concurrent expect-absent save and never overwrites the winning candidate', async () => {
+    const barrier = createFirstReadBarrier(2)
+    const results = await Promise.allSettled([
+      save({ ...candidate(), expectedConfigRevision: 0 }, barrier),
+      save({ ...candidate(shiftB), expectedConfigRevision: 0 }, barrier),
+    ])
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 409, code: configServiceLib.ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED } })
+    const winner = results.find(result => result.status === 'fulfilled')
+    const rows = await storedConfig()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].shift_id).toBe(winner?.status === 'fulfilled' ? winner.value.shiftId : null)
+    expect(Number(rows[0].revision)).toBe(1)
+    expect(await counts()).toEqual({ configs: 1, effects: 0 })
+  })
+
+  it('rejects one concurrent stale update after a single revision advance', async () => {
+    await save({ ...candidate(), expectedConfigRevision: 0 })
+    const results = await Promise.allSettled([
+      save({ ...candidate(shiftB), expectedConfigRevision: 1 }),
+      save({ ...candidate(), endDate: '2026-09-30', expectedConfigRevision: 1 }),
+    ])
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 409 } })
+    expect(Number((await storedConfig())[0].revision)).toBe(2)
+    expect(await counts()).toEqual({ configs: 1, effects: 0 })
+  })
+
+  it('retains unconditional legacy saves when the optional expectation is omitted', async () => {
+    await save(candidate())
+    const changed = await save(candidate(shiftB))
+    expect(changed).toMatchObject({ shiftId: shiftB, revision: 2 })
   })
 })

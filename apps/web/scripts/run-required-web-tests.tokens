@@ -145,6 +145,7 @@ attendance-approval-option-wiring
 attendance-daily-calendar-copy
 attendance-date-only-format
 attendance-experience-entrypoints
+attendance-group-fixed-schedule
 attendance-import-preview-regression.spec.ts
 attendance-punch-outcome
 attendance-record-timeline

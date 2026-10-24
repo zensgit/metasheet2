@@ -5929,12 +5929,15 @@
                         <select
                           id="attendance-group-fixed-schedule-shift"
                           v-model="attendanceGroupFixedSchedulePreviewForm.shiftId"
-                          :disabled="shifts.length === 0 || attendanceGroupFixedScheduleFormBusy"
+                          :disabled="attendanceGroupFixedScheduleShifts.length === 0 || attendanceGroupFixedScheduleFormBusy"
                           data-attendance-group-fixed-schedule-shift
                         >
                           <option value="">{{ tr('Select shift', '选择班次') }}</option>
-                          <option v-for="shift in shifts" :key="shift.id" :value="shift.id">
-                            {{ shift.name }}
+                          <option v-if="attendanceGroupFixedSchedulePreviewForm.shiftId && !attendanceGroupFixedScheduleSelectedShift" :value="attendanceGroupFixedSchedulePreviewForm.shiftId">
+                            {{ tr('Saved shift unavailable', '已保存班次不可用') }}
+                          </option>
+                          <option v-for="shift in attendanceGroupFixedScheduleShifts" :key="shift.id" :value="shift.id">
+                            {{ shift.name }} · {{ formatAttendanceShiftSegments(shift, tr) }}
                           </option>
                         </select>
                       </label>
@@ -5957,6 +5960,21 @@
                         />
                       </label>
                     </div>
+                    <AttendanceGroupFixedScheduleConfig
+                      :editor="attendanceGroupFixedSchedule.editor.value"
+                      :load-state="attendanceGroupFixedSchedule.loadState.value"
+                      :error-message="attendanceGroupFixedSchedule.errorMessage.value"
+                      :eligibility-hint="attendanceGroupFixedSchedule.eligibilityHint.value"
+                      :save-available="attendanceGroupFixedSchedule.saveAvailable.value"
+                      :busy="attendanceGroupFixedScheduleFormBusy"
+                      :saving="attendanceGroupFixedSchedule.operation.value === 'save'"
+                      :managed-key="attendanceGroupFixedSchedule.selectedManagedKey.value"
+                      :managed-key-for="attendanceGroupFixedSchedule.managedKey"
+                      :shift-label-for="id => attendanceGroupFixedScheduleShifts.find(shift => shift.id === id)?.name ?? tr('Unavailable shift', '班次不可用')"
+                      @reload="attendanceGroupFixedSchedule.load()"
+                      @save="attendanceGroupFixedSchedule.save()"
+                      @select-managed="attendanceGroupFixedSchedule.selectedManagedKey.value = $event"
+                    />
                     <div
                       class="attendance__fixed-schedule-week-matrix"
                       data-attendance-group-fixed-schedule-week-matrix
@@ -9407,7 +9425,7 @@
                       id="attendance-assignment-publish-status-filter"
                       name="assignmentPublishStatusFilter"
                       v-model="assignmentPublishStatusFilter"
-                      @change="loadAssignments"
+                      @change="loadAssignments()"
                     >
                       <option value="all">{{ tr('All', '全部') }}</option>
                       <option value="draft">{{ tr('Draft', '草稿') }}</option>
@@ -9415,7 +9433,7 @@
                       <option value="published">{{ tr('Published', '已发布') }}</option>
                     </select>
                   </label>
-                  <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
+                  <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments()">
                     {{ assignmentLoading ? tr('Loading...', '加载中...') : tr('Reload assignments', '重载分配') }}
                   </button>
                 </div>
@@ -10497,6 +10515,8 @@ import {
   type AttendanceShiftSegmentCapabilities,
   type AttendanceShiftSegmentDraft,
 } from './attendance/attendanceShiftSegments'
+import { useAttendanceGroupFixedSchedule } from './attendance/useAttendanceGroupFixedSchedule'
+import AttendanceGroupFixedScheduleConfig from './attendance/AttendanceGroupFixedScheduleConfig.vue'
 import { attendanceSetupPrefillPending } from './attendance/attendanceSetupPrefillLeaveGuard'
 import {
   buildAttendanceSetupTemplatePrefillPlan,
@@ -12560,6 +12580,7 @@ const ruleLoading = ref(false)
 const shiftLoading = ref(false)
 const shiftSaving = ref(false)
 const assignmentLoading = ref(false)
+let assignmentLoadGeneration = 0
 const assignmentSaving = ref(false)
 const temporaryAssignmentSaving = ref(false)
 const holidayLoading = ref(false)
@@ -12585,10 +12606,6 @@ let attendanceGroupLoadGeneration = 0
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
-const attendanceGroupFixedSchedulePreviewLoading = ref(false)
-const attendanceGroupFixedScheduleApplyLoading = ref(false)
-const attendanceGroupFixedScheduleRebuildLoading = ref(false)
-const attendanceGroupFixedScheduleClearLoading = ref(false)
 const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollSummaryFieldOptionsLoading = ref(false)
@@ -14296,12 +14313,6 @@ const attendanceGroupManagerRole = ref<AttendanceGroupManagerRole>('owner')
 const attendanceGroupManagerResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
 const attendanceAssignmentResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
 let attendanceAssignmentResolveSeq = 0
-const attendanceGroupFixedSchedulePreviewForm = reactive({
-  shiftId: '',
-  startDate: toDateInput(new Date()),
-  endDate: toDateInput(new Date()),
-})
-const attendanceGroupFixedSchedulePreviewResult = ref<AttendanceGroupFixedSchedulePreviewResult | null>(null)
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
@@ -14930,7 +14941,7 @@ const attendanceGroupMemberSubmitAvailable = computed(() =>
     || parseUserIdList(attendanceGroupMemberUserIds.value).length > 0
 )
 const attendanceGroupFixedScheduleSelectedShift = computed(() =>
-  shifts.value.find(shift => shift.id === attendanceGroupFixedSchedulePreviewForm.shiftId) ?? null
+  attendanceGroupFixedScheduleShifts.value.find(shift => shift.id === attendanceGroupFixedSchedulePreviewForm.shiftId) ?? null
 )
 const attendanceGroupFixedScheduleWeekMatrix = computed<AttendanceGroupFixedScheduleWeekDay[]>(() => {
   const shift = attendanceGroupFixedScheduleSelectedShift.value
@@ -14945,7 +14956,7 @@ const attendanceGroupFixedScheduleWeekMatrix = computed<AttendanceGroupFixedSche
         ? shift.name
         : tr('Rest', '休息'),
       timeLabel: isWorkingDay && shift
-        ? `${shift.workStartTime}-${shift.workEndTime}`
+        ? formatAttendanceShiftSegments(shift, tr)
         : tr('No shift', '无班次'),
     }
   })
@@ -14959,16 +14970,6 @@ const attendanceGroupFixedScheduleWeekMatrixHint = computed(() => {
     `${shift.name} 每周 ${workingDayCount} 个工作日。`,
   )
 })
-const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
-  Boolean(
-    attendanceGroupEditingId.value
-      && attendanceGroupFixedSchedulePreviewForm.shiftId
-      && attendanceGroupFixedSchedulePreviewForm.startDate
-      && attendanceGroupFixedSchedulePreviewForm.endDate
-      && !attendanceGroupFixedScheduleFormBusy.value,
-  )
-)
-
 function openAttendanceGroupRoute(
   step: AttendanceGroupRouteStep,
   surface: AttendanceGroupRouteSurface | null,
@@ -15061,32 +15062,6 @@ function setAttendanceGroupWorkTimeType(type: AttendanceGroupType) {
   if (attendanceGroupEditingId.value) return
   attendanceGroupForm.attendanceType = normalizeAttendanceGroupType(type)
 }
-const attendanceGroupFixedScheduleFormBusy = computed(() =>
-  attendanceGroupFixedSchedulePreviewLoading.value
-    || attendanceGroupFixedScheduleApplyLoading.value
-    || attendanceGroupFixedScheduleRebuildLoading.value
-    || attendanceGroupFixedScheduleClearLoading.value
-)
-const attendanceGroupFixedScheduleManagedActionAvailable = computed(() =>
-  Boolean(
-    attendanceGroupEditingId.value
-      && attendanceGroupFixedSchedulePreviewForm.shiftId
-      && attendanceGroupFixedSchedulePreviewForm.startDate
-      && attendanceGroupFixedSchedulePreviewForm.endDate
-      && !attendanceGroupFixedScheduleFormBusy.value,
-  )
-)
-const attendanceGroupFixedScheduleApplyAvailable = computed(() =>
-  Boolean(
-    attendanceGroupFixedSchedulePreviewResult.value
-      && attendanceGroupFixedSchedulePreviewResult.value.blockingConflicts.length === 0
-      && !attendanceGroupFixedSchedulePreviewResult.value.applied
-      && !attendanceGroupFixedSchedulePreviewResult.value.rebuilt
-      && !attendanceGroupFixedScheduleFormBusy.value,
-  )
-)
-const attendanceGroupFixedScheduleRebuildAvailable = computed(() => attendanceGroupFixedScheduleManagedActionAvailable.value)
-const attendanceGroupFixedScheduleClearAvailable = computed(() => attendanceGroupFixedScheduleManagedActionAvailable.value)
 const attendanceGroupFixedSchedulePreviewSummary = computed(() => {
   const result = attendanceGroupFixedSchedulePreviewResult.value
   if (!result) return ''
@@ -15533,6 +15508,46 @@ const attendancePluginEntry = computed(() => {
   return plugins.value.find(plugin => attendancePluginNames.has(plugin.name)) ?? null
 })
 const attendancePluginActive = computed(() => attendancePluginEntry.value?.status === 'active')
+const attendanceGroupFixedScheduleHydratedShifts = ref<Record<string, AttendanceShift>>({})
+const attendanceGroupFixedScheduleShifts = computed(() => {
+  const scope = normalizedOrgId() ?? ''
+  const extras = Object.entries(attendanceGroupFixedScheduleHydratedShifts.value)
+    .filter(([key, shift]) => key === JSON.stringify([scope, shift.id]) && !shifts.value.some(item => item.id === shift.id))
+    .map(([, shift]) => shift)
+  return [...shifts.value.filter(shift => !scope || !shift.orgId || shift.orgId === scope), ...extras]
+})
+const attendanceGroupFixedSchedule = useAttendanceGroupFixedSchedule<AttendanceGroupFixedSchedulePreviewResult>({
+  groupId: attendanceGroupEditingId,
+  orgId: normalizedOrgId,
+  enabled: attendancePluginActive,
+  hasShift: id => attendanceGroupFixedScheduleShifts.value.some(shift => shift.id === id),
+  rememberShift: shift => {
+    const item = shift as AttendanceShift
+    attendanceGroupFixedScheduleHydratedShifts.value[JSON.stringify([normalizedOrgId() ?? '', item.id])] = item
+  },
+  apiFetch,
+  tr,
+  setStatus,
+  reloadAssignments: loadAssignments,
+  confirm: message => window.confirm(message),
+})
+const {
+  form: attendanceGroupFixedSchedulePreviewForm,
+  previewResult: attendanceGroupFixedSchedulePreviewResult,
+  busy: attendanceGroupFixedScheduleFormBusy,
+  previewAvailable: attendanceGroupFixedSchedulePreviewAvailable,
+  applyAvailable: attendanceGroupFixedScheduleApplyAvailable,
+  rebuildAvailable: attendanceGroupFixedScheduleRebuildAvailable,
+  clearAvailable: attendanceGroupFixedScheduleClearAvailable,
+  preview: previewAttendanceGroupFixedSchedule,
+  apply: applyAttendanceGroupFixedSchedulePreview,
+  rebuild: rebuildAttendanceGroupFixedScheduleManagedRows,
+  clear: clearAttendanceGroupFixedScheduleManagedRows,
+} = attendanceGroupFixedSchedule
+const attendanceGroupFixedSchedulePreviewLoading = computed(() => attendanceGroupFixedSchedule.operation.value === 'preview')
+const attendanceGroupFixedScheduleApplyLoading = computed(() => attendanceGroupFixedSchedule.operation.value === 'apply')
+const attendanceGroupFixedScheduleRebuildLoading = computed(() => attendanceGroupFixedSchedule.operation.value === 'rebuild')
+const attendanceGroupFixedScheduleClearLoading = computed(() => attendanceGroupFixedSchedule.operation.value === 'clear')
 const pluginFailed = computed(() => pluginsLoaded.value && attendancePluginEntry.value?.status === 'failed')
 const pluginLoading = computed(() => !pluginsLoaded.value || pluginsLoading.value)
 const pluginMissing = computed(() => pluginsLoaded.value && !attendancePluginActive.value)
@@ -28496,9 +28511,6 @@ async function loadShifts() {
     if (!temporaryAssignmentForm.shiftId && shifts.value.length > 0) {
       temporaryAssignmentForm.shiftId = shifts.value[0].id
     }
-    if (!attendanceGroupFixedSchedulePreviewForm.shiftId && shifts.value.length > 0) {
-      attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0].id
-    }
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load shifts', '加载班次失败')), 'error')
   } finally {
@@ -28621,7 +28633,12 @@ function editAssignment(item: AttendanceAssignmentItem) {
   assignmentForm.slotIndex = assignmentSlotIndex(item.assignment)
 }
 
-async function loadAssignments() {
+async function loadAssignments(isCurrent = () => true) {
+  if (!isCurrent()) return
+  const generation = ++assignmentLoadGeneration
+  const scope = JSON.stringify([normalizedOrgId(), assignmentPublishStatusFilter.value])
+  const current = () => generation === assignmentLoadGeneration && isCurrent()
+    && scope === JSON.stringify([normalizedOrgId(), assignmentPublishStatusFilter.value])
   assignmentLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
@@ -28629,11 +28646,13 @@ async function loadAssignments() {
       query.set('publishStatus', assignmentPublishStatusFilter.value)
     }
     const response = await apiFetch(`/api/attendance/assignments?${query.toString()}`)
+    if (!current()) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
     }
     const data = await response.json()
+    if (!current()) return
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load assignments', '加载分配失败')))
     }
@@ -28642,9 +28661,10 @@ async function loadAssignments() {
     reconcileSelectedDraftAssignmentIds()
     void resolveAttendanceAssignmentUserLabels()
   } catch (error: any) {
+    if (!current()) return
     setStatus(readErrorMessage(error, tr('Failed to load assignments', '加载分配失败')), 'error')
   } finally {
-    assignmentLoading.value = false
+    if (generation === assignmentLoadGeneration) assignmentLoading.value = false
   }
 }
 
@@ -29263,9 +29283,6 @@ function resetAttendanceGroupForm() {
 
 function resetAttendanceGroupFixedSchedulePreview() {
   attendanceGroupFixedSchedulePreviewResult.value = null
-  attendanceGroupFixedSchedulePreviewForm.startDate = toDateInput(today)
-  attendanceGroupFixedSchedulePreviewForm.endDate = toDateInput(today)
-  attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0]?.id ?? attendanceGroupFixedSchedulePreviewForm.shiftId
 }
 
 function editAttendanceGroup(item: AttendanceGroup, stage: AttendanceGroupWorkflowStage = 'basics') {
@@ -29608,167 +29625,6 @@ async function loadAttendanceGroupManagers() {
     setStatus(readErrorMessage(error, tr('Failed to load group owners', '加载考勤组负责人失败')), 'error')
   } finally {
     attendanceGroupManagerLoading.value = false
-  }
-}
-
-async function previewAttendanceGroupFixedSchedule() {
-  const groupId = attendanceGroupEditingId.value
-  if (!groupId) {
-    setStatus(tr('Save the group before previewing a fixed schedule.', '请先保存考勤组，再预览固定排班。'), 'error')
-    return
-  }
-  if (!attendanceGroupFixedSchedulePreviewForm.shiftId) {
-    setStatus(tr('Select a shift before previewing.', '请先选择班次再预览。'), 'error')
-    return
-  }
-  if (!attendanceGroupFixedSchedulePreviewForm.startDate || !attendanceGroupFixedSchedulePreviewForm.endDate) {
-    setStatus(tr('Select a start and end date before previewing.', '请先选择开始和结束日期再预览。'), 'error')
-    return
-  }
-  attendanceGroupFixedSchedulePreviewLoading.value = true
-  attendanceGroupFixedSchedulePreviewResult.value = null
-  try {
-    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/preview`, {
-      method: 'POST',
-      body: JSON.stringify({
-        shiftId: attendanceGroupFixedSchedulePreviewForm.shiftId,
-        startDate: attendanceGroupFixedSchedulePreviewForm.startDate,
-        endDate: attendanceGroupFixedSchedulePreviewForm.endDate,
-        orgId: normalizedOrgId(),
-      }),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to preview fixed schedule', '预览固定排班失败')))
-    }
-    adminForbidden.value = false
-    attendanceGroupFixedSchedulePreviewResult.value = data.data as AttendanceGroupFixedSchedulePreviewResult
-    setStatus(tr('Fixed schedule preview ready. No assignments were written.', '固定排班预览已生成，未写入任何排班。'))
-  } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to preview fixed schedule', '预览固定排班失败')), 'error')
-  } finally {
-    attendanceGroupFixedSchedulePreviewLoading.value = false
-  }
-}
-
-function buildAttendanceGroupFixedScheduleRequestBody(): Record<string, string | undefined> {
-  return {
-    shiftId: attendanceGroupFixedSchedulePreviewForm.shiftId,
-    startDate: attendanceGroupFixedSchedulePreviewForm.startDate,
-    endDate: attendanceGroupFixedSchedulePreviewForm.endDate,
-    orgId: normalizedOrgId(),
-  }
-}
-
-async function applyAttendanceGroupFixedSchedulePreview() {
-  const groupId = attendanceGroupEditingId.value
-  const preview = attendanceGroupFixedSchedulePreviewResult.value
-  if (!groupId || !preview) {
-    setStatus(tr('Preview the fixed schedule before applying.', '请先预览固定排班再应用。'), 'error')
-    return
-  }
-  if (preview.blockingConflicts.length > 0) {
-    setStatus(tr('Resolve blocking conflicts before applying.', '请先解决阻断冲突再应用。'), 'error')
-    return
-  }
-  attendanceGroupFixedScheduleApplyLoading.value = true
-  try {
-    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/apply`, {
-      method: 'POST',
-      body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to apply fixed schedule', '应用固定排班失败')))
-    }
-    adminForbidden.value = false
-    attendanceGroupFixedSchedulePreviewResult.value = data.data as AttendanceGroupFixedSchedulePreviewResult
-    await loadAssignments()
-    setStatus(tr('Fixed schedule applied.', '固定排班已应用。'))
-  } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to apply fixed schedule', '应用固定排班失败')), 'error')
-  } finally {
-    attendanceGroupFixedScheduleApplyLoading.value = false
-  }
-}
-
-async function rebuildAttendanceGroupFixedScheduleManagedRows() {
-  const groupId = attendanceGroupEditingId.value
-  if (!groupId) {
-    setStatus(tr('Save the group before rebuilding managed fixed schedules.', '请先保存考勤组，再重建已管理固定排班。'), 'error')
-    return
-  }
-  if (!attendanceGroupFixedScheduleManagedActionAvailable.value) return
-  attendanceGroupFixedScheduleRebuildLoading.value = true
-  try {
-    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/rebuild`, {
-      method: 'POST',
-      body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to rebuild managed fixed schedule rows', '重建已管理固定排班失败')))
-    }
-    adminForbidden.value = false
-    attendanceGroupFixedSchedulePreviewResult.value = data.data as AttendanceGroupFixedSchedulePreviewResult
-    await loadAssignments()
-    setStatus(tr('Managed fixed schedule rows rebuilt.', '已重建已管理固定排班。'))
-  } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to rebuild managed fixed schedule rows', '重建已管理固定排班失败')), 'error')
-  } finally {
-    attendanceGroupFixedScheduleRebuildLoading.value = false
-  }
-}
-
-async function clearAttendanceGroupFixedScheduleManagedRows() {
-  const groupId = attendanceGroupEditingId.value
-  if (!groupId) {
-    setStatus(tr('Save the group before clearing managed fixed schedules.', '请先保存考勤组，再清除已管理固定排班。'), 'error')
-    return
-  }
-  if (!attendanceGroupFixedScheduleManagedActionAvailable.value) return
-  if (!window.confirm(tr(
-    'Clear managed fixed schedule rows for this shift and date window? Unmanaged/manual rows will not be touched.',
-    '确认清除此班次与日期窗口的已管理固定排班吗？未管理/手工排班不会被修改。',
-  ))) return
-  attendanceGroupFixedScheduleClearLoading.value = true
-  try {
-    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/clear`, {
-      method: 'POST',
-      body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to clear managed fixed schedule rows', '清除已管理固定排班失败')))
-    }
-    adminForbidden.value = false
-    attendanceGroupFixedSchedulePreviewResult.value = null
-    await loadAssignments()
-    const count = Array.isArray(data.data?.deactivated) ? data.data.deactivated.length : 0
-    setStatus(tr(
-      `Cleared ${count} managed fixed schedule rows.`,
-      `已清除 ${count} 条已管理固定排班。`,
-    ))
-  } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to clear managed fixed schedule rows', '清除已管理固定排班失败')), 'error')
-  } finally {
-    attendanceGroupFixedScheduleClearLoading.value = false
   }
 }
 
@@ -31251,17 +31107,6 @@ watch([attendanceGroupMemberGroupId, attendancePluginActive], ([, pluginActive])
     loadAttendanceGroupManagers()
   }
 }, { immediate: true })
-
-watch(
-  () => [
-    attendanceGroupFixedSchedulePreviewForm.shiftId,
-    attendanceGroupFixedSchedulePreviewForm.startDate,
-    attendanceGroupFixedSchedulePreviewForm.endDate,
-  ],
-  () => {
-    attendanceGroupFixedSchedulePreviewResult.value = null
-  },
-)
 
 watch(importProfileId, () => {
   const profile = selectedImportProfile.value
