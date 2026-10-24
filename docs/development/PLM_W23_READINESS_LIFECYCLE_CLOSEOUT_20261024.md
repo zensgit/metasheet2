@@ -1,0 +1,15 @@
+# Readonly Readiness snapshot lifecycle closeout — 2026-10-24
+
+SOURCE `d6dfce69c98516255ec1e47a359b151aa06cc392`, based on Draft6526 `6aea1f39b065a384c40420c0697226740bf263a9`. This is the single closeout document commit. Current-head remote CI is pending publication and must be checked separately.
+
+The existing snapshot service and five routes now handle explicit ECO and Readiness kinds. Readiness keeps the frozen nine-string projection, five-part selected tuple, fixed nullable Item version and three canonical local collaboration fields. It reuses records, permissions, comments, history and operation engines. Absent GET selection returns an authorized collection shell. Confirm checks row and source-field authority before provider egress and at publication; failure retention uses the canonical row-auth transaction lock and preserves ECO new-tuple semantics. No business action, alternate credential, registry or management engine was added.
+
+Actual Grok4.7(xhigh) implemented the change and repairs. Codex independently reviewed and reproduced the counterexamples. Root's current whole-file unit run is **170 passed, 0 failure/error/skip in five files**; backend TypeScript exited0. Separate actual PostgreSQL16.15 runs passed seven existing ECO service cases, two Readiness collection/noop/CAS/local-field/comment/history cases, and the canonical row-auth ordering case. These are service/transaction proofs with a controlled Native provider; they are not added to the parent's overlapping51 cases.
+
+Independent controls separately passed security2, current structural-validator3, ECO compatibility1 and the strict route-fixture alternate-shape1. The identical ECO new-tuple case passed on frozen6aea, failed on initial77a and passed on current26a. Historical runtime and private-fixture failures remain immutable. Codex also narrowed the last two newly broad route-fixture answers to exact SQL and retained three unknown-statement shapes. Required gates, baselines and capacity floors remain intact.
+
+The nonce-owned Readiness database had no remaining fixture schemas, public relations or other clients before its drop. Cluster catalogs matched the fresh baseline. Existing lifecycle cleanup proved status3, PID absence, no open files, owned cluster/runtime copy/lock removal and unchanged original runtime pins. No Docker/MinIO, runner-capacity or artifact-quota recovery follows.
+
+[Design and verification](PLM_W23_READINESS_LIFECYCLE_DESIGN_VALIDATION_20261024.md) and [compact evidence](../../artifacts/plm-w23-readiness-persistence-20261024/verification.json) retain exact code/log hashes and private immutable packet references. Caught subscriber42P01 warnings from the minimal fixture are retained; subscriptions were not qualified by this slice.
+
+Actual Native+Meta HTTP and independent personal-purpose identity, ordinary-login browser/unified entry, registered Readiness service-process verification, source/build/image/installed provenance, current E-head CI and full master acceptance remain open. Keep the PR Draft. No merge, deployment, production enablement, real business notice or issue closure occurred.
