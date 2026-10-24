@@ -597,7 +597,7 @@ export class EcoCollaborationSnapshotService {
         await this.authorizeBase(query, actor, locked.base_id)
         const published = input.expectedVersion === 0
           ? await this.provision(query, actor, locked, material.snapshot)
-          : await this.append(query, actor, locked, input.targetBindingId!, input.expectedVersion, material.snapshot)
+          : await this.appendEcoSnapshot(query, actor, locked, input.targetBindingId!, input.expectedVersion, material.snapshot)
         await this.consume(query, actor, locked, input.requestId, published.bindingId)
         return { ...published, replayed: false }
       })
@@ -1029,7 +1029,7 @@ export class EcoCollaborationSnapshotService {
     return { bindingId, sheetId, viewId, version: 1, status: 'active' as const, recordId, noop: false }
   }
 
-  private async append(
+  private async appendEcoSnapshot(
     query: EcoQuery,
     actor: string,
     preview: PreviewRow,

@@ -115,6 +115,12 @@ const W4C0_REASON =
  * of sites under that key. Verdicts follow ADR §3.11 (必接 / 免检 / 非数据写入者).
  */
 const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
+  ENTRY_VIA(EXEMPT('multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: appendEcoSnapshot', 'PLM ECO snapshot', 'Publishes only the strict eleven string/null source cells on the fenced query. Immutable 11+3 maps and database string/readOnly field guards prevent retype; sync rejects local-cell edits. Minted nonnull operation, canonical history and successful seal share the transaction; success awaits commit.'), ['EcoCollaborationSnapshotService.appendEcoSnapshot>EcoCollaborationSnapshotService.publishRow']),
+  ENTRY_VIA(EXEMPT('multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: provision', 'PLM ECO snapshot', 'Creates eleven readOnly string fields and three local fields under the canonical fence. The binding guard locks and validates every mapped field before fixed-source publication; locals are never patched. Minted nonnull operation, canonical history and successful seal share the transaction; success awaits commit.'), ['EcoCollaborationSnapshotService.provision>EcoCollaborationSnapshotService.publishRow']),
+  VIA(EXEMPT('multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.refresh :: loadRefresh', 'PLM ECO snapshot', 'Three calls cover preflight, no-op recheck and final publication. Only the final transaction calls writeSource: fresh field/row/lock authority and the canonical fence precede eleven string/null source cells, immutable DB maps/types, source-only sync, nonnull mint, history and seal. Local longText stays on canonical CRUD.', 3), ['EcoCollaborationSnapshotService.writeSource']),
+  NONWRITER('multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: assertExplicitTarget', 'PLM ECO snapshot', 'Pre-provider transaction locks and revalidates the explicit frozen target and current management; no record-data publication in this transaction.'),
+  NONWRITER('multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.disable :: fenceWriterEntry', 'PLM ECO snapshot', 'Changes binding status/version only; no record data, history or source sync publication.'),
+  NONWRITER('multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.retainProviderFailure :: fenceWriterEntry', 'PLM ECO snapshot', 'Records a provider failure and stales only the exact matched binding; no source or local record-data write.'),
   NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.bindPersonalChangeRead :: personalReadContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 2),
   NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.personalChangeReadManagement :: personalReadContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 1),
   NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.startPersonalChangeRead :: personalReadContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 1),
@@ -450,6 +456,8 @@ describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () 
     // Anti-vacuity: pin every real entry whose body writes through a callee.
     expect(REAL.holders.filter((h) => h.entryWritesVia.length > 0).map((h) => h.key)).toEqual([
       'multitable/plm-bom-review-service.ts :: PlmBomReviewService.create :: publishSnapshot',
+      'multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: appendEcoSnapshot',
+      'multitable/plm-collaboration-snapshot-service.ts :: EcoCollaborationSnapshotService.confirm :: provision',
       'multitable/recovery-archive-restore-worker.ts :: executeChunk :: executeRecoveryArchiveAsyncRestoreChunk',
       'services/plm-managed-snapshot-share-flow.ts :: PlmManagedSnapshotShareFlow.complete :: publishConsentedSnapshotOnQuery',
     ])
@@ -703,6 +711,44 @@ describe('field retype slice 3a — the census analyzer on synthetic sources', (
 describe('fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5)', () => {
   const withReal = (patch: (rel: string, text: string) => string, ...extra: CensusSource[]): Census =>
     runFenceHolderCensus([...REAL_SOURCES.map((s) => ({ rel: s.rel, text: patch(s.rel, s.text.replace(/\r\n/g, '\n')) })), ...extra])
+
+  it('ECO ingress: URL append calls are nonwriters, while unknown receivers of the unique ECO entry stay fail-closed', () => {
+    for (const [rel, count] of [['services/plm-managed-companion.ts', 2], ['services/StorageService.ts', 3]] as const) {
+      expect(REAL_SOURCES.find((s) => s.rel === rel)!.text.match(/\.append\(/g)).toHaveLength(count)
+      expect(REAL.holders.filter((h) => h.rel === rel)).toEqual([])
+    }
+    const unknown = src('multitable/eco-unknown-receiver.ts', [
+      'export async function unknownReceiver(pool: P) {',
+      '  return pool.transaction(async ({ query }) => {',
+      '    await receiver.appendEcoSnapshot(query, actor, preview, target, version, snapshot)',
+      '  })',
+      '}',
+    ])
+    const c = withReal((_rel, text) => text, unknown)
+    expect(unclassified(c, FENCE_HOLDER_LEDGER)).toEqual([
+      'multitable/eco-unknown-receiver.ts :: unknownReceiver :: appendEcoSnapshot',
+    ])
+  })
+
+  it('ECO ingress: a new callee inside the exempt append entry still reds the exact entryWritesVia ledger', () => {
+    const target = 'multitable/plm-collaboration-snapshot-service.ts'
+    const anchor = '    const version = await this.publishRow('
+    const helper = src('multitable/eco-ingress-rewrite.ts', [
+      'export async function ecoIngressRewrite(query: Q) {',
+      "  await query('UPDATE meta_records SET data = data || $1::jsonb', [{}])",
+      '}',
+    ])
+    expect(REAL_SOURCES.find((s) => s.rel === target)!.text).toContain(anchor)
+    const c = withReal((rel, text) => rel === target
+      ? `import { ecoIngressRewrite } from './eco-ingress-rewrite'\n${text.replace(anchor, `    await ecoIngressRewrite(query)\n${anchor}`)}`
+      : text, helper)
+    expect(unclassified(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(countMismatches(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(entryWritesViaMismatches(c, FENCE_HOLDER_LEDGER).some((v) =>
+      v.startsWith(`${target} :: EcoCollaborationSnapshotService.confirm :: appendEcoSnapshot:`)
+      && v.includes('ecoIngressRewrite'))).toBe(true)
+    expect(entryWritesViaMismatches(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
+  })
 
   it('C1-F1: a NEW function named exactly like an entry (ensureView), taking the fence and writing data, is a holder — guard A reds', () => {
     const collide = src('multitable/c1-collide.ts', [

@@ -33,6 +33,14 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
 import { describe, expect, test } from 'vitest'
+import ts from 'typescript'
+
+import {
+  ECO_COLLABORATION_ECO_FIELDS,
+  ECO_COLLABORATION_LOCAL_FIELDS,
+  parseEcoCollaborationSource,
+} from '../../src/multitable/plm-collaboration-snapshot-wire'
+import { RECORDS_WRITE_RE } from '../utils/fence-holder-census'
 
 const SRC = join(__dirname, '../../src')
 
@@ -106,6 +114,10 @@ const ALLOWLIST: Record<
     disposition: 'SAFE',
     reason: 'Owner-authorized snapshot sync writes only SOURCE_FIELDS created as string; the database field guard forbids retyping/deleting them. Local rich-text fields are never in the patch.',
   },
+  'multitable/plm-collaboration-snapshot-service.ts': {
+    disposition: 'SAFE',
+    reason: 'Strict eleven string/null ECO cells map only to readOnly string source fields. Immutable 11+3 binding maps and DB field guards reject retype/readonly drift; source-sync guards prohibit locals/extras. Same-query canonical fence, current authority/record lock, nonnull mint, canonical history and seal precede commit. Local review_note longText stays on canonical CRUD.',
+  },
   'multitable/auto-number-service.ts': {
     disposition: 'SAFE',
     reason: 'writes ONLY auto-number columns (numeric sequence values) — never a user-supplied longText carrier',
@@ -152,6 +164,92 @@ function writesRecordData(src: string): boolean {
 
 const SANITIZER_REF = /\bvalidateLongTextValue\b|\bsanitizeRichLongText\b/
 
+// The ECO SAFE verdict is conditional on these fixed-source boundaries, not on its filename.
+const ECO_SERVICE = readFileSync(join(SRC, 'multitable/plm-collaboration-snapshot-service.ts'), 'utf8').replace(/\r\n/g, '\n')
+const ECO_DB = readFileSync(join(SRC, 'db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts'), 'utf8').replace(/\r\n/g, '\n')
+const ECO_BOUNDARIES = [
+  ['source-only projection', 'service', 'for (const key of ECO_COLLABORATION_ECO_FIELDS) data[fields[key]] = snapshot.eco[key]\n  return data'],
+  ['string source descriptors', 'service', "type: 'string' as const,\n        order,\n        property: { readOnly: true, plmCollaborationSnapshot: { source: true, key } }"],
+  ['writer flag', 'service', "if (!isWriterFenceEnabled()) fail(503, 'ECO_RUNTIME_UNAVAILABLE')"],
+  ['provision canonical fence', 'service', 'await fenceWriterEntry(query, sheetId)\n    const sheet = await createSheet({ query, sheetId,'],
+  ['append canonical fence', 'service', 'await fenceWriterEntry(query, binding.sheet_id)\n    await this.authorizeSheet(query, actor, binding, true)\n    const stored = await this.readStoredRow(query, binding.id, preview.row_key)'],
+  ['refresh canonical fence', 'service', 'await fenceWriterEntry(query, binding.sheet_id)\n    await this.authorizeSheet(query, actor, binding, true)\n    const source = await this.admit(query, actor, binding.data_source_id, mode)'],
+  ['nonnull operation', 'service', "const ledger = await mintOperation(query, binding.sheet_id)\n    if (ledger.operationId === null) fail(503, 'ECO_RUNTIME_UNAVAILABLE')"],
+  ['successful seal', 'service', "if (!(await sealOperation(query, ledger))) fail(503, 'ECO_RUNTIME_UNAVAILABLE')"],
+  ['canonical revision history', 'service', 'await recordRecordRevision(query, {\n      sheetId,\n      recordId,\n      version,\n      action,\n      source: \'system_sync\''],
+  ['history keeps minted ledger', 'service', 'changedFieldIds,\n      patch,\n      snapshot,\n      ledger,\n    })'],
+  ['commit before success', 'service', 'return await this.deps.pool.transaction(async ({ query }) => fn(query))'],
+  ['exact source keys', 'db', "source_fields - ARRAY[${SOURCE_KEY_SQL}] = '{}'::jsonb\n          AND source_fields ?& ARRAY[${SOURCE_KEY_SQL}]"],
+  ['exact local keys', 'db', "local_fields - ARRAY[${LOCAL_KEY_SQL}] = '{}'::jsonb\n          AND local_fields ?& ARRAY[${LOCAL_KEY_SQL}]"],
+  ['immutable binding maps', 'db', "mutable text[] := ARRAY['version', 'status', 'updated_at', 'last_failure_code', 'last_failure_at'];"],
+  ['binding immutability enforced', 'db', 'IF (to_jsonb(NEW) - mutable) IS DISTINCT FROM (to_jsonb(OLD) - mutable)'],
+  ['mapped field lock', 'db', "SELECT id, sheet_id, type, property INTO field FROM ${s}.meta_fields WHERE id = pair.value FOR UPDATE;"],
+  ['mapped source type and readonly', 'db', "IF field.type IS DISTINCT FROM 'string'\n         OR field.property -> 'readOnly' IS DISTINCT FROM 'true'::jsonb"],
+  ['field type cannot drift', 'db', 'NEW.id IS DISTINCT FROM OLD.id OR NEW.sheet_id IS DISTINCT FROM OLD.sheet_id OR NEW.type IS DISTINCT FROM OLD.type'],
+  ['source readonly cannot drift', 'db', "NEW.type IS DISTINCT FROM 'string'\n       OR NEW.property -> 'readOnly' IS DISTINCT FROM 'true'::jsonb"],
+  ['source sync forbids extras', 'db', "(entry.value -> 'data') - physical_ids <> '{}'::jsonb\n       OR NOT ((entry.value -> 'data') ?& physical_ids)"],
+  ['receipt row and postimage identity', 'db', "OR new_source IS DISTINCT FROM (accepted.patch -> 'data')\n       OR (accepted.patch -> 'row_key') IS DISTINCT FROM mapped_key"],
+  ['source sync forbids local insert', 'db', 'OR EXISTS (SELECT 1 FROM jsonb_each(NEW.data) cell WHERE cell.key = ANY(local_ids))'],
+  ['source sync forbids local update', 'db', 'IF new_local IS DISTINCT FROM old_local\n         OR NEW.modified_by IS DISTINCT FROM accepted.actor_id'],
+] as const
+
+// Enumerate literal writes across the WHOLE already-SAFE service, not just references to `cells`.
+// This finite source contract deliberately requires review of any new SQL or builder write port.
+function ecoRecordWriteSites(service: string): string[][] {
+  const source = ts.createSourceFile('eco-service.ts', service, ts.ScriptTarget.Latest, true)
+  const writes: string[][] = []
+  const normalized = (text: string): string => text.replace(/\s+/g, ' ').trim()
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteralLike(node) && (RECORDS_WRITE_RE.test(node.text)
+      || /\bMERGE\s+INTO\s+(?:"?public"?\.)?"?meta_records"?(?![\w])/i.test(node.text))) {
+      let owner: ts.Node | undefined = node.parent
+      while (owner && !ts.isMethodDeclaration(owner) && !ts.isFunctionDeclaration(owner)) owner = owner.parent
+      const call = node.parent
+      writes.push([
+        owner && (ts.isMethodDeclaration(owner) || ts.isFunctionDeclaration(owner))
+          ? owner.name?.getText(source) ?? '<outside method>' : '<outside method>',
+        ts.isCallExpression(call) ? call.expression.getText(source) : '<indirect SQL>',
+        normalized(node.text),
+        ts.isCallExpression(call) && call.arguments[0] === node ? normalized(call.arguments[1]?.getText(source) ?? '') : '',
+      ])
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && ['insertInto', 'updateTable', 'mergeInto', 'deleteFrom'].includes(node.expression.name.text)) {
+      const table = node.arguments[0]
+      if (table && ts.isStringLiteralLike(table) && /^(?:"?public"?\.)?"?meta_records"?$/i.test(table.text)) {
+        writes.push(['<builder>', node.expression.name.text, table.text, ''])
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return writes
+}
+
+const ECO_RECORD_WRITE_SITES = [
+  ['writeGuardedRow', 'query',
+    'INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, locked, locked_by, locked_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, false, NULL, NULL)',
+    '[recordId, binding.sheet_id, JSON.stringify(cells), actor]'],
+  ['writeGuardedRow', 'query',
+    'UPDATE meta_records SET data = data || $1::jsonb, version = version + 1, modified_by=$2, updated_at=now() WHERE id=$3 AND sheet_id=$4 AND version=$5 RETURNING version, data',
+    '[JSON.stringify(cells), actor, recordId, binding.sheet_id, current.version]'],
+]
+
+function ecoBoundaryFailures(service: string, db: string): string[] {
+  const failures = ECO_BOUNDARIES.filter(([_name, file, anchor]) => !(file === 'service' ? service : db).includes(anchor))
+    .map(([name]) => String(name))
+  const sourceCells = service.slice(service.indexOf('function sourceCells('), service.indexOf('\nfunction previewFrom('))
+  if (sourceCells.trim() !== [
+    'function sourceCells(snapshot: EcoCollaborationSource, fields: Record<string, string>): Record<string, string | null> {',
+    '  const data: Record<string, string | null> = {}',
+    '  for (const key of ECO_COLLABORATION_ECO_FIELDS) data[fields[key]] = snapshot.eco[key]',
+    '  return data',
+    '}',
+  ].join('\n')) failures.push('source-only projection')
+  if (JSON.stringify(ecoRecordWriteSites(service)) !== JSON.stringify(ECO_RECORD_WRITE_SITES)) failures.push('exact source write sites')
+  return [...new Set(failures)]
+}
+
 describe('rich-longText write-sink — durable structural guard', () => {
   const writerFiles = listRuntimeTsFiles().filter((rel) => writesRecordData(readFileSync(join(SRC, rel), 'utf8')))
 
@@ -166,6 +264,119 @@ describe('rich-longText write-sink — durable structural guard', () => {
         `through validateLongTextValue(value, fieldId, field.property) (or sanitizeRichLongText for ` +
         `bare-SQL payloads), then add the file to ALLOWLIST with its disposition (CHOKEPOINT / SAFE+reason).`,
     ).toEqual([])
+  })
+
+  test('ECO ingress: SAFE requires the exact eleven string/null keys and three canonical local field types', () => {
+    expect(ECO_COLLABORATION_ECO_FIELDS).toEqual([
+      'id', 'name', 'eco_type', 'product_id', 'source_version_id', 'target_version_id',
+      'stage_id', 'state', 'kanban_state', 'priority', 'updated_at',
+    ])
+    expect(ECO_COLLABORATION_LOCAL_FIELDS).toEqual([
+      { key: 'collaboration_owner', type: 'person' },
+      { key: 'followup_due_at', type: 'dateTime' },
+      { key: 'review_note', type: 'longText' },
+    ])
+    const anchor = { tenantId: 'tenant', orgId: 'org', itemId: 'item', ecoId: 'eco', currentVersionId: null }
+    const dto = {
+      projection_contract: 'eco_collaboration_source.v1', feature_key: 'collaboration_source_read', entitled: true,
+      source: { tenant_id: 'tenant', org_id: 'org', item_id: 'item', current_version_id: null },
+      snapshot_at: '2026-10-24T01:02:03.000000Z',
+      eco: {
+        id: 'eco', name: '<b>plain source text</b>', eco_type: 'design', product_id: 'item',
+        source_version_id: null, target_version_id: null, stage_id: null, state: null,
+        kanban_state: null, priority: null, updated_at: null,
+      },
+    }
+    const parsed = parseEcoCollaborationSource(dto, anchor)
+    expect(Object.keys(parsed.eco)).toEqual([...ECO_COLLABORATION_ECO_FIELDS])
+    expect(Object.values(parsed.eco).every((value) => value === null || typeof value === 'string')).toBe(true)
+    for (const eco of [
+      { ...dto.eco, review_note: 'local must use canonical CRUD' },
+      { ...dto.eco, unexpected: 'extra' },
+      { ...dto.eco, name: { rich: true, html: '<img onerror=alert(1)>' } },
+      { ...dto.eco, name: ['text'] },
+    ]) expect(() => parseEcoCollaborationSource({ ...dto, eco }, anchor)).toThrow('ECO_SOURCE_REJECTED')
+  })
+
+  test('ECO ingress: fixed-source exemption keeps source-only payload, immutable schema and transaction guards', () => {
+    expect(ecoBoundaryFailures(ECO_SERVICE, ECO_DB)).toEqual([])
+    const writer = ECO_SERVICE.slice(ECO_SERVICE.indexOf('  private async writeGuardedRow('), ECO_SERVICE.indexOf('  private async history('))
+    expect(writer.split('\n').filter((line) => /\bcells\b/.test(line)).map((line) => line.trim())).toEqual([
+      'const cells = sourceCells(snapshot, binding.source_fields)',
+      'data: cells,',
+      '[recordId, binding.sheet_id, JSON.stringify(cells), actor],',
+      "await this.history(query, actor, binding.sheet_id, recordId, 1, 'create', Object.values(binding.source_fields), cells, cells, ledger)",
+      'const changed = Object.values(binding.source_fields).filter((id) => JSON.stringify(current.data[id] ?? null) !== JSON.stringify(cells[id] ?? null))',
+      '[JSON.stringify(cells), actor, recordId, binding.sheet_id, current.version],',
+      'const postimage = { ...current.data, ...cells }',
+      "await this.history(query, actor, binding.sheet_id, recordId, Number(updated.rows[0].version), 'update', changed, cells, postimage, ledger)",
+    ])
+    const ordered = [
+      'this.requireWriterFence()', 'const cells = sourceCells(snapshot, binding.source_fields)',
+      'await mintOperation(query, binding.sheet_id)', 'if (ledger.operationId === null)',
+      'INSERT INTO meta_plm_collaboration_syncs', 'INSERT INTO meta_records',
+      'await this.history(query,', 'await sealOperation(query, ledger)',
+    ].map((token) => writer.indexOf(token))
+    expect(ordered.every((offset) => offset >= 0)).toBe(true)
+    expect(ordered).toEqual([...ordered].sort((a, b) => a - b))
+    for (const [method, next] of [['provision', 'appendEcoSnapshot'], ['appendEcoSnapshot', 'publishRow'], ['loadRefresh', 'sourceFieldBlocked']]) {
+      const body = ECO_SERVICE.slice(ECO_SERVICE.indexOf(`  private async ${method}(`), ECO_SERVICE.indexOf(`  private async ${next}(`))
+      const fence = body.indexOf('await fenceWriterEntry(query,')
+      const use = body.indexOf(method === 'loadRefresh' ? 'await this.fieldAndLock(query,' : 'await this.publishRow(query,')
+      expect(fence, method).toBeGreaterThanOrEqual(0)
+      expect(use, method).toBeGreaterThan(fence)
+    }
+    expect(ECO_SERVICE).toContain('await recordRecordRevision(query, {')
+    expect(ECO_SERVICE).toContain('SET data = data || $1::jsonb')
+    expect(ECO_SERVICE).toContain('const postimage = { ...current.data, ...cells }')
+  })
+
+  test.each(ECO_BOUNDARIES)('ECO ingress mutation: removing %s invalidates SAFE', (name, file, anchor) => {
+    const service = file === 'service' ? ECO_SERVICE.replace(anchor, '') : ECO_SERVICE
+    const db = file === 'db' ? ECO_DB.replace(anchor, '') : ECO_DB
+    expect(ecoBoundaryFailures(service, db)).toContain(name)
+  })
+
+  test('ECO ingress mutation: adding a local cell to the source projection invalidates SAFE', () => {
+    const anchor = '  for (const key of ECO_COLLABORATION_ECO_FIELDS) data[fields[key]] = snapshot.eco[key]'
+    const service = ECO_SERVICE.replace(anchor, `${anchor}\n  data[fields.review_note] = 'local write'`)
+    expect(ecoBoundaryFailures(service, ECO_DB)).toContain('source-only projection')
+  })
+
+  test.each(['inside', 'outside'])('ECO additive writer: alternate payload %s writeGuardedRow invalidates SAFE', (location) => {
+    const statement = "    await query('UPDATE meta_records SET data = $1::jsonb WHERE id = $2', [payload, recordId])"
+    const anchor = location === 'inside'
+      ? "    await query(`SELECT set_config('metasheet.plm_collaboration_sync', '', true)`, [])"
+      : '  private async history('
+    const replacement = location === 'inside'
+      ? `${anchor}\n${statement}`
+      : `  private async alternateWriter(query: EcoQuery, payload: unknown, recordId: string) {\n${statement}\n  }\n\n${anchor}`
+    expect(ECO_SERVICE).toContain(anchor)
+    const service = ECO_SERVICE.replace(anchor, replacement)
+    expect(writesRecordData(service)).toBe(true)
+    expect(ecoBoundaryFailures(service, ECO_DB)).toContain('exact source write sites')
+  })
+
+  test.each([
+    '[recordId, binding.sheet_id, JSON.stringify(cells), actor]',
+    '[JSON.stringify(cells), actor, recordId, binding.sheet_id, current.version]',
+  ])('ECO additive writer: changing a reviewed source payload in %s invalidates SAFE', (parameters) => {
+    expect(ECO_SERVICE).toContain(parameters)
+    const service = ECO_SERVICE.replace(parameters, parameters.replace('JSON.stringify(cells)', 'JSON.stringify(payload)'))
+    expect(ecoBoundaryFailures(service, ECO_DB)).toContain('exact source write sites')
+  })
+
+  test.each(['insertInto', 'updateTable', 'mergeInto'])('ECO additive writer: a new literal %s builder port invalidates SAFE', (method) => {
+    const anchor = '  private async history('
+    const service = ECO_SERVICE.replace(anchor,
+      `  private async alternateBuilder(db: DB, payload: unknown) {\n    return db.${method}('meta_records').values(payload)\n  }\n\n${anchor}`)
+    expect(ecoBoundaryFailures(service, ECO_DB)).toContain('exact source write sites')
+  })
+
+  test('ECO additive writer: SQL mentioned only in a comment creates no write site', () => {
+    const service = `${ECO_SERVICE}\n// await query('UPDATE meta_records SET data = $1::jsonb', [payload])\n`
+    expect(ecoRecordWriteSites(service)).toEqual(ECO_RECORD_WRITE_SITES)
+    expect(ecoBoundaryFailures(service, ECO_DB)).toEqual([])
   })
 
   test('every CHOKEPOINT-classified writer actually references the rich-longText sanitizer', () => {
