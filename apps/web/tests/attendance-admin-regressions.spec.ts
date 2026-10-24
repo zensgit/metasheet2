@@ -5929,6 +5929,14 @@ describe('Attendance admin regressions', () => {
     const previewBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: false, reasonCode: 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED' },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -5953,6 +5961,7 @@ describe('Attendance admin regressions', () => {
             shift: {
               id: 'shift-a',
               name: 'Day shift',
+                segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
               timezone: 'Asia/Shanghai',
               workStartTime: '09:00',
               workEndTime: '18:00',
@@ -6023,6 +6032,7 @@ describe('Attendance admin regressions', () => {
               {
                 id: 'shift-a',
                 name: 'Day shift',
+                segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
                 timezone: 'Asia/Shanghai',
                 workStartTime: '09:00',
                 workEndTime: '18:00',
@@ -6060,10 +6070,13 @@ describe('Attendance admin regressions', () => {
     const weekMatrix = previewPanel!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-week-matrix]')
     expect(weekMatrix).toBeTruthy()
     expect(weekMatrix!.textContent).toContain('Day shift')
-    expect(weekMatrix!.textContent).toContain('09:00-18:00')
+    expect(weekMatrix!.textContent).toContain('08:00-12:00 / 13:00-17:00')
+    expect(shiftSelect!.textContent).toContain('08:00-12:00 / 13:00-17:00')
     expect(weekMatrix!.textContent).toContain('Sun')
     expect(weekMatrix!.textContent).toContain('Rest')
 
+    expect(previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-rebuild-submit]')?.disabled).toBe(true)
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-eligibility]')?.textContent).toContain('cannot apply or rebuild multi-segment')
     const previewButton = previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')
     expect(previewButton).toBeTruthy()
     previewButton!.click()
@@ -6098,6 +6111,7 @@ describe('Attendance admin regressions', () => {
       shift: {
         id: 'shift-a',
         name: 'Day shift',
+        segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
         timezone: 'Asia/Shanghai',
         workStartTime: '09:00',
         workEndTime: '18:00',
@@ -6118,6 +6132,14 @@ describe('Attendance admin regressions', () => {
     }
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -6183,6 +6205,7 @@ describe('Attendance admin regressions', () => {
               {
                 id: 'shift-a',
                 name: 'Day shift',
+        segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
                 timezone: 'Asia/Shanghai',
                 workStartTime: '09:00',
                 workEndTime: '18:00',
@@ -6231,12 +6254,12 @@ describe('Attendance admin regressions', () => {
       endDate: '2026-06-30',
     }
     expect(previewBodies).toEqual([expectedBody])
-    expect(applyBodies).toEqual([expectedBody])
+    expect(applyBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
     expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-apply-created]')?.textContent).toContain('1')
     expect(applyButton!.disabled).toBe(true)
     applyButton!.click()
     await flushUi(2)
-    expect(applyBodies).toEqual([expectedBody])
+    expect(applyBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
     expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )).toBe(false)
@@ -6245,6 +6268,9 @@ describe('Attendance admin regressions', () => {
   it('rebuilds and clears managed fixed schedule rows through group routes', async () => {
     const rebuildBodies: unknown[] = []
     const clearBodies: unknown[] = []
+    let captureAssignmentRefresh = false
+    let resolveOldAssignmentRefresh!: (response: Response) => void
+    const oldAssignmentRefresh = new Promise<Response>((resolve) => { resolveOldAssignmentRefresh = resolve })
     const confirmSpy = vi.spyOn(window, 'confirm')
       .mockReturnValueOnce(false)
       .mockReturnValueOnce(true)
@@ -6282,6 +6308,18 @@ describe('Attendance admin regressions', () => {
 
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.startsWith('/api/attendance/assignments?') && captureAssignmentRefresh) {
+        captureAssignmentRefresh = false
+        return oldAssignmentRefresh
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -6400,7 +6438,8 @@ describe('Attendance admin regressions', () => {
       rebuildButton!.click()
       await flushUi(8)
 
-      expect(rebuildBodies).toEqual([expectedBody])
+      await vi.waitFor(() => expect(clearButton!.disabled).toBe(false))
+      expect(rebuildBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-rebuild-created]')?.textContent).toContain('1')
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-deactivated]')?.textContent).toContain('1')
 
@@ -6414,7 +6453,31 @@ describe('Attendance admin regressions', () => {
 
       expect(clearBodies).toEqual([expectedBody])
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-result]')).toBeNull()
-      expect(container!.textContent).toContain('Cleared 2 managed fixed schedule rows.')
+      await vi.waitFor(() => expect(container!.textContent).toContain('Cleared 2 managed fixed schedule rows.'))
+      await vi.waitFor(() => expect(rebuildButton!.disabled).toBe(false))
+      captureAssignmentRefresh = true
+      rebuildButton!.click()
+      await vi.waitFor(() => expect(captureAssignmentRefresh).toBe(false))
+      const schedulingGroup = container!.querySelector<HTMLButtonElement>('[data-admin-anchor-group="scheduling"] > button')
+      expect(schedulingGroup).toBeTruthy()
+      expect(schedulingGroup!.getAttribute('aria-expanded')).toBe('false')
+      schedulingGroup!.click()
+      await flushUi(2)
+      const assignmentsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')
+      expect(assignmentsNav).toBeTruthy()
+      assignmentsNav!.click()
+      await flushUi(4)
+      const filter = container!.querySelector<HTMLSelectElement>('#attendance-assignment-publish-status-filter')!
+      filter.value = 'published'
+      filter.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(8)
+      resolveOldAssignmentRefresh(jsonResponse(200, { ok: true, data: { items: [{
+        assignment: { ...rebuiltData.created[0], id: 'stale-scope-assignment', userId: 'stale-scope-user' },
+        shift: rebuiltData.shift,
+      }] } }))
+      await flushUi(12)
+      expect(container!.querySelector('[data-attendance-assignment-user-id]')).toBeNull()
+      expect(container!.textContent).not.toContain('stale-scope-user')
       expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
         String(input) === '/api/attendance/assignments' && init?.method === 'POST'
       )).toBe(false)
@@ -6426,6 +6489,14 @@ describe('Attendance admin regressions', () => {
   it('shows a clear-first hint when a managed fixed schedule blocks the selected window', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,

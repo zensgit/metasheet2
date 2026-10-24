@@ -191,6 +191,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/index.cjs',
   'plugins/plugin-attendance/lib/attendance-fixed-schedule-self-route-identity.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs',
+  // The editor projects persisted schedule facts and canonical posture.
+  // Keep both W6 aggregate bans active; no not-calculation-path exclusion.
+  'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-editor-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
   // Import identity resolution selects the employee whose frozen context is built.

@@ -1163,6 +1163,11 @@ describe('DirectoryManagementView', () => {
 
     expect(container?.textContent).toContain('暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐）')
     expect(container?.textContent).toContain('修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。')
+    // field item 3: a bound member who logged in before the upgrade rescans once; the admin refreshes
+    // and grants on this page (user management is not equivalent for these members)
+    const rescanHints = Array.from(container!.querySelectorAll('p.directory-admin__hint'))
+      .filter((hint) => hint.textContent?.includes('已绑定、升级前用钉钉登录过的成员：升级后请让成员再用钉钉扫码登录一次，点「刷新当前成员」后在本页开通（这类成员不要到用户管理开通）。'))
+    expect(rescanHints.length).toBeGreaterThanOrEqual(2)
     expect(container?.textContent).not.toContain('检查钉钉目录同步返回值')
     const refreshButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('刷新当前成员'))
     expect(refreshButtons.length).toBeGreaterThanOrEqual(2)
@@ -1264,6 +1269,8 @@ describe('DirectoryManagementView', () => {
       ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
     expect(grantInput?.disabled).toBe(true)
     expect(accountsSection.textContent).toContain('暂时拿不到该成员的 openId')
+    // the field-item-3 rescan hint is for members who are already bound; this account is not
+    expect(accountsSection.textContent).not.toContain('已绑定、升级前用钉钉登录过的成员')
   })
 
   it('binds an openId-missing account without enabling DingTalk grant', async () => {
