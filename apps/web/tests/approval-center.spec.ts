@@ -929,6 +929,78 @@ describe('ApprovalCenterView', () => {
       expect(loadPendingSpy.mock.lastCall?.[0]).not.toHaveProperty('workflowKey')
     })
 
+    it('filtering inside the attendance view keeps it; clearing the filters then leaves it', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 2 })
+
+      await mountView()
+      await flushUi()
+      filterButton()!.click()
+      await flushUi()
+
+      // Entering the view resets the other filters, so 清空筛选 has nothing to clear until one is
+      // set again inside the view.
+      const source = container!.querySelector('[data-testid="approval-source-filter"]') as HTMLSelectElement
+      source.value = 'platform'
+      source.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        workflowKey: 'attendance.request',
+        sourceSystem: 'platform',
+      }))
+      expect(showAllButton(), 'still in the attendance view after filtering inside it').toBeTruthy()
+
+      loadPendingSpy.mockClear()
+      ;(container!.querySelector('[data-testid="approval-clear-filters"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+      expect(loadPendingSpy.mock.lastCall?.[0]).toMatchObject({ sourceSystem: 'all', page: 1 })
+      expect(loadPendingSpy.mock.lastCall?.[0]).not.toHaveProperty('workflowKey')
+      expect(showAllButton()).toBeNull()
+      expect(filterButton()).toBeTruthy()
+    })
+
+    it('a deep link into the list (query change on the mounted view) leaves the attendance view', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 2 })
+
+      await mountView()
+      await flushUi()
+      filterButton()!.click()
+      await flushUi()
+      expect(showAllButton()).toBeTruthy()
+
+      loadPendingSpy.mockClear()
+      mockRoute.query = { templateId: 'tpl-42' }
+      await flushUi()
+
+      expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+      expect(loadPendingSpy.mock.lastCall?.[0]).toMatchObject({ templateId: 'tpl-42', page: 1 })
+      expect(loadPendingSpy.mock.lastCall?.[0]).not.toHaveProperty('workflowKey')
+      expect(showAllButton()).toBeNull()
+    })
+
+    it('a list reload keeps the last 考勤待审 number on screen while the total is re-read', async () => {
+      listApprovalsSpy.mockResolvedValue({ data: [attendanceRow('apv_a1', 'req-a1')], total: 3 })
+
+      await mountView()
+      await flushUi()
+      expect(filterButton()!.textContent).toContain('考勤待审 3')
+      const countReadsBefore = listApprovalsSpy.mock.calls.length
+
+      // The next read never answers: the button must neither drop the number nor turn disabled.
+      listApprovalsSpy.mockReturnValue(new Promise(() => {}))
+      const source = container!.querySelector('[data-testid="approval-source-filter"]') as HTMLSelectElement
+      source.value = 'platform'
+      source.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      expect(listApprovalsSpy.mock.calls.length, 'the reload re-asks for the total').toBe(countReadsBefore + 1)
+      expect(listApprovalsSpy).toHaveBeenLastCalledWith(ATTENDANCE_COUNT_QUERY)
+      expect(filterButton()!.textContent).toContain('考勤待审 3')
+      expect(filterButton()!.disabled).toBe(false)
+      expect(reason()).toBeNull()
+    })
+
     it('nothing pending: the button is disabled and says why', async () => {
       listApprovalsSpy.mockResolvedValue({ data: [], total: 0 })
 
