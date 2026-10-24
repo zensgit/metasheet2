@@ -1609,6 +1609,7 @@ exec npx vitest run \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
   attendance-daily-calendar-copy \
+  attendance-group-roster-stale \
   attendance-record-timeline \
   attendance-report-calendar-view.spec.ts \
   attendance-report-date-range-view.spec.ts \
