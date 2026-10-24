@@ -37,6 +37,7 @@
       />
       <PlmSnapshotSharePanel :data-source-id="readySource" :part-id="readyPart ?? ''" />
       <PlmBomChangeReadPanel :data-source-id="readySource" :part-id="readyPart ?? ''" />
+      <PlmCollaborationSnapshotsPanel :data-source-id="readySource" :item-id="readyPart ?? ''" />
     </template>
   </section>
 </template>
@@ -59,6 +60,7 @@ import {
 import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
 import PlmSnapshotSharePanel from '../components/plm/PlmSnapshotSharePanel.vue'
 import PlmBomChangeReadPanel from '../components/plm/PlmBomChangeReadPanel.vue'
+import PlmCollaborationSnapshotsPanel from '../components/plm/PlmCollaborationSnapshotsPanel.vue'
 
 type QueryHint =
   | { status: 'missing' | 'blank' | 'array' | 'ambiguous' }

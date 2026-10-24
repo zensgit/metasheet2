@@ -1,0 +1,624 @@
+{
+  "nonce": "ccacaa3ace9647398aaa0c9bdf56b91a",
+  "base": "4036ac23e5f7cd60554ea2b4d4cbc24e2add0bd1",
+  "branch": "codex/plm-w23-collaboration-entry-20261024",
+  "frozen": {
+    "packages/core-backend/src/multitable/plm-collaboration-snapshot-service.ts": "26a70904d4345e32ede8c6884253518c97df3e6378b1fc44a853654cc92a42b0",
+    "packages/core-backend/src/routes/plm-collaboration-snapshots.ts": "1bab47a54e20d404aa526a48876c028587efaa4cfcfe3c0eea1a2580a3abbd9b",
+    "apps/web/tests/PlmBomReviewWorkspaceView.spec.ts": "1ff1a443d2b5efa80716e147b81fa425f15121c1618c8506369d50c4963949ef"
+  },
+  "required_script_pre_edit_blob_sha256": "552f3f3e8c76cce44b90f41bb6b0dfcd37c1b9424cea7283c7fee797c2287614",
+  "required_script_pre_edit_note": "Binding baseline is null because the path was sparse-absent. The blob above is git show of 4036:apps/web/scripts/run-required-web-tests.sh before the token line was inserted.",
+  "scope_before": {
+    "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "32596570ae7c95bdcdbb755d594368a1aca1834194a68adefaa1863a21875ba0",
+    "apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": null,
+    "apps/web/src/multitable/views/MultitableWorkbench.vue": "5ced8d79af4778a642456a19de2363c0de13e6b2895db2b7b6dc71a15faaae55",
+    "packages/core-backend/src/routes/univer-meta.ts": "4513cc8a7b23d17fee952856a0f76192f8357503b5affd641ead5d8e96cb266d",
+    "apps/web/tests/PlmCollaborationSnapshotsPanel.spec.ts": null,
+    "packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts": null,
+    "apps/web/src/multitable/types.ts": "3f9723bcf2ed5c0248b5e47784e4d13c4938b2cfe73d102480da523ae03dcf24",
+    "apps/web/scripts/run-required-web-tests.sh": null,
+    ".github/workflows/plm-bom-listener.yml": "2cbb5f46fd339838d0ce483cf15ce997031bfcd1162335698cb53bcd04021dd3",
+    "docs/development/PLM_W23_COLLABORATION_ENTRY_DESIGN_VALIDATION_20261024.md": null,
+    "artifacts/plm-w23-collaboration-entry-20261024/verification.json": null
+  },
+  "scope_after": {
+    "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "a9c8ac90ab001162675519d96d923a1c6a36f34e79029d0c614158412da4d87a",
+    "apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": "3f4287e3ae2f822d249ac26912671ed1933226d37697e41e91dad9f5b322373c",
+    "apps/web/src/multitable/views/MultitableWorkbench.vue": "2779924fe9d5a83578165fb9b0a65b476976e192a7bd94d0ae53f99376a7a79e",
+    "packages/core-backend/src/routes/univer-meta.ts": "b8bcaef0b430ceec86558fad96c2318122ac0d7c69cad3c2bbeebc0d30a014e2",
+    "apps/web/tests/PlmCollaborationSnapshotsPanel.spec.ts": "f781eacbba0128fc09eb67b11a81ab559def762d725e8fdca2bb48a86f520739",
+    "packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts": "da396bc6a17fb3ea4218b92a85736bcccf4e182ccea80e698d11041d4684061e",
+    "apps/web/src/multitable/types.ts": "82446345275e879867be6c93c2643e26d084d835c8a2b4053324f58b45372182",
+    "apps/web/scripts/run-required-web-tests.sh": "3e72aad52cb8092a3e0c95c432906855f13599255b8974772568d3fcb8cd9957",
+    ".github/workflows/plm-bom-listener.yml": "4854224fc9e1a3634b205d2b6f6349bb8f907eb8885bb5c7d817390facad42b4",
+    "docs/development/PLM_W23_COLLABORATION_ENTRY_DESIGN_VALIDATION_20261024.md": "a297ea87e4bc85ac99eb005b73c7431d10dc9b8d59681ca2fbbc9b9e853cca40",
+    "artifacts/plm-w23-collaboration-entry-20261024/verification.json": null,
+    "apps/web/src/shared/comments/normalize.ts": "d9fd89b9bc338ff6f58c815ab5026b25096718eb0f16606eac8426263a85ee29"
+  },
+  "scope_after_note": "Final Source scope after independent Root one-line fault-reachability assertion; artifact self hash remains null and external receipt records it. Historical R1/R2/R3/R4 results remain unchanged.",
+  "checks": [
+    {
+      "name": "backend-collaboration-navigation-hint",
+      "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+      "command": "./node_modules/.bin/vitest run tests/unit/multitable-collaboration-navigation-hint.test.ts --reporter=verbose",
+      "exit": 0,
+      "passed": 6,
+      "fail": 0,
+      "error": 0,
+      "skip": 0,
+      "limit": "Vitest 1.6.1 reported Test Files 1 passed (1), Tests 6 passed (6). The 500 case prints console.error 'bindings unavailable' from the route; that is the asserted failure path. Importing PoolManager printed DATABASE_URL not set; the suite uses a mocked pool and did not open PostgreSQL. Not rerun this turn; backend source did not change."
+    },
+    {
+      "name": "backend-tsc",
+      "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+      "command": "node node_modules/typescript/bin/tsc --noEmit",
+      "exit": 0,
+      "passed": null,
+      "fail": 0,
+      "error": 0,
+      "skip": 0,
+      "limit": "Completed in 8.12s with no diagnostics. packages/core-backend/tsconfig.json excludes **/*.test.ts, so the new unit test is not part of this check. The route file is included. Not rerun this turn; backend source did not change."
+    },
+    {
+      "name": "frontend-panel-and-bom-host",
+      "cwd": "/tmp/plm-w23-ui-grok-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+      "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vitest/vitest.mjs run --config /tmp/plm-w23-ui-grok-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.root.config.mts --watch=false tests/PlmCollaborationSnapshotsPanel.spec.ts tests/PlmBomReviewWorkspaceView.spec.ts --reporter=json --outputFile=/tmp/plm-w23-ui-grok-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.result.json",
+      "exit": 0,
+      "passed": 23,
+      "fail": 0,
+      "error": 0,
+      "skip": 0,
+      "limit": "Vitest 1.6.1, success true, numTotalTests 23, numPassedTests 23, numFailedTests 0, numPendingTests 0. PlmCollaborationSnapshotsPanel.spec.ts 13 passed. PlmBomReviewWorkspaceView.spec.ts 10 passed. Host spec sha256 remains 1ff1a443d2b5efa80716e147b81fa425f15121c1618c8506369d50c4963949ef. Private fixture node_modules is a symlink to the existing frontend deps. No install. apps/web/node_modules is still absent, so this is not an apps/web npx run."
+    },
+    {
+      "name": "frontend-vue-tsc-panel-dto",
+      "cwd": "/tmp/plm-w23-ui-grok-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+      "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js --noEmit --incremental false --project /tmp/plm-w23-ui-grok-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/tsconfig.root-ui.json --pretty false",
+      "exit": 2,
+      "passed": null,
+      "fail": 1,
+      "error": 1,
+      "skip": 0,
+      "limit": "Narrow include only: PlmCollaborationSnapshotsPanel.vue, src/multitable/types.ts, src/vite-env.d.ts. This is not a full app, host, or workbench typecheck. The panel and types.ts produced no diagnostic. The one diagnostic is unchanged 4036 import src/shared/comments/normalize.ts(82,17) TS2550 Object.hasOwn, sha256 2787d5bbf8ee6445176cdeb4ebf74117badb73902ec41d422a29cb914ed73568, same as git show 4036. That file was not edited."
+    }
+  ],
+  "limits": [
+    "Frontend specs ran only in the nonce fixture. 23 passed, 0 failed. The original BOM host spec stayed byte-identical and passed 10.",
+    "Narrow vue-tsc exited 2 with one baseline-import diagnostic in src/shared/comments/normalize.ts. Not a full app typecheck.",
+    "vue-tsc rewrote the existing shared generated file apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts through the fixture symlink. Directory mtime stayed 2026-09-30. File mtime became 2026-10-24T16:27:32. sha256 5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8. No older copy was found to restore. No other shared dep path was newer than the pre-run marker. Repo apps/web/node_modules was not created.",
+    "No dependency install, network fetch, PostgreSQL, Docker, redis, browser, or production process was started.",
+    "No commit, push, pull request, merge, or deploy."
+  ],
+  "r1": {
+    "panel_sha256": "843d6c1882a1a76e74ba9963c0db01392c5614b200ffaa1cdec882097a910ccd",
+    "root_seven_controls": {
+      "pass": 2,
+      "fail": 5,
+      "error": 0,
+      "skip": 0
+    },
+    "root_seven_note": "Corrected private fixture. Earlier seven-initial had 3 missing-hint errors because the fixture clicked before DOM render. Those are fixture failures, not product evidence.",
+    "checks_in_this_file": "The checks array above is the R1 record and is not a rerun."
+  },
+  "r2": {
+    "claim": "Focused repair and focused checks. Not a Root acceptance. Not a full app typecheck, browser run, HTTP server run, install, hour, or production run.",
+    "repairs": [
+      "Capture session signature, parent Source, parent Item, hint key, and generation before the first await. Hash the captured signature. Recheck before storage mutation and POST. Do not delete an unknown pending record when the stamp is stale.",
+      "Drop the loaded anchor when parent Source, Item, or hint changes. Refresh and disable use that anchor only while it still matches. Version choice is not reset.",
+      "An incompatible pending record stays in sessionStorage, is not hydrated over the current parent Item, and is not retargeted.",
+      "Loaded cells render only whitelisted visibleFields names from own UUID keys.",
+      "Backend SQL mock throws unless the query is an enumerated branch. Added the context empty branches discovered by that throw, plus an unexpected-query rejection.",
+      "Required web script lists PlmBomReviewWorkspaceView once. One exec line remains.",
+      "normalize.ts uses Object.prototype.hasOwnProperty.call(raw, id). Lib, target, and strict were not changed."
+    ],
+    "checks": [
+      {
+        "name": "backend-collaboration-navigation-hint",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+        "command": "cd packages/core-backend && ./node_modules/.bin/vitest run tests/unit/multitable-collaboration-navigation-hint.test.ts --reporter=verbose",
+        "exit": 0,
+        "passed": 7,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Vitest 1.6.1 final run: Test Files 1 passed, Tests 7 passed. Six existing cases stayed, plus rejects a query outside the known empty branches. Empty branches added after the default throw were meta_views for one sheet, meta_fields ordered by order and id, field_permissions fp, and the user_permissions/user_roles permission-code union. The 500 case still prints console.error bindings unavailable. PoolManager may print DATABASE_URL not set. No PostgreSQL."
+      },
+      {
+        "name": "backend-tsc",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+        "command": "node node_modules/typescript/bin/tsc --noEmit",
+        "exit": 0,
+        "passed": null,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Exit 0. packages/core-backend/tsconfig.json excludes **/*.test.ts, so the unit test is not part of this check. The route file is included and was not edited."
+      },
+      {
+        "name": "frontend-panel-and-bom-host",
+        "cwd": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vitest/vitest.mjs run --config /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.root.config.mts --watch=false tests/PlmCollaborationSnapshotsPanel.spec.ts tests/PlmBomReviewWorkspaceView.spec.ts --reporter=json --outputFile=/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.result.json",
+        "exit": 0,
+        "passed": 30,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Vitest 1.6.1 success true. numTotalTests 30, numPassedTests 30, numFailedTests 0, numPendingTests 0. PlmCollaborationSnapshotsPanel.spec.ts 20 passed. PlmBomReviewWorkspaceView.spec.ts 10 passed. Host spec sha256 remains 1ff1a443d2b5efa80716e147b81fa425f15121c1618c8506369d50c4963949ef. New fixture. node_modules is a symlink. No install."
+      },
+      {
+        "name": "frontend-vue-tsc-panel-dto",
+        "cwd": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js --noEmit --incremental false --project /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/tsconfig.root-ui.json --pretty false",
+        "exit": 0,
+        "passed": null,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Narrow include: PlmCollaborationSnapshotsPanel.vue, src/multitable/types.ts, src/vite-env.d.ts, plus imports. Inherited app config: strict true, target esnext, lib es2020/dom/dom.iterable from @vue/tsconfig/tsconfig.dom.json. vueCompilerOptions.globalTypesPath=./.cache/vue-global-types/vue_3.5_0.d.ts. tsBuildInfoFile=./.cache/tsconfig.app.tsbuildinfo. incremental false. No -b. Empty output. Not a full app typecheck. The prior RangeError write-guard run is not counted."
+      },
+      {
+        "name": "normalize-own-property-edges",
+        "cwd": "/tmp",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --experimental-strip-types /tmp/plm-w23-r2-normalize-edges.mjs",
+        "exit": 0,
+        "passed": 1,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Private script, not a product test. Own trimmed label kept. Inherited constructor and spoiled ignored. Null-prototype own constructor and __proto__ kept. Blank dropped. Result map has a null prototype. Printed NORMALIZE_EDGES_OK."
+      },
+      {
+        "name": "protected-pins-and-frozen",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+        "command": "sha256 compare of binding pins and frozen paths",
+        "exit": 0,
+        "passed": 5122,
+        "fail": 0,
+        "error": 0,
+        "skip": 8965,
+        "limit": "14087 binding pins. 5122 non-null hashes matched. 8965 null pins were absent. 0 mismatch. Frozen five R1 scope files, host spec, snapshot service, and snapshot routes matched their pins. Allowed R2 writes are not in the 14087 pin map."
+      }
+    ],
+    "type_cache": {
+      "path": "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts",
+      "sha256": "5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8",
+      "size": 6303,
+      "mtime_ns_before": 1792830452822532600,
+      "mtime_ns_after": 1792830452822532600,
+      "dir_mtime_ns_before": 1790739124106486800,
+      "dir_mtime_ns_after": 1790739124106486800,
+      "unchanged": true,
+      "private_global_types": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/.cache/vue-global-types/vue_3.5_0.d.ts"
+    },
+    "limits": [
+      "R2 frontend specs ran only in /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a. 30 passed, 0 failed. Host spec stayed byte-identical and passed 10.",
+      "Narrow vue-tsc exited 0. This is not a full app, host, or workbench typecheck.",
+      "Shared .vue-global-types/vue_3.5_0.d.ts hash and mtime were unchanged. The private globalTypesPath received the generated file.",
+      "No dependency install, network fetch, PostgreSQL, Docker, redis, browser, or production process was started.",
+      "No commit, push, pull request, merge, or deploy.",
+      "Source-picker, unified entry, browser, and hour remain later slices."
+    ],
+    "scope_after_at_first_release": {
+      "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "a9c8ac90ab001162675519d96d923a1c6a36f34e79029d0c614158412da4d87a",
+      "apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": "6017674197d54a2177de0b9ab463f25bf576ef462a83c633a397a2a9d70388df",
+      "apps/web/src/multitable/views/MultitableWorkbench.vue": "2779924fe9d5a83578165fb9b0a65b476976e192a7bd94d0ae53f99376a7a79e",
+      "packages/core-backend/src/routes/univer-meta.ts": "b8bcaef0b430ceec86558fad96c2318122ac0d7c69cad3c2bbeebc0d30a014e2",
+      "apps/web/tests/PlmCollaborationSnapshotsPanel.spec.ts": "6f4793dd54dee819e52e6c0eda55917ce925aea2a4bf762ce1f7ecc97e173ca3",
+      "packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts": "6723e6e0bae97d1d20d5714ce4f1dd21ebdf63e5e3f5f38c3e29df0ad2ce1d0b",
+      "apps/web/src/multitable/types.ts": "82446345275e879867be6c93c2643e26d084d835c8a2b4053324f58b45372182",
+      "apps/web/scripts/run-required-web-tests.sh": "3e72aad52cb8092a3e0c95c432906855f13599255b8974772568d3fcb8cd9957",
+      ".github/workflows/plm-bom-listener.yml": "4854224fc9e1a3634b205d2b6f6349bb8f907eb8885bb5c7d817390facad42b4",
+      "docs/development/PLM_W23_COLLABORATION_ENTRY_DESIGN_VALIDATION_20261024.md": "43eb6b42acf4804535043929a4f5a2d38388b91e63c485c952c34baa285c0f05",
+      "artifacts/plm-w23-collaboration-entry-20261024/verification.json": null,
+      "apps/web/src/shared/comments/normalize.ts": "d9fd89b9bc338ff6f58c815ab5026b25096718eb0f16606eac8426263a85ee29"
+    },
+    "first_release_note": "scope_after_at_first_release is the hash map at 2026-10-24T17:17:48.913266+08:00. Top-level scope_after is the supplementary map. verification.json stays null inside this file."
+  },
+  "r2_supplementary": {
+    "claim": "Three additional permanent controls for the frozen R1 races. Not a Root acceptance. Not a full app typecheck, browser run, HTTP server run, install, hour, or production run. The first R2 release at 2026-10-24T17:17:48.913266+08:00 is historical only.",
+    "immutable_r1_panel_sha256": "843d6c1882a1a76e74ba9963c0db01392c5614b200ffaa1cdec882097a910ccd",
+    "root_packet_manifest_sha256": "4598051ff7c5c8c1dd30eae341be23a82ac883c875082a58e1adc485411b459d",
+    "panel_source_changed": false,
+    "panel_sha256": "6017674197d54a2177de0b9ab463f25bf576ef462a83c633a397a2a9d70388df",
+    "controls": [
+      "Mount restorePending under principal A with the real digest held, notify B, finish B storage inspection, then release A. Anchor and retry stay null. Storage bytes stay identical.",
+      "While B storage inspection digest is held, the old A anchor and retry are already absent. Storage bytes stay identical.",
+      "Loaded refresh switches to B before the first storage await returns. The returned promise resolves undefined, there is no /refresh POST, and there is no unhandled rejection."
+    ],
+    "checks": [
+      {
+        "name": "frontend-panel-and-bom-host",
+        "cwd": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vitest/vitest.mjs run --config /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.root.config.mts --watch=false tests/PlmCollaborationSnapshotsPanel.spec.ts tests/PlmBomReviewWorkspaceView.spec.ts --reporter=json --outputFile=/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.result.json",
+        "exit": 0,
+        "passed": 33,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Vitest 1.6.1 success true. numTotalTests 33, numPassedTests 33, numFailedTests 0, numPendingTests 0. PlmCollaborationSnapshotsPanel.spec.ts 23 passed, including the three new race controls. PlmBomReviewWorkspaceView.spec.ts 10 passed. Host spec sha256 remains 1ff1a443d2b5efa80716e147b81fa425f15121c1618c8506369d50c4963949ef. Same R2 fixture, spec and panel overlaid from the worktree. node_modules is a symlink. No install. Separate from R1 23 and the first R2 30."
+      },
+      {
+        "name": "frontend-vue-tsc-panel-dto",
+        "cwd": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js --noEmit --incremental false --project /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/tsconfig.root-ui.json --pretty false",
+        "exit": 0,
+        "passed": null,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Narrow include unchanged. Empty output. No -b. Not a full app typecheck. Panel source hash unchanged, so this rerun is the cache guard for the supplementary turn."
+      },
+      {
+        "name": "protected-pins-and-frozen",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+        "command": "sha256 compare of binding pins and frozen paths",
+        "exit": 0,
+        "passed": 5122,
+        "fail": 0,
+        "error": 0,
+        "skip": 8965,
+        "limit": "14087 binding pins. 5122 non-null hashes matched. 8965 null pins were absent. 0 mismatch. 0 null pin present. Frozen five R1 scope files, host spec, snapshot service, and snapshot routes matched. Allowed R2 writes are not in the pin map. Backend unit and backend tsc were not rerun; those sources did not change."
+      }
+    ],
+    "not_rerun": [
+      "backend-collaboration-navigation-hint: test file hash remains 6723e6e0bae97d1d20d5714ce4f1dd21ebdf63e5e3f5f38c3e29df0ad2ce1d0b. First R2 result stays 7 passed.",
+      "backend-tsc: route file was not edited. First R2 result stays exit 0.",
+      "normalize-own-property-edges: normalize.ts hash remains d9fd89b9bc338ff6f58c815ab5026b25096718eb0f16606eac8426263a85ee29."
+    ],
+    "type_cache": {
+      "path": "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts",
+      "sha256": "5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8",
+      "size": 6303,
+      "mtime_ns_before": 1792830452822532600,
+      "mtime_ns_after": 1792830452822532600,
+      "dir_mtime_ns_before": 1790739124106486800,
+      "dir_mtime_ns_after": 1790739124106486800,
+      "unchanged": true,
+      "private_global_types": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/.cache/vue-global-types/vue_3.5_0.d.ts"
+    },
+    "limits": [
+      "Supplementary frontend specs ran only in /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a. 33 passed, 0 failed. Host spec stayed byte-identical and passed 10. Panel spec passed 23.",
+      "The panel Vue source was not edited in this supplementary turn.",
+      "Narrow vue-tsc exited 0. This is not a full app, host, or workbench typecheck.",
+      "Shared .vue-global-types/vue_3.5_0.d.ts hash and both mtimes were unchanged before and after vue-tsc.",
+      "No dependency install, network fetch, PostgreSQL, Docker, redis, browser, or production process was started.",
+      "No commit, push, pull request, merge, or deploy.",
+      "The first R2 release is historical and is not acceptance."
+    ],
+    "scope_after_at_restore_release": {
+      "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "a9c8ac90ab001162675519d96d923a1c6a36f34e79029d0c614158412da4d87a",
+      "apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": "6017674197d54a2177de0b9ab463f25bf576ef462a83c633a397a2a9d70388df",
+      "apps/web/src/multitable/views/MultitableWorkbench.vue": "2779924fe9d5a83578165fb9b0a65b476976e192a7bd94d0ae53f99376a7a79e",
+      "packages/core-backend/src/routes/univer-meta.ts": "b8bcaef0b430ceec86558fad96c2318122ac0d7c69cad3c2bbeebc0d30a014e2",
+      "apps/web/tests/PlmCollaborationSnapshotsPanel.spec.ts": "8498328e69302e7a093876b80628b7824e69b09011bee59abdf1f3287b1f10e1",
+      "packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts": "6723e6e0bae97d1d20d5714ce4f1dd21ebdf63e5e3f5f38c3e29df0ad2ce1d0b",
+      "apps/web/src/multitable/types.ts": "82446345275e879867be6c93c2643e26d084d835c8a2b4053324f58b45372182",
+      "apps/web/scripts/run-required-web-tests.sh": "3e72aad52cb8092a3e0c95c432906855f13599255b8974772568d3fcb8cd9957",
+      ".github/workflows/plm-bom-listener.yml": "4854224fc9e1a3634b205d2b6f6349bb8f907eb8885bb5c7d817390facad42b4",
+      "docs/development/PLM_W23_COLLABORATION_ENTRY_DESIGN_VALIDATION_20261024.md": "f15934b889cd24d4c286b55ba2f16c956566c36424396c7319d27c52bbb7c36d",
+      "artifacts/plm-w23-collaboration-entry-20261024/verification.json": null,
+      "apps/web/src/shared/comments/normalize.ts": "d9fd89b9bc338ff6f58c815ab5026b25096718eb0f16606eac8426263a85ee29"
+    }
+  },
+  "r2_pending_slot": {
+    "claim": "Pending-slot compare and conditional acknowledgement clear. Not a Root acceptance. Not a cross-process guarantee. The releases at 2026-10-24T17:17:48.913266+08:00 and 2026-10-24T17:34:10.505000+08:00 are historical only.",
+    "immutable_r1_panel_sha256": "843d6c1882a1a76e74ba9963c0db01392c5614b200ffaa1cdec882097a910ccd",
+    "root_packet_manifest_sha256": "bc35817afb93383d7d2c6bbc4bcc204f87c86aeca416900ca040f22b24317933",
+    "panel_sha256": "ccb141ed159fd7aa60d7adaaf3585c25820105466b07746bafb5ad9e7ee60e71",
+    "controls": [
+      "During a retry inspectStorage digest, a same-identity same-context replacement with a new request id and preview id stays byte-identical. The stale record is not posted.",
+      "After the retry POST has started and before its response, the acknowledgement removes storage only when the frozen raw text is still current. A newer unknown record is preserved and reconciled, and is not replayed, deleted, or retargeted."
+    ],
+    "checks": [
+      {
+        "name": "frontend-panel-and-bom-host",
+        "cwd": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vitest/vitest.mjs run --config /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.root.config.mts --watch=false tests/PlmCollaborationSnapshotsPanel.spec.ts tests/PlmBomReviewWorkspaceView.spec.ts --reporter=json --outputFile=/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.result.json",
+        "exit": 0,
+        "passed": 35,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Vitest 1.6.1 success true. numTotalTests 35, numPassedTests 35, numFailedTests 0, numPendingTests 0. PlmCollaborationSnapshotsPanel.spec.ts 25 passed, including the two pending-slot controls. PlmBomReviewWorkspaceView.spec.ts 10 passed. Host spec sha256 remains 1ff1a443d2b5efa80716e147b81fa425f15121c1618c8506369d50c4963949ef. Separate from R1 23, first R2 30, and restore supplement 33."
+      },
+      {
+        "name": "frontend-vue-tsc-panel-dto",
+        "cwd": "/tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js --noEmit --incremental false --project /tmp/plm-w23-ui-grok-r2-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/tsconfig.root-ui.json --pretty false",
+        "exit": 0,
+        "passed": null,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Empty output. No -b. Not a full app typecheck."
+      },
+      {
+        "name": "protected-pins-and-frozen",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+        "command": "sha256 compare of binding pins and frozen paths",
+        "exit": 0,
+        "passed": 5122,
+        "fail": 0,
+        "error": 0,
+        "skip": 8965,
+        "limit": "14087 binding pins. 5122 non-null hashes matched. 8965 null pins were absent. 0 mismatch. Frozen five, host spec, snapshot service, and snapshot routes matched. Allowed writes are not in the pin map. Backend unit and backend tsc were not rerun."
+      }
+    ],
+    "not_rerun": [
+      "backend-collaboration-navigation-hint stays 7 passed at hash 6723e6e0bae97d1d20d5714ce4f1dd21ebdf63e5e3f5f38c3e29df0ad2ce1d0b.",
+      "backend-tsc stays exit 0. The route file was not edited.",
+      "normalize-own-property-edges stays at hash d9fd89b9bc338ff6f58c815ab5026b25096718eb0f16606eac8426263a85ee29."
+    ],
+    "type_cache": {
+      "path": "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts",
+      "sha256": "5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8",
+      "size": 6303,
+      "mtime_ns_before": 1792830452822532600,
+      "mtime_ns_after": 1792830452822532600,
+      "dir_mtime_ns_before": 1790739124106486800,
+      "dir_mtime_ns_after": 1790739124106486800,
+      "unchanged": true
+    },
+    "limits": [
+      "Same-origin sessionStorage can change during a confirm await. These controls do not claim a cross-process lock.",
+      "Fixture vitest 35 passed, 0 failed. Host spec stayed byte-identical.",
+      "Narrow vue-tsc exited 0. This is not a full app typecheck.",
+      "No install, PostgreSQL, Docker, browser, commit, push, or deploy."
+    ],
+    "scope_after_at_pending_slot_release": {
+      "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "a9c8ac90ab001162675519d96d923a1c6a36f34e79029d0c614158412da4d87a",
+      "apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": "ccb141ed159fd7aa60d7adaaf3585c25820105466b07746bafb5ad9e7ee60e71",
+      "apps/web/src/multitable/views/MultitableWorkbench.vue": "2779924fe9d5a83578165fb9b0a65b476976e192a7bd94d0ae53f99376a7a79e",
+      "packages/core-backend/src/routes/univer-meta.ts": "b8bcaef0b430ceec86558fad96c2318122ac0d7c69cad3c2bbeebc0d30a014e2",
+      "apps/web/tests/PlmCollaborationSnapshotsPanel.spec.ts": "c3c6a2e3413ca1d404bf61c3ae50c645512f4bf979ef0421c35f7c743ffc4991",
+      "packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts": "6723e6e0bae97d1d20d5714ce4f1dd21ebdf63e5e3f5f38c3e29df0ad2ce1d0b",
+      "apps/web/src/multitable/types.ts": "82446345275e879867be6c93c2643e26d084d835c8a2b4053324f58b45372182",
+      "apps/web/scripts/run-required-web-tests.sh": "3e72aad52cb8092a3e0c95c432906855f13599255b8974772568d3fcb8cd9957",
+      ".github/workflows/plm-bom-listener.yml": "4854224fc9e1a3634b205d2b6f6349bb8f907eb8885bb5c7d817390facad42b4",
+      "docs/development/PLM_W23_COLLABORATION_ENTRY_DESIGN_VALIDATION_20261024.md": "d205f2bbae176b6ee241a93e20ff1d1e5f08b2af6abc716d73e9c79069ecccaa",
+      "artifacts/plm-w23-collaboration-entry-20261024/verification.json": null,
+      "apps/web/src/shared/comments/normalize.ts": "d9fd89b9bc338ff6f58c815ab5026b25096718eb0f16606eac8426263a85ee29"
+    }
+  },
+  "r3": {
+    "claim": "Residual P2 was this unit observability. The production route was not edited. Root independently reran the original 7+3+2 UI controls: 12 passed, 0 failed, 0 error, 0 skip, panel ccb141ed159fd7aa60d7adaaf3585c25820105466b07746bafb5ad9e7ee60e71. These unit controls are not a product bug fix and are not a Root acceptance.",
+    "root_r2_packet": "w23-ui-entry-r2-released-20261024",
+    "root_r2_manifest_sha256": "3b25334e48b53fc5e66576c866c96505541417edeb4f7b0d62c88318aaa5596d",
+    "root_r2_independent_controls": {
+      "passed": 12,
+      "fail": 0,
+      "error": 0,
+      "skip": 0,
+      "panel_sha256": "ccb141ed159fd7aa60d7adaaf3585c25820105466b07746bafb5ad9e7ee60e71",
+      "note": "Root reran the exact original 7+3+2 controls on the immutable released panel. This turn did not rerun them and did not edit the panel."
+    },
+    "restored_unit_sha256": "d37b8e20ad56406692e646286f56b37a8dc7e5ec114a8ad3c389fa0c0a3dbb81",
+    "production_route_sha256": "b8bcaef0b430ceec86558fad96c2318122ac0d7c69cad3c2bbeebc0d30a014e2",
+    "pre_mutant_green": {
+      "exit": 0,
+      "passed": 7,
+      "fail": 0,
+      "pending": 0,
+      "todo": 0
+    },
+    "mutant": {
+      "where": "test pool only, throwBindings branch of packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts",
+      "injected_sql": "SELECT injected_unknown_during_500 FROM meta_future_table",
+      "still_threw": "bindings unavailable",
+      "exit": 1,
+      "passed": 6,
+      "fail": 1,
+      "pending": 0,
+      "todo": 0,
+      "failed_test": "surfaces a bindings read failure as the route 500",
+      "failed_assertion": "expectNoUnexpectedSql",
+      "received_journal": [
+        "SELECT injected_unknown_during_500 FROM meta_future_table"
+      ],
+      "route_log": "[univer-meta] list sheets failed: Error: bindings unavailable",
+      "restored": true,
+      "production_route_edited": false
+    },
+    "checks": [
+      {
+        "name": "backend-collaboration-navigation-hint-restored",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node ./node_modules/vitest/vitest.mjs run tests/unit/multitable-collaboration-navigation-hint.test.ts --reporter=json --outputFile=/tmp/plm-w23-collab-r3-unit-restored.json",
+        "exit": 0,
+        "passed": 7,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "pending": 0,
+        "todo": 0,
+        "limit": "Vitest 1.6.1 JSON reporter success true. numPassedTests 7, numFailedTests 0, numPendingTests 0, numTodoTests 0. The same file before the mutant was also 7 passed, exit 0. The controlled test-pool mutant, removed before this run, was exit 1 with 6 passed and 1 failed. The failure was expectNoUnexpectedSql on the 500 route case. The received journal entry was SELECT injected_unknown_during_500 FROM meta_future_table. The route log remained bindings unavailable. The production route was not edited. PostgreSQL was not opened."
+      },
+      {
+        "name": "protected-pins-and-frozen-r2",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+        "command": "sha256 compare of /tmp/plm-w23-collaboration-entry-r2-binding-20261024.json pins and frozen R2 paths",
+        "exit": 0,
+        "passed": 5122,
+        "fail": 0,
+        "error": 0,
+        "skip": 8965,
+        "limit": "14087 binding pins. 5122 non-null hashes matched. 8965 null pins were absent. 0 mismatch. The three R3 allowed writes are not in the pin map. Panel, web spec, host spec, workbench, types, univer route, listener, required script, normalize, snapshot service, and snapshot routes matched their released hashes. Frontend, host, narrow vue-tsc, backend tsc, and E170 were not rerun."
+      }
+    ],
+    "not_rerun": [
+      "Root original 7+3+2 UI controls",
+      "frontend panel and host vitest",
+      "narrow vue-tsc",
+      "backend tsc",
+      "E170",
+      "PostgreSQL, Docker, browser, install"
+    ],
+    "limits": [
+      "unexpectedSql is capped at 4. afterEach does not clear it and does not whitelist unknowns.",
+      "The direct sentinel isolates one expected unknown on its own fixture and does not clear that entry.",
+      "The injected unknown was private to the test pool, proved the 500 case red, and was restored.",
+      "No product route change and no new Source feature.",
+      "Root review, whole app, HTTP, browser, install, and hour remain open."
+    ],
+    "scope_after_at_r3_release": {
+      "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "a9c8ac90ab001162675519d96d923a1c6a36f34e79029d0c614158412da4d87a",
+      "apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue": "ccb141ed159fd7aa60d7adaaf3585c25820105466b07746bafb5ad9e7ee60e71",
+      "apps/web/src/multitable/views/MultitableWorkbench.vue": "2779924fe9d5a83578165fb9b0a65b476976e192a7bd94d0ae53f99376a7a79e",
+      "packages/core-backend/src/routes/univer-meta.ts": "b8bcaef0b430ceec86558fad96c2318122ac0d7c69cad3c2bbeebc0d30a014e2",
+      "apps/web/tests/PlmCollaborationSnapshotsPanel.spec.ts": "c3c6a2e3413ca1d404bf61c3ae50c645512f4bf979ef0421c35f7c743ffc4991",
+      "packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts": "d37b8e20ad56406692e646286f56b37a8dc7e5ec114a8ad3c389fa0c0a3dbb81",
+      "apps/web/src/multitable/types.ts": "82446345275e879867be6c93c2643e26d084d835c8a2b4053324f58b45372182",
+      "apps/web/scripts/run-required-web-tests.sh": "3e72aad52cb8092a3e0c95c432906855f13599255b8974772568d3fcb8cd9957",
+      ".github/workflows/plm-bom-listener.yml": "4854224fc9e1a3634b205d2b6f6349bb8f907eb8885bb5c7d817390facad42b4",
+      "docs/development/PLM_W23_COLLABORATION_ENTRY_DESIGN_VALIDATION_20261024.md": "62a1d362b8a5c5d98fdec206ea448aea5ee0a4d4c0b8c70e3695968dafe53a91",
+      "artifacts/plm-w23-collaboration-entry-20261024/verification.json": null,
+      "apps/web/src/shared/comments/normalize.ts": "d9fd89b9bc338ff6f58c815ab5026b25096718eb0f16606eac8426263a85ee29"
+    }
+  },
+  "r4": {
+    "claim": "Hint-only Workbench availability repair. A nonempty outer Source or Item constrains the loaded anchor. When those props are absent, the explicit binding GET establishes the frozen context from its finite server anchor. This is not a new business feature, not an authority bypass, and not a Root acceptance. The R3 release and the R2 35, 12, and narrow exit 0 stay historical.",
+    "root_packet": "w23-workbench-hint-only-r2-root-red-20261024",
+    "root_manifest_sha256": "5b03cfe2d33c8145b648e184177f20c7ca43ffc8723424f75f777980a3cee6df",
+    "r2_panel_sha256": "ccb141ed159fd7aa60d7adaaf3585c25820105466b07746bafb5ad9e7ee60e71",
+    "panel_sha256": "3f4287e3ae2f822d249ac26912671ed1933226d37697e41e91dad9f5b322373c",
+    "spec_sha256": "f781eacbba0128fc09eb67b11a81ab559def762d725e8fdca2bb48a86f520739",
+    "design_sha256": "f0cba1c2429251318b0947cd9752522e722a267f44928c510a14ead9883d1950",
+    "backend_unit_sha256": "d37b8e20ad56406692e646286f56b37a8dc7e5ec114a8ad3c389fa0c0a3dbb81",
+    "backend_unit_rerun": false,
+    "production_route_sha256": "b8bcaef0b430ceec86558fad96c2318122ac0d7c69cad3c2bbeebc0d30a014e2",
+    "production_route_edited": false,
+    "checks": [
+      {
+        "name": "frontend-panel-and-bom-host",
+        "cwd": "/tmp/plm-w23-ui-grok-r4-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vitest/vitest.mjs run --config /tmp/plm-w23-ui-grok-r4-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.root.config.mts --watch=false tests/PlmCollaborationSnapshotsPanel.spec.ts tests/PlmBomReviewWorkspaceView.spec.ts --reporter=json --outputFile=/tmp/plm-w23-ui-grok-r4-registered.json",
+        "exit": 0,
+        "passed": 37,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "pending": 0,
+        "limit": "Vitest 1.6.1 success true. numPassedTests 37, numFailedTests 0, numPendingTests 0. PlmCollaborationSnapshotsPanel.spec.ts 27 passed, including the hint-only positive and the provided-parent mismatch negative. PlmBomReviewWorkspaceView.spec.ts 10 passed and stayed sha256 1ff1a443d2b5efa80716e147b81fa425f15121c1618c8506369d50c4963949ef. Separate from R2 registered 35."
+      },
+      {
+        "name": "copied-root-original12-plus-hint-only",
+        "cwd": "/tmp/plm-w23-ui-grok-r4-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vitest/vitest.mjs run --config /tmp/plm-w23-ui-grok-r4-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/vitest.root.config.mts --watch=false tests/root-frozen-preparation-races.spec.ts tests/root-additional-restore-races.spec.ts tests/root-pending-slot-cas.spec.ts tests/root-workbench-hint-only.spec.ts --reporter=json --outputFile=/tmp/plm-w23-ui-grok-r4-root13.json",
+        "exit": 0,
+        "passed": 13,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "pending": 0,
+        "todo": 0,
+        "limit": "Copies of the exact Root original 12 plus the hint-only case. 13 passed, 0 failed. Spec copies remained sha256 c8c721a824d8af11bebf02af17889cedb6dd97d085ad1928ff40d8f1e3cc93a2, e845d275a668b193b9ebed888c5560b18a42e96537efb64ab53c31300775a919, ae123a61539a8e4a4841f0fec11719fbc01cdb05cbf37b787a3c339a767c2c3a, and 7c7329f832beae0123810f61dff927527e0235349cfc499853c73cd2548a2367. Root fixture /tmp/plm-w23-ui-root-6fac21eab11e49c0bcb064da33ea9eaa was not edited. Its panel stayed ccb141ed159fd7aa60d7adaaf3585c25820105466b07746bafb5ad9e7ee60e71."
+      },
+      {
+        "name": "frontend-vue-tsc-panel-dto",
+        "cwd": "/tmp/plm-w23-ui-grok-r4-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web",
+        "command": "/Users/chouhua/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/vue-tsc/bin/vue-tsc.js --noEmit --incremental false --project /tmp/plm-w23-ui-grok-r4-ccacaa3ace9647398aaa0c9bdf56b91a/apps/web/tsconfig.root-ui.json --pretty false",
+        "exit": 0,
+        "passed": null,
+        "fail": 0,
+        "error": 0,
+        "skip": 0,
+        "limit": "Empty output. No -b. Not a full app typecheck. Shared .vue-global-types/vue_3.5_0.d.ts stayed sha256 5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8, size 6303, mtime_ns 1792830452822532608, directory mtime_ns 1790739124106486757."
+      },
+      {
+        "name": "protected-pins-and-frozen",
+        "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+        "command": "sha256 compare of /tmp/plm-w23-collaboration-entry-r2-binding-20261024.json pins and frozen R2 paths",
+        "exit": 0,
+        "passed": 5122,
+        "fail": 0,
+        "error": 0,
+        "skip": 8965,
+        "limit": "14087 binding pins. 5122 non-null hashes matched. 8965 null pins were absent. 0 mismatch. The four R4 allowed writes are not in the pin map. Backend unit stayed d37b8e20ad56406692e646286f56b37a8dc7e5ec114a8ad3c389fa0c0a3dbb81 and was not rerun. Workbench, types, univer route, listener, required script, normalize, host spec, snapshot service, and snapshot routes matched."
+      }
+    ],
+    "not_rerun": [
+      "backend-collaboration-navigation-hint stays 7 passed at hash d37b8e20ad56406692e646286f56b37a8dc7e5ec114a8ad3c389fa0c0a3dbb81.",
+      "backend tsc, E170, PostgreSQL, Docker, browser, install, and network were not run.",
+      "Root original fixtures were not edited."
+    ],
+    "type_cache": {
+      "path": "/Users/chouhua/Downloads/Github/.codex-worktrees/metasheet-plm-window-20260930/apps/web/node_modules/.vue-global-types/vue_3.5_0.d.ts",
+      "sha256": "5a214dfb5fc02409787e0a7e297baad796809fe3a7b82c6874f5bcc323c43fb8",
+      "size": 6303,
+      "mtime_ns_before": 1792830452822532608,
+      "mtime_ns_after": 1792830452822532608,
+      "dir_mtime_ns_before": 1790739124106486757,
+      "dir_mtime_ns_after": 1790739124106486757,
+      "unchanged": true
+    },
+    "limits": [
+      "Nonempty outer Source and Item remain constraints. Absent props do not infer a Source, Item, or version.",
+      "The explicit binding GET and server ACL remain the authority for the frozen anchor.",
+      "Unknown pending compare, three local fields, Readiness row selector, and existing engines were not changed.",
+      "Registered 37 and copied Root 13 are R4 counts. R2 remains 35 registered, 12 original, and narrow exit 0.",
+      "No install, PostgreSQL, Docker, browser, commit, push, or deploy. Root review remains open."
+    ]
+  },
+  "root_final": {
+    "at": "2026-10-24T10:24:00.381614+00:00",
+    "actor": "CODEX_INDEPENDENT_REVIEW_AND_REPRODUCTION",
+    "source_sha": "PENDING_SOURCE_COMMIT; recorded once in single closeout",
+    "frontend": {
+      "tests": 50,
+      "independent_countercases": 13,
+      "permanent_panel": 27,
+      "unchanged_host": 10,
+      "failures": 0,
+      "errors": 0,
+      "skips": 0,
+      "receipt": "/tmp/plm-w23-ui-root-final-r4-50-20261024.json",
+      "log_sha256": "3347bbb1d31e0c1297ad5b5fd92192525aa4f651bf70c80f8e564cdec002a6d0"
+    },
+    "frontend_types": {
+      "exit": 0,
+      "output_bytes": 0,
+      "scope": "Actual app ES2020 strict importedpanel/DTOclosure, notfullapp/host/workbench",
+      "shared_cache_sha_and_nanosecond_mtime_unchanged": true,
+      "private_globaltypes_and_writeguard": true
+    },
+    "backend": {
+      "unit_tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skips": 0,
+      "test_only_delta": "Assert intended bindings failure query reached exactlyonce",
+      "unit_sha256": "da396bc6a17fb3ea4218b92a85736bcccf4e182ccea80e698d11041d4684061e",
+      "mutant_earlier_known_failure": {
+        "exit": 1,
+        "selected_failures": 1,
+        "filtered_cases_not_coverage": 6
+      },
+      "mutant_unexpected_sql": {
+        "exit": 1,
+        "selected_failures": 1,
+        "filtered_cases_not_coverage": 6
+      },
+      "restored_selected_case": {
+        "exit": 0,
+        "passed": 1,
+        "filtered_cases_not_coverage": 6
+      },
+      "private_fixture_cleanup": true,
+      "receipt": "/tmp/plm-w23-root-backend-final-20261024.json",
+      "production_source_mutated_for_mutants": false
+    },
+    "backend_types": {
+      "exit": 0,
+      "output_bytes": 0,
+      "scope": "Existingproductionconfig includesroute/excludestest"
+    },
+    "publication": "DRAFT_ONLY_PENDING_SOURCE_ONE_FRESH_PARENT_HEAD_AND_NEW_HEAD_CI",
+    "limits": [
+      "No new actualPG cohort; frozen snapshot engine unchanged",
+      "No ordinary-login Native+Meta HTTP/browser/unified source picker proof",
+      "No full application frontend typecheck/build",
+      "No image/install/originalFrame>=3600s/production or whole-goal acceptance"
+    ]
+  }
+}

@@ -8269,6 +8269,79 @@ export interface RecoveryArchiveRouterDatabaseRuntime {
   readonly transactionDepthProbe: RecoveryArchivePreviewRuntime['transactionDepth']
 }
 
+interface PlmCollaborationSnapshotHint {
+  bindingId: string
+  sourceKind: 'eco' | 'readiness'
+}
+
+type PlmCollaborationHintQuery = (
+  sql: string,
+  params?: readonly unknown[],
+) => Promise<{ rows?: readonly unknown[] }>
+
+const PLM_COLLABORATION_BINDING_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Optional navigation hint for sheets the caller can already read.
+ * `to_regclass` skips the lookup when the collaboration migration is absent.
+ * The SELECT never reads source config, anchor, tuple, resources, owner, or credentials.
+ * A thrown bindings query stays thrown so the route's existing 500 is unchanged.
+ */
+async function loadPlmCollaborationSnapshotHints(
+  query: PlmCollaborationHintQuery,
+  sheetIds: readonly string[],
+): Promise<Map<string, PlmCollaborationSnapshotHint>> {
+  const allowed: string[] = []
+  const seen = new Set<string>()
+  for (const raw of sheetIds) {
+    const id = typeof raw === 'string' ? raw : ''
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    allowed.push(id)
+  }
+  const hints = new Map<string, PlmCollaborationSnapshotHint>()
+  if (allowed.length === 0) return hints
+  const presence = await query(`SELECT to_regclass('meta_plm_collaboration_bindings') AS present`)
+  const present = (presence.rows?.[0] as { present?: unknown } | undefined)?.present
+  if (present === null || present === undefined) return hints
+  const result = await query(
+    `SELECT id::text AS id, sheet_id, source_kind FROM meta_plm_collaboration_bindings WHERE sheet_id = ANY($1::text[])`,
+    [allowed],
+  )
+  const grouped = new Map<string, PlmCollaborationSnapshotHint[]>()
+  for (const raw of result.rows ?? []) {
+    if (!raw || typeof raw !== 'object') continue
+    const row = raw as { id?: unknown; sheet_id?: unknown; source_kind?: unknown }
+    const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
+    const bindingId = typeof row.id === 'string' ? row.id : ''
+    if (!seen.has(sheetId)) continue
+    if (!PLM_COLLABORATION_BINDING_ID.test(bindingId)) continue
+    if (row.source_kind !== 'eco' && row.source_kind !== 'readiness') continue
+    const list = grouped.get(sheetId) ?? []
+    list.push({ bindingId, sourceKind: row.source_kind })
+    grouped.set(sheetId, list)
+  }
+  for (const [sheetId, rows] of grouped) {
+    if (rows.length !== 1) continue
+    const row = rows[0]
+    if (!row) continue
+    hints.set(sheetId, { bindingId: row.bindingId, sourceKind: row.sourceKind })
+  }
+  return hints
+}
+
+function withPlmCollaborationSnapshotHint<T extends { id: string }>(
+  sheet: T,
+  hints: ReadonlyMap<string, PlmCollaborationSnapshotHint>,
+): T & { plmCollaborationSnapshot?: PlmCollaborationSnapshotHint } {
+  const hint = hints.get(sheet.id)
+  if (!hint) return sheet
+  return {
+    ...sheet,
+    plmCollaborationSnapshot: { bindingId: hint.bindingId, sourceKind: hint.sourceKind },
+  }
+}
+
 export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router {
   const router = Router()
   const injectedRecoveryArchiveDatabase = options.recoveryArchiveDatabaseRuntime
@@ -9488,6 +9561,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const plmBomSource = effectiveSheetId && capabilities.canRead
         ? await loadPlmBomSourceNavigation(pool.query.bind(pool), access.userId, effectiveSheetId)
         : undefined
+      const collaborationHints = await loadPlmCollaborationSnapshotHints(
+        pool.query.bind(pool) as PlmCollaborationHintQuery,
+        readableSheetRows.map((row) => String(row.id)),
+      )
 
       return res.json({
         ok: true,
@@ -9495,25 +9572,25 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           ...(plmBomSource ? { plmBomSource } : {}),
           base: baseRow ? serializeBaseRow(baseRow) : null,
           sheet: selectedSheet
-            ? {
+            ? withPlmCollaborationSnapshotHint({
               id: String(selectedSheet.id),
               baseId: typeof selectedSheet.base_id === 'string' ? selectedSheet.base_id : null,
               name: String(selectedSheet.name),
               description: typeof selectedSheet.description === 'string' ? selectedSheet.description : null,
               copiedFrom: selectedCopiedFrom,
-            }
+            }, collaborationHints)
             : null,
           // #5825: filter the RAW rows (they carry `system_kind`; the serialized shape below does not).
           sheets: ((sheetListResult as any).rows as any[]).filter((row: any) =>
             !isHiddenSystemSheet(row)
             && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
-          ).map((row: any) => ({
+          ).map((row: any) => withPlmCollaborationSnapshotHint({
             id: String(row.id),
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
             copiedFrom: serializeCopiedFrom(row),
-          })),
+          }, collaborationHints)),
           views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
           // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
           // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
@@ -9586,14 +9663,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         filterVisibleSheetRows((result.rows ?? []) as any[]),
         access,
       )
-      const sheets = readableSheetRows.map((r: any) => ({
+      const collaborationHints = await loadPlmCollaborationSnapshotHints(
+        pool.query.bind(pool) as PlmCollaborationHintQuery,
+        readableSheetRows.map((row) => String(row.id)),
+      )
+      const sheets = readableSheetRows.map((r: any) => withPlmCollaborationSnapshotHint({
         id: String(r.id),
         baseId: typeof r.base_id === 'string' ? r.base_id : null,
         name: String(r.name),
         description: typeof r.description === 'string' ? r.description : null,
         // Copy-sheet S1 badge (ADR CS-14): kind/at only — the source id is never listed here.
         copiedFrom: serializeCopiedFrom(r),
-      }))
+      }, collaborationHints))
       return res.json({ ok: true, data: { sheets } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)

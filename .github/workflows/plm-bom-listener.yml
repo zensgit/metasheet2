@@ -5,6 +5,15 @@ on:
       - 'packages/core-backend/src/multitable/plm-*.ts'
       - 'packages/core-backend/src/routes/plm-bom-reviews.ts'
       - 'packages/core-backend/src/routes/plm-collaboration-snapshots.ts'
+      - 'packages/core-backend/src/routes/univer-meta.ts'
+      - 'packages/core-backend/tests/unit/multitable-collaboration-navigation-hint.test.ts'
+      - 'apps/web/src/components/plm/PlmCollaborationSnapshotsPanel.vue'
+      - 'apps/web/tests/PlmCollaborationSnapshotsPanel.spec.ts'
+      - 'apps/web/src/views/PlmBomReviewWorkspaceView.vue'
+      - 'apps/web/tests/PlmBomReviewWorkspaceView.spec.ts'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/src/multitable/types.ts'
+      - 'apps/web/scripts/run-required-web-tests.sh'
       - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
       - 'packages/core-backend/src/index.ts'
       - 'packages/core-backend/src/db/migrations/*plm*.ts'
@@ -66,6 +75,10 @@ jobs:
           tests/unit/plm-collaboration-readiness-wire.test.ts
           tests/unit/plm-collaboration-readiness-source-transport.test.ts
           tests/unit/plm-collaboration-eco-source-transport.test.ts
+          tests/unit/multitable-collaboration-navigation-hint.test.ts
+      - name: Collaboration entry panel and BOM host
+        working-directory: apps/web
+        run: npx vitest run tests/PlmCollaborationSnapshotsPanel.spec.ts tests/PlmBomReviewWorkspaceView.spec.ts --reporter=dot
       - name: Real PostgreSQL collaboration snapshot guards
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_listener

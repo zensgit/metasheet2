@@ -75,6 +75,16 @@ export interface MetaSheet {
    * wire shape is mapped (so a backend casing change is a one-line fix there). Absent/null = not a copy.
    */
   copiedFrom?: MetaSheetCopiedFromWire | null
+  /**
+   * Navigation hint only. The authorized snapshot GET owns anchor, row, and canRefresh.
+   * Present only when the sheet has one finite binding id and source kind.
+   */
+  plmCollaborationSnapshot?: PlmCollaborationSnapshotHint
+}
+
+export interface PlmCollaborationSnapshotHint {
+  bindingId: string
+  sourceKind: 'eco' | 'readiness'
 }
 
 /** Wire shape of `MetaSheet.copiedFrom` (ADR §6). Loosely typed on purpose: the adapter validates it. */

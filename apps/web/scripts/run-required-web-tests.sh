@@ -1917,6 +1917,8 @@ exec npx vitest run \
   parallelBranchRunsView \
   permissionManagementView \
   personal-view-client \
+  PlmBomReviewWorkspaceView \
+  PlmCollaborationSnapshotsPanel \
   public-multitable-form \
   recordReportPresentation.spec.ts \
   requesterPreviewFields \
