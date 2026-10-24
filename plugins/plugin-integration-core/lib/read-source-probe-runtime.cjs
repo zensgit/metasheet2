@@ -19,7 +19,11 @@ const {
   normalizeReadSourceProbeContract,
   readSourceProbeEvidence,
 } = require('./read-source-probe-contract.cjs')
-const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
+const {
+  isB4ReadOperationProfile,
+  applyReadOperationProfileOverlay,
+  b4MaterialListResponseViolation,
+} = require('./k3-read-operation-profiles.cjs')
 const {
   READ_SMOKE_LIST_REQUEST_MARKER,
   READ_SMOKE_BOM_REQUEST_MARKER,
@@ -31,6 +35,7 @@ const {
 const {
   K3WISE_BOM_LIST_BY_MATERIAL_PRESET,
   K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
+  isBomListByMaterialKeyValid,
 } = require('./read-source-bom-list-by-material-contract.cjs')
 
 const K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODE_SET = new Set(K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES)
@@ -104,6 +109,12 @@ function normalizeReadSourceProbeInputs(plan, inputs) {
   }
   if (plan.requiredNamedInputs.includes('key')) {
     if (!isBoundedProbeKeyValue(source.key)) {
+      throw new ReadSourceProbeContractError('key_required')
+    }
+    // BL2 identity: a numeric key must be a safe integer BEFORE it is stringified. A raw JSON id such as
+    // 9007199254740993 already parsed to the rounded 9007199254740992; String() would turn that into a
+    // digit run the adapter accepts and queries as the wrong id. Exact digit strings are untouched.
+    if (isBomListByMaterialPlan(plan) && typeof source.key === 'number' && !isBomListByMaterialKeyValid(source.key)) {
       throw new ReadSourceProbeContractError('key_required')
     }
     const normalized = { key: String(source.key).trim() }
@@ -273,7 +284,7 @@ async function executeReadSourceProbe(probe, { system, createAdapter, timeoutMs 
     throw new ReadSourceProbeRuntimeError('kind_mismatch')
   }
 
-  const adapterSystem = applyReadSmokePresetOverlay(system, buildReadSourceProbeOverlayPreset(plan))
+  const adapterSystem = applyReadOperationProfileOverlay(system, plan, buildReadSourceProbeOverlayPreset(plan))
   const adapter = createAdapter(adapterSystem)
   const request = buildReadSourceProbeRequest(plan, inputs)
 
@@ -296,6 +307,11 @@ async function executeReadSourceProbe(probe, { system, createAdapter, timeoutMs 
     // settlement so a late rejection cannot become an unhandled rejection.
     readPromise.catch(() => {})
     return probeFailure(plan, 'READ_SOURCE_PROBE_TIMEOUT', 'TimeoutError', { timeoutReached: true })
+  }
+
+  if (isB4ReadOperationProfile(plan.actionProfileVersion)) {
+    const violation = b4MaterialListResponseViolation(raced, request)
+    if (violation !== null) return probeFailure(plan, violation, 'ReadSourceProbeRuntimeError')
   }
 
   const raw = raced && raced.raw

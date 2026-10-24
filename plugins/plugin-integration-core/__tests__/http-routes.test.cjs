@@ -8423,6 +8423,177 @@ async function testReadSourceCompositionRoutes() {
     findCall(calls, 'readSourceCompositionListAudit')
   }
 
+  // ── K3-F1: unsafe numeric handoff into the fully locked BL2 hop. REAL planner/runtime, REAL
+  //    createK3WiseWebApiAdapter on BOTH hops, only an injected closed-world fetch is stubbed. The route
+  //    eagerly loads BOTH systems' credentials, so the unsafe case still sees TWO source-system loads but
+  //    only ONE adapter creation / fetch (hop 2 never runs). ──
+  {
+    const { createK3WiseWebApiAdapter } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs'))
+    const F1_BASE_URL = 'https://k3-f1-handoff.synthetic.invalid'
+    const F1_ORIGIN = new URL(F1_BASE_URL).origin
+    const F1_ITEM_PATH = '/K3API/Material/GetList'
+    const F1_BOM_PATH = '/K3API/BOM/GetList'
+    const F1_RUN_ROUTE = '/api/integration/read-source-compositions/:id/run'
+    const F1_BOM_NUMBER = 'BOM-F1-OK'
+
+    function f1ReadConfig(overrides) {
+      const result = validateReadSourceConfig({
+        version: 1,
+        requiredKind: 'erp:k3-wise-webapi',
+        mode: 'resolver_lookup',
+        readMethod: 'POST',
+        operations: ['read'],
+        resolverRule: 'exactly_one',
+        containerPaths: ['Data.DATA'],
+        ...overrides,
+      })
+      assert.equal(result.valid, true, `F1 fixture must S1-validate: ${JSON.stringify(result.errors)}`)
+      return result.normalized
+    }
+    const F1_ITEM_CONFIG = f1ReadConfig({
+      systemId: 'sys_f1_item', object: 'material', readPath: F1_ITEM_PATH, keyField: 'FNumber',
+      fieldMap: [{ source: 'FItemID', target: 'item_id' }],
+    })
+    // Hop 2 is the fully locked BL2 material-bom-list preset (NOT the generic bom object).
+    const F1_BL2_CONFIG = f1ReadConfig({
+      systemId: 'sys_f1_bom', object: 'material-bom-list', readPath: F1_BOM_PATH,
+      keyField: 'FPercentItemID', keyEncoding: 'numeric_id',
+      fieldMap: [{ source: 'FBOMNumber', target: 'bom_number' }],
+    })
+    const F1_COMPOSITION = {
+      version: 1, name: 'material-to-bom-f1', operations: ['read'],
+      steps: [
+        { id: 'a', readSourceConfigId: 'cfg-f1-item' },
+        { id: 'b', readSourceConfigId: 'cfg-f1-bl2', input: { fromStep: 'a', sourceTarget: 'item_id', toInput: 'key' } },
+      ],
+    }
+
+    // `itemIdJson` is a RAW JSON literal spliced into the response text, so a numeric literal reaches the
+    // adapter's JSON.parse as an actual number (never pre-converted to a string).
+    async function runF1Chain(itemIdJson) {
+      const probe = {
+        systemLoads: [], adapterCreations: 0, fetches: [], refused: [], globalFetchCalls: 0,
+        itemResponseText:
+          '{"StatusCode":200,"Message":"Successful","Data":{"ROWCOUNT":1,"PAGESIZE":10,"PAGEINDEX":1,"DATA":[{"FNumber":"MAT-F1-001","FItemID":' + itemIdJson + '}]}}',
+        bomResponseText: JSON.stringify({
+          StatusCode: 200, Message: 'Successful',
+          Data: { ROWCOUNT: 1, PAGESIZE: 10, PAGEINDEX: 1, DATA: [{ FBOMNumber: F1_BOM_NUMBER }] },
+        }),
+      }
+      const textByPath = { [F1_ITEM_PATH]: probe.itemResponseText, [F1_BOM_PATH]: probe.bomResponseText }
+      const fetchImpl = async (url, options = {}) => {
+        let parsed
+        try { parsed = new URL(String(url)) } catch { probe.refused.push('unparseable-url'); throw new Error('F1 fetch refused: unparseable url') }
+        const method = String(options.method || 'GET').toUpperCase()
+        const text = Object.prototype.hasOwnProperty.call(textByPath, parsed.pathname) ? textByPath[parsed.pathname] : undefined
+        if (parsed.origin !== F1_ORIGIN || method !== 'POST' || text === undefined) {
+          probe.refused.push(`${method} ${parsed.origin}${parsed.pathname}`)
+          throw new Error('F1 fetch refused: unexpected request')
+        }
+        probe.fetches.push({ pathname: parsed.pathname, method, bodyText: typeof options.body === 'string' ? options.body : '' })
+        return { ok: true, status: 200, headers: { get: () => null }, async text() { return text } }
+      }
+      const services = createMockServices({
+        externalSystemRegistry: {
+          async getExternalSystemForAdapter(input) {
+            probe.systemLoads.push(input.id)
+            return {
+              id: input.id, tenantId: input.tenantId, workspaceId: input.workspaceId, name: `F1 ${input.id}`,
+              kind: 'erp:k3-wise-webapi', status: 'active',
+              credentials: { sessionId: 'f1-synthetic-session' },
+              config: { baseUrl: F1_BASE_URL },
+            }
+          },
+        },
+        readSourceCompositionConfigStore: {
+          async saveVersion() { return {} }, async list() { return [] }, async get() { return {} },
+          async approve() { return {} }, async retire() { return {} }, async listAudit() { return [] },
+          async getForRuntime(input) {
+            return { id: input.id, status: 'approved', name: 'material-to-bom-f1', config: F1_COMPOSITION }
+          },
+        },
+        readSourceConfigStore: {
+          async saveVersion() { return {} }, async list() { return [] }, async get() { return {} },
+          async approve() { return {} }, async retire() { return {} }, async listAudit() { return [] },
+          async getForRuntime(input) {
+            const isBl2 = input.id === 'cfg-f1-bl2'
+            return {
+              id: input.id, status: 'approved',
+              systemId: isBl2 ? 'sys_f1_bom' : 'sys_f1_item',
+              config: isBl2 ? F1_BL2_CONFIG : F1_ITEM_CONFIG,
+            }
+          },
+        },
+        adapterRegistry: {
+          createAdapter(input) {
+            probe.adapterCreations += 1
+            const system = input && typeof input === 'object' && input.system && typeof input.system === 'object' ? input.system : input
+            return createK3WiseWebApiAdapter({ system, fetchImpl })
+          },
+        },
+      }).services
+      const realGlobalFetch = globalThis.fetch
+      globalThis.fetch = async () => { probe.globalFetchCalls += 1; throw new Error('F1 forbids global fetch') }
+      try {
+        const { routes } = mountRoutes(services)
+        const res = await invoke(routes, 'POST', F1_RUN_ROUTE, {
+          user: READ_USER, params: { id: 'rscc_f1' }, body: { inputs: { key: 'MAT-F1-001' } },
+        })
+        return { res, probe }
+      } finally {
+        globalThis.fetch = realGlobalFetch
+      }
+    }
+
+    function assertF1ClosedWorld(probe) {
+      assert.deepEqual(probe.refused, [], 'F1 fetch must never see an unexpected URL/method')
+      assert.equal(probe.globalFetchCalls, 0, 'F1 must not touch global fetch')
+    }
+
+    // Unsafe numeric handoff: rejected before hop 2; only ONE adapter/fetch; data null; STEP_NOT_RUN.
+    for (const literal of ['9007199254740993', '12345678901234567890', '1e19', '-9007199254740993', '-12345678901234567890', '-1e19']) {
+      const { res, probe } = await runF1Chain(literal)
+      assert.equal(typeof JSON.parse(probe.itemResponseText).Data.DATA[0].FItemID, 'number', `F1 ${literal} must be a real JSON number`)
+      assert.ok(probe.itemResponseText.includes(`"FItemID":${literal}}`), `F1 ${literal} must be an unquoted literal on the wire`)
+      assertOkResponse(res, 200)
+      assert.equal(res.body.data.evidence.ok, false, `F1 unsafe ${literal} must fail the chain`)
+      assert.equal(res.body.data.evidence.failedStep, 1)
+      assert.equal(res.body.data.evidence.steps[0].ok, true)
+      assert.deepEqual(res.body.data.evidence.steps[1], { step: 1, ok: false, errorCode: 'READ_SOURCE_COMPOSITION_STEP_NOT_RUN' })
+      assert.equal(res.body.data.data, null)
+      // The route eagerly loads BOTH systems' credentials; only execution is short-circuited.
+      assert.equal(probe.systemLoads.length, 2, `F1 ${literal}: route loads both source systems eagerly`)
+      assert.equal(probe.adapterCreations, 1, `F1 ${literal}: only hop 1 may create an adapter`)
+      assert.deepEqual(probe.fetches.map((f) => f.pathname), [F1_ITEM_PATH], `F1 ${literal}: BL2 hop must never hit the wire`)
+      assertF1ClosedWorld(probe)
+      const bodyStr = JSON.stringify(res.body)
+      for (const leak of ['f1-synthetic-session', 'synthetic.invalid', 'FPercentItemID', F1_BOM_NUMBER]) {
+        assert.ok(!bodyStr.includes(leak), `F1 unsafe response must not leak ${leak}`)
+      }
+    }
+
+    // Safe handoffs really execute BOTH real adapter reads and carry the exact digits into the BL2 filter.
+    const f1Positives = [
+      { literal: '9007199254740991', digits: '9007199254740991' }, // numeric, safe boundary
+      { literal: '12345', digits: '12345' }, // numeric, ordinary
+      { literal: '"12345678901234567890"', digits: '12345678901234567890' }, // exact long digit STRING
+    ]
+    for (const { literal, digits } of f1Positives) {
+      const { res, probe } = await runF1Chain(literal)
+      assertOkResponse(res, 200)
+      assert.equal(res.body.data.evidence.ok, true, `F1 safe ${literal} must succeed: ${JSON.stringify(res.body.data.evidence)}`)
+      assert.deepEqual(res.body.data.data, { resolver: { target: 'bom_number', value: F1_BOM_NUMBER } })
+      assert.equal(probe.systemLoads.length, 2)
+      assert.equal(probe.adapterCreations, 2)
+      assert.deepEqual(probe.fetches.map((f) => f.pathname), [F1_ITEM_PATH, F1_BOM_PATH])
+      assert.ok(probe.fetches.every((f) => f.method === 'POST'))
+      const bomBody = JSON.parse(probe.fetches[1].bodyText)
+      assert.equal(bomBody.Data.Filter, `[FPercentItemID] = ${digits}`, 'F1 BOM filter must carry exactly the handoff key')
+      assertF1ClosedWorld(probe)
+      assert.ok(!JSON.stringify(res.body.data.evidence).includes(digits), 'F1 evidence must not carry the intermediate key')
+    }
+  }
+
   console.log('  testReadSourceCompositionRoutes OK')
 }
 

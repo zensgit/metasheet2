@@ -191,6 +191,48 @@ function testDeriveFailClosed() {
   assert.equal(malformed.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
 }
 
+// K3-F1: a prior NUMBER beyond the safe-integer range may already be rounded upstream; deriving must not
+// String() it into a plausible-looking wrong key. Safe numbers (incl. fractions) and exact digit strings
+// keep working.
+function testDeriveUnsafeNumericHandoff() {
+  const plan = plannedPlan()
+  const unsafeNumbers = [
+    JSON.parse('9007199254740993'),
+    Number.MAX_SAFE_INTEGER + 1,
+    12345678901234567890,
+    1e19,
+    JSON.parse('-9007199254740993'),
+    -(Number.MAX_SAFE_INTEGER + 1),
+    -12345678901234567890,
+    -1e19,
+  ]
+  for (const value of unsafeNumbers) {
+    const derived = deriveCompositionStepInput(plan, 1, { resolver: { target: 'internal_id', value } })
+    assert.deepEqual(
+      derived,
+      { ok: false, errorCode: 'READ_SOURCE_COMPOSITION_HANDOFF_VALUE_INVALID' },
+      `unsafe number ${String(value)} must be rejected`,
+    )
+    assert.ok(Object.isFrozen(derived))
+  }
+
+  const safeNumbers = [
+    [Number.MAX_SAFE_INTEGER, '9007199254740991'], // boundary itself is still safe
+    [12345, '12345'],
+    [1.5, '1.5'],
+    [-1.5, '-1.5'],
+  ]
+  for (const [value, expectedKey] of safeNumbers) {
+    const derived = deriveCompositionStepInput(plan, 1, { resolver: { target: 'internal_id', value } })
+    assert.deepEqual(derived, { ok: true, inputs: { key: expectedKey } }, `safe number ${String(value)} must derive`)
+  }
+
+  // An exact long digit STRING is not a lossy number and must pass through unchanged.
+  const longDigits = '12345678901234567890'
+  const stringDerive = deriveCompositionStepInput(plan, 1, { resolver: { target: 'internal_id', value: longDigits } })
+  assert.deepEqual(stringDerive, { ok: true, inputs: { key: longDigits } })
+}
+
 // ── never-throw + single-read snapshot (accessor-bearing hop data) ─────────────────────────────────
 function testAccessorBearingHopData() {
   const plan = plannedPlan()
@@ -525,6 +567,7 @@ testPlanRequiresApprovalContext()
 testEvaluateContradictoryHopFailsClosed()
 testDeriveHappyPath()
 testDeriveFailClosed()
+testDeriveUnsafeNumericHandoff()
 testAccessorBearingHopData()
 testChainDataStripsExtraFields()
 testNonScalarResolvedHopGetsDedicatedCode()
