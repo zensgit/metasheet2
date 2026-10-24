@@ -1,0 +1,434 @@
+{
+  "nonce": "7e09d5e00da0451287d73467c39d4a0b",
+  "session": "gbt-d5a9-1a169a37722-bd",
+  "actor": "ACTUAL_GROK47_XHIGH",
+  "base": "f33398b790b191294d69a43e0bc1832a437e3755",
+  "head": "f33398b790b191294d69a43e0bc1832a437e3755",
+  "branch": "codex/plm-w23-readiness-transport-20261024",
+  "slice": "READINESS_SOURCE_TRANSPORT_ONLY",
+  "disk_floor_bytes": 4563402752,
+  "pin_count": 46,
+  "pin_mismatches": 0,
+  "pins": {
+    "artifacts/plm-w23-eco-ingress-ci-20261024/verification.json": {
+      "sha256": "898a6e0037cf3f64f2906c287ee241bc2515a3680691984896949bd3afd7b5ca",
+      "bytes": 49528,
+      "matches_owner": true
+    },
+    "artifacts/plm-w23-eco-persistence-20261024/verification.json": {
+      "sha256": "9d01840285f0a7de365a611b04f5c0083cad6d3ade97b7ffd88506ccf16673f8",
+      "bytes": 6420,
+      "matches_owner": true
+    },
+    "artifacts/plm-w23-readiness-wire-20261024/verification.json": {
+      "sha256": "6624b07d1116d87530b4c95ab94359335ba23e1d84f108c5736a6367b36c8d4a",
+      "bytes": 10032,
+      "matches_owner": true
+    },
+    "docs/development/PLM_W23_ECO_INGRESS_CI_GUARDS_20261024.md": {
+      "sha256": "b645343256e9e7700b410ad112b0a18a2d719171f682a85fd47e27db72660173",
+      "bytes": 16481,
+      "matches_owner": true
+    },
+    "docs/development/PLM_W23_ECO_INGRESS_CI_GUARDS_CLOSEOUT_20261024.md": {
+      "sha256": "2fa41320fe86767413946d5df923146847046c0b267aab414bcab3b80c0bddad",
+      "bytes": 2873,
+      "matches_owner": true
+    },
+    "docs/development/PLM_W23_ECO_PERSISTENCE_20261024.md": {
+      "sha256": "6c0108600fbd8b864543744bb417f78baa066fcaf0ca64005b8e0a762b322e15",
+      "bytes": 13055,
+      "matches_owner": true
+    },
+    "docs/development/PLM_W23_ECO_PERSISTENCE_CLOSEOUT_20261024.md": {
+      "sha256": "c7e3777b519d391d4af06bb12353596288da4769a16e9d590cedc93157c55e81",
+      "bytes": 2954,
+      "matches_owner": true
+    },
+    "docs/development/PLM_W23_READINESS_WIRE_CLOSEOUT_20261024.md": {
+      "sha256": "73047b222b32dab4862d5ad13335f84d26de37e90fff0df658e192bcb699b066",
+      "bytes": 2759,
+      "matches_owner": true
+    },
+    "docs/development/PLM_W23_READINESS_WIRE_DESIGN_VALIDATION_20261024.md": {
+      "sha256": "ee9f3d0e1561c1a66db358839565574a624fffc9cc3e29625b84008b24cfcab1",
+      "bytes": 14308,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/db/migrations/zzzz20261024010000_create_plm_collaboration_snapshots.ts": {
+      "sha256": "df125b0fa4dd3eb652507d116b0005b1afe5a66a038699f7747ee5dc8fc20714",
+      "bytes": 57414,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/index.ts": {
+      "sha256": "172a5cc6788c3401265fe64879741ea50dceb850b730d6a3bd506cc19704814e",
+      "bytes": 283049,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/integration/db/connection-pool.ts": {
+      "sha256": "c653c806183216da621a7cd838214f7a8236a5160df98605977e9fafe38f39f5",
+      "bytes": 11897,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/canonical-sheet-fence.ts": {
+      "sha256": "d13eb8754a2394f74f318bf9b2decf2549ac110fdc5b47b4846194d976ca18df",
+      "bytes": 15344,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/config-revision-recorder.ts": {
+      "sha256": "9c14cc7d440a8f66c08fd654fbc84c273742c7fdf712351bc1671d7c2738256c",
+      "bytes": 7961,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/operation-ledger.ts": {
+      "sha256": "03a3feafc169b12f68d727851f674a37efb835e2058a1fea0a780b4f67852f70",
+      "bytes": 10528,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/permission-service.ts": {
+      "sha256": "cf30537b05dbb1681dab2e4374a1dd74dd2a060307917865a82c398ee2206a89",
+      "bytes": 89408,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/plm-bom-review-service.ts": {
+      "sha256": "eadfddbe4c88eb153c32d37becf2c40774455903cfb03388f7eb48dfe75b91ec",
+      "bytes": 113366,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/plm-bom-source-navigation.ts": {
+      "sha256": "c26731ca8708b8519a6d3533d995744eb87ba9f84171a174a7f4e73232bf248f",
+      "bytes": 3300,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/plm-collaboration-readiness-wire.ts": {
+      "sha256": "87a547b7d9915ed10dc48ba5498c9bb16f58d88aaa663e74b6a1d658d705576a",
+      "bytes": 16511,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/plm-collaboration-snapshot-service.ts": {
+      "sha256": "b76af548aa185d9bd83147023da06dd5f8a7b20d94a603bf7a34ad09ee6163c7",
+      "bytes": 64389,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/plm-collaboration-snapshot-wire.ts": {
+      "sha256": "4faac4685183d4afa4013128aa95ad382bc801d65781e408dd13b4a35fd19873",
+      "bytes": 10329,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/provisioning.ts": {
+      "sha256": "23783f61c6857ebd49164606f65f456a64a60b6e4ea09407cbce266375df9c36",
+      "bytes": 44652,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/record-history-service.ts": {
+      "sha256": "9815233fcaafab51be996ba085cb9cca20bc62ccb8a6011274e885895347dde5",
+      "bytes": 23569,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/record-lock.ts": {
+      "sha256": "e3ceb24b33dfea7f30e91b27e609000cff6f3c85864afc506b32cdfcff4605c9",
+      "bytes": 5043,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/multitable/record-write-service.ts": {
+      "sha256": "2f87862c7be188545169202e45e127805764f08ab45e06c20481e2d4b3223ebd",
+      "bytes": 73460,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/routes/plm-bom-reviews.ts": {
+      "sha256": "4be1ca1e1ea41536f7f3735dfb0ea1dbbb7794a7baba84afa25d2c0762e22bdc",
+      "bytes": 9486,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/routes/plm-collaboration-snapshots.ts": {
+      "sha256": "30247bb8ec93ef438f4e62b033346570ffeca14e7d58571d33efbfd03f4c0c5b",
+      "bytes": 3077,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/services/StorageService.ts": {
+      "sha256": "eaff1a6fe005d958a93c7b4e5fb264c1225eeae7a3b11a0282d041f909dff743",
+      "bytes": 31177,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/services/approval-record-link-row-auth-lock.ts": {
+      "sha256": "00605ad512ccbfe8e18a489ea42b7f6598067caf66e501bce3567cf8eb2a5568",
+      "bytes": 2804,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/services/approval-record-link-txn-auth.ts": {
+      "sha256": "c353271740fbc1397207ab7c30154721a4d772f816154bc3c585e66d0ea2c1b1",
+      "bytes": 30532,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/services/plm-managed-companion-flow.ts": {
+      "sha256": "168626504550ec27cab915d57bfca693ce7c65f72b98989af55127b45a1217b3",
+      "bytes": 130932,
+      "matches_owner": true
+    },
+    "packages/core-backend/src/services/plm-managed-companion.ts": {
+      "sha256": "0534ce299126543fc58fd49b7617b5050581821ab35e029d2cdf59082843e1d7",
+      "bytes": 15028,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts": {
+      "sha256": "1f1cb6bc7a4742712eaf61a104f4cfbdfcbf26b8b4224d403400ffe70734d59b",
+      "bytes": 140974,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/integration/plm-collaboration-snapshot-service.realdb.test.ts": {
+      "sha256": "585954f4e62824374b65c0f4788e0bc805a2ff771f2f15125eec233177d152fc",
+      "bytes": 33983,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/plm-collaboration-snapshot/bootstrap.ts": {
+      "sha256": "80e85370e80dc500c3b2f77f8a36e40ee1e3a7a72d8046679ed6bace87a59f3f",
+      "bytes": 5523,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts": {
+      "sha256": "35fe75f5e3249a1cb1682078b26022539e99e83dfafbbe8328e8a08d3379869a",
+      "bytes": 89827,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts": {
+      "sha256": "74219aec1db1b85f6c3cc336146e380ca4417acf6cd7bd956af719b13da27135",
+      "bytes": 28167,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts": {
+      "sha256": "4115a09d1419ffd2aff656315336963e6e49d040636d672d0418200e50d02729",
+      "bytes": 84239,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/unit/plm-collaboration-eco-source-transport.test.ts": {
+      "sha256": "1113dae8a3462ff1ca56a2e8f351c1b738721aed69dc42e219a0566fb3acae9b",
+      "bytes": 22892,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/unit/plm-collaboration-readiness-wire.test.ts": {
+      "sha256": "9207e38ffdef0bf3ed91e73156f7975b5f52bb86b561fa093a5ad419af5be5f6",
+      "bytes": 21994,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/unit/plm-collaboration-snapshot-routes.test.ts": {
+      "sha256": "8c3da76f888bc72b4d833994d931928cef7ea8f2803ad66bf98740261074a2f0",
+      "bytes": 6617,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/unit/plm-collaboration-snapshot-service.test.ts": {
+      "sha256": "29cde7e13bf17c8dd1c165ed718bfd428f202503d6d8d3a3ab5e03cd1517d17d",
+      "bytes": 33816,
+      "matches_owner": true
+    },
+    "packages/core-backend/tests/utils/fence-holder-census.ts": {
+      "sha256": "afb9d89e75287a618a826fc01821a97f3d21d200691527a033626258cb798e6f",
+      "bytes": 49098,
+      "matches_owner": true
+    },
+    "packages/core-backend/vitest.config.ts": {
+      "sha256": "16c53f3df1149389d6562d9f03344f5d544ecfcba2e50e02c0f262442ec885c9",
+      "bytes": 184703,
+      "matches_owner": true
+    },
+    "packages/core-backend/vitest.plm-collaboration-snapshot.config.ts": {
+      "sha256": "8633a75659c79ce6e54df885412cd65257b17213dce2a9f27dcf33d7308f0062",
+      "bytes": 430,
+      "matches_owner": true
+    },
+    "scripts/verification/plm-managed-companion-pg/owned-socket.mjs": {
+      "sha256": "c21f8767d372c66b0cf160d74ab6ecfff83560f32881617248c6180276a69c09",
+      "bytes": 20271,
+      "matches_owner": true
+    }
+  },
+  "scope": {
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": {
+      "baseline_sha256": "b2cf3aa31fb763a929ada84a4f07553cc5b0b1c6664676f71a7c7db6f7e33638",
+      "baseline_bytes": 177607,
+      "sha256": "a1df570b27ba6ef95627295a963e7885c5cdf4baa158c7624fcc555b6439732c",
+      "bytes": 182908
+    },
+    "packages/core-backend/tests/unit/plm-collaboration-readiness-source-transport.test.ts": {
+      "baseline_sha256": null,
+      "baseline_bytes": null,
+      "sha256": "0bca08ddda7a7cbd37cbc38448aaa294c44f90c93159c2132274a2750f47469c",
+      "bytes": 25856
+    },
+    ".github/workflows/plm-bom-listener.yml": {
+      "baseline_sha256": "da580118aca6fa1f2e8d4863b918aa41efbbf266a537125ea1a2f5c5129aa3f0",
+      "baseline_bytes": 3334,
+      "sha256": "84cf1f71bb1b6c0c5c5cafc1a04003131a9b48dc8886bc7c6c572390dd0eed01",
+      "bytes": 3408
+    },
+    "docs/development/PLM_W23_READINESS_TRANSPORT_DESIGN_VALIDATION_20261024.md": {
+      "baseline_sha256": null,
+      "baseline_bytes": null,
+      "sha256": "9d9f0e374c99f49538c7d637b46b3f49007ba53f3fafed68b156c0a95792f83f",
+      "bytes": 8936
+    },
+    "artifacts/plm-w23-readiness-transport-20261024/verification.json": {
+      "baseline_sha256": null,
+      "baseline_bytes": null,
+      "sha256": null,
+      "bytes": null,
+      "note": "This file does not embed its own sha256. The grok report records it after write."
+    }
+  },
+  "workflow_append": "tests/unit/plm-collaboration-readiness-source-transport.test.ts",
+  "workflow_numstat": {
+    "insertions": 1,
+    "deletions": 0
+  },
+  "adapter_numstat": {
+    "insertions": 212,
+    "deletions": 74
+  },
+  "eco_transport_test_sha256": "1113dae8a3462ff1ca56a2e8f351c1b738721aed69dc42e219a0566fb3acae9b",
+  "eco_transport_test_bytes": 22892,
+  "artifact_git_status": "ignored by .git/info/exclude artifacts/ rule; exclude file not edited",
+  "prior_uncaptured_run": {
+    "log_sha256": null,
+    "reason": "implementation turn printed the result and did not write a log file",
+    "free_bytes_before": 11832700928,
+    "tsc_exit": 0,
+    "tsc_start_utc": null,
+    "tsc_end_utc": null,
+    "vitest": "1.6.1",
+    "vitest_start_local": "08:55:42",
+    "vitest_pool_timestamps": [
+      "2026-10-24T00:55:42.811Z",
+      "2026-10-24T00:55:43.092Z"
+    ],
+    "vitest_duration_ms": 858,
+    "files": 2,
+    "tests_passed": 61,
+    "vitest_exit": 0
+  },
+  "frozen_log": {
+    "path": "/tmp/plm-w23-readiness-transport-checks-20261024.log",
+    "sha256": "06f6f7e6c393cfd324f5b801f1b90dee53bcd5f87a85e65873f938f9c8ab9fc5",
+    "bytes": 9580,
+    "free_bytes_at_gate": 13505818624
+  },
+  "tsc": {
+    "cwd": "packages/core-backend",
+    "command": "node node_modules/typescript/bin/tsc --noEmit --pretty false",
+    "exit": 0,
+    "start_utc": "2026-10-24T01:01:07.887856+00:00",
+    "end_utc": "2026-10-24T01:01:16.534193+00:00",
+    "free_bytes_before": 13505806336,
+    "free_bytes_after": 13495025664,
+    "covers_new_test": false
+  },
+  "unit": {
+    "cwd": "packages/core-backend",
+    "command": "node node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1 tests/unit/plm-collaboration-readiness-source-transport.test.ts tests/unit/plm-collaboration-eco-source-transport.test.ts",
+    "vitest": "1.6.1",
+    "workers": {
+      "maxWorkers": 1,
+      "minWorkers": 1
+    },
+    "files": 2,
+    "tests": 61,
+    "passed": 61,
+    "failed": 0,
+    "readiness_tests_listed": 33,
+    "eco_tests_listed": 28,
+    "duration_ms": 840,
+    "duration_detail_ms": {
+      "transform": 169,
+      "setup": 51,
+      "collect": 397,
+      "tests": 113,
+      "environment": 0,
+      "prepare": 81
+    },
+    "start_utc": "2026-10-24T01:01:16.534288+00:00",
+    "end_utc": "2026-10-24T01:01:17.789536+00:00",
+    "start_local": "09:01:16",
+    "free_bytes_before": 13495025664,
+    "free_bytes_after": 13490708480,
+    "exit": 0,
+    "stderr": "Vite CJS Node API deprecation warning"
+  },
+  "loopback_is_native_authority": false,
+  "loopback_is_postgresql": false,
+  "loopback_is_ui": false,
+  "loopback_is_install_acceptance": false,
+  "not_implemented": [
+    "readiness service",
+    "forward migration",
+    "real PostgreSQL",
+    "UI",
+    "route enablement",
+    "grants",
+    "flags",
+    "persistence admission",
+    "Native authority"
+  ],
+  "commit": false,
+  "push": false,
+  "parent_draft_6520_ci_cancelled": false,
+  "root_independent_validation": {
+    "at": "2026-10-24T01:06:56.474551+00:00",
+    "actor": "CodexRoot",
+    "source_sha256": "a1df570b27ba6ef95627295a963e7885c5cdf4baa158c7624fcc555b6439732c",
+    "unit": {
+      "at": "2026-10-24T01:05:44.677647+00:00",
+      "base": "f33398b790b191294d69a43e0bc1832a437e3755",
+      "source_sha256": "a1df570b27ba6ef95627295a963e7885c5cdf4baa158c7624fcc555b6439732c",
+      "unit": {
+        "exit": 0,
+        "argv": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "tests/unit/plm-collaboration-readiness-transport-root-counters-20261024.test.ts",
+          "--reporter=default",
+          "--reporter=junit",
+          "--outputFile=/tmp/plm-w23-readiness-transport-root-20261024.xml",
+          "--maxWorkers=1",
+          "--minWorkers=1"
+        ],
+        "counts": {
+          "passed": 8,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "failed": [],
+        "log": "/tmp/plm-w23-readiness-transport-root-20261024.log",
+        "log_sha256": "e3724c3d08922434a2789a4d2b8e41c649711b112484a81ca7381e34fec677bd"
+      },
+      "independent_probe": "/tmp/plm-w23-readiness-transport-root-counters-preparation-20261024.ts",
+      "independent_probe_sha256": "556d87d3742f6ac3b25711d514a090762eb37495897ee0fae4207f46447273a3",
+      "temporary_probe_removed": true,
+      "all_final_pins_stable": true,
+      "scope": "Only 8 independent Root transport protocol controls. Grok already executed new Readiness33+affected ECO28 and tsc0 on same pinned Adapter; no rerun of that passing cohort. No DB/Nativeauthority/UI/installed/fullmaster acceptance."
+    },
+    "author61_and_tsc0_log_sha_verified": true,
+    "author_passing_cohort_and_tsc_not_rerun": true,
+    "peer": {
+      "json": "/tmp/plm-w23-readiness-transport-root-peer-review-20261024.json",
+      "sha256": "6d746d83137dd1708cf195e4f55a5e782544443fb94a6bdb8ba49ec8879a7cf5",
+      "actionable_findings": []
+    },
+    "ci_final": {
+      "at": "2026-10-24T01:06:56.474551+00:00",
+      "baseline_sha256": "da580118aca6fa1f2e8d4863b918aa41efbbf266a537125ea1a2f5c5129aa3f0",
+      "grok_one_append_sha256": "84cf1f71bb1b6c0c5c5cafc1a04003131a9b48dc8886bc7c6c572390dd0eed01",
+      "root_final_sha256": "08c2e74a9cf332ec660ba0ecaceda2fc4315123996e81fed7ae29dcf6e8abbbc",
+      "yaml_parse": true,
+      "exact_two_arguments_append": true,
+      "added": [
+        "tests/unit/plm-collaboration-readiness-source-transport.test.ts",
+        "tests/unit/plm-collaboration-eco-source-transport.test.ts"
+      ],
+      "reason": "RootfixedrefgitgrepconfirmedexistingECOtransportfileunregisteredinanyworkflow. Tnowchangesitscommoncapture/login/bodyexecutor; includeaffectedECOregressioninthesameexistingstep. No newjob/gate/trigger/permission/baseline; old arguments retained.",
+      "passing_local_author61_not_rerun": true
+    },
+    "final_design_sha256": "fe2aa8e28ee08cfd0663e2390176a966788cc65fc8880b47d0baf2f8473d206b",
+    "author_snapshot_note": "Earlier implementation scope/pins/log remain historical Grok state. Root final block supersedes its workflow and design metadata only. Source and tests unchanged.",
+    "limitation": "Transportonly, Readinesspersistenceunadmitted; notNativeauth/DB/realdualprocessHTTP/browser/install/masterqualification"
+  }
+}

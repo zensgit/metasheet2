@@ -46,6 +46,12 @@ import {
   parseEcoCollaborationSourceInput,
   type EcoCollaborationSource,
 } from '../multitable/plm-collaboration-snapshot-wire'
+import {
+  ReadinessCollaborationSourceError,
+  parseReadinessCollaborationSource,
+  parseReadinessCollaborationSourceInput,
+  type ReadinessCollaborationSource,
+} from '../multitable/plm-collaboration-readiness-wire'
 import { currentManagedRequest } from '../services/plm-managed-request-context'
 
 /**
@@ -4297,42 +4303,44 @@ export class PLMAdapter extends HTTPAdapter {
     input: unknown,
     freshSourceConfig: DataSourceConfig,
   ): Promise<EcoCollaborationSource> {
-    const prepared = prepareEcoCollaborationTransport(input, freshSourceConfig)
-    await assertLegacySharedTransportAllowed(prepared.sourceId)
-    try {
-      const token = prepared.token ?? await loginForEcoCollaboration(prepared)
-      if (prepared.token === null) await assertLegacySharedTransportAllowed(prepared.sourceId)
-      const response = await fetch(prepared.ecoUrl, {
-        method: 'POST',
-        redirect: 'error',
-        signal: AbortSignal.timeout(prepared.timeoutMs),
-        headers: { ...prepared.headers, Authorization: `Bearer ${token}` },
-        body: prepared.body,
-      })
-      return await acceptEcoCollaborationResponse(response, prepared)
-    } catch (error) {
-      if (error instanceof ManagedCompanionRefusal || error instanceof EcoCollaborationSourceError) throw error
-      throw new EcoCollaborationSourceError(502, 'ECO_SOURCE_UNAVAILABLE')
-    }
+    return executeCollaborationTransport(prepareEcoCollaborationTransport(input, freshSourceConfig))
+  }
+
+  /**
+   * Read one release-readiness collaboration source from the supplied persisted config.
+   * This method does not admit a preview, binding, or record. Capture and admission
+   * use the same lifecycle as `getEcoCollaborationSource`.
+   */
+  async getReadinessCollaborationSource(
+    input: unknown,
+    freshSourceConfig: DataSourceConfig,
+  ): Promise<ReadinessCollaborationSource> {
+    return executeCollaborationTransport(prepareReadinessCollaborationTransport(input, freshSourceConfig))
   }
 }
 
 const ECO_COLLABORATION_TIMEOUT_MS = 8000
 const ECO_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 
-interface PreparedEcoCollaborationTransport {
+type CollaborationTransportKind = 'eco' | 'readiness'
+
+interface PreparedCollaborationTransportBase {
   sourceId: string
   timeoutMs: typeof ECO_COLLABORATION_TIMEOUT_MS
   token: string | null
   loginUrl: string
   loginBody: string
-  ecoUrl: string
+  requestUrl: string
   body: string
   headers: Readonly<{
     'Content-Type': 'application/json'
     'x-tenant-id': string
     'x-org-id': string
   }>
+}
+
+interface PreparedEcoCollaborationTransport extends PreparedCollaborationTransportBase {
+  kind: 'eco'
   expected: {
     tenantId: string
     orgId: string
@@ -4342,11 +4350,40 @@ interface PreparedEcoCollaborationTransport {
   }
 }
 
-function ecoTransportError(status: number, code: string): EcoCollaborationSourceError {
-  return new EcoCollaborationSourceError(status, code)
+interface PreparedReadinessCollaborationTransport extends PreparedCollaborationTransportBase {
+  kind: 'readiness'
+  expected: {
+    tenantId: string
+    orgId: string
+    itemId: string
+    rulesetId: string
+    currentVersionId: string | null
+  }
 }
 
-function agreedEcoScope(headers: unknown, name: string, option: unknown): string {
+type PreparedCollaborationTransport = PreparedEcoCollaborationTransport | PreparedReadinessCollaborationTransport
+
+function collaborationTransportError(
+  kind: CollaborationTransportKind,
+  status: number,
+  suffix: string,
+): EcoCollaborationSourceError | ReadinessCollaborationSourceError {
+  const code = `${kind === 'eco' ? 'ECO' : 'READINESS'}_SOURCE_${suffix}`
+  return kind === 'eco'
+    ? new EcoCollaborationSourceError(status, code)
+    : new ReadinessCollaborationSourceError(status, code)
+}
+
+function isCollaborationSourceError(error: unknown): boolean {
+  return error instanceof EcoCollaborationSourceError || error instanceof ReadinessCollaborationSourceError
+}
+
+function agreedCollaborationScope(
+  kind: CollaborationTransportKind,
+  headers: unknown,
+  name: string,
+  option: unknown,
+): string {
   const aliases: unknown[] = []
   if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
     for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
@@ -4359,31 +4396,70 @@ function agreedEcoScope(headers: unknown, name: string, option: unknown): string
     || aliases.some((value) => typeof value !== 'string' || !isEcoCollaborationId(value, 64) || /[\r\n]/.test(value))
     || new Set(aliases).size !== 1
   ) {
-    throw ecoTransportError(403, 'ECO_SOURCE_SCOPE_AMBIGUOUS')
+    throw collaborationTransportError(kind, 403, 'SCOPE_AMBIGUOUS')
   }
   return aliases[0] as string
 }
 
-function ecoTransportBase(connection: { url?: unknown; baseURL?: unknown } | undefined): URL {
+function collaborationTransportBase(
+  kind: CollaborationTransportKind,
+  connection: { url?: unknown; baseURL?: unknown } | undefined,
+): URL {
   const rawUrl = typeof connection?.url === 'string' ? connection.url : undefined
   const rawBase = typeof connection?.baseURL === 'string' ? connection.baseURL : undefined
   const selected = rawUrl || rawBase
-  if (!selected) throw ecoTransportError(403, 'ECO_SOURCE_URL_REJECTED')
+  if (!selected) throw collaborationTransportError(kind, 403, 'URL_REJECTED')
   let url: URL
   try {
     url = new URL(selected)
-    if (rawUrl && rawBase && url.href !== new URL(rawBase).href) throw ecoTransportError(403, 'ECO_SOURCE_URL_REJECTED')
+    if (rawUrl && rawBase && url.href !== new URL(rawBase).href) {
+      throw collaborationTransportError(kind, 403, 'URL_REJECTED')
+    }
   } catch (error) {
-    if (error instanceof EcoCollaborationSourceError) throw error
-    throw ecoTransportError(403, 'ECO_SOURCE_URL_REJECTED')
+    if (isCollaborationSourceError(error)) throw error
+    throw collaborationTransportError(kind, 403, 'URL_REJECTED')
   }
   const loopback = process.env.NODE_ENV === 'test'
     && url.protocol === 'http:'
     && ECO_LOOPBACK_HOSTS.has(url.hostname)
   if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !loopback)) {
-    throw ecoTransportError(403, 'ECO_SOURCE_URL_REJECTED')
+    throw collaborationTransportError(kind, 403, 'URL_REJECTED')
   }
   return url
+}
+
+function captureCollaborationCredentials(
+  kind: CollaborationTransportKind,
+  credentials: DataSourceConfig['credentials'],
+  tenant: string,
+  org: string,
+): { token: string | null; loginBody: string } {
+  const rawToken = credentials && typeof credentials === 'object' ? (credentials as { token?: unknown }).token : undefined
+  let token: string | null = null
+  if (typeof rawToken === 'string' && rawToken.length > 0) {
+    if (/[\r\n]/.test(rawToken)) throw collaborationTransportError(kind, 401, 'TOKEN_REJECTED')
+    token = rawToken
+  } else if (rawToken !== undefined && rawToken !== null && rawToken !== '') {
+    throw collaborationTransportError(kind, 401, 'TOKEN_REJECTED')
+  }
+  const username = credentials && typeof credentials === 'object' ? (credentials as { username?: unknown }).username : undefined
+  const password = credentials && typeof credentials === 'object' ? (credentials as { password?: unknown }).password : undefined
+  let loginBody = ''
+  if (token === null) {
+    if (typeof username !== 'string' || username.length === 0 || typeof password !== 'string' || password.length === 0) {
+      throw collaborationTransportError(kind, 403, 'CREDENTIALS_REQUIRED')
+    }
+    loginBody = JSON.stringify({ username, password, tenant_id: tenant, org_id: org })
+  }
+  return { token, loginBody }
+}
+
+function collaborationHeaders(tenant: string, org: string): PreparedCollaborationTransportBase['headers'] {
+  return Object.freeze({
+    'Content-Type': 'application/json',
+    'x-tenant-id': tenant,
+    'x-org-id': org,
+  })
 }
 
 function prepareEcoCollaborationTransport(
@@ -4393,48 +4469,28 @@ function prepareEcoCollaborationTransport(
   const sourceId = freshSourceConfig && typeof freshSourceConfig === 'object'
     ? (freshSourceConfig as { id?: unknown }).id
     : undefined
-  if (!isEcoCollaborationId(sourceId, 128)) throw ecoTransportError(403, 'ECO_SOURCE_ID_REQUIRED')
+  if (!isEcoCollaborationId(sourceId, 128)) throw collaborationTransportError('eco', 403, 'ID_REQUIRED')
   const parsed = parseEcoCollaborationSourceInput(input)
   if (freshSourceConfig.type !== 'plm' || freshSourceConfig.options?.apiMode !== 'yuantus') {
-    throw ecoTransportError(403, 'ECO_SOURCE_CONFIG_REJECTED')
+    throw collaborationTransportError('eco', 403, 'CONFIG_REJECTED')
   }
-  const base = ecoTransportBase(freshSourceConfig.connection)
-  const tenant = agreedEcoScope(freshSourceConfig.connection?.headers, 'x-tenant-id', freshSourceConfig.options?.tenantId)
-  const org = agreedEcoScope(freshSourceConfig.connection?.headers, 'x-org-id', freshSourceConfig.options?.orgId)
-  const credentials = freshSourceConfig.credentials
-  const rawToken = credentials && typeof credentials === 'object' ? (credentials as { token?: unknown }).token : undefined
-  let token: string | null = null
-  if (typeof rawToken === 'string' && rawToken.length > 0) {
-    if (/[\r\n]/.test(rawToken)) throw ecoTransportError(401, 'ECO_SOURCE_TOKEN_REJECTED')
-    token = rawToken
-  } else if (rawToken !== undefined && rawToken !== null && rawToken !== '') {
-    throw ecoTransportError(401, 'ECO_SOURCE_TOKEN_REJECTED')
-  }
-  const username = credentials && typeof credentials === 'object' ? (credentials as { username?: unknown }).username : undefined
-  const password = credentials && typeof credentials === 'object' ? (credentials as { password?: unknown }).password : undefined
-  let loginBody = ''
-  if (token === null) {
-    if (typeof username !== 'string' || username.length === 0 || typeof password !== 'string' || password.length === 0) {
-      throw ecoTransportError(403, 'ECO_SOURCE_CREDENTIALS_REQUIRED')
-    }
-    loginBody = JSON.stringify({ username, password, tenant_id: tenant, org_id: org })
-  }
+  const base = collaborationTransportBase('eco', freshSourceConfig.connection)
+  const tenant = agreedCollaborationScope('eco', freshSourceConfig.connection?.headers, 'x-tenant-id', freshSourceConfig.options?.tenantId)
+  const org = agreedCollaborationScope('eco', freshSourceConfig.connection?.headers, 'x-org-id', freshSourceConfig.options?.orgId)
+  const captured = captureCollaborationCredentials('eco', freshSourceConfig.credentials, tenant, org)
   return {
+    kind: 'eco',
     sourceId,
     timeoutMs: ECO_COLLABORATION_TIMEOUT_MS,
-    token,
+    token: captured.token,
     loginUrl: new URL('/api/v1/auth/login', base).href,
-    loginBody,
-    ecoUrl: new URL(
+    loginBody: captured.loginBody,
+    requestUrl: new URL(
       `/api/v1/plm/collaboration-sources/items/${encodeURIComponent(parsed.itemId)}/eco-context`,
       base,
     ).href,
     body: JSON.stringify({ eco_id: parsed.ecoId, current_version_id: parsed.currentVersionId }),
-    headers: Object.freeze({
-      'Content-Type': 'application/json',
-      'x-tenant-id': tenant,
-      'x-org-id': org,
-    }),
+    headers: collaborationHeaders(tenant, org),
     expected: {
       tenantId: tenant,
       orgId: org,
@@ -4445,7 +4501,46 @@ function prepareEcoCollaborationTransport(
   }
 }
 
-async function discardEcoResponse(response: Response): Promise<void> {
+function prepareReadinessCollaborationTransport(
+  input: unknown,
+  freshSourceConfig: DataSourceConfig,
+): PreparedReadinessCollaborationTransport {
+  const sourceId = freshSourceConfig && typeof freshSourceConfig === 'object'
+    ? (freshSourceConfig as { id?: unknown }).id
+    : undefined
+  if (!isEcoCollaborationId(sourceId, 128)) throw collaborationTransportError('readiness', 403, 'ID_REQUIRED')
+  const parsed = parseReadinessCollaborationSourceInput(input)
+  if (freshSourceConfig.type !== 'plm' || freshSourceConfig.options?.apiMode !== 'yuantus') {
+    throw collaborationTransportError('readiness', 403, 'CONFIG_REJECTED')
+  }
+  const base = collaborationTransportBase('readiness', freshSourceConfig.connection)
+  const tenant = agreedCollaborationScope('readiness', freshSourceConfig.connection?.headers, 'x-tenant-id', freshSourceConfig.options?.tenantId)
+  const org = agreedCollaborationScope('readiness', freshSourceConfig.connection?.headers, 'x-org-id', freshSourceConfig.options?.orgId)
+  const captured = captureCollaborationCredentials('readiness', freshSourceConfig.credentials, tenant, org)
+  return {
+    kind: 'readiness',
+    sourceId,
+    timeoutMs: ECO_COLLABORATION_TIMEOUT_MS,
+    token: captured.token,
+    loginUrl: new URL('/api/v1/auth/login', base).href,
+    loginBody: captured.loginBody,
+    requestUrl: new URL(
+      `/api/v1/plm/collaboration-sources/items/${encodeURIComponent(parsed.itemId)}/release-readiness`,
+      base,
+    ).href,
+    body: JSON.stringify({ ruleset_id: parsed.rulesetId, current_version_id: parsed.currentVersionId }),
+    headers: collaborationHeaders(tenant, org),
+    expected: {
+      tenantId: tenant,
+      orgId: org,
+      itemId: parsed.itemId,
+      rulesetId: parsed.rulesetId,
+      currentVersionId: parsed.currentVersionId,
+    },
+  }
+}
+
+async function discardCollaborationResponse(response: Response): Promise<void> {
   try {
     await response.body?.cancel()
   } catch {
@@ -4453,16 +4548,16 @@ async function discardEcoResponse(response: Response): Promise<void> {
   }
 }
 
-async function assertFreshEcoSource(sourceId: string, response: Response): Promise<void> {
+async function assertFreshCollaborationSource(sourceId: string, response: Response): Promise<void> {
   try {
     await assertLegacySharedTransportAllowed(sourceId)
   } catch (error) {
-    await discardEcoResponse(response)
+    await discardCollaborationResponse(response)
     throw error
   }
 }
 
-async function loginForEcoCollaboration(prepared: PreparedEcoCollaborationTransport): Promise<string> {
+async function loginForCollaboration(prepared: PreparedCollaborationTransport): Promise<string> {
   let response: Response
   try {
     response = await fetch(prepared.loginUrl, {
@@ -4473,45 +4568,88 @@ async function loginForEcoCollaboration(prepared: PreparedEcoCollaborationTransp
       body: prepared.loginBody,
     })
   } catch {
-    throw ecoTransportError(502, 'ECO_SOURCE_UNAVAILABLE')
+    throw collaborationTransportError(prepared.kind, 502, 'UNAVAILABLE')
   }
   if (!response.ok) {
-    await discardEcoResponse(response)
-    throw ecoTransportError(401, 'ECO_SOURCE_LOGIN_REJECTED')
+    await discardCollaborationResponse(response)
+    throw collaborationTransportError(prepared.kind, 401, 'LOGIN_REJECTED')
   }
-  await assertFreshEcoSource(prepared.sourceId, response)
+  await assertFreshCollaborationSource(prepared.sourceId, response)
   let payload: unknown
   try {
     payload = await response.json()
   } catch {
-    throw ecoTransportError(502, 'ECO_SOURCE_UNAVAILABLE')
+    throw collaborationTransportError(prepared.kind, 502, 'UNAVAILABLE')
   }
   const token = payload && typeof payload === 'object'
     ? (payload as { access_token?: unknown }).access_token
     : undefined
   if (typeof token !== 'string' || token.length === 0 || /[\r\n]/.test(token)) {
-    throw ecoTransportError(401, 'ECO_SOURCE_TOKEN_REJECTED')
+    throw collaborationTransportError(prepared.kind, 401, 'TOKEN_REJECTED')
   }
   return token
 }
 
-async function acceptEcoCollaborationResponse(
+async function acceptCollaborationResponse(
   response: Response,
   prepared: PreparedEcoCollaborationTransport,
-): Promise<EcoCollaborationSource> {
-  await assertFreshEcoSource(prepared.sourceId, response)
+): Promise<EcoCollaborationSource>
+async function acceptCollaborationResponse(
+  response: Response,
+  prepared: PreparedReadinessCollaborationTransport,
+): Promise<ReadinessCollaborationSource>
+async function acceptCollaborationResponse(
+  response: Response,
+  prepared: PreparedCollaborationTransport,
+): Promise<EcoCollaborationSource | ReadinessCollaborationSource> {
+  await assertFreshCollaborationSource(prepared.sourceId, response)
   if (!response.ok) {
-    await discardEcoResponse(response)
+    await discardCollaborationResponse(response)
     const denied = prepared.token !== null && (response.status === 401 || response.status === 403)
-    throw ecoTransportError(denied ? 401 : 502, denied ? 'ECO_SOURCE_TOKEN_REJECTED' : 'ECO_SOURCE_UNAVAILABLE')
+    throw collaborationTransportError(
+      prepared.kind,
+      denied ? 401 : 502,
+      denied ? 'TOKEN_REJECTED' : 'UNAVAILABLE',
+    )
   }
   let payload: unknown
   try {
     payload = await response.json()
   } catch {
-    throw ecoTransportError(502, 'ECO_SOURCE_UNAVAILABLE')
+    throw collaborationTransportError(prepared.kind, 502, 'UNAVAILABLE')
   }
-  const accepted = parseEcoCollaborationSource(payload, prepared.expected)
-  await assertFreshEcoSource(prepared.sourceId, response)
+  const accepted = prepared.kind === 'eco'
+    ? parseEcoCollaborationSource(payload, prepared.expected)
+    : parseReadinessCollaborationSource(payload, prepared.expected)
+  await assertFreshCollaborationSource(prepared.sourceId, response)
   return accepted
+}
+
+async function executeCollaborationTransport(
+  prepared: PreparedEcoCollaborationTransport,
+): Promise<EcoCollaborationSource>
+async function executeCollaborationTransport(
+  prepared: PreparedReadinessCollaborationTransport,
+): Promise<ReadinessCollaborationSource>
+async function executeCollaborationTransport(
+  prepared: PreparedCollaborationTransport,
+): Promise<EcoCollaborationSource | ReadinessCollaborationSource> {
+  await assertLegacySharedTransportAllowed(prepared.sourceId)
+  try {
+    const token = prepared.token ?? await loginForCollaboration(prepared)
+    if (prepared.token === null) await assertLegacySharedTransportAllowed(prepared.sourceId)
+    const response = await fetch(prepared.requestUrl, {
+      method: 'POST',
+      redirect: 'error',
+      signal: AbortSignal.timeout(prepared.timeoutMs),
+      headers: { ...prepared.headers, Authorization: `Bearer ${token}` },
+      body: prepared.body,
+    })
+    return prepared.kind === 'eco'
+      ? await acceptCollaborationResponse(response, prepared)
+      : await acceptCollaborationResponse(response, prepared)
+  } catch (error) {
+    if (error instanceof ManagedCompanionRefusal || isCollaborationSourceError(error)) throw error
+    throw collaborationTransportError(prepared.kind, 502, 'UNAVAILABLE')
+  }
 }
