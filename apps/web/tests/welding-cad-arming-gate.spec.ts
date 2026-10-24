@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, effectScope, nextTick } from 'vue'
 import { createRequire } from 'node:module'
+import { nativeOracleRoot } from './utils/weldingNativeOracle'
 import Panel from '../src/views/welding/WeldingCadPanel.vue'
 import { useWeldingPlanSession } from '../src/views/welding/useWeldingPlanSession'
 import { useWeldingCadSession } from '../src/views/welding/useWeldingCadSession'
@@ -14,7 +15,8 @@ import type { CommandRecoveryStore } from '../src/services/welding/commandRecove
 // Resolve the original module at its pinned runtime URL; do not substitute measurement logic.
 vi.mock('/welding-cad/b05b3684664f215ced015f09f23d300fcccf8ba49ea4e8826e1a373070083bb8/helpers/welding_measurement.js', async () => {
   const { createRequire } = await import('node:module')
-  return createRequire(import.meta.url)(`${process.env.WELDING_CAD_TEST_ROOT ?? '/Users/chouhua/.codex/worktrees/welding-f18c-representations/CADGameFusion'}/tools/web_viewer/helpers/welding_measurement.js`)
+  const { nativeOracleRoot } = await import('./utils/weldingNativeOracle')
+  return createRequire(import.meta.url)(`${nativeOracleRoot()}/tools/web_viewer/helpers/welding_measurement.js`)
 })
 const owner = { tenant_id: 't', org_id: 'o', auth_user_id: 7, rbac_user_id: 19 }, hash = 'a'.repeat(64)
 const cleanups: Array<() => void> = []
@@ -26,7 +28,7 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 async function setup() {
-  const require = createRequire(import.meta.url), cadRoot = process.env.WELDING_CAD_TEST_ROOT ?? '/Users/chouhua/.codex/worktrees/welding-f18c-representations/CADGameFusion'
+  const require = createRequire(import.meta.url), cadRoot = nativeOracleRoot()
   const { workspace, context } = require(`${cadRoot}/tools/web_viewer/tests/helpers/welding_entry_harness.js`)
   const { installWeldingMessageBridge } = require(`${cadRoot}/tools/web_viewer/bridge/welding_message_bridge.js`)
   const input = context(), payload = { schema_version: 1, product: { item_id: 'p', version_id: 'pv' }, drawing: { item_id: 'd', version_id: 'dv', file_id: 'f', file_role: 'drawing', expected_checksum: hash }, welds: [{ weld_id: 'weld-1', display_no: 'W1' }], overlay: input.overlay }

@@ -31,7 +31,7 @@ const PATTERNS: readonly { name: string; re: RegExp }[] = [
  * why. Pinning the TEXT (not just a count) means a different violation added to an exempted file still
  * fails, even if the number of matches happens to stay the same.
  */
-const EXEMPTIONS: readonly { file: string; reason: string; allowed: readonly string[] }[] = [
+const EXEMPTIONS: readonly { file: string; reason: string; allowed: readonly string[]; exactLine?: string }[] = [
   {
     file: 'routes/welding.ts',
     reason:
@@ -39,6 +39,7 @@ const EXEMPTIONS: readonly { file: string; reason: string; allowed: readonly str
       'bound to GET; it is not an API-prefix classification or authentication exception. ' +
       'The exact complete expression is pinned by welding-contract.test.ts.',
     allowed: ['/^\\/api'],
+    exactLine: String.raw`const template = /^\/api\/welding\/resources\/import\/templates\/(csv|xlsx)$/.exec(req.path)`,
   },
   {
     file: 'auth/api-path-policy.ts',
@@ -82,7 +83,7 @@ function listTsFiles(dir: string, out: string[] = []): string[] {
   return out
 }
 
-type Finding = { file: string; pattern: string; text: string; line: number }
+type Finding = { file: string; pattern: string; text: string; line: number; sourceLine: string }
 
 function scan(source: string, file: string): Finding[] {
   const findings: Finding[] = []
@@ -91,15 +92,23 @@ function scan(source: string, file: string): Finding[] {
     const rx = new RegExp(re.source, 'g')
     let m: RegExpExecArray | null
     while ((m = rx.exec(source)) !== null) {
+      const line = source.slice(0, m.index).split('\n').length
       findings.push({
         file,
         pattern: name,
         text: m[0],
-        line: source.slice(0, m.index).split('\n').length,
+        line,
+        sourceLine: source.split('\n')[line - 1].trim(),
       })
     }
   }
   return findings
+}
+
+function isExempt(finding: Finding): boolean {
+  const ex = EXEMPTIONS.find(e => e.file === finding.file)
+  return !!ex && (!ex.exactLine || finding.sourceLine === ex.exactLine)
+    && ex.allowed.some(a => finding.text.includes(a) || a.includes(finding.text))
 }
 
 describe('API path policy — no call site may re-implement the path test locally', () => {
@@ -126,6 +135,14 @@ describe('API path policy — no call site may re-implement the path test locall
     expect(detected.map((d) => d.pattern).sort()).toEqual(PATTERNS.map((p) => p.name).sort())
   })
 
+  it('rejects another raw API regex in welding even when its prefix matches the template exception', () => {
+    const original = EXEMPTIONS.find(ex => ex.file === 'routes/welding.ts')!.exactLine!
+    const extra = String.raw`const bypass = /^\/api\/private/`
+    const detected = scan(original + '\n' + extra, 'routes/welding.ts')
+    expect(detected).toHaveLength(2)
+    expect(detected.filter(f => !isExempt(f))).toEqual([expect.objectContaining({ line: 2 })])
+  })
+
   it('every exemption names a real file that still carries the text it exempts', () => {
     // Stops the exemption list from rotting into permission for things that no longer exist — a stale
     // entry would silently widen what the guard tolerates.
@@ -135,7 +152,8 @@ describe('API path policy — no call site may re-implement the path test locall
       expect(ex.reason.trim().length).toBeGreaterThan(0)
       for (const allowed of ex.allowed) {
         expect(
-          forFile.some((f) => f.text.includes(allowed) || allowed.includes(f.text)),
+          forFile.some((f) => (!ex.exactLine || f.sourceLine === ex.exactLine)
+            && (f.text.includes(allowed) || allowed.includes(f.text))),
           `exemption for ${ex.file} allows ${JSON.stringify(allowed)}, which no longer appears there`,
         ).toBe(true)
       }
@@ -143,11 +161,7 @@ describe('API path policy — no call site may re-implement the path test locall
   })
 
   it('no undeclared call site re-implements the API path test', () => {
-    const undeclared = findings.filter((f) => {
-      const ex = EXEMPTIONS.find((e) => e.file === f.file)
-      if (!ex) return true
-      return !ex.allowed.some((a) => f.text.includes(a) || a.includes(f.text))
-    })
+    const undeclared = findings.filter(f => !isExempt(f))
 
     expect(
       undeclared.map((f) => `${f.file}:${f.line} — ${f.pattern} (${f.text})`),

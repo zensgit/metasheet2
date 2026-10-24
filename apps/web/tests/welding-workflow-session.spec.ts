@@ -51,7 +51,7 @@ function fixture(initial = 'InReview') {
 const fixtures: ReturnType<typeof fixture>[] = []
 async function make(initial = 'InReview', attached = false) { const f = fixture(initial); fixtures.push(f); if (attached) await f.session.open('plan', 'v1'); await vi.waitFor(() => expect(f.workflow.state.working).toBe(false)); await f.workflow.setTarget('plan', 'v1'); return f }
 beforeEach(() => { localStorage.setItem('auth_token', 'native-A'); Object.defineProperty(navigator, 'locks', { configurable: true, value: { request: async (_name: string, _options: unknown, action: () => Promise<unknown>) => action() } }) })
-afterEach(() => { fixtures.splice(0).forEach(f => { f.workflow.dispose(); f.session.dispose() }); vi.restoreAllMocks(); delete (navigator as any).locks })
+afterEach(() => { fixtures.splice(0).forEach(f => { f.workflow.dispose(); f.session.dispose() }); vi.restoreAllMocks(); vi.unstubAllGlobals(); delete (navigator as any).locks })
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes }); return { promise, resolve } }
 describe('F18b independent reuse interaction', () => {
   async function reuseFixture() {
@@ -500,7 +500,7 @@ describe('finite C2 workflow consumer', () => {
     const f = await finalFixture(); f.current.state = state; f.current.is_current = state === 'Released'; f.current.allowed_actions = []; f.current.final_profile = null; f.current.publication = formal(state)
     f.flags.writable = false; vi.mocked(f.client.recoveryOwner).mockRejectedValue(new Error('editor 503'))
     const original = { schema: 'metasheet.welding_command_pending/1' as const, kind: 'workflow' as const, owner, plan_id: 'plan', item_version_id: 'v1', action: 'final-retry' as const, body: { request_id: 'archived-original', expected_attempt: 2 }, basis: finalBasis }; f.setPending(original)
-    await f.workflow.refresh(); const createURL = vi.fn(() => 'blob:formal-' + crypto.randomUUID()), revokeURL = vi.fn(); Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createURL }); Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeURL }); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    await f.workflow.refresh(); const createURL = vi.fn(() => 'blob:formal-' + crypto.randomUUID()), revokeURL = vi.fn(); vi.stubGlobal('URL', class extends URL { static get createObjectURL() { return createURL }; static get revokeObjectURL() { return revokeURL } }); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     await f.workflow.downloadPublication('pdf'); await f.workflow.downloadPublication('docx')
     expect(f.client.downloadPublicationFile).toHaveBeenCalledTimes(2); expect(f.client.recoveryOwner).not.toHaveBeenCalled(); expect(f.getPending()).toEqual(original); expect(createURL).toHaveBeenCalledTimes(2)
     f.workflow.dispose(); expect(revokeURL).toHaveBeenCalledTimes(2)
@@ -652,14 +652,15 @@ describe('C3 independent official reader', () => {
   })
   it('offers both sides PDF and DOCX only after fresh archives and authority, and releases all object URLs', async () => {
     const f = await officialFixture(); await f.workflow.selectFormal(entry('v2'), 'from'); await f.workflow.selectFormal(entry('v3'), 'to')
-    const create = vi.fn(() => 'blob:formal'), revoke = vi.fn(); Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: create }); Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revoke }); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const create = vi.fn(() => 'blob:formal-' + crypto.randomUUID()), revoke = vi.fn(); vi.stubGlobal('URL', class extends URL { static get createObjectURL() { return create }; static get revokeObjectURL() { return revoke } }); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     for (const side of ['from', 'to'] as const) for (const format of ['pdf', 'docx'] as const) await f.workflow.downloadFormal(format, side)
     expect(f.client.downloadPublicationFile).toHaveBeenCalledTimes(4); expect(create).toHaveBeenCalledTimes(4)
-    f.workflow.dispose(); expect(revoke).toHaveBeenCalled()
+    expect(new Set(create.mock.results.map(result => result.value)).size).toBe(4)
+    f.workflow.dispose(); expect(revoke).toHaveBeenCalledTimes(4)
   })
   it('C3 changing official selection invalidates an in-flight download without leaving a stuck download gate', async () => {
     const f = await officialFixture(), held = deferred<Blob>(), create = vi.fn(() => 'blob:stale')
-    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: create })
+    vi.stubGlobal('URL', class extends URL { static get createObjectURL() { return create } })
     vi.mocked(f.client.downloadPublicationFile).mockReturnValueOnce(held.promise)
     const job = f.workflow.downloadFormal('pdf'); await vi.waitFor(() => expect(f.client.downloadPublicationFile).toHaveBeenCalledOnce())
     await f.workflow.selectFormal(entry('v2'), 'selected'); expect(f.workflow.formal.downloading).toBe(false)

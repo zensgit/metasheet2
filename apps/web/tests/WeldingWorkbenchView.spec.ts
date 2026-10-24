@@ -200,7 +200,7 @@ describe('reachable welding draft page with controlled APIs', () => {
       if (path.includes('/publication/files/')) { const descriptor = files[path.endsWith('/pdf') ? 'pdf' : 'docx']; return new Response(data, { headers: { 'Content-Type': descriptor.mime_type, 'Content-Length': String(data.length), 'X-Artifact-SHA256': digest } }) }
       return response({ error: { code: 'WELDING_PLUGIN_UNAVAILABLE' } }, 503)
     })
-    const createURL = vi.fn(() => 'blob:formal-view-' + crypto.randomUUID()), revokeURL = vi.fn(); Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createURL }); Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeURL }); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const createURL = vi.fn(() => 'blob:formal-view-' + crypto.randomUUID()), revokeURL = vi.fn(); vi.stubGlobal('URL', class extends URL { static get createObjectURL() { return createURL }; static get revokeObjectURL() { return revokeURL } }); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     await mount(); await waitText('评审状态：' + state)
     for (const [i, format] of ['PDF', 'DOCX'].entries()) { await vi.waitFor(() => expect(button('下载正式 ' + format).disabled).toBe(false)); button('下载正式 ' + format).click(); await vi.waitFor(() => expect(createURL).toHaveBeenCalledTimes(i + 1)) }
     expect(mocks.workflowRecords.get(key)).toEqual(original); expect(mocks.apiFetch.mock.calls.filter(([path]) => path.includes('/publication/files/'))).toHaveLength(2)

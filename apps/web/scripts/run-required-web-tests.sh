@@ -1833,6 +1833,14 @@ exec npx vitest run \
   tests/welding-assembly-contract.spec.ts \
   tests/welding-assembly-panel.spec.ts \
   tests/welding-assembly-session.spec.ts \
+  tests/welding-batch-fields.spec.ts \
+  tests/welding-cad-arming-gate.spec.ts \
+  tests/welding-source-change-contract.spec.ts \
+  tests/welding-source-change-panel.spec.ts \
+  tests/welding-source-change-session.spec.ts \
+  tests/welding-source-preparation-client.spec.ts \
+  tests/welding-sparse-save.spec.ts \
+  tests/welding-statistics.spec.ts \
   tests/welding-cad-bridge.spec.ts \
   tests/welding-cad-panel.spec.ts \
   tests/welding-cad-session.spec.ts \

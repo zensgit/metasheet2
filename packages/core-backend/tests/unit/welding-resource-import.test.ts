@@ -390,17 +390,22 @@ describe('fixed resource import binary relay', () => {
   it('applies one 300-second deadline across a slow native session and a hung Y response', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      mocks.query.mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve({ rows: [{ id: 'sid1' }] }), 200000)))
+      let enteredNative!: () => void, enteredUpstream!: () => void
+      const nativeStarted = new Promise<void>(resolve => { enteredNative = resolve })
+      const upstreamStarted = new Promise<void>(resolve => { enteredUpstream = resolve })
+      mocks.query.mockImplementationOnce(() => new Promise(resolve => {
+        setTimeout(() => resolve({ rows: [{ id: 'sid1' }] }), 200000); enteredNative()
+      }))
         .mockResolvedValue({ rows: [{ id: 'sid1' }] })
       fetchMock.mockResolvedValueOnce(json({ state: 'state', nonce: 'nonce', expires_in: 300 }))
         .mockResolvedValueOnce(json({ access_token: 'personal-bearer', token_type: 'bearer', expires_in: 3600,
           tenant_id: 'yt', user_id: 71 }))
-        .mockResolvedValueOnce(json(authority)).mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValueOnce(json(authority)).mockImplementationOnce(() => { enteredUpstream(); return new Promise(() => {}) })
       const pending = post(commitPath).then(result => result)
-      for (let i = 0; i < 20 && mocks.query.mock.calls.length === 0; i++) await new Promise(resolve => setImmediate(resolve))
+      await nativeStarted
       expect(fetchMock).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(200000)
-      for (let i = 0; i < 20 && fetchMock.mock.calls.length < 4; i++) await new Promise(resolve => setImmediate(resolve))
+      await upstreamStarted
       expect(fetchMock).toHaveBeenCalledTimes(4)
       await vi.advanceTimersByTimeAsync(100000)
       const result = await pending
