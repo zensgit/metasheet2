@@ -270,18 +270,56 @@
             {{ t.markAllRead }}
           </el-button>
         </div>
+        <!-- #6524 N0-a: this entry stays in the approval center. 「考勤待审 N」 is the total of the
+             pending list query narrowed to `workflowKey=attendance.request` (independent of the
+             page loaded below); a click narrows THIS list to those rows. It never routes to the
+             attendance module — opening a row (handleRowClick) is unchanged. Disabled, with the
+             reason written next to it, while the total is loading, unreadable, or zero. -->
         <div
           class="approval-center__attendance-entry"
           data-testid="attendance-approval-queue-entry"
         >
           <div class="approval-center__attendance-entry-copy">
             <strong>{{ t.attendanceTitle }}</strong>
-            <p>
+            <p data-testid="attendance-approval-queue-body">
               {{ t.attendanceBody }}
             </p>
+            <p
+              v-if="attendanceOnly"
+              class="approval-center__attendance-entry-status"
+              data-testid="attendance-approval-queue-active"
+            >
+              {{ attendanceActiveText }}
+            </p>
+            <p
+              v-else-if="attendanceEntryReason"
+              id="attendance-approval-queue-reason"
+              class="approval-center__attendance-entry-status"
+              data-testid="attendance-approval-queue-reason"
+            >
+              {{ attendanceEntryReason }}
+            </p>
           </div>
-          <el-button type="primary" plain @click="openAttendanceApprovalQueue">
-            {{ t.attendanceOpen }}
+          <el-button
+            v-if="attendanceOnly"
+            type="primary"
+            plain
+            data-testid="attendance-approval-queue-show-all"
+            @click="leaveAttendanceOnlyView"
+          >
+            {{ t.attendanceShowAll }}
+          </el-button>
+          <el-button
+            v-else
+            type="primary"
+            plain
+            :disabled="!attendanceEntryEnabled"
+            :title="t.attendanceFilterHint"
+            :aria-describedby="attendanceEntryReason ? 'attendance-approval-queue-reason' : undefined"
+            data-testid="attendance-approval-queue-filter"
+            @click="enterAttendanceOnlyView"
+          >
+            {{ attendanceFilterButtonText }}
           </el-button>
         </div>
         <ApprovalMobileList
@@ -709,6 +747,7 @@ import {
   getCcUnreadCount,
   getMineOutcomesUnseenCount,
   getPendingCount,
+  listApprovals,
   markAllApprovalsRead,
   markApprovalRead,
   remindApproval,
@@ -1484,6 +1523,7 @@ const filtersExpanded = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const attendanceRequestsSection = 'attendance-overview-requests'
+const ATTENDANCE_REQUEST_WORKFLOW_KEY = 'attendance.request'
 
 const advancedFilterCount = computed(() => [
   statusFilter.value,
@@ -1680,6 +1720,9 @@ async function handleExportCsv(): Promise<void> {
 let isInitialTabLoad = true
 
 function loadCurrentTab() {
+  // #6524 N0-a: the attendance-only view applies to 待我处理 only, and the key is ABSENT (not
+  // `undefined`) whenever the view is off, so every other request keeps its exact shape.
+  if (activeTab.value !== 'pending') attendanceOnly.value = false
   const filters = {
     search: searchText.value || undefined,
     status: (statusFilter.value || undefined) as ApprovalStatus | undefined,
@@ -1687,6 +1730,7 @@ function loadCurrentTab() {
     templateId: templateFilter.value || undefined,
     createdFrom: createdFromQuery.value,
     createdTo: createdToQuery.value,
+    ...(attendanceOnly.value ? { workflowKey: ATTENDANCE_REQUEST_WORKFLOW_KEY } : {}),
   }
   const query = {
     ...filters,
@@ -1717,6 +1761,7 @@ function loadCurrentTab() {
   // reload had already fetched. A choke point cannot be forgotten by the next call site.
   void refreshPendingBadgeCount({ resnapshot: true })
   void refreshTabBadgeCounts()
+  if (activeTab.value === 'pending') void refreshAttendancePendingTotal()
   // UI-7: this is also the ONE place every list reload passes through — including a pane-triggered
   // 通过/驳回 (`handleInlineApprove`/`submitRowReject` both call `loadCurrentTab()` on success), and
   // filter/page/search changes. Re-run the pane's single-fetch detail here so an open pane never
@@ -1729,6 +1774,7 @@ function loadCurrentTab() {
 }
 
 function handleTabChange() {
+  attendanceOnly.value = false
   currentPage.value = 1
   clearPendingSelection()
   // UI-7: the pane's selection belongs to the tab it was opened from — switching tabs closes it
@@ -1746,11 +1792,8 @@ function handleSearch() {
 }
 
 function clearFilters() {
-  searchText.value = ''
-  statusFilter.value = ''
-  sourceSystemFilter.value = 'all'
-  templateFilter.value = ''
-  createdRange.value = null
+  resetListFilterValues()
+  attendanceOnly.value = false
   currentPage.value = 1
   clearPendingSelection()
   loadCurrentTab()
@@ -1771,7 +1814,7 @@ function handlePageChange(page: number) {
 }
 
 function isAttendanceApproval(row: UnifiedApprovalDTO): boolean {
-  return row.workflowKey === 'attendance.request'
+  return row.workflowKey === ATTENDANCE_REQUEST_WORKFLOW_KEY
     || row.formSnapshot?.attendanceRequestId !== undefined
 }
 
@@ -1808,14 +1851,104 @@ function handleRowClick(row: UnifiedApprovalDTO) {
   navigateToApprovalDetail(row)
 }
 
-function openAttendanceApprovalQueue() {
-  const firstPendingAttendanceRequest = store.pendingApprovals.find(row =>
-    isAttendanceApproval(row) && attendanceRequestIdOf(row) !== null,
-  )
-  router.push({
-    name: 'attendance',
-    query: attendanceRequestQuery(firstPendingAttendanceRequest),
-  })
+// #6524 N0-a — the 考勤审批 entry on 待我处理.
+//
+// The pending list query already includes the attendance requests the viewer is seated on (they
+// are ordinary platform instances with `workflowKey === 'attendance.request'`). The entry used to
+// search only the page already loaded for such a row and, finding none, route to the attendance
+// module with no request id — which lands on the employee's own request form. It now stays here:
+//
+//   * 「考勤待审 N」 = `total` of the SAME pending list query narrowed by the server's existing
+//     `workflowKey` filter, asked for page 1 / pageSize 1 so the number never depends on paging.
+//     It is the list's own scope, so it can never count a row this viewer's list would not show.
+//   * a click narrows THIS list to those rows (`attendanceOnly`), resetting the other filters so
+//     the rows shown are exactly the ones counted. One list reload, through loadCurrentTab().
+//   * disabled with a written reason while the total is loading, unreadable or zero; an
+//     unreadable total shows no number at all.
+//
+// Opening a row is unchanged (handleRowClick). Not done here: an attendance-side approver queue,
+// deciding from the center, and any rule / timezone readiness signal (the center reads none).
+const attendanceOnly = ref(false)
+const attendancePendingTotal = ref<number | null>(null)
+const attendancePendingState = ref<'loading' | 'ready' | 'failed'>('loading')
+let attendancePendingRequest = 0
+
+function attendancePendingCountQuery() {
+  return {
+    tab: 'pending' as const,
+    sourceSystem: 'all' as const,
+    workflowKey: ATTENDANCE_REQUEST_WORKFLOW_KEY,
+    page: 1,
+    pageSize: 1,
+  }
+}
+
+async function refreshAttendancePendingTotal(): Promise<void> {
+  const request = ++attendancePendingRequest
+  attendancePendingState.value = 'loading'
+  try {
+    // Read through a closure (never at setup), like the tab badge counts above: several
+    // approval-center specs mock the api module with an explicit export list without this name.
+    const result = await Promise.resolve().then(() => listApprovals(attendancePendingCountQuery()))
+    if (request !== attendancePendingRequest) return
+    const total = Number(result?.total)
+    if (!Number.isFinite(total) || total < 0) throw new Error('invalid total')
+    attendancePendingTotal.value = total
+    attendancePendingState.value = 'ready'
+  } catch {
+    if (request !== attendancePendingRequest) return
+    attendancePendingTotal.value = null
+    attendancePendingState.value = 'failed'
+  }
+}
+
+const attendanceEntryEnabled = computed(() =>
+  attendancePendingState.value === 'ready' && (attendancePendingTotal.value ?? 0) > 0,
+)
+
+const attendanceEntryReason = computed<string>(() => {
+  if (attendancePendingState.value === 'loading') return t.value.attendanceReasonLoading
+  if (attendancePendingState.value === 'failed') return t.value.attendanceReasonFailed
+  if ((attendancePendingTotal.value ?? 0) <= 0) return t.value.attendanceReasonNone
+  return ''
+})
+
+const attendanceFilterButtonText = computed(() => {
+  const total = attendancePendingState.value === 'ready' ? attendancePendingTotal.value : null
+  if (total === null) return isZh.value ? '考勤待审' : 'Attendance pending'
+  return isZh.value ? `考勤待审 ${total}` : `Attendance pending ${total}`
+})
+
+const attendanceActiveText = computed(() => {
+  const total = attendancePendingState.value === 'ready' ? attendancePendingTotal.value : null
+  if (total === null) return isZh.value ? '正在只看考勤待审。' : 'Showing attendance requests only.'
+  return isZh.value
+    ? `正在只看考勤待审。考勤待审共 ${total} 条。`
+    : `Showing attendance requests only. Attendance requests pending: ${total}.`
+})
+
+function resetListFilterValues() {
+  searchText.value = ''
+  statusFilter.value = ''
+  sourceSystemFilter.value = 'all'
+  templateFilter.value = ''
+  createdRange.value = null
+}
+
+function enterAttendanceOnlyView() {
+  if (!attendanceEntryEnabled.value) return
+  resetListFilterValues()
+  attendanceOnly.value = true
+  currentPage.value = 1
+  clearPendingSelection()
+  loadCurrentTab()
+}
+
+function leaveAttendanceOnlyView() {
+  attendanceOnly.value = false
+  currentPage.value = 1
+  clearPendingSelection()
+  loadCurrentTab()
 }
 
 // B3-03 (看板钻取): ApprovalMetricsView's KPI tiles / per-template rows deep-link here with
@@ -1869,6 +2002,8 @@ watch(
   () => {
     if (route.name !== 'approval-list') return
     applyDeepLinkFilters()
+    // A deep link is a full sync of the filter bar and never carries the attendance-only view.
+    attendanceOnly.value = false
     currentPage.value = 1
     clearPendingSelection()
     loadCurrentTab()
@@ -2283,6 +2418,10 @@ onBeforeUnmount(() => {
   color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.approval-center__attendance-entry-copy .approval-center__attendance-entry-status {
+  color: var(--ms-text-1);
 }
 
 @media (max-width: 1100px) {
