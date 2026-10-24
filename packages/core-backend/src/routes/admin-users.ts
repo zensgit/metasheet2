@@ -15,6 +15,10 @@ import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
 import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../attendance/attendance-timezone-runtime-locks'
+import {
+  assertAttendanceManagementGroupAdmission,
+  AttendanceGroupMembershipPolicyError,
+} from '../attendance/attendance-group-membership-policy'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
@@ -4330,6 +4334,9 @@ export function adminUsersRouter(): Router {
         }
 
         if (attendanceOnboarding && cleanAttendanceGroupId) {
+          await assertAttendanceManagementGroupAdmission(client, attendanceOrgId, [
+            { groupId: cleanAttendanceGroupId, userId },
+          ])
           const memberResult = await client.query(
             `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
              VALUES ($1, $2, $3, NOW(), NOW())
@@ -4428,6 +4435,12 @@ export function adminUsersRouter(): Router {
         attendanceOnboarding,
       })
     } catch (error) {
+      if (error instanceof AttendanceGroupMembershipPolicyError) {
+        if (error.code === 'ATTENDANCE_MULTIPLE_GROUPS_DISABLED') {
+          return jsonError(res, 409, 'ATTENDANCE_MULTIPLE_GROUPS_DISABLED', 'Attendance group membership policy could not be applied')
+        }
+        return jsonError(res, 503, 'ATTENDANCE_GROUP_MEMBERSHIP_POLICY_UNAVAILABLE', 'Attendance group membership policy could not be applied')
+      }
       if (error instanceof AttendanceShiftReferenceUnavailableError) {
         return jsonError(res, error.status, error.code, error.message, error.details)
       }

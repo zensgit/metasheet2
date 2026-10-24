@@ -79,6 +79,7 @@ import { normalizeAttendanceSourceOperationEnvelopeV1 } from '../../src/attendan
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
 const require = createRequire(import.meta.url)
+const groupMembershipPolicy = require('../../../../plugins/plugin-attendance/lib/attendance-group-membership-policy.cjs')
 const syncCompatibility = (
   require('../../../../plugins/plugin-attendance/index.cjs') as {
     __attendanceW4C3aSyncCompatibilityForTests: {
@@ -717,6 +718,107 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
   }, 30000)
 
   // -------------------------------------------------------------------------
+  it('management-group policy prefix prevents the null-version production revision-trigger deadlock', async () => {
+    // This is the migrated production schema, not the simplified policy fixture.
+    // Disabling the new prefix recreates: import owns revision -> API owns org
+    // -> API waits revision -> import waits org (40P01).
+    const triggers = await pool.query(`
+      SELECT c.relname AS table_name, p.proname AS function_name, t.tgenabled AS enabled
+      FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+      JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE t.tgrelid IN ('public.attendance_groups'::regclass, 'public.attendance_group_members'::regclass)
+        AND t.tgname IN ('trg_attendance_groups_w4c3a_revision', 'trg_attendance_group_members_w4c3a_revision')
+      ORDER BY c.relname
+    `)
+    expect(triggers.rows).toEqual([
+      { table_name: 'attendance_group_members', function_name: 'attendance_bump_group_effect_revision', enabled: 'O' },
+      { table_name: 'attendance_groups', function_name: 'attendance_bump_group_effect_revision', enabled: 'O' },
+    ])
+    const orgId = crypto.randomUUID()
+    const apiGroup = crypto.randomUUID()
+    const importedGroup = crypto.randomUUID()
+    const jobId = crypto.randomUUID()
+    const identity = 'p1-null-version-' + crypto.randomUUID()
+    await pool.query('INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)', [ACTOR, orgId])
+    await pool.query("INSERT INTO attendance_groups(id,org_id,name,timezone) VALUES($1,$2,$3,'UTC')", [apiGroup, orgId, 'p1-api-' + RUN])
+    await pool.query('INSERT INTO attendance_management_group_policies(org_id,allow_multiple_groups,version) VALUES($1,true,1)', [orgId])
+    await pool.query(`INSERT INTO attendance_import_jobs
+      (id,org_id,batch_id,created_by,idempotency_key,status,progress,total,payload)
+      VALUES($1,$2,$3,$4,$5,'running',0,1,'{}'::jsonb)`,
+    [jobId, orgId, crypto.randomUUID(), ACTOR, identity])
+    const baseline = Number((await pool.query(
+      'SELECT revision FROM attendance_group_effect_revisions WHERE org_id=$1', [orgId],
+    )).rows[0].revision)
+    const api = await pool.connect()
+    const apiPid = await backendPid(api)
+    let releaseImport!: () => void
+    const holdImport = new Promise<void>(resolve => { releaseImport = resolve })
+    let groupWritten!: () => void
+    const groupWriteReached = new Promise<void>(resolve => { groupWritten = resolve })
+    let apiAdmitted = false
+    let sawOrgWait = false
+    let apiRun: Promise<{ ok: boolean; code?: string }> | undefined
+    const imported = syncCompatibility.runAttendanceLegacyNullVersionCommitAtomically({
+      db: pluginDb(pool), jobId, orgId, lockIdentity: identity,
+      lockWitness: legacyWorkerLockWitness(orgId, identity),
+      commitLegacy: async client => {
+        await client.query("INSERT INTO attendance_groups(id,org_id,name,timezone) VALUES($1,$2,$3,'UTC')",
+          [importedGroup, orgId, 'p1-import-' + RUN])
+        // Prove the actual production trigger has executed in this transaction.
+        expect(await client.query('SELECT revision::text AS revision FROM attendance_group_effect_revisions WHERE org_id=$1', [orgId]))
+          .toEqual([{ revision: String(baseline + 1) }])
+        groupWritten()
+        await holdImport
+        await groupMembershipPolicy.assertCanAddMembers(client, orgId, [{ groupId: importedGroup, userId: ACTOR }])
+        await client.query('INSERT INTO attendance_group_members(org_id,group_id,user_id) VALUES($1,$2,$3)', [orgId, importedGroup, ACTOR])
+        return { imported: 1 }
+      },
+      buildTerminal: () => ({ progress: 1, total: 1, payload: { synthetic: true } }),
+    }).then(() => ({ ok: true }), error => ({ ok: false, code: String(error?.code ?? 'UNEXPECTED_ERROR') }))
+    try {
+      await Promise.race([
+        groupWriteReached,
+        imported.then(outcome => { throw new Error('IMPORT_DID_NOT_REACH_PRODUCTION_GROUP_TRIGGER:' + JSON.stringify(outcome)) }),
+      ])
+      apiRun = (async () => {
+        try {
+          await api.query('BEGIN')
+          await groupMembershipPolicy.assertCanAddMembers(api, orgId, [{ groupId: apiGroup, userId: ACTOR }])
+          apiAdmitted = true
+          await api.query('INSERT INTO attendance_group_members(org_id,group_id,user_id) VALUES($1,$2,$3)', [orgId, apiGroup, ACTOR])
+          await api.query('COMMIT')
+          return { ok: true }
+        } catch (error) {
+          await api.query('ROLLBACK')
+          return { ok: false, code: String((error as { code?: string }).code ?? 'UNEXPECTED_ERROR') }
+        }
+      })()
+      const deadline = Date.now() + 8000
+      for (;;) {
+        const waiting = await pool.query(
+          "SELECT count(*)::int AS n FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND granted=false", [apiPid])
+        if (Number(waiting.rows[0].n) > 0) { sawOrgWait = true; break }
+        // Mutant path deliberately continues into the real trigger deadlock,
+        // so failure is attributable to 40P01 rather than a source assertion.
+        if (apiAdmitted) break
+        if (Date.now() >= deadline) throw new Error('POLICY_API_NEITHER_BLOCKED_NOR_ADMITTED')
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      releaseImport()
+      expect(await Promise.all([imported, apiRun])).toEqual([{ ok: true }, { ok: true }])
+      expect(sawOrgWait).toBe(true)
+      expect((await pool.query('SELECT count(*)::int AS count FROM attendance_group_members WHERE org_id=$1', [orgId])).rows)
+        .toEqual([{ count: 2 }])
+      expect((await pool.query('SELECT status FROM attendance_import_jobs WHERE id=$1', [jobId])).rows)
+        .toEqual([{ status: 'completed' }])
+    } finally {
+      releaseImport()
+      await Promise.all([imported, apiRun])
+      await api.query('ROLLBACK')
+      api.release()
+    }
+  })
+
   // Leg 6 — null-version legacy worker: terminal-without-effect is unobservable.
   // -------------------------------------------------------------------------
   it('null-version legacy worker: source effect + terminal status commit atomically under the rollout SHARED lock; a transition waits on exclusive and never observes terminal-without-effect; failure leaves the job nonterminal with zero effect', async () => {

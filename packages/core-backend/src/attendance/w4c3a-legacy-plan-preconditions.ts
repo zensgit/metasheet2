@@ -6,6 +6,10 @@ import {
   type LegacyImportRecordPreconditionV1,
   type LegacyImportRecordWritePlanV1,
 } from './w4c3a-legacy-execution-plan'
+import {
+  AttendanceGroupMembershipPolicyError,
+  prepareAttendanceManagementGroupAdmission,
+} from './attendance-group-membership-policy'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import type { VerifiedAttendanceLegacyPlanV1 } from './w4c3a-legacy-plan-worker'
 import { throwAttendanceRosterOrgMembershipError } from './w4c3a-legacy-plan-group-effects'
@@ -267,6 +271,17 @@ export async function lockAndRecheckAttendanceLegacyGroupPreconditionsV1(
   }
 
   const orgId = plan.manifest.orgId
+  // Admission is a live precondition, separate from immutable calculation inputs.
+  // The shared org lock remains held through the effect phase and COMMIT.
+  try {
+    await prepareAttendanceManagementGroupAdmission(trx, orgId, plan.groupEffects
+      .flatMap(effect => effect.kind === 'ensure_member'
+        ? [{ groupId: effect.groupRef, userId: effect.userId }] : []))
+  } catch (error) {
+    if (error instanceof AttendanceGroupMembershipPolicyError
+      && error.code === 'ATTENDANCE_MULTIPLE_GROUPS_DISABLED') return false
+    throw error
+  }
   const existingGroups = plan.groupEffects
     .filter(
       (

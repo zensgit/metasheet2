@@ -96,6 +96,8 @@ const TABLE_BUCKETS = Object.freeze({
   // --- reference: org configuration/reference data, not calculation truth ------------------
   attendance_groups: 'reference',
   attendance_group_members: 'reference',
+  // Organization membership admission settings, not frozen calculation/result truth.
+  attendance_management_group_policies: 'reference',
   attendance_group_managers: 'reference',
   attendance_group_fixed_schedule_configs: 'reference',
   attendance_schedule_groups: 'reference',

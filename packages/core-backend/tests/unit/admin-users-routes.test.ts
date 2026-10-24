@@ -3609,6 +3609,7 @@ describe('admin-users routes', () => {
         return { rows: [{ id: shiftId, name: '早班', segment_count: 1 }] }
       }
       if (statement.includes('INSERT INTO users (')) return { rows: [] }
+      if (statement.includes('INSERT INTO attendance_management_group_policies')) return { rows: [{ allow_multiple_groups: false, version: 0 }] }
       if (statement.includes('INSERT INTO attendance_group_members')) {
         expect(params).toEqual(['default', groupId, expect.any(String)])
         return { rows: [{ memberId: 'member-1' }] }
@@ -3690,6 +3691,64 @@ describe('admin-users routes', () => {
     const userInsertIndex = statements.findIndex((statement) => statement.includes('INSERT INTO users ('))
     expect(lockedShiftIndex).toBeGreaterThanOrEqual(0)
     expect(userInsertIndex).toBeGreaterThan(lockedShiftIndex)
+  })
+
+  it('fails closed before onboarding member INSERT when the shared management-group policy refuses admission', async () => {
+    const groupId = '11111111-1111-4111-8111-111111111111'
+    const existingGroupId = '22222222-2222-4222-8222-222222222222'
+    rbacMocks.isAdmin.mockResolvedValueOnce(true)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const statement = String(sql)
+      if (statement.includes('FROM attendance_groups')) return { rows: [{ id: groupId, name: 'Synthetic Group' }] }
+      if (statement.includes('INSERT INTO attendance_management_group_policies')) {
+        return { rows: [{ allow_multiple_groups: false, version: 0 }] }
+      }
+      if (statement.includes('group_id::text AS group_id, user_id FROM attendance_group_members')) {
+        return { rows: [{ group_id: existingGroupId, user_id: (params[1] as string[])[0] }] }
+      }
+      return { rows: [] }
+    })
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: { username: 'synthetic-new-user', name: 'Synthetic User', password: 'WelcomePass9A', attendanceGroupId: groupId, isActive: true },
+    })
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toEqual({ ok: false, error: {
+      code: 'ATTENDANCE_MULTIPLE_GROUPS_DISABLED',
+      message: 'Attendance group membership policy could not be applied',
+      details: undefined,
+    } })
+    expect(pgMocks.query.mock.calls.some(([sql]) => /INSERT INTO attendance_group_members\s*\(/.test(String(sql)))).toBe(false)
+  })
+
+  it.each([
+    ['ATTENDANCE_GROUP_MEMBERSHIP_POLICY_UNAVAILABLE', 503],
+    ['synthetic private error code', 418],
+  ])('does not echo private message or details from a typed management-group policy failure (%s)', async (code, status) => {
+    const { AttendanceGroupMembershipPolicyError } = await import('../../src/attendance/attendance-group-membership-policy')
+    const error = Object.assign(new AttendanceGroupMembershipPolicyError(code, status), {
+      message: 'synthetic private driver message', details: { subject: 'synthetic private subject' },
+    })
+    const groupId = '11111111-1111-4111-8111-111111111111'
+    rbacMocks.isAdmin.mockResolvedValueOnce(true)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('FROM attendance_groups')) return { rows: [{ id: groupId, name: 'Synthetic Group' }] }
+      if (String(sql).includes('INSERT INTO attendance_management_group_policies')) throw error
+      return { rows: [] }
+    })
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: { username: 'synthetic-new-user', name: 'Synthetic User', password: 'WelcomePass9A', attendanceGroupId: groupId, isActive: true },
+    })
+    expect(response.statusCode).toBe(503)
+    expect(response.body).toEqual({ ok: false, error: {
+      code: 'ATTENDANCE_GROUP_MEMBERSHIP_POLICY_UNAVAILABLE',
+      message: 'Attendance group membership policy could not be applied',
+      details: undefined,
+    } })
+    expect(pgMocks.query.mock.calls.some(([sql]) => /INSERT INTO attendance_group_members\s*\(/.test(String(sql)))).toBe(false)
   })
 
   it.each([

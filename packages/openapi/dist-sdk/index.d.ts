@@ -1018,6 +1018,166 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/group-membership-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read organization management-group membership policy
+         * @description Requires attendance administration authority and active membership of the authenticated organization. An orgId selector must match that binding. Missing organization policy defaults to false and version zero. This policy does not change calculation membership history or overlap constraints.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Organization membership policy */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                orgId: string;
+                                /** @default false */
+                                allowMultipleGroups: boolean;
+                                version: number;
+                            };
+                        };
+                    };
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Active organization membership and attendance administration required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Organization selector does not match authenticated binding */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Policy storage unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Set organization management-group membership policy
+         * @description Compare-and-set against expectedVersion. Stale versions return 409 even for an unchanged value. Only an actual boolean transition increments the version. Disabling preserves existing multiple memberships and allows same-group idempotency and removal; new second memberships are rejected. Does not recalculate history or change immutable calculation membership.
+         */
+        post: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        allowMultipleGroups: boolean;
+                        expectedVersion: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description Persisted organization policy acknowledgment */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                orgId: string;
+                                allowMultipleGroups: boolean;
+                                version: number;
+                            };
+                        };
+                    };
+                };
+                /** @description Strict boolean and nonnegative safe integer version required; unknown fields rejected */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Active organization membership and attendance administration required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Organization selector does not match authenticated binding */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_GROUP_MEMBERSHIP_POLICY_VERSION_CONFLICT */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Policy storage unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/effective-calendar": {
         parameters: {
             query?: never;

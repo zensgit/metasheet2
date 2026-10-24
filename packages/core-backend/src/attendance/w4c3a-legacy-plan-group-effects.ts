@@ -14,6 +14,7 @@
  * verifier checks source invariants after effects; its proof is prepared by
  * the host.
  */
+import { requireAttendanceManagementGroupAdmission } from './attendance-group-membership-policy'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import { requireAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 import type { VerifiedAttendanceLegacyPlanV1 } from './w4c3a-legacy-plan-worker'
@@ -160,6 +161,10 @@ export async function applyAttendanceLegacyGroupEffectsV1(
       throwAttendanceRosterOrgMembershipError(plan, rejected)
     }
   }
+
+  await requireAttendanceManagementGroupAdmission(trx, plan.manifest.orgId, plan.groupEffects
+    .flatMap(effect => effect.kind === 'ensure_member'
+      ? [{ groupId: effect.groupRef, userId: effect.userId }] : []))
 
   // Fixed order: groups first, members second (OD-W4C-58 §5 / effect adapter).
   for (const effect of plan.groupEffects) {

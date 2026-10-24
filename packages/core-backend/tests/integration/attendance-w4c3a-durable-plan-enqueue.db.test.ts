@@ -8,6 +8,7 @@ import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_
 import { up as memberSourcesUp } from '../../src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals'
 import { up as rosterOrgReasonUp } from '../../src/db/migrations/zzzz20260924180000_attendance_roster_org_gate_job_reason'
 import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
+import { up as groupMembershipPolicyUp } from '../../src/db/migrations/zzzz20261023120000_attendance_group_membership_policy'
 import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 import { createAttendanceLegacyPlanProcessorV1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
 import {
@@ -718,6 +719,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await rosterOrgReasonUp(db)
     await memberSourcesUp(db)
     await timezonePolicyUp(db)
+    await groupMembershipPolicyUp(db)
     registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
     await pool.query(
       `INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4), ($5), ($6)`,

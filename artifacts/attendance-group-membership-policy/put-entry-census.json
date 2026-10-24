@@ -1,0 +1,70 @@
+{
+  "scope": "Source residual after proposed PR6505; not a deployed-main or live gateway-health claim",
+  "reviewed_pr": 6505,
+  "reviewed_head": "8ff3f738905f00cba7c4d273eb383fc6f296f1b2",
+  "feature_base": "663faa529f71e41ed4c5b4a7787645ce0b89ab70",
+  "bare_id_puts_with_post_update_twins": 18,
+  "native_remaining_count": 7,
+  "browser_reachable_count": 6,
+  "records": [
+    {
+      "method": "PUT",
+      "path": "/api/attendance/settings",
+      "browser_caller_present": true,
+      "caller_symbol": "saveSettings and partial settings savers",
+      "source": "plugins/plugin-attendance/index.cjs",
+      "line_on_reviewed_head": 52673
+    },
+    {
+      "method": "PUT",
+      "path": "/api/attendance/rules/default",
+      "browser_caller_present": true,
+      "caller_symbol": "saveRule",
+      "source": "plugins/plugin-attendance/index.cjs",
+      "line_on_reviewed_head": 42329
+    },
+    {
+      "method": "PUT",
+      "path": "/api/attendance/rule-templates",
+      "browser_caller_present": true,
+      "caller_symbol": "saveRuleTemplates",
+      "source": "plugins/plugin-attendance/index.cjs",
+      "line_on_reviewed_head": 42562
+    },
+    {
+      "method": "PUT",
+      "path": "/api/attendance/import/template-prefs",
+      "browser_caller_present": true,
+      "caller_symbol": "flushImportTemplatePrefsPut",
+      "source": "plugins/plugin-attendance/index.cjs",
+      "line_on_reviewed_head": 43189
+    },
+    {
+      "method": "PUT",
+      "path": "/api/attendance/timezone-policy",
+      "browser_caller_present": true,
+      "caller_symbol": "AttendanceTimezonePolicyPanel.save",
+      "source": "plugins/plugin-attendance/lib/attendance-timezone-policy-routes.cjs",
+      "line_on_reviewed_head": 175
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/attendance/report-fields/:code/formula",
+      "browser_caller_present": true,
+      "caller_symbol": "saveFormulaDraft",
+      "source": "plugins/plugin-attendance/index.cjs",
+      "line_on_reviewed_head": 52204
+    },
+    {
+      "method": "PUT",
+      "path": "/api/attendance/groups/:groupId/fixed-schedule/config",
+      "browser_caller_present": false,
+      "caller_symbol": null,
+      "source": "plugins/plugin-attendance/index.cjs",
+      "line_on_reviewed_head": 47579
+    }
+  ],
+  "main_independently_checked_registrations": true,
+  "no_live_transport_probe": true,
+  "transport_routes_modified_by_this_pr": false
+}

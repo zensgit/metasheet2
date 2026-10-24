@@ -249,6 +249,46 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
     }
   })
 
+  it('rolls back the real onboarding transaction when policy admission rejects a second group', async () => {
+    const firstGroup = (await query<{ id: string }>(
+      "INSERT INTO attendance_groups(org_id,name,timezone) VALUES($1,$2,'UTC') RETURNING id",
+      [freshOrg, NS + '-rollback-first'],
+    )).rows[0].id
+    const secondGroup = (await query<{ id: string }>(
+      "INSERT INTO attendance_groups(org_id,name,timezone) VALUES($1,$2,'UTC') RETURNING id",
+      [freshOrg, NS + '-rollback-second'],
+    )).rows[0].id
+    const email = NS + '-rollback@example.test'
+    const triggerName = NS + '_membership_seed'
+    // A synthetic DB-side first assignment makes rejection reachable after the
+    // real user/user_orgs INSERTs, proving rollback rather than mocking ROLLBACK.
+    // All interpolated literals/identifiers are this file's generated fixtures.
+    try {
+      await query(
+        "CREATE FUNCTION " + triggerName + "() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN " +
+        "IF NEW.org_id = '" + freshOrg + "' AND EXISTS(SELECT 1 FROM users WHERE id=NEW.user_id AND email='" + email + "') THEN " +
+        "INSERT INTO attendance_group_members(id,org_id,group_id,user_id) VALUES(gen_random_uuid(),NEW.org_id,'" + firstGroup + "'::uuid,NEW.user_id); " +
+        "END IF; RETURN NEW; END $$",
+      )
+      await query("CREATE TRIGGER " + triggerName + " AFTER INSERT ON user_orgs FOR EACH ROW EXECUTE FUNCTION " + triggerName + "()")
+      const result = await createUser({
+        name: 'Synthetic rollback', email, orgId: freshOrg,
+        attendanceOrgId: freshOrg, attendanceGroupId: secondGroup,
+      })
+      expect(result.status).toBe(409)
+      expect(result.body).toMatchObject({ ok: false, error: { code: 'ATTENDANCE_MULTIPLE_GROUPS_DISABLED' } })
+      expect((await query<{ count: number }>('SELECT count(*)::int AS count FROM users WHERE email=$1', [email])).rows)
+        .toEqual([{ count: 0 }])
+      expect((await query<{ count: number }>('SELECT count(*)::int AS count FROM attendance_group_members WHERE group_id=ANY($1::uuid[])', [[firstGroup, secondGroup]])).rows)
+        .toEqual([{ count: 0 }])
+    } finally {
+      await query('DROP TRIGGER IF EXISTS ' + triggerName + ' ON user_orgs')
+      await query('DROP FUNCTION IF EXISTS ' + triggerName + '()')
+      await query('DELETE FROM attendance_group_members WHERE group_id=ANY($1::uuid[])', [[firstGroup, secondGroup]])
+      await query('DELETE FROM attendance_groups WHERE id=ANY($1::uuid[])', [[firstGroup, secondGroup]])
+    }
+  })
+
   it('explicit attendanceOrgId conflicting with the group/shift-derived org → 400 ATTENDANCE_ORG_CONFLICT', async () => {
     // Seed a real attendance_group under `groupDerivedOrg` so resolveAttendanceOnboardingOrgId's
     // derivation path has something concrete to disagree with `conflictOrg` about. orgId is
@@ -275,3 +315,7 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
     }
   })
 })
+
+// Keep cold server graph transformation outside the original 15s startup hook.
+// All fixture refs are initialized before collection preload; the hook stays unchanged.
+await import('../../src/index')

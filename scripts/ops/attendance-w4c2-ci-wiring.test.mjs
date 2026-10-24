@@ -2201,6 +2201,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts',
   'tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
   'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
+  'tests/integration/attendance-group-membership-policy.db.test.ts',
   'tests/integration/attendance-import-template-prefs.test.ts',
   'tests/integration/attendance-import-user-identity.db.test.ts',
   'tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts',

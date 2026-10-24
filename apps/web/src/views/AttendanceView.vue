@@ -2817,6 +2817,9 @@
                 <AttendanceTimezonePolicyPanel :tr="tr" />
               </section>
               <section class="attendance__form-card">
+                <AttendanceGroupMembershipPolicyPanel :tr="tr" />
+              </section>
+              <section class="attendance__form-card">
                 <h5>{{ tr('Auto absence', '自动缺勤') }}</h5>
                 <div class="attendance__admin-grid attendance__admin-grid--thirds">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
@@ -10464,6 +10467,7 @@ import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTe
 // an ops env gate. Pure modules + one display component; no behaviour change (see the module headers).
 import AttendanceScheduledFeatureStatus from './attendance/AttendanceScheduledFeatureStatus.vue'
 import AttendanceTimezonePolicyPanel from './attendance/AttendanceTimezonePolicyPanel.vue'
+import AttendanceGroupMembershipPolicyPanel from './attendance/AttendanceGroupMembershipPolicyPanel.vue'
 import { attendanceTimezoneErrorMessage } from './attendance/attendanceTimezoneError'
 import AttendanceBusinessTripRequestCard from './attendance/AttendanceBusinessTripRequestCard.vue'
 import AttendanceRequestTimezoneFields from './attendance/AttendanceRequestTimezoneFields.vue'

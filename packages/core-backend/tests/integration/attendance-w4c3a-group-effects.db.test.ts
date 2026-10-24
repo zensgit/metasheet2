@@ -1,3 +1,5 @@
+import { prepareAttendanceManagementGroupAdmission } from '../../src/attendance/attendance-group-membership-policy'
+import { up as membershipPolicyUp } from '../../src/db/migrations/zzzz20261023120000_attendance_group_membership_policy'
 import { Kysely, PostgresDialect } from 'kysely'
 import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
 /**
@@ -7,7 +9,7 @@ import crypto from 'node:crypto'
 import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1, registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
-import { applyAttendanceLegacyGroupEffectsV1 } from '../../src/attendance/w4c3a-legacy-plan-group-effects'
+import { applyAttendanceLegacyGroupEffectsV1 as applyRawGroupEffects } from '../../src/attendance/w4c3a-legacy-plan-group-effects'
 import {
   buildAttendanceLegacyFirstExecutionBatchMetaV1,
 } from '../../src/attendance/w4c3a-legacy-plan-batch-effects'
@@ -22,6 +24,16 @@ const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 
 function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
   return createAttendanceLegacyPlanCommitConnectionV1(client)
+}
+
+async function applyAttendanceLegacyGroupEffectsV1(
+  client: AttendanceW4TransactionClientV1,
+  frozenPlan: VerifiedAttendanceLegacyPlanV1,
+) {
+  await prepareAttendanceManagementGroupAdmission(client, frozenPlan.manifest.orgId,
+    frozenPlan.groupEffects.flatMap(effect => effect.kind === 'ensure_member'
+      ? [{ groupId: effect.groupRef, userId: effect.userId }] : []))
+  return applyRawGroupEffects(client, frozenPlan)
 }
 
 function plan(
@@ -118,6 +130,7 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
       )`)
     await pool.query("CREATE TABLE attendance_rules (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), timezone text NOT NULL DEFAULT 'UTC')")
     await timezonePolicyUp(new Kysely({ dialect: new PostgresDialect({ pool }) }))
+    await membershipPolicyUp(new Kysely({ dialect: new PostgresDialect({ pool }) }))
     // This counts-only fixture has no runtime/calendar data. Real resolver
     // integration is exercised separately in attendance-timezone-runtime.db.test.
     registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
@@ -131,6 +144,49 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
       await adminPool.end().catch(() => undefined)
     }
   })
+
+  it.each(['missing', 'cross_transaction'] as const)(
+    'production effect adapter refuses %s admission proof before group/member DML with fresh timezone proof',
+    async mode => {
+      const userId = 'effect-proof-' + mode + '-' + run
+      const groupId = crypto.randomUUID()
+      const memberId = crypto.randomUUID()
+      await pool.query('INSERT INTO users(id,is_active) VALUES($1,true)', [userId])
+      await pool.query('INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)', [userId, orgId])
+      const frozen = plan(orgId, [
+        { kind: 'ensure_group', groupId, normalizedName: 'proof-' + mode, displayName: 'Proof ' + mode + ' ' + run,
+          code: null, timezone: 'UTC', ruleSetId: null, groupExistedAtPrepare: false },
+        { kind: 'ensure_member', memberId, groupRef: groupId, userId, membershipExistedAtPrepare: false },
+      ])
+      const client = await pool.connect()
+      const prepared = trx(client)
+      try {
+        if (mode === 'cross_transaction') {
+          await client.query('BEGIN')
+          await prepareAttendanceManagementGroupAdmission(prepared, orgId, [{ groupId, userId }])
+          await client.query('ROLLBACK')
+        }
+        await client.query('BEGIN')
+        await acquireAttendanceImportTimezonePrefixV1(prepared, orgId)
+        await prepareAttendanceImportTimezoneSourceV1(prepared, orgId)
+        // Direct production adapter call: do not use this file's preparation wrapper.
+        await expect(applyRawGroupEffects(prepared, frozen)).rejects.toMatchObject({
+          code: 'ATTENDANCE_GROUP_MEMBERSHIP_PRECONDITION_REQUIRED', status: 409,
+        })
+        expect((await client.query('SELECT count(*)::int AS count FROM attendance_groups WHERE id=$1', [groupId])).rows)
+          .toEqual([{ count: 0 }])
+        expect((await client.query('SELECT count(*)::int AS count FROM attendance_group_members WHERE id=$1', [memberId])).rows)
+          .toEqual([{ count: 0 }])
+        // Same transaction and timezone proof: a fresh admission proof must work.
+        await prepareAttendanceManagementGroupAdmission(prepared, orgId, [{ groupId, userId }])
+        expect(await applyRawGroupEffects(prepared, frozen)).toEqual({ groupCreated: 1, groupMembersAdded: 1 })
+        await client.query('ROLLBACK')
+      } finally {
+        await client.query('ROLLBACK')
+        client.release()
+      }
+    },
+  )
 
   it('conflict-updated ensure_group returns groupCreated=1; empty effects remain 0', async () => {
     const existingId = crypto.randomUUID()
