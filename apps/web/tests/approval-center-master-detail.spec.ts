@@ -792,6 +792,21 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeTruthy()
   })
 
+  it('an actor gets no pane 通过/驳回 when the detail fetch says canDecideCurrentNode is false (list rows never carry the flag)', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销', { canDecideCurrentNode: false }))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    expect(getApprovalSpy).toHaveBeenCalledWith('apv_1')
+    expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-detail-pane-approve"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeNull()
+  })
+
   it('打开完整详情 navigates to the exact same approval-detail route the narrow-width click uses', async () => {
     getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
     mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]

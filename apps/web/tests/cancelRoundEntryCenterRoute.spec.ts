@@ -255,6 +255,7 @@ afterEach(() => {
   container?.remove()
   document.body.innerHTML = ''
   localStorage.removeItem('user_permissions')
+  localStorage.removeItem('user_roles')
   app = null
   container = null
   vi.clearAllMocks()
@@ -581,6 +582,22 @@ describe('ApprovalCenterView — platform-row affordances follow approvals:act (
     expect(container!.querySelector('[data-testid="approval-row-approve-cr_1"]')).not.toBeNull()
     await selectAllThenBatchApprove()
     expect(dispatchActionSpy).not.toHaveBeenCalled()
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
+  })
+
+  it('an administrator (role only, neither approvals:act nor attendance:approve) gets the inline 通过 on the platform AND the cancel-round row and batch-decides both', async () => {
+    // The admin bypass behind canAct / canDecideCancelRoundWith: without this positive control,
+    // dropping `access.isAdmin ||` hides every 通过/驳回 from administrators with the suite green.
+    // The reader case above is the matching negative control (same codes, no admin role).
+    localStorage.setItem('user_roles', JSON.stringify(['admin']))
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read']))
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' }), cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-approve-cr_1"]')).not.toBeNull()
+    await selectAllThenBatchApprove()
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_plain', { action: 'approve' })
     expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
   })
 

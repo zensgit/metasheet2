@@ -848,10 +848,11 @@ const paneDisplayRow = computed<UnifiedApprovalDTO | null>(() => selectedRow.val
 const showDetailPane = computed(() => masterDetailEnabled.value && !!selectedApprovalId.value && !!paneDisplayRow.value)
 
 // Mirrors the row actions' own gate exactly (§ B1-03 `isRowBatchSelectable`) — pending tab,
-// platform-native rows only.
+// platform-native rows only. The pane additionally honours the detail fetch's own
+// `canDecideCurrentNode` (list rows never carry it; `paneApproval` does), same `!== false` idiom.
 const paneShowQuickActions = computed(() => {
   const row = paneDisplayRow.value
-  return activeTab.value === 'pending' && !!row && isRowBatchSelectable(row)
+  return activeTab.value === 'pending' && !!row && isRowBatchSelectable(row) && paneApproval.value?.canDecideCurrentNode !== false
 })
 const paneSummaryLine = computed(() => (paneDisplayRow.value ? summaryLineFor(paneDisplayRow.value) : ''))
 // Test report 2026-10-08 T4b (gate r1 P3-4): the pane's row is not always a list row. A `?detail=`
