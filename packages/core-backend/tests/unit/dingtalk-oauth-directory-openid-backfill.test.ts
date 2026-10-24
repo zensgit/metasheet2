@@ -60,7 +60,14 @@ const IDENTITY_USER = {
   activation_status: 'activated',
 }
 
-function installTransaction(options: { failBackfill?: boolean; failRollback?: boolean; failSavepoint?: boolean } = {}): Call[] {
+function installTransaction(options: {
+  failBackfill?: boolean
+  failRollback?: boolean
+  failSavepoint?: boolean
+  /** rows answered to the corp-less identity's linked-directory-account lookup (field item 3) */
+  linkedAccounts?: Array<Record<string, unknown>>
+  failLinkedLookup?: boolean
+} = {}): Call[] {
   const calls: Call[] = []
   pgMocks.transaction.mockImplementation(async (callback: (client: unknown) => Promise<unknown>) => callback({
     query: async (sql: string, params: unknown[] = []) => {
@@ -99,6 +106,10 @@ function installTransaction(options: { failBackfill?: boolean; failRollback?: bo
       }
       if (options.failBackfill && statement.includes('UPDATE directory_accounts')) {
         throw new Error('canceling statement due to lock timeout')
+      }
+      if (statement.includes('FROM directory_account_links')) {
+        if (options.failLinkedLookup) throw new Error('canceling statement due to statement timeout')
+        return { rows: options.linkedAccounts ?? [] }
       }
       return { rows: [] }
     },
@@ -225,5 +236,116 @@ describe('DingTalk login backfills the directory member openId', () => {
 
     await exchangeCodeForUser('code-no-corp')
     expect(backfillCall(calls)).toBeUndefined()
+  })
+
+  describe('field item 3: a corp-less identity borrows the corp of its single linked directory account, for the backfill only', () => {
+    const LINKED_ACCOUNT = { corp_id: 'dir-corp', union_id: 'union-1', is_active: true }
+
+    beforeEach(() => {
+      clientMocks.readDingTalkOauthConfig.mockReturnValue({
+        clientId: 'dt-client',
+        clientSecret: 'dt-secret',
+        redirectUri: 'https://app.example.com/login/dingtalk/callback',
+        corpId: '',
+        baseUrl: 'https://oapi.dingtalk.com',
+      })
+    })
+
+    function linkedLookupCall(calls: Call[]): Call | undefined {
+      return calls.find((call) => call.sql.includes('FROM directory_account_links'))
+    }
+
+    function identityUpdateCall(calls: Call[]): Call | undefined {
+      return calls.find((call) => call.sql.includes('UPDATE user_external_identities'))
+    }
+
+    it('a successful login backfills under the linked account corp; the lookup runs inside the savepoint and the identity keeps corp NULL', async () => {
+      const calls = installTransaction({ linkedAccounts: [LINKED_ACCOUNT] })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+        .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+
+      await expect(exchangeCodeForUser('code-corpless')).resolves.toMatchObject({ localUserId: 'user-1' })
+
+      const lookup = linkedLookupCall(calls)
+      expect(lookup, 'expected the linked directory account lookup').toBeTruthy()
+      const lookupSql = lookup!.sql.replace(/\s+/g, ' ')
+      expect(lookupSql).toContain('link.local_user_id = $1::text')
+      expect(lookupSql).toContain("link.link_status = 'linked'")
+      expect(lookupSql).toContain('account.provider = $2::text')
+      expect(lookupSql).toContain('LIMIT 2')
+      expect(lookup!.params).toEqual(['user-1', 'dingtalk'])
+
+      const backfill = backfillCall(calls)
+      expect(backfill?.params).toEqual(['dingtalk', 'dir-corp', 'union-1', 'open-1'])
+      const savepointIndex = calls.findIndex((call) => /^SAVEPOINT /.test(call.sql))
+      expect(savepointIndex).toBeGreaterThan(-1)
+      expect(calls.indexOf(lookup!)).toBeGreaterThan(savepointIndex)
+
+      // identity UPDATE params: [$1 provider, $2 user, $3 key, $4 union, $5 open, $6 corp, ...]
+      const identityUpdate = identityUpdateCall(calls)
+      expect(identityUpdate?.params[2]).toBe('union-1')
+      expect(identityUpdate?.params[5]).toBeNull()
+    })
+
+    it.each([
+      ['two linked accounts', [LINKED_ACCOUNT, { ...LINKED_ACCOUNT, corp_id: 'other-corp' }]],
+      ['an inactive account', [{ ...LINKED_ACCOUNT, is_active: false }]],
+      ['an account of another unionId', [{ ...LINKED_ACCOUNT, union_id: 'union-2' }]],
+      ['an account without a corp', [{ ...LINKED_ACCOUNT, corp_id: null }]],
+      ['no linked account', []],
+    ])('%s: no backfill, the savepoint is released, the login succeeds', async (_label, linkedAccounts) => {
+      const calls = installTransaction({ linkedAccounts })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+        .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+
+      await expect(exchangeCodeForUser('code-corpless-skip')).resolves.toMatchObject({ localUserId: 'user-1' })
+      expect(linkedLookupCall(calls)).toBeTruthy()
+      expect(backfillCall(calls)).toBeUndefined()
+      expect(calls.some((call) => /^RELEASE SAVEPOINT /.test(call.sql))).toBe(true)
+    })
+
+    it('a login REJECTED for a missing grant applies the same rule', async () => {
+      vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+      const calls = installTransaction({ linkedAccounts: [LINKED_ACCOUNT] })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+        .mockResolvedValueOnce({ rows: [] })
+
+      await expect(exchangeCodeForUser('code-corpless-rejected')).rejects.toMatchObject({ code: 'grant_required' })
+      expect(backfillCall(calls)?.params).toEqual(['dingtalk', 'dir-corp', 'union-1', 'open-1'])
+      expect(identityUpdateCall(calls)?.params[5]).toBeNull()
+    })
+
+    it('a failing linked-account lookup is rolled back to the savepoint and the login still succeeds', async () => {
+      const calls = installTransaction({ failLinkedLookup: true })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+        .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+
+      await expect(exchangeCodeForUser('code-corpless-lookup-fails')).resolves.toMatchObject({ localUserId: 'user-1' })
+      expect(backfillCall(calls)).toBeUndefined()
+      expect(calls.some((call) => /^ROLLBACK TO SAVEPOINT /.test(call.sql))).toBe(true)
+    })
+
+    it('a profile without openId (the container surface) never looks a corp up', async () => {
+      const calls = installTransaction({ linkedAccounts: [LINKED_ACCOUNT] })
+      clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({
+        openId: '',
+        unionId: 'union-1',
+        nick: 'Alpha',
+        email: 'alpha@example.com',
+        mobile: '13800000000',
+        avatarUrl: '',
+      })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+        .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+
+      await expect(exchangeCodeForUser('code-no-openid')).resolves.toMatchObject({ localUserId: 'user-1' })
+      expect(linkedLookupCall(calls)).toBeUndefined()
+      expect(backfillCall(calls)).toBeUndefined()
+    })
   })
 })
