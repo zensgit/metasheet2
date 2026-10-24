@@ -5,7 +5,9 @@
 // module-scope `useLocale()` singleton.
 //
 // Copy with interpolated values (counts, titles) stays next to its use as an `isZh.value ? … : …`
-// ternary in the view, the same split #5545 used. Two constructs in ApprovalCenterView.vue already
+// ternary in the view, the same split #5545 used — except where the value is simply appended to,
+// or substituted into, a table entry (`ccUnreadBadgeSuffix`, the #6524 N0-a attendance entry
+// copy); those entries live here and the view composes them. Two constructs in ApprovalCenterView.vue already
 // followed the locale before this slice and are left as they are: `tabEmptyText` (#5545) and the
 // CSV export copy `exportCopy` (F3-E1).
 
@@ -49,6 +51,12 @@ export const CENTER_ZH = {
   attendanceBody: '「待我处理」已包含轮到你审批的考勤申请（如补卡、请假、加班），也计入待办数。点开其中一行会转到考勤模块。发起考勤申请请到考勤模块。',
   attendanceFilterHint: '只显示「待我处理」里的考勤申请',
   attendanceShowAll: '显示全部待办',
+  // 「考勤待审 N」 button text: the view appends ` ${total}` when the number is known (same
+  // count-plus-label composition as ccUnreadBadgeSuffix).
+  attendanceFilterLabel: '考勤待审',
+  // Status line of the attendance-only view; `{total}` is replaced with the number when known.
+  attendanceActiveNote: '正在只看考勤待审。',
+  attendanceActiveNoteWithTotal: '正在只看考勤待审。考勤待审共 {total} 条。',
   attendanceReasonLoading: '正在获取考勤待审数量…',
   attendanceReasonNone: '目前没有轮到你审批的考勤申请。',
   attendanceReasonFailed: '暂时无法获取考勤待审数量，请稍后刷新页面再试。',
@@ -115,6 +123,9 @@ export const CENTER_EN: Record<keyof typeof CENTER_ZH, string> = {
   attendanceBody: '“Waiting for me” already includes attendance requests waiting for your approval (such as missed punches, leave and overtime), and they count toward your to-dos. Opening one takes you to the attendance module. To submit an attendance request, go to the attendance module.',
   attendanceFilterHint: 'Show only the attendance requests in “Waiting for me”',
   attendanceShowAll: 'Show all to-dos',
+  attendanceFilterLabel: 'Attendance pending',
+  attendanceActiveNote: 'Showing attendance requests only.',
+  attendanceActiveNoteWithTotal: 'Showing attendance requests only. Attendance requests pending: {total}.',
   attendanceReasonLoading: 'Loading the number of attendance requests…',
   attendanceReasonNone: 'No attendance requests are waiting for your approval.',
   attendanceReasonFailed: 'Could not load the number of attendance requests. Refresh the page later to try again.',
