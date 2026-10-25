@@ -5583,6 +5583,16 @@
                     </template>
                   </section>
 
+                  <AttendanceGroupPolicyWorkspace
+                    :enabled="attendanceGroupPolicyWorkspaceEnabled"
+                    :visible="attendanceGroupActiveStage === 'policies'"
+                    :canonical="Boolean(props.routeGroupContext)"
+                    :source="attendanceGroupPolicyWorkspaceSource"
+                    :return-to="props.routeGroupContext?.returnTo ?? '/attendance?tab=admin&section=attendance-admin-groups'"
+                    @navigate="navigateAttendanceGroupPolicyWorkspace"
+                    @tool="handleAttendanceGroupSummaryAction"
+                  >
+                    <template #legacy>
                   <section v-show="attendanceGroupActiveStage === 'policies'" id="attendance-group-stage-policies" class="attendance__group-summary-grid" data-attendance-group-summaries>
                     <div
                       v-for="card in attendanceGroupSummaryCards"
@@ -5623,6 +5633,32 @@
                       </div>
                     </div>
                   </section>
+                    </template>
+                    <template #tools="{ openTool }">
+                      <div class="attendance__group-summary-grid" data-attendance-group-policy-tools>
+                        <div
+                          v-for="card in attendanceGroupSummaryCards.filter(card => card.actions.length > 0)"
+                          :key="card.key"
+                          class="attendance__group-summary"
+                          :data-attendance-group-policy-tool="card.key"
+                        >
+                          <strong>{{ card.title }}</strong>
+                          <div class="attendance__group-summary-actions">
+                            <button
+                              v-for="action in card.actions"
+                              :key="action.key"
+                              class="attendance__btn attendance__btn--inline"
+                              type="button"
+                              :data-attendance-group-summary-action="action.key"
+                              @click="openTool(action)"
+                            >
+                              {{ action.label }}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </AttendanceGroupPolicyWorkspace>
 
                   <div
                     v-if="attendanceGroupRulePolicyDrawerOpen"
@@ -10677,6 +10713,7 @@ import {
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
 import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../router/attendanceGroupContextRoute'
+import AttendanceGroupPolicyWorkspace, { useAttendanceGroupPolicyWorkspace } from './attendance/AttendanceGroupPolicyWorkspace'
 import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupRouteContext'
 import { hydrateAttendanceGroupRoute, type AttendanceGroupRouteWorkflowStage } from './attendance/attendanceGroupRouteHydration'
 import type { AttendanceGroupEffectivePolicyStageActionV1 } from './attendance/attendanceGroupEffectivePolicyLabels'
@@ -15460,6 +15497,24 @@ const importPreviewSummaryCards = computed(() => [
 
 const initialAuthHeaders = typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders() : {}
 const orgId = ref(String(initialAuthHeaders['x-tenant-id'] || '').trim())
+const {
+  enabled: attendanceGroupPolicyWorkspaceEnabled,
+  source: attendanceGroupPolicyWorkspaceSource,
+  navigate: navigateAttendanceGroupPolicyWorkspace,
+} = useAttendanceGroupPolicyWorkspace({
+  groupId: () => attendanceGroupEditingId.value ?? '',
+  orgId: () => normalizedOrgId() ?? '',
+  canonical: () => Boolean(props.routeGroupContext),
+  stale: () => attendanceSessionGuard.stale.value,
+  isCurrent: attendanceSessionGuard.isCurrent,
+  openRoute: openAttendanceGroupRoute,
+  openStage: target => {
+    if (target.groupId !== attendanceGroupEditingId.value) return
+    attendanceGroupStageActionRevision += 1
+    selectAttendanceGroupStage(target.stage)
+    selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)
+  },
+})
 const {
   loading: sessionOrgLoading, switching: sessionOrgSwitching,
   errorMessage: sessionOrgError, orgs: sessionOrgIds, currentOrgId: sessionOrgId,
@@ -29534,6 +29589,8 @@ async function loadAttendanceGroups() {
       }
       return
     }
+    // W6 ON: catalog reads update the list, never replay selection over a local draft.
+    if (attendanceGroupPolicyWorkspaceEnabled.value) return
     const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     const selected = selectedId ? attendanceGroups.value.find(item => item.id === selectedId) : null
     if (selected) {

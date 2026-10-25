@@ -97,7 +97,7 @@
             type="button"
             class="attendance-group-effective-policy-panel__domain-action"
             :data-attendance-w6-effective-policy-domain-nav="row.key"
-            @click="navigate(row.nav)"
+            @click="navigate(row.nav, row.editorRef)"
           >
             {{ tr('Open', '前往') }}
           </button>
@@ -151,7 +151,7 @@
               type="button"
               class="attendance-group-effective-policy-panel__conflict-action"
               :data-attendance-w6-effective-policy-conflict-nav="index"
-              @click="navigate(row.nav)"
+              @click="navigate(row.nav, row.editorRef)"
             >
               {{ tr('Resolve', '前往处理') }}
             </button>
@@ -188,6 +188,7 @@ import {
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_SUMMARY_KEYS_V1,
   type AttendanceGroupEffectivePolicyAggregateRawV1,
   type AttendanceGroupEffectivePolicyEditorNavigationV1,
+  type AttendanceGroupEffectivePolicyEditorRefV1,
   type AttendanceGroupEffectivePolicyStageActionV1,
   type AttendanceGroupEffectivePolicyDomainSummaryKeyV1,
 } from './attendanceGroupEffectivePolicyLabels'
@@ -195,10 +196,12 @@ import {
 const props = defineProps<{
   groupId: string
   returnTo: string
+  delegateNavigation?: boolean
 }>()
 
 const emit = defineEmits<{
   (event: 'open-group-stage', target: AttendanceGroupEffectivePolicyStageActionV1): void
+  (event: 'navigate-editor', target: { groupId: string; editorRef: AttendanceGroupEffectivePolicyEditorRefV1 }): void
 }>()
 
 let active = true
@@ -214,12 +217,20 @@ type PanelStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
 const status = ref<PanelStatus>('idle')
 const aggregate = ref<AttendanceGroupEffectivePolicyAggregateRawV1 | null>(null)
 
+let loadGeneration = 0
+
 async function load(): Promise<void> {
+  if (props.delegateNavigation && !active) return
+  const groupId = props.groupId
+  const generation = ++loadGeneration
+  const acceptsResponse = () => !props.delegateNavigation
+    || (active && generation === loadGeneration && groupId === props.groupId && sessionGuard.isCurrent())
   try { sessionGuard.assertCurrent() } catch { return }
   status.value = 'loading'
   aggregate.value = null
   try {
     const response = await apiFetch(`/api/attendance/groups/${encodeURIComponent(props.groupId)}/effective-policy`)
+    if (!acceptsResponse()) return
     if (response.status === 403 || response.status === 404) {
       status.value = 'unavailable'
       return
@@ -229,6 +240,7 @@ async function load(): Promise<void> {
       return
     }
     const payload = await response.json()
+    if (!acceptsResponse()) return
     const parsed = parseAttendanceGroupEffectivePolicyEnvelopeV1(payload)
     if (!parsed || parsed.groupId !== props.groupId) {
       status.value = 'error'
@@ -237,13 +249,22 @@ async function load(): Promise<void> {
     aggregate.value = parsed
     status.value = 'ready'
   } catch {
-    if (!sessionGuard.isCurrent()) return
+    if (!acceptsResponse() || !sessionGuard.isCurrent()) return
     status.value = 'error'
   }
 }
 
-function navigate(target: AttendanceGroupEffectivePolicyEditorNavigationV1): void {
+function navigate(
+  target: AttendanceGroupEffectivePolicyEditorNavigationV1,
+  editorRef: AttendanceGroupEffectivePolicyEditorRefV1 | null,
+): void {
   if (!active || status.value !== 'ready' || !sessionGuard.isCurrent()) return
+  if (props.delegateNavigation) {
+    if (!editorRef || aggregate.value?.groupId !== props.groupId
+      || ![...domainRows.value, ...conflictRows.value].some(row => row.nav === target && row.editorRef === editorRef)) return
+    emit('navigate-editor', { groupId: props.groupId, editorRef })
+    return
+  }
   if (target.kind === 'group-stage') {
     if (target.groupId !== props.groupId) return
     emit('open-group-stage', { groupId: target.groupId, stage: target.stage })
@@ -297,6 +318,7 @@ interface DomainRow {
   domainText: string
   labelText: string
   nav: AttendanceGroupEffectivePolicyEditorNavigationV1 | null
+  editorRef: AttendanceGroupEffectivePolicyEditorRefV1 | null
 }
 
 const domainRows = computed<DomainRow[]>(() => {
@@ -320,6 +342,7 @@ const domainRows = computed<DomainRow[]>(() => {
       domainText: attendanceGroupEffectivePolicyDomainText(domainEnumValue, tr),
       labelText,
       nav,
+      editorRef,
     })
   }
   return rows
@@ -348,6 +371,7 @@ interface ConflictRow {
   domainText: string
   affectedUserCount: number | null
   nav: AttendanceGroupEffectivePolicyEditorNavigationV1 | null
+  editorRef: AttendanceGroupEffectivePolicyEditorRefV1 | null
 }
 
 const conflictRows = computed<ConflictRow[]>(() => {
@@ -373,6 +397,7 @@ const conflictRows = computed<ConflictRow[]>(() => {
       domainText,
       affectedUserCount: typeof record.affectedUserCount === 'number' ? record.affectedUserCount : null,
       nav,
+      editorRef,
     }
   })
 })

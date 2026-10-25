@@ -309,38 +309,65 @@ export type AttendanceGroupEffectivePolicyEditorNavigationV1 =
   | { readonly kind: 'route'; readonly href: string; readonly sameRouteStage?: AttendanceGroupEffectivePolicyStageActionV1 }
   | ({ readonly kind: 'group-stage' } & AttendanceGroupEffectivePolicyStageActionV1)
 
-/** Reuse #4711 routes for schedule/policies and the live selector for ordinary editor stages. */
-export function resolveAttendanceGroupEffectivePolicyEditorNavigationV1(
+export type AttendanceGroupEffectivePolicyEditorTargetV1 =
+  | ({ readonly kind: 'group-stage' } & AttendanceGroupEffectivePolicyStageActionV1)
+  | {
+      readonly kind: 'route'
+      readonly groupId: string
+      readonly step: AttendanceGroupRouteStep
+      readonly surface: AttendanceGroupRouteSurface | null
+      readonly sameRouteStage?: AttendanceGroupEffectivePolicyStageActionV1
+    }
+
+/** The shared closed mapping, before either href construction or delegated AV navigation. */
+export function resolveAttendanceGroupEffectivePolicyEditorTargetV1(
   editorRef: AttendanceGroupEffectivePolicyEditorRefV1,
-  context: { readonly groupId: string; readonly returnTo: string },
-): AttendanceGroupEffectivePolicyEditorNavigationV1 | null {
+  context: { readonly groupId: string },
+): AttendanceGroupEffectivePolicyEditorTargetV1 {
   switch (editorRef.kind) {
     case 'group_stage': {
       if (editorRef.stage === 'basics' || editorRef.stage === 'people') {
         return { kind: 'group-stage', groupId: context.groupId, stage: editorRef.stage }
       }
-      const href = buildAttendanceGroupRouteHref({
+      return {
+        kind: 'route',
         groupId: context.groupId,
         step: editorRef.stage === 'schedule' ? 'schedule' : 'rules',
         surface: null,
-        returnTo: context.returnTo,
-      })
-      return href ? { kind: 'route', href, sameRouteStage: { groupId: context.groupId, stage: editorRef.stage } } : null
+        sameRouteStage: { groupId: context.groupId, stage: editorRef.stage },
+      }
     }
-    case 'group_context_route': {
-      const href = buildAttendanceGroupRouteHref({
+    case 'group_context_route':
+      return {
+        kind: 'route',
         groupId: context.groupId,
         step: editorRef.step,
         surface: editorRef.surface ?? null,
-        returnTo: context.returnTo,
-      })
-      return href ? { kind: 'route', href } : null
-    }
+      }
     default: {
       const exhaustiveCheck: never = editorRef
       return exhaustiveCheck
     }
   }
+}
+
+/** Reuse #4711 routes for schedule/policies and the live selector for ordinary editor stages. */
+export function resolveAttendanceGroupEffectivePolicyEditorNavigationV1(
+  editorRef: AttendanceGroupEffectivePolicyEditorRefV1,
+  context: { readonly groupId: string; readonly returnTo: string },
+): AttendanceGroupEffectivePolicyEditorNavigationV1 | null {
+  const target = resolveAttendanceGroupEffectivePolicyEditorTargetV1(editorRef, context)
+  if (target.kind === 'group-stage') return target
+  const href = buildAttendanceGroupRouteHref({
+    groupId: target.groupId,
+    step: target.step,
+    surface: target.surface,
+    returnTo: context.returnTo,
+  })
+  if (!href) return null
+  return target.sameRouteStage
+    ? { kind: 'route', href, sameRouteStage: target.sameRouteStage }
+    : { kind: 'route', href }
 }
 
 // ---------------------------------------------------------------------------

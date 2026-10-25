@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
-import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-router'
+import { createMemoryHistory, createWebHistory, createRouter, RouterView, type Router } from 'vue-router'
 import AttendanceExperienceView from '../src/views/attendance/AttendanceExperienceView.vue'
 import AttendanceGroupContextHost from '../src/views/attendance/AttendanceGroupContextHost.vue'
 import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
+import { readAuthSessionSignature, readStoredToken } from '../src/composables/authPrincipal'
+import type { AttendanceGroupEffectivePolicyEditorRefV1 } from '../src/views/attendance/attendanceGroupEffectivePolicyLabels'
 
 // The entire panel -> authorized host -> Experience -> AdminCenter -> AttendanceView chain is real.
 // IO, principal and rollout inputs are mocked; the unrendered workflow designer is isolated.
@@ -97,9 +99,9 @@ function selectGroup(id: string) {
   expect(row, `listed group ${id}`).toBeTruthy()
   row!.querySelector<HTMLButtonElement>('.attendance__group-list-main')!.click()
 }
-async function mount(step: 'schedule' | 'rules' = 'schedule') {
+async function mount(step: 'schedule' | 'rules' = 'schedule', entry?: string, webHistory = false) {
   router = createRouter({
-    history: createMemoryHistory(),
+    history: webHistory ? createWebHistory() : createMemoryHistory(),
     routes: [
       { path: '/attendance', component: AttendanceExperienceView },
       ...(['schedule', 'calendar', 'rules'] as const).map(step => ({
@@ -109,7 +111,7 @@ async function mount(step: 'schedule' | 'rules' = 'schedule') {
       })),
     ],
   })
-  await router.push(`/attendance/admin/groups/${A}/${step}?returnTo=${encodeURIComponent(RETURN_TO)}`)
+  await router.push(entry ?? `/attendance/admin/groups/${A}/${step}?returnTo=${encodeURIComponent(RETURN_TO)}`)
   await router.isReady()
   app = createApp(RouterView)
   app.mixin({
@@ -175,6 +177,9 @@ beforeEach(() => {
 afterEach(() => {
   app?.unmount()
   app = null
+  router?.options.history.destroy()
+  window.history.replaceState(null, '', '/attendance')
+  window.localStorage.clear()
   container.remove()
   // batch/resolve is an existing read-only POST, never an application write.
   const writes = vi.mocked(apiFetch).mock.calls.filter(([path, init]) =>
@@ -400,5 +405,151 @@ describe('W6 real host-to-editor stage navigation', () => {
     await vi.waitFor(() => expect(container.querySelector('[data-attendance-group-context="error"]')).toBeTruthy())
     expect(nameInput()).toBeNull()
     expect(vi.mocked(apiFetch).mock.calls).toEqual([[`/api/attendance/groups/${A}`]])
+  })
+})
+
+
+describe('W6 generic workspace through the existing host/editor chain', () => {
+  async function parentReady() {
+    // The return-scope reader is real and separate from the injected request guard.
+    window.localStorage.setItem('auth_token', 'w6-synthetic-return-session')
+    window.localStorage.setItem('tenantId', 'synthetic-org')
+    expect(readStoredToken()).toBe('w6-synthetic-return-session')
+    expect(readAuthSessionSignature()).not.toBe('invalid')
+    // Share the browser history actually read by Experience, not detached memory history.
+    await mount('schedule', RETURN_TO, true)
+    await vi.waitFor(() => expect(container.querySelector('[data-attendance-group-list]')?.textContent).toContain(groupA.name))
+    selectGroup(A)
+    await vi.waitFor(() => expect(nameInput()?.value).toBe(groupA.name))
+    await click('[data-attendance-group-workflow-step="policies"]')
+  }
+
+  it('has one collapsed panel, preserves all eight scheduled-group tool actions and local dirty fields', async () => {
+    await parentReady()
+    expect(container.querySelectorAll('[data-attendance-w6-effective-policy-panel]')).toHaveLength(1)
+    expect(vi.mocked(apiFetch).mock.calls.filter(([path]) => String(path).endsWith('/effective-policy'))).toEqual([])
+    expect(container.querySelectorAll('[data-attendance-group-policy-tools] button')).toHaveLength(8)
+    const avScopes = nameInput().getAttributeNames().filter(name => name.startsWith('data-v-') && !name.endsWith('-s'))
+    expect(avScopes.length).toBeGreaterThan(0)
+    for (const node of container.querySelectorAll(
+      '[data-attendance-group-policy-tools], [data-attendance-group-policy-tool], [data-attendance-group-policy-tools] .attendance__group-summary-actions, [data-attendance-group-policy-tools] button',
+    )) {
+      for (const scope of avScopes) expect(node.hasAttribute(scope)).toBe(true)
+    }
+    nameInput().value = 'Generic unsaved A'
+    nameInput().dispatchEvent(new Event('input', { bubbles: true }))
+    await openPolicy()
+    await click('[data-attendance-w6-effective-policy-domain-nav="membership"]')
+    await vi.waitFor(() => expect(activeStage()).toBe('people'))
+    expect(nameInput().value).toBe('Generic unsaved A')
+    expect(router.currentRoute.value.path).toBe('/attendance')
+    const reload = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-attendance-group-manager] button'))
+      .find(node => node.textContent?.trim() === 'Reload groups')!
+    reload.click()
+    await vi.waitFor(() => expect(reload.disabled).toBe(false))
+    expect(nameInput().value).toBe('Generic unsaved A')
+    expect(activeStage()).toBe('people')
+  })
+
+  it('retains all nine fixed-group tool actions without opening the aggregate', async () => {
+    intercept = path => path.startsWith('/api/attendance/groups?')
+      ? response({ items: [{ ...groupA, attendanceType: 'fixed_shift' }, groupB], total: 2, scope: 'org' })
+      : undefined
+    await parentReady()
+    expect(container.querySelectorAll('[data-attendance-group-policy-tools] button')).toHaveLength(9)
+    expect(vi.mocked(apiFetch).mock.calls.filter(([path]) => String(path).endsWith('/effective-policy'))).toEqual([])
+  })
+
+  async function assertMappedReturn(
+    editorRef: AttendanceGroupEffectivePolicyEditorRefV1,
+    sourceKind: 'domain' | 'conflict',
+    exit: 'back' | 'return',
+    step: 'schedule' | 'rules',
+  ) {
+    const groupPath = '/api/attendance/groups/' + A
+    const returnProbe = deferred<Response>()
+    let holdReturn = false
+    const entry = { label: 'org_inherited', reasonCodes: [], editorRef }
+    const conflict = {
+      code: step === 'schedule' ? 'SCHEDULE_STRATEGY_INCOMPLETE' : 'RULE_SOURCE_MISSING',
+      domain: step === 'schedule' ? 'schedule' : 'rules',
+      label: 'conflict_action_required', editorRef,
+    }
+    intercept = path => {
+      if (path === groupPath && holdReturn) return returnProbe.promise
+      if (path.endsWith('/effective-policy')) return response({
+        ...policy(A),
+        domains: sourceKind === 'domain' ? { punchMethod: entry } : {},
+        conflicts: sourceKind === 'conflict' ? [conflict] : [],
+      })
+      return undefined
+    }
+    await parentReady()
+    await openPolicy()
+    await click(sourceKind === 'domain'
+      ? '[data-attendance-w6-effective-policy-domain-nav="punchMethod"]'
+      : '[data-attendance-w6-effective-policy-conflict-nav="0"]')
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/attendance/admin/groups/' + A + '/' + step))
+    await vi.waitFor(() => expect(container.querySelector('[data-attendance-group-context="ready"]')).toBeTruthy())
+    // First prove the session-bound intent was captured on the real history entry.
+    const captured = window.history.state?.attendanceGroupReturn
+    expect(captured).toEqual({ groupId: A, stage: 'policies', origin: RETURN_TO, nonce: expect.any(String) })
+    expect(captured.nonce.length).toBeGreaterThan(0)
+    expect(container.querySelectorAll('[data-attendance-w6-effective-policy-panel]')).toHaveLength(1)
+    expect(vi.mocked(apiFetch).mock.calls.filter(([path]) => String(path).endsWith('/effective-policy'))).toHaveLength(1)
+    const probesBefore = vi.mocked(apiFetch).mock.calls.filter(([path]) => path === groupPath).length
+    holdReturn = true
+    if (exit === 'back') {
+      const completed = new Promise<void>(resolve => {
+        const remove = router.afterEach(() => { remove(); resolve() })
+      })
+      router.back()
+      await completed
+    } else {
+      await click('[data-attendance-group-return]')
+    }
+    await vi.waitFor(() => {
+      expect(router.currentRoute.value.fullPath).toBe(RETURN_TO)
+      expect(vi.mocked(apiFetch).mock.calls.filter(([path]) => path === groupPath)).toHaveLength(probesBefore + 1)
+    })
+    expect(window.history.state?.attendanceGroupReturn).toEqual(captured)
+    // Only a fresh matching probe releases the returned parent; no borrowed canonical DTO.
+    returnProbe.resolve(response(groupA))
+    await vi.waitFor(() => {
+      expect(nameInput()?.value).toBe(groupA.name)
+      expect(activeStage()).toBe('policies')
+    })
+    expect(container.querySelectorAll('[data-attendance-w6-effective-policy-panel]')).toHaveLength(1)
+    expect(container.querySelector('[data-attendance-w6-effective-policy-content]')).toBeNull()
+    expect(vi.mocked(apiFetch).mock.calls.filter(([path]) => String(path).endsWith('/effective-policy'))).toHaveLength(1)
+  }
+
+  it('delegates a context-route ref through actual session/history capture and a fresh returned-parent probe', async () => {
+    await assertMappedReturn({ kind: 'group_context_route', step: 'rules', surface: 'rule-sets' }, 'domain', 'back', 'rules')
+  })
+
+  it.each([
+    ['schedule', 'schedule', 'domain', 'back'],
+    ['schedule', 'schedule', 'domain', 'return'],
+    ['schedule', 'schedule', 'conflict', 'back'],
+    ['schedule', 'schedule', 'conflict', 'return'],
+    ['policies', 'rules', 'domain', 'back'],
+    ['policies', 'rules', 'domain', 'return'],
+    ['policies', 'rules', 'conflict', 'back'],
+    ['policies', 'rules', 'conflict', 'return'],
+  ] as const)('maps group_stage %s to %s from %s and preserves parent association on %s', async (stage, step, sourceKind, exit) => {
+    await assertMappedReturn({ kind: 'group_stage', stage }, sourceKind, exit, step)
+  })
+
+  it('holds a generic dirty draft when the mounted catalog resolves late', async () => {
+    const list = deferred<Response>()
+    intercept = path => path.startsWith('/api/attendance/groups?') ? list.promise : undefined
+    await mount('schedule', RETURN_TO)
+    await vi.waitFor(() => expect(nameInput()).toBeTruthy())
+    nameInput().value = 'Unsaved while catalog loads'
+    nameInput().dispatchEvent(new Event('input', { bubbles: true }))
+    list.resolve(response({ items: [groupA, groupB], total: 2, scope: 'org' }))
+    await vi.waitFor(() => expect(container.querySelector('[data-attendance-group-list]')?.textContent).toContain(groupA.name))
+    expect(nameInput().value).toBe('Unsaved while catalog loads')
   })
 })
