@@ -1,0 +1,47 @@
+{
+  "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "state": "local-gates-complete-remote-CI-pending-Draft-only",
+  "delta": "one exact required exec token plus official manifest, existing domain gate unchanged",
+  "tokenCounts": {
+    "baseline": 624,
+    "candidate": 625,
+    "invocations": 20,
+    "maximumMultiplicity": 1,
+    "oldTokensAndCountsRetained": true
+  },
+  "actualRunnerDerivedFilter": {
+    "token": "attendance-web-guard-workflow.spec.ts",
+    "matchedFiles": 1,
+    "actualPassed": 31,
+    "failed": 0,
+    "skipped": 0
+  },
+  "baselineCoverageNegative": {
+    "actual": 0,
+    "expected": 1,
+    "exit": 1
+  },
+  "tokenRemovalMutations": {
+    "coverageExit": 1,
+    "strictManifestExit": 1,
+    "matching": true,
+    "exactSourceRestored": true
+  },
+  "backendRegistrationGuards": {
+    "actualPassed": 63,
+    "failed": 0,
+    "skipped": 0
+  },
+  "validateAllExit": 0,
+  "noFullLocalRequiredLaneRerun": true,
+  "productSourceAndBudgetsUnchanged": true,
+  "boundaries": {
+    "DraftHOLD": true,
+    "Stream": "OFF",
+    "lifecycle": "OFF",
+    "noMergeDeployR71TagReleaseConfigChange": true,
+    "realUAT": "excluded",
+    "business50004": "excluded",
+    "historical08PUT": "INCONCLUSIVE"
+  }
+}
