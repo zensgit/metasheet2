@@ -165,5 +165,35 @@
     "No full rerun of all64 final applicable assertions; 63 initial plus2 affected across source phases with1 overlap",
     "No backend/schema/calculator/writer/flags changes",
     "All PRDraft/HOLD; no merge/deploy/R71; realUAT/business50004excluded"
-  ]
+  ],
+  "ciFixtureCorrection": {
+    "failedParent": "bfa19b9394ee2b1bd6bed3b3378ed2df65a9b8b5",
+    "failedJobs": [
+      121280207832,
+      121280207212
+    ],
+    "sameCaseBothJobs": "adds, reorders, and removes shift segments while calculating paid time without gaps",
+    "matchedLocalRed": {
+      "failed": 1,
+      "excluded": 145
+    },
+    "observationalControls": {
+      "originalAndCandidate": 2,
+      "notFeatureAcceptancePasses": true,
+      "sameFocusedHiddenWriteBlurLimitation": true
+    },
+    "minimalPatch": "Only named test input setup focuses and commits visible input/change; four setup calls use it",
+    "original7OutcomeAssertionsMocksBudgetsUnchanged": true,
+    "fixedCaseActualPassed": 1,
+    "fixedCaseExcluded": 145,
+    "scopedEslintExit": 0,
+    "productSourceAndOriginalBrowserProofByteIdentical": true,
+    "priorGreenSuitesAndBrowserNotRerun": true,
+    "independentReview": {
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "confirmedNewP1P2": 0
+    },
+    "newHeadCI": "pending; never borrow parent green"
+  }
 }
