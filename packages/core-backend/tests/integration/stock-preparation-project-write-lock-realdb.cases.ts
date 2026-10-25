@@ -2866,9 +2866,17 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       //   S3A-08 (U07, both ways) switch off: a PILOT project registered on its own sheet is refused 409 RETARGETED on
       //          dry-run, reconcile, mvp-persist, carry and apply (0 source reads, env sheet untouched, no store row, no
       //          token left, no bump); a registered NOT-governed project pulls on the env sheet as before, 0 step-4 rows.
-      //   S3A-13 (O-22) a seeded FAILED execution, or a RUNNING one of a dead lease: the apply under its own live
-      //          lease is 409 RECOVERY_PENDING from the rows (the derived state under a live lease reads `executing`),
-      //          nothing written, no new execution.
+      //   S3A-11 (G1 / A11; review round 1 item 2) the step-4 tables ABSENT from the store's binding (42P01 — what a
+      //          pre-102/103 database answers; the registry stays readable): the chunk route on a PAUSED job, the
+      //          dry-run and the apply answer 503 STORE_FAILED `continuation`; 0 source reads, nothing written, no token,
+      //          no bump, the job STAYS paused (explicitly) and the lease is released.
+      //   S3A-12 (H6 / E09; review round 1 item 1, lens B V50B-08) a REAL fault inside the reconcile transaction (a
+      //          BEFORE INSERT trigger on the hold table raising 42501 for this tenant only): the preview and the apply
+      //          answer 503 `hold_open`; every step-4 row byte-identical, no bump, no token, no execution, main untouched.
+      //   S3A-13 (O-22) a seeded FAILED execution, or a RUNNING one of a dead lease: the PREVIEW answers
+      //          `recovery_pending` (no token, no bump; review round 1 item 4) and the apply under its own live lease is
+      //          409 RECOVERY_PENDING from the rows (the derived state under a live lease reads `executing`), nothing
+      //          written, no new execution.
       //   S3A-17 (ST-1 / TD-23) the settling finish vs a concurrent preview reconcile, on PostgreSQL, both orders
       //          (pg_blocking_pids) plus the non-settling leg: no 40P01, no stuck `running` row, and while the finish
       //          waits it holds neither its execution row nor the bound continuation.
@@ -2883,6 +2891,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       //          hold table does.
       //   S3A-27 (R-13) step-4 rows on sheet A, the registry re-pointed to sheet B, switch on: dry-run, reconcile,
       //          mvp-persist, carry, apply and the chunk route all 409 RETARGETED `sheet`; 0 source reads, no store write.
+      //   S3A-28 (review round 1 item 3, lens B V50B-16) a carry whose key is DUPLICATE-RESOLVED
+      //          (`<json>::duplicate:<kind>:<hash>`): a NOT-governed project (switch off) carries as before this PR; a
+      //          GOVERNED project's consult resolves THAT project (an earlier failed execution => RECOVERY_PENDING).
       describe('S3A step-4 lanes (real Postgres, real lock, real host)', () => {
         const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
         const projectTargetsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
@@ -2919,6 +2930,13 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           return { count: rows.length, rows: rows.map((row: any) => `${row.id}@${row.version}`), revisions }
         }
         const sameJson = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+        // Every step-4 row of one tenant (the five tables): the "nothing persisted" fingerprint of a lane refusal.
+        async function stepFour(tenantId: string) {
+          const out: unknown[] = []
+          for (const table of [RT.continuation, RT.member, RT.hold, RT.state, RT.execution]) out.push((await q(`SELECT * FROM ${table} WHERE tenant_id = $1 ORDER BY id`, [tenantId])).rows)
+          return JSON.stringify(out)
+        }
+        const kvTokens = async () => Number((await q(`SELECT count(*)::int AS n FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE 'integration:table-action:dry-run-token:%'`)).rows[0].n)
         const errorOf = (res: any) => (res && res.body && res.body.error ? res.body.error : {})
         const decisionVersionOf = async (scope: Record<string, string>) => Number(((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1 AND project_no = $2`, [scope.sheetId, scope.projectNo])).rows[0] || { decision_version: 0 }).decision_version)
 
@@ -3242,7 +3260,6 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           await st.lock.withProjectWriteLease(envKey, { purpose: 'small_apply', runId: 's3a-08-prime' }, async () => null)
           const envGen0 = await st.generation(envKey)
           expect(envGen0.generationToken).toBeTruthy()
-          const kvTokens = async () => Number((await q(`SELECT count(*)::int AS n FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE 'integration:table-action:dry-run-token:%'`)).rows[0].n)
           const tokens0 = await kvTokens()
           const carryPair = await seedCarryPair({ multitable: st.multitable, sheetId: st.envTarget.sheetId, target: st.envTarget }, st.projectNo)
           const envMainWithPair = await st.main(st.envTarget.sheetId)
@@ -3290,7 +3307,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           expect((await nt.refresh.governance.consult({ ...nt.scope, sheetId: nt.envTarget.sheetId })).governed).toBe(false)
         }, 240000)
 
-        test('S3A-13 (O-22) a seeded FAILED execution, or a RUNNING one of a dead lease: the apply under its own live lease is 409 RECOVERY_PENDING from the rows, nothing written, no new execution; the derived state under a live lease reads `executing`', async () => {
+        test('S3A-13 (O-22) a seeded FAILED execution, or a RUNNING one of a dead lease: the PREVIEW answers `recovery_pending` (canApply false, no token, no bump, stamped with the recovery code) and the apply under its own live lease is 409 RECOVERY_PENDING from the same rows, nothing written, no new execution; the derived state under a live lease reads `executing`', async () => {
           for (const variant of ['failed', 'running']) {
             const st = await s3aStack(`s13${variant[0]}`, { pilot: true })
             const first = await st.dryRun()
@@ -3307,6 +3324,17 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               startedBy: 'u_s3a_dead',
             })
             if (variant === 'failed') await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 1, attemptedWrites: 1, errorCodes: ['E_S3A'] })
+            // Review round 1 item 4: the preview says so — the same rows the apply refuses on.
+            const genBeforePreview = await st.generation()
+            const tokensBeforePreview = await kvTokens()
+            const preview = await st.dryRun()
+            expect(preview.statusCode, JSON.stringify(preview.body)).toBe(200)
+            expect({ status: preview.body.data.status, canApply: preview.body.data.canApply, token: preview.body.data.dryRunToken, recovery: preview.body.data.refreshRecovery })
+              .toEqual({ status: 'recovery_pending', canApply: false, token: null, recovery: { pending: true, openExecutions: 1 } })
+            expect(await st.generation()).toEqual(genBeforePreview)
+            expect(await kvTokens()).toBe(tokensBeforePreview)
+            const stamp = (await q('SELECT last_pull_outcome, last_pull_code FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo])).rows[0]
+            expect(stamp).toEqual({ last_pull_outcome: 'previewed', last_pull_code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' })
             const main0 = await st.main()
             const executions0 = await st.executions()
             const applied = await st.apply(st.users.puller, first.body.data.dryRunToken)
@@ -3325,6 +3353,125 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             }
           }
         }, 240000)
+
+        test('S3A-11 (G1 / A11; review round 1 item 2) the step-4 tables ABSENT from the store binding (42P01 — the shape of a pre-102/103 database; the registry readable): the chunk route on a PAUSED job, the dry-run and the apply answer 503 STORE_FAILED continuation before any source read — nothing written, no token, no bump, the job STAYS paused, the lease released', async () => {
+          const client = await poolManager.get().getInternalPool().connect()
+          const schema = `s3a_nostep4_${TOKEN}`
+          try {
+            await client.query(`CREATE SCHEMA ${schema}`)
+            // The registry stays readable on this binding (the consult's registry reads share the store's snapshot):
+            // only the five step-4 tables are missing, as on a database without migrations 102 / 103.
+            await client.query(`CREATE VIEW ${schema}.integration_stock_prep_project_target AS SELECT * FROM public.integration_stock_prep_project_target`)
+            await client.query(`SET search_path TO ${schema}`)
+            const st = await s3aStack('s11', { pilot: false, refresh: realRefreshServices(dbOn(client)) })
+            const storage: any = st.pluginContext.storage
+            const jobScope = { tenantId: st.tenantId, workspaceId: 'workspace-default' }
+            const jobId = `s3a_11_${TOKEN}`
+            const applyJobId = `s3a_11_apply_${TOKEN}`
+            const records = st.multitable.records as any
+            await largeBomJobs.createLargeBomBackgroundExpansionJob({
+              storage, ...jobScope, action: st.action, parameters: { projectNo: st.projectNo }, principal: 's3a-11', createJobId: () => jobId,
+              writeGenerationObserver: async () => writeObservationFromGeneration(await st.lock.observeGeneration(st.key)),
+            })
+            await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId: ACTION_ID, jobId, sourceAdapter: st.sourceAdapter })
+            await largeBomJobs.planLargeBomBackgroundExpansionJob({
+              storage, ...jobScope, actionId: ACTION_ID, jobId,
+              existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, st.target, st.projectNo),
+              writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
+            })
+            await largeBomJobs.createLargeBomCheckpointApplyJob({
+              storage, ...jobScope, actionId: ACTION_ID, jobId, principal: 's3a-11', permission: 'write', createApplyJobId: () => applyJobId,
+              writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await st.lock.bumpGeneration(st.key, { reason: 'large_approval', expect })),
+            })
+            // One chunk lands through the lib with a HEALTHY gate (its own production services): the job is paused.
+            const scoped = await tableActions.createTargetScopedRecordsApi(records, st.target, { fieldIdTranslation: 'pre_mapped' })
+            const first = await st.lock.withProjectWriteLease(st.key, { purpose: 'large_apply_chunk', runId: 's3a-11-first' }, (guard: any) =>
+              largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId: ACTION_ID, applyJobId, recordsApi: scoped, projectWriteGuard: guard, maxDecisionsPerChunk: 1, refreshGovernanceGate: realChunkGate(st.tenantId, st.projectNo) }))
+            expect(first.status).toBe('paused')
+            const job0 = await largeBomJobs.loadLargeBomCheckpointApplyJob({ storage, ...jobScope, actionId: ACTION_ID, applyJobId })
+            const main0 = await st.main()
+            const gen0 = await st.generation()
+            const tokens0 = await kvTokens()
+            const reads0 = st.state.reads
+            const lanes: Record<string, any> = {
+              chunk: await st.chunk(jobId, applyJobId),
+              dryRun: await st.dryRun(),
+            }
+            const genAfterPreview = await st.generation()
+            lanes.apply = await st.apply(st.users.puller, await st.mintToken('rev_s3a_11'))
+            const answers = Object.fromEntries(Object.entries(lanes).map(([lane, res]) => [lane, `${res.statusCode}:${errorOf(res).code}:${errorOf(res).details && errorOf(res).details.store}:${errorOf(res).details && errorOf(res).details.sqlState}`]))
+            const job1 = await largeBomJobs.loadLargeBomCheckpointApplyJob({ storage, ...jobScope, actionId: ACTION_ID, applyJobId })
+            const observed = {
+              answers,
+              jobStatus: job1.status,
+              jobByteIdentical: sameJson(job1, job0),
+              leaseReleased: (await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [st.key])).rows[0].lease_id === null,
+              sourceReads: st.state.reads - reads0,
+              mainUnchanged: sameJson(await st.main(), main0),
+              noBumpByThePreview: sameJson(genAfterPreview, gen0),
+              tokensLeft: (await kvTokens()) - tokens0,
+            }
+            console.log(`[S3A-11] ${JSON.stringify(observed)}`)
+            const refused = '503:STOCK_PREP_REFRESH_STORE_FAILED:continuation:42P01'
+            expect(observed).toEqual({
+              answers: { chunk: refused, dryRun: refused, apply: refused },
+              jobStatus: 'paused',
+              jobByteIdentical: true,
+              leaseReleased: true,
+              sourceReads: 0,
+              mainUnchanged: true,
+              noBumpByThePreview: true,
+              tokensLeft: 0,
+            })
+            await q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`stock-preparation:large-bom:%:${st.tenantId}:%`]).catch(() => {})
+          } finally {
+            await client.query('RESET search_path').catch(() => {})
+            await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
+            client.release()
+          }
+        }, 240000)
+
+        test('S3A-12 (H6 / E09; review round 1 item 1, lens B V50B-08) a REAL fault inside the reconcile transaction — a BEFORE INSERT trigger on the hold table raising 42501 for this tenant only: the preview and the apply answer 503 STORE_FAILED hold_open; every step-4 row byte-identical, no bump, no token, no execution, the main sheet untouched', async () => {
+          const st = await s3aStack('s12', { pilot: true })
+          await firstPullApplied(st)
+          st.state.data = CF.secondPullSource()
+          const fn = `s3a_hold_fault_${TOKEN}`
+          await q(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN IF NEW.tenant_id = '${st.tenantId}' THEN RAISE EXCEPTION 's3a hold fault' USING ERRCODE = '42501'; END IF; RETURN NEW; END $fn$`)
+          await q(`CREATE TRIGGER ${fn} BEFORE INSERT ON ${RT.hold} FOR EACH ROW EXECUTE FUNCTION ${fn}()`)
+          try {
+            const four0 = await stepFour(st.tenantId)
+            const gen0 = await st.generation()
+            const tokens0 = await kvTokens()
+            const main0 = await st.main()
+            const execs0 = (await st.executions()).length
+            const preview = await st.dryRun()
+            const genAfterPreview = await st.generation()
+            const apply = await st.apply(st.users.puller, await st.mintToken('rev_s3a_12'))
+            const answer = (res: any) => `${res.statusCode}:${errorOf(res).code}:${errorOf(res).details && errorOf(res).details.operation}:${errorOf(res).details && errorOf(res).details.sqlState}`
+            const observed = {
+              preview: answer(preview),
+              apply: answer(apply),
+              stepFourUnchanged: (await stepFour(st.tenantId)) === four0,
+              noBumpByThePreview: sameJson(genAfterPreview, gen0),
+              tokensLeft: (await kvTokens()) - tokens0,
+              mainUnchanged: sameJson(await st.main(), main0),
+              newExecutions: (await st.executions()).length - execs0,
+            }
+            console.log(`[S3A-12] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              preview: '503:STOCK_PREP_REFRESH_STORE_FAILED:hold_open:42501',
+              apply: '503:STOCK_PREP_REFRESH_STORE_FAILED:hold_open:42501',
+              stepFourUnchanged: true,
+              noBumpByThePreview: true,
+              tokensLeft: 0,
+              mainUnchanged: true,
+              newExecutions: 0,
+            })
+          } finally {
+            await q(`DROP TRIGGER IF EXISTS ${fn} ON ${RT.hold}`).catch(() => {})
+            await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+          }
+        }, 180000)
 
         test('S3A-17 (ST-1 / TD-23) a settling finish vs a concurrent preview reconcile on PostgreSQL, both orders, plus the non-settling leg: no 40P01, no stuck running row; while the finish waits it holds neither its execution row nor the bound continuation', async () => {
           const fixture = await refreshKit.candidateHoldFixture()
@@ -3690,6 +3837,46 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           })
           await q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`stock-preparation:large-bom:%:${st.tenantId}:%`]).catch(() => {})
         }, 240000)
+
+        test('S3A-28 (review round 1 item 3, lens B V50B-16) a carry whose key is DUPLICATE-RESOLVED: a NOT-governed project (switch off, unregistered, env sheet) carries as before this PR; a GOVERNED project consults THAT project — an earlier failed execution of it refuses 409 RECOVERY_PENDING, nothing patched', async () => {
+          const suffixed = (key: string) => `${key}::duplicate:sortLine:${"7".repeat(16)}`
+          const seedSuffixedPair = async (sb: any, projectNo: string) => {
+            const physical = (logical: string) => (sb.target.fieldIdMap && sb.target.fieldIdMap[logical]) || logical
+            const toPhysical = (data: Record<string, unknown>) => Object.fromEntries(Object.entries(data).map(([key, value]) => [physical(key), value]))
+            const { oldKey, newKey: plainNewKey } = carryKeys(projectNo)
+            const newKey = suffixed(plainNewKey)
+            const records = sb.multitable.records as any
+            await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: oldKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), active: false, notes: 'synthetic note' }) })
+            const target = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: newKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), active: true }) })
+            const notes = async () => (await q('SELECT data->>$2 AS notes FROM meta_records WHERE id = $1', [target.id, physical('notes')])).rows[0].notes
+            return { decision: { ...carryDecision(projectNo), idempotencyKey: newKey }, notes }
+          }
+          const observed: Record<string, unknown> = {}
+          {
+            const st = await s3aStack('s28n', { pilot: false, register: false, switchOn: false })
+            const pair = await seedSuffixedPair({ multitable: st.multitable, sheetId: st.envTarget.sheetId, target: st.envTarget }, st.projectNo)
+            const res = await st.carry(pair.decision)
+            observed.notGoverned = { status: res.statusCode, mode: res.body.data && res.body.data.mode, code: errorOf(res).code || null, notes: await pair.notes(), stepFourRows: await st.stepFourRows() }
+          }
+          {
+            const st = await s3aStack('s28g', { pilot: true })
+            const gen = await st.generation()
+            const begun = await st.refresh.store.beginExecution({
+              ...st.scope, lane: 'small_apply',
+              guard: { leaseRunId: 'run_s3a_28_dead', leaseId: 'lease_s3a_28_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_28' },
+              tokenRevision: 'rev_s3a_28', planDigest: 'd'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_28',
+            })
+            await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_28'] })
+            const pair = await seedSuffixedPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
+            const res = await st.carry(pair.decision)
+            observed.governed = { status: res.statusCode, code: errorOf(res).code, notes: await pair.notes() }
+          }
+          console.log(`[S3A-28] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({
+            notGoverned: { status: 200, mode: 'carried', code: null, notes: 'synthetic note', stepFourRows: 0 },
+            governed: { status: 409, code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', notes: null },
+          })
+        }, 180000)
       })
     })
   })
