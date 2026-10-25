@@ -322,7 +322,7 @@
   ],
   "outside_E1_identical": true,
   "real_HTTP_calls": 0,
-  "scratch_retained": "tmp/e1-doc-no-network-e37kbgyo",
+  "scratch_retained": "tmp/e1-doc-examples/e1-doc-no-network-20n651wi",
   "filter_sha256": "cef65bb34834a29c84367e8b2c35ac24fe7a941b047211e6655af14f60522b52",
   "document_sha256": "1414c79610f06ca99c1edde3561fbf4cacda8665d6536aa2a9251030977fd610",
   "pass": true

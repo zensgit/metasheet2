@@ -40,7 +40,8 @@ probe('unbounded retryAfter hidden','login',{'success':False,'retryAfter':10**40
 text=DOC.read_text();section=text.split('## 1. E1 ',1)[1].split('## 2.',1)[0];blocks=re.findall(r'```bash\n(.*?)```',section,re.S);assert len(blocks)==3
 for block in blocks:subprocess.run(['/bin/bash','-n'],input=block,text=True,check=True)
 # Exercise the actual default-OFF shell block with a private mock executable, never curl/network.
-scratch=Path(tempfile.mkdtemp(prefix='e1-doc-no-network-',dir=ROOT.parent/'tmp'));fake=scratch/'curl';fake.write_text('#!/usr/bin/env python3\nimport os,sys\nsys.stdout.write(os.environ["E1_SYNTHETIC_BODY"]+"\\n404")\nraise SystemExit(int(os.environ["E1_SYNTHETIC_EXIT"]))\n');fake.chmod(0o755)
+scratch_root=ROOT/'tmp'/'e1-doc-examples';scratch_root.mkdir(parents=True,exist_ok=True)
+scratch=Path(tempfile.mkdtemp(prefix='e1-doc-no-network-',dir=scratch_root));fake=scratch/'curl';fake.write_text('#!/usr/bin/env python3\nimport os,sys\nsys.stdout.write(os.environ["E1_SYNTHETIC_BODY"]+"\\n404")\nraise SystemExit(int(os.environ["E1_SYNTHETIC_EXIT"]))\n');fake.chmod(0o755)
 pipeline=[]
 for code,body,match in [(0,disabled,True),(18,disabled,False),(0,{**disabled,'success':0},False)]:
  env=dict(os.environ,PATH=str(scratch)+':'+os.environ.get('PATH',''),STAGING_BASE_URL='http://synthetic.invalid',E1_SYNTHETIC_BODY=json.dumps(body),E1_SYNTHETIC_EXIT=str(code))
@@ -49,5 +50,5 @@ manifest=json.loads((A/'source-evidence-disposition.json').read_text())
 outside={'before':hashlib.sha256(text.split('## 1. E1 ',1)[0].encode()).hexdigest(),'after':hashlib.sha256(text.split('## 2.',1)[1].encode()).hexdigest()}
 assert outside==manifest['outside_E1_sha256']
 subprocess.run(['git','diff','--check'],cwd=ROOT,check=True)
-report={'scope':'offline synthetic CLI filters, actual Bash example with fake curl, source doc assertions; no real HTTP/TS/backend execution','filter_probes':rows,'shell_blocks_syntax':len(blocks),'actual_shell_fake_curl_probes':pipeline,'outside_E1_identical':True,'real_HTTP_calls':0,'scratch_retained':str(scratch.relative_to(ROOT.parent)),'filter_sha256':hashlib.sha256((A/'e1_response_filter.py').read_bytes()).hexdigest(),'document_sha256':hashlib.sha256(DOC.read_bytes()).hexdigest(),'pass':True}
+report={'scope':'offline synthetic CLI filters, actual Bash example with fake curl, source doc assertions; no real HTTP/TS/backend execution','filter_probes':rows,'shell_blocks_syntax':len(blocks),'actual_shell_fake_curl_probes':pipeline,'outside_E1_identical':True,'real_HTTP_calls':0,'scratch_retained':str(scratch.relative_to(ROOT)),'filter_sha256':hashlib.sha256((A/'e1_response_filter.py').read_bytes()).hexdigest(),'document_sha256':hashlib.sha256(DOC.read_bytes()).hexdigest(),'pass':True}
 (A/'filter-review-fix-verification.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({'filter_probes':len(rows),'actual_shell_fake_curl_probes':len(pipeline),'shell_syntax_blocks':len(blocks),'outside_E1_identical':True,'real_HTTP_calls':0,'pass':True}))
