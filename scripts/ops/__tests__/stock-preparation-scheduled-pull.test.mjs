@@ -358,6 +358,26 @@ test('manual_confirm_required is recorded and NEVER applied, even with --apply',
   assert.equal(lines[0].action, 'skipped_manual_confirm_required')
   assert.equal(lines[1].summary.skippedManualConfirmRequired, 1)
   assert.equal(lines[1].summary.failed, 0)
+
+  // Batch-refresh step 4 PR-3a (E-1(c) scheduled-pull leg, refuter R-8): a SUSPENDED preview — the status a governed
+  // project's held pull now answers (no token, canApply false) — is never applied either, and until PR-7 adds
+  // `skipped_suspended` it fails CLOSED as an unknown status: `error`, `failed: true`, non-zero exit. Asserted
+  // inside this existing subtest on purpose: the ops TAP `# tests` count (EXPECTED_OPS_TESTS_COUNT) does not move.
+  const suspended = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'suspended', canApply: false, dryRunToken: null, counts: {} } } }
+      }
+      return { status: 500, json: { ok: false, error: { code: 'SHOULD_NOT_BE_CALLED' } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(suspended.requests.length, 1, 'a suspended pull is never applied')
+  assert.notEqual(suspended.result.code, 0, `${suspended.result.stdout}\n${suspended.result.stderr}`)
+  const suspendedLines = jsonLines(suspended.result.stdout)
+  assert.equal(suspendedLines[0].action, 'error')
+  assert.equal(suspendedLines[0].failed, true)
+  assert.equal(suspendedLines[1].summary.failed, 1)
 })
 
 test('large_bom_bounded is recorded as skipped and NEVER applied', async () => {

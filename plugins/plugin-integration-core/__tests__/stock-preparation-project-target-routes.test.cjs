@@ -53,6 +53,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //        to 'read' on any of them resolves the archived sheet instead and reds here.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -266,9 +267,12 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
     if (env[key] === undefined) delete process.env[key]
     else process.env[key] = env[key]
   }
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  // PR-3a: the real refresh governance, unless the case names its own service (even null: the unwired leg).
+  const wired = Object.prototype.hasOwnProperty.call(serviceExtras, 'stockPreparationRefreshGovernance') ? services : withRefreshGovernance(services)
+  httpRoutes.registerIntegrationRoutes({ context, services: wired, logger: { info() {}, warn() {}, error() {} } })
   return {
     routes, auditAppends, provisioning, records, db, store, context,
+    refresh: services.refreshGovernanceEnv || null,
     projectWriteLock: services.stockPreparationProjectWriteLock || null,
     restore() { for (const [key, value] of Object.entries(previousEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value } },
   }
@@ -945,6 +949,51 @@ test('R6 large lane: approval bumps + binds; the chunk route takes the project l
     assert.equal(stored.status, 'queued', 'nothing ran')
     assert.equal(Object.prototype.hasOwnProperty.call(stored, 'writeScope'), false)
   } finally { bare.restore() }
+})
+
+test('R6g (batch-refresh step 4 PR-3a: RW-G2 / RW-G6r / CG chunk legs) the chunk route consults INSIDE its lease: an unwired governance service is 501 governance_service; a project governed by a hold on its sheet 409 LARGE_LANE_REFUSED hold; a project governed by rows on ANOTHER sheet 409 RETARGETED sheet — each before the job turns running (the job byte-identical), no record write; a not-governed project runs', async () => {
+  const kit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const storedJob = (h, applyJobId) => h.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, applyJobId }))
+  const hold = () => {
+    const value = { kind: 'content_change', confirmable: false, notConfirmableReason: 'needs_step5', subject: { keyDigest: 'd'.repeat(64) }, detail: { recordId: null, recordVersion: null, key: 'k_r6g', reason: 'plm_system_refresh', fields: {}, inContinuation: null, humanColumnsPresent: {} } }
+    value.fingerprint = pairing.holdFingerprint(value)
+    return value
+  }
+  const legs = [
+    { name: 'unwired', serviceExtras: { stockPreparationRefreshGovernance: null }, seed: async () => {}, status: 501, code: 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', reason: 'governance_service' },
+    { name: 'governed', serviceExtras: {}, seed: async (h, sheetId) => h.refresh.seedHolds({ tenantId: TENANT, sheetId, projectNo: PROJECT }, [hold()]), status: 409, code: 'STOCK_PREP_REFRESH_LARGE_LANE_REFUSED', reason: 'hold' },
+    { name: 'retargeted', serviceExtras: {}, seed: async (h) => h.refresh.seedHolds({ tenantId: TENANT, sheetId: 'sheet_r6g_previous', projectNo: PROJECT }, [hold()]), status: 409, code: 'STOCK_PREP_REFRESH_TARGET_RETARGETED', reason: 'sheet' },
+    { name: 'not governed', serviceExtras: {}, seed: async () => {}, status: 200 },
+  ]
+  for (const leg of legs) {
+    const env = kit.createInMemoryProjectWriteLock({ timers: 'real' })
+    const records = makeRecordsApi()
+    const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, records, serviceExtras: { stockPreparationProjectWriteLock: env.lock, ...leg.serviceExtras } })
+    try {
+      const { sheetId, objectId } = registerActive(h)
+      await leg.seed(h, sheetId)
+      const jobId = `job-r6g-${leg.name.replace(/\s+/g, '-')}`
+      await seedPlannedExpansionJob(h, { jobId, target: { sheetId, objectId, fieldIdMap: {} } })
+      assert.equal((await plan(h.routes, jobId)).statusCode, 200, leg.name)
+      const approved = await applyStart(h.routes, jobId)
+      assert.equal(approved.statusCode, 202, `${leg.name}: ${JSON.stringify(approved.body)}`)
+      const applyJobId = approved.body.data.jobId
+      const before = await storedJob(h, applyJobId)
+      const ran = await applyRun(h.routes, jobId, applyJobId)
+      assert.equal(ran.statusCode, leg.status, `${leg.name}: ${JSON.stringify(ran.body)}`)
+      if (leg.status === 200) {
+        assert.notEqual((await storedJob(h, applyJobId)).status, 'queued', `${leg.name}: the chunk ran`)
+        continue
+      }
+      assert.equal(ran.body.error.code, leg.code, leg.name)
+      assert.equal(ran.body.error.details.reason, leg.reason, leg.name)
+      const after = await storedJob(h, applyJobId)
+      assert.equal(after.status, 'queued', `${leg.name}: never turned running`)
+      assert.deepEqual(after, before, `${leg.name}: the job is byte-identical`)
+      assert.equal(records.writes.length, 0, `${leg.name}: no record write`)
+    } finally { h.restore() }
+  }
 })
 
 // S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — the same per-test loop
