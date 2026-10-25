@@ -40,7 +40,7 @@
         <li v-for="user in menuUsers" :key="user.id">
           <button type="button" :disabled="disabled" @mousedown.prevent @click="selectUser(user.id)">
             <span>{{ pickerLabel(user) }}</span>
-            <span v-if="!personLabel(user)" class="attendance__user-picker-id">{{ user.id }}</span>
+            <span v-if="!personLabel(user) && !isRetainedPersonnelValue(user)" class="attendance__user-picker-id">ID: {{ user.id }}</span>
           </button>
         </li>
         <li v-if="showTypeaheadEmpty" class="attendance__user-picker-empty" data-attendance-search-empty>
@@ -67,6 +67,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAttendanceAdminUsers, type AttendanceAdminUserSearchItem } from './useAttendanceAdminUsers'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import { apiFetch } from '../../utils/api'
+import { attendancePersonnelName, isRetainedPersonnelValue } from './attendancePersonnelIdentity'
 
 type Translate = (en: string, zh: string) => string
 
@@ -161,26 +162,19 @@ const showTypeaheadEmpty = computed(() => (
   && typeaheadSearchSettled.value
 ))
 
-const selectedVisibleLabel = computed(() => personLabel(users.value.find((item) => item.id === props.modelValue.trim()) ?? null))
+const selectedVisibleLabel = computed(() => {
+  const selected = displayUsers.value.find((item) => item.id === props.modelValue.trim())
+  return selected ? personLabel(selected) || formatUserLabel(selected) : ''
+})
 const typeaheadInputValue = computed(() => (typeaheadEditing.value ? searchQuery.value : selectedVisibleLabel.value))
 
-function looksLikeRawId(value: string): boolean {
-  return /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{8,}/i.test(value)
-}
-
 function personLabel(user: AttendanceAdminUserSearchItem | null | undefined): string {
-  if (!user) return ''
-  const name = user.name?.trim() || ''
-  const email = typeof user.email === 'string' ? user.email.trim() : ''
-  const emailVisible = Boolean(email) && email !== user.id && !looksLikeRawId(email)
-  if (name && emailVisible) return `${name} · ${email}`
-  if (name) return name
-  if (emailVisible) return email
-  return ''
+  return attendancePersonnelName(user)
 }
 
 function pickerLabel(user: AttendanceAdminUserSearchItem): string {
-  return personLabel(user) || (props.typeahead ? props.tr('Unnamed employee', '未命名员工') : formatUserLabel(user))
+  if (isRetainedPersonnelValue(user)) return formatUserLabel(user)
+  return personLabel(user) || props.tr('Unnamed employee', '未命名员工')
 }
 
 let typeaheadTimer: ReturnType<typeof setTimeout> | undefined
@@ -269,6 +263,10 @@ function selectUser(userId: string) {
 function handleChange(event: Event) {
   selectUser((event.target as HTMLSelectElement).value)
 }
+
+watch(() => props.modelValue, (id) => {
+  emit('update:displayName', primaryLabel(id))
+})
 
 watch(users, () => {
   emit('update:displayName', primaryLabel(props.modelValue))
