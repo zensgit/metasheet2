@@ -213,5 +213,28 @@
     "private17IncludesThisChange": false,
     "fullParentAcceptance": false
   },
-  "requiredCI": "pending-new-public-head"
+  "requiredCI": "pending-new-public-head",
+  "CI_single_fork_fixture_followup": {
+    "parentHead": "78a33669f419eec516172e00d539153b37b35d9a",
+    "failedJob": 121296437129,
+    "actualReproduction": {
+      "passed": 47,
+      "matchingFailed": 8
+    },
+    "afterOneOwnedHistoryTeardownLine": {
+      "passed": 55,
+      "failed": 0,
+      "skip": 0,
+      "exit": 0
+    },
+    "runtimeSourceChanged": false,
+    "originalAssertionsAndBudgetsUnchanged": true,
+    "fullPassingSuitesNotRepeated": true,
+    "newExactHeadCI": "pending-after-normal-push",
+    "fixtureLint": {
+      "errors": 0,
+      "warnings": 7,
+      "exit": 0
+    }
+  }
 }

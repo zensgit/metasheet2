@@ -114,6 +114,7 @@ describe('attendance group-context R2 history', () => {
     app?.unmount()
     app = null
     ownedHistories.splice(0).forEach(history => history.destroy())
+    window.history.replaceState(null, '', '/attendance')
     container.remove()
     vi.clearAllMocks()
     localStorage.removeItem('auth_token')
