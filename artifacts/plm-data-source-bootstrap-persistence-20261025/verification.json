@@ -1,0 +1,291 @@
+{
+  "status": "BOOTSTRAP_REPAIR_REAL_HTTP_VERIFIED_COMPLETE_W23_OPEN",
+  "at": "2026-10-25T01:21:47.564450+00:00",
+  "Source": "8346168524cc95a71672758ec7de4652efcd569f",
+  "parent": "fa8eeee6429be86ff0344fa4e9f0596d9427424c",
+  "Native_runtime": "538cbf07509a1a806a314eed49fff5f1f0d2b49b",
+  "index_sha256": "ba7efc5c177f6b76b0f828a7615d80263992bcfbc358ceb3ad2917eb6d518115",
+  "implementation_handoff": {
+    "status": "SOURCE_ONLY",
+    "acceptance": "NOT_ACCEPTED",
+    "draft": true,
+    "merge": false,
+    "install": false,
+    "production": false,
+    "commit": false,
+    "push": false,
+    "base": "fa8eeee6429be86ff0344fa4e9f0596d9427424c",
+    "branch": "codex/plm-data-source-bootstrap-persistence-20261025",
+    "nonce": "f281bf0cd14d40d1946d5b30233b914a",
+    "scope": [
+      "packages/core-backend/src/index.ts",
+      "docs/development/PLM_DATA_SOURCE_BOOTSTRAP_PERSISTENCE_DESIGN_VALIDATION_20261025.md",
+      "artifacts/plm-data-source-bootstrap-persistence-20261025/verification.json"
+    ],
+    "old_http": {
+      "evidence": "/tmp/plm-w23-r15-source-forbidden-Root-diagnostic-current-20261025.json",
+      "error": "status_preview-eco_403",
+      "exit_code": 1,
+      "profile_result": "RED",
+      "row_present": false,
+      "startup_manager_init_success_marker": true,
+      "startup_manager_init_failure_marker": false
+    },
+    "pure_module_proof": {
+      "evidence": "/tmp/plm-w23-r15-manager-binding-actual-pure-review-20261025.json",
+      "status": "ACTUAL_MODULE_BINDING_SPLIT_REPRODUCED_NO_SQL",
+      "meaningful_control_count": 21,
+      "sql_executed": false,
+      "live_instance_trace": false,
+      "causal_closure": "ROOT_REAL_HTTP"
+    },
+    "exact_change": {
+      "file": "packages/core-backend/src/index.ts",
+      "before_sha256": "172a5cc6788c3401265fe64879741ea50dceb850b730d6a3bd506cc19704814e",
+      "after_sha256": "ba7efc5c177f6b76b0f828a7615d80263992bcfbc358ceb3ad2917eb6d518115",
+      "static_import_line": 342,
+      "static_import_names": [
+        "dataSourcesRouter",
+        "getDataSourceManager",
+        "initializeDataSourceManager"
+      ],
+      "removed": "const { initializeDataSourceManager } = await import('./routes/data-sources')",
+      "retained": [
+        "await import('./db/db')",
+        "await initializeDataSourceManager(kyselyDbDataSources)",
+        "ordering",
+        "degraded-mode catch"
+      ]
+    },
+    "old_fa8_compiled_archive_qualifies_new_source": false,
+    "old_fa8_compiled_archive": {
+      "meta": "fa8eeee6429be86ff0344fa4e9f0596d9427424c",
+      "backend_output": "/tmp/plm-fa8-backend-production-20261025-252525e6108c4fc18bf712c1f9af56d2",
+      "package_archive": "/tmp/plm-fa8-production-package-20261025-6c26cad66b944a2e8731dfdd1a2ad2fd"
+    },
+    "real_new_source_http": "NOT_RUN",
+    "future_commit_sha": null,
+    "checks": {
+      "transpileModule": {
+        "node": "v20.20.2",
+        "typescript": "5.8.3",
+        "api": "transpileModule",
+        "syntax_diagnostics": 0,
+        "full_typecheck": false,
+        "output_written": false
+      },
+      "source_import_call_binding": {
+        "ok": true,
+        "evidence": "/tmp/plm-meta-bootstrap-persistence-lock-20261025/binding-proof.json",
+        "static_import_line": 342,
+        "call_line": 4361,
+        "persistence_try_line": 4359,
+        "dynamic_data_sources_imports": 0
+      },
+      "unchanged_21_controls_rerun": false
+    },
+    "protected_six_byte_exact": true
+  },
+  "independent_source_review": {
+    "path": "/tmp/plm-meta-bootstrap-persistence-Sol-independent-source-review-20261025.json",
+    "sha256": "dba0d13813d62a9b141962746502a1dea3cd58efb08bb2323c9e4703ad57a4cb",
+    "accepted_product_source": true
+  },
+  "Root_binding_controls": {
+    "before": "EXPECTED_SOURCE_CONTRACT_RED",
+    "after": "SOURCE_CONTRACT_GREEN",
+    "ablations": 2,
+    "full_typecheck": false,
+    "unchanged_21_module_controls_rerun": false
+  },
+  "actual_new_Source": {
+    "pointer": "/tmp/plm-w23-r16-Root-actual-current-20261025.json",
+    "instrumentation": false,
+    "http_count": 11,
+    "statuses": {
+      "200": 8,
+      "201": 2,
+      "422": 1
+    },
+    "transcript": [
+      {
+        "body_sha256": "59f5f3b804c794a8f078894b4d358c214ea57583c628b599cb3d27be4a60e756",
+        "code": null,
+        "id": "native-login",
+        "method": "POST",
+        "path": "/api/v1/auth/login",
+        "status": 200
+      },
+      {
+        "body_sha256": "ba4a4cf9d0fac64363b08432eacbb66032f18aacfe625ff896bcdb1d12dd16d1",
+        "code": null,
+        "id": "meta-login",
+        "method": "POST",
+        "path": "/api/auth/login",
+        "status": 200
+      },
+      {
+        "body_sha256": "1d99cfca07f2f947053ddd13c867151f2ed92adaaf34cc98ebfa5dc1adc88672",
+        "code": null,
+        "id": "native-eco",
+        "method": "POST",
+        "path": "/api/v1/plm/collaboration-sources/items/ff852b69-4429-46c7-9a17-ba730cfec8be/eco-context",
+        "status": 200
+      },
+      {
+        "body_sha256": "323e498d040dd94fcd8537c2d353ea4ad55275c02dff95cf9fafd81c7469086b",
+        "code": null,
+        "id": "native-readiness-default",
+        "method": "POST",
+        "path": "/api/v1/plm/collaboration-sources/items/ff852b69-4429-46c7-9a17-ba730cfec8be/release-readiness",
+        "status": 200
+      },
+      {
+        "body_sha256": "979b75ba563a716e1c2d90c7efbf286009345b579c0b8977199d84cb330e46ea",
+        "code": null,
+        "id": "native-readiness-readiness",
+        "method": "POST",
+        "path": "/api/v1/plm/collaboration-sources/items/ff852b69-4429-46c7-9a17-ba730cfec8be/release-readiness",
+        "status": 200
+      },
+      {
+        "body_sha256": "5acaf5ff766c5a68663ec1a31294ff75d2abc0dccaf6082b1ef285550150fabf",
+        "code": null,
+        "id": "meta-base",
+        "method": "POST",
+        "path": "/api/multitable/bases",
+        "status": 201
+      },
+      {
+        "body_sha256": "79339a07ec891759f169daa0f9db8865ff8a55899824177f3d210020321d8fe4",
+        "code": null,
+        "id": "register-source",
+        "method": "POST",
+        "path": "/api/data-sources",
+        "status": 201
+      },
+      {
+        "body_sha256": "5002d1530d9cfdf266357b5f87e4d5c0246a0f974df0a88d8b9c8ffb1489c698",
+        "code": "ECO_REQUEST_INVALID",
+        "id": "missing-version",
+        "method": "POST",
+        "path": "/api/plm-collaboration-snapshots/preview",
+        "status": 422
+      },
+      {
+        "body_sha256": "a0af9e35304ab496ebd983abc6ec3412dc2bfa3d2506b1f77fafbd0c9431284e",
+        "code": null,
+        "id": "preview-eco",
+        "method": "POST",
+        "path": "/api/plm-collaboration-snapshots/preview",
+        "status": 200
+      },
+      {
+        "body_sha256": "568b9a4459cbebd4b58647266d0957d82e54b888f683c387433a15974a212cf4",
+        "code": null,
+        "id": "confirm-eco",
+        "method": "POST",
+        "path": "/api/plm-collaboration-snapshots/confirm",
+        "status": 200
+      },
+      {
+        "body_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "code": null,
+        "id": "eco-get",
+        "method": "GET",
+        "path": "/api/plm-collaboration-snapshots/8897b7e7-0369-45c5-83fd-3682bdee5e5d",
+        "status": 200
+      }
+    ],
+    "journal": [
+      {
+        "after": 4,
+        "before": 3,
+        "elapsed_ms": 0,
+        "excludes": [
+          "auth_login"
+        ],
+        "finished_at": "2026-10-25T01:12:30.618Z",
+        "kind": "positive_meta_relay",
+        "lines": [
+          {
+            "path": "/api/v1/plm/collaboration-sources/items/ff852b69-4429-46c7-9a17-ba730cfec8be/eco-context",
+            "status": "200"
+          },
+          {
+            "path": "/api/v1/plm/collaboration-sources/items/ff852b69-4429-46c7-9a17-ba730cfec8be/release-readiness",
+            "status": "200"
+          },
+          {
+            "path": "/api/v1/plm/collaboration-sources/items/ff852b69-4429-46c7-9a17-ba730cfec8be/release-readiness",
+            "status": "200"
+          },
+          {
+            "path": "/api/v1/plm/collaboration-sources/items/ff852b69-4429-46c7-9a17-ba730cfec8be/eco-context",
+            "status": "200"
+          }
+        ],
+        "native_pid": 85244,
+        "scope": "collaboration_source_post_only",
+        "source": "uvicorn",
+        "started_at": "2026-10-25T01:12:30.618Z",
+        "window_ms": 5000
+      }
+    ],
+    "error": "eco_cell_missing_target_version_id",
+    "profile_result": "RED",
+    "source_unchanged": true,
+    "cleanup": "PASS_no_live_ownedPIDs_seriallease_released"
+  },
+  "causal_scope": "Unchanged fresh-source admission and actualNative relay now allow preview/confirm/get200 after same-manager bootstrap repair. Not full persistence/restart/field/approval/lifecycle acceptance.",
+  "target_cell_diagnostic": {
+    "pointer": "/tmp/plm-w23-r17-target-cell-Root-diagnostic-current-20261025.json",
+    "instrumentation": true,
+    "metadata": {
+      "diagnostic_only": true,
+      "status": 200,
+      "cells_object": true,
+      "target_own_key": true,
+      "target_is_null": true,
+      "target_type": "object",
+      "target_is_array": false,
+      "target_is_empty_string": false
+    },
+    "existing_contract": "null and stringincludingempty legal; missing and wrongtypes not legal",
+    "oracle_repair": "PENDING_SEPARATE_VERIFIER_SCOPE",
+    "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/w23-r17-target-own-null-before-oracle-repair-20261025",
+    "manifest_sha256": "6a9935d5c22d4736849067749783f568d5f4561f3e8b6b2065153f3905f46819"
+  },
+  "bootstrap_packet": {
+    "packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta-bootstrap-Source834-real-ECO-create-get-20261025",
+    "manifest_sha256": "56f3d64fd81fda473b98e49f35f2046bae0f8980018f9f82c6e61b324cb38d5c"
+  },
+  "release": {
+    "draft": true,
+    "PR": "PENDING_PUBLICATION",
+    "current_head_CI": "PENDING_PUBLICATION",
+    "one_documentation_closeout": "SHA_RECORDED_EXTERNALLY_AFTER_COMMIT",
+    "merge": false,
+    "deploy": false,
+    "production_enablement": false,
+    "business_notice": false,
+    "issue_closure": false
+  },
+  "not_accepted": [
+    "full_typecheck",
+    "newSourcecompiledbackend/archive/images",
+    "restart/CAS/revoke/recovery",
+    "samecollectionreauthorization_pending_ownerchoice",
+    "browser/originalframe/hour",
+    "pureNative/optionalpackageinstallation/lifecycle",
+    "whole_master"
+  ],
+  "old_fa8_artifacts_qualify_new_Source": false,
+  "frozen_R14_six_unchanged": true,
+  "held_scope": [
+    "ClaudeStageA",
+    "ClaudeRGsourcebinding",
+    "#249HOLD",
+    "ECOindependentreviewandseparateownermergepassword"
+  ]
+}
