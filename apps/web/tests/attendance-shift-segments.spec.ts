@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { createApp, h, nextTick, ref } from 'vue'
+import AttendanceLocaleTimeInput from '../src/views/attendance/AttendanceLocaleTimeInput.vue'
+import AttendanceShiftSegmentsEditor from '../src/views/attendance/AttendanceShiftSegmentsEditor.vue'
+import { useLocale } from '../src/composables/useLocale'
 import AttendanceShiftFlexPolicyEditor from '../src/views/attendance/AttendanceShiftFlexPolicyEditor.vue'
 import {
   analyzeAttendanceShiftFlexPolicy,
@@ -283,5 +286,104 @@ describe('attendance shift segment analysis', () => {
       workStartTime: '09:00',
       workEndTime: '18:00',
     })).toBe(false)
+  })
+})
+
+
+describe('shift segment accessible fields and keyboard focus', () => {
+  let cleanup: (() => void) | undefined
+
+  afterEach(() => {
+    cleanup?.()
+    cleanup = undefined
+    useLocale().setLocale('en')
+  })
+
+  function mountEditor(locale: 'en' | 'zh' = 'en') {
+    useLocale().setLocale(locale)
+    const segments = ref<AttendanceShiftSegmentDraft[]>([
+      segment('08:00', '12:00'),
+      segment('13:00', '17:00'),
+    ])
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({
+      setup: () => () => h(AttendanceShiftSegmentsEditor, {
+        segments: segments.value,
+        'onUpdate:segments': (next: AttendanceShiftSegmentDraft[]) => { segments.value = next },
+        analysis: analyzeAttendanceShiftSegments(segments.value, tr),
+        previewOnly: true,
+      }),
+    })
+    app.mount(root)
+    cleanup = () => { app.unmount(); root.remove() }
+    const visible = () => Array.from(root.querySelectorAll<HTMLInputElement>('[data-attendance-locale-time-typed]'))
+    return { root, segments, visible }
+  }
+
+  it.each([
+    ['en', ['Segment 1 start', 'Segment 1 end', 'Segment 2 start', 'Segment 2 end']],
+    ['zh', ['时段 1 开始', '时段 1 结束', '时段 2 开始', '时段 2 结束']],
+  ] as const)('distinguishes all visible start and end fields in %s', (locale, labels) => {
+    const { visible } = mountEditor(locale)
+    expect(visible().map(input => input.getAttribute('aria-label'))).toEqual(labels)
+    expect(visible().map(input => input.tabIndex)).toEqual([0, 0, 0, 0])
+  })
+
+  it('hides only compatibility values from accessibility while preserving original selectors and input', async () => {
+    const { root, segments, visible } = mountEditor()
+    const values = Array.from(root.querySelectorAll<HTMLInputElement>('.attendance-locale-time__value'))
+    expect(values).toHaveLength(4)
+    expect(values.map(input => [input.getAttribute('aria-hidden'), input.tabIndex])).toEqual([
+      ['true', -1], ['true', -1], ['true', -1], ['true', -1],
+    ])
+    expect(values.map(input => input.value)).toEqual(['08:00', '12:00', '13:00', '17:00'])
+    expect(visible().every(input => input.getAttribute('aria-hidden') !== 'true')).toBe(true)
+    const originalSelector = root.querySelector<HTMLInputElement>('[data-attendance-shift-segment-start="0"]')!
+    originalSelector.value = '07:30'
+    originalSelector.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(segments.value[0]!.startTime).toBe('07:30')
+    expect(visible()[0]!.value).toBe('07:30')
+  })
+
+  it('preserves unlabeled sibling compatibility context rather than hiding it globally', () => {
+    const root = document.createElement('label')
+    root.append('Core start')
+    const host = document.createElement('span')
+    root.appendChild(host)
+    document.body.appendChild(root)
+    const app = createApp(AttendanceLocaleTimeInput, { modelValue: '10:00' })
+    app.mount(host)
+    cleanup = () => { app.unmount(); root.remove() }
+    const value = root.querySelector<HTMLInputElement>('.attendance-locale-time__value')!
+    const typed = root.querySelector<HTMLInputElement>('[data-attendance-locale-time-typed]')!
+    expect(value.getAttribute('aria-hidden')).toBeNull()
+    expect(value.tabIndex).toBe(-1)
+    expect(typed.getAttribute('aria-label')).toBe('Time (24-hour, for example 09:00)')
+    expect(typed.value).toBe('10:00')
+  })
+
+  it('keeps focus on visible fields through add, reorder and removal without changing values', async () => {
+    const { root, segments, visible } = mountEditor()
+    const activate = async (selector: string) => {
+      const button = root.querySelector<HTMLButtonElement>(selector)!
+      button.focus()
+      button.click()
+      await nextTick()
+      await nextTick()
+    }
+    await activate('[data-attendance-shift-segment-up="1"]')
+    expect(segments.value.map(item => item.startTime)).toEqual(['13:00', '08:00'])
+    expect(document.activeElement).toBe(visible()[0])
+    await activate('[data-attendance-shift-segment-down="0"]')
+    expect(segments.value.map(item => item.startTime)).toEqual(['08:00', '13:00'])
+    expect(document.activeElement).toBe(visible()[2])
+    await activate('[data-attendance-shift-segment-remove="1"]')
+    expect(segments.value).toEqual([segment('08:00', '12:00')])
+    expect(document.activeElement).toBe(visible()[0])
+    await activate('[data-attendance-shift-segment-add]')
+    expect(segments.value).toEqual([segment('08:00', '12:00'), segment('12:00', '13:00')])
+    expect(document.activeElement).toBe(visible()[2])
   })
 })
