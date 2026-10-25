@@ -40,6 +40,16 @@
 // for a clean computation with zero pending decisions — the settled columns (§9.2). `runbook_only` holds
 // (an escalated continuation, §8.4) are never superseded by a computation.
 //
+// LOCK ORDER (TD-23, PR-3a). ONE rule for every step-4 transaction: a transaction that will touch the
+// refresh-state row takes it FOR UPDATE FIRST (reconcileHolds, confirmContinuation, endContinuation and a
+// SETTLING finishExecution), so any two of them on one project serialise on that row before either holds
+// anything else. A non-settling finishExecution starts at its execution row and never touches the state row;
+// it locks only its bound continuations. Continuation rows a computation or a finish touches are taken in
+// ascending id order (the planner's verdicts are sorted, the lane's refresh binding is sorted). Execution rows
+// and hold rows are never both locked by one transaction. Before PR-3a a settling finish locked execution ->
+// continuation -> state and could deadlock a concurrent preview's reconcile (state -> hold -> continuation);
+// the real-DB case S3A-17 proves both interleavings.
+//
 // THE CONSULT READ IS ONE SNAPSHOT (review X-1). The CAS above only holds if the decision_version the consult
 // observed and the holds / continuations / members it planned from are ONE point in time. `readGovernanceRows`
 // therefore runs every read in ONE transaction pinned to REPEATABLE READ by its first statement (and lets the
@@ -1706,6 +1716,12 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
 
     return db.transaction(async (rawTrx) => {
       const trx = requireTrx(rawTrx)
+      // LOCK ORDER (TD-23, PR-3a ST-1): a SETTLING finish takes the refresh-state row FOR UPDATE FIRST — the
+      // order every reconciliation and decision uses (state -> hold / execution -> continuation) — so a
+      // concurrent preview's reconcile (state -> hold -> continuation) and this finish can never wait on each
+      // other in a cycle. Exactly one state lock per finish; a non-settling finish never touches the state row.
+      const settleState = settlement ? await lockStateRow(trx, scope, { at }) : null
+      if (settlement && !settleState) throw stateMoved('state_row_absent')
       let row
       try {
         row = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.execution, { id: executionId })
@@ -1758,19 +1774,17 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
           consumed += 1
         }
         if (settlement) {
-          const stateRow = await lockStateRow(trx, scope, { at })
-          if (!stateRow) throw stateMoved('state_row_absent')
           let stateRows
           try {
             stateRows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.state, {
-              version: (intOrNull(stateRow.version) || 0) + 1,
+              version: (intOrNull(settleState.version) || 0) + 1,
               settled_at: at,
               settled_execution_id: executionId,
               settled_generation_token: settlement.generationToken,
               settled_sheet_machine_digest: settlement.sheetMachineDigest,
               settled_source_content_digest: settlement.sourceContentDigest,
               updated_at: at,
-            }, { id: stateRow.id, version: intOrNull(stateRow.version) || 0 }))
+            }, { id: settleState.id, version: intOrNull(settleState.version) || 0 }))
           } catch (error) {
             throw translate(error, 'state_settle')
           }
