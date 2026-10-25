@@ -124,5 +124,36 @@
     "applicationRuntimeAndTestBytesUnchanged": true,
     "front314AndBrowserMatricesNotRepeated": true,
     "newHeadRequiresFreshAllRequiredCI": true
+  },
+  "CISetupTemplateFixtureFollowup": {
+    "at": "2026-10-25T23:10:24.070027+00:00",
+    "parentHead": "23cc6668182f73bee8e2f42ee640f2e33fc8eae0",
+    "failedCurrentCIJob": 121316842863,
+    "failedCases": 3,
+    "originalReproduction": {
+      "matchingFailed": 3,
+      "passingShiftControl": 1,
+      "filteredExcluded": 41
+    },
+    "repair": "Explicit legacy OFF value for existing W6 gate in the existing broad shell feature mock; no runtime change",
+    "actualFailedFileFullRun": {
+      "files": 1,
+      "passed": 45,
+      "skipped": 0,
+      "exit": 0
+    },
+    "scopedESLint": {
+      "errors": 0,
+      "inheritedWarnings": 4,
+      "introduced": 0,
+      "exit": 0
+    },
+    "originalAssertionsAPIMocksBudgetsBytePreserved": true,
+    "other18ScopeRuntimeAndTestBytesUnchanged": true,
+    "independentReview": "gpt-6.1-sol/high source-only, no confirmed P1/P2; main runtime evidence separate",
+    "reproductionHarnessCorrection": "Initial control-count expectation0 was wrong; actual unaffected shift positive control1 retained. No red run repeated.",
+    "invalidAttempt2": "Repair-script literal newline error failed before collection;0tests executed, excluded. v3 corrected source then45passed.",
+    "initial314AndBrowserQualityNotRepeated": true,
+    "freshAllRequiredOnNewHead": "pending"
   }
 }

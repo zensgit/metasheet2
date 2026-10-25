@@ -135,3 +135,17 @@ new workspace token. The complete history/return/entrypoints same-fork invocatio
 mocks and budgets are retained. Bash syntax, official manifest check and the two affected
 lane guards63/63 passed. App runtime/tests are byte-identical;314 frontend cases and browser
 matrices were not replayed. This wiring-only commit starts fresh exact-head CI.
+
+
+## CI template-fixture scope followup
+
+Current23cc domain job121316842863 failed three legacy template-prefill cases because its
+previously shell-only hasFeature=>true mock now enables the new imported W6 bridge.
+Contract8 intentionally keeps W6 ON catalog selection explicit; OFF retains the original
+initial auto-selection. The fixture now explicitly keeps this existing gate OFF while
+preserving other shell flags, every original assertion, API mock and budget. Original
+reproduction:3 exact failures,1 unaffected shift control,41 filtered exclusions. Full
+failed-file validation:45/45 passed,0 skipped,exit0; scoped lint0 errors/4 unchanged
+fixture warnings, introduced0. Independent Sol/high source review found no confirmed
+P1/P2. Initial314 UI/browser/quality proofs retain identical product inputs and were not
+repeated. New commit requires fresh terminal required CI; no old-head green borrowing.
