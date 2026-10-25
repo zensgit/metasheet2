@@ -285,7 +285,7 @@ describe('Attendance admin regressions', () => {
     setViewportWidth(1280)
 
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/rule-sets/preview')) {
         return jsonResponse(200, {
           ok: true,
@@ -984,7 +984,7 @@ describe('Attendance admin regressions', () => {
     const writes: ShiftWrite[] = []
     const fallback = vi.mocked(apiFetch).getMockImplementation()
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (/^\/api\/attendance\/shifts(?:\?.*)?$/.test(url) && method === 'GET') {
         return jsonResponse(200, { ok: true, data: { items: shifts, total: shifts.length } })
@@ -1634,7 +1634,7 @@ describe('Attendance admin regressions', () => {
   it('W3/4353 admin-forbidden: a 403 admin surface shows the permission notice and never renders the task home (charter §7)', async () => {
     const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance') || url.includes('/api/admin') || url.includes('/api/permissions')) {
         return jsonResponse(403, { ok: false, error: { code: 'FORBIDDEN', message: 'forbidden' } })
       }
@@ -3218,7 +3218,7 @@ describe('Attendance admin regressions', () => {
       status: 'open',
     }
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/payroll-cycles/cycle-new/summary')) {
         return jsonResponse(200, {
@@ -3474,6 +3474,100 @@ describe('Attendance admin regressions', () => {
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-holidays]')).toBeNull()
   })
 
+  it.each([200, 403, 404, 500])('renders creator identity from its scoped directory entry (resolver %s)', async (status) => {
+    const locale = useLocale()
+    const previousLocale = locale.locale.value
+    locale.setLocale('en')
+    try {
+      window.localStorage.setItem('tenantId', 'default')
+      const ownerA = 'owner-a'
+      const ownerB = 'owner-b'
+      const creatorName = 'creator-name'
+      const creatorEmail = 'creator-email'
+      const creatorUnknown = 'creator-unresolved'
+      const creatorEqualId = '11111111-1111-4111-8111-111111111111'
+      const managers = [
+        { id: 'row-name', userId: ownerA, createdBy: creatorName },
+        { id: 'row-email', userId: ownerB, created_by: creatorEmail },
+        { id: 'row-unresolved', userId: ownerA, createdBy: creatorUnknown },
+        { id: 'row-name-equals-id', userId: ownerA, createdBy: creatorEqualId },
+        { id: 'row-empty', userId: ownerA, createdBy: null },
+        { id: 'row-whitespace', userId: ownerA, createdBy: '  ', created_by: '' },
+        { id: 'row-repeated', userId: ownerB, createdBy: creatorName },
+      ].map(row => ({ ...row, role: 'owner', groupId: 'group-a' }))
+      const directory = [
+        { id: ownerA, name: 'Synthetic Owner A', email: 'owner-a@example.invalid', is_active: true },
+        { id: ownerB, name: 'Synthetic Owner B', email: 'owner-b@example.invalid', is_active: true },
+        { id: creatorName, name: 'Synthetic Creator', email: 'creator@example.invalid', is_active: false },
+        { id: creatorEmail, name: null, email: 'creator-email@example.invalid', is_active: true },
+        { id: creatorEqualId, name: creatorEqualId, email: 'equal@example.invalid', is_active: true },
+        { id: 'unrequested', name: 'Unrequested Person', email: 'extra@example.invalid', is_active: true },
+      ]
+      const resolveBodies: unknown[] = []
+      const fallback = vi.mocked(apiFetch).getMockImplementation()
+      vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+        const url = String(input)
+        if (url === '/api/attendance/groups/group-a/managers') {
+          return jsonResponse(200, { ok: true, data: { items: managers } })
+        }
+        if (url === '/api/attendance/groups/group-a/members') {
+          return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+        }
+        if (url === '/api/attendance-admin/users/batch/resolve') {
+          resolveBodies.push(JSON.parse(String(init?.body || '{}')))
+          return jsonResponse(status, { ok: status === 200, data: { items: directory } })
+        }
+        return fallback ? fallback(input, init) : emptyAttendanceResponse()
+      })
+
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+      await flushUi(8)
+
+      expect(container!.querySelector('[data-attendance-group-manager-row] td:nth-child(3)')?.textContent).toContain(status === 200 ? 'Synthetic Creator' : 'User')
+      const cells = Array.from(container!.querySelectorAll<HTMLElement>('[data-attendance-group-manager-creator]'))
+      expect(cells).toHaveLength(managers.length)
+      const expectCreators = (neutral: string, idPrefix: string) => {
+        const expectedLabels = status === 200
+          ? ['Synthetic Creator', 'creator-email@example.invalid', neutral, creatorEqualId, null, null, 'Synthetic Creator']
+          : [neutral, neutral, neutral, neutral, null, null, neutral]
+        cells.forEach((cell, index) => {
+          const label = expectedLabels[index]
+          if (label === null) {
+            expect(cell.textContent?.trim()).toBe('-')
+            expect(cell.querySelector('[data-attendance-group-manager-creator-id]')).toBeNull()
+            return
+          }
+          expect(cell.querySelector('[data-attendance-group-manager-creator-label]')?.textContent).toBe(label)
+          const creatorId = managers[index].createdBy?.trim() || managers[index].created_by?.trim()
+          const technicalId = cell.querySelector<HTMLElement>('[data-attendance-group-manager-creator-id]')!
+          expect(technicalId.textContent?.trim()).toBe(`${idPrefix}: ${creatorId}`)
+          expect(technicalId.classList.contains('attendance__id-clip')).toBe(false)
+          expect(technicalId.closest('[hidden], [aria-hidden="true"]')).toBeNull()
+          expect(cell.textContent).not.toMatch(/Synthetic Owner|Unrequested Person|Deleted|Inactive/)
+        })
+      }
+      expectCreators('User', 'User ID')
+      expect(resolveBodies).toEqual([{
+        orgId: 'default',
+        userIds: [ownerA, ownerB, creatorName, creatorEmail, creatorUnknown, creatorEqualId],
+      }])
+      expect(vi.mocked(apiFetch).mock.calls.filter(([, init]) =>
+        ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(init?.method || 'GET').toUpperCase())
+      ).map(([url, init]) => ({ url: String(url), method: init?.method }))).toEqual([
+        { url: '/api/attendance-admin/users/batch/resolve', method: 'POST' },
+      ])
+      useLocale().setLocale('zh-CN')
+      await flushUi(2)
+      expectCreators('用户', '用户 ID')
+      expect(resolveBodies).toHaveLength(1)
+    } finally {
+      locale.setLocale(previousLocale)
+    }
+  })
+
   it('manages attendance group owners separately from attendance members', async () => {
     window.localStorage.setItem('tenantId', 'default')
     const managerUserId = 'manager-user-1'
@@ -3511,7 +3605,7 @@ describe('Attendance admin regressions', () => {
         return jsonResponse(200, {
           ok: true,
           data: {
-            items: requested.map((userId) => ({
+            items: requested.filter(userId => userId === managerUserId || userId === existingOwnerId).map((userId) => ({
               id: userId,
               email: userId === managerUserId ? 'manager@example.com' : 'owner@example.com',
               name: userId === managerUserId ? 'Manager User' : 'Ops Owner',
@@ -3898,7 +3992,7 @@ describe('Attendance admin regressions', () => {
       resolveGroups = resolve
     })
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.startsWith('/api/attendance/groups?') && method === 'GET') {
         return delayedGroups
@@ -4011,7 +4105,7 @@ describe('Attendance admin regressions', () => {
     const clearSection = vi.fn()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url === '/api/attendance/groups/group-a/update' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
@@ -4095,7 +4189,7 @@ describe('Attendance admin regressions', () => {
       resolveOldestList = resolve
     })
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.startsWith('/api/attendance/groups?') && method === 'GET') {
         listCalls += 1
@@ -5928,7 +6022,7 @@ describe('Attendance admin regressions', () => {
   it('previews fixed schedule coverage and disables apply when blocking conflicts exist', async () => {
     const previewBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
         return jsonResponse(200, { ok: true, data: {
           groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
@@ -6131,7 +6225,7 @@ describe('Attendance admin regressions', () => {
       blockingConflicts: [],
     }
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
         return jsonResponse(200, { ok: true, data: {
           groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
@@ -6307,7 +6401,7 @@ describe('Attendance admin regressions', () => {
     }
 
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.startsWith('/api/attendance/assignments?') && captureAssignmentRefresh) {
         captureAssignmentRefresh = false
         return oldAssignmentRefresh
@@ -6488,7 +6582,7 @@ describe('Attendance admin regressions', () => {
 
   it('shows a clear-first hint when a managed fixed schedule blocks the selected window', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
         return jsonResponse(200, { ok: true, data: {
           groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
@@ -7777,7 +7871,7 @@ describe('Attendance admin regressions', () => {
 
   it('runs a weak comprehensive-hours advisory before saving shift assignments without blocking save', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
@@ -7892,7 +7986,7 @@ describe('Attendance admin regressions', () => {
   it('saves a shift assignment draft through the draft route without the immediate-save preview', async () => {
     const draftBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
@@ -8028,7 +8122,7 @@ describe('Attendance admin regressions', () => {
   it('bulk-apply: confirm gate — opening the modal never posts; only the modal submit does', async () => {
     const draftBodies: Array<Record<string, unknown>> = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
       if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
@@ -8066,7 +8160,7 @@ describe('Attendance admin regressions', () => {
   it('bulk-apply: N selected (user,date) cells produce N schedule-drafts POSTs with the exact draft body and distinct idempotencyKeys, never the immediate-save route', async () => {
     const draftBodies: Array<Record<string, unknown>> = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
       if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
@@ -8107,7 +8201,7 @@ describe('Attendance admin regressions', () => {
 
   it('bulk-apply: a >50-cell candidate selection disables the open-modal button, never silently truncating', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
       if (url.includes('/api/attendance/assignments')) return jsonResponse(200, { ok: true, data: { items: [] } })
       return emptyAttendanceResponse()
@@ -8133,7 +8227,7 @@ describe('Attendance admin regressions', () => {
     const draftBodies: Array<Record<string, unknown>> = []
     let failUserAttempts = 0
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
       if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
@@ -8260,7 +8354,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, { ok: true, data: { items: [baseShift, temporaryShift] } })
@@ -8370,7 +8464,7 @@ describe('Attendance admin regressions', () => {
       workEndTime: '19:00',
     }
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, { ok: true, data: { items: [baseShift, temporaryShift] } })
@@ -8431,7 +8525,7 @@ describe('Attendance admin regressions', () => {
   it('publishes selected direct and rotation schedule drafts with an exact request body', async () => {
     const publicationBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       const method = String(init?.method || 'GET').toUpperCase()
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
@@ -8539,7 +8633,7 @@ describe('Attendance admin regressions', () => {
 
   it('runs a weak comprehensive-hours advisory before saving rotation assignments without blocking save', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/rotation-rules')) {
         return jsonResponse(200, {
           ok: true,
@@ -8642,7 +8736,7 @@ describe('Attendance admin regressions', () => {
 
   it('keeps shift assignment save available when the weak comprehensive-hours advisory preview fails', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
@@ -8707,7 +8801,7 @@ describe('Attendance admin regressions', () => {
 
   it('PR5 strong-control blocks shift assignment save when preview returns violation', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
@@ -8831,7 +8925,7 @@ describe('Attendance admin regressions', () => {
 
   it('PR5 strong-control allows shift assignment save when preview returns warning', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
@@ -8939,7 +9033,7 @@ describe('Attendance admin regressions', () => {
 
   it('PR5 strong-control allows shift assignment save when preview returns ok', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
@@ -9037,7 +9131,7 @@ describe('Attendance admin regressions', () => {
 
   it('PR5 strong-control allows shift assignment save when preview fails with 503', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
@@ -9106,7 +9200,7 @@ describe('Attendance admin regressions', () => {
 
   it('PR5 strong-control blocks rotation assignment save when preview returns violation', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/rotation-rules')) {
         return jsonResponse(200, {
           ok: true,
@@ -9213,7 +9307,7 @@ describe('Attendance admin regressions', () => {
 
   it('PR5 strong-control does NOT block shift assignment save when preview is degraded even if status is violation', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
@@ -9315,7 +9409,7 @@ describe('Attendance admin regressions', () => {
 
   it('PR5 inactive shift assignment skips the preview call in both modes', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
-      const url = typeof input === 'string' ? input : input.url
+      const url = String(input)
       if (url.includes('/api/attendance/shifts')) {
         return jsonResponse(200, {
           ok: true,
