@@ -360,6 +360,25 @@ test('RW-V4 a SUSPENDED preview is stamped `previewed` + STOCK_PREP_PULL_SUSPEND
   } finally { h.restore() }
 })
 
+test('RW-V5 (review round 1) a governed project whose earlier execution FAILED previews `recovery_pending` through the route — 200, canApply false, no token, no bump — and is stamped `previewed` + STOCK_PREP_REFRESH_RECOVERY_PENDING', async () => {
+  const h = mount({ switchOn: true })
+  try {
+    const { sheetId } = h.seedRegistryRow(PROJECT)
+    await h.refresh.seedExecution({ tenantId: TENANT, sheetId, projectNo: PROJECT }, { status: 'failed' })
+    const generation = await h.lockEnv.lock.readGeneration(sheetWriteScopeKey(sheetId))
+    const dry = await dryRun(h)
+    assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+    assert.equal(dry.body.data.status, 'recovery_pending')
+    assert.equal(dry.body.data.canApply, false)
+    assert.equal(dry.body.data.dryRunToken, null)
+    assert.deepEqual(dry.body.data.refreshRecovery, { pending: true, openExecutions: 1 })
+    assert.deepEqual(await h.lockEnv.lock.readGeneration(sheetWriteScopeKey(sheetId)), generation, 'no bump')
+    const row = h.registryRows().find((entry) => entry.project_no === PROJECT)
+    assert.equal(row.last_pull_outcome, 'previewed')
+    assert.equal(row.last_pull_code, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
+  } finally { h.restore() }
+})
+
 // ── RW-CR (TD-25 / TD-26) ────────────────────────────────────────────────────────────────────────
 
 const CARRY_COMPONENT = 'PART-RW-CARRY'
@@ -402,18 +421,31 @@ function carryRecordsFake() {
   }
 }
 
-function carryMount() {
-  const h = mount({ switchOn: true })
+// The carry pair. Default: switch ON, the project registered (its own sheet). `switchOn: false`: the project is
+// NOT registered and the pair lives on the tenant's env sheet (`tenantEnv`, the only env shape the carry's tenant
+// wall admits). `newKey`: the key the successor row carries (a duplicate-resolved one, V50B-16).
+function carryMount({ switchOn = true, newKey = NEW_KEY } = {}) {
+  const h = mount(switchOn ? { switchOn: true } : { switchOn: false, tenantEnv: true })
   const fake = carryRecordsFake()
   Object.assign(h.records, { queryRecords: fake.queryRecords, createRecord: fake.createRecord, patchRecord: fake.patchRecord })
-  const { sheetId, objectId } = h.seedRegistryRow(PROJECT)
-  const physical = (fieldId) => h.provisioning.getFieldId(h.staging, objectId, fieldId)
+  const { sheetId, objectId } = switchOn ? h.seedRegistryRow(PROJECT) : { sheetId: h.envSheet, objectId: ENV_OBJECT }
+  // The env target is configured with an EMPTY fieldIdMap, so its physical ids are the logical ones; a project
+  // sheet's come from provisioning.
+  const physical = switchOn ? (fieldId) => h.provisioning.getFieldId(h.staging, objectId, fieldId) : (fieldId) => fieldId
   const seedRow = (logical, id) => fake.rows.push({ id, sheetId, version: 1, data: Object.fromEntries(Object.entries(logical).map(([key, value]) => [physical(key), value])) })
   seedRow({ projectNo: PROJECT, idempotencyKey: OLD_KEY, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), totalQuantity: 2, active: false, notes: 'synthetic carried note' }, 'rec_rw_old')
-  seedRow({ projectNo: PROJECT, idempotencyKey: NEW_KEY, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), totalQuantity: 2, active: true }, 'rec_rw_new')
+  seedRow({ projectNo: PROJECT, idempotencyKey: newKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), totalQuantity: 2, active: true }, 'rec_rw_new')
   fake.calls.length = 0
-  return Object.assign(h, { sheetId, scope: { tenantId: TENANT, sheetId, projectNo: PROJECT }, patches: () => fake.calls.filter(([op]) => op === 'patchRecord').length })
+  return Object.assign(h, {
+    sheetId,
+    scope: { tenantId: TENANT, sheetId, projectNo: PROJECT },
+    patches: () => fake.calls.filter(([op]) => op === 'patchRecord').length,
+    carriedNote: () => fake.rows.find((row) => row.id === 'rec_rw_new').data[physical('notes')],
+  })
 }
+
+// The conflict planner's duplicate-resolved key shape (`duplicateResolvedKey`): `<base>::duplicate:<kind>:<hash>`.
+const duplicateResolved = (key) => `${key}::duplicate:sortLine:${'7'.repeat(16)}`
 
 const carry = (h, decision = carryDecision()) => call(h, 'POST', CARRY_PATH, { body: { decision }, user: ADMIN })
 
@@ -475,6 +507,47 @@ test('RW-CR1..CR5 the carry on a GOVERNED project consults inside its lease: an 
     assert.equal(errorOf(res).details.field, 'projectNo')
     assert.equal(off.records.calls.length, 0, 'zero records IO: no ledger read, no patch')
   } finally { off.restore() }
+})
+
+// ── RW-CR6..CR8: a DUPLICATE-RESOLVED decision key (review round 1, lens B V50B-16) ─────────────────
+
+test('RW-CR6 (V50B-16) a NOT-governed project\'s carry whose key is duplicate-resolved (`<json>::duplicate:<kind>:<hash>`) carries as before this PR: switch off (unregistered, env sheet) => 200 carried; switch on (registered, not governed) => 200 carried on its own sheet', async () => {
+  const key = duplicateResolved(NEW_KEY)
+  for (const switchOn of [false, true]) {
+    const h = carryMount({ switchOn, newKey: key })
+    try {
+      const res = await carry(h, carryDecision(key))
+      assert.equal(res.statusCode, 200, `switch ${switchOn ? 'on' : 'off'}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.data.mode, 'carried')
+      assert.equal(h.patches(), 1)
+      assert.equal(h.carriedNote(), 'synthetic carried note')
+      assert.equal(h.refresh.stepFourRowCount(), 0, 'a not-governed carry writes no step-4 row')
+    } finally { h.restore() }
+  }
+})
+
+test('RW-CR7 (V50B-16) a GOVERNED project with a duplicate-resolved key consults THAT project: an earlier failed execution of it refuses 409 RECOVERY_PENDING (a key parsed to no project would answer 422 / 400 instead), nothing patched', async () => {
+  const key = duplicateResolved(NEW_KEY)
+  const h = carryMount({ newKey: key })
+  try {
+    await h.refresh.seedExecution(h.scope, { status: 'failed' })
+    const res = await carry(h, carryDecision(key))
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
+    assert.equal(h.patches(), 0)
+  } finally { h.restore() }
+})
+
+test('RW-CR8 (V50B-16, the executor half) a duplicate-resolved key whose embedded project is NOT the rows\' project is refused 409 CONFIRM_CARRY_PROJECT_MISMATCH (idempotencyKey) — the executor checks the BASE of a suffixed key now, where it used to skip it — nothing patched', async () => {
+  const otherProjectKey = duplicateResolved(JSON.stringify({ projectNo: 'PRJ-RW-OTHER', componentSourceId: CARRY_COMPONENT, parentSourceId: null, path: ['NEW', CARRY_COMPONENT] }))
+  const h = carryMount({ switchOn: false, newKey: otherProjectKey })
+  try {
+    const res = await carry(h, carryDecision(otherProjectKey))
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, 'CONFIRM_CARRY_PROJECT_MISMATCH')
+    assert.equal(errorOf(res).details.field, 'idempotencyKey')
+    assert.equal(h.patches(), 0)
+  } finally { h.restore() }
 })
 
 // ── RW-SB1 (R-1) ─────────────────────────────────────────────────────────────────────────────────

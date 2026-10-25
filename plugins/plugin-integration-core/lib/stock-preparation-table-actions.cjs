@@ -93,6 +93,7 @@ const {
   isCompleteComputation,
   mapContinuationStraddle,
   planDigestOf,
+  previewRecoveryOf,
   reconcileComputation,
   selfSettlementFor,
 } = require('./stock-preparation-refresh-lanes.cjs')
@@ -2636,12 +2637,22 @@ async function dryRunStockPreparationAction(input = {}) {
   if (isLargeBomBoundedExpansion(dryRun.expansion) && typeof input.pilotLaneGuard === 'function') {
     await input.pilotLaneGuard()
   }
+  // PR-3a review round 1 (lens A note 2): a GOVERNED project with an execution that did not finish cleanly
+  // previews `recovery_pending` — read off the SAME consult rows the apply refuses 409 RECOVERY_PENDING on
+  // (RL `previewRecoveryOf`: partial / failed / aborted, or `running` under a lease that is not live) — so a
+  // preview never promises an apply that will be refused: canApply false, no token, no bump. It takes precedence
+  // over every other status (not_found and large_bom_bounded included), as RECOVERY_PENDING precedes every other
+  // refusal of the apply. The apply's order is kept — the hold reconciliation below still runs — but it NEVER
+  // settles: `settlementForComputation` reads only the NEWEST execution, so an older failure beside a newer
+  // success would otherwise settle a project the apply refuses.
+  const recovery = dryRun.refresh && dryRun.refresh.governed ? previewRecoveryOf(dryRun.refresh.consult) : null
   // PR-3a (design §8.4, D-13 / TD-24): THE ONE hold reconciliation of a governed, COMPLETE preview — after the
   // pilot guard and BEFORE the token block, so a store failure (503) or a decision that landed since the consult
   // (409 STATE_MOVED) leaves no token and no `small_preview` bump. A settling preview settles here.
-  const refreshOutcome = await reconcileComputation(dryRun, { lane: 'small_preview', settle: { template: action.template } })
-  // A preview mints only when it is applicable AND its reconcile left the pull unsuspended (no hold open).
-  const mintable = dryRun.canApply && !(refreshOutcome && refreshOutcome.suspended)
+  const refreshOutcome = await reconcileComputation(dryRun, { lane: 'small_preview', ...(recovery ? {} : { settle: { template: action.template } }) })
+  // A preview mints only when it is applicable, its reconcile left the pull unsuspended (no hold open) and no
+  // earlier execution awaits recovery.
+  const mintable = dryRun.canApply && !(refreshOutcome && refreshOutcome.suspended) && !recovery
   let dryRunToken = null
   if (mintable) {
     // PLAN GENERATION (batch-refresh phase 0 step 1): an applicable preview SUPERSEDES every earlier
@@ -2673,7 +2684,7 @@ async function dryRunStockPreparationAction(input = {}) {
     : null
   return {
     action: publicActionMetadata(action),
-    status: dryRunStatus(dryRun, refreshOutcome),
+    status: recovery ? 'recovery_pending' : dryRunStatus(dryRun, refreshOutcome),
     largeBom: isLargeBomBoundedExpansion(dryRun.expansion),
     boundedPreview: largeBomBoundedPreview(dryRun.expansion),
     dryRunToken,
@@ -2715,6 +2726,9 @@ async function dryRunStockPreparationAction(input = {}) {
     // PR-3a (P3-V3): the values-free hold stanza of a governed, reconciled preview — counts, closed kind tokens
     // and the hold-set digest. Beside `evidence`, never inside it; absent for every not-governed preview.
     ...(refreshOutcome ? { refreshHold: refreshOutcome.stanza } : {}),
+    // Review round 1: the values-free recovery stanza (a count) of a governed preview awaiting recovery; absent
+    // otherwise (every not-governed response is byte-identical).
+    ...(recovery ? { refreshRecovery: recovery } : {}),
     // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
     // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
     // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH

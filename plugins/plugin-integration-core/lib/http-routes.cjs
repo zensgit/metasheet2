@@ -682,6 +682,7 @@ const {
   saveTableScopeConflictPolicies,
 } = require('./stock-preparation-conflict-policies.cjs')
 const {
+  baseIdempotencyKeyOf,
   duplicateExpandedKeyDiagnosticsForRows,
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
@@ -5026,6 +5027,12 @@ function requireStockPreparationAudit() {
     const expansion = isPlainObject(dryRunEvidence.expansion) ? dryRunEvidence.expansion : null
     return expansion && Number.isInteger(expansion.missingComponentDistinctCount) ? expansion.missingComponentDistinctCount : undefined
   }
+  /** PR-3a: the code a `previewed` stamp carries for the two preview statuses that say "this pull will not apply". */
+  function previewStampCode(status) {
+    if (status === 'suspended') return { code: 'STOCK_PREP_PULL_SUSPENDED' }
+    if (status === 'recovery_pending') return { code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' }
+    return {}
+  }
   const tableActions = createStockPreparationTableActionRegistry({
     actions: configuredTableActions,
     resolveSourceBinding: stockPreparationSourceBinding
@@ -5351,13 +5358,19 @@ function requireStockPreparationAudit() {
    * The project number a 结转 decision addresses, read off its `idempotencyKey` exactly as
    * confirm-writes.cjs reads it (a real key EMBEDS its projectNo; bom-expansion makeIdempotencyKey).
    * A key that does not parse yields null, which the overlay turns into 400 PROJECT_NO_REQUIRED
-   * while the switch is on and ignores while it is off.
+   * while the switch is on, and which the in-lease refresh consult refuses 422 (TD-26).
+   *
+   * Batch-refresh step 4 PR-3a review round 1 (V50B-16): a DUPLICATE-RESOLVED key (the conflict planner's
+   * `<base>::duplicate:<kind>:<hash>`) is parsed through its BASE (`baseIdempotencyKeyOf`, the ONE strip the
+   * executor's key-vs-rows check uses too), so the consulted project is the project of the row the carry
+   * patches. Before the strip such a key parsed to null: with the switch off that newly met the consult's 422
+   * (a carry that worked before this PR), and with the switch on it met the overlay's 400.
    */
   function projectNoFromCarryDecision(decision) {
     if (!isPlainObject(decision)) return null
     let parsed = null
     try {
-      parsed = JSON.parse(decision.idempotencyKey)
+      parsed = JSON.parse(baseIdempotencyKeyOf(decision.idempotencyKey))
     } catch (error) {
       parsed = null
     }
@@ -7717,9 +7730,10 @@ function requireStockPreparationAudit() {
           await stampWriteLockRefusal(action, dryRunTenantId, error)
           throw error
         }
-        // PR-3a (AMB-6): a SUSPENDED preview is stamped `previewed` WITH the suspension code (shape-only; no
-        // vocabulary migration); every other preview's stamp is unchanged.
-        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult), ...(dryRunResult.status === 'suspended' ? { code: 'STOCK_PREP_PULL_SUSPENDED' } : {}) })
+        // PR-3a (AMB-6): a SUSPENDED preview is stamped `previewed` WITH the suspension code, and (review round 1) a
+        // preview awaiting RECOVERY with the recovery code (shape-only; no vocabulary migration); every other
+        // preview's stamp is unchanged.
+        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult), ...previewStampCode(dryRunResult.status) })
         if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo, { recount: true })
         return dryRunResult
       }

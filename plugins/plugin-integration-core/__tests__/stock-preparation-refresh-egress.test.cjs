@@ -240,6 +240,28 @@ test('EG-12b the census: EVERY refusal constructor PR-3a adds, driven with senti
   }
 })
 
+test('EG-14 (review round 1) a `recovery_pending` preview of a project whose execution rows carry sentinel values (lease id, run id, error code) answers only the counts-only `refreshRecovery` stanza — no sentinel, no private key, no token', async () => {
+  const w = await libWorld()
+  const scope = { tenantId: TENANT, sheetId: SHEET, projectNo: PROJECT }
+  const begun = await w.env.store.beginExecution({
+    ...scope,
+    lane: 'small_apply',
+    guard: { leaseRunId: `${SENTINEL}-run`, leaseId: `${SENTINEL}-lease`, fencingEpoch: 1, generation: 1, generationToken: 'tok_eg_dead' },
+    tokenRevision: 'rev_eg_dead',
+    planDigest: 'plan_eg_dead',
+    plannedCounts: { add: 0, update: 0, inactive: 0 },
+    refreshBinding: { continuations: [] },
+    startedBy: `${SENTINEL}-principal`,
+  })
+  await w.env.store.finishExecution({ ...scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: [`E_${SENTINEL.replace(/-/g, '_')}`] })
+  const preview = await w.dryRun()
+  assert.equal(preview.status, 'recovery_pending')
+  assert.equal(preview.dryRunToken, null)
+  assert.deepEqual({ ...preview.refreshRecovery }, { pending: true, openExecutions: 1 })
+  assertClean('EG-14 recovery-pending preview', preview)
+  assert.ok(JSON.stringify(w.env.db.rows(T.execution)).includes(SENTINEL), 'calibration: the sentinel is in the execution row')
+})
+
 test('EG-3/EG-8/EG-11 the routes: a governed project\'s background dry-run job record (its result), the route logs and the registry row carry no hold value and no private key', async () => {
   const warns = []
   const lockEnv = lockKit.createInMemoryProjectWriteLock({ timers: 'real' })

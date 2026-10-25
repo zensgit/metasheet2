@@ -271,11 +271,9 @@ function keyOf(row) {
 // `duplicateResolvedKey`). Every claim map here — the projection's two sets and the three candidate maps — is
 // keyed by BASE keys (members and detection read raw expansion keys), so every lookup and the post-condition
 // strip the suffix first; otherwise a resolved group at a continued or candidate position escapes suppression.
-const DUPLICATE_KEY_SEPARATOR = '::duplicate:'
+// ONE definition of the strip, owned by the module that mints the suffix (review round 1).
 function baseKeyOf(key) {
-  if (typeof key !== 'string') return key
-  const at = key.indexOf(DUPLICATE_KEY_SEPARATOR)
-  return at === -1 ? key : key.slice(0, at)
+  return planner.baseIdempotencyKeyOf(key)
 }
 
 function isActiveRow(row) {

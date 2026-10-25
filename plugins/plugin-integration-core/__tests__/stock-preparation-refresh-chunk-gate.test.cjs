@@ -245,4 +245,33 @@ test('CG-6 a verdict that does not match the plan (`projected` for an unprojecte
   assert.equal(typeof lanes.largeLaneVerdictOf, 'function')
 })
 
+test('CG-7 (review round 1, lens B CHUNKERR) the step-4 store UNREADABLE inside the gate (42P01): 503 STORE_FAILED, and the job STAYS where it was — `queued` (approved, never run) and `paused` (one chunk landed) — byte-identical, no storage.set, no records write: a refused request never advances the job (not even to `failed`)', async () => {
+  for (const variant of ['queued', 'paused']) {
+    const flow = await approvedJob()
+    const api = createTargetRecordsApi()
+    if (variant === 'paused') {
+      const first = await runChunk(flow, api, { refreshGovernanceGate: gateOf(flow), maxDecisionsPerChunk: 1 })
+      assert.equal(first.error, null, first.error && `${first.error.code}: ${first.error.message}`)
+      assert.equal(first.result.status, 'paused', 'calibration: one decision landed, the job paused')
+    }
+    const before = await flow.storage.get(flow.key)
+    assert.equal(before.status, variant, `calibration: the job is ${variant}`)
+    const writes = api.writes()
+    flow.env.db.faults.select = (args) => (args && /integration_stock_prep_(continuation|refresh)/.test(args.table) ? refreshKit.sqlError('42P01', 'relation does not exist') : null)
+    try {
+      const { error, sets } = await runChunk(flow, api, { refreshGovernanceGate: gateOf(flow) })
+      assert.ok(error, `${variant}: refused`)
+      assert.equal(error.status, 503, `${variant}: ${error.code}`)
+      assert.equal(error.code, 'STOCK_PREP_REFRESH_STORE_FAILED')
+      const after = await flow.storage.get(flow.key)
+      assert.equal(after.status, variant, `${variant}: the job STAYS ${variant}`)
+      assert.deepEqual(after, before, `${variant}: byte-identical`)
+      assert.equal(sets, 0, `${variant}: no storage.set during the refused chunk`)
+      assert.equal(api.writes(), writes, `${variant}: no records write`)
+    } finally {
+      delete flow.env.db.faults.select
+    }
+  }
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-chunk-gate.test.cjs', tests)

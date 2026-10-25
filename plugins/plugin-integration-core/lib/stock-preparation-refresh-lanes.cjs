@@ -401,15 +401,43 @@ async function reconcileComputation(dryRun, { lane, settle } = {}) {
 const UNVERIFIED_FAILURE_STATUSES = Object.freeze(['partial', 'failed', 'aborted'])
 
 /**
- * O-22: from the consult's ROWS, never the derived state (the caller's own live lease derives `executing` and
- * masks an earlier failure). Any partial / failed / aborted execution, or a `running` one of ANOTHER lease,
- * refuses — 409 RECOVERY_PENDING, before anything is begun or written.
+ * THE rows a lane must not write over (O-22), read from the consult's ROWS, never the derived state: every
+ * partial / failed / aborted execution, and every `running` one that is not `exemptLeaseId`'s in-flight run. The
+ * apply exempts its OWN lease (its own lease would derive `executing` and mask an earlier failure); a preview
+ * exempts the LIVE lease the consult saw (an apply in flight is not a failure — that preview meets the bump's
+ * WRITE_LOCKED exactly as before). `exemptLeaseId === null` counts every running row.
+ */
+function unfinishedExecutionsOf(consult, exemptLeaseId) {
+  return consult.executions.filter((entry) => UNVERIFIED_FAILURE_STATUSES.includes(entry.status)
+    || (entry.status === 'running' && (exemptLeaseId === null || entry.leaseId !== exemptLeaseId)))
+}
+
+/** The lease the consult saw LIVE (the refresh-state derivation's own read), else null. */
+function liveLeaseIdOf(consult) {
+  const lock = consult && consult.lock
+  return lock && isPlainObject(lock.state) && lock.state.leaseLive === true && isPlainObject(lock.generation) && nonBlankString(lock.generation.leaseId)
+    ? lock.generation.leaseId
+    : null
+}
+
+/**
+ * Review round 1 (lens A note 2): what a PREVIEW of a governed project answers when an earlier execution did not
+ * finish cleanly — the SAME rows the apply refuses RECOVERY_PENDING on, so the preview never promises an apply
+ * that will be refused. Values-free (a count). Null when there is none.
+ */
+function previewRecoveryOf(consult) {
+  const open = unfinishedExecutionsOf(consult, liveLeaseIdOf(consult))
+  return open.length > 0 ? Object.freeze({ pending: true, openExecutions: open.length }) : null
+}
+
+/**
+ * O-22: any partial / failed / aborted execution, or a `running` one of ANOTHER lease, refuses — 409
+ * RECOVERY_PENDING, before anything is begun or written (`unfinishedExecutionsOf`, the caller's own lease exempt).
  */
 function assertNoUnfinishedExecution(consult, guard) {
   const fence = guard && typeof guard.hostWriteFence === 'function' ? guard.hostWriteFence() : null
   const ownLeaseId = fence && nonBlankString(fence.leaseId) ? fence.leaseId : null
-  const open = consult.executions.filter((entry) => UNVERIFIED_FAILURE_STATUSES.includes(entry.status)
-    || (entry.status === 'running' && (ownLeaseId === null || entry.leaseId !== ownLeaseId)))
+  const open = unfinishedExecutionsOf(consult, ownLeaseId)
   if (open.length > 0) {
     throw new StockPreparationRefreshLaneError(409, REFRESH_LANE_ERROR_CODES.RECOVERY_PENDING, 'an earlier execution of this project did not finish cleanly; nothing is written until it is recovered', {
       state: 'failed_pending_recovery',
@@ -632,6 +660,7 @@ module.exports = {
   mapContinuationStraddle,
   pickPersistedHold,
   planDigestOf,
+  previewRecoveryOf,
   reconcileComputation,
   refreshBindingOf,
   refreshHoldStanza,
@@ -645,6 +674,8 @@ module.exports = {
   stockPreparationSourceScopeDigest,
   __internals: {
     isRefreshHandle,
+    liveLeaseIdOf,
+    unfinishedExecutionsOf,
     planningInputsOrRefuse,
     storeFailed,
     storeUnavailable,

@@ -873,6 +873,19 @@ function duplicateGroupDiscriminator(rows) {
   return null
 }
 
+// THE BASE of a duplicate-resolved key (`duplicateResolvedKey` below appends `::duplicate:<kind>:<hash>` to the
+// expansion's own idempotency key, a JSON object that EMBEDS its projectNo — bom-expansion makeIdempotencyKey).
+// Every reader that parses a key or looks one up by its expansion identity strips the suffix through this ONE
+// helper: the continuation core's claim maps (pairing `baseKeyOf`), the carry route's project number and the
+// carry executor's key-vs-rows project check (batch-refresh step 4 PR-3a review round 1, V50B-16). A key
+// without the suffix is returned unchanged; a non-string is returned as given.
+const DUPLICATE_RESOLVED_KEY_SEPARATOR = '::duplicate:'
+function baseIdempotencyKeyOf(key) {
+  if (typeof key !== 'string') return key
+  const at = key.indexOf(DUPLICATE_RESOLVED_KEY_SEPARATOR)
+  return at === -1 ? key : key.slice(0, at)
+}
+
 function duplicateResolvedKey(baseKey, groupFingerprint, discriminatorKind, discriminatorValue) {
   const discriminatorHash = stableFingerprint(`${groupFingerprint}\0${discriminatorKind}\0${stableStringify(stableValue(discriminatorValue))}`)
   return `${baseKey}::duplicate:${discriminatorKind}:${discriminatorHash}`
@@ -1882,6 +1895,7 @@ module.exports = {
   UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   PACK_FIELD_OWNERSHIP_REASONS,
   StockPreparationConflictPlannerError,
+  baseIdempotencyKeyOf,
   derivePackAwarePlmWritableFields,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,

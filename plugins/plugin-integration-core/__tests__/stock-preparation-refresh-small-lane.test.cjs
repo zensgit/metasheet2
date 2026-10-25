@@ -35,6 +35,7 @@ expansionModule.expandPlmProjectBom = function expanderSpy(input) {
 
 const tableActions = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const lanes = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
+const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
 const { readProjectRefreshState } = require(path.join(LIB, 'stock-preparation-refresh-state.cjs'))
 const { sheetWriteScopeKey, writeBindingFromGeneration } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 const { PLM_STOCK_PREPARATION_BOM_READ_PLAN } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
@@ -589,6 +590,12 @@ test('SL-X5/X6/T1 a written execution derives executed_pending_settlement; the n
   const settling = await w.dryRun()
   assert.equal(settling.status, 'ready')
   assert.equal(w.rows('state')[0].settled_execution_id, written.id, 'T1: the settlement names the newest succeeded execution')
+  // T2 (review round 1, M-18): the stored machine digest is the one an INDEPENDENT recompute gives over the rows
+  // as the project-scoped reader returns them (record refs attached) and the machine band of the template.
+  const normalized = tableActions.assertStockPreparationTargetReady(w.action)
+  const asRead = await tableActions.__internals.readExistingStockPreparationRows(w.sheet.api, normalized.target, PROJECT)
+  const independent = pairing.sheetMachineDigest(asRead, { machineFieldIds: pairing.machineBandFieldIds({ template: normalized.template, installedFieldProperties: undefined }) })
+  assert.equal(w.rows('state')[0].settled_sheet_machine_digest, independent, 'T2: the settled digest equals an independent recompute')
   assert.equal((await w.derived()).status, 'complete')
   for (let round = 1; round <= 2; round += 1) {
     const preview = await w.dryRun()
@@ -877,6 +884,152 @@ test('SL-M1 governed mvp-persist plans with the SAME strict band, mapping and co
   suspended.source.state.data = F.secondPullSource()
   await suspended.dryRun()
   await expectCode(suspended.mvp(), { status: 409, code: 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', reason: 'refresh_suspended' })
+})
+
+// ── SL-RF: the hold reconciliation FAILS (review round 1, lens B V50B-08 / M-11; H6, E09) ──────────────
+
+test('SL-RF1 the preview\'s hold reconciliation FAILS (the hold insert answers 42501): 503 STORE_FAILED hold_open — no token, no bump, every step-4 row byte-identical (the transaction rolled back); the apply over the same plan is refused 503 the same way before any execution is begun or row written — a reconcile error is never swallowed into a clean answer', async () => {
+  const w = await world()
+  await w.firstPullApplied()
+  w.source.state.data = F.secondPullSource()
+  const before = w.env.snapshot()
+  const generation = await w.generation()
+  const tokens = w.tokenStore.map.size
+  const executions = w.rows('execution').length
+  const writes = w.sheet.writes()
+  w.env.db.faults.insertOne = (args) => (args && args.table === T.hold ? refreshKit.sqlError('42501', 'permission denied for the synthetic hold table') : null)
+  try {
+    const refused = await expectCode(w.dryRun(), { status: 503, code: 'STOCK_PREP_REFRESH_STORE_FAILED' })
+    assert.equal(refused.details.operation, 'hold_open')
+    assert.equal(refused.details.sqlState, '42501')
+    assert.equal(w.tokenStore.map.size, tokens, 'no token')
+    const after = await w.generation()
+    assert.deepEqual([after.generation, after.generationToken], [generation.generation, generation.generationToken], 'no bump')
+    assert.equal(w.env.snapshot(), before, 'the reconcile transaction left nothing behind')
+    const forged = await tableActions.__internals.createDryRunToken(w.tokenStore, {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      parametersHash: tableActions.__internals.hashJson({ projectNo: PROJECT }),
+      revision: 'rev_sl_rf1_forged',
+      conflictPolicyReview: null,
+      ...writeBindingFromGeneration(after),
+    })
+    const applyRefused = await expectCode(w.apply(forged), { status: 503, code: 'STOCK_PREP_REFRESH_STORE_FAILED' })
+    assert.equal(applyRefused.details.operation, 'hold_open')
+    assert.equal(w.rows('execution').length, executions, 'no execution begun')
+    assert.equal(w.sheet.writes(), writes, 'no row written')
+    assert.equal(w.env.snapshot(), before)
+  } finally {
+    delete w.env.db.faults.insertOne
+  }
+})
+
+test('SL-RF2 (H4) the store answers the preview\'s reconcile 409 STATE_MOVED hold_race (a concurrent computation opened the same hold first — a unique violation on the hold insert): the preview PROPAGATES the retryable 409 — never translated to 503, never swallowed — no token, no bump, nothing persisted', async () => {
+  const w = await world()
+  await w.firstPullApplied()
+  w.source.state.data = F.secondPullSource()
+  const before = w.env.snapshot()
+  const generation = await w.generation()
+  const tokens = w.tokenStore.map.size
+  w.env.db.faults.insertOne = (args) => (args && args.table === T.hold ? refreshKit.sqlError('23505', 'duplicate key value violates the synthetic open-hold unique index') : null)
+  try {
+    const refused = await expectCode(w.dryRun(), { status: 409, code: 'STOCK_PREP_PULL_STATE_MOVED', reason: 'hold_race' })
+    assert.equal(refused.details.partial === undefined || refused.details.partial === false, true)
+    assert.equal(w.tokenStore.map.size, tokens)
+    const after = await w.generation()
+    assert.deepEqual([after.generation, after.generationToken], [generation.generation, generation.generationToken])
+    assert.equal(w.env.snapshot(), before)
+  } finally {
+    delete w.env.db.faults.insertOne
+  }
+})
+
+// ── SL-A12: a person's fill never revokes a confirmed relationship (E-4) ─────────────────────────────
+
+test('SL-A12 (E-4 / A12) a PERSON\'s fill of a human column on an old row of a CONFIRMED relationship never revokes it: the re-preview stays ready, the continuation stays active with a valid verdict, the apply writes no human column and the filled value survives', async () => {
+  const w = await world()
+  await w.firstPullApplied()
+  w.source.state.data = F.secondPullSource()
+  assert.equal((await w.dryRun()).status, 'suspended')
+  const confirmed = await w.confirmOpenCandidate()
+  assert.equal((await w.dryRun()).status, 'ready', 'calibration: the confirmed relationship verifies')
+  const root = w.sheet.rows.find((row) => row.data.componentSourceId === 'S-001' && JSON.parse(row.data.path).length === 1)
+  assert.ok(root, 'the old S-001 root row')
+  // The fill, as a host write would land it: the human cell set, the record version bumped.
+  root.data.notes = 'synthetic human fill'
+  root.version += 1
+  const again = await w.dryRun()
+  assert.equal(again.status, 'ready', 'the human fill does not revoke the relationship')
+  const continuation = w.rows('continuation').find((row) => row.id === confirmed.continuationId)
+  assert.equal(continuation.status, 'active')
+  assert.equal(continuation.last_verdict, 'valid')
+  const applied = await w.apply(again.dryRunToken)
+  assert.equal(applied.status, 'succeeded')
+  assert.equal(w.sheet.rows.find((row) => row.id === root.id).data.notes, 'synthetic human fill', 'the apply writes no human column')
+})
+
+// ── SL-R: the preview of a project awaiting RECOVERY (review round 1, lens A note 2) ─────────────────
+
+test('SL-R1 a governed project with an earlier FAILED / PARTIAL / ABORTED execution, or a RUNNING one whose lease is not live, PREVIEWS `recovery_pending` — canApply false, no token minted, no bump, the values-free stanza { pending, openExecutions } — read off the same rows the apply refuses on: an apply with a token forged at the current generation is 409 RECOVERY_PENDING', async () => {
+  for (const status of ['failed', 'partial', 'aborted', 'running']) {
+    const w = await world()
+    await w.firstPullApplied()
+    await w.env.seedExecution(SCOPE, { status })
+    const generation = await w.generation()
+    const tokensBefore = w.tokenStore.map.size
+    const preview = await w.dryRun()
+    assert.equal(preview.status, 'recovery_pending', status)
+    assert.equal(preview.canApply, false, status)
+    assert.equal(preview.dryRunToken, null, status)
+    assert.equal(preview.evidence.canApply, false, `${status}: the evidence agrees`)
+    assert.deepEqual({ ...preview.refreshRecovery }, { pending: true, openExecutions: 1 }, status)
+    assert.equal(w.tokenStore.map.size, tokensBefore, `${status}: no token minted`)
+    const after = await w.generation()
+    assert.deepEqual([after.generation, after.generationToken], [generation.generation, generation.generationToken], `${status}: no bump`)
+    const forged = await tableActions.__internals.createDryRunToken(w.tokenStore, {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      parametersHash: tableActions.__internals.hashJson({ projectNo: PROJECT }),
+      revision: preview.revision,
+      conflictPolicyReview: null,
+      ...writeBindingFromGeneration(after),
+    })
+    await expectCode(w.apply(forged), { status: 409, code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' })
+  }
+})
+
+test('SL-R2 the LIVE lease is exempt, exactly as the apply exempts its own: an execution `running` under the lease the consult sees live (an apply in flight) is not a failure — the preview proceeds as before and meets the bump\'s 409 WRITE_LOCKED (no token), never `recovery_pending`', async () => {
+  const w = await world()
+  await w.firstPullApplied()
+  const grant = await w.harness.lock.acquire(w.scopeKey, { purpose: 'small_apply', runId: 'sl-r2-in-flight' })
+  try {
+    await w.env.seedExecution(SCOPE, { status: 'running', leaseId: grant.leaseId, leaseRunId: 'sl-r2-in-flight' })
+    const consult = await w.consult()
+    assert.equal(lanes.__internals.liveLeaseIdOf(consult), grant.leaseId, 'calibration: the consult sees the lease live')
+    const refused = await expectCode(w.dryRun(), { status: 409 })
+    assert.equal(refused.code, 'STOCK_PREP_PROJECT_WRITE_LOCKED', `the in-flight run's preview is refused by the bump, not recovery: ${refused.code}`)
+    assert.equal(w.tokenStore.map.size, 0)
+  } finally {
+    await w.harness.lock.createGuard(grant).release()
+  }
+})
+
+test('SL-R3 a preview awaiting recovery NEVER settles: an OLDER failed execution beside a NEWER succeeded one (the newest-execution rule alone would settle) — the clean preview answers `recovery_pending` and the state row keeps no settlement; the derived state reads failed_pending_recovery', async () => {
+  const w = await world()
+  await w.firstPullApplied()
+  const newest = w.rows('execution').find((row) => row.status === 'succeeded')
+  assert.ok(newest, 'calibration: the first pull recorded a succeeded execution')
+  // An OLDER failed run (its started_at before the succeeded one's), seeded through the store's own clock.
+  const now = w.env.clock.iso()
+  w.env.clock.set(new Date(Date.parse(now) - 60 * 60 * 1000).toISOString())
+  await w.env.seedExecution(SCOPE, { status: 'failed' })
+  w.env.clock.set(now)
+  const preview = await w.dryRun()
+  assert.equal(preview.status, 'recovery_pending')
+  assert.equal(preview.dryRunToken, null)
+  const state = w.rows('state')[0]
+  assert.ok(state, 'calibration: the state row exists')
+  assert.equal(state.settled_execution_id, null, 'no settlement while an execution awaits recovery')
+  assert.equal(state.settled_at, null)
+  assert.equal((await w.derived()).status, 'failed_pending_recovery')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-small-lane.test.cjs', tests)
