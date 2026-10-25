@@ -401,7 +401,7 @@ test('GR-08 governed by rows: headers with memberCount, members, state, decision
   assert.equal(derived.governed, 'protected')
   assert.deepEqual(derived.counts, { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 1 })
   const slice = plannerSlice(answer)
-  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: false, projectNo: w.scope.projectNo, continuations: slice.continuations, members: slice.members, demandEvidence: null, sourceIdentity: w.sourceIdentity, specSlotDeclared: false })
+  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: false, projectNo: w.scope.projectNo, continuations: slice.continuations, members: slice.members, demandEvidence: null, sourceIdentity: w.sourceIdentity, specSlotDeclared: false, persistedHolds: [] })
   const projection = pairing.buildContinuationProjection(input.continuations, input.members)
   assert.equal(projection.suppressAddKeys.size, 4)
   assert.equal(projection.protectInactiveKeys.size, 4)

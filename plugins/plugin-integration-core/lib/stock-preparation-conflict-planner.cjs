@@ -1623,7 +1623,7 @@ function planStockPreparationConflicts(input = {}) {
       if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
       // Step 4: a row a continuation protects (or a suspended candidate's old row) is NOT swept, so it
       // is not a predecessor either (design §6.2, third consumer).
-      if (governed && (governed.continuedRefFor(key) || governed.candidateProtectKeys.has(key))) continue
+      if (governed && (governed.continuedRefFor(key) || governed.candidateProtectHoldFor(key))) continue
       const existingRow = rows[0]
       carrySources.push(existingRow.active === false ? existingRow : { ...existingRow, active: false })
     }
@@ -1648,8 +1648,12 @@ function planStockPreparationConflicts(input = {}) {
         addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
         continue
       }
-      if (!existingRow && governed.candidateSuppressAddKeys.has(key)) {
-        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: governed.candidateSuppressAddKeys.get(key) }))
+      // PR-3a (TD-15(i), O-5; TD-14, O-4): a candidate's new-subtree key — free (would be ADDed) OR already
+      // occupied by an inactive tombstone / an active copy (would be revived / patched) — is SKIPped, compared
+      // as its BASE key so a resolved duplicate group cannot escape.
+      const candidateHold = governed.candidatePositionHoldFor(key)
+      if (candidateHold) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: candidateHold }))
         continue
       }
     }
@@ -1710,8 +1714,11 @@ function planStockPreparationConflicts(input = {}) {
 
     const refreshChanges = strategy.refreshPlmSystemFields ? changedFields(row, existingRow, plmFields, templateFields) : []
     // Step 4, design §6.7 (pilot projects only): a change in a content-trigger field suspends the whole
-    // pull; the decision itself stays what the planner computed (the suspension dominates).
-    if (governed && governed.pilot && refreshChanges.length > 0 && existingRow.active !== false) {
+    // pull; the decision itself stays what the planner computed (the suspension dominates). PR-3a (O-3,
+    // TD-13): detected REGARDLESS of `conflictStrategy.refreshPlmSystemFields` — with the strategy off a
+    // material change would otherwise reach a governed pilot sheet unheld. `noteContentChange` compares the
+    // trigger fields itself and returns when none changed.
+    if (governed && governed.pilot && existingRow.active !== false) {
       governed.noteContentChange(row, existingRow, { reason: 'plm_system_refresh' })
     }
     if (refreshChanges.length === 0) {
@@ -1731,8 +1738,9 @@ function planStockPreparationConflicts(input = {}) {
         addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
         continue
       }
-      if (governed.candidateProtectKeys.has(key)) {
-        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: governed.candidateProtectKeys.get(key) }))
+      const protectHold = governed.candidateProtectHoldFor(key)
+      if (protectHold) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: protectHold }))
         continue
       }
     }

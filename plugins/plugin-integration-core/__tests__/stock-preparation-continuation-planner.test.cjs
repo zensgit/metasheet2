@@ -656,4 +656,276 @@ test('content change: on a governed NON-pilot project a non-identity trigger cha
   assert.deepEqual(Object.keys(holdOf(pilot, 'content_change').detail.fields).sort(), ['rawQuantity', 'totalQuantity'])
 })
 
+// ── PR-3a (batch-refresh step 4): persisted holds survive pilot exit (AMB-1 / TD-10), the displayed plan
+//    never contradicts a hold (O-5 / TD-15 / TD-29), and the O-3 / O-4 / O-6 / O-7 planner fixes ──────────
+
+const pairingCore = require(path.join(__dirname, '..', 'lib', 'stock-preparation-continuation-pairing.cjs'))
+const { stableFingerprint } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs')).__internals
+
+// A pure-core hold as the refresh store would hand it back through a consult and the lane would field-pick it
+// (PERSISTED_HOLD_KEYS): jsonb round-trip for subject / detail, nulls for absent optionals.
+function persistedFrom(hold, { runbookOnly = false, continuationRoots = null, confirmable, notConfirmableReason } = {}) {
+  const isConfirmable = confirmable === undefined ? hold.confirmable === true : confirmable
+  return {
+    kind: hold.kind,
+    fingerprint: hold.fingerprint,
+    confirmable: isConfirmable,
+    notConfirmableReason: isConfirmable ? null : (notConfirmableReason || hold.notConfirmableReason),
+    shapeToken: hold.shapeToken || null,
+    continuationId: hold.continuationId || null,
+    subject: JSON.parse(JSON.stringify(hold.subject)),
+    detail: JSON.parse(JSON.stringify(hold.detail)),
+    evidenceFingerprint: hold.evidenceFingerprint || null,
+    comparisonFingerprint: hold.comparisonFingerprint || null,
+    pairingFingerprint: hold.pairingFingerprint || null,
+    runbookOnly,
+    continuationRoots,
+  }
+}
+
+function writesOn(planned, predicate) {
+  return planned.decisions.filter((decision) => [DECISIONS.ADD, DECISIONS.UPDATE, DECISIONS.INACTIVE].includes(decision.decision) && predicate(decision))
+}
+
+function underPath(prefix) {
+  return (decision) => {
+    const key = JSON.parse(decision.idempotencyKey.split('::duplicate:')[0])
+    return Array.isArray(key.path) && key.path.length >= prefix.length && key.path.slice(0, prefix.length).join('/') === prefix.join('/')
+  }
+}
+
+test('PC-RE-0 persistedHolds is a REQUIRED planner key (absent / not an array => 500), each entry closed to the 13-key PHK set and validated like a stored hold', async () => {
+  assert.equal(pairingCore.CONTINUATION_INPUT_KEYS.length, 10)
+  assert.ok(pairingCore.CONTINUATION_INPUT_KEYS.includes('persistedHolds'))
+  assert.deepEqual(pairingCore.PERSISTED_HOLD_KEYS.slice().sort(), ['comparisonFingerprint', 'confirmable', 'continuationId', 'continuationRoots', 'detail', 'evidenceFingerprint', 'fingerprint', 'kind', 'notConfirmableReason', 'pairingFingerprint', 'runbookOnly', 'shapeToken', 'subject'])
+  const valid = F.continuationInput()
+  const { persistedHolds: omitted, ...withoutKey } = valid
+  assert.deepEqual(omitted, [])
+  const refusesWith = (input, field) => assert.throws(() => pairingCore.normalizeContinuationInput(input), (error) => error.status === 500
+    && error.code === CONTINUATION_ERROR_CODES.INPUT_INVALID && (field === undefined || error.details.field === field), `refused ${field}`)
+  refusesWith(withoutKey, 'continuation.persistedHolds')
+  refusesWith({ ...valid, persistedHolds: null }, 'continuation.persistedHolds')
+  refusesWith({ ...valid, persistedHolds: {} }, 'continuation.persistedHolds')
+  // The planner itself refuses (a lane that forgot the key never silently plans without the protection).
+  const { sheet, expansion, a01 } = await confirmedStory()
+  assert.throws(() => F.plan(expansion, sheet, { continuation: withoutKey }), (error) => error.code === CONTINUATION_ERROR_CODES.INPUT_INVALID && error.details.field === 'continuation.persistedHolds')
+  const entry = persistedFrom(holdOf(a01, 'continuation_candidate'))
+  assert.equal(pairingCore.normalizeContinuationInput({ ...valid, persistedHolds: [entry] }).persistedHolds.length, 1)
+  const at = 'continuation.persistedHolds[0]'
+  refusesWith({ ...valid, persistedHolds: ['x'] }, at)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, id: 'hold_1' }] }, `${at}.id`)
+  const { runbookOnly: dropped, ...missingKey } = entry
+  assert.equal(dropped, false)
+  refusesWith({ ...valid, persistedHolds: [missingKey] }, `${at}.runbookOnly`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, kind: 'not_a_kind' }] }, `${at}.kind`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, fingerprint: ' ' }] }, `${at}.fingerprint`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, confirmable: 'yes' }] }, `${at}.confirmable`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, notConfirmableReason: 'phase_2' }] }, `${at}.notConfirmableReason`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, confirmable: false, notConfirmableReason: 'nope' }] }, `${at}.notConfirmableReason`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, shapeToken: 'no_shape' }] }, `${at}.shapeToken`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, continuationId: 7 }] }, `${at}.continuationId`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, subject: null }] }, `${at}.subject`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, detail: [] }] }, `${at}.detail`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, runbookOnly: 1 }] }, `${at}.runbookOnly`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, continuationRoots: { oldRootKey: 'a' } }] }, `${at}.continuationRoots`)
+  refusesWith({ ...valid, persistedHolds: [{ ...entry, continuationRoots: { oldRootKey: 'a', newRootKey: 'b', extra: 1 } }] }, `${at}.continuationRoots`)
+  refusesWith({ ...valid, persistedHolds: [entry, { ...entry }] }, 'continuation.persistedHolds[1].fingerprint')
+})
+
+test('PC-RE-1 pilot exit: a persisted continuation_candidate is re-emitted with its STORED fingerprint, the plan stays suspended, and the copy is neither ADDed nor the old rows swept (P3-H8; the control without it would write both)', async () => {
+  const { sheet, expansion, a01 } = await confirmedStory()
+  const candidate = holdOf(a01, 'continuation_candidate')
+  const entry = persistedFrom(candidate)
+  const exited = F.plan(expansion, sheet, { continuation: F.continuationInput({ pilot: false, demandEvidence: expansion.demandEvidence, persistedHolds: [entry] }) })
+  const reemitted = holdOf(exited, 'continuation_candidate')
+  assert.equal(reemitted.fingerprint, candidate.fingerprint)
+  assert.equal(exited.suspended, true)
+  assert.equal(exited.valid, false)
+  assert.deepEqual(exited.continuation.holds, { count: 1, confirmable: 1, kinds: { continuation_candidate: 1 } })
+  assert.deepEqual(writesOn(exited, underPath(['P-001', 'S-001'])), [], 'no ADD of the P-001 > S-001 copy')
+  assert.deepEqual(writesOn(exited, underPath(['S-001'])), [], 'no INACTIVE of the old S-001 rows')
+  // The control: the same non-pilot computation WITHOUT the persisted hold would ADD the copy and sweep the old rows.
+  const control = F.plan(expansion, sheet, { continuation: F.continuationInput({ pilot: false, demandEvidence: expansion.demandEvidence }) })
+  assert.equal(control.suspended, false)
+  assert.ok(writesOn(control, underPath(['P-001', 'S-001'])).length >= 4)
+  assert.ok(writesOn(control, underPath(['S-001'])).length >= 4)
+  // Pilot still ON: detection re-creates the same hold; the persisted copy is NOT re-emitted twice (one hold).
+  const stillPilot = F.plan(expansion, sheet, { continuation: F.continuationInput({ demandEvidence: expansion.demandEvidence, persistedHolds: [entry] }) })
+  assert.equal(stillPilot.holds.filter((hold) => hold.fingerprint === candidate.fingerprint).length, 1)
+})
+
+test('PC-RE-2 an escalated (runbook-only) relationship hold whose body no longer hashes to its fingerprint is re-emitted with the STORED fingerprint — pilot or not — and never through makeHold (R-6)', async () => {
+  const { sheet, expansion, header, members } = await confirmedStory()
+  const switched = governedPlan(expansion, sheet, header, members, { sourceIdentity: { ...F.SOURCE_IDENTITY, readPlanDigest: 'c'.repeat(64) } })
+  const reconfirm = holdOf(switched, 'relationship_reconfirm')
+  assert.equal(reconfirm.confirmable, true)
+  // The store's escalate UPDATE (endContinuation escalate_special_repair): confirmable false, specialist_repair,
+  // runbook_only true, fingerprint NOT recomputed. The continuation is ENDED, so it is not in the planner slice.
+  const escalated = persistedFrom(reconfirm, {
+    runbookOnly: true, confirmable: false, notConfirmableReason: 'specialist_repair',
+    continuationRoots: { oldRootKey: header.oldRootKey, newRootKey: header.newRootKey },
+  })
+  const body = pairingCore.__internals.reemittedHold(escalated)
+  assert.notEqual(pairingCore.holdFingerprint(body), escalated.fingerprint, 'the escalated body no longer hashes to its stored fingerprint')
+  for (const pilot of [false, true]) {
+    const planned = F.plan(expansion, sheet, { continuation: F.continuationInput({ pilot, demandEvidence: expansion.demandEvidence, persistedHolds: [escalated] }) })
+    const runbook = planned.holds.filter((hold) => hold.kind === 'relationship_reconfirm')
+    assert.equal(runbook.length, 1, `pilot=${pilot}`)
+    assert.equal(runbook[0].fingerprint, escalated.fingerprint, 'the stored fingerprint, verbatim')
+    assert.equal(runbook[0].confirmable, false)
+    assert.equal(runbook[0].notConfirmableReason, 'specialist_repair')
+    assert.equal(planned.suspended, true)
+    // PC-RE-5: the ended relationship's subtrees stay protected through its roots: no copy, no sweep.
+    assert.deepEqual(writesOn(planned, underPath(['P-001', 'S-001'])), [], `pilot=${pilot}: no ADD of the copy`)
+    assert.deepEqual(writesOn(planned, underPath(['S-001'])), [], `pilot=${pilot}: no INACTIVE of the old rows`)
+  }
+})
+
+test('PC-RE-3/4/6 the displayed plan after pilot exit never contradicts a re-emitted hold: a dropped head\'s copy is not ADDed, an occupied candidate position is not revived, and a non-detection hold kind is NOT re-emitted', async () => {
+  // RE-4 dropped head (first pull with S-001 AND P-001): pilot holds it; after exit the persisted hold keeps the copy out.
+  const firstPull = await F.expand(F.secondPullSource())
+  const pilotPlan = F.plan(firstPull, [], { continuation: F.continuationInput({ demandEvidence: firstPull.demandEvidence }) })
+  const dropped = holdOf(pilotPlan, 'dropped_order_head_unresolved')
+  assert.deepEqual(writesOn(pilotPlan, underPath(['P-001', 'S-001'])), [], 'pilot: the dropped head\'s copy is not ADDed in the displayed plan (O-7 display)')
+  const exitedHead = F.plan(firstPull, [], { continuation: F.continuationInput({ pilot: false, demandEvidence: firstPull.demandEvidence, persistedHolds: [persistedFrom(dropped)] }) })
+  assert.equal(holdOf(exitedHead, 'dropped_order_head_unresolved').fingerprint, dropped.fingerprint)
+  assert.equal(exitedHead.suspended, true)
+  assert.deepEqual(writesOn(exitedHead, underPath(['P-001', 'S-001'])), [])
+  // RE-6 an occupied candidate position (an inactive tombstone at P-001 > S-001): never revived, pilot or exited.
+  const sheet = await F.firstPullSheet()
+  const expansion = await F.expand(F.secondPullSource())
+  const target = expansion.rows.find((row) => row.componentSourceId === 'S-001' && row.path.startsWith('["P-001"'))
+  const tombstone = F.withRecordRef({ ...target, active: false }, 'rec_tomb_s', 3)
+  const occupiedPilot = F.plan(expansion, sheet.concat([tombstone]), { continuation: F.continuationInput({ demandEvidence: expansion.demandEvidence }) })
+  const occupiedHold = holdOf(occupiedPilot, 'candidate_target_occupied')
+  const exitedOccupied = F.plan(expansion, sheet.concat([tombstone]), { continuation: F.continuationInput({ pilot: false, demandEvidence: expansion.demandEvidence, persistedHolds: [persistedFrom(occupiedHold)] }) })
+  for (const planned of [occupiedPilot, exitedOccupied]) {
+    assert.equal(planned.suspended, true)
+    assert.deepEqual(writesOn(planned, underPath(['P-001', 'S-001'])), [], 'no ADD and no revive under the occupied position')
+    assert.deepEqual(writesOn(planned, underPath(['S-001'])), [], 'no INACTIVE of the old rows')
+  }
+  // A persisted hold of a kind only VERIFICATION produces (relationship_reconfirm, not runbook-only) is NOT
+  // re-emitted after exit: verification re-derives it from the continuation, which is still in the slice.
+  const { header, members } = await confirmedStory()
+  const verification = holdOf(governedPlan(expansion, sheet, header, members, { sourceIdentity: { ...F.SOURCE_IDENTITY, readPlanDigest: 'd'.repeat(64) } }), 'relationship_reconfirm')
+  const notReemitted = F.plan(expansion, sheet, { continuation: F.continuationInput({ pilot: false, demandEvidence: expansion.demandEvidence, persistedHolds: [persistedFrom(verification)] }) })
+  assert.equal(notReemitted.holds.some((hold) => hold.fingerprint === verification.fingerprint), false)
+  // A pilot content change persisted before exit IS re-emitted (its kind/reason is pilot-detection only).
+  assert.equal(pairingCore.__internals.shouldReemitPersistedHold({ kind: 'content_change', detail: { reason: 'plm_system_refresh' }, runbookOnly: false }, false), true)
+  assert.equal(pairingCore.__internals.shouldReemitPersistedHold({ kind: 'content_change', detail: { reason: 'component_identity_conflict' }, runbookOnly: false }, false), false)
+  assert.equal(pairingCore.__internals.shouldReemitPersistedHold({ kind: 'continuation_candidate', detail: {}, runbookOnly: false }, true), false, 'pilot on: detection owns it')
+})
+
+test('PC-P1 (O-3, TD-13) on a pilot project a trigger-field change is held even with conflictStrategy.refreshPlmSystemFields off (the strategy no longer gates detection)', async () => {
+  const { sheet, expansion, header, members } = await confirmedStory()
+  const afterApply = F.applyToSheet(governedPlan(expansion, sheet, header, members), sheet, { idPrefix: 'rec_p' })
+  // A NON-identity trigger change (N-001's order quantity 1 -> 3): only the plm_system_refresh path detects it
+  // (an identity field would be held through component_identity_conflict whatever the strategy).
+  const changed = await F.expand(F.project({
+    orders: [{ part: 'P-001', qty: 5 }, { part: 'S-001', qty: 10 }, { part: 'N-001', qty: 3 }],
+    parts: F.PARTS.slice(),
+    boms: { 'P-001': [{ part: 'S-001', usage: 2 }], ...F.S_BOMS },
+  }))
+  const strategyOff = F.plan(changed, afterApply, {
+    conflictStrategy: { refreshPlmSystemFields: false },
+    continuation: F.continuationInput({ demandEvidence: changed.demandEvidence, continuations: [header], members }),
+  })
+  const hold = holdOf(strategyOff, 'content_change')
+  assert.equal(hold.detail.reason, 'plm_system_refresh')
+  assert.deepEqual(Object.keys(hold.detail.fields).sort(), ['rawQuantity', 'totalQuantity'])
+  assert.equal(strategyOff.suspended, true)
+  assert.equal(F.byDecision(strategyOff, DECISIONS.UPDATE).length, 0, 'the strategy still decides the decision; detection is independent of it')
+})
+
+test('PC-P2 (O-4, TD-14) a keep_multiple_rows duplicate group resolved AT a continued new position is never ADDed (the ::duplicate: suffix is stripped before every lookup and in the post-condition)', async () => {
+  const { sheet, header, members } = await confirmedStory()
+  const doubled = await F.expand(F.secondPullSource({ boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }, { part: 'PART-B', usage: 9 }] } }))
+  const partB = members.find((member) => member.componentSourceId === 'PART-B')
+  const review = { selectedPolicies: [{ fingerprint: stableFingerprint(partB.newKey), policy: 'keep_multiple_rows', scope: 'run_only' }] }
+  const planned = F.plan(doubled, sheet, {
+    duplicatePolicyReview: review,
+    continuation: F.continuationInput({ demandEvidence: doubled.demandEvidence, continuations: [header], members }),
+  })
+  const resolved = planned.decisions.filter((decision) => decision.idempotencyKey.startsWith(`${partB.newKey}::duplicate:`))
+  assert.equal(resolved.length, 2, 'the group WAS resolved into two suffixed keys (the fixture exercises the strip)')
+  assert.ok(resolved.every((decision) => decision.decision === DECISIONS.SKIP && decision.conflictSummary.type === 'continued_by_relationship'))
+  // The post-condition compares base keys: a resolved ADD at a continued position is a violation by itself.
+  const projection = pairingCore.buildContinuationProjection([header], members)
+  assert.throws(() => pairingCore.assertContinuationPostCondition([{ decision: DECISIONS.ADD, idempotencyKey: resolved[0].idempotencyKey }], { projection }),
+    (error) => error.code === CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED)
+})
+
+test('PC-P3 (O-5, TD-15) the displayed plan: an occupant at a candidate position is SKIPped (no revive UPDATE), and a dropped head\'s old rows are not swept', async () => {
+  const sheet = await F.firstPullSheet()
+  const expansion = await F.expand(F.secondPullSource())
+  for (const occupiedComponent of ['S-001', 'PART-C']) {
+    const target = expansion.rows.find((row) => row.componentSourceId === occupiedComponent && row.path.startsWith('["P-001"'))
+    const tombstone = F.withRecordRef({ ...target, active: false }, `rec_tomb_${occupiedComponent}`, 3)
+    const planned = F.plan(expansion, sheet.concat([tombstone]), { continuation: F.continuationInput({ demandEvidence: expansion.demandEvidence }) })
+    assert.equal(planned.counts.update, 0, `${occupiedComponent}: the tombstone is not revived inside a suspended plan`)
+    const atTombstone = planned.decisions.filter((decision) => decision.idempotencyKey === target.idempotencyKey)
+    assert.deepEqual(atTombstone.map((decision) => `${decision.decision}:${decision.conflictSummary.type}`), ['skip:suspended_continuation_candidate'])
+  }
+  // A head dropped as "a child elsewhere" and expanded NOWHERE, with old rows: the old rows are protected.
+  const nowhere = await F.expand(F.project({
+    orders: [{ part: 'P-001', qty: 5 }, { part: 'S-001', qty: 10 }],
+    parts: F.PARTS.slice(),
+    boms: { 'P-001': [{ part: 'N-001', usage: 1 }], ...F.S_BOMS },
+  }))
+  const droppedPlan = F.plan(nowhere, sheet, { continuation: F.continuationInput({ demandEvidence: nowhere.demandEvidence }) })
+  holdOf(droppedPlan, 'dropped_order_head_unresolved')
+  assert.equal(droppedPlan.counts.inactive, 0, 'the dropped head\'s old rows are not swept in the displayed plan')
+  // An EXTRA row under a continued old subtree (not a member: landed after the confirm) while the relationship
+  // fails verification: protected with the subtree (TD-15(ii)), never swept inside the suspended plan.
+  const story = await confirmedStory()
+  const oldRoot = story.sheet.find((row) => row.componentSourceId === 'S-001')
+  const extra = F.withRecordRef({
+    ...oldRoot,
+    componentSourceId: 'PART-X',
+    parentSourceId: 'S-001',
+    path: JSON.stringify(['S-001', 'PART-X']),
+    idempotencyKey: JSON.stringify({ projectNo: F.PROJECT_NO, componentSourceId: 'PART-X', parentSourceId: 'S-001', path: ['S-001', 'PART-X'] }),
+  }, 'rec_extra_x', 1)
+  const failing = governedPlan(story.expansion, story.sheet.concat([extra]), story.header, story.members, { pilot: false, sourceIdentity: { ...F.SOURCE_IDENTITY, readPlanDigest: 'e'.repeat(64) } })
+  assert.deepEqual(failing.continuation.verdicts, { [story.header.id]: 'source_scope_changed' })
+  const atExtra = failing.decisions.filter((decision) => decision.idempotencyKey === extra.idempotencyKey)
+  assert.deepEqual(atExtra.map((decision) => `${decision.decision}:${decision.conflictSummary.type}`), ['skip:suspended_continuation_candidate'])
+  assert.equal(failing.counts.inactive, 0)
+  // The extra row ALONE already breaks the pairing (the old closure gained a row): structure_changed, and the
+  // same protection holds without any other change.
+  const extraOnly = governedPlan(story.expansion, story.sheet.concat([extra]), story.header, story.members, { pilot: false })
+  assert.deepEqual(extraOnly.continuation.verdicts, { [story.header.id]: 'structure_changed' })
+  assert.equal(extraOnly.decisions.filter((decision) => decision.idempotencyKey === extra.idempotencyKey)[0].decision, DECISIONS.SKIP)
+  assert.equal(extraOnly.counts.inactive, 0)
+  // The post-condition forbids an UPDATE at an occupied candidate key, and compares base keys.
+  const projection = pairingCore.buildContinuationProjection([], [])
+  assert.throws(() => pairingCore.assertContinuationPostCondition([{ decision: DECISIONS.UPDATE, idempotencyKey: 'k_occ' }], { projection, candidateOccupiedKeys: new Map([['k_occ', 'h']]) }),
+    (error) => error.code === CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED)
+  assert.throws(() => pairingCore.assertContinuationPostCondition([{ decision: DECISIONS.ADD, idempotencyKey: 'k_new::duplicate:pathParent:abc' }], { projection, candidateSuppressAddKeys: new Map([['k_new', 'h']]) }),
+    (error) => error.code === CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED)
+})
+
+test('PC-P4 (O-6) a component held both as an active root still ordered AND as an active nested copy raises candidate_shape_unresolved / old_root_still_ordered instead of being filtered out', async () => {
+  const sheet = await F.firstPullSheet()
+  const kept = await F.expand(F.secondPullSource(), { rootSelection: { enabled: false } })
+  const copy = kept.rows.filter((row) => row.path.startsWith('["P-001","S-001"')).map((row, index) => F.withRecordRef({ ...row }, `rec_twocopy_${index}`, 1))
+  assert.equal(copy.length, 4)
+  const planned = F.plan(kept, sheet.concat(copy), { continuation: F.continuationInput({ demandEvidence: kept.demandEvidence }) })
+  const hold = holdOf(planned, 'candidate_shape_unresolved')
+  assert.equal(hold.shapeToken, 'old_root_still_ordered')
+  assert.equal(hold.confirmable, false)
+  assert.equal(planned.suspended, true)
+  assert.deepEqual(writesOn(planned, underPath(['P-001', 'S-001'])), [], 'the nested copy is not patched inside the suspended plan')
+})
+
+test('PC-P5 (O-7) inactive remnants + a head dropped by a base rule and expanded under P-001: held (only ACTIVE root rows count), suspended, and the copy is not ADDed', async () => {
+  const remnants = (await F.firstPullSheet()).map((row) => F.withRecordRef({ ...row, active: false }, `${row[EXISTING_ROW_RECORD_REF].id}_r`, 2))
+  const expansion = await F.expand(F.secondPullSource())
+  const planned = F.plan(expansion, remnants, { continuation: F.continuationInput({ demandEvidence: expansion.demandEvidence }) })
+  const hold = holdOf(planned, 'dropped_order_head_unresolved')
+  assert.equal(hold.detail.componentSourceId, 'S-001')
+  assert.equal(planned.suspended, true)
+  assert.deepEqual(writesOn(planned, underPath(['P-001', 'S-001'])), [], 'no ADD of the copy')
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-continuation-planner.test.cjs', tests)

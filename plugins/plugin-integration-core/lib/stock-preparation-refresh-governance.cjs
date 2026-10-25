@@ -35,10 +35,15 @@
 // before the lock read — is invisible to both halves, and the answer is the state before it (possibly 已完成,
 // export allowed). The review (round 2) reproduced it with a zero-write FAILED run: the stale consult answers
 // 已完成, the next one 失败待恢复. A settling computation built on such a consult names the execution it saw
-// (O-14), so it cannot settle over the unseen one. The formal export must not trust one consult: a zero-write
-// failure moves neither the lock generation nor the sheet's machine digest, so the export gate's double
-// generation read and digest check cannot see it — its FINAL re-consult inside its own read must (design
-// O-21, PR-5).
+// (O-14), so it cannot settle over the unseen one. The formal export must not trust one consult, and one more
+// consult is not enough either: a FINAL re-consult can itself land after such a whole run and miss it the same
+// way (reproduced on real PG by the reviewer of record). A zero-write failure leaves the generation token and
+// the sheet's machine digest unchanged but ADVANCES the lock's fencing epoch (its acquire), so the formal
+// export (PR-5, design §23.7 O-21 as replaced) must run the fixed order G0 -> C1 -> data read -> C2 +
+// settlement -> G1: read the lock generation (G0), derive the state (C1), read the data and build the file,
+// derive the state again with the settlement check (C2), read the lock generation again (G1) — and refuse
+// unless G0 and G1 carry the same `generationToken` AND the same `fencingEpoch` with no in-flight lease.
+// Nothing here guarantees that by itself; this module only answers one consult.
 // Then the assertions: EVERY row's tenant must be the proven tenant (409 STOCK_PREP_REFRESH_TENANT_MISMATCH —
 // a derivation discrepancy fails closed, A-M6); every governed row and the registry row must name the
 // RESOLVED sheet and this project (409 STOCK_PREP_REFRESH_TARGET_RETARGETED — the project-sheets switch

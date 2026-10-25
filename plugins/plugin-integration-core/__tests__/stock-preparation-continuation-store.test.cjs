@@ -399,7 +399,7 @@ test('ST-04 confirm: statement order, rows, the read-back feeds the pure core, d
   assert.equal(rows.holds.length, 0, 'open holds only')
   assert.equal(rows.states.length, 1)
   const headers = rows.continuations.map((entry) => ({ ...entry, memberCount: rows.members.filter((member) => member.continuationId === entry.id).length }))
-  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: true, projectNo: scope.projectNo, continuations: headers, members: rows.members, demandEvidence: null, sourceIdentity, specSlotDeclared: false })
+  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: true, projectNo: scope.projectNo, continuations: headers, members: rows.members, demandEvidence: null, sourceIdentity, specSlotDeclared: false, persistedHolds: [] })
   const projection = pairing.buildContinuationProjection(input.continuations, input.members)
   assert.equal(projection.suppressAddKeys.size, 4)
   assert.equal(projection.protectInactiveKeys.size, 4)
