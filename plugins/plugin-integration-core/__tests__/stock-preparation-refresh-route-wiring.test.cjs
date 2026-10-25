@@ -169,11 +169,21 @@ test('RW-G2 an UNWIRED governance service answers 501 STOCK_PREP_REFRESH_STORE_U
       assert.equal(errorOf(res).details.reason, 'governance_service', lane)
       assert.equal(h.source.calls.length, sourceReads, `${lane}: zero source reads`)
     }
+    // The background job: the enqueue answers 202, then the detached run reaches the same consult and STORES the
+    // synchronous route's own refusal — wait for that record (not a fixed sleep), then assert it and zero reads.
     const job = await startJob(h)
-    assert.equal(job.statusCode, 202)
-    // The job stores the route's own envelope; the source was never read.
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    assert.equal(h.source.calls.length, 0)
+    assert.equal(job.statusCode, 202, JSON.stringify(job.body))
+    const jobRecord = () => Array.from(h.context.storage.entries())
+      .filter(([key]) => String(key).startsWith('stock-preparation:dry-run-job:'))
+      .map(([, value]) => value)
+      .find((value) => value && value.status && value.status !== 'running')
+    for (let i = 0; i < 200 && !jobRecord(); i += 1) await new Promise((resolve) => setTimeout(resolve, 10))
+    const stored = jobRecord()
+    assert.ok(stored, 'the background run finished and stored its outcome')
+    assert.equal(stored.status, 'failed')
+    const storedText = JSON.stringify(stored)
+    assert.ok(storedText.includes(CODE_UNAVAILABLE) && storedText.includes('governance_service'), `the stored failure is the consult's refusal: ${storedText}`)
+    assert.equal(h.source.calls.length, 0, 'job: zero source reads')
   } finally { h.restore() }
 })
 
