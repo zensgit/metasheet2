@@ -1613,6 +1613,7 @@ exec npx vitest run \
   attendance-report-calendar-view.spec.ts \
   attendance-report-date-range-view.spec.ts \
   attendance-reports-analytics \
+  attendance-rule-draft-preview \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \

@@ -19808,9 +19808,8 @@ async function previewRuleSet() {
     const payload: Record<string, unknown> = {
       config: ruleBuilderPreviewConfig.value,
     }
-    if (ruleSetEditingId.value) {
-      payload.ruleSetId = ruleSetEditingId.value
-    }
+    // Draft preview must not request the API's saved-record lookup.
+    // A ruleSetId would replace this editor config with the stored version.
     if (previewEvents.length > 0) {
       payload.events = previewEvents
     }
