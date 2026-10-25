@@ -25,6 +25,26 @@
       </button>
     </section>
 
+    <section v-else-if="parentReturnState.kind === 'loading'" data-attendance-parent-return="loading">
+      <p>{{ isZh ? '正在加载考勤组...' : 'Loading attendance group...' }}</p>
+    </section>
+    <section
+      v-else-if="parentReturnState.kind === 'unavailable' || parentReturnState.kind === 'error'"
+      :data-attendance-parent-return="parentReturnState.kind"
+    >
+      <p>{{ parentReturnState.kind === 'error'
+        ? (isZh ? '无法加载该考勤组。' : 'Unable to load this attendance group.')
+        : (isZh ? '该考勤组不可用。' : 'This attendance group is unavailable.') }}</p>
+      <button v-if="parentReturnState.kind === 'error'" type="button" @click="restoreParentGroup">{{ isZh ? '重试' : 'Retry' }}</button>
+      <button type="button" @click="leaveParentReturn">{{ isZh ? '返回' : 'Return' }}</button>
+    </section>
+    <AttendanceAdminCenter
+      v-else-if="parentReturnState.kind === 'ready'"
+      initial-section-id="attendance-admin-groups"
+      :return-group-context="{ group: parentReturnState.group, stage: parentReturnState.stage }"
+      @clear-section="returnToAdminHome"
+      @open-group-route="openGroupRoute"
+    />
     <AttendanceGroupContextHost
       v-else-if="groupRouteActive"
       :key="groupRouteHostKey"
@@ -121,6 +141,12 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vu
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import type { LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
+import { useAuth } from '../../composables/useAuth'
+import { onAuthSessionSwitch, readAuthSessionSignature, readStoredToken } from '../../composables/authPrincipal'
+import { apiFetch } from '../../utils/api'
+import { createAttendanceGroupReturnNavigation, type AttendanceGroupReturnIntent } from './attendanceGroupReturnNavigation'
+import type { AttendanceAuthorizedGroup } from './useAttendanceGroupRouteContext'
+import type { AttendanceGroupRouteWorkflowStage } from './attendanceGroupRouteHydration'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { confirmAttendanceSetupPrefillLeave } from './attendanceSetupPrefillLeaveGuard'
 import {
@@ -206,6 +232,105 @@ function openGroupStage(target: AttendanceGroupEffectivePolicyStageActionV1, sou
     || source.groupId !== target.groupId || !canAccessAdmin.value
     || !hasFeature('attendanceGroupEffectivePolicyPanel')) return
   groupStageRequest.value = { groupId: target.groupId, stage: target.stage }
+}
+
+// Local navigation intent only; the server probe below is still required on every return.
+const auth = useAuth()
+function readReturnScope(): string | null {
+  try {
+    const signature = readAuthSessionSignature()
+    const org = auth.buildAuthHeaders()['x-tenant-id']
+    return readStoredToken() && org && signature !== 'invalid' ? JSON.stringify([signature, org]) : null
+  } catch { return null }
+}
+const groupReturns = createAttendanceGroupReturnNavigation(readReturnScope)
+type ParentReturnState =
+  | { kind: 'none' | 'loading' | 'unavailable' | 'error' }
+  | { kind: 'ready'; group: AttendanceAuthorizedGroup; stage: AttendanceGroupRouteWorkflowStage }
+const parentReturnState = ref<ParentReturnState>({ kind: 'none' })
+let parentReturnGeneration = 0
+let activeGroupReturnIntent: AttendanceGroupReturnIntent | null = null
+
+function leaveParentReturn(): void {
+  // Clear this entry only; older same-session Back/Forward intents remain usable.
+  const state = { ...window.history.state }
+  delete state.attendanceGroupReturn
+  window.history.replaceState(state, '')
+  activeGroupReturnIntent = null
+  parentReturnGeneration += 1
+  parentReturnState.value = { kind: 'none' }
+}
+function invalidateParentReturn(): void {
+  activeGroupReturnIntent = null
+  parentReturnGeneration += 1
+  if (parentReturnState.value.kind !== 'none') {
+    parentReturnState.value = { kind: 'unavailable' }
+  }
+}
+const unsubscribeGroupReturns = onAuthSessionSwitch(() => {
+  groupReturns.clear()
+  invalidateParentReturn()
+})
+function refreshGroupReturnScope(): void {
+  if (groupReturns.refresh()) invalidateParentReturn()
+}
+
+function navigationWithReturnIntent(href: string, intent: AttendanceGroupReturnIntent | null) {
+  const { path, query, hash } = router.resolve(href)
+  return { path, query, hash, state: { attendanceGroupReturn: intent ? { ...intent } : null } }
+}
+
+async function restoreParentGroup(): Promise<void> {
+  const generation = ++parentReturnGeneration
+  parentReturnState.value = { kind: 'none' }
+  if (!featuresReady.value || !canAccessAdmin.value || desktopOnlyBlocked.value) return
+  const metadata = window.history.state?.attendanceGroupReturn
+  if (groupRoutePathActive.value) {
+    // Metadata never selects canonical content. Only carry it across the same parsed group.
+    const groupId = routeGroupContext.value?.groupId
+    const intent = groupId ? groupReturns.read(metadata === undefined ? activeGroupReturnIntent : metadata, undefined, groupId) : null
+    if (metadata === undefined && intent) {
+      window.history.replaceState({ ...window.history.state, attendanceGroupReturn: { ...intent } }, '')
+    }
+    activeGroupReturnIntent = intent
+    return
+  }
+  activeGroupReturnIntent = null
+  const selection = groupReturns.read(metadata, route.fullPath)
+  if (!selection) {
+    if (metadata !== undefined) parentReturnState.value = { kind: 'unavailable' }
+    return
+  }
+  const current = () => {
+    if (generation !== parentReturnGeneration) return false
+    if (groupReturns.read(metadata, route.fullPath)) return true
+    // A response can observe the scope change before its storage notification.
+    invalidateParentReturn()
+    return false
+  }
+  parentReturnState.value = { kind: 'loading' }
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${selection.groupId}`)
+    if (!current()) return
+    if (response.status === 403 || response.status === 404) {
+      parentReturnState.value = { kind: 'unavailable' }
+      return
+    }
+    if (!response.ok) {
+      parentReturnState.value = { kind: 'error' }
+      return
+    }
+    const payload = await response.json()
+    if (!current()) return
+    if (!payload?.ok || payload.data?.id !== selection.groupId
+      || typeof payload.data.name !== 'string' || typeof payload.data.timezone !== 'string') {
+      parentReturnState.value = { kind: 'error' }
+      return
+    }
+    parentReturnState.value = { kind: 'ready', group: payload.data, stage: selection.stage }
+  } catch {
+    if (current()) parentReturnState.value = { kind: 'error' }
+  }
 }
 
 const canAccessAdmin = computed(() => hasFeature('attendanceAdmin'))
@@ -525,6 +650,7 @@ async function selectTab(tab: AttendanceTab): Promise<void> {
   if (nextTab !== activeTab.value && !confirmAttendanceSetupPrefillLeave(setupPrefillLeaveTr)) {
     return
   }
+  if (!groupRoutePathActive.value) leaveParentReturn()
   activeTab.value = nextTab
   // Any intentional tab navigation (including the banner's own "back to overview"/retry/enable
   // buttons routing through here) supersedes a stale denial notice.
@@ -548,6 +674,7 @@ async function selectTab(tab: AttendanceTab): Promise<void> {
 // keep the `admin`/`import` tab but drop any deep-linked `section`, so a
 // route refresh does not re-open the section the operator just left.
 async function returnToAdminHome(): Promise<void> {
+  leaveParentReturn()
   const query: LocationQueryRaw = { ...route.query, tab: 'admin' }
   delete query.section
   await router.replace({ query })
@@ -555,7 +682,11 @@ async function returnToAdminHome(): Promise<void> {
 
 async function returnFromGroupRoute(): Promise<void> {
   if (groupRouteActive.value) {
-    await router.push(routeGroupContext.value?.returnTo ?? '/attendance?tab=admin&section=attendance-admin-groups')
+    const href = routeGroupContext.value?.returnTo ?? '/attendance?tab=admin&section=attendance-admin-groups'
+    const groupId = routeGroupContext.value?.groupId
+    const metadata = window.history.state?.attendanceGroupReturn
+    const intent = groupId ? groupReturns.read(metadata, href, groupId) : null
+    await router.push(metadata !== undefined ? navigationWithReturnIntent(href, intent) : href)
     return
   }
   await selectTab('overview')
@@ -565,6 +696,7 @@ async function openGroupRoute(target: {
   groupId: string
   step: AttendanceGroupRouteStep
   surface: AttendanceGroupRouteSurface | null
+  originStage?: AttendanceGroupRouteWorkflowStage
 }): Promise<void> {
   if (groupRouteActive.value && routeGroupContext.value?.groupId !== target.groupId) return
   const href = buildAttendanceGroupRouteHref({
@@ -574,7 +706,14 @@ async function openGroupRoute(target: {
       : route.fullPath,
   })
   if (!href) return
-  await router.push(href)
+  const intent = groupRouteActive.value
+    ? groupReturns.read(window.history.state?.attendanceGroupReturn, undefined, target.groupId)
+    : groupReturns.capture(target.groupId, target.originStage, route.fullPath)
+  if (intent && !groupRouteActive.value) {
+    // Attach metadata to this entry without changing its URL or navigating/remounting the draft.
+    window.history.replaceState({ ...window.history.state, attendanceGroupReturn: { ...intent } }, '')
+  }
+  await router.push(intent ? navigationWithReturnIntent(href, intent) : href)
 }
 
 watch(() => [route.path, route.name, route.query.tab, route.query.surface, route.query.returnTo, route.params?.groupId, route.params?.step], () => {
@@ -598,7 +737,12 @@ watch(availableTabs, () => {
   activeTab.value = ensureTabAllowed(activeTab.value)
 })
 
+watch(() => [route.fullPath, featuresReady.value, canAccessAdmin.value, desktopOnlyBlocked.value], () => {
+  void restoreParentGroup()
+}, { flush: 'sync' })
+
 onMounted(async () => {
+  window.addEventListener('storage', refreshGroupReturnScope)
   await loadProductFeatures()
   updateMobileState()
   syncFromRoute()
@@ -607,6 +751,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unsubscribeGroupReturns()
+  groupReturns.clear()
+  invalidateParentReturn()
+  window.removeEventListener('storage', refreshGroupReturnScope)
   window.removeEventListener('resize', updateMobileState)
 })
 </script>
