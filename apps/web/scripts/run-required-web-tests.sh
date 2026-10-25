@@ -607,7 +607,6 @@ npx vitest run \
 # Attendance group list-detail closeout (#4354): these existing specs carry the
 # four-stage interaction and focused admin-rail behavior. Run them in an isolated
 # single fork because attendance-admin-regressions is intentionally a large mounted suite.
-NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressions attendance-group-fixed-schedule useAttendanceAdminRailNavigation attendance-experience-entrypoints --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 # W6-R8 fidelity: explicit W6 label/panel/gate coverage plus the real host-to-editor path.
 NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupPolicyWorkspace attendanceGroupContextHostEffectivePolicyGate attendanceGroupEffectivePolicyStageNavigation --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressions attendance-group-context-history attendance-group-fixed-schedule attendance-group-return-navigation useAttendanceAdminRailNavigation attendance-experience-entrypoints --pool=forks --poolOptions.forks.singleFork=true --reporter=dot

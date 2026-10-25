@@ -125,3 +125,13 @@ records code/test hashes, screenshot hashes and the source/phase boundaries.
   provider/staging/activation gates remain separately tracked.
 - All PRs Draft/HOLD; no merge/deploy/R71/tag/release/business-config change.
   Stream/lifecycle OFF; real UAT/business50004 excluded; historical08am PUT inconclusive.
+
+## Validation-chain follow-up
+
+The first dependency merge retained one redundant quartet invocation. A maximum-multiplicity
+audit detected it even though the set/shape guards were green. The duplicate invocation was
+removed; all631 token multiplicities now equal the maximum of main/#6539/#6553 plus the one
+new workspace token. The complete history/return/entrypoints same-fork invocation, assertions,
+mocks and budgets are retained. Bash syntax, official manifest check and the two affected
+lane guards63/63 passed. App runtime/tests are byte-identical;314 frontend cases and browser
+matrices were not replayed. This wiring-only commit starts fresh exact-head CI.

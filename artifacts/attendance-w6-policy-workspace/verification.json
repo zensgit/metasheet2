@@ -65,7 +65,7 @@
   "documentationFinalizedAfterGatesOnly": true,
   "sourceHashes": {
     ".github/workflows/attendance-web-guard.yml": "0eb57b40c80641218cc3c98efb7d7b8f84901ecb0177a0ee3cfe6c479dcc8ca9",
-    "apps/web/scripts/run-required-web-tests.sh": "79d5604a68e3bd47162ff765db3507d840a38015c3b8f202e2134a402f08e680",
+    "apps/web/scripts/run-required-web-tests.sh": "c2f5d6c53b2304956f10f17a3017b61e9147264c39c4447e0bbd8d4a5cd3d853",
     "apps/web/scripts/run-required-web-tests.tokens": "8b5dd7ddca20ac57320ee4cdcc17b7575465bfc5636ce7dcb3991faf73457570",
     "apps/web/src/views/AttendanceView.vue": "6f981d39d3101526885e3e4fe1476c63c09f55c8cc89492790795edc1882411a",
     "apps/web/src/views/attendance/AttendanceAdminCenter.vue": "dccfa9c110b6df4af629ecfbe109194a40454168ee797dcbb73fcabc9474d507",
@@ -107,5 +107,22 @@
   "noMergeDeployR71TagReleaseConfig": true,
   "StreamLifecycle": "OFF",
   "realUATAndBusiness50004": "excluded",
-  "historical08PUT": "inconclusive"
+  "historical08PUT": "inconclusive",
+  "validationChainFollowup": {
+    "at": "2026-10-25T22:53:40.338261+00:00",
+    "parentHead": "a12182ec2a8a6eb834f7a926eee6c7fdccde3b8b",
+    "reason": "Automatic dependency merge retained a redundant quartet invocation beyond maximum input multiplicity",
+    "removedDuplicateInvocationCount": 1,
+    "all631TokenMultiplicitiesMatchMaximumDependencyUNION": true,
+    "uniqueTokens": 631,
+    "tokenExecutions": 631,
+    "sameForkHistoryEntrypointsRetained": true,
+    "bashSyntaxExit": 0,
+    "officialManifestCheckExit": 0,
+    "strictLaneGuardsActualPassed": 63,
+    "skipped": 0,
+    "applicationRuntimeAndTestBytesUnchanged": true,
+    "front314AndBrowserMatricesNotRepeated": true,
+    "newHeadRequiresFreshAllRequiredCI": true
+  }
 }
