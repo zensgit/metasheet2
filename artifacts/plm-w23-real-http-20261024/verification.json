@@ -1,0 +1,1936 @@
+{
+  "acceptance": "NOT_ACCEPTED",
+  "actor": "ACTUAL_GROK47_XHIGH",
+  "admitted_run_invoked": false,
+  "at": "2026-10-24T20:43:05Z",
+  "base": "fa8eeee6429be86ff0344fa4e9f0596d9427424c",
+  "branch": "codex/plm-w23-real-http-verifier-20261024",
+  "checks": [
+    {
+      "exit": 0,
+      "name": "help_verify",
+      "stderr_empty": true
+    },
+    {
+      "exit": 0,
+      "name": "help_fixture",
+      "stderr_empty": true
+    },
+    {
+      "exit": 0,
+      "name": "help_run",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "preflight_missing",
+      "profile_result": "NOT_RUN",
+      "reason": "missing_native_pin",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "seed_unadmitted",
+      "profile_result": "NOT_RUN",
+      "reason": "services_not_admitted",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "run_noarg",
+      "profile_result": "NOT_RUN",
+      "reason": "admission_file_required",
+      "runtime": "NOT_RUN",
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 0,
+      "failed_checks": [],
+      "gap_codes": [
+        "app_license_written_only_in_admitted_seed",
+        "service_assigned_primary_keys",
+        "alembic_not_importable_not_executed"
+      ],
+      "http_executed": false,
+      "name": "self_check",
+      "profile_result": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 0,
+      "failed_checks": [],
+      "http_executed": false,
+      "name": "run_self_check",
+      "profile_result": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "seed_meta_writes_native_license": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 0,
+      "name": "node_check",
+      "stderr_empty": true
+    },
+    {
+      "exit": 0,
+      "name": "py_compile",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "seed_meta_refused",
+      "profile_result": "NOT_RUN",
+      "reason": "meta_secret_refused",
+      "runtime": "NOT_RUN",
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "seed_meta_bad_secret",
+      "profile_result": "NOT_RUN",
+      "reason": "meta_secret_refused",
+      "runtime": "NOT_RUN",
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "seed_meta_prefix_without_owned",
+      "profile_result": "NOT_RUN",
+      "reason": "meta_secret_refused",
+      "runtime": "NOT_RUN",
+      "status": "NOT_RUN",
+      "stderr_empty": true,
+      "prefix_exists": false
+    },
+    {
+      "exit": 0,
+      "name": "meta_status_unit",
+      "note": "verifier-only porcelain accepted; a tracked modification refused; empty status accepted; an extra untracked path refused",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "e3_preflight",
+      "profile_result": "NOT_RUN",
+      "reason": "e3_planning_ref_refused",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "e3_run",
+      "profile_result": "NOT_RUN",
+      "reason": "e3_planning_ref_refused",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "unreviewed_preflight",
+      "profile_result": "NOT_RUN",
+      "reason": "native_pin_not_reviewed",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "exit": 2,
+      "http_executed": false,
+      "name": "override_preflight",
+      "profile_result": "NOT_RUN",
+      "reason": "ancestor_override_refused",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "database": false,
+      "exit": 0,
+      "failed_checks": [],
+      "http_executed": false,
+      "label": "filesystem-only",
+      "name": "fs_admission_check",
+      "profile_result": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "services_started": false,
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    },
+    {
+      "executed": false,
+      "exit": 0,
+      "failed_checks": [],
+      "http_executed": false,
+      "label": "pinned-executable-file-only",
+      "logical_path_kept": true,
+      "name": "pinned_python_check",
+      "profile_result": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "status": "NOT_RUN",
+      "stderr_empty": true
+    }
+  ],
+  "dsn_proof_strategy": {
+    "executed": false,
+    "meta": "seed-meta requires --secret /tmp/plm-w23-real-http-run-<16 hex nonce>/secret.json and --owned <same run>/owned-resource.json. A missing pair, a bad secret, or a runtime-prefix secret without --owned exits NOT_RUN meta_secret_refused before the pool import and before a marker read. When the pair matches, seed-meta lstats the marker, refuses a symlink, and requires DATABASE_URL to equal the owned w23meta DSN: one host= equal to <root>/s and exactly one port=5432. current_database() must equal that name. users and user_orgs counts must be 0. Tables may exist because migrations already ran. That import was not executed.",
+    "native_global": "YUANTUS_DATABASE_URL and settings.DATABASE_URL must equal the owned-socket DSN for w23glob plus the nonce, one host= equal to <root>/s, one port=5432. current_database() must match and the ordinary table count must be 0 before Alembic. Not executed.",
+    "native_identity": "YUANTUS_IDENTITY_DATABASE_URL must equal get_identity_database_url() and the owned w23ident nonce DSN. Fallback to the global URL is identity_plane_fell_back. Not executed.",
+    "native_tenant": "resolve_database_url(w23http, w23org) must equal the tenant ORM URL, including options=-csearch_path=yt_t_w23http. Emptiness uses the raw tenant DSN, name w23ten plus the same nonce. Not executed.",
+    "order": "Admitted seed proves the owned-socket marker before prove_owned_engines. prove_owned_engines checks current_database and empty planes before upgrade_schema. seed-meta runs after migrate --latest and both confirms, before register and before the license gate. None of that was executed."
+  },
+  "fixture_functions": [
+    "prove_owned_engines",
+    "_ensure_item_type",
+    "_insert_part",
+    "_seed_item_acl",
+    "_try_bom_edge",
+    "_try_assembly",
+    "_try_routing",
+    "_try_mbom",
+    "_try_baseline",
+    "_try_eco",
+    "_write_app_license",
+    "seedMeta",
+    "loginMeta"
+  ],
+  "fixture_state_not_acceptance": [
+    "Released child is_released true is fixture state so BOMService.add_child can run. It is not release acceptance.",
+    "Active AppLicense is written only by admitted seed through LicenseImportService.import_license. license_signature_verified is true only when that engine succeeds. Production issuance and install acceptance stay NOT_RUN.",
+    "Meta users.role admin, is_admin, roles id admin, seven permission rows, and one user_orgs row are fixture rows. They are not business issuance."
+  ],
+  "gaps": [
+    "app_license_written_only_in_admitted_seed",
+    "service_assigned_primary_keys",
+    "alembic_not_importable_not_executed"
+  ],
+  "git_status": [
+    "?? docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md",
+    "?? scripts/verification/plm-collaboration-paired/"
+  ],
+  "grok_session_id": "a3c4f803-a506-4961-8f98-c9720b1249cb",
+  "head": "fa8eeee6429be86ff0344fa4e9f0596d9427424c",
+  "http_executed": false,
+  "main_ancestor": "3fd21e31cca358f1b1a80dd6365ec060cc23bc5e",
+  "native_edit": false,
+  "native_pin": null,
+  "native_pin_note": "No runtime pin was passed or accepted. Historical pins ca5aa5ea55b6e0842081744f0311d5b1fbb4d2f2 and 3fd21e31cca358f1b1a80dd6365ec060cc23bc5e are historical only. Reviewed Native source e4902f455f61dc9f61b6d72e8dcac541c841f4e8 and Main 4795fe660b7fa37669f6249ba35caf376aaf6fcc were not read in this worktree. Future Root binding supplies the exact current reviewed tuple. The Native worktree was not read.",
+  "node": "v24.14.1",
+  "node_path": "/Users/chouhua/.local/bin/node",
+  "nonce": "5ffcdf22bb59440facb16c2e1664c6f0",
+  "parent_env": {
+    "NODE_ENV_test": "false",
+    "NODE_TLS_REJECT_UNAUTHORIZED": "unset",
+    "PRODUCT_MODE_attendance": "false",
+    "REDIS_HOST": "unset",
+    "REDIS_PORT": "unset",
+    "REDIS_URL": "unset",
+    "VITEST": "unset"
+  },
+  "phase": "RELEASED_SOURCE_ONLY",
+  "pin_compare": {
+    "allowed_paths_in_pin_map": [],
+    "matched": 5138,
+    "mismatch": 0,
+    "missing": 0,
+    "null_absent": 8965,
+    "null_present": 0
+  },
+  "profile_result": "NOT_RUN",
+  "protected_count": 14103,
+  "python": "3.9.6",
+  "r1_acceptance": "NOT_ACCEPTED",
+  "r1_manifest": "99dd658b8f61be2668b6189c85206f350fb9dc4e08c71105be165e0e16fbbbe7",
+  "r1_packet": "w23-real-http-r1-source-only-released-not-accepted-20261024",
+  "r1_verification_sha256": "accf60c3fbe85295893be0a10644d4a15fb7fd14d99f672b37b789812a0da640",
+  "r2_acceptance": "NOT_ACCEPTED",
+  "r2_manifest": "f9c6d481257409a76fee7a1edd0b5d05a64fb69d2658edf5496311b064f0554f",
+  "r2_packet": "w23-real-http-r2-source-only-released-before-Root-review-20261024",
+  "r2_verification_sha256": "f7217b07c23e299c06b02991a8d20def4a8f9acce3f797da6276c31975b56f35",
+  "runtime": "NOT_RUN",
+  "schema_mode": "alembic-upgrade-head",
+  "seed_context_invoked": false,
+  "services_invoked": [],
+  "services_started": false,
+  "session": "/root/w23_r8_ecocells_fix",
+  "skip_worktree_count": 8965,
+  "source_one_pr": "NOT_CREATED",
+  "source_sha256": {
+    "scripts/verification/plm-collaboration-paired/verify.py": "d17419d6e69a86a7b65ffb6445a15d068cc22a25364fc1626af5fd6832ff952d",
+    "scripts/verification/plm-collaboration-paired/native_fixture.py": "a7089c54b03b8b2c808c8eff9b949296813226015f573877d564c77cb7f481df",
+    "scripts/verification/plm-collaboration-paired/run.mts": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986",
+    "scripts/verification/plm-collaboration-paired/README.md": "6111b2ed674ec93316ba1741417af55942dcd146ec4ebdb3a1ad34e920fa366f",
+    "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "c46ee42980ca1e6ae45ddab81c920d5c09b57c694679a9293167befd90177d0f"
+  },
+  "sparse_checkout": true,
+  "tracked_diff_empty": true,
+  "tree": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+  "verification_sha256": null,
+  "license_import": {
+    "engine": "LicenseImportService.import_license",
+    "fixture_signature_verification": "implemented_for_admitted_seed_not_executed",
+    "install_acceptance": "NOT_RUN",
+    "memory_signature_control": "passed_in_self_check_no_database",
+    "production_issuance": "NOT_RUN",
+    "self_check_calls_import_license": false,
+    "self_check_writes_license": false,
+    "verifier": "license_verification.verify_license"
+  },
+  "r3_acceptance": "NOT_ACCEPTED",
+  "r3_manifest": "dd5ce02b2d83f82eb7d1e3867bc04693ab91463b315aab103ab9bcd88bb5bf97",
+  "r3_packet": "w23-real-http-r3-c8-source-only-released-before-Root-review-20261024",
+  "r3_phase": "RELEASED_SOURCE_ONLY",
+  "r3_verification_sha256": "fb0ee1400202a4beae583d222f11e29a3bc3d67b1b70b3b4ffa425f3c9355c62",
+  "r4_acceptance": "NOT_ACCEPTED",
+  "r4_manifest": "be4d7e66d53d187d4ed2e41915f13fe80c51285a0d9dbbf9fd7fda068a54b0b1",
+  "r4_packet": "w23-real-http-r4-c8-source-only-released-before-Root-review-20261024",
+  "r4_packet_file_sha256": "53c846566ed4950e38746ef3414479214e405710f89f51e6ab0a361b45d66198",
+  "r4_phase": "RELEASED_SOURCE_ONLY",
+  "r4_released_at": "2026-10-24T14:31:55Z",
+  "r4_verification_sha256": "98ad73569432f0d5e0debb065e3200dc17d89d9b018cbbabbe8db0eedb30a7f7",
+  "r5_acceptance": "NOT_ACCEPTED",
+  "r5_inputs": {
+    "probes_py_sha256": "8da6e2e8c77a9fbf7b16f06a45631705ed3f3e9492513162d4f26c977af97029",
+    "probes_mts_sha256": "1f1d9864ba27232f000c9b6749c25e69c6932e202f941ab663bece95f72c935d",
+    "probes_sha256": "732153882d42ea9413c14e78812b74962a99ae4fd09600d11d0a9a699293ada7",
+    "review_sha256": "f477f066807a7ee268ba24b674b440e4a4091bd161912d9a10146bccfd90353e"
+  },
+  "comments_history_evidence": "Unexecuted driver writes the three ECO local fields and one ECO comment before restart, saves the ordinary record version, local values, comment digest, history digest, and ids, and compares that carried state after restart before the ECO noop. Absolute owned counts are required at confirm, append, local PATCH, and comment. A null count baseline is refused. Source-only checks did not execute the read-only SQL.",
+  "predicate_self_checks_are_http": false,
+  "r5_limitations": [
+    "Runtime NOT_RUN. Production issuance NOT_RUN. Install acceptance NOT_RUN.",
+    "Predicate self-checks are not HTTP. http_executed is false.",
+    "Comment and history comparisons are API list projections, not a claimed SQL rollback.",
+    "Signed in-memory Ed25519 checks are not licensed-database or install acceptance.",
+    "R1 through R4 stay NOT_ACCEPTED. The frozen R4 packet file was not rewritten.",
+    "Reviewed Native pin ca5aa5ea55b6e0842081744f0311d5b1fbb4d2f2 is the parent of worktree HEAD ba8cd981a77e21275ba0a87a22b304aeee202352. Runtime HOLD.",
+    "Exact Main ancestor 3fd21e31cca358f1b1a80dd6365ec060cc23bc5e is not an object in this worktree. It was not fetched.",
+    "Existing exact resource admission owns the disk and capacity floors. This release did not call services and did not use vm_stat as that floor."
+  ],
+  "checks_completed_at": "2026-10-24T19:33:01.613631+00:00",
+  "historical_native_pin": "ca5aa5ea55b6e0842081744f0311d5b1fbb4d2f2",
+  "main_ancestor_role": "historical_frozen_ancestry_not_current_runtime_admission",
+  "native_delivery_head_checked_in_worktree": false,
+  "native_delivery_head_supplied": "e198ccf594187678be2b4dafe518c718a915263e",
+  "origin_main_checked_in_worktree": false,
+  "origin_main_supplied": "4795fe660b7fa37669f6249ba35caf376aaf6fcc",
+  "r5_manifest": "663e1506c1086b0a3c16afa62083283958424e697c8c7d40fa3efd1d367f8d92",
+  "r5_packet": "NOT_CREATED",
+  "r5_packet_file_sha256": "3c844a9a24cb54e12780800efe53ee8c8886dfb6d2930f4f5dffa64939d3e2c9",
+  "r5_phase": "RELEASED_SOURCE_ONLY",
+  "r5_released_at": "2026-10-24T15:03:48Z",
+  "r5_source_sha256": {
+    "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "38d8e87ef388e942831262eca04dbd67b109ebff6bbc7dc96ca253310272ff97",
+    "scripts/verification/plm-collaboration-paired/README.md": "1b5eac4ba04c5499121421e7712c55b1d3bce521d2d5177d40fbd65bdefdd71e",
+    "scripts/verification/plm-collaboration-paired/native_fixture.py": "c512c64134e45ac705c42a53f7aa59927a9cb9a46a8892954f8b622d8fbcf2c7",
+    "scripts/verification/plm-collaboration-paired/run.mts": "ae92ff9466a020a40cbe9f67059629874f15c494b79783c80208fb339995a99d",
+    "scripts/verification/plm-collaboration-paired/verify.py": "92235012eb4a4ef41086293fe41d3225395dabf2bf313151d079521999732c84"
+  },
+  "r5_verification_sha256": "576e541c5e78de4e43ef8840b2f855aa7b2b6a271703c7538cdbfb57dfe73123",
+  "r6_acceptance": "NOT_ACCEPTED",
+  "r6_checks_not_executed": [
+    "unreviewed_run",
+    "override_run",
+    "admitted_http",
+    "cardinality_sql"
+  ],
+  "r6_inputs": {
+    "binding_sha256": "51a01283da7735d93472f70d7ce251fe7a37166fd79f80bc99383ce1ee645115",
+    "r5_manifest_sha256": "663e1506c1086b0a3c16afa62083283958424e697c8c7d40fa3efd1d367f8d92",
+    "r5_packet_file_sha256": "3c844a9a24cb54e12780800efe53ee8c8886dfb6d2930f4f5dffa64939d3e2c9",
+    "review_sha256": "b7434dd352617314b9c475a13fc3788181bb12ad808ed96c3ce67e1beed0d0c1",
+    "root_probes_sha256": "f8c863ae241fa8a5bf363c0fca48ce4ccef35ec4b0e5b7d9d56ca2fcbfb1b0a9",
+    "service_sha256": "26a70904d4345e32ede8c6884253518c97df3e6378b1fc44a853654cc92a42b0"
+  },
+  "r6_limitations": [
+    "Runtime NOT_RUN. HTTP, PostgreSQL, Redis, Meta, Native, TLS, browser, Docker, install, build, and the real hour stay NOT_RUN and HOLD. Production issuance and install acceptance stay NOT_RUN.",
+    "Predicate self-checks are not HTTP. http_executed is false. The filesystem pair and the pinned-executable pair start no service and open no database.",
+    "Cardinality SQL is read-only in source and was not executed. No owned Meta database was opened. An orphan sync or record delta is RED in that unexecuted verdict even when returned ids and versions look correct.",
+    "ECO description is stored on the owned ORM row. The Meta snapshot business hash observes eco name. A future CAS is not the prior accepted CAS. This ECO refresh path was not executed over HTTP.",
+    "Comment API total is paired with a read-only SQL count in the unexecuted driver. History API list length is not that count.",
+    "Signed in-memory Ed25519 checks are not licensed-database or install acceptance.",
+    "No current runtime pin was passed or accepted. Historical ca5aa5ea55b6e0842081744f0311d5b1fbb4d2f2 and 3fd21e31cca358f1b1a80dd6365ec060cc23bc5e are not current runtime admission. Root-supplied Native e198ccf594187678be2b4dafe518c718a915263e and origin Main 4795fe660b7fa37669f6249ba35caf376aaf6fcc were not checked in this worktree.",
+    "R1 through R5 stay NOT_ACCEPTED. The frozen R5 packet was not rewritten. r6_packet is NOT_CREATED. unreviewed_run and override_run were not re-executed; their preflights refused before git.",
+    "This profile stays NOT_ACCEPTED until Root actual HTTP on the current reviewed tuple and the capacity floor. This release did not call services and did not use vm_stat as that floor.",
+    "fs-admission-check and pinned-python-check removed only paths they created. Two older /tmp/plm-managed-consumer-pg paths were already present and were not removed."
+  ],
+  "r6_packet": "NOT_CREATED",
+  "r6_phase": "RELEASED_SOURCE_ONLY",
+  "r6_released_at": "2026-10-24T15:48:42Z",
+  "service_sha256": "26a70904d4345e32ede8c6884253518c97df3e6378b1fc44a853654cc92a42b0",
+  "r7_acceptance": "NOT_ACCEPTED",
+  "r7_phase": "RELEASED_SOURCE_ONLY",
+  "r7_packet": "w23-real-http-r7-source-only-released-before-Root-review-20261024",
+  "r7_reviewed_native_source": "e4902f455f61dc9f61b6d72e8dcac541c841f4e8",
+  "r7_reviewed_native_source_checked_in_worktree": false,
+  "r7_main_base": "4795fe660b7fa37669f6249ba35caf376aaf6fcc",
+  "r7_main_base_checked_in_worktree": false,
+  "r7_protected_map": {
+    "rerun": false,
+    "frozen_r6_protected_count": 14103,
+    "frozen_r6_mismatches": 0,
+    "frozen_r6_manifest": "d608d475f8ea121b09b60c2fd3917b36ae7599048b5f25a11c0c2f0b5be5abac"
+  },
+  "r7_checks_note": "r7_checks are the only commands executed in this session. The checks array is the retained R6 record and was not re-executed. verify.py and native_fixture.py are byte-identical to frozen R6, so the filesystem admission pair and the license self-check were not repeated.",
+  "r7_checks": [
+    {
+      "name": "help_verify",
+      "exit": 0,
+      "stderr_empty": true,
+      "http_executed": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "help_fixture",
+      "exit": 0,
+      "stderr_empty": true,
+      "http_executed": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "help_run",
+      "exit": 0,
+      "stderr_empty": true,
+      "http_executed": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "node_check",
+      "exit": 0,
+      "stderr_empty": true,
+      "http_executed": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "run_self_check",
+      "exit": 0,
+      "stderr_empty": true,
+      "failed_checks": [],
+      "http_executed": false,
+      "profile_result": "NOT_RUN",
+      "status": "NOT_RUN",
+      "services_started": false,
+      "label": "pure-controls"
+    }
+  ],
+  "r7_checks_not_executed": [
+    "preflight",
+    "admitted_http",
+    "cardinality_sql",
+    "fs_admission_check",
+    "pinned_python_check",
+    "native_fixture_self_check",
+    "protected_map",
+    "license_database"
+  ],
+  "r7_count_vectors": {
+    "eco_confirm": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      0
+    ],
+    "eco_after_local_patch": [
+      1,
+      1,
+      1,
+      1,
+      2,
+      0
+    ],
+    "eco_after_comment": [
+      1,
+      1,
+      1,
+      1,
+      2,
+      1
+    ],
+    "eco_after_source_refresh": [
+      1,
+      1,
+      2,
+      1,
+      3,
+      1
+    ],
+    "readiness_confirm": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      0
+    ],
+    "readiness_after_append_before_locals": [
+      1,
+      2,
+      2,
+      2,
+      1,
+      0
+    ],
+    "readiness_after_local_patch": [
+      1,
+      2,
+      2,
+      2,
+      2,
+      0
+    ],
+    "readiness_after_comment": [
+      1,
+      2,
+      2,
+      2,
+      2,
+      1
+    ],
+    "readiness_after_source_refresh": [
+      1,
+      2,
+      3,
+      2,
+      3,
+      1
+    ],
+    "order": "bindings,snapshot_rows,syncs,records,selected_history,comments"
+  },
+  "r7_limitations": [
+    "Profile NOT_ACCEPTED. Runtime NOT_RUN. HTTP, PostgreSQL, Redis, Meta, Native, TLS, browser, Docker, install, build, and the real hour stay NOT_RUN and HOLD.",
+    "Predicate self-checks are not HTTP. http_executed is false. The absolute count vectors were not executed against a database.",
+    "A null owned-count baseline is refused in source. Confirm, append, local PATCH, and comment carry finite absolute vectors, and the after-restart comparison is before the noop. This was not executed over HTTP.",
+    "ECO locals and the one ECO comment are written only by the unexecuted normal Meta record PATCH and comment routes. Empty local values are no longer the restart baseline.",
+    "No current runtime pin was accepted. Native source e4902f455f61dc9f61b6d72e8dcac541c841f4e8 and Main 4795fe660b7fa37669f6249ba35caf376aaf6fcc were not read. Future Root binding supplies that exact tuple.",
+    "Historical ca5aa5ea55b6e0842081744f0311d5b1fbb4d2f2 and 3fd21e31cca358f1b1a80dd6365ec060cc23bc5e stay historical. The frozen R6 packet and the Root, Astra, and Sol reviews were not rewritten.",
+    "verify.py and native_fixture.py are unchanged, so the old filesystem admission controls and license self-check were not repeated. The protected map was not walked again; frozen R6 remains 14103 matched and 0 mismatched.",
+    "Admission and the signed license implementation were not reopened. No duplicate binding control was added.",
+    "app_license_written_only_in_admitted_seed, service_assigned_primary_keys, and alembic_not_importable_not_executed remain. Production issuance and install acceptance stay NOT_RUN."
+  ],
+  "reasoning_effort": "high",
+  "taskname": "/root/w23_r8_ecocells_fix",
+  "r8_acceptance": "NOT_ACCEPTED",
+  "r8_phase": "RELEASED_SOURCE_ONLY",
+  "r8_packet": "NOT_CREATED",
+  "r8_checks": [
+    {
+      "name": "help_verify",
+      "argv": [
+        "python3",
+        "scripts/verification/plm-collaboration-paired/verify.py",
+        "--help"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "23134272a4ae7920be682a8d159072b40f39b824515962aa4dc9508c8d3ca456",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "help_fixture",
+      "argv": [
+        "python3",
+        "scripts/verification/plm-collaboration-paired/native_fixture.py",
+        "--help"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "c5bb3913b94229165e166d86d2b4cce8c2247a3d2491e2a09c1a84fce02023ff",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "help_run",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "scripts/verification/plm-collaboration-paired/run.mts",
+        "--help"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "0aba30a3a5670c4db39ad2b899c79a56fbf545f9e31718ac81c8a09cefe31387",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "node_check",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "--check",
+        "scripts/verification/plm-collaboration-paired/run.mts"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "run_self_check",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "scripts/verification/plm-collaboration-paired/run.mts",
+        "self-check"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "5c448612569cc7a96396454db1261ba6fa3d70babd2d48c35b00f14001084475",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN",
+      "result": {
+        "seed_meta_writes_native_license": false,
+        "status": "NOT_RUN",
+        "runtime": "NOT_RUN",
+        "profile_result": "NOT_RUN",
+        "http_executed": false,
+        "failed_checks": [],
+        "transcript": [],
+        "journal": [],
+        "journal_scope": "collaboration_source_post_only"
+      }
+    },
+    {
+      "name": "python_compile_in_memory",
+      "exit": 0,
+      "pycache_written": false,
+      "http_executed": false
+    },
+    {
+      "name": "isolated_exact_production_helper_controls_and_R7_guard_reproduction",
+      "exit": 0,
+      "stderr_empty": true,
+      "http_executed": false,
+      "services_started": false,
+      "result": {
+        "controls": 12,
+        "failed_checks": [],
+        "r7_guard_reason": "eco_locals_changed_snapshot",
+        "local_only_change_accepted": true,
+        "metadata_mutants_refused": 7,
+        "source_field_mutant_refused": true,
+        "wiped_local_mutant_refused": true,
+        "serialized_postlocal_restart_retained": true,
+        "wiped_local_restart_refused": true,
+        "production_helper_sha256": {
+          "sha": "395c55ea3ab65aa149f2e9973f5332959bb482eef422bfa40bb1375c53c76802",
+          "sameJson": "c47d25db232a37fac6c2fcb5609263ef5d7c464ec30b9b1d1af12063c30b6246",
+          "sourceDigest": "c3f80f93e750c67412bb41a9d7fcf4fc9af6bc43a03c9cb9ecdcd872d896afd7",
+          "cellDigest": "e9cfe6b884a9b0bfe9672251587855b88adfbac246a2b44ef09c4ae68e156314",
+          "snapshotMeta": "d15d46f68e0325ac3314a8f8d94308a6d9b8346222650d4838eec49720e150ae",
+          "assertMetaHeld": "5d0a3abd6291cb832c8bbfc3cadd49435b644003f1d083d27794397ad11c6dab",
+          "assertLocals": "cd7c98b3516729cc6d0adb845c81c31a2db70db0401774381128d8594c090e59",
+          "assertEcoLocalSnapshotHeld": "42579edde27b3eeda2b2f0e212e57aaa53a8dc1aac2304475a98eba8a11ef7c7",
+          "restartVerdict": "d29370dca01d71b5641a76d1c38a129f24f6d83135a2fa6fa05a1315c888d3ba"
+        }
+      }
+    },
+    {
+      "name": "after_restore_byte_unchanged_from_R7",
+      "exit": 0,
+      "sha256": "9d38bc85735645f2a90908e547e804aeb51331945894cb3c2d14e86788a5bdff"
+    },
+    {
+      "name": "python_pair_byte_identical_to_R7_R6",
+      "exit": 0
+    },
+    {
+      "name": "frozen_R7_manifest_matches",
+      "exit": 0,
+      "sha256": "843b5cb18114b6a95a28d5a055dd42c4b5a65ca0118742b5d3a7cd55a7d36ad4"
+    },
+    {
+      "name": "protected_map",
+      "exit": 0,
+      "count": 14103,
+      "mismatches": 0,
+      "map_sha256": "51a01283da7735d93472f70d7ce251fe7a37166fd79f80bc99383ce1ee645115"
+    },
+    {
+      "name": "R6_R7_guard_helpers_and_vectors_byte_identical",
+      "exit": 0,
+      "items": 29,
+      "mismatches": 0
+    }
+  ],
+  "r8_runtime": "NOT_RUN",
+  "r8_recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+  "r8_checks_note": "Only r8_checks were executed for R8. Existing checks/r7_checks are retained historical records. Two read-only diagnostics initially used an incorrect phase marker or omitted a TypeScript constant annotation and exited1; both corrected comparisons passed before finalization. Neither diagnostic ran the profile or changed files.",
+  "r8_inputs": {
+    "r7_packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/w23-real-http-r7-cb-source-only-released-before-Root-review-20261024",
+    "r7_manifest_sha256": "843b5cb18114b6a95a28d5a055dd42c4b5a65ca0118742b5d3a7cd55a7d36ad4",
+    "r7_source_packet_sha256": "48e95c820ddba53efb9ea9678d49ce24eb10e52307569c6b8642228a301f21b6",
+    "eco_review_sha256": "b314145c41e8a9a0472b1dc705c1b75efffdbc7b4c23cfdc7805bcb047cdd64b",
+    "recovery_review_sha256": "c41d1a5f173da5f1ea3f7fcc875d7e20de29e109cd1c1df1c94fb1eaf32c4a4c"
+  },
+  "r8_limitations": [
+    "NOT_ACCEPTED; source-only pure controls are not HTTP, database, service, licensed install, build, browser, Docker, or real-hour acceptance.",
+    "after_restore is byte-identical to frozen R7 and still attempts the unsupported same-tuple new-name confirm; COLLECTION_CONFLICT is not converted to a passing oracle.",
+    "Owner product choice in /tmp/plm-w23-same-collection-reauthorization-proposal-20261025.md remains PENDING. No new base, data source, product operation, stale-to-active change, or DB guard relaxation was made.",
+    "No current Native tree or runtime pin was read or admitted. Root handles Native CI and independent frozen-R8 review.",
+    "verify.py/native_fixture.py retain exact R7/R6 bytes; admission, signed-license, R6 guards and R7 count/comment/history protections are unchanged.",
+    "Cardinality SQL and the full profile were not executed. Production issuance and installation remain NOT_RUN."
+  ],
+  "r8_preserved_byte_identical": {
+    "capturedVersion": true,
+    "sameVersionAnchor": true,
+    "assertReadinessIdentity": true,
+    "ecoBusinessVerdict": true,
+    "priorAcceptedCas": true,
+    "cardinalityVerdict": true,
+    "requireHealthyCarry": true,
+    "observeOwnedCounts": true,
+    "localValues": true,
+    "sourceDigest": true,
+    "assertLocals": true,
+    "commentDigest": true,
+    "historyDigest": true,
+    "fieldWalk": true,
+    "signedImportRefusal": true,
+    "ownedSocketRefusal": true,
+    "restartVerdict": true,
+    "ECO_CONFIRM_COUNTS": true,
+    "ECO_LOCAL_COUNTS": true,
+    "ECO_COMMENT_COUNTS": true,
+    "ECO_SOURCE_COUNTS": true,
+    "READY_CONFIRM_COUNTS": true,
+    "READY_APPEND_COUNTS": true,
+    "READY_LOCAL_COUNTS": true,
+    "READY_COMMENT_COUNTS": true,
+    "READY_SOURCE_COUNTS": true,
+    "OWNED_COUNT_SQL": true,
+    "LOCAL_FIELDS": true,
+    "ECO_CELLS": true
+  },
+  "r8_previous_session": "a3c4f803-a506-4961-8f98-c9720b1249cb",
+  "r8_released_at": "2026-10-24T19:34:32.724658+00:00",
+  "r9_acceptance": "NOT_ACCEPTED",
+  "r9_phase": "RELEASED_SOURCE_ONLY",
+  "r9_packet": "NOT_CREATED",
+  "r9_runtime": "NOT_RUN",
+  "r9_recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+  "r9_driver_rule": "owned_socket_refusal stays the canonical admission. native_sqlalchemy_url runs only after parse_owned_dsn and owned_plane_refusal accept the URL, then swaps the postgresql:// prefix for postgresql+psycopg://. The Meta URL is not passed to that map. Owned records stay postgresql://.",
+  "r9_redis_archive": {
+    "hash": "3efe030b",
+    "kind": "github_commit_archive",
+    "services_started": false,
+    "installed": false,
+    "redis_server_sha256_pin_changed": false
+  },
+  "reasoning_effort_actual": "xhigh",
+  "model_actual": "grok-4.7",
+  "session_actual": "a0f2f704-bb03-43a3-a841-0d515e372164",
+  "r9_historical_root_red": {
+    "path": "/tmp/plm-w23-r9-driver-Root-red-20261025.json",
+    "sha256": "7b5e441de015628ffb60d28417fa35dd0e926296fde0accba340ffab7e66abca",
+    "rewritten": false,
+    "plain_error": "ModuleNotFoundError",
+    "plain_message": "No module named 'psycopg2'",
+    "plain_connected": false,
+    "mapped_driver": "psycopg",
+    "mapped_created": true,
+    "mapped_connected": false
+  },
+  "r9_native_declaration": {
+    "tree": "/Users/chouhua/.codex/worktrees/plm-eco-domain-audit-20261017/Yuantus",
+    "head": "3e5596e7431e792120057c998f1e97ed6b2e1303",
+    "dependency": "psycopg[binary]>=3.1.0",
+    "mutated": false,
+    "porcelain_empty": true,
+    "published_draft": 382,
+    "ci_active": true
+  },
+  "r9_source_sha256": {
+    "scripts/verification/plm-collaboration-paired/verify.py": "cdb7de13b4c54aa26abab1d3c06dab2d42b32224acf8398d5aa5a7bed23838e8",
+    "scripts/verification/plm-collaboration-paired/native_fixture.py": "33a3cd9ff4e330f078d09ab1d1c7b2191411880f55709a3dee983b9a16b32706",
+    "scripts/verification/plm-collaboration-paired/README.md": "1d46358e9add73b7abdde89d17d023298ef4e4428c55cdfbd4a942baf98ecf99",
+    "scripts/verification/plm-collaboration-paired/run.mts": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986",
+    "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "0ea54f09f87a0ce74748beb69e7f71a57682525456d20a1542f3b99435763f05"
+  },
+  "r9_checks": [
+    {
+      "name": "python_compile_in_memory",
+      "exit": 0,
+      "pycache_written": false,
+      "http_executed": false,
+      "services_started": false,
+      "files": [
+        "scripts/verification/plm-collaboration-paired/verify.py",
+        "scripts/verification/plm-collaboration-paired/native_fixture.py"
+      ]
+    },
+    {
+      "name": "help_verify",
+      "argv": [
+        "python3",
+        "scripts/verification/plm-collaboration-paired/verify.py",
+        "--help"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "8a8625cdc1d88e6b99c1ff898bd83d2f6276e970d30356e5b24fadcc9c55cf73",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "help_fixture",
+      "argv": [
+        "python3",
+        "scripts/verification/plm-collaboration-paired/native_fixture.py",
+        "--help"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "19b43afe795ea7c09aae1f669a491bc650fa8dcea318dd46eb59ce5381986373",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "fixture_self_check",
+      "argv": [
+        "python3",
+        "scripts/verification/plm-collaboration-paired/native_fixture.py",
+        "self-check"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "223903ecd91338c45081cbad3f69182b4a998df36019d8ff4cd49003deeaa7be",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN",
+      "check_count": 67,
+      "driver_control_count": 22,
+      "failed_checks": [],
+      "driver_probe": {
+        "connections": false,
+        "native_product_imported": false,
+        "plain": {
+          "scheme": "postgresql",
+          "created": false,
+          "connected": false,
+          "error": "ModuleNotFoundError",
+          "message": "No module named 'psycopg2'"
+        },
+        "mapped_driver": "psycopg",
+        "mapped_drivername": "postgresql+psycopg",
+        "mapped_roles": [
+          "global",
+          "identity",
+          "tenant",
+          "tenant_orm"
+        ],
+        "checked_out": 0,
+        "checked_in": 0,
+        "connected": false,
+        "username": "plm_test",
+        "password_set": false,
+        "authority_host": "localhost",
+        "query_port": "5432",
+        "host_count": 1,
+        "tenant_orm_options": "-csearch_path=yt_t_w23http"
+      }
+    },
+    {
+      "name": "help_run",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "scripts/verification/plm-collaboration-paired/run.mts",
+        "--help"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "0aba30a3a5670c4db39ad2b899c79a56fbf545f9e31718ac81c8a09cefe31387",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "node_check",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "--check",
+        "scripts/verification/plm-collaboration-paired/run.mts"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "run_self_check",
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "scripts/verification/plm-collaboration-paired/run.mts",
+        "self-check"
+      ],
+      "exit": 0,
+      "stderr_empty": true,
+      "stdout_sha256": "5c448612569cc7a96396454db1261ba6fa3d70babd2d48c35b00f14001084475",
+      "http_executed": false,
+      "services_started": false,
+      "profile_result": "NOT_RUN"
+    },
+    {
+      "name": "protected_map",
+      "exit": 0,
+      "count": 14103,
+      "hashed": 5138,
+      "null_pins": 8965,
+      "mismatches": 0,
+      "http_executed": false
+    },
+    {
+      "name": "run_mts_byte_identical_r8",
+      "exit": 0,
+      "sha256": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986"
+    }
+  ],
+  "r9_limitations": [
+    "NOT_ACCEPTED. Source-only checks are not HTTP, SQL, service, licensed install, build, browser, Docker, or real-hour acceptance. A green self-check is not a whole-profile pass.",
+    "BLOCKED_PENDING_PRODUCT_CHOICE. after_restore stays the unchanged R8 same-tuple new-name confirm. COLLECTION_CONFLICT is not a passing oracle. Owner proposal /tmp/plm-w23-same-collection-reauthorization-proposal-20261025.md remains PENDING. No reauthorization API was added.",
+    "Historical Root driver RED file was not rewritten. The self-check reproduces ModuleNotFoundError for plain postgresql and constructs postgresql+psycopg engines without connect.",
+    "No current runtime pin was admitted. Native HEAD 3e5596e7431e792120057c998f1e97ed6b2e1303 was read only: porcelain was empty, published Draft 382, CI active, and the tree was not mutated. Root owns actual runtime and independent validation. No handoff to ca5aa5ea55b6e0842081744f0311d5b1fbb4d2f2 or e3f44e5a8816b52f0e30be553c98fff7b344ab25.",
+    "Root rebuilt the missing owned Redis binary from GitHub commit-archive hash 3efe030b. Redis was not started, no package was installed, and the caller-supplied redis_server_sha256 pin was not changed.",
+    "Frozen R1-R8 packets were not rewritten. run.mts is byte-identical to R8. Protected hashed pins remained 0 mismatches.",
+    "The sha256 of this verification.json file is recorded on the owner lock after this object is sealed."
+  ],
+  "r10_acceptance": "NOT_ACCEPTED",
+  "r10_phase": "RELEASED_SOURCE_ONLY",
+  "r10_packet": "NOT_CREATED",
+  "r10_runtime": "NOT_RUN",
+  "r10_recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+  "r10_model_actual": "grok-4.7",
+  "r10_reasoning_effort_actual": "xhigh",
+  "r10_session_actual": "bf92bfbb-32db-47ec-bc9b-7a461e2acb65",
+  "r10_native": {
+    "tree": "/Users/chouhua/.codex/worktrees/plm-eco-domain-audit-20261017/Yuantus",
+    "head": "3e5596e7431e792120057c998f1e97ed6b2e1303",
+    "mutated": false,
+    "porcelain_empty": true
+  },
+  "r10_run_mts_sha256": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986",
+  "r10_historical_root_red": {
+    "path": "/tmp/plm-w23-r9-complete-pg-diagnostic-current-20261025.json",
+    "observation": "/tmp/plm-w23-r9-complete-pg-diagnostic-20261025-7e8ce5dd388c43f8a1a30ed9dcbfbf55/native-seed-value-free-observation.json",
+    "rewritten": false,
+    "code": "app_license_not_written",
+    "error": "NoReferencedTableError",
+    "meta_seed": "separate_later_task"
+  },
+  "r10_before_fix": {
+    "path": "/tmp/plm-w23-real-http-lock-20261024/r10-fk-before-fix-20261025.json",
+    "sha256": "81bed890df360c730eda8415ee8f1405dd9663397c81b7f269a2e5d01c00bb76",
+    "missing_status": "RED",
+    "missing_error": "NoReferencedTableError",
+    "missing_table": "meta_app_registry",
+    "existing_model_registration_status": "GREEN",
+    "target": "meta_app_registry.id",
+    "connect_attempts": 0,
+    "sql_connections": false
+  },
+  "r10_historical_scaffolding_checks": [
+    {
+      "name": "license_fk_check",
+      "historical": true,
+      "product_command": false,
+      "argv": [
+        "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/.venv/bin/python",
+        "scripts/verification/plm-collaboration-paired/native_fixture.py",
+        "license-fk-check"
+      ],
+      "stdout_sha256": "0237a8890a6490125b6772a0de2d3005916b4395524c9ca518ea899719744a56",
+      "exit": 0,
+      "note": "Removed product CLI. Stdout retained."
+    },
+    {
+      "name": "refusal_order_check",
+      "historical": true,
+      "product_command": false,
+      "argv": [
+        "python3",
+        "scripts/verification/plm-collaboration-paired/verify.py",
+        "refusal-order-check"
+      ],
+      "stdout_sha256": "8527b11ea8f50e8097ac7713dd7d02635f11449b2a7bf231c03522cf6ac58e4e",
+      "exit": 0,
+      "note": "Removed product CLI. Source-order proof. Stdout retained."
+    },
+    {
+      "name": "license_fk_check_values_free",
+      "historical": true,
+      "product_command": false,
+      "stdout_sha256": "db2ad511c0e0967b42bfa170b5ca0978767b3946a12c2a145e7256f0fec1bae1",
+      "exit": 0,
+      "note": "Removed product CLI. Class-token rerun. Stdout retained."
+    }
+  ],
+  "r10_checks": [
+    {
+      "name": "python_compile_in_memory",
+      "exit": 0,
+      "pycache_written_by_compile": false,
+      "http_executed": false,
+      "services_started": false,
+      "sql_connections": false,
+      "files": [
+        "scripts/verification/plm-collaboration-paired/verify.py",
+        "scripts/verification/plm-collaboration-paired/native_fixture.py"
+      ]
+    },
+    {
+      "name": "r10_fk_metadata_pair",
+      "argv": [
+        "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/.venv/bin/python",
+        "/tmp/plm-w23-real-http-lock-20261024/r10-fk-metadata-pair-20261025.py"
+      ],
+      "env": [
+        "PYTHONDONTWRITEBYTECODE=1",
+        "PYTHONPATH=/Users/chouhua/.codex/worktrees/plm-eco-domain-audit-20261017/Yuantus/src"
+      ],
+      "script_sha256": "5e8a718f73df24fb1ceea277a999a33b59bf4f83be6084bff2acd202847ae882",
+      "exit": 0,
+      "stdout_sha256": "ba1bc30e7a5019642692c1b1a88ee974320902e9ba672a25c335d268c6157b57",
+      "control": "GREEN",
+      "missing_referenced_table": "RED",
+      "missing_error": "NoReferencedTableError",
+      "referenced_table_from_declaration": "meta_app_registry",
+      "declared_target": "meta_app_registry.id",
+      "registered_foreign_key": "GREEN",
+      "registered_target": "meta_app_registry.id",
+      "failed_checks": [],
+      "connect_attempts": 0,
+      "engine_connect_blocked": true,
+      "http_executed": false,
+      "services_started": false,
+      "sql_connections": false,
+      "profile_result": "NOT_RUN",
+      "acceptance": "NOT_ACCEPTED"
+    },
+    {
+      "name": "r10_refusal_intercept",
+      "cwd": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+      "argv": [
+        "python3",
+        "/tmp/plm-w23-real-http-lock-20261024/r10-refusal-intercept-20261025.py"
+      ],
+      "env": [
+        "PYTHONDONTWRITEBYTECODE=1",
+        "unset REDIS_URL REDIS_HOST REDIS_PORT VITEST NODE_TLS_REJECT_UNAUTHORIZED NODE_ENV PRODUCT_MODE"
+      ],
+      "script_sha256": "e9f5420158dd29c9df2729b16cc5d5dad3e3c76df3254eb818f2bdc2856d72a7",
+      "exit": 0,
+      "stdout_sha256": "797a78cc9b84ca89d6f1a237d73b23c59f509370cafe75056affe8f050020bac",
+      "control": "GREEN",
+      "invalid_meta_calls": [],
+      "invalid_errors": [
+        "license_provenance_missing",
+        "license_signature_not_verified",
+        "production_issuance_claim_refused"
+      ],
+      "owned_receipt_checked_label": "meta_migrate_latest",
+      "inspect_getsource": false,
+      "real_subprocess_calls": 0,
+      "failed_checks": [],
+      "http_executed": false,
+      "services_started": false,
+      "sql_connections": false,
+      "profile_result": "NOT_RUN",
+      "acceptance": "NOT_ACCEPTED"
+    },
+    {
+      "name": "git_diff_check",
+      "exit_note": "git diff --check --no-index against /dev/null exits 1 because --exit-code sees a non-empty file. No trailing-whitespace or conflict-marker warning was printed.",
+      "whitespace_warnings": 0,
+      "http_executed": false
+    },
+    {
+      "name": "run_mts_byte_identical",
+      "exit": 0,
+      "sha256": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986"
+    }
+  ],
+  "r10_limitations": [
+    "NOT_ACCEPTED. Source-only checks are not HTTP, SQL, service, licensed install, build, browser, Docker, or real-hour acceptance.",
+    "The missing-import foreign key stays observable as NoReferencedTableError. The lock metadata script reports meta_app_registry from the declared ForeignKey target. The runtime gap stores the code and the exception class token only.",
+    "Meta seed genericError from the Root diagnostic is a separate later task and was not changed.",
+    "BLOCKED_PENDING_PRODUCT_CHOICE. after_restore stays the unchanged same-tuple confirm. No reauthorization API was added.",
+    "No current runtime pin was admitted. Native HEAD 3e5596e7431e792120057c998f1e97ed6b2e1303 was not mutated. Root owns actual runtime and independent validation.",
+    "Broad passing oracle cohorts, the protected pin walk, and the fixture self-check were not rerun. The two scaffolding self-check records were removed. run.mts is byte-identical.",
+    "Frozen R1-R9 packets and the Root diagnostic were not rewritten. Product license-fk and refusal-order commands were removed. Their earlier stdout hashes are under r10_historical_scaffolding_checks. The sha256 of this verification.json file is recorded on the owner lock after this object is sealed."
+  ],
+  "r11_phase": "RELEASED_SOURCE_ONLY_PENDING_INDEPENDENT",
+  "r11_acceptance": "NOT_ACCEPTED",
+  "r11_actor": "Root",
+  "r11_change": "Both source-importing runner argv use existing pinnedtsx (seed-meta and HTTP/cardinality); run.mtsunchanged",
+  "r11_runtime": "NOT_RUN",
+  "r11_pure_module_proof": {
+    "path": "/tmp/plm-w23-seed-module-transport-Root-pure-20261025.json",
+    "sha256": "2accad3481f695bd504dc5920579656bdfc61f68132eaee5c233738e3bbb9913",
+    "native_strip_expected_RED": 2,
+    "existing_tsx_real_exports_PASS": 2,
+    "network_attempts": 0
+  },
+  "r11_native_pin": "/tmp/plm-w23-native-reviewed-538cbf075-complete-pg-pin-20261025.json",
+  "r11_native_pin_sha256": "99704d6c9a3f74e709a67965462e605f6e2f55ef48bbe9b10fa2f77355ff003b",
+  "r11_r10_packet_manifest": "e83f4beb60349fba3fa19ce5f96f22fef4e34de2eeb2a3798a256a5fd90aa495",
+  "r11_compile": "twoPythonfilesinmemoryPASS; noNodeorSQLbythismetadatahandoff",
+  "r11_recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+  "r11_at": "2026-10-24T22:17:07.123305+00:00",
+  "r11_source_sha256": {
+    "scripts/verification/plm-collaboration-paired/verify.py": "62f3b51999f238647a3b747e96afa4fef647cb1fb2e5e13e61dc1747e996428f",
+    "scripts/verification/plm-collaboration-paired/native_fixture.py": "023d4e42905733dbdd5dbc13c46aa47e7c654b5a2018f9a6775110879acc93f1",
+    "scripts/verification/plm-collaboration-paired/run.mts": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986",
+    "scripts/verification/plm-collaboration-paired/README.md": "a0a17f39043e9501538d40138999ceb6f862dc62f9f8a4ece88e683c0d4dc19e",
+    "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "029d2db69d93538294b9877858e7822a93d168c542acb87745ff8890d1fd9886"
+  },
+  "r11_independent_finding_fixed": "HTTP readOwnedCounts import also needsloader; sameactualpuremoduleprobe; fixedbeforefullrun",
+  "r12_phase": "RELEASED_SOURCE_ONLY",
+  "r12_acceptance": "NOT_ACCEPTED",
+  "r12_runtime": "NOT_RUN",
+  "r12_recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+  "r12_http_executed": false,
+  "r12_sql_executed": false,
+  "r12_services_started": false,
+  "r12_model_actual": "grok-4.7",
+  "r12_reasoning_effort_actual": "xhigh",
+  "r12_session_actual": "e6bcec9b-f4f2-4c13-acb0-25eb16126184",
+  "r12_model_record": "session summary.json current_model_id and reasoning_effort; client record, not a runtime acceptance flag",
+  "r12_native": {
+    "tree": "/Users/chouhua/.codex/worktrees/plm-continuous-generation-20261022/Yuantus",
+    "head": "538cbf07509a1a806a314eed49fff5f1f0d2b49b",
+    "porcelain_empty": true,
+    "edited": false
+  },
+  "r12_meta": "fa8eeee6429be86ff0344fa4e9f0596d9427424c",
+  "r12_tenant_database": "w23tenw23http<nonce>",
+  "r12_template_database": "w23ten{tenant_id}<nonce>",
+  "r12_r11_run_mts_sha256": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986",
+  "r12_run_mts_sha256": "2a0da25c298a0f6ee13df8ae495ff6ece5fd99dae2af2478719456fe4b67e323",
+  "r12_run_mts_byte_identical_to_r11": false,
+  "r12_historical_collision": {
+    "preserved": true,
+    "rerun": false,
+    "function": "require_session_scope",
+    "exception": "PushValidationError",
+    "code": "business_scope_collision"
+  },
+  "r12_checks": {
+    "python_compile_in_memory": true,
+    "routing_admission_failures": [],
+    "routing_admission_count": 20,
+    "affected_driver_failures": [],
+    "affected_driver_count": 22,
+    "driver_connections": false,
+    "driver_native_imported": false,
+    "yuantus_imported_during_driver": false,
+    "routing_guard_status": "PASS",
+    "routing_guard_failures": [],
+    "routing_guard_attempts": {
+      "connection_execute": 0,
+      "dbapi_connect": 0,
+      "engine_connect": 0,
+      "network": 0,
+      "raw_connection": 0,
+      "session_execute": 0
+    },
+    "query_only_guard": {
+      "code": null,
+      "identity_factory_calls": 1
+    },
+    "tsx_help_exit": 0,
+    "tsx_help_stdout_sha256": "0aba30a3a5670c4db39ad2b899c79a56fbf545f9e31718ac81c8a09cefe31387",
+    "tsx_tenant_admission": {
+      "ok": true,
+      "failed": []
+    },
+    "node_experimental_strip_types": "rejected_by_pinned_node_v20.20.2",
+    "full_self_check_rerun": false,
+    "full_run_mts_self_check_rerun": false,
+    "http_profile_rerun": false
+  },
+  "r12_source_sha256": {
+    "scripts/verification/plm-collaboration-paired/verify.py": "e11d64e3f2f18c499515b443b8124b1c731cd90a26354ea2ce027b13c0bc16a9",
+    "scripts/verification/plm-collaboration-paired/native_fixture.py": "c1faf3fbd6c2b78e1be85d5c97aedf3258be5e3b51f10dfdee6d1fc3220d6f3e",
+    "scripts/verification/plm-collaboration-paired/run.mts": "2a0da25c298a0f6ee13df8ae495ff6ece5fd99dae2af2478719456fe4b67e323",
+    "scripts/verification/plm-collaboration-paired/README.md": "2cfd27cb3371e0959c08236809780253913caa27ce741d4ccdfc7f27fad554a5",
+    "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "91e543f52013ebd3e883e864d0d2281348bf9133c8baf7e031bc620bfc0f53d0"
+  },
+  "r12_limitations": [
+    "Source-only. No PostgreSQL, Redis, SQL, server, browser, Docker, network, or package install.",
+    "Positive require_session_scope used a simulated identity catalog containing only w23http. That is not a database read.",
+    "Query-only application_name difference kept one parsed database and failed physical_target_refusal. The unchanged product guard completed that case because the URL strings differ; identity_factory_calls was 1 and no connection was attempted.",
+    "Old constant and historical w23ten<nonce> templates still raised business_scope_collision before the identity factory.",
+    "Wrong bound global URL raised business_scope_mismatch.",
+    "No runtime acceptance and no whole-profile PASS. Same-collection recovery remains BLOCKED_PENDING_PRODUCT_CHOICE."
+  ],
+  "r12_business_route": {
+    "phase": "RELEASED_SOURCE_ONLY",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN",
+    "sql_executed": false,
+    "http_executed": false,
+    "services_started": false,
+    "existing_witness": "prove_owned_engines reads current_database on the raw global, identity, and tenant engines before migrations and refuses owned_database_not_empty. It does not read current_schema and does not use the business session.",
+    "added": "seed calls _observe_business_route after upgrade_schema and before _identity. The function uses _business_session, SELECT current_database(), current_schema(), compares the admitted context tenant name and TENANT_SCHEMA, then session.close(). No create_engine, sessionmaker, or get_sessionmaker_for_tenant in that function.",
+    "public_fields": [
+      "routing_witness.current_database",
+      "routing_witness.current_schema"
+    ],
+    "refusal": "business_route_refused",
+    "omitted_receipt_key": "execute_profile does not invent a witness when routing_witness is absent",
+    "present_mismatch": "execute_profile refuses a present witness that disagrees with the admitted tenant name or TENANT_SCHEMA",
+    "checks": {
+      "compile_ok": true,
+      "admission_count": 26,
+      "admission_failures": [],
+      "driver_count": 22,
+      "driver_failures": [],
+      "driver_connections": false,
+      "driver_native_imported": false,
+      "yuantus_imported": false,
+      "native_head": "538cbf07509a1a806a314eed49fff5f1f0d2b49b",
+      "native_porcelain_empty": true,
+      "routing_guard_rerun": false,
+      "http_profile_rerun": false,
+      "postmigration_select_executed": false,
+      "evidence": "/tmp/plm-w23-real-http-r12-lock-20261025/focused-check-route.out"
+    },
+    "source_sha256": {
+      "scripts/verification/plm-collaboration-paired/verify.py": "13a33e5f644fffd80215d9971ff84c46d4d2223636a709ee37d3ec3d94884e1f",
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "54fe22b2b48d38f1ad055c0c244bec710d82b383ba6905abc70bdd51bb2a5659",
+      "scripts/verification/plm-collaboration-paired/run.mts": "2a0da25c298a0f6ee13df8ae495ff6ece5fd99dae2af2478719456fe4b67e323",
+      "scripts/verification/plm-collaboration-paired/README.md": "69a068c2ca2e2542808c9e8d98fab79288b67cc73aac7f4237cb35cbd4527adf",
+      "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "72c09ffebdf07c30ae5d015f129e3018a3912f9ad6eff0f548aa1343e01714d4"
+    },
+    "run_mts_unchanged_sha256": "2a0da25c298a0f6ee13df8ae495ff6ece5fd99dae2af2478719456fe4b67e323",
+    "model_actual": "grok-4.7",
+    "reasoning_effort_actual": "xhigh",
+    "session_actual": "e6bcec9b-f4f2-4c13-acb0-25eb16126184",
+    "model_record": "session summary.json current_model_id and reasoning_effort; client record, not a runtime acceptance flag"
+  },
+  "r12_entry_correction": {
+    "phase": "RELEASED_SOURCE_ONLY",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN",
+    "sql_executed": false,
+    "http_executed": false,
+    "services_started": false,
+    "restored": "unconditional main(); import { fileURLToPath } from node:url",
+    "removed": [
+      "pathToFileURL",
+      "export function tenantRoutingAdmission",
+      "direct-invocation guard",
+      "String.replace third argument"
+    ],
+    "controls": "non-exported tenantRoutingAdmission called from metaSelfCheck; two descriptor tenant names remain w23tenw23http",
+    "postmigration_witness": "kept; SELECT not executed",
+    "prior_intermediate_run_mts_sha256": "2a0da25c298a0f6ee13df8ae495ff6ece5fd99dae2af2478719456fe4b67e323",
+    "run_mts_sha256": "eaac22ebd809f07b50dd50ecd9ab8d5be37484b59148bb380dbf70c8f5f406df",
+    "subset_harness": {
+      "ok": true,
+      "failed": [],
+      "network_attempts": 0,
+      "production_entry_executed": false,
+      "help_stdout_sha256": "0aba30a3a5670c4db39ad2b899c79a56fbf545f9e31718ac81c8a09cefe31387"
+    },
+    "checks": {
+      "compile_ok": true,
+      "admission_count": 23,
+      "admission_failures": [],
+      "driver_count": 22,
+      "driver_failures": [],
+      "driver_connections": false,
+      "yuantus_imported": false,
+      "native_head": "538cbf07509a1a806a314eed49fff5f1f0d2b49b",
+      "native_porcelain_empty": true,
+      "routing_guard_rerun": false,
+      "http_profile_rerun": false,
+      "postmigration_select_executed": false
+    },
+    "source_sha256": {
+      "scripts/verification/plm-collaboration-paired/verify.py": "13a33e5f644fffd80215d9971ff84c46d4d2223636a709ee37d3ec3d94884e1f",
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "b50bb3605e7034cc4495500981c4abfc8564d3ab0fb786c4c1e8f5bf1352a43c",
+      "scripts/verification/plm-collaboration-paired/run.mts": "eaac22ebd809f07b50dd50ecd9ab8d5be37484b59148bb380dbf70c8f5f406df",
+      "scripts/verification/plm-collaboration-paired/README.md": "93ea5c30f9942f9832775e08b86e6b6c1bfc8fbe7f5b8ed641134662b8d83211",
+      "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "428dff982eae1b694207fc529188dec254ef5f8a9db143d662da4a1134bac65e"
+    },
+    "model_actual": "grok-4.7",
+    "reasoning_effort_actual": "xhigh",
+    "session_actual": "e6bcec9b-f4f2-4c13-acb0-25eb16126184",
+    "model_record": "session summary.json current_model_id and reasoning_effort; client record, not a runtime acceptance flag"
+  },
+  "r12_slim_counterexamples": {
+    "phase": "RELEASED_SOURCE_ONLY",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN",
+    "sql_executed": false,
+    "moved_to_scratch": [
+      "routing_admission_records",
+      "routing_guard_nosql",
+      "_clone_owned_proof"
+    ],
+    "scratch": "/tmp/plm-w23-real-http-r12-lock-20261025/r12_counterexamples.py",
+    "self_check_matrix": [
+      "r12_canonical_namespace",
+      "r12_concrete_format",
+      "r12_old_fixed_and_query_only_rejected",
+      "r12_legacy_mixed_swap_template_refused",
+      "r12_route_witness"
+    ],
+    "self_check_status": "NOT_RUN",
+    "self_check_failed": [],
+    "scratch_admission_count": 20,
+    "scratch_admission_failed": [],
+    "scratch_guard_status": "PASS",
+    "scratch_guard_failed": [],
+    "scratch_guard_attempts": {
+      "network": 0,
+      "engine_connect": 0,
+      "raw_connection": 0,
+      "connection_execute": 0,
+      "session_execute": 0,
+      "dbapi_connect": 0
+    },
+    "postmigration_select_executed": false,
+    "run_mts_unchanged_sha256": "eaac22ebd809f07b50dd50ecd9ab8d5be37484b59148bb380dbf70c8f5f406df",
+    "source_sha256": {
+      "scripts/verification/plm-collaboration-paired/verify.py": "13a33e5f644fffd80215d9971ff84c46d4d2223636a709ee37d3ec3d94884e1f",
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "9506d5074db705f32a00b43896aec01e5f0b0bc2fb58994bef455ae2b4e7966f",
+      "scripts/verification/plm-collaboration-paired/run.mts": "eaac22ebd809f07b50dd50ecd9ab8d5be37484b59148bb380dbf70c8f5f406df",
+      "scripts/verification/plm-collaboration-paired/README.md": "be613d4bd2cbfa17431be6c34b5b91c929607de736889abb43b9924fbab4bcc9",
+      "docs/development/PLM_W23_REAL_HTTP_DESIGN_VALIDATION_20261024.md": "88ea7b686e6c77d8a0eccf024da50d876cbe3c48cfb1a13de07145c0142d6faf"
+    },
+    "model_actual": "grok-4.7",
+    "reasoning_effort_actual": "xhigh",
+    "session_actual": "e6bcec9b-f4f2-4c13-acb0-25eb16126184",
+    "model_record": "session summary.json current_model_id and reasoning_effort; client record, not a runtime acceptance flag"
+  },
+  "r12_root_mandatory_witness": {
+    "at": "2026-10-24T23:36:26.187537+00:00",
+    "phase": "ROOT_REVIEW_CODE_QUALIFIED_FINAL_METADATA_PENDING_INDEPENDENT_BINDING",
+    "runtime": "NOT_RUN",
+    "acceptance": "NOT_ACCEPTED",
+    "recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+    "mandatory_witness": true,
+    "refusal": "business_route_refused beforeMeta migrations for missing/nonobject/invalid database orschema",
+    "boundary_cases": 6,
+    "invalid_cases_refused_before_Meta": 5,
+    "valid_witness_retained_and_reaches_next_boundary": true,
+    "focused_source_checks": 15,
+    "original_TS_business_functions_unchanged": 88,
+    "code_sha256": {
+      "scripts/verification/plm-collaboration-paired/verify.py": "e3e30ab66192c81438f9a5dc087d1037b90b2ad3be89da342e9ecdebd1986e34",
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "9506d5074db705f32a00b43896aec01e5f0b0bc2fb58994bef455ae2b4e7966f",
+      "scripts/verification/plm-collaboration-paired/run.mts": "eaac22ebd809f07b50dd50ecd9ab8d5be37484b59148bb380dbf70c8f5f406df"
+    },
+    "reports": {
+      "/tmp/plm-w23-r12-Sol-witness-boundary-20261025.json": "5ecc736519cfb5e17da8af9f803cc0a177306f3db82743d6d5c48f6c07f5031d",
+      "/tmp/plm-w23-r12-Sol-final-code-focused-20261025.json": "5552423e0124942a2db6aca88b3aa9fbb56e9bd3bb950f0c342fe3c74673afd2",
+      "/tmp/plm-w23-r12-Sol-final-ts-parity-20261025.json": "6e4478ff7d067dc8dbb9fd146931d02ae2ec3cd97345d7b491ee80f822b15408"
+    },
+    "retained_RED": "/tmp/plm-w23-r12-Sol-witness-boundary-before-fix-20261025.json",
+    "retained_RED_sha256": "df8f6737637a90cb04ba1967a0df162c9d7f357f22145650415ed319230d4dc8",
+    "historical_author_stages": "Earlier r12_* source hashes and omitted_receipt_key statements are retained intermediate-stage observations; this mandatory-gate correction supersedes the optional witness behavior. Current complete six-file binding lives outside this JSON."
+  },
+  "r13_rulecoverage_fixture": {
+    "phase": "RELEASED_SOURCE_ONLY",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN",
+    "recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+    "sql_executed": false,
+    "http_executed": false,
+    "services_started": false,
+    "network_executed": false,
+    "design_review": "/tmp/plm-w23-r13-minimal-fixture-design-review-20261025.json",
+    "design_review_status": "MINIMAL_FIXTURE_DESIGN_SUPPORTED_BY_SOURCE",
+    "edits": [
+      "parent _insert_part released False to True; child stays True",
+      "RoutingService.create_routing is_primary=False",
+      "omit RoutingService.add_operation"
+    ],
+    "parent_released_row": "synthetic preexisting Released fixture state; not an earned release, approval, migration, or business acceptance",
+    "diagnostic_engines_unchanged": [
+      "Routing",
+      "MBOM",
+      "Baseline",
+      "Item"
+    ],
+    "notifications_added": false,
+    "eco_service_create_eco_called": false,
+    "five_distinct_gate_unchanged": true,
+    "gate_sites": [
+      "run.mts directRuleIds.size < 5",
+      "run.mts restoredRules.size < 5"
+    ],
+    "code_sha256": {
+      "scripts/verification/plm-collaboration-paired/verify.py": "e3e30ab66192c81438f9a5dc087d1037b90b2ad3be89da342e9ecdebd1986e34",
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "4437103e5246b9b6881b68e4f685556f93439b13d2db9e8eb97d830b83132523",
+      "scripts/verification/plm-collaboration-paired/run.mts": "eaac22ebd809f07b50dd50ecd9ab8d5be37484b59148bb380dbf70c8f5f406df"
+    },
+    "retained_r12_actual": {
+      "source": "reviewed design citation of retained Root evidence; not rerun",
+      "result": "RED diagnostic_rule_ids_lt_5",
+      "http_200": [
+        "Native login",
+        "Meta login",
+        "Native ECO context",
+        "Native readiness default",
+        "Native readiness readiness"
+      ],
+      "observed_distinct_rule_ids": [
+        "mbom.has_released_routing",
+        "baseline.warnings_for_unreleased_or_changed_members"
+      ],
+      "distinct_count": 2,
+      "public_seed_rule_count": 8,
+      "public_seed_rule_count_meaning": "eight valid family/ruleset calls; four families times default and readiness; not eight distinct issue rule IDs"
+    },
+    "predicted_distinct_rule_ids": {
+      "qualification": "source-supported prediction, not an executed R13 result",
+      "default": [
+        "mbom.has_released_routing",
+        "baseline.warnings_for_unreleased_or_changed_members",
+        "item.not_already_released",
+        "routing.has_operations",
+        "routing.primary_unique_in_scope"
+      ],
+      "default_count": 5,
+      "readiness": [
+        "mbom.has_released_routing",
+        "baseline.warnings_for_unreleased_or_changed_members",
+        "routing.has_operations",
+        "routing.primary_unique_in_scope"
+      ],
+      "readiness_count": 4,
+      "union_across_both": 5
+    },
+    "separate_later_gap": {
+      "id": "BASELINE_RELEASE_STATE_CASE_COMPARISON",
+      "disposition": "later owner-scoped work; no baseline engine fix, lowercase workaround, or warning injection in R13"
+    },
+    "checks": {
+      "compile_ok": true,
+      "ast_exact_3_edits": true,
+      "protected_hashes_match": true,
+      "native_head": "538cbf07509a1a806a314eed49fff5f1f0d2b49b",
+      "native_porcelain_empty": true,
+      "cohort_rerun": false,
+      "sql_executed": false
+    },
+    "historical_packets_preserved": true,
+    "self_hash": null,
+    "hashes_of_readme_design_and_this_file": "bound only in /tmp/plm-w23-r13-rulecoverage-lock-20261025/implementation.json",
+    "model_requested": "grok-4.7",
+    "reasoning_effort_requested": "xhigh",
+    "footer_verification": "Root"
+  },
+  "r14_registration_contract": {
+    "phase": "RELEASED_SOURCE_ONLY",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN",
+    "recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+    "sql_executed": false,
+    "http_executed": false,
+    "services_started": false,
+    "network_executed": false,
+    "build_commit_push": false,
+    "design_review": "/tmp/plm-w23-r14-existing-connect-design-review-20261025.json",
+    "design_review_status": "MINIMAL_VERIFIER_CREATION_CONTRACT_CORRECTION_SUPPORTED",
+    "design_review_runtime": "NOT_RUN_BY_REVIEWER",
+    "admitted_r13_actual": {
+      "source": "lock context for the stopped R13 profile; not rerun in R14",
+      "http_200_count": 5,
+      "http_201_count": 2,
+      "stop": "source_not_connected",
+      "cause": "DataSourceManager.addDataSource always calls addDataSourceInternal(config, false); create 201 returns connected false"
+    },
+    "creation_request_unchanged": "owned id, type plm, owned Native HTTPS origin, per-source yuantus tenant/org/readOnly, per-source credentials",
+    "autoConnect_added": false,
+    "legacy_connect_called": false,
+    "global_plm_env_added": false,
+    "gate": "registered.id === dataSourceId && registered.type === \"plm\" && registered.connected === false",
+    "refusal": "source_registration_contract_refused",
+    "fail_closed": "wrong or missing id, wrong or missing type, missing connected, true, or non-boolean connected",
+    "preview_and_journalPositive": "unchanged and NOT_RUN",
+    "r11_run_mts_sha256": "2686de1808f350f6742e58abbc0e21b20c09de2b8b077a42efc1c4ef32a3e986",
+    "r13_run_mts_sha256": "eaac22ebd809f07b50dd50ecd9ab8d5be37484b59148bb380dbf70c8f5f406df",
+    "r13_native_fixture_sha256": "4437103e5246b9b6881b68e4f685556f93439b13d2db9e8eb97d830b83132523",
+    "code_sha256": {
+      "scripts/verification/plm-collaboration-paired/verify.py": "e3e30ab66192c81438f9a5dc087d1037b90b2ad3be89da342e9ecdebd1986e34",
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "53b4ba4479b501478d5b1190811ead90961f543d74001266285e323a56329b94",
+      "scripts/verification/plm-collaboration-paired/run.mts": "217cdbc5697afee5bd5f8b6d1137c04e3fb3aad7ce57a23d9014a72bc0030146"
+    },
+    "checks": {
+      "pinned_python": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/.venv/bin/python",
+      "compile_native_fixture_in_memory": true,
+      "compile_exit": 0,
+      "pyc_written": false,
+      "exact_branch_control": "/tmp/plm-w23-r14-registration-contract-lock-20261025/registration-contract-control.mjs",
+      "positive_id_type_disconnected": true,
+      "negative_id_type_connected_refused": true,
+      "control_failures": [],
+      "control_exit": 0,
+      "new_source_helper": false,
+      "test_framework": false,
+      "old_suites_rerun": false,
+      "one_line_run_restores_r13_hash": true,
+      "one_literal_fixture_restores_r13_hash": true
+    },
+    "historical_packets_preserved": true,
+    "self_hash": null,
+    "hashes_of_readme_design_and_this_file": "bound only in /tmp/plm-w23-r14-registration-contract-lock-20261025/implementation.json",
+    "model_requested": "grok-4.7",
+    "reasoning_effort_requested": "xhigh",
+    "footer_verification": "Root independently runs actual HTTP"
+  },
+  "r17_target_null_oracle": {
+    "status": "SOURCE_ONLY_PENDING_INDEPENDENT_REVIEW",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN_BY_IMPLEMENTER",
+    "recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+    "Root_prior_actual_diagnostic": "/tmp/plm-w23-r17-target-cell-Root-diagnostic-current-20261025.json",
+    "Root_prior_safe_metadata": {
+      "diagnostic_only": true,
+      "status": 200,
+      "cells_object": true,
+      "target_own_key": true,
+      "target_is_null": true,
+      "target_type": "object",
+      "target_is_array": false,
+      "target_is_empty_string": false
+    },
+    "delta": "Existing assertEcoIdentity loop requires all11 own keys and allows target_version_id null only. All other cell string checks and empty-string behavior remain; no target revision was created.",
+    "run_mts_sha256": "5500aae06e2530ea4305a212c903efb3479408541a5e6234e1bbb753f4d2f610",
+    "native_fixture_change": "RUN_MTS_SHA256 literal only",
+    "verify_py_sha256": "e3e30ab66192c81438f9a5dc087d1037b90b2ad3be89da342e9ecdebd1986e34",
+    "controls": {
+      "report": "/tmp/plm-w23-r17-target-null-oracle-lock-20261025/controls.json",
+      "sha256": "7b65ecce33f956ca9f764ab1e56d827e495351506cd4149bb720335d2ad735ec",
+      "count": 54,
+      "failures": [],
+      "remove_null_exception_positive_turns_RED": true,
+      "other_TS_functions_byte_exact": 91,
+      "all_other_top_level_statements_byte_exact": true,
+      "fixture_functions_unchanged": 66,
+      "pinned_python": "3.11.15",
+      "in_memory_compile": true,
+      "SQL_network_services": false
+    },
+    "historical_fields_preserved": true,
+    "self_hash": null,
+    "source_hash_binding": "All6 hashes are external in /tmp/plm-w23-r17-target-null-oracle-lock-20261025/implementation.json",
+    "independent_review_and_actual_HTTP": "Root owns both; source-only controls do not confer whole profile PASS"
+  },
+  "r19_same_sheet_field_descriptors": {
+    "status": "SOURCE_ONLY_PENDING_INDEPENDENT_REVIEW",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN_BY_IMPLEMENTER",
+    "recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+    "design": "/tmp/plm-w23-r19-eco-local-field-readonly-design-20261025.json",
+    "prior_R18_actual": "/tmp/plm-w23-r18-Root-actual-current-20261025.json",
+    "delta": "Exactly five runPhase consumers retain original context GET and standalone fieldWalk(context), then read the existing same-sheet fields endpoint with same owner JWT/expect200 and pass only descriptor response to original consumer. No helper, field creation, product/API change, combined array or new permissions policy.",
+    "run_mts_sha256": "24ccc4c1b0ccd21ad9d413d7ba0ce00412087d82ca84c4fd52a9182e23dd2281",
+    "native_fixture_change": "RUN_MTS_SHA256 literal only",
+    "verify_py_sha256": "e3e30ab66192c81438f9a5dc087d1037b90b2ad3be89da342e9ecdebd1986e34",
+    "pure_controls": {
+      "report": "/tmp/plm-w23-r19-field-descriptors-lock-20261025/controls.json",
+      "sha256": "dd17790c05b022d882b19873e1ad29dfa0c182577e56da8be7758a5bf23c64e2",
+      "count": 38,
+      "failures": [],
+      "all_other_top_level_statements_byte_exact": true,
+      "other_TS_functions_unchanged": 91,
+      "fixture_functions_unchanged": 66,
+      "context_HINT_boundary_and_expected200_retained": true,
+      "same_sheet_JWT_method_path_expected_status_checked_all_five": true,
+      "old_context_only_RED": true,
+      "new_fields_positive": true,
+      "ECO_missing_local_refused": true,
+      "Readiness_wrongtype_refused": true,
+      "blocked_attempts": {
+        "network": 0,
+        "sql": 0,
+        "spawn": 0,
+        "listen": 0
+      }
+    },
+    "inherited_limits": [
+      "ECO fieldIds does not type-check; wrong_type ECO controls intentionally remain accepted, preserving prior semantics.",
+      "No explicit fieldPermissions value oracle existed; context_permissions_absent intentionally remains accepted. Context request expected200 and existing hint_boundary still must pass.",
+      "Source gates remain prior nonempty/includes checks, not a new exact11 or all-field permission proof."
+    ],
+    "initial_harness_expectation_mismatch": "controls-initial-expectation-mismatch.json retains one harness expectation mismatch: readiness restart refusal was expected local_field_missing but actual existing code is local_field_not_retained. Only harness expectation was corrected; no source edit followed that result.",
+    "syntax": {
+      "node": "v20.20.2",
+      "typescript": "5.8.3",
+      "parse_error_count": 0,
+      "no_emit": true
+    },
+    "pinned_python": "3.11.15",
+    "in_memory_compile_fixture_and_verify": true,
+    "SQL_services_network_build_Git": false,
+    "historical_fields_preserved": true,
+    "self_hash": null,
+    "external_all_six_hashes": "/tmp/plm-w23-r19-field-descriptors-lock-20261025/implementation.json",
+    "independent_review_and_actual_HTTP": "Root owns both; pure checks do not confer whole profile PASS"
+  },
+  "r21_native_delta_model_closure": {
+    "status": "SOURCE_ONLY_PENDING_INDEPENDENT_REVIEW",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN_BY_IMPLEMENTER",
+    "recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+    "design": "/tmp/plm-w23-r21-delta-mapper-readonly-design-20261025.json",
+    "design_sha256": "09d14d9b77038a8b96a5277082f1dc413db62ede2de36606e89793ab40c8e4c8",
+    "retained_R20_HTTP": {
+      "top_http_executed": false,
+      "error": "InvalidRequestError",
+      "phases": [
+        {
+          "phase": "http_before_restart",
+          "status": "CONTINUE",
+          "exit": 10,
+          "transcript_count": 54
+        },
+        {
+          "phase": "http_after_restart",
+          "status": "CONTINUE",
+          "exit": 10,
+          "transcript_count": 35
+        }
+      ],
+      "retained_HTTP_request_total": 89
+    },
+    "retained_R20_cleanup": "PASS; no live owned PIDs; lease released, per actual execution receipt",
+    "historical_R20_top_false_preserved": true,
+    "live_exception_stack": "NOT_RETAINED; pure missing-Item mapper mechanism is supported but not absolute现场 proof",
+    "native_fixture_delta": "Only descriptive_delta early official bootstrap import/call after admission/_prepare_import before ORM; no global preparation change.",
+    "verify_delta": "Only generic Exception Stop construction adds http_executed from existing nonempty http_* transcripts. RED/error/actions/cleanup/admission unchanged.",
+    "code_sha256": {
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "25b7ad1f4e19b1c6e6ee9922ed700e76a7d6a315048e4795dca705cdf9615ff0",
+      "scripts/verification/plm-collaboration-paired/verify.py": "d429e2b1de6e7bb1a4bb45d3d071db67a778c59e280ee721b79406848299a6fb"
+    },
+    "run_mts_and_RUNliteral_unchanged": true,
+    "pure_controls": {
+      "prefix_before": "RED InvalidRequestError",
+      "prefix_after": "PASS official loader before ORM",
+      "prefix_cases": 2,
+      "reporting_cases": 8,
+      "reporting_failures": [],
+      "known89_true_after": true,
+      "before_HTTP_false": true,
+      "RED_exit1_error_phases_retained": true,
+      "all_SQL_connect_network_spawn_listen_attempts": 0,
+      "other_function_byte_parity": {
+        "scripts/verification/plm-collaboration-paired/native_fixture.py": {
+          "all_other_top_level_statements_byte_exact": true,
+          "other_function_count": 65,
+          "changed_function": "descriptive_delta",
+          "single_replacement_restores_whole_preimage": true
+        },
+        "scripts/verification/plm-collaboration-paired/verify.py": {
+          "all_other_top_level_statements_byte_exact": true,
+          "other_function_count": 28,
+          "changed_function": "execute_profile",
+          "single_replacement_restores_whole_preimage": true
+        }
+      },
+      "pinned_python": "3.11.15",
+      "in_memory_compile_fixture_and_verify": true
+    },
+    "inherited_limits": [
+      "ECO fieldIds retains no type check.",
+      "Context fieldPermissions concrete values are not an existing explicit verifier oracle.",
+      "Source-field gates retain prior nonempty/includes semantics; no new complete11-field permission proof.",
+      "Partial mapper pure reproduction is not a retained live R20 stack; actual delta may have executed SET before mapper failure.",
+      "Full profile remains unaccepted and same-collection recovery pending product choice."
+    ],
+    "historical_fields_preserved": true,
+    "self_hash": null,
+    "external_all6_hashes": "/tmp/plm-w23-r21-native-model-closure-lock-20261025/implementation.json",
+    "independent_review_actual": "Root owns independent source review and full R22 actual HTTP; pure controls do not claim whole PASS"
+  },
+  "r23_fixed_fixture_field_contract": {
+    "status": "SOURCE_ONLY_PENDING_INDEPENDENT_REVIEW",
+    "acceptance": "NOT_ACCEPTED",
+    "runtime": "NOT_RUN_BY_IMPLEMENTER",
+    "recovery": "BLOCKED_PENDING_PRODUCT_CHOICE",
+    "human_authority": "DIRECT_HUMAN_THIS_CHAT20261023:采用提案先做只读持久协作; source/localtypes validation only, no new ACL policy. Later samecollection reauth stillpending.",
+    "design": "/tmp/plm-w23-r23-field-contract-readonly-design-20261025.json",
+    "design_sha256": "8a8a7095f15ae5666063130f5868bb2e4d0a38b07b35acfcc8f789c2ad5f671c",
+    "fixed_fixture_gate": "Fresh no-field-rename/no-extra-field profile expects ECO14/readiness12 descriptors; this is not a universal product max/immutable name rule",
+    "R22_actual": {
+      "HTTP_phase_counts": [
+        54,
+        35,
+        42,
+        11,
+        9
+      ],
+      "HTTP_total": 151,
+      "profile": "RED",
+      "last": "confirm-recovery409 COLLECTION_CONFLICT",
+      "cleanup": "PASS",
+      "lease_released": true
+    },
+    "delta": "One finite direct fields helper reused5, plus fullsourceIDset comparisons at3postrestart/delta sites. Existing context GET/hintwalk, fieldWalk, local id/CAS/digest/history/cardinality/journal/readonly PATCH/recovery logic unchanged.",
+    "run_mts_sha256": "014605bfc908968503d09c519d4879db5d601a5cee266f6ad04f0a0d367cbf15",
+    "native_fixture_change": "RUN_MTS_SHA256 literal only",
+    "protected_verify_sha256": "d429e2b1de6e7bb1a4bb45d3d071db67a778c59e280ee721b79406848299a6fb",
+    "controls": {
+      "report": "/tmp/plm-w23-r23-field-contract-lock-20261025/controls.json",
+      "sha256": "a95e562a584b434bbcf68f164f0d40c0dfc6c2e7a46c17b5425f81d1f96176eb",
+      "exact_source_cases": 56,
+      "failures": [],
+      "mutants": [
+        {
+          "removed_gate": "local_type",
+          "negative_became_accepted": true,
+          "negative_control_verdict": "RED",
+          "mutant_killed": true
+        },
+        {
+          "removed_gate": "source_whitelist",
+          "negative_became_accepted": true,
+          "negative_control_verdict": "RED",
+          "mutant_killed": true
+        }
+      ],
+      "helper_consumers": 5,
+      "context_lines_byte_exact": true,
+      "all_other_TS_functions_byte_exact": 91,
+      "all_other_top_level_statements_byte_exact": true,
+      "fixture_functions_byte_exact": 66,
+      "R17_ownnull_retained": true,
+      "Node20": "v20.20.2",
+      "TypeScript": "5.8.3",
+      "full_run_parse_errors": 0,
+      "pinned_python": "3.11.15",
+      "in_memory_compile": true,
+      "blocked_attempts": {
+        "network": 0,
+        "sql": 0,
+        "spawn": 0,
+        "listen": 0
+      }
+    },
+    "limits": [
+      "Business descriptor readonly is validated; no raw ACL grants/denials or effective context fieldPermissions concrete-value policy is added.",
+      "Fixed fixture14/12 and exact display names do not impose universal product maxima or name immutability.",
+      "Pure actual planner/serializer creates synthetic descriptors/ids in memory only; no product fields or persisted/runtime ids are created.",
+      "R22 actual151HTTP still ends RED at unchanged samecollection409; no renamed/rebound/newsource/DB fallback.",
+      "Current source validation does not qualify browser/install/CI/full deployment coverage; Root reported Docker/install limitations remain separate."
+    ],
+    "historical_fields_preserved": true,
+    "self_hash": null,
+    "external_all6_hashes": "/tmp/plm-w23-r23-field-contract-lock-20261025/implementation.json",
+    "independent_review_actual": "Root owns source review and actual R24; no full PASS claimed"
+  },
+  "current_delivery": {
+    "status": "SOURCE_FULL_BASELINE_REVIEW_ACCEPTED_R24_ACTUAL_RED",
+    "verifier_Source": "883a9dfff53eb1744a7d889703a5754f1aabcb3d",
+    "product_parent": "0cae1b88b3961bfcc718a63a3ead185e98c7bc81",
+    "future_ONE_closing_commit": "Recorded by external receipt only; no self-referential commit update.",
+    "scope": "Four verifier/README files first delivered on Meta0cae; exact bytes match old Meta0cae runtime. Closing MD+JSON only; no new runtime performed in sparse delivery tree.",
+    "all_four_code_sha256": {
+      "scripts/verification/plm-collaboration-paired/verify.py": "d429e2b1de6e7bb1a4bb45d3d071db67a778c59e280ee721b79406848299a6fb",
+      "scripts/verification/plm-collaboration-paired/native_fixture.py": "5359b0f38994de8ebcb8b48145bfff010915a15a6106f30294abaa14353b1654",
+      "scripts/verification/plm-collaboration-paired/run.mts": "014605bfc908968503d09c519d4879db5d601a5cee266f6ad04f0a0d367cbf15",
+      "scripts/verification/plm-collaboration-paired/README.md": "680e8607e928813e7e116a50047b9f1d3eb99525a337e51e69063fc83e079612"
+    },
+    "full_baseline_review": {
+      "accepted_source": true,
+      "new_files": 4,
+      "new_lines": 5613,
+      "scope_all_new_baseline": true,
+      "profile_GREEN": false
+    },
+    "R24": {
+      "pointer": "/tmp/plm-w23-r24-Root-actual-current-20261025.json",
+      "pointer_sha256": "81ba9eb4d92f565fc5e4612b526390ce282665f5b49ae67cbef24eb7ff341bc2",
+      "execution": "/tmp/plm-w23-r24-Root-actual-20261025-369bed90bdf0459db9f3073f51097e1a/execution.json",
+      "execution_sha256": "e33558cff56e459d54f37329a346e18fbbb30a214715c8c2fed4f108819d33b3",
+      "profile": "/tmp/plm-w23-r24-Root-actual-20261025-369bed90bdf0459db9f3073f51097e1a/profile.stdout.json",
+      "profile_sha256": "47a99175adf615e1e3a7db8620c4084d2b3f33a12409af8bb1568a43e9369bc7",
+      "Native_pin": "538cbf07509a1a806a314eed49fff5f1f0d2b49b",
+      "Meta_product_ref": "0cae1b88b3961bfcc718a63a3ead185e98c7bc81",
+      "verifier_bytes_equal_Source883a": true,
+      "ran_in_delivery_sparse_tree": false,
+      "phase_HTTP_counts": [
+        54,
+        35,
+        42,
+        11,
+        9
+      ],
+      "actual_HTTP": 151,
+      "status_counts": {
+        "200": 137,
+        "201": 4,
+        "422": 1,
+        "409": 5,
+        "403": 3,
+        "401": 1
+      },
+      "phase_statuses": [
+        "CONTINUE",
+        "CONTINUE",
+        "CONTINUE",
+        "CONTINUE",
+        "RED"
+      ],
+      "terminal_exit": 1,
+      "profile_result": "RED",
+      "last": {
+        "id": "confirm-recovery",
+        "status": 409,
+        "code": "COLLECTION_CONFLICT"
+      },
+      "source_unchanged": true,
+      "owned_cleanup": {
+        "cleanup_directory_removed": true,
+        "cleanup_exit": 0,
+        "cleanup_marker_matched": true,
+        "cleanup_postgres_stopped": true,
+        "fault": null,
+        "runtime_removed": true,
+        "stop_directory_removed": false,
+        "stop_exit": 0,
+        "stop_postgres_stopped": true
+      },
+      "live_owned_pids": [],
+      "lease_released": true
+    },
+    "actual_coordinator_argv": [
+      "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/.venv/bin/python",
+      "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/scripts/verification/plm-collaboration-paired/verify.py",
+      "run",
+      "--native-pin",
+      "/tmp/plm-w23-native-reviewed-538cbf075-pg16-node20-pin-20261025.json",
+      "--meta-tree",
+      "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+      "--meta-ref",
+      "0cae1b88b3961bfcc718a63a3ead185e98c7bc81"
+    ],
+    "runtime_native_pin": {
+      "commit": "538cbf07509a1a806a314eed49fff5f1f0d2b49b",
+      "reviewed": true,
+      "tree": "/Users/chouhua/.codex/worktrees/plm-continuous-generation-20261022/Yuantus",
+      "executables": {
+        "redis_server": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-owned-redis-rebuild-20261025-31_i5e1x/redis-f103d127b9747965e28f20615ef790332661fc68/src/redis-server",
+        "redis_server_sha256": "bb76c94a5c728ac1f305ccb3bf35b9a47334dbbba1dff02848c503c2e3df6400",
+        "pg_bin": "/tmp/plm-pg16-extensions-runtime-20261025-jvh1r88m/install/bin",
+        "node": "/tmp/plm-owned-node20-restore-lock-20261025/toolchain-009c15ecf2ea4145b4739c80b2c6038e-20261024T204903Z/node-v20.20.2-darwin-arm64/bin/node",
+        "tsx": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2/packages/core-backend/node_modules/tsx/dist/cli.mjs",
+        "python": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/.venv/bin/python",
+        "openssl": "/usr/bin/openssl"
+      }
+    },
+    "actual_driver": "Coordinator invokes [pin.node, pin.tsx, hardcoded META_TREE/scripts/verification/plm-collaboration-paired/run.mts, owned phase argument]; Node20+existing tsx, not historical node --experimental-strip-types. Owned secret and phase files are ephemeral and not invented as reusable argv.",
+    "environment_prerequisites": [
+      "This is an environment-scoped verifier. verify.py META_TREE is intentionally the original absolute runtime worktree. Sparse delivery checkout itself has no node_modules and is not a directly runnable alternate --meta-tree; explicit path/ref admission must be honored.",
+      "Provide Root-reviewed Native pin with full clean exact HEAD descended from fixed Main ancestor, no override fields; Native .venv with Alembic/SQLAlchemy/psycopg/crypto dependencies and existing full source, exact PostgreSQL tools.",
+      "Provide existing Node20 plus pinned tsx and Meta0cae backend locked dependencies/runtime libraries, explicit Redis binary SHA256, openssl; no download or installer is performed by this verifier.",
+      "Use actual Node20+existing tsx loader for run.mts (as coordinator does). Historical README node --experimental-strip-types examples are not sufficient as Node20 execution instructions; a current closeout/runbook should show the real entry.",
+      "Publish Source883a verifier bytes and later one Doc closing commit separately from productMeta0cae; actual R24 hashes transfer source equivalence only, never change the product/runtime ref or package anchor.",
+      "Caller must serialize heavy runtime use and enforce admission resource floor; this standalone harness contains no global heavy-lease manager. Read-only preflight/source checks are not a substitute."
+    ],
+    "caller_gates": {
+      "global_heavy_lease": "Caller serializes and owns global heavy lease; standalone verifier has no global lease manager.",
+      "free_space_floor_bytes": 8589934592,
+      "actual_free_before": 11015729152,
+      "actual_free_after": 10987606016,
+      "hardcoded_META_TREE": "/Users/chouhua/.codex/worktrees/plm-w23-meta-readonly-20261023/metasheet2",
+      "installed_Node20_tsx_PG16_Redis_Native_pin_required": true
+    },
+    "R23_historical_pure_controls": {
+      "author": 56,
+      "independent": 18,
+      "new_execution_in_this_delivery": false,
+      "counts_not_added_to_R24_HTTP": true,
+      "author_killed_mutants": 2
+    },
+    "limits": {
+      "whole_profile": "RED; same-collection reauthorization remains owner choice, no bypass or altered expectation.",
+      "not_executed_after_recovery_failure": [
+        "denied-selector",
+        "disable",
+        "malformed-credential"
+      ],
+      "journal": "Only collaboration-sources POST journal and five-second denial windows; excludes auth login, not all egress and not hour evidence.",
+      "readonly_layers": "Descriptor property.readOnly business metadata, effective context UI fieldPermissions.readOnly, raw per-subject ACL scope are separate; descriptor controls do not assert the latter two policies.",
+      "fresh_field_counts": "14 ECO / 12 Readiness describe fresh owned no-extra/no-rename fixture only; not universal field maxima.",
+      "fixture_state": "Direct fixture Released state/ACL/license setup is owned test preparation, not earned approval/release or production grant.",
+      "not_package_acceptance": "Actual Native538 + productMeta0cae source-process run, not packageNative85, extracted backend/service installation, images/browser/hour acceptance.",
+      "author_new_SQL_HTTP_services_install_tests_CI": false,
+      "commit_push": false
+    },
+    "evidence": {
+      "full_baseline_review": {
+        "path": "/tmp/plm-w23-verifier-delivery-full-Sol-review-20261025.json",
+        "sha256": "3125db7388564b6136b39700f8ee66b4d9f932be3bc00bc3d322fffc81808776"
+      },
+      "Source": {
+        "path": "/tmp/plm-w23-verifier-delivery-Source-20261025.json",
+        "sha256": "dcc7c25a8897eb4303037018e46b699d9db5edaaa22efdeb66aa559317c2ef20"
+      },
+      "R24_pointer": {
+        "path": "/tmp/plm-w23-r24-Root-actual-current-20261025.json",
+        "sha256": "81ba9eb4d92f565fc5e4612b526390ce282665f5b49ae67cbef24eb7ff341bc2"
+      },
+      "R24_execution": {
+        "path": "/tmp/plm-w23-r24-Root-actual-20261025-369bed90bdf0459db9f3073f51097e1a/execution.json",
+        "sha256": "e33558cff56e459d54f37329a346e18fbbb30a214715c8c2fed4f108819d33b3"
+      },
+      "R24_profile": {
+        "path": "/tmp/plm-w23-r24-Root-actual-20261025-369bed90bdf0459db9f3073f51097e1a/profile.stdout.json",
+        "sha256": "47a99175adf615e1e3a7db8620c4084d2b3f33a12409af8bb1568a43e9369bc7"
+      },
+      "Native_pin": {
+        "path": "/tmp/plm-w23-native-reviewed-538cbf075-pg16-node20-pin-20261025.json",
+        "sha256": "8b74ccb14ac17b19378279210764bf9e13747727ede8cc2029811ac3c8879768"
+      }
+    }
+  }
+}
