@@ -10678,7 +10678,7 @@ import {
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
 import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../router/attendanceGroupContextRoute'
 import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupRouteContext'
-import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
+import { hydrateAttendanceGroupRoute, type AttendanceGroupRouteWorkflowStage } from './attendance/attendanceGroupRouteHydration'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
   deriveAdminTaskHomeGroupStatus,
@@ -10861,6 +10861,7 @@ const props = withDefaults(
     mode?: AttendancePageMode
     initialSectionId?: string
     initialRequestId?: string
+    returnGroupContext?: { group: AttendanceAuthorizedGroup; stage: AttendanceGroupRouteWorkflowStage } | null
     routeGroupContext?: {
       group: AttendanceAuthorizedGroup
       step: AttendanceGroupRouteStep
@@ -10872,6 +10873,7 @@ const props = withDefaults(
     mode: 'overview',
     initialSectionId: '',
     initialRequestId: '',
+    returnGroupContext: null,
     routeGroupContext: null,
   }
 )
@@ -10882,6 +10884,7 @@ const emit = defineEmits<{
     groupId: string
     step: AttendanceGroupRouteStep
     surface: AttendanceGroupRouteSurface | null
+    originStage?: AttendanceGroupRouteWorkflowStage
   }): void
 }>()
 
@@ -14990,7 +14993,8 @@ function openAttendanceGroupRoute(
     )
     return
   }
-  emit('open-group-route', { groupId, step, surface })
+  if (!attendanceSessionGuard.isCurrent()) return
+  emit('open-group-route', { groupId, step, surface, originStage: attendanceGroupActiveStage.value })
 }
 
 function attendanceGroupSummaryRouteTarget(actionKey: string): {
@@ -15680,7 +15684,7 @@ const {
 // gates hash-restore/scroll-spy/keyboard-nav so a hidden workspace doesn't
 // silently mutate `adminActiveSectionId` or scroll behind the task home.
 function hasExplicitAdminSectionTarget(): boolean {
-  if (props.routeGroupContext) return true
+  if (props.routeGroupContext || props.returnGroupContext) return true
   if (isKnownAdminSectionId(props.initialSectionId.trim())) return true
   if (typeof window === 'undefined') return false
   return isKnownAdminSectionId(window.location.hash.replace(/^#/, '').trim())
@@ -16453,7 +16457,20 @@ function openHolidayCalendarPolicyFromSettings(): void {
   })
 }
 
+let parentReturnHydrated = false
 async function focusInitialAttendanceSection(): Promise<void> {
+  if (showAdmin.value && props.returnGroupContext) {
+    if (!parentReturnHydrated && attendanceSessionGuard.isCurrent()) {
+      const { group, stage } = props.returnGroupContext
+      if (stage !== 'basics' && stage !== 'people' && stage !== 'schedule' && stage !== 'policies') return
+      parentReturnHydrated = true
+      attendanceGroups.value = [group, ...attendanceGroups.value.filter(item => item.id !== group.id)]
+      attendanceGroupsTotal.value = Math.max(attendanceGroupsTotal.value, attendanceGroups.value.length)
+      editAttendanceGroup(group, stage)
+      selectAdminSection('attendance-admin-groups')
+    }
+    return
+  }
   if (showAdmin.value && props.routeGroupContext) {
     hydrateAttendanceGroupFromRoute(props.routeGroupContext)
     return
@@ -29469,6 +29486,15 @@ async function loadAttendanceGroups() {
           ? { ...props.routeGroupContext.group, ...listedGroup }
           : previousRouteGroup ?? props.routeGroupContext.group,
       )
+      return
+    }
+    if (props.returnGroupContext) {
+      // Selection was initialized after a fresh probe. Do not replay it over an edited form.
+      const group = props.returnGroupContext.group
+      if (attendanceGroupEditingId.value === group.id && !attendanceGroups.value.some(item => item.id === group.id)) {
+        attendanceGroups.value.unshift(group)
+        attendanceGroupsTotal.value = Math.max(attendanceGroupsTotal.value, attendanceGroups.value.length)
+      }
       return
     }
     const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
