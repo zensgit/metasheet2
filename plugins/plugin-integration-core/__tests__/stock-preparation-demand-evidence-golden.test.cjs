@@ -472,19 +472,22 @@ async function main() {
     assert.ok(routes.includes('requireCompleteBatch: Boolean(largeBomB2aAuthorization),'), 'run route arms the batch check only under B2a')
   })
 
-  for (const mode of MODES) {
-    const observed = await observeAll(harness, mode)
+  for (const handle of ['wired', 'absent']) for (const mode of MODES) {
+    const observed = await observeAll(harness, mode, undefined, { handle })
     const stripped = stripHarnessKeys(observed)
+    // PR-3a: a handle-absent apply is refused by the writer (asserted in the harness) — the one section that leg
+    // cannot reproduce; every other section is the golden, byte for byte.
+    const goldenFor = (name) => (handle === 'absent' && GOLDEN[name].apply ? { ...GOLDEN[name], apply: 'refused_governance_absent' } : GOLDEN[name])
 
-    await run(`[${mode}] every golden scenario was observed`, () => {
+    await run(`[${handle}][${mode}] every golden scenario was observed`, () => {
       assert.deepEqual(Object.keys(stripped).sort(), Object.keys(GOLDEN).sort())
     })
 
     for (const name of Object.keys(GOLDEN)) {
-      await run(`[${mode}] ${name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
-        assert.deepEqual(stripped[name], GOLDEN[name])
+      await run(`[${handle}][${mode}] ${name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
+        assert.deepEqual(stripped[name], goldenFor(name))
       })
-      await run(`[${mode}] ${name}: the switch carried every expansion of the scenario`, () => {
+      await run(`[${handle}][${mode}] ${name}: the switch carried every expansion of the scenario`, () => {
         assert.equal(observed[name].__expansionCalls, EXPECTED_EXPANSIONS[name])
         for (const call of observed[name].__calls) {
           assert.equal(call.mode, mode)
@@ -493,7 +496,7 @@ async function main() {
         }
       })
       // The ON legs are only a byte-identity proof if the recorder really ran (or really faulted).
-      await run(`[${mode}] ${name}: the expansion ${mode === 'off' ? 'carries no' : 'carries the'} demand evidence`, () => {
+      await run(`[${handle}][${mode}] ${name}: the expansion ${mode === 'off' ? 'carries no' : 'carries the'} demand evidence`, () => {
         for (const call of observed[name].__calls) {
           const evidence = call.result.demandEvidence
           if (mode === 'off') {
@@ -519,10 +522,10 @@ async function main() {
       })
     }
 
-    await run(`[${mode}] structural parities the golden relies on`, () => {
+    await run(`[${handle}][${mode}] structural parities the golden relies on`, () => {
       for (const name of Object.keys(GOLDEN)) {
         const entry = stripped[name]
-        if (entry.apply) {
+        if (entry.apply && typeof entry.apply === 'object') {
           // The apply recomputes the content revision the harness derived off the dry-run expansion.
           assert.equal(entry.apply.sourceContentRevision, entry.sourceContent.revision, `${name}: apply vs dry-run content revision`)
         }
