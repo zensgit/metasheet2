@@ -339,7 +339,7 @@ import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
-import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { dataSourcesRouter, getDataSourceManager, initializeDataSourceManager } from './routes/data-sources'
 import {
   createDataSourcePluginFacade,
   createDataSourceSealedSnapshotConnectionFacade,
@@ -4358,7 +4358,6 @@ export class MetaSheetServer {
     // Bind external data-source manager to DB and load persisted sources (A0)
     try {
       const { db: kyselyDbDataSources } = await import('./db/db')
-      const { initializeDataSourceManager } = await import('./routes/data-sources')
       await initializeDataSourceManager(kyselyDbDataSources)
       this.logger.info('DataSourceManager persistence initialized')
     } catch (e) {
