@@ -1,0 +1,329 @@
+{
+  "scope": "offline synthetic CLI filters, actual Bash example with fake curl, source doc assertions; no real HTTP/TS/backend execution",
+  "filter_probes": [
+    {
+      "name": "disabled exact",
+      "exit": 0,
+      "result": {
+        "http_status": 404,
+        "transport_exit": 0,
+        "code": "container_login_disabled",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "default_off_contract_match": true
+      }
+    },
+    {
+      "name": "disabled numeric0 is not false",
+      "exit": 1,
+      "result": {
+        "http_status": 404,
+        "transport_exit": 0,
+        "code": "container_login_disabled",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "default_off_contract_match": false
+      }
+    },
+    {
+      "name": "disabled extra key",
+      "exit": 1,
+      "result": {
+        "http_status": 404,
+        "transport_exit": 0,
+        "code": "container_login_disabled",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "default_off_contract_match": false
+      }
+    },
+    {
+      "name": "complete disabled body but incomplete transfer",
+      "exit": 1,
+      "result": {
+        "http_status": 404,
+        "transport_exit": 18,
+        "code": "container_login_disabled",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "default_off_contract_match": false
+      }
+    },
+    {
+      "name": "complete disabled body but timeout",
+      "exit": 1,
+      "result": {
+        "http_status": 404,
+        "transport_exit": 28,
+        "code": "container_login_disabled",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "default_off_contract_match": false
+      }
+    },
+    {
+      "name": "wrong status",
+      "exit": 1,
+      "result": {
+        "http_status": 401,
+        "transport_exit": 0,
+        "code": "container_login_disabled",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "default_off_contract_match": false
+      }
+    },
+    {
+      "name": "nonJSON",
+      "exit": 1,
+      "result": {
+        "http_status": 404,
+        "transport_exit": 0,
+        "code": null,
+        "retryable": null,
+        "retry_after_seconds": null,
+        "default_off_contract_match": false
+      }
+    },
+    {
+      "name": "success exact",
+      "exit": 0,
+      "result": {
+        "http_status": 200,
+        "transport_exit": 0,
+        "code": null,
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": true
+      }
+    },
+    {
+      "name": "success numeric1 is not true",
+      "exit": 1,
+      "result": {
+        "http_status": 200,
+        "transport_exit": 0,
+        "code": null,
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "complete login body but incomplete transfer",
+      "exit": 1,
+      "result": {
+        "http_status": 200,
+        "transport_exit": 18,
+        "code": null,
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "JWT refusal bounded code",
+      "exit": 1,
+      "result": {
+        "http_status": 401,
+        "transport_exit": 0,
+        "code": "UNAUTHORIZED",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "provider rejection bounded code",
+      "exit": 1,
+      "result": {
+        "http_status": 401,
+        "transport_exit": 0,
+        "code": "invalid_auth_code",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "recovery retains nested retryability",
+      "exit": 1,
+      "result": {
+        "http_status": 409,
+        "transport_exit": 0,
+        "code": "RECOVERY_AUTHORITY_BUSY",
+        "retryable": true,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "rate limit numeric retryAfter",
+      "exit": 1,
+      "result": {
+        "http_status": 429,
+        "transport_exit": 0,
+        "code": null,
+        "retryable": null,
+        "retry_after_seconds": 12,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "boolean retryAfter is not a number",
+      "exit": 1,
+      "result": {
+        "http_status": 429,
+        "transport_exit": 0,
+        "code": null,
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "unknown code does not echo",
+      "exit": 1,
+      "result": {
+        "http_status": 500,
+        "transport_exit": 0,
+        "code": "UNRECOGNIZED",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "unlinked enabled local policy code retained",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "unlinked_enabled_local_user",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "unlinked local policy code retained",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "unlinked_local_user",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "retains fixed current policy auto_provision_alias_conflict",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "auto_provision_alias_conflict",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "retains fixed current policy auto_provision_corp_required",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "auto_provision_corp_required",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "retains fixed current policy auto_provision_email_conflict",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "auto_provision_email_conflict",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "retains fixed current policy directory_managed_identity",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "directory_managed_identity",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "retains fixed current policy identity_already_bound",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "identity_already_bound",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "retains fixed current policy identity_mismatch",
+      "exit": 1,
+      "result": {
+        "http_status": 403,
+        "transport_exit": 0,
+        "code": "identity_mismatch",
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    },
+    {
+      "name": "unbounded retryAfter hidden",
+      "exit": 1,
+      "result": {
+        "http_status": 429,
+        "transport_exit": 0,
+        "code": null,
+        "retryable": null,
+        "retry_after_seconds": null,
+        "login_envelope_match": false
+      }
+    }
+  ],
+  "shell_blocks_syntax": 3,
+  "actual_shell_fake_curl_probes": [
+    {
+      "mock_curl_exit": 0,
+      "pipeline_exit": 0,
+      "match": true
+    },
+    {
+      "mock_curl_exit": 18,
+      "pipeline_exit": 1,
+      "match": false
+    },
+    {
+      "mock_curl_exit": 0,
+      "pipeline_exit": 1,
+      "match": false
+    }
+  ],
+  "outside_E1_identical": true,
+  "real_HTTP_calls": 0,
+  "scratch_retained": "tmp/e1-doc-no-network-e37kbgyo",
+  "filter_sha256": "cef65bb34834a29c84367e8b2c35ac24fe7a941b047211e6655af14f60522b52",
+  "document_sha256": "1414c79610f06ca99c1edde3561fbf4cacda8665d6536aa2a9251030977fd610",
+  "pass": true
+}
