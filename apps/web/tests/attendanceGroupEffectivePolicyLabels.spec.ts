@@ -30,7 +30,6 @@ import {
   type AttendanceGroupEffectivePolicySourceLabelV1,
   type AttendanceGroupFixedScheduleStateV1,
 } from '../src/views/attendance/attendanceGroupEffectivePolicyLabels'
-import { ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO } from '../src/router/attendanceGroupContextRoute'
 
 const tr = (en: string, zh: string): string => `${en}|${zh}`
 
@@ -196,6 +195,9 @@ describe('attendanceGroupEffectivePolicyLabels — editorRef closed-table parse 
     [{ kind: 'group_stage', stage: 'archived' }],
     [{ kind: 'group_stage' }],
     [{ kind: 'group_context_route', step: 'shifts' }],
+    [{ kind: 'group_context_route', step: 'basics' }],
+    [{ kind: 'group_context_route', step: 'people' }],
+    [{ kind: 'group_context_route', step: 'policies' }],
     [{ kind: 'group_context_route', step: 'rules', surface: 'assignments' }],
     [{ kind: 'wat', stage: 'people' }],
   ])('rejects a malformed or out-of-table editorRef: %j', (value) => {
@@ -206,13 +208,23 @@ describe('attendanceGroupEffectivePolicyLabels — editorRef closed-table parse 
 describe('attendanceGroupEffectivePolicyLabels — editorRef navigation resolver', () => {
   const context = { groupId: GROUP_ID, returnTo: '/attendance?tab=admin&section=attendance-admin-groups' }
 
-  it('resolves every group_stage ref to the existing groups-list section, not a fabricated deep link', () => {
-    for (const stage of ['basics', 'people', 'schedule', 'policies'] as const) {
-      expect(resolveAttendanceGroupEffectivePolicyEditorNavigationV1({ kind: 'group_stage', stage }, context)).toEqual({
-        kind: 'group-list',
-        href: ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO,
-      })
-    }
+  it.each(['basics', 'people'] as const)('preserves the exact group and %s stage as an internal action', (stage) => {
+    expect(resolveAttendanceGroupEffectivePolicyEditorNavigationV1({ kind: 'group_stage', stage }, context)).toEqual({
+      kind: 'group-stage',
+      groupId: GROUP_ID,
+      stage,
+    })
+  })
+
+  it.each([
+    ['schedule', 'schedule'],
+    ['policies', 'rules'],
+  ] as const)('opens group_stage %s through the existing /%s route', (stage, step) => {
+    expect(resolveAttendanceGroupEffectivePolicyEditorNavigationV1({ kind: 'group_stage', stage }, context)).toEqual({
+      kind: 'route',
+      href: `/attendance/admin/groups/${GROUP_ID}/${step}?returnTo=${encodeURIComponent(context.returnTo)}`,
+      sameRouteStage: { groupId: GROUP_ID, stage },
+    })
   })
 
   it('resolves a group_context_route ref through the existing #4711 href builder', () => {
@@ -220,10 +232,10 @@ describe('attendanceGroupEffectivePolicyLabels — editorRef navigation resolver
       { kind: 'group_context_route', step: 'rules', surface: 'rule-sets' },
       context,
     )
-    expect(result?.kind).toBe('route')
-    expect(result?.href).toBe(
-      `/attendance/admin/groups/${GROUP_ID}/rules?surface=rule-sets&returnTo=${encodeURIComponent(context.returnTo)}`,
-    )
+    expect(result).toEqual({
+      kind: 'route',
+      href: `/attendance/admin/groups/${GROUP_ID}/rules?surface=rule-sets&returnTo=${encodeURIComponent(context.returnTo)}`,
+    })
   })
 
   it('resolves a group_context_route ref with no surface (calendar step)', () => {
@@ -231,8 +243,10 @@ describe('attendanceGroupEffectivePolicyLabels — editorRef navigation resolver
       { kind: 'group_context_route', step: 'calendar' },
       context,
     )
-    expect(result?.kind).toBe('route')
-    expect(result?.href).toBe(`/attendance/admin/groups/${GROUP_ID}/calendar?returnTo=${encodeURIComponent(context.returnTo)}`)
+    expect(result).toEqual({
+      kind: 'route',
+      href: `/attendance/admin/groups/${GROUP_ID}/calendar?returnTo=${encodeURIComponent(context.returnTo)}`,
+    })
   })
 })
 
