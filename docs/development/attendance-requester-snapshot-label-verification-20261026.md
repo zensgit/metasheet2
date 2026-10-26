@@ -60,3 +60,19 @@ The original ACP case passed once in the owned isolated PostgreSQL database (one
 An injected early 409/ATTENDANCE_CLEANING_BUSY response produced one matching red with 34 filtered and the expected bounded diagnostic. Restoring the real HTTP retry produced one actual pass with 34 filtered; owned PG was stopped and data retained. Final diagnostic redaction was then narrowed from a bounded string pattern to the explicit allowlist; the actual final expression passed 16 code/redaction cases and changed-test lint exited zero (three inherited warnings). That final redaction variant is not misrepresented as a new whole PG run. Earlier zero-match selector and reporter-abbreviation postcheck failures are preserved as harness history, not green suite results.
 
 This is a diagnostic repair, not a demonstrated root-cause fix. The original CI concurrency failure remains unexplained until actual retry/lock evidence identifies it. No blind CI rerun or unchanged green suite replay was performed; the new commit must earn its own required CI.
+
+## FE06 permanent paired-null witness — 2026-10-27
+
+The already-proved valid never-approved paired-null request case is now part of the existing registered integration file. Both approval reference columns start NULL, no approval exists with its ATT request number, and a fresh request UUID/control actor keeps old history separate. The original invalid create-then-detach probe remains retired; it is not promoted and not counted as a new product defect.
+
+| Evidence | Actual result |
+|---|---|
+| Real authenticated HTTP/PG registered case | 1passed/65filtered; real profile, FK23503 rejection and preserved paired-null preimage, edit200/new snapshot, exact unified DTO and1new matching approval, unrelated entire old approval row unchanged |
+| Matching mutation | Only null-reference current-name branch changed to neutral label:1matching red/65filtered; exact helper bytes restored |
+| Source preservation | Valid case copied byte-exact from retained one-off proof; original65cases/hooks byte-identical. Runtime, auth/permissions, FK/CHECK, realDB run-list and noDB exclusion unchanged |
+| Owned DB | Original ledger458/pending0 re-read, no migration replay. Pair CHECK and composite FK validated/nondeferrable; ownPG stopped/portclosed/dataretained |
+| Quality | Explicit changed-test lint exit0; actual production TS file list excludes the changed integration spec. Production validate:all is carried by unchanged production inputs, not described as rerun |
+| Review | Independent source review PASS,0introducedP1/P2; actual test/restore/loghashes independently verified by main |
+| Current-head CI | Pending. Must observe full registered66case execution and all current-head required terminal success before final evidence; old65case/D4green is historical |
+
+This is durable evidence maintenance for existing FE06 behavior, not a new parent acceptance denominator or runtime repair. All original phase/source limits and owner/manual/live exclusions remain.

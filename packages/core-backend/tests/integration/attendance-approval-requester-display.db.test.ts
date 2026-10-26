@@ -453,4 +453,41 @@ describe('attendance requester display through real authenticated HTTP, saved sn
     }
   })
 
+
+  it('a never-approved legacy paired-null request creates a new named snapshot through the real edit route', async () => {
+    const target = await subject()
+    const control = await subject()
+    const made = await createGeneric(control)
+    const old = await saved(made.id)
+    const oldInstance = (await f.pool.query('SELECT to_jsonb(a) AS row FROM approval_instances a WHERE id=$1', [old.approval_instance_id])).rows
+    const legacyId = randomUUID()
+    const metadata = { approvalFlow: { id: flows.generic, name: ns + '_generic',
+      steps: [{ approverUserIds: [admin.userId] }], currentStep: 0 } }
+    await f.pool.query(
+      "INSERT INTO attendance_requests (id,user_id,org_id,work_date,request_type,requested_in_at,reason,status,metadata) VALUES($1,$2,$3,$4,'missed_check_in',$5,'Synthetic legacy request','pending',$6::jsonb)",
+      [legacyId, target.userId, f.orgId, workDate, workDate + 'T09:00:00.000Z', JSON.stringify(metadata)],
+    )
+    const legacy = (await f.pool.query(
+      'SELECT approval_instance_id,approval_workflow_key FROM attendance_requests WHERE id=$1', [legacyId],
+    )).rows
+    expect(legacy).toEqual([{ approval_instance_id: null, approval_workflow_key: null }])
+    expect((await f.pool.query('SELECT count(*)::int AS n FROM approval_instances WHERE request_no=$1', ['ATT-' + legacyId])).rows)
+      .toEqual([{ n: 0 }])
+    await expect(f.pool.query(
+      "UPDATE attendance_requests SET approval_instance_id=$2,approval_workflow_key='attendance.request' WHERE id=$1",
+      [legacyId, 'apv_' + randomUUID()],
+    )).rejects.toMatchObject({ code: '23503' })
+    expect((await f.pool.query(
+      'SELECT approval_instance_id,approval_workflow_key FROM attendance_requests WHERE id=$1', [legacyId],
+    )).rows).toEqual(legacy)
+    await setProfile(target, 'Current directory label for never-approved legacy', target.userId + '@legacy.test')
+    const response = await edit(legacyId, target)
+    expect(response.status, JSON.stringify(response.body)).toBe(200)
+    await assertSaved(legacyId, target, 'Current directory label for never-approved legacy')
+    expect((await f.pool.query('SELECT count(*)::int AS n FROM approval_instances WHERE request_no=$1', ['ATT-' + legacyId])).rows)
+      .toEqual([{ n: 1 }])
+    expect((await f.pool.query('SELECT to_jsonb(a) AS row FROM approval_instances a WHERE id=$1', [old.approval_instance_id])).rows)
+      .toEqual(oldInstance)
+  })
+
 })
