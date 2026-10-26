@@ -697,6 +697,8 @@ module.exports = {
   mapContinuationStraddle,
   pickPersistedHold,
   planDigestOf,
+  // PR-5: the export gate digests with the SAME strict band a governed computation settles with (TD-22).
+  planningInputsOrRefuse,
   previewRecoveryOf,
   previewRecoveryRechecked,
   reconcileComputation,
