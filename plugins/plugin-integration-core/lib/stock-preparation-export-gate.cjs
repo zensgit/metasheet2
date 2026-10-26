@@ -257,13 +257,20 @@ function continuationExportInputOf(consult) {
   })
 }
 
-/** The values-free slice of a gate refusal's details an audit row may carry (tokens and booleans only). */
+/**
+ * The values-free slice of a gate refusal's details an audit row may carry (tokens and booleans only).
+ * It NEVER emits `operation`: the audit row's own `operation` is the route's (`prep_line_export`) and a caller
+ * spreads this slice after it, so a store's operation token (`read_holds`, `ledger_read`, …) rides along as
+ * `storeOperation` instead (step-4 review follow-ups, #6566 N1). A five-character SQLSTATE is carried too.
+ */
 function auditableRefusalDetail(details) {
   const out = {}
   if (!isPlainObject(details)) return out
-  for (const key of ['reason', 'status', 'governed', 'store', 'operation', 'previousStatus']) {
+  for (const key of ['reason', 'status', 'governed', 'store', 'previousStatus']) {
     if (nonBlankString(details[key])) out[key] = details[key]
   }
+  if (nonBlankString(details.operation)) out.storeOperation = details.operation
+  if (typeof details.sqlState === 'string' && /^[0-9A-Z]{5}$/.test(details.sqlState)) out.sqlState = details.sqlState
   for (const key of ['generationMoved', 'epochMoved']) {
     if (typeof details[key] === 'boolean') out[key] = details[key]
   }

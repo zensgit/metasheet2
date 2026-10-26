@@ -393,6 +393,8 @@ function assertRefused(h, res, status, code, { reason, state } = {}) {
   assert.equal(delivered.length, 0, 'no success audit row')
   assert.equal(refused.length, 1, 'exactly one export_refused audit row')
   assert.equal(refused[0].detail.refusal, code)
+  // Step-4 review follow-ups (item 1, #6566 N1): the row names the export, never a store operation.
+  assert.equal(refused[0].detail.operation, 'prep_line_export', 'the refusal row keeps operation prep_line_export')
   for (const [key, value] of Object.entries(refused[0].detail)) {
     assert.ok(['string', 'number', 'boolean'].includes(typeof value), `audit detail ${key} is a token / count / boolean`)
   }
@@ -783,6 +785,11 @@ async function main() {
       const res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
       assertRefused(h, res, 503, EXPORT_GATE_ERROR_CODES.STATE_UNREADABLE, { reason: 'unreadable' })
       assert.equal(errorOf(res).details.store, 'continuation')
+      // Item 1 (#6566 N1): the store's operation rides along as storeOperation; the HTTP details keep `operation`.
+      const row = h.auditAppends.find((entry) => entry.mode === 'export_refused')
+      assert.equal(row.detail.store, 'continuation')
+      assert.equal(row.detail.storeOperation, 'read_holds')
+      assert.equal(errorOf(res).details.operation, 'read_holds', 'the response details are unchanged')
       assert.deepEqual(h.reads, [])
       h.env.db.faults.select = null
     }
@@ -1007,6 +1014,68 @@ async function main() {
     assert.equal(directoryLib.PREP_LINE_EXPORT_REFUSED_MODE, 'export_refused')
   })
 
+  // ── XR-09 ──────────────────────────────────────────────────────────────────────────────────────
+  // Step-4 review follow-ups (item 2, #6566 N2): EVERY failure that escapes the gate call leaves ONE values-free
+  // export_refused row — a lane-class refusal inside R (the pack-install ledger read), an untyped host failure and
+  // a typed host failure — with the response's code and closed tokens only, never a message or a host detail.
+  await run('XR-09 every failure inside the gate call audits one export_refused row: (a) a pack-ledger read failure in R => 503 STORE_FAILED row {store, storeOperation}; (b) an untyped host failure on the digest read => 500 ROUTE_FAILED row; (c) a typed host failure on the rows read => its code; no message or host detail reaches a row', async () => {
+    const noSentinelInAudit = (h, label) => assert.equal(JSON.stringify(h.auditAppends).includes(SENTINEL), false, `${label}: no sentinel in an audit row`)
+    // (a) governed, complete + settled; the pack-install ledger read fails inside R.
+    {
+      const h = mountExport({ rows: await governedRows() })
+      const { execution } = await seedConfirmedAndConsumed(h)
+      await h.settle({ executionId: execution.id })
+      h.env.packInstallStore.fail(new Error(`ledger down ${SENTINEL}`))
+      const res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
+      h.env.packInstallStore.clearFault()
+      assertRefused(h, res, 503, 'STOCK_PREP_REFRESH_STORE_FAILED')
+      const row = h.auditAppends.find((entry) => entry.mode === 'export_refused')
+      assert.equal(row.detail.store, 'pack_installed_fields')
+      assert.equal(row.detail.storeOperation, 'ledger_read')
+      assert.deepEqual(h.xlsxCalls, [], '(a) no workbook')
+      noSentinelInAudit(h, '(a)')
+    }
+    // (b) governed; the SECOND records read (the settlement digest's read) throws an UNTYPED error.
+    {
+      const h = mountExport({
+        rows: await governedRows(),
+        hooks: { afterRecordsRead: async (n) => { if (n === 2) throw new Error(`driver failure ${SENTINEL}`) } },
+      })
+      const { execution } = await seedConfirmedAndConsumed(h)
+      await h.settle({ executionId: execution.id })
+      const res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
+      assertRefused(h, res, 500, 'STOCK_PREPARATION_ROUTE_FAILED')
+      assert.deepEqual(h.reads, [GOV_SHEET, GOV_SHEET], '(b) the failure is the digest read')
+      const row = h.auditAppends.find((entry) => entry.mode === 'export_refused')
+      assert.deepEqual(row.detail, { operation: 'prep_line_export', refusal: 'STOCK_PREPARATION_ROUTE_FAILED' }, '(b) the code only')
+      assert.equal(JSON.stringify(res.body).includes(SENTINEL), false, '(b) the untyped message never answers')
+      assert.deepEqual(h.xlsxCalls, [], '(b) no workbook')
+      noSentinelInAudit(h, '(b)')
+    }
+    // (c) NOT governed (the golden mount); the rows read throws a TYPED host error carrying sentinel text.
+    {
+      const h = mountExport({
+        rows: goldenRows(),
+        tenantId: GOLDEN_TENANT,
+        sheetId: GOLDEN_SHEET,
+        hooks: { afterRecordsRead: async (n) => { if (n === 1) throw Object.assign(new Error(SENTINEL), { status: 503, code: 'HOST_RECORDS_UNAVAILABLE', details: { value: SENTINEL } }) } },
+      })
+      const res = await h.exportAs(GOLDEN_OPERATOR, GOLDEN_PROJECT)
+      assertRefused(h, res, 503, 'HOST_RECORDS_UNAVAILABLE')
+      const row = h.auditAppends.find((entry) => entry.mode === 'export_refused')
+      assert.deepEqual(row.detail, { operation: 'prep_line_export', refusal: 'HOST_RECORDS_UNAVAILABLE' }, '(c) the code only, no host detail')
+      assert.deepEqual(h.xlsxCalls, [], '(c) no workbook')
+      noSentinelInAudit(h, '(c)')
+    }
+    // Control: XR-01's golden 200 audit row is unchanged by the wider catch (C09).
+    {
+      const h = mountExport({ rows: goldenRows(), tenantId: GOLDEN_TENANT, sheetId: GOLDEN_SHEET })
+      const res = await h.exportAs(GOLDEN_OPERATOR, GOLDEN_PROJECT)
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+      assert.deepEqual(h.auditAppends, [GOLDEN_AUDIT])
+    }
+  })
+
   // ── XH-01..04 ──────────────────────────────────────────────────────────────────────────────────
   await run('XH-01 the handoff TERMINAL hop of a governed project with an open hold is refused 409 STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE — no cursor move, no trail row, no notification; the two non-terminal hops before it completed WITHOUT a consult', async () => {
     const h = mountHandoff()
@@ -1151,6 +1220,13 @@ async function main() {
       if (error.details && typeof error.details.reason === 'string') assert.ok(EXPORT_GATE_REASONS.includes(error.details.reason) || error.code === EXPORT_GATE_ERROR_CODES.GATE_INVALID, `${label}: reason is in the closed list`)
     }
     assert.deepEqual(auditableRefusalDetail({ reason: 'state', status: 'executing', governed: 'pilot', counts: { pendingConfirm: 1 }, generationMoved: true, epochMoved: false, extra: SENTINEL, partial: false }), { reason: 'state', status: 'executing', governed: 'pilot', generationMoved: true, epochMoved: false })
+    // Item 1 (#6566 N1): a store's `operation` is carried as `storeOperation` (the row's own `operation` is the
+    // route's); a five-character SQLSTATE rides along; anything that is not a closed token stays out.
+    const slice = auditableRefusalDetail({ reason: 'unreadable', store: 'continuation', operation: 'read_continuations', partial: false })
+    assert.deepEqual(slice, { reason: 'unreadable', store: 'continuation', storeOperation: 'read_continuations' })
+    assert.equal(Object.prototype.hasOwnProperty.call(slice, 'operation'), false, 'the slice never emits operation')
+    assert.deepEqual(auditableRefusalDetail({ store: 'continuation', operation: 'read_holds', sqlState: '42P01' }), { store: 'continuation', storeOperation: 'read_holds', sqlState: '42P01' })
+    assert.deepEqual(auditableRefusalDetail({ store: 'continuation', sqlState: SENTINEL }), { store: 'continuation' }, 'a sqlState that is not five closed characters stays out')
   })
 
   console.log(`\nstock-preparation-export-gate.test.cjs: ${passed} passed, ${failed} failed`)
