@@ -49,3 +49,13 @@ No dependency/lock/schema/OpenAPI/workflow/feature-flag changes. New helper is i
 Correction replacement/missing-boundary semantics and approval/OT bridge remain separate and awaiting the existing human target decision. Full parent DB/CALC/MUT reconciliation, formal4556/4844/6512 owner acceptance, private combined-source verification, human AT/native menu/screenreader, TRANSFER freeze, W8/PQA/staging/soak/performance/reconciliation/live/provider/2000-user/Redis/secrets are not closed here.
 
 All PR Draft/HOLD; no merge/deploy/R71/tag/release/business-config changes. Stream/lifecycle OFF; real UAT/50004 excluded; historical08PUT INCONCLUSIVE. This is not whole product or production acceptance.
+
+## CI follow-up: exact Intl-site classification
+
+Parent candidate c9a9bb75036c9ae90461cfd3ecfc3feeaf5d2295 backend job121799976243 failed at core85 in exactly two source-files-hourcycle-parsing-guard tests (six printed failure lines include retries). The new helper uses Intl.DateTimeFormat solely to validate an IANA zone and discards the formatted value; no hour/date part is parsed. It was missing from the existing frozen site inventory (39 live sites versus38 classified). The scanner correctly caught the omission after the helper became tracked. Native whole W3/W2 suites had not executed; later cleanup failure does not constitute a new business defect.
+
+The minimum followup adds this exact file/trimmed source line as an ordinary display/validity-probe entry, matching the two existing backend probes, and changes the strict known-site count38 to39. No allowsHourOption, scan-domain, scanner logic, existing site, assertion or test budget is relaxed. Inverse byte audit restores the entire original guard when this entry/count/comment is removed.
+
+Actual local before:2 matching failures/14 filtered. Entry-only intermediate:15 actual passed/1 failed (the unchanged strict count38). Final affected count case:1 actual passed/15 filtered; the already-passed15 were not replayed. These are staged assertions, not a fresh all16 local run. Explicit same-path lint matches baseline. The prior production validateall0 remains source-applicable: every runtime/config/dependency input is byte-identical; only this test and this report changed. Current-head CI must run the whole16 guard plus the required full registered native and unit targets. No parent green is inherited.
+
+Full parent failure log and SHA are retained in ci-c9a9bb-backend-failed.log and its receipt. The parent's named helper/runtime/W7/W6 passing executions are separately archived and are not counted as new-head CI. No local passed business suite was rerun for this test-inventory repair.
