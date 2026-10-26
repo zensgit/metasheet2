@@ -399,7 +399,7 @@ test('ST-04 confirm: statement order, rows, the read-back feeds the pure core, d
   assert.equal(rows.holds.length, 0, 'open holds only')
   assert.equal(rows.states.length, 1)
   const headers = rows.continuations.map((entry) => ({ ...entry, memberCount: rows.members.filter((member) => member.continuationId === entry.id).length }))
-  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: true, projectNo: scope.projectNo, continuations: headers, members: rows.members, demandEvidence: null, sourceIdentity, specSlotDeclared: false })
+  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: true, projectNo: scope.projectNo, continuations: headers, members: rows.members, demandEvidence: null, sourceIdentity, specSlotDeclared: false, persistedHolds: [] })
   const projection = pairing.buildContinuationProjection(input.continuations, input.members)
   assert.equal(projection.suppressAddKeys.size, 4)
   assert.equal(projection.protectInactiveKeys.size, 4)
@@ -796,6 +796,42 @@ test('ST-10 executions: begin -> running; finish succeeded stamps the bound cont
   const rows = await store.readGovernanceRows(scope)
   assert.ok(rows.executions.some((entry) => entry.id === failedOld.id), 'the failed execution beyond the newest five is still answered')
   assert.equal(derivedState(w).status, 'failed_pending_recovery')
+})
+
+// ── ST1-a lock order (PR-3a ST-1 / TD-23) ────────────────────────────────────────────────────────
+
+test('ST1-a lock order (TD-23, PR-3a ST-1): a SETTLING finish locks the refresh-state row FIRST, then its execution, then its bound continuations, and the state exactly once; a settling finish without a state row refuses before touching the execution; a non-settling finish never touches the state row', async () => {
+  const w = await world()
+  const { store, db, scope } = w
+  await seedHolds(w, [w.hold])
+  const confirmed = await confirmHold(w, w.hold)
+  const guard = { leaseRunId: 'run_1', leaseId: 'lease_1', fencingEpoch: 3, generation: 9, generationToken: 'tok_9' }
+  const begin = { ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_1', planDigest: 'plan_1', plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [{ id: confirmed.continuationId, revision: 1 }], holdSetFingerprint: null }, startedBy: PULLER }
+  const settling = await store.beginExecution(begin)
+  db.log.length = 0
+  await store.finishExecution({ ...scope, executionId: settling.id, status: 'succeeded', written: 0, attemptedWrites: 0, counts: { add: 0, update: 0, inactive: 0, failed: 0 }, settlement: { executionId: settling.id, generationToken: 'tok_9', sourceContentDigest: 'src_1', sheetMachineDigest: 'machine_1' } })
+  const locking = statementsOf(db).filter((entry) => /^trx\.(selectOneForUpdate|updateRow):/.test(entry))
+  assert.deepEqual(locking, [
+    'trx.selectOneForUpdate:refresh_state',
+    'trx.selectOneForUpdate:refresh_execution',
+    'trx.updateRow:refresh_execution',
+    'trx.updateRow:continuation',
+    'trx.updateRow:refresh_state',
+  ])
+  assert.equal(locking.filter((entry) => entry === 'trx.selectOneForUpdate:refresh_state').length, 1, 'exactly one state lock per finish')
+  // A non-settling finish never touches the state row.
+  const plain = await store.beginExecution({ ...begin, refreshBinding: { continuations: [] } })
+  db.log.length = 0
+  await store.finishExecution({ ...scope, executionId: plain.id, status: 'failed', written: 0, attemptedWrites: 0, errorCodes: ['E1'] })
+  assert.equal(statementsOf(db).some((entry) => entry.endsWith(':refresh_state')), false)
+  // A settling finish on a project with no state row: refused 409 state_row_absent BEFORE the execution row is
+  // locked or written (the run stays `running`; nothing moved).
+  const bare = await world()
+  const orphan = await bare.store.beginExecution({ ...begin, ...bare.scope, refreshBinding: { continuations: [] } })
+  bare.db.log.length = 0
+  await expectError(bare.store.finishExecution({ ...bare.scope, executionId: orphan.id, status: 'succeeded', settlement: { sheetMachineDigest: 'machine_1' } }), { status: 409, code: CODES.STATE_MOVED, reason: 'state_row_absent' })
+  assert.deepEqual(statementsOf(bare.db).filter((entry) => /^trx\.(selectOneForUpdate|updateRow):/.test(entry)), ['trx.selectOneForUpdate:refresh_state'])
+  assert.equal(bare.db.rows(T.execution)[0].status, 'running')
 })
 
 // ── ST-11 values-free errors, ST-12 keyed reads ──────────────────────────────────────────────────

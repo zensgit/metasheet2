@@ -70,6 +70,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // what it was asked to write).
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
@@ -446,7 +447,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory(), exportBoundTo = 'A'
 
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {
@@ -696,7 +697,7 @@ function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
   services.stockPreparationAuditStore = { async append() { return { ok: true } } }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
 
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, adapterTenants, tenantPrincipalDirectory }
 }
 

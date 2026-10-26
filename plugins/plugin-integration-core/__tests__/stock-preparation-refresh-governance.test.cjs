@@ -16,10 +16,11 @@
 //   GR-05 the tenant assertion (A-M6): a row of another tenant on this sheet — through the store or the registry
 //         — is 409 TENANT_MISMATCH; a header-steered tenant that owns no rows is REFUSED, never "not governed";
 //         readRefreshState rethrows it (a refusal is not a state). A registry refusal reads no step-4 row.
-//   GR-06 retarget (B-B3 / E-2(b)): the registry naming another sheet for this project, or another project for
-//         this sheet, is 409 RETARGETED BEFORE any step-4 row read (the snapshot rolls back); this project's rows
-//         on another sheet, and another project's continuation on this sheet (found by the SHEET-keyed read), are
-//         RETARGETED too.
+//   GR-06 retarget (B-B3 / E-2(b)): a PILOT project's registry row naming another sheet, or another project
+//         registered on this sheet, is 409 RETARGETED BEFORE any step-4 row read (the snapshot rolls back); a
+//         NON-pilot registered project with no step-4 row is not governed (PR-3a GV-1, GV1-a) and one with rows is
+//         refused by them (GV1-c); this project's rows on another sheet, and another project's continuation on
+//         this sheet (found by the SHEET-keyed read), are RETARGETED too.
 //   GR-07 unreadable: a store failure, a lock read failure, a malformed store answer, a snapshot that cannot be
 //         pinned, a store that answered without running the registry reads in its snapshot -> 503 with the store
 //         token; readRefreshState answers the `unreadable` state carrying that token — never not_governed.
@@ -283,15 +284,38 @@ test('GR-05 tenant assertion: a row of another tenant on this sheet is 409 TENAN
 
 // ── GR-06 retarget ───────────────────────────────────────────────────────────────────────────────
 
-test('GR-06 retarget: the registry naming another sheet / another project refuses BEFORE any row read; this project\'s rows on another sheet, and another project\'s continuation on this sheet, are RETARGETED through the sheet-keyed read', async () => {
-  // The project is registered on its managed sheet; the action resolved to the env sheet (switch off).
+test('GR-06 retarget: a PILOT registry row naming another sheet / another project on this sheet refuses BEFORE any row read; a non-pilot registered project is governed only by its rows (GV-1: none => not governed, rows elsewhere => RETARGETED sheet); this project\'s rows on another sheet, and another project\'s continuation on this sheet, are RETARGETED through the sheet-keyed read', async () => {
+  // GV1-a (PR-3a GV-1, owner ruling 2026-10-24): the project is registered — NOT pilot — on its managed sheet;
+  // the action resolved to the env sheet (switch off); no step-4 row anywhere -> NOT governed (today's
+  // behaviour for that project), never refused.
   const w = await world({ registryRows: [registryRow({ projectNo: 'PRJ-SCC-1', sheetId: 'sheet_managed' })] })
-  const refused = await expectError(w.governance.consult(w.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'project_registered_on_another_sheet' })
+  const notGoverned = await w.governance.consult(w.scope)
+  assert.equal(notGoverned.ok, true)
+  assert.equal(notGoverned.governed, false)
+  assert.equal(notGoverned.registry.sheetId, 'sheet_managed')
+  assert.equal(stepFourReads(w.db).length > 0, true, 'the step-4 reads ran (and found nothing)')
+  assert.equal((await w.governance.readRefreshState(w.scope)).state.status, 'not_governed')
+  // GV1-b: the same registry row of a PILOT project -> RETARGETED before any step-4 row read; the snapshot rolls back.
+  const wp = await world({ registryRows: [registryRow({ projectNo: 'PRJ-SCC-1', sheetId: 'sheet_managed', pilot: true })] })
+  const refused = await expectError(wp.governance.consult(wp.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'project_registered_on_another_sheet' })
   assert.equal(refused.details.store, 'registry')
-  assert.equal(stepFourReads(w.db).length, 0, 'refused before any step-4 row read')
-  assert.equal(w.db.log[w.db.log.length - 1][0], 'rollback')
+  assert.equal(stepFourReads(wp.db).length, 0, 'refused before any step-4 row read')
+  assert.equal(wp.db.log[wp.db.log.length - 1][0], 'rollback')
   assert.ok(!JSON.stringify(refused.details).includes('sheet_managed'), 'values-free')
-  await expectError(w.governance.readRefreshState(w.scope), { status: 409, code: CODES.TARGET_RETARGETED })
+  await expectError(wp.governance.readRefreshState(wp.scope), { status: 409, code: CODES.TARGET_RETARGETED })
+  // GV1-c: the registry row is NOT pilot, but the project's step-4 rows live on the managed sheet -> RETARGETED
+  // `sheet` by the (tenant, project) read (assertRows): a project governed by rows is refused without the pilot marker.
+  const wr = await world({ registryRows: [registryRow({ projectNo: 'PRJ-SCC-1', sheetId: 'sheet_managed' })] })
+  await seedAndConfirm(wr, { sheetId: 'sheet_managed' })
+  const byRows = await expectError(wr.governance.consult(wr.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'sheet' })
+  assert.equal(byRows.details.store, 'continuation')
+  assert.equal(byRows.details.table, 'continuation')
+  // ... and a state row alone governs the same way (table refresh_state).
+  const ws = await world({ registryRows: [registryRow({ projectNo: 'PRJ-SCC-1', sheetId: 'sheet_managed' })] })
+  await ws.continuationStore.reconcileHolds({ ...ws.scope, sheetId: 'sheet_managed', decisionVersionObserved: 0, holds: [], computation: computation({ suspended: false }) })
+  const byState = await expectError(ws.governance.consult(ws.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'sheet' })
+  assert.equal(byState.details.table, 'refresh_state')
+  // GV1-d (unchanged below): this sheet registered to ANOTHER project, and the (d) leg of GR-10, still refuse.
   // This sheet is registered to ANOTHER project.
   const w2 = await world({ registryRows: [registryRow({ projectNo: 'PRJ-OTHER', sheetId: SHEET })] })
   await expectError(w2.governance.consult(w2.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'sheet_registered_to_another_project' })
@@ -401,7 +425,7 @@ test('GR-08 governed by rows: headers with memberCount, members, state, decision
   assert.equal(derived.governed, 'protected')
   assert.deepEqual(derived.counts, { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 1 })
   const slice = plannerSlice(answer)
-  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: false, projectNo: w.scope.projectNo, continuations: slice.continuations, members: slice.members, demandEvidence: null, sourceIdentity: w.sourceIdentity, specSlotDeclared: false })
+  const input = pairing.normalizeContinuationInput({ storeState: 'ok', pilot: false, projectNo: w.scope.projectNo, continuations: slice.continuations, members: slice.members, demandEvidence: null, sourceIdentity: w.sourceIdentity, specSlotDeclared: false, persistedHolds: [] })
   const projection = pairing.buildContinuationProjection(input.continuations, input.members)
   assert.equal(projection.suppressAddKeys.size, 4)
   assert.equal(projection.protectInactiveKeys.size, 4)

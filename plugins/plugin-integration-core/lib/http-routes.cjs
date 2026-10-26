@@ -682,6 +682,7 @@ const {
   saveTableScopeConflictPolicies,
 } = require('./stock-preparation-conflict-policies.cjs')
 const {
+  baseIdempotencyKeyOf,
   duplicateExpandedKeyDiagnosticsForRows,
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
@@ -722,6 +723,17 @@ const {
   resolveCustomerPackCatalogConfig,
 } = require('./stock-preparation-customer-pack-catalog.cjs')
 const { loadPackInstalledFieldProperties } = require('./stock-preparation-pack-installed-fields.cjs')
+// Batch-refresh step 4 PR-3a: the lane helpers — the scope digest (moved here verbatim), the governance handle
+// builder every planning lane is handed, the source-binding check, the large-lane verdict and the carry's
+// rows-based refusals.
+const {
+  assertNoRunbookOnlyHold,
+  assertNoUnfinishedExecution,
+  createRefreshGovernanceHandle,
+  largeLaneVerdictOf,
+  sourceBindingDisagreementOf,
+  stockPreparationSourceScopeDigest,
+} = require('./stock-preparation-refresh-lanes.cjs')
 // The OTHER half of the pack line: a pack says WHICH tenant `ext_` columns exist, this says WHERE
 // their values come from. Server-held and built once at registration, exactly like the catalog
 // above. Absent config -> null -> the refresh path is byte-identical to one that never heard of it.
@@ -1807,12 +1819,9 @@ function assertStockPreparationTableActionMvpPersistNoSteering(req) {
 const STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN = /^[0-9a-f]{32}$/
 const STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT_CODE = 'STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT'
 
-function stockPreparationSourceScopeDigest({ tenantId, actionId, externalSystemId }) {
-  return crypto.createHash('sha256')
-    .update(JSON.stringify(['stock-preparation/source-scope/v1', tenantId, actionId, externalSystemId]))
-    .digest('hex')
-    .slice(0, 32)
-}
+// Batch-refresh step 4 PR-3a: the digest function itself now lives in lib/stock-preparation-refresh-lanes.cjs
+// (moved verbatim, same name; imported at the top of this module) — the continuation's source identity and
+// PR-4's confirm use the very same helper.
 
 // Absent → null (a caller that cannot say which source its write read — see the route for what that
 // caller gets instead). Present → exactly the shape the apply answers, or a 400 before any I/O.
@@ -4608,6 +4617,45 @@ function requireStockPreparationAudit() {
     }
     return stockPreparationProjectWriteLock
   }
+  // Batch-refresh step 4 PR-3a (plan-final §2.8 HR-2): THE REFRESH GOVERNANCE — the reader every planning and
+  // writing lane consults, and the continuation store a governed computation reconciles into / an execution is
+  // ledgered in (both wired by index.cjs from migrations 102 / 103). Optional at registration like the lock;
+  // resolved LAZILY by the handle, so a deployment without them answers 501 by name at consult time — inside
+  // the lane, before any source read — and never silently plans the pre-step-4 way (P3-G2).
+  const stockPreparationRefreshGovernance = services.stockPreparationRefreshGovernance || null
+  const stockPreparationContinuationStore = services.stockPreparationContinuationStore || null
+  function requireStockPreparationRefreshServices() {
+    if (!stockPreparationRefreshGovernance || typeof stockPreparationRefreshGovernance.consult !== 'function'
+      || !stockPreparationContinuationStore
+      || typeof stockPreparationContinuationStore.reconcileHolds !== 'function'
+      || typeof stockPreparationContinuationStore.beginExecution !== 'function'
+      || typeof stockPreparationContinuationStore.finishExecution !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', 'the stock-prep refresh governance is not available on this deployment; nothing is planned or written without it', { reason: 'governance_service' })
+    }
+    return { governance: stockPreparationRefreshGovernance, store: stockPreparationContinuationStore }
+  }
+  // THE handle a lane hands `computeDryRun` (built by the lane module, so a direct lib test drives the same
+  // code): bound to the lane's OWN tenant (TD-6 — the value its tenant wall and its source read already use),
+  // server-held, never request-supplied. Its strict pack read and its source-binding check run under the same
+  // tenant, only when the consult answers governed (TD-21 / TD-22).
+  function refreshGovernanceFor(tenantId) {
+    return createRefreshGovernanceHandle({
+      tenantId,
+      resolveServices: requireStockPreparationRefreshServices,
+      sourceBindingStore: stockPreparationSourceBinding,
+      packInstallStore: stockPreparationPackInstalls,
+      resolveProvisioning: getPackReadbackProvisioning,
+      projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+      defaultObjectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+      extFieldMapping: stockPreparationExtFieldMapping,
+    })
+  }
+  // The large lane refuses every governed project (design §7.1 rows 7-11): governed => 409
+  // STOCK_PREP_REFRESH_LARGE_LANE_REFUSED; otherwise the not-governed verdict the chunk hands its writer.
+  async function consultLargeLane({ tenantId, projectNo, sheetId }, lane) {
+    const consult = await requireStockPreparationRefreshServices().governance.consult({ tenantId, projectNo, sheetId })
+    return largeLaneVerdictOf(consult, lane)
+  }
   // THE write scope of a table action: the resolved target sheet (R-52). The project number is validated
   // first with the plan's own validator, so a malformed number is the same 400 the plan would answer.
   function stockPreparationProjectWriteScope(action, rawParameters) {
@@ -4979,6 +5027,12 @@ function requireStockPreparationAudit() {
     const expansion = isPlainObject(dryRunEvidence.expansion) ? dryRunEvidence.expansion : null
     return expansion && Number.isInteger(expansion.missingComponentDistinctCount) ? expansion.missingComponentDistinctCount : undefined
   }
+  /** PR-3a: the code a `previewed` stamp carries for the two preview statuses that say "this pull will not apply". */
+  function previewStampCode(status) {
+    if (status === 'suspended') return { code: 'STOCK_PREP_PULL_SUSPENDED' }
+    if (status === 'recovery_pending') return { code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' }
+    return {}
+  }
   const tableActions = createStockPreparationTableActionRegistry({
     actions: configuredTableActions,
     resolveSourceBinding: stockPreparationSourceBinding
@@ -5304,13 +5358,19 @@ function requireStockPreparationAudit() {
    * The project number a 结转 decision addresses, read off its `idempotencyKey` exactly as
    * confirm-writes.cjs reads it (a real key EMBEDS its projectNo; bom-expansion makeIdempotencyKey).
    * A key that does not parse yields null, which the overlay turns into 400 PROJECT_NO_REQUIRED
-   * while the switch is on and ignores while it is off.
+   * while the switch is on, and which the in-lease refresh consult refuses 422 (TD-26).
+   *
+   * Batch-refresh step 4 PR-3a review round 1 (V50B-16): a DUPLICATE-RESOLVED key (the conflict planner's
+   * `<base>::duplicate:<kind>:<hash>`) is parsed through its BASE (`baseIdempotencyKeyOf`, the ONE strip the
+   * executor's key-vs-rows check uses too), so the consulted project is the project of the row the carry
+   * patches. Before the strip such a key parsed to null: with the switch off that newly met the consult's 422
+   * (a carry that worked before this PR), and with the switch on it met the overlay's 400.
    */
   function projectNoFromCarryDecision(decision) {
     if (!isPlainObject(decision)) return null
     let parsed = null
     try {
-      parsed = JSON.parse(decision.idempotencyKey)
+      parsed = JSON.parse(baseIdempotencyKeyOf(decision.idempotencyKey))
     } catch (error) {
       parsed = null
     }
@@ -6140,14 +6200,11 @@ function requireStockPreparationAudit() {
       if (actual !== expectedDigest) throw mvpPersistSourceBindingSplit('not_the_written_source')
       return
     }
-    if (!stockPreparationSourceBinding) return
-    if (typeof stockPreparationSourceBinding.listForAction !== 'function') throw mvpPersistSourceBindingSplit('bindings_unverifiable')
-    const listed = await stockPreparationSourceBinding.listForAction({ tenantId, actionId: action.actionId })
-    const bindings = listed && Array.isArray(listed.bindings) ? listed.bindings : null
-    if (!bindings || listed.complete !== true) throw mvpPersistSourceBindingSplit('bindings_unverifiable')
-    if (bindings.some((binding) => !binding || binding.externalSystemId !== resolvedSystemId)) {
-      throw mvpPersistSourceBindingSplit('bindings_disagree')
-    }
+    // PR-3a: the no-digest leg is the lane module's ONE disagreement check (shared with the governed lanes'
+    // unanimity check, R-1). Same answers, byte for byte: no store => go on; a store that cannot list or an
+    // incomplete listing => unverifiable; any row naming another source => disagree; a listing throw propagates.
+    const disagreement = await sourceBindingDisagreementOf({ sourceBindingStore: stockPreparationSourceBinding, tenantId, actionId: action.actionId, externalSystemId: resolvedSystemId })
+    if (disagreement) throw mvpPersistSourceBindingSplit(disagreement)
   }
 
   /**
@@ -7626,6 +7683,9 @@ function requireStockPreparationAudit() {
             installedFieldProperties: await resolveInstalledFieldProperties(req, action),
             // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
             targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
+            // Batch-refresh step 4 PR-3a: the governance handle, UNCONDITIONALLY (an unwired service is 501 at
+            // consult time, before any source read), bound to this lane's own tenant.
+            refreshGovernance: refreshGovernanceFor(dryRunTenantId),
             // The source->`ext_` mapping, from server config. null when unconfigured, which
             // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
             // Configured: the SAME object the apply route passes, so both routes expand the same rows
@@ -7670,7 +7730,10 @@ function requireStockPreparationAudit() {
           await stampWriteLockRefusal(action, dryRunTenantId, error)
           throw error
         }
-        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult) })
+        // PR-3a (AMB-6): a SUSPENDED preview is stamped `previewed` WITH the suspension code, and (review round 1) a
+        // preview awaiting RECOVERY with the recovery code (shape-only; no vocabulary migration); every other
+        // preview's stamp is unchanged.
+        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult), ...previewStampCode(dryRunResult.status) })
         if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo, { recount: true })
         return dryRunResult
       }
@@ -7882,6 +7945,9 @@ function requireStockPreparationAudit() {
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
         extFieldMapping: stockPreparationExtFieldMapping,
         targetFieldExistence: targetFieldExistenceForTenant(tenantId),
+        // PR-3a: the governance handle (this lane's own tenant); a governed, complete computation reconciles its
+        // holds inside the lib, before the audit intent and the ledger write below.
+        refreshGovernance: refreshGovernanceFor(tenantId),
       })
       // The audit table's action vocabulary is migration-frozen (9 actions). Decision-candidate
       // generation is a generation run with a fixed operation subtype, not a new action. Audit the
@@ -7991,6 +8057,9 @@ function requireStockPreparationAudit() {
         sourceAdapter,
         recordsApi: getMultitableRecordsApi(),
         targetFieldExistence: targetFieldExistenceForTenant(tenantId),
+        // PR-3a (TD-22): the governance handle ONLY — a governed project gets the dry-run's strict band and
+        // mapping through it; a not-governed archive is planned exactly as before.
+        refreshGovernance: refreshGovernanceFor(tenantId),
         // B2a. `tenantId` here is the authenticated-user tenant this route already resolved and
         // already scoped the adapter load with — never a query/body carrier.
         b2aTrialRegistry,
@@ -8153,6 +8222,12 @@ function requireStockPreparationAudit() {
               installedFieldProperties: await resolveInstalledFieldProperties(req, action),
               // Same probe input the dry-run route threaded, from the same tenant derivation.
               targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
+              // PR-3a: the governance handle (consulted under the lease), and the two server-held inputs the
+              // execution ledger records: the principal and the run id this lease was acquired with.
+              refreshGovernance: refreshGovernanceFor(applyTenantId),
+              startedBy: requestPrincipal(req),
+              projectWriteRunId: applyB2aRunId,
+              logger: routeLogger,
               // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
               // compares its revision against the token. A mapping on one route and not the other would
               // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
@@ -8709,6 +8784,7 @@ function requireStockPreparationAudit() {
         applyJobId: pendingJob.jobId,
         recordsApi: scopedRecordsApi,
         largeLanePilotCheck: ({ target }) => assertLargeLaneAllowedForPilot({ ...chunkPilotInput, sheetId: target && target.sheetId }, 'large_apply_chunk'),
+        refreshGovernanceGate: ({ target }) => consultLargeLane({ ...chunkPilotInput, sheetId: target && target.sheetId }, 'large_apply_chunk'),
         projectWriteGuard,
       }))
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)))
@@ -10069,6 +10145,18 @@ function requireStockPreparationAudit() {
       const carryWriteScope = sheetWriteScopeKey(carryAction.target.sheetId)
       let result
       await projectWriteLock.withProjectWriteLease(carryWriteScope, { purpose: 'carry_confirm', runId: b2aRunId('stock-preparation-carry-confirm'), tenantId }, async (projectWriteGuard) => {
+        // Batch-refresh step 4 PR-3a (TD-5 as amended by TD-25 / TD-26, refuter R-7): THE CARRY CONSULTS, inside
+        // its lease, before the ledger pre-flight — its fail-closed legs refuse (503 unreadable, 409 retargeted /
+        // tenant mismatch, 501 unwired, 422 a decision without a project). On a GOVERNED project two rows-based
+        // refusals follow (no new IO): an earlier execution that did not finish cleanly (O-22; this carry's own
+        // lease never masks it) and an open runbook-only hold (O-15: an escalated relationship is specialist
+        // territory). It NEVER refuses on ordinary holds or a suspended pull — a person filling human columns
+        // keeps working (plan §5.1 「普通人工填写可继续」). The consult writes nothing.
+        const carryConsult = await refreshGovernanceFor(tenantId).consult({ projectNo: projectNoFromCarryDecision(input.decision), sheetId: carryAction.target.sheetId })
+        if (carryConsult.governed === true) {
+          assertNoUnfinishedExecution(carryConsult, projectWriteGuard)
+          assertNoRunbookOnlyHold(carryConsult)
+        }
         // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
         // `inputFingerprint` arrive as three independent client fields; until they are proven to be
         // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the

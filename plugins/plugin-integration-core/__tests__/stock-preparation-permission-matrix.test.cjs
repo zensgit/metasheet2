@@ -57,6 +57,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // touch is stubbed to throw.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const fs = require('node:fs')
 const path = require('node:path')
 
@@ -279,7 +280,7 @@ function mount({
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {

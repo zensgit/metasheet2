@@ -144,8 +144,10 @@ function continuationFromHold(hold, { id = 'cont_scc_1', status = 'active', stat
   return { header, members }
 }
 
-function continuationInput({ pilot = true, continuations = [], members = [], demandEvidence = null, sourceIdentity = SOURCE_IDENTITY, specSlotDeclared = false, projectNo = PROJECT_NO, ...rest } = {}) {
-  return { storeState: 'ok', pilot, projectNo, continuations, members, demandEvidence, sourceIdentity, specSlotDeclared, ...rest }
+// PR-3a (AMB-1): `persistedHolds` is a REQUIRED planner key; the default [] keeps every #6508 / #6514 governed
+// fixture byte-identical. A test that exercises re-emission must pass real persisted holds, never rely on it.
+function continuationInput({ pilot = true, continuations = [], members = [], demandEvidence = null, sourceIdentity = SOURCE_IDENTITY, specSlotDeclared = false, projectNo = PROJECT_NO, persistedHolds = [], ...rest } = {}) {
+  return { storeState: 'ok', pilot, projectNo, continuations, members, demandEvidence, sourceIdentity, specSlotDeclared, persistedHolds, ...rest }
 }
 
 function byType(planned, type) {

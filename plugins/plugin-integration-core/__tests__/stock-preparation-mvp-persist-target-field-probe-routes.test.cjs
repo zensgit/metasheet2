@@ -33,6 +33,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // carry a sheet id => R1 red; M4 host failure rethrown raw => R5 red.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -284,7 +285,7 @@ function mount(hostOptions = {}) {
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(source.adapter),
+    services: withRefreshGovernance(baseServices(source.adapter)),
     logger: {
       info(message, detail) { logLines.push(['info', message, detail]) },
       warn(message, detail) { logLines.push(['warn', message, detail]) },

@@ -97,6 +97,13 @@ node __tests__/stock-preparation-continuation-planner.test.cjs
 node __tests__/stock-preparation-refresh-state.test.cjs
 node __tests__/stock-preparation-continuation-store.test.cjs
 node __tests__/stock-preparation-refresh-governance.test.cjs
+node __tests__/stock-preparation-refresh-lanes.test.cjs
+node __tests__/stock-preparation-refresh-small-lane.test.cjs
+node __tests__/stock-preparation-refresh-writer-tripwire.test.cjs
+node __tests__/stock-preparation-refresh-chunk-gate.test.cjs
+node __tests__/stock-preparation-refresh-route-wiring.test.cjs
+node __tests__/stock-preparation-refresh-egress.test.cjs
+node __tests__/stock-preparation-refresh-scan.test.cjs
 node __tests__/stock-preparation-existing-row-record-ref.test.cjs
 node __tests__/stock-preparation-foreign-existing-rows-readside.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs
