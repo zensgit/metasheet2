@@ -968,6 +968,24 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     return Object.freeze({ continuation: rowToContinuation(row), members: members.map(rowToMember) })
   }
 
+  /**
+   * PR-5 (design §11, the directory's union count): the OPEN holds of one tenant, counted by project number.
+   * One paged read of the open rows (ceiling READ_CEILINGS.hold), grouped in process; throws 503 on any
+   * failure — never an empty map (the directory then answers `ledgerReady: false`, never zero).
+   */
+  async function countOpenHoldsByProjectNo(input = {}) {
+    const tenantId = trimmed(input.tenantId)
+    if (!tenantId) throw scopeInvalid('tenantId')
+    const rows = await selectAll(db, REFRESH_STORE_TABLES.hold, { tenant_id: tenantId, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'count_open_holds' })
+    const byProjectNo = new Map()
+    for (const row of rows) {
+      const projectNo = trimmed(row.project_no)
+      if (!projectNo) continue
+      byProjectNo.set(projectNo, (byProjectNo.get(projectNo) || 0) + 1)
+    }
+    return Object.freeze({ ok: true, byProjectNo })
+  }
+
   /** One hold by id, scoped (any status). */
   async function readHold(input = {}) {
     const scope = normalizeScope(input)
@@ -1841,6 +1859,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     readSheetGovernanceMarks,
     readContinuation,
     readHold,
+    countOpenHoldsByProjectNo,
     confirmContinuation,
     reconfirmContinuation,
     endContinuation,

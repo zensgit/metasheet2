@@ -34,6 +34,14 @@
 // THE LOCK NEEDS BOTH #6501 SHAPES: "an execution `running` whose lease_id is the live lease" needs the
 // LIVE flag (readState.leaseLive — expiry + grace) and the lease ID (only readGeneration exposes it). A
 // failed lock read is `unreadable`, NEVER "no live lease, so the running execution died".
+//
+// PR-5 (batch-refresh step 4): `settled` rides on the derived answer — a settling computation (design
+// §9.2) has written the state row's `settled_at` and its machine-column digest. The FORMAL surfaces (the
+// project material export, the handoff's terminal hop, the overview posture) share ONE predicate,
+// `formalSurfaceVerdict`: a not-governed project passes as today; a governed one passes only when its
+// status is `complete` AND it is settled (plan §5.3 「只有完整成功的结果才可解除拦截」; the export then
+// re-checks the settled digest against the sheet). `exportAllowed` keeps its PR-1 meaning (the status
+// predicate alone) so no PR-1 consumer moves; the gate never reads it.
 
 const STATUS_TOKENS = Object.freeze([
   'unreadable',
@@ -95,6 +103,7 @@ function unreadable(reason, failure) {
     statusLabel: STATUS_LABELS_ZH.unreadable,
     governed: 'unknown',
     exportAllowed: false,
+    settled: false,
     counts: null,
     unreadable: { reason },
   }
@@ -157,6 +166,7 @@ function newestExecution(executions) {
  * Derive the project's refresh state from a consult answer. First matching predicate wins, in the
  * design §9.1 order. Returns a frozen, values-free object:
  *   { readable, status, statusLabel, governed: 'pilot'|'protected'|'none'|'unknown', exportAllowed,
+ *     settled: boolean (PR-5: a settling computation wrote settled_at + the machine digest; false when not governed),
  *     counts: { pendingConfirm, confirmable, openExecutions, pendingReviews, continuations } | null,
  *     unreadable?: { reason, store?, operation? } }
  */
@@ -188,6 +198,9 @@ function readProjectRefreshState(consult) {
   const pilotEnabled = isPlainObject(pilot) && pilot.enabled === true
   const anyRows = continuations.length > 0 || holds.length > 0 || state !== null || executions.length > 0 || changePlans.length > 0
   const governed = pilotEnabled ? 'pilot' : (anyRows ? 'protected' : 'none')
+  // PR-5: a settling computation wrote the state row's `settled_at` AND its machine-column digest
+  // (design §9.2 — both land in one statement; either alone is an unsettled row).
+  const settled = state !== null && timestampOf(state.settledAt) !== null && nonBlankString(state.settledSheetMachineDigest)
 
   function answerWith(status) {
     return Object.freeze({
@@ -196,6 +209,7 @@ function readProjectRefreshState(consult) {
       statusLabel: STATUS_LABELS_ZH[status],
       governed,
       exportAllowed: status === 'not_governed' || status === 'complete',
+      settled: status === 'not_governed' ? false : settled,
       counts,
     })
   }
@@ -236,11 +250,40 @@ function readProjectRefreshState(consult) {
   return answerWith('complete')
 }
 
+// ── PR-5: the ONE predicate of every formal surface ───────────────────────────────────────────────
+
+const FORMAL_SURFACE_REFUSALS = Object.freeze(['unreadable', 'state', 'not_settled'])
+
+/**
+ * What a FORMAL surface (the project material export, the handoff's terminal hop, the overview's
+ * 「可以导出」) may do with a derived state. Pure, values-free. `{ allowed: true, reason: null }` for a
+ * not-governed project (today's behaviour) and for a governed project that is `complete` AND settled;
+ * otherwise `{ allowed: false, reason }` with `reason` one of FORMAL_SURFACE_REFUSALS:
+ *   `unreadable`   the state could not be read (plan §5.3 「状态无法可靠读取」: 503 on the export);
+ *   `state`        any unfinished status (待确认 / 已确认待执行 / 执行中 / 失败待恢复 / 已执行待核对 /
+ *                  变更待复核 — 409);
+ *   `not_settled`  `complete` by derivation but no settling computation ever wrote the state row's
+ *                  digest (a never-pulled pilot project, legacy rows with no clean preview yet — O-9's
+ *                  "never-leased pilot" question answered: not until a clean computation settles it; 409).
+ * Anything that is not a well-formed derived state is `unreadable` (fail closed).
+ */
+function formalSurfaceVerdict(state) {
+  if (!isPlainObject(state) || state.readable !== true || !STATUS_TOKENS.includes(state.status) || state.status === 'unreadable') {
+    return Object.freeze({ allowed: false, reason: 'unreadable' })
+  }
+  if (state.status === 'not_governed') return Object.freeze({ allowed: true, reason: null })
+  if (state.status !== 'complete') return Object.freeze({ allowed: false, reason: 'state' })
+  if (state.settled !== true) return Object.freeze({ allowed: false, reason: 'not_settled' })
+  return Object.freeze({ allowed: true, reason: null })
+}
+
 module.exports = {
   STATUS_TOKENS,
   STATUS_LABELS_ZH,
+  FORMAL_SURFACE_REFUSALS,
   // PR-3a (O-14): the ONE newest-execution ordering (startedAt desc, then id desc) a settling computation
   // names its execution by — exported so the lanes never reproduce it.
   newestExecution,
   readProjectRefreshState,
+  formalSurfaceVerdict,
 }

@@ -731,9 +731,22 @@ const {
   assertNoUnfinishedExecution,
   createRefreshGovernanceHandle,
   largeLaneVerdictOf,
+  planningInputsOrRefuse,
   sourceBindingDisagreementOf,
   stockPreparationSourceScopeDigest,
 } = require('./stock-preparation-refresh-lanes.cjs')
+// Batch-refresh step 4 PR-5: the formal-export gate (G0 -> C1 -> rows + file -> C2 -> G1), the ONE machine digest
+// the settlement and the export share, and the ONE predicate every formal surface (export, handoff terminal hop)
+// keys on.
+const {
+  StockPreparationExportGateError,
+  auditableRefusalDetail,
+  continuationExportInputOf,
+  runFormalExportGate,
+} = require('./stock-preparation-export-gate.cjs')
+const { machineBandFieldIds, sheetMachineDigest } = require('./stock-preparation-continuation-pairing.cjs')
+const { formalSurfaceVerdict } = require('./stock-preparation-refresh-state.cjs')
+const { StockPreparationRefreshGovernanceError } = require('./stock-preparation-refresh-governance.cjs')
 // The OTHER half of the pack line: a pack says WHICH tenant `ext_` columns exist, this says WHERE
 // their values come from. Server-held and built once at registration, exactly like the catalog
 // above. Absent config -> null -> the refresh path is byte-identical to one that never heard of it.
@@ -4663,6 +4676,56 @@ function requireStockPreparationAudit() {
     const consult = await requireStockPreparationRefreshServices().governance.consult({ tenantId, projectNo, sheetId })
     return largeLaneVerdictOf(consult, lane)
   }
+  // PR-5: the derived-state reader of the READ surfaces (board / directory / overview), bound to the proven tenant.
+  // `null` when the governance service is not wired: those surfaces then show the `unreadable` state BY NAME (never
+  // zero, never "complete"). The FORMAL surfaces — the export and the handoff's terminal hop — go through
+  // requireStockPreparationRefreshServices() instead and refuse 501 unwired, like every lane.
+  function refreshStateReaderOrNull(tenantId) {
+    if (!stockPreparationRefreshGovernance || typeof stockPreparationRefreshGovernance.readRefreshState !== 'function') return null
+    return ({ projectNo, sheetId }) => stockPreparationRefreshGovernance.readRefreshState({ tenantId, projectNo, sheetId })
+  }
+  // PR-5 (design §11): the tenant's OPEN refresh holds by project number — the directory's union count. A store that is
+  // not wired or cannot read answers `ready: false`, which the directory surfaces as `ledgerReady: false` (its pending
+  // counts cannot be trusted) — never as "no holds".
+  async function openHoldCountsFor(tenantId) {
+    const store = stockPreparationContinuationStore
+    if (!store || typeof store.countOpenHoldsByProjectNo !== 'function') return { ready: false, byProjectNo: new Map() }
+    try {
+      const counted = await store.countOpenHoldsByProjectNo({ tenantId })
+      const ready = Boolean(counted && counted.ok === true && counted.byProjectNo instanceof Map)
+      return { ready, byProjectNo: ready ? counted.byProjectNo : new Map() }
+    } catch (error) {
+      return { ready: false, byProjectNo: new Map() }
+    }
+  }
+  // PR-5 (design §7.1 row 25, D-17): the handoff's TERMINAL hop is a formal handover and is refused while the
+  // project's refresh state is unfinished or unreadable — the ONE predicate the export keys on
+  // (`formalSurfaceVerdict`: a not-governed project passes; a governed one only when complete AND settled). One
+  // fresh state read; the reader's own refusals (409 RETARGETED / TENANT_MISMATCH) propagate.
+  async function assertHandoffTerminalHopAllowed({ tenantId, projectNo, sheetId }) {
+    const read = await requireStockPreparationRefreshServices().governance.readRefreshState({ tenantId, projectNo, sheetId })
+    const state = read && read.state && typeof read.state === 'object' ? read.state : null
+    const verdict = formalSurfaceVerdict(state)
+    if (verdict.allowed) return state
+    const unreadable = verdict.reason === 'unreadable'
+    const failure = state && state.unreadable && typeof state.unreadable === 'object' ? state.unreadable : {}
+    throw new HttpRouteError(
+      unreadable ? 503 : 409,
+      'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE',
+      unreadable
+        ? 'the project\'s refresh state could not be read; the final handoff step is refused'
+        : 'this project has an unfinished refresh state; the final handoff step is refused until it is complete and checked',
+      {
+        reason: verdict.reason,
+        status: state ? state.status : 'unreadable',
+        governed: state ? state.governed : 'unknown',
+        counts: state && state.counts ? { ...state.counts } : null,
+        ...(typeof failure.store === 'string' ? { store: failure.store } : {}),
+        ...(typeof failure.operation === 'string' ? { operation: failure.operation } : {}),
+        partial: false,
+      },
+    )
+  }
   // THE write scope of a table action: the resolved target sheet (R-52). The project number is validated
   // first with the plan's own validator, so a malformed number is the same 400 the plan would answer.
   function stockPreparationProjectWriteScope(action, rawParameters) {
@@ -4898,6 +4961,8 @@ function requireStockPreparationAudit() {
         projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         projectNo,
         recount,
+        // PR-5: the per-event row keeps the same 「状态」 rule as the full refresh.
+        readRefreshState: refreshStateReaderOrNull(tenantId),
       })
     } catch (error) {
       if (routeLogger && typeof routeLogger.warn === 'function') {
@@ -11212,6 +11277,8 @@ function requireStockPreparationAudit() {
           store,
           tenantId,
           projectId: targetProjectId,
+          // PR-5: one consult per project — 「可以导出」 is never written over an unfinished or unreadable state.
+          readRefreshState: refreshStateReaderOrNull(tenantId),
         })
         await audit.append({
           tenantId,
@@ -12077,12 +12144,68 @@ function requireStockPreparationAudit() {
         targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         target: action.target,
       })
-      const exportResult = await exportStockPreparationPrepLines({
-        recordsApi: getMultitableRecordsApi(),
-        target: action.target,
-        projectNo,
-        permission: 'admin',
-      })
+      // PR-5 — THE FORMAL-EXPORT GATE (stock-preparation-export-gate.cjs; design §11, §23.7 O-21 as replaced;
+      // plan §5.3 「第一期启用项目存在上述任一未完成状态，或状态无法可靠读取时，服务端拒绝正式导出」). The fixed
+      // order, every read FRESH and awaited: G0 (lock generation) -> C1 (derived state) -> the rows, then the
+      // settlement's own digest read, then the workbook IN MEMORY -> C2 (derived state + the settled machine
+      // digest) -> G1 (lock generation: same token AND epoch, no lease). A governed project exports only when it
+      // is complete AND settled and nothing moved in between; a not-governed project keeps today's rows, audit
+      // row and workbook bytes (C09) under the same G0 lease refusal and G0/G1 bracket (O-9). Every refusal
+      // streams nothing and audits `export_refused` with the code and tokens only. The governance service and
+      // the lock are REQUIRED here (501 by name when unwired, like every lane): a formal surface never
+      // falls back to "not governed".
+      const refreshServices = requireStockPreparationRefreshServices()
+      const exportLock = requireStockPreparationProjectWriteLock()
+      const refreshHandle = refreshGovernanceFor(tenantId)
+      const exportScope = { tenantId, projectNo, sheetId: action.target.sheetId }
+      if (!stockPreparationXlsxExport || typeof stockPreparationXlsxExport.buildWorkbookBuffer !== 'function') {
+        throw new HttpRouteError(501, 'PREP_LINE_EXPORT_XLSX_UNAVAILABLE', 'xlsx export capability is not available')
+      }
+      let gate
+      try {
+        gate = await runFormalExportGate({
+          readGeneration: () => exportLock.readGeneration(sheetWriteScopeKey(action.target.sheetId)),
+          readRefreshState: () => refreshServices.governance.readRefreshState(exportScope),
+          readData: async (read, { governed }) => {
+            // The export rows FIRST (today's read, byte for byte for a not-governed project)...
+            const exportResult = await exportStockPreparationPrepLines({
+              recordsApi: getMultitableRecordsApi(),
+              target: action.target,
+              projectNo,
+              permission: 'admin',
+              ...(governed ? { continuation: continuationExportInputOf(read.consult) } : {}),
+            })
+            if (!governed) return { exportResult, sheetMachineDigest: null }
+            // ...THEN the settlement's own projection: the planner's reader, the strict pack band (TD-22) and the
+            // ONE shared digest — never the export's own column projection (design §9.2). A host-side machine
+            // write landing between the two reads moves this digest away from the settlement (409).
+            const existingRows = await tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo)
+            const planningInputs = planningInputsOrRefuse(await refreshHandle.planningInputs(action))
+            const machineFieldIds = machineBandFieldIds({ template: action.template, installedFieldProperties: planningInputs.installedFieldProperties })
+            return { exportResult, sheetMachineDigest: sheetMachineDigest(existingRows, { machineFieldIds }) }
+          },
+          buildFile: ({ exportResult }) => stockPreparationXlsxExport.buildWorkbookBuffer({
+            sheetName: stockPreparationExportSheetName(projectNo),
+            headers: exportResult.headers,
+            rows: exportResult.rows,
+          }),
+        })
+      } catch (error) {
+        // A refusal of the gate or of the reader (409 RETARGETED / TENANT_MISMATCH, 503 unreadable) leaves a
+        // values-free `export_refused` row: the code and the closed reason / status tokens, never a value.
+        if (error instanceof StockPreparationExportGateError || error instanceof StockPreparationRefreshGovernanceError) {
+          await audit.append({
+            tenantId,
+            projectId: projectNo,
+            action: 'prep_line_export',
+            actor: user.id || user.email,
+            mode: 'export_refused',
+            detail: { operation: 'prep_line_export', refusal: error.code, ...auditableRefusalDetail(error.details) },
+          })
+        }
+        throw error
+      }
+      const exportResult = gate.data.exportResult
       // Record intent FIRST — the same "audit before the effect is observable" discipline the write
       // routes use: if the audit store is unavailable or refuses the payload, no workbook may be
       // streamed. Values-free: counts only, never a material name/quantity.
@@ -12097,22 +12220,21 @@ function requireStockPreparationAudit() {
           totalRowCount: exportResult.totalRowCount,
           activeRowCount: exportResult.activeRowCount,
           columnCount: exportResult.headers.length,
+          // PR-5, GOVERNED projects only (a not-governed row is byte-identical to before this change): the state
+          // the gate passed on, the live relationships and the rows the 沿用说明 column names — counts and tokens.
+          ...(gate.governed ? {
+            refreshState: gate.state.status,
+            continuationCount: gate.state.counts ? gate.state.counts.continuations : 0,
+            continuedRowCount: Number.isInteger(exportResult.continuedRowCount) ? exportResult.continuedRowCount : 0,
+          } : {}),
         },
-      })
-      if (!stockPreparationXlsxExport || typeof stockPreparationXlsxExport.buildWorkbookBuffer !== 'function') {
-        throw new HttpRouteError(501, 'PREP_LINE_EXPORT_XLSX_UNAVAILABLE', 'xlsx export capability is not available')
-      }
-      const buffer = await stockPreparationXlsxExport.buildWorkbookBuffer({
-        sheetName: stockPreparationExportSheetName(projectNo),
-        headers: exportResult.headers,
-        rows: exportResult.rows,
       })
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
       res.setHeader('Content-Disposition', `attachment; filename="${stockPreparationExportFilename(projectNo)}"`)
       // Lets the front end tell "downloaded, but this project has zero active material rows right now"
       // apart from a normally populated export, without parsing the binary body — see the UI notice.
       res.setHeader('X-Stock-Prep-Export-Row-Count', String(exportResult.activeRowCount))
-      return res.send(buffer)
+      return res.send(gate.file)
     },
 
     // 一线看得见自己工厂的项目 — THE OPERATOR PROJECT DIRECTORY / WORKLIST.
@@ -12253,6 +12375,9 @@ function requireStockPreparationAudit() {
         // route's top-level key set is frozen and asserted (S-02a), so it is served only to a caller
         // that asked for it in as many words.
         includePendingCounts: firstString(input.includePendingCounts) === '1',
+        // PR-5 (design §11): `pendingDecisionCount` is the UNION of the confirmation ledger and the open refresh
+        // holds; an unreadable hold table makes `ledgerReady` false, never "zero holds".
+        refreshHoldCounts: await openHoldCountsFor(scope.tenantId),
       })
       // VALUES-FREE AUDIT over a value-bearing response. Counts, booleans and handles only: no
       // projectNo, no projectName, and no `projects` array — the row records THAT a directory read
@@ -12672,6 +12797,12 @@ function requireStockPreparationAudit() {
         )
       }
 
+      // PR-5 (design §7.1 row 25, D-17): the TERMINAL hop is a formal handover — refused 409 (503 unreadable)
+      // STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE while the project's refresh state is unfinished, through the
+      // ONE predicate the formal export keys on; a not-governed project passes as today. Non-terminal hops are
+      // untouched (no consult). Before the cursor, the trail row, the claim and the ping.
+      if (terminal) await assertHandoffTerminalHopAllowed({ tenantId, projectNo, sheetId: action.target.sheetId })
+
       // STEP 5 — THE TURN. Cursor only: the notification claim is taken separately, after the trail
       // row lands, so that a failing audit cannot leave a hop permanently unnotifiable (RC1).
       const applied = await store.advance({
@@ -12937,6 +13068,9 @@ function requireStockPreparationAudit() {
           projectNo,
           boundTarget,
           audit,
+          // PR-5: the `refresh` stanza (the derived state, values-free) and the open-hold union count.
+          readRefreshState: refreshStateReaderOrNull(scope.tenantId),
+          refreshHoldCounts: await openHoldCountsFor(scope.tenantId),
         })
       } catch (error) {
         // A MISS IS STILL A READ, and it is audited as one — values-free, so the trail cannot become

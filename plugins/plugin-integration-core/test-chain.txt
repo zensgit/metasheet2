@@ -119,6 +119,7 @@ node __tests__/stock-preparation-permission-matrix.test.cjs
 node __tests__/stock-preparation-members-routes.test.cjs
 node __tests__/stock-preparation-prep-line-export.test.cjs
 node __tests__/stock-preparation-prep-line-export-tenant-wall.test.cjs
+node __tests__/stock-preparation-export-gate.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight-tenant-scope.test.cjs
