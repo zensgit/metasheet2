@@ -359,6 +359,12 @@ export interface ApprovalListQuery {
   templateId?: string
   createdFrom?: string
   createdTo?: string
+  /**
+   * #6524 N0-a: narrow the feed to one workflow (the server's existing `workflowKey` filter on
+   * `GET /api/approvals`). The approval center uses `attendance.request` for its 考勤待审 view and
+   * count. Additive — composes with `tab` and every other filter; absent means no narrowing.
+   */
+  workflowKey?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1025,7 @@ export async function listApprovals(
       items = items.filter((a) => (a.title ?? '').toLowerCase().includes(q) || (a.requestNo ?? '').toLowerCase().includes(q))
     }
     if (query?.templateId) items = items.filter((a) => a.templateId === query.templateId)
+    if (query?.workflowKey) items = items.filter((a) => a.workflowKey === query.workflowKey)
     if (query?.createdFrom) items = items.filter((a) => a.createdAt >= query.createdFrom!)
     if (query?.createdTo) items = items.filter((a) => a.createdAt <= query.createdTo!)
     const page = query?.page ?? 1
@@ -1046,6 +1053,7 @@ function approvalListSearchParams(query: ApprovalListQuery | undefined, includeP
   if (includePaging && query?.pageSize) params.set('pageSize', String(query.pageSize))
   if (query?.sourceSystem) params.set('sourceSystem', query.sourceSystem)
   if (query?.templateId) params.set('templateId', query.templateId)
+  if (query?.workflowKey) params.set('workflowKey', query.workflowKey)
   if (query?.createdFrom) params.set('createdFrom', query.createdFrom)
   if (query?.createdTo) params.set('createdTo', query.createdTo)
   return params

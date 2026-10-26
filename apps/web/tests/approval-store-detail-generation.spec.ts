@@ -22,6 +22,7 @@ import { createPinia, setActivePinia } from 'pinia'
 const getApprovalMock = vi.fn()
 const getApprovalHistoryMock = vi.fn()
 const dispatchActionMock = vi.fn()
+const listApprovalsMock = vi.fn()
 
 vi.mock('../src/approvals/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/approvals/api')>()
@@ -30,6 +31,7 @@ vi.mock('../src/approvals/api', async (importOriginal) => {
     getApproval: (...args: unknown[]) => getApprovalMock(...args),
     getApprovalHistory: (...args: unknown[]) => getApprovalHistoryMock(...args),
     dispatchAction: (...args: unknown[]) => dispatchActionMock(...args),
+    listApprovals: (...args: unknown[]) => listApprovalsMock(...args),
   }
 })
 
@@ -742,5 +744,43 @@ describe('approval store — executeAction result publication', () => {
     pendingB.resolve(instance('apv_b'))
     await bLoad
     expect(store.loading).toBe(false)
+  })
+})
+
+// #6524 N0-a: the approval center's 考勤待审 view narrows 待我处理 with `workflowKey`. loadPending
+// must hand that filter (and every other one) to listApprovals untouched, with tab forced to
+// pending. Non-regression guard: the store already spreads the query through on the base commit.
+describe('approval store — loadPending passes the list filters through', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    listApprovalsMock.mockReset()
+  })
+
+  it('forwards workflowKey with tab=pending and publishes the rows and total', async () => {
+    listApprovalsMock.mockResolvedValue({ data: [instance('apv_att', { workflowKey: 'attendance.request' })], total: 9 })
+    const store = useApprovalStore()
+
+    await store.loadPending({ sourceSystem: 'all', workflowKey: 'attendance.request', page: 1, pageSize: 10 })
+
+    expect(listApprovalsMock).toHaveBeenCalledTimes(1)
+    expect(listApprovalsMock).toHaveBeenCalledWith({
+      sourceSystem: 'all',
+      workflowKey: 'attendance.request',
+      page: 1,
+      pageSize: 10,
+      tab: 'pending',
+    })
+    expect(store.pendingApprovals.map((row) => row.id)).toEqual(['apv_att'])
+    expect(store.totalPending).toBe(9)
+  })
+
+  it('without workflowKey the request carries no such key (the store adds none of its own)', async () => {
+    listApprovalsMock.mockResolvedValue({ data: [], total: 0 })
+    const store = useApprovalStore()
+
+    await store.loadPending({ sourceSystem: 'all', page: 1, pageSize: 10 })
+
+    expect(listApprovalsMock.mock.lastCall?.[0]).not.toHaveProperty('workflowKey')
+    expect(listApprovalsMock.mock.lastCall?.[0]).toMatchObject({ tab: 'pending' })
   })
 })

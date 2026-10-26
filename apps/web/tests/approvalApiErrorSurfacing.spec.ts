@@ -550,6 +550,53 @@ describe('exportApprovalsCsv (F3-E1)', () => {
     expect(Object.keys(exportFilters).sort()).toEqual(Object.keys(query).sort())
   })
 
+  // #6524 N0-a: the approval center's 「考勤待审 N」 asks the list route for the attendance workflow
+  // only, one row per page, and reads `total`. The mock boundary in approval-center.spec.ts only
+  // sees the query object; this pins that `workflowKey` (and the paging) really reach the URL, and
+  // that the export of the same view carries the same filter.
+  it('sends workflowKey to the list route (and to the export of the same filters)', async () => {
+    const countQuery = {
+      tab: 'pending' as const,
+      sourceSystem: 'all' as const,
+      workflowKey: 'attendance.request',
+      page: 1,
+      pageSize: 1,
+    }
+    const { response } = csvResponse(FULL_HEADERS)
+    const fetchMock = vi.fn(async (rawUrl: string) => (
+      new URL(rawUrl).searchParams.get('format') === 'csv'
+        ? response
+        : { ok: true, status: 200, json: async () => ({ data: [], total: 4 }), clone() { return this } }
+    ))
+    vi.resetModules()
+    vi.stubEnv('DEV', false)
+    vi.stubGlobal('fetch', fetchMock)
+    let listResult: { total: number } | undefined
+    try {
+      const api = await import('../src/approvals/api')
+      listResult = await api.listApprovals(countQuery)
+      await api.exportApprovalsCsv({ tab: 'pending', sourceSystem: 'all', workflowKey: 'attendance.request' })
+    } finally {
+      vi.unstubAllEnvs()
+      vi.unstubAllGlobals()
+      vi.resetModules()
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [listUrl, exportUrl] = fetchMock.mock.calls.map(([rawUrl]) => new URL(rawUrl))
+    expect(listUrl.pathname).toBe('/api/approvals')
+    expect(Object.fromEntries(listUrl.searchParams.entries())).toEqual({
+      tab: 'pending',
+      sourceSystem: 'all',
+      workflowKey: 'attendance.request',
+      page: '1',
+      pageSize: '1',
+    })
+    expect(listResult?.total).toBe(4)
+    expect(exportUrl.searchParams.get('workflowKey')).toBe('attendance.request')
+    expect(exportUrl.searchParams.get('format')).toBe('csv')
+  })
+
   it('returns the response body untouched, with the file name and the four export headers', async () => {
     const { response, blob, blobSpy } = csvResponse({
       ...FULL_HEADERS,
