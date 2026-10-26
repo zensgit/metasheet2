@@ -2134,6 +2134,13 @@ jobs:
       - name: Create isolated attendance timezone database
         run: createdb --host=localhost --username=postgres attendance_timezone_ci
 
+      - name: Prepare isolated W6 authentication proof database
+        id: w6-auth-db-prepare
+        run: createdb --host=localhost --username=postgres attendance_w6_auth_ci
+
+      - name: Migrate isolated W6 authentication proof database
+        run: DATABASE_URL=postgresql://postgres@localhost:5432/attendance_w6_auth_ci ATTENDANCE_TEST_DATABASE_URL=postgresql://postgres@localhost:5432/attendance_w6_auth_ci pnpm --filter @metasheet/core-backend migrate
+
       - name: Run attendance integration tests
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
@@ -2314,9 +2321,19 @@ jobs:
             tests/integration/attendance-daily-calendar.db.test.ts \
             --reporter=dot
 
+          # W6 real JWT/DB-RBAC proof compares every business table; do not mix
+          # its fixture rows with the timezone lane's global-policy evidence.
+          DATABASE_URL=postgresql://postgres@localhost:5432/attendance_w6_auth_ci ATTENDANCE_TEST_DATABASE_URL=postgresql://postgres@localhost:5432/attendance_w6_auth_ci pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/attendance-w6-real-auth.db.test.ts \
+            --reporter=dot
+
       - name: Remove isolated attendance timezone database
         if: always()
         run: dropdb --host=localhost --username=postgres --if-exists attendance_timezone_ci
+
+      - name: Remove isolated W6 authentication proof database
+        if: ${{ always() && steps.w6-auth-db-prepare.outcome == 'success' }}
+        run: dropdb --host=localhost --username=postgres --if-exists attendance_w6_auth_ci
 
       - name: Upload test results
         if: always()
