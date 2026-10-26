@@ -444,6 +444,9 @@
         :fill-target="composedFillTarget"
         :target-api="projectTargetApi"
         no-link-hint-context="board"
+        :refresh-status="refreshStanza ? refreshStanza.status : null"
+        :refresh-settled="refreshStanza ? refreshStanza.settled : false"
+        :can-open-refresh-queue="canOpenRefreshQueue"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
         @synced="onSyncReportChanged"
@@ -468,6 +471,27 @@
             data-testid="stock-prep-project-board-posture"
           >{{ bi(posture.zh, posture.en) }}</span>
         </h3>
+        <!-- 备料分批拉取第一期 step 4 PR-7 (design §13): THE REFRESH BANNER, for everyone who can open this board —
+             counts and words only, never a hold payload. ABSENT (no element at all) for a project the batch refresh
+             does not govern, for a complete-and-checked one, and for an older backend that sends no stanza, so every
+             such page is the DOM it was. The link to 「拉取待确认」 renders only for the PULL tier (R-11). -->
+        <p
+          v-if="refreshBanner"
+          class="sp-board__refresh-banner"
+          data-testid="stock-prep-project-board-refresh-banner"
+          :data-refresh-status="refreshBanner.key"
+          role="status"
+        >
+          {{ bi(refreshBanner.zh, refreshBanner.en) }}
+          <span class="sp-board__hint">{{ bi(refreshBanner.zhNext, refreshBanner.enNext) }}</span>
+          <button
+            v-if="refreshBanner.link"
+            type="button"
+            class="sp-board__link"
+            data-testid="stock-prep-project-board-refresh-open-queue"
+            @click="openRefreshQueue"
+          >{{ bi('去「拉取待确认」', 'Open “Pull holds”') }}</button>
+        </p>
         <dl class="sp-board__facts">
           <div class="sp-board__fact" data-testid="stock-prep-project-board-rows">
             <dt :title="bi(rowsTooltip.zh, rowsTooltip.en)">{{ bi('表里有多少行', 'Rows in the table') }}</dt>
@@ -507,10 +531,10 @@
              them. The link stays — it goes to the CROSS-PROJECT queue, which this page does not
              replace — but it is a text link, not the primary action; the 「下一步」 bar above owns
              that (G1) and now opens 面板 2 in place. -->
-        <p v-if="board.pendingDecisionCount > 0" class="sp-board__pending" data-testid="stock-prep-project-board-pending">
+        <p v-if="ledgerPending > 0" class="sp-board__pending" data-testid="stock-prep-project-board-pending">
           {{ bi(
-            `这个项目有 ${board.pendingDecisionCount} 件事等您拿主意 —— 在下面的「等您拿主意」里就能处理。`,
-            `${board.pendingDecisionCount} thing(s) on this project are waiting for your decision — you can handle them in 「等您拿主意」 below.`,
+            `这个项目有 ${ledgerPending} 件事等您拿主意 —— 在下面的「等您拿主意」里就能处理。`,
+            `${ledgerPending} thing(s) on this project are waiting for your decision — you can handle them in 「等您拿主意」 below.`,
           ) }}
           <button
             type="button"
@@ -538,7 +562,7 @@
            for. Once they collapse it (or open another project, which resets the flag) the entry
            condition is the only thing left holding it open. -->
       <section
-        v-if="board.pendingDecisionCount > 0 || confirmPanelExpanded"
+        v-if="ledgerPending > 0 || confirmPanelExpanded"
         ref="confirmPanelEl"
         class="sp-board__confirm-panel"
         data-testid="stock-prep-project-board-confirm-panel"
@@ -546,7 +570,7 @@
         <div class="sp-board__confirm-panel-header">
           <h3 class="sp-board__confirm-panel-title">
             {{ bi('等您拿主意', 'Waiting on your decision') }}
-            <span v-if="board.pendingDecisionCount > 0">({{ board.pendingDecisionCount }})</span>
+            <span v-if="ledgerPending > 0">({{ ledgerPending }})</span>
           </h3>
           <button
             type="button"
@@ -834,10 +858,18 @@ import {
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 import {
+  canOpenStockPrepRefreshQueue,
   canOpenStockPrepYidaEntries,
   canRunStockPrepProjectSync,
   grantedStockPrepCapabilities,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  parseStockPrepRefreshStanza,
+  stockPrepPendingSplit,
+  stockPrepRefreshBanner,
+  type StockPrepRefreshBanner,
+  type StockPrepRefreshStanza,
+} from '../../../services/integration/stockPreparation/refreshState'
 import { useAuth } from '../../../composables/useAuth'
 import {
   operatorNextStep,
@@ -882,6 +914,12 @@ const emit = defineEmits<{
   (e: 'open-multitable', target: { sheetId: string; viewId: string } | null): void
   /** Mirrors the opened project into the shell's `?projectNo=` query. */
   (e: 'select-project-no', projectNo: string): void
+  /**
+   * 备料分批拉取第一期 step 4 PR-7: the open project's refresh stanza (values-free tokens / counts / booleans — the
+   * parsed board `refresh` key), or null when none is open / the backend sends none. The shell's 拉取待确认 rail
+   * count reads it (R-62 ④); nothing values-bearing rides this emit.
+   */
+  (e: 'refresh-changed', stanza: StockPrepRefreshStanza | null): void
 }>()
 
 const { locale } = useLocale()
@@ -900,6 +938,11 @@ const busy = ref(false)
  */
 const refreshing = ref(false)
 const errorCode = ref<string | null>(null)
+/**
+ * PR-7 (PR-5 pg review N1): the last failure's clamped `details.reason` token (confirmApi.ts) — so the export's
+ * `lease_in_flight` / `state` / `not_settled` refusals read as three different sentences. Never a message.
+ */
+const errorReason = ref<string | null>(null)
 /**
  * WHICH VOCABULARY THE LAST FAILURE BELONGS TO. This page mixes a read (the board) with two actions
  * that genuinely write or download (通知下一步, 导出), and 「这一步没有保存成功」 is right for one of
@@ -1067,13 +1110,15 @@ function onEmbeddedQueueChanged(next: StockPreparationDecisionQueue | null): voi
   if (!byStatus) return
   const pending = typeof byStatus.pending === 'number' ? byStatus.pending : 0
   const current = board.value
-  if (current === null || current.pendingDecisionCount === pending) return
+  // PR-7: the queue counts LEDGER rows; compare against the board's ledger part, never the union with holds
+  // (which would re-read the board on every queue response of a governed project).
+  if (current === null || ledgerPending.value === pending) return
   // §4.2 rule 4 ON THE IN-PLACE PATH. Its wording is 「本次会话内 pending 归零」, and until now the ONLY
   // way that could be observed was `watch(board.pendingDecisionCount)` after a tab round-trip, which
   // this path never makes — so 「都确认完了。再同步一次」, the step the design calls 「每天漏得最多的
   // 一步」, would never have fired for the operator who confirmed without leaving the page. Set from
   // the transition itself (was > 0, is now 0), so it cannot latch on a project that was already clear.
-  if (pending === 0 && current.pendingDecisionCount > 0) justConfirmedFlag.value = true
+  if (pending === 0 && ledgerPending.value > 0) justConfirmedFlag.value = true
   void reloadBoard()
 }
 
@@ -1229,7 +1274,7 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
 const errorText = computed<StockPrepPlainEntry>(() => {
   const code = errorCode.value
   if (!code) return stockPrepBoardErrorPlain('')
-  return errorShape.value === 'write' ? stockPrepErrorPlain(code) : stockPrepBoardErrorPlain(code)
+  return errorShape.value === 'write' ? stockPrepErrorPlain(code, errorReason.value) : stockPrepBoardErrorPlain(code)
 })
 
 /**
@@ -1470,12 +1515,47 @@ const notifyLabel = computed<string>(() => {
  * from THIS page's own live `board` + the composed sync panel's `busy`/report state (via `syncBusy`/
  * `missingComponentsCount` above).
  */
-const posture = computed<StockPrepPosture>(() => stockPrepPosture({
-  busy: syncBusy.value,
-  pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
-  missingComponentsCount: missingComponentsCount.value,
-  pulledRowCount: board.value?.pulledRowCount ?? 0,
-}))
+const posture = computed<StockPrepPosture>(() => {
+  const stanza = refreshStanza.value
+  return stockPrepPosture({
+    busy: syncBusy.value,
+    // PR-7: the LEDGER part only — holds are a puller's work, said by the banner and the refresh posture below.
+    pendingDecisionCount: ledgerPending.value,
+    missingComponentsCount: missingComponentsCount.value,
+    pulledRowCount: board.value?.pulledRowCount ?? 0,
+    // PR-7 (#6566 review N5): `settled`, NEVER `exportAllowed` — a complete-but-unsettled project is 「待核对」.
+    // Absent stanza (older backend): no refresh input at all, so the posture is exactly the pre-PR-5 one.
+    ...(stanza
+      ? {
+        refreshStatus: stanza.status,
+        refreshSettled: stanza.settled,
+        refreshPendingConfirmCount: stanza.counts?.pendingConfirm ?? 0,
+      }
+      : {}),
+  })
+})
+
+/**
+ * 备料分批拉取第一期 step 4 PR-7 — THE BOARD'S REFRESH STANZA (design §13; plan §8). Parsed once; `null` when the
+ * backend sends none (pre-PR-5: the page is exactly what it was), the `unreadable` stanza for anything malformed.
+ */
+const refreshStanza = computed<StockPrepRefreshStanza | null>(() => parseStockPrepRefreshStanza(board.value?.refresh))
+/** 「拉取待确认」 is the PULL tier exactly — the six routes' own gate (R-62 ①). */
+const canOpenRefreshQueue = computed<boolean>(() => canOpenStockPrepRefreshQueue(auth.getAccessSnapshot()))
+/**
+ * The board's 「等您拿主意」 is LEDGER work only (R-62 ⑥): since PR-5 `board.pendingDecisionCount` is the union of
+ * the ledger's pending rows and the open holds; the holds are a puller's, shown by the banner. For an absent /
+ * unreadable stanza `ledger === board.pendingDecisionCount`, so every pre-PR-7 fixture renders unchanged.
+ */
+const pendingSplit = computed(() => stockPrepPendingSplit(board.value, refreshStanza.value))
+const ledgerPending = computed<number>(() => pendingSplit.value.ledger)
+/** The banner, for EVERYONE who can open the board; `null` (no element) for absent / not_governed / complete ∧ settled. */
+const refreshBanner = computed<StockPrepRefreshBanner | null>(() => stockPrepRefreshBanner(refreshStanza.value, { canOpenQueue: canOpenRefreshQueue.value }))
+
+function openRefreshQueue(): void {
+  if (!canOpenRefreshQueue.value) return
+  emit('navigate-stage', 'refresh-queue')
+}
 
 /**
  * P0-3: the "下一步" bar's input — every field already lives on this page or the composed panel; see
@@ -1486,12 +1566,19 @@ const posture = computed<StockPrepPosture>(() => stockPrepPosture({
  */
 const nextStep = computed<OperatorNextStepResult | null>(() => {
   if (!openedProjectNo.value || visibleErrorCode.value) return null
+  const stanza = refreshStanza.value
   const step = operatorNextStep({
     boardFound: board.value !== null,
     pulledRowCount: board.value?.pulledRowCount ?? 0,
     missingComponentsCount: missingComponentsCount.value,
-    pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
+    // PR-7: rule 3 reads the LEDGER part only; the holds go to rule 3b below.
+    pendingDecisionCount: ledgerPending.value,
     justConfirmed: justConfirmed.value,
+    // PR-7: rule 3b — the stanza's values-free inputs (absent: the rule never fires).
+    refreshStatus: stanza ? stanza.status : null,
+    refreshSettled: stanza ? stanza.settled : false,
+    refreshPendingConfirmCount: stanza?.counts?.pendingConfirm ?? null,
+    canOpenRefreshQueue: canOpenRefreshQueue.value,
     hasExported: Boolean(board.value?.lastExportAt),
     // The SAME rule as the button, so the bar never offers a press the button refuses — or says
     // 「没有等您的事」 above a last step that is still waiting on this operator.
@@ -1507,7 +1594,11 @@ const nextStep = computed<OperatorNextStepResult | null>(() => {
   // button with, so the bar can never offer a button whose click would be swallowed. The SENTENCE
   // still renders — knowing what the next step is remains useful to someone who has to ask a
   // colleague to press it, and the panel below says in words who that is.
-  if ((step.action === 'pull' || step.action === 'resync') && !canRunPull.value) {
+  if ((step.action === 'pull' || step.action === 'resync' || step.action === 'check') && !canRunPull.value) {
+    return { ...step, action: null, actionZh: '', actionEn: '' }
+  }
+  // PR-7: 「拉取待确认」 is the PULL tier exactly — absent, not disabled, for anyone else (R-11).
+  if (step.action === 'go-refresh-queue' && !canOpenRefreshQueue.value) {
     return { ...step, action: null, actionZh: '', actionEn: '' }
   }
   return step
@@ -1525,7 +1616,7 @@ const justConfirmed = computed<boolean>(() => {
   if (!rememberedHeld.value) return false
   if (syncReport.value) return false // a run landed in THIS mount; its verdict is the newer fact
   const current = board.value
-  return current !== null && current.pendingDecisionCount === 0 && current.pulledRowCount > 0
+  return current !== null && ledgerPending.value === 0 && current.pulledRowCount > 0
 })
 
 // justConfirmed tracking (§4.2 rule 4), SESSION-LOCAL and reset whenever a different project opens.
@@ -1549,7 +1640,7 @@ watch(syncReport, (report) => {
   rememberedHeld.value = false
 })
 
-watch(() => board.value?.pendingDecisionCount ?? 0, (count) => {
+watch(() => ledgerPending.value, (count) => {
   if (wasHeldPending.value && count === 0) {
     justConfirmedFlag.value = true
     wasHeldPending.value = false
@@ -1562,6 +1653,11 @@ watch(() => board.value?.pendingDecisionCount ?? 0, (count) => {
 // ONLY FOR A PROJECT THAT REALLY RESOLVED. Without the `board` guard a mistyped number would 404,
 // leave `board` null, settle on 「还没拉过」 and be remembered forever: the home page would grow a
 // permanent junk card per typo, and 30 of them would evict every real entry.
+// PR-7 (R-62 ④): the shell's 拉取待确认 rail count follows the OPEN project's stanza — values-free, null when none.
+watch(refreshStanza, (stanza) => {
+  emit('refresh-changed', stanza)
+}, { immediate: true })
+
 watch(posture, (value) => {
   if (!openedProjectNo.value || board.value === null) return
   recordStockPrepProjectVisit(openedProjectNo.value, value.key, props.scope)
@@ -1571,11 +1667,15 @@ watch(posture, (value) => {
 async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'): Promise<void> {
   busy.value = true
   errorCode.value = null
+  errorReason.value = null
   errorShape.value = shape
   try {
     await work()
   } catch (error) {
     const code = (error as { code?: unknown })?.code
+    // PR-7: the clamped reason token (StockPreparationConfirmApiError.reason) — already lower_snake or null.
+    const reason = (error as { reason?: unknown })?.reason
+    errorReason.value = typeof reason === 'string' && /^[a-z][a-z0-9_]{0,47}$/.test(reason) ? reason : null
     // The fallback code differs by shape for the same reason the copy does: an unlabelled read
     // failure must not borrow the confirm surface's "nothing was saved" identity.
     errorCode.value = typeof code === 'string'
@@ -1822,6 +1922,16 @@ function onNextStepAction(): void {
   }
   if (step.action === 'open-fill') {
     openFillTarget()
+    return
+  }
+  if (step.action === 'check') {
+    // PR-7 「核对」: the composed panel's own dry-run-only check (one preview, nothing written), like `resync`
+    // reaching the panel's own run — one implementation.
+    void syncPanelEl.value?.runSettlementCheck?.()
+    return
+  }
+  if (step.action === 'go-refresh-queue') {
+    openRefreshQueue()
     return
   }
   if (step.action === 'notify-next') {
@@ -2554,6 +2664,17 @@ onMounted(async () => {
 .sp-board__pending {
   margin: var(--ms-space-3) 0 0;
   color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* PR-7: the refresh banner — the warning tone of the posture badge, one line of copy plus its next step. */
+.sp-board__refresh-banner {
+  margin: var(--ms-space-2) 0 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border-left: 3px solid var(--ms-color-warning);
+  background: color-mix(in srgb, var(--ms-color-warning) 10%, transparent);
+  color: var(--ms-text-1);
   font-size: 13px;
   line-height: 1.7;
 }

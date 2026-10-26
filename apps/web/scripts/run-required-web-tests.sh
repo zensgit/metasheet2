@@ -944,6 +944,19 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # `StockPreparationRouteFailedPlain` (its neighbour `StockPreparationRail` diverges right after
 # `StockPreparationR`), it is not a substring of any token, and it matches exactly one file on disk.
 #
+# 备料分批拉取第一期 step 4 PR-7 (batch-refresh, register R-62, 2026-10-27): TWO tokens added,
+# `StockPreparationRefreshQueue` — the NEW spec (apps/web/tests/StockPreparationRefreshQueue.spec.ts) for the
+# puller's 「拉取待确认」 page (renderings, read receipt, allow-listed bodies parsed out of the plugin source,
+# end / keep / re-confirm, hold-id churn, values staying in the page), RQ-ALIGN through the real shell for the
+# six refresh controls the permission matrix defers to, and the board / sync-panel consumers of the refresh
+# stanza — and `StockPreparationRefreshState` — the NEW spec (apps/web/tests/StockPreparationRefreshState.spec.ts)
+# for the pure stanza module mirrored against the plugin's real derivation, the cross-side error-copy
+# tripwire, projectSync's `suspended` / 「核对」, rule 3b and the home memory fold. Substring collision checked
+# in BOTH directions: no existing token is a substring of either (their neighbours `StockPreparationRail` /
+# `StockPreparationRouteFailedPlain` diverge right after `StockPreparationR`), neither is a substring of any
+# token or of the other (they diverge right after `StockPreparationRefresh`), and each matches exactly one
+# file on disk. Case-insensitive order: …Rail < …RefreshQueue < …RefreshState < …RouteFailedPlain.
+#
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
 # StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
@@ -1970,6 +1983,8 @@ exec npx vitest run \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationRail \
+  StockPreparationRefreshQueue \
+  StockPreparationRefreshState \
   StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \

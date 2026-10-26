@@ -154,10 +154,12 @@ Flags:
   --help, -h          print this text and exit 0
 
 Exit code is non-zero if any project's dry-run (or apply) failed outright — never for a project that
-was simply skipped as manual_confirm_required, large_bom_bounded, not_found, (without --apply)
-ready-but-not-applied, or — with per-project sheets enabled on the server — project_sheet_absent
-(no 拉取人员 has created that project's sheet yet; this script NEVER creates one) or
-project_sheet_archived.
+was simply skipped as manual_confirm_required, suspended (a governed project's pull waits for a
+拉取人员 to decide its holds on the 拉取待确认 page — at the preview or, if a hold opened in between,
+at the apply), large_bom_bounded, not_found, (without --apply) ready-but-not-applied, or — with
+per-project sheets enabled on the server — project_sheet_absent (no 拉取人员 has created that
+project's sheet yet; this script NEVER creates one) or project_sheet_archived. A governed project
+whose earlier write did not finish (recovery_pending) IS a failure.
 
 The account behind MS_TOKEN must be allowed to PULL: since S0 (stock-prep:pull) the floor tier
 (read+operate) is refused dry-run and apply, so use a 拉取人员 account (pull+operate+read), a
@@ -482,6 +484,22 @@ function errorCodeOf(envelope) {
     : null
 }
 
+/** An error envelope's `details` object, or null. Read only by `holdCountOf` below. */
+function errorDetailsOf(envelope) {
+  const details = envelope && envelope.json && envelope.json.error ? envelope.json.error.details : null
+  return details && typeof details === 'object' && !Array.isArray(details) ? details : null
+}
+
+/**
+ * PR-7: the ONE field a suspended project's record copies — a non-negative integer `holdCount` from the
+ * preview's `refreshHold` stanza or the apply refusal's `details`; anything else is null. Never `kinds`,
+ * never a digest (the values-free rule above).
+ */
+function holdCountOf(source) {
+  const value = source && typeof source === 'object' ? source.holdCount : null
+  return Number.isInteger(value) && value >= 0 ? value : null
+}
+
 /**
  * Turns a `postJson` network-layer failure into the ONE string this script will ever report for it.
  * `'timeout'` is a literal fixed string (never composed with anything request-specific) for the
@@ -577,6 +595,13 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   if (data.status === 'manual_confirm_required') {
     return { ...record, action: 'skipped_manual_confirm_required', durationMs: Date.now() - startedAt }
   }
+  // Batch-refresh step 4 PR-7 (register R-62 ②): a GOVERNED project whose pull is SUSPENDED — the preview found holds a
+  // 拉取人员 has to decide on the 「拉取待确认」 page first (no token, canApply false). Human work, not a fault: the
+  // same class as manual_confirm_required (recorded, exit code unaffected), never applied. Only the integer hold count
+  // is copied off the values-free `refreshHold` stanza — never its `kinds` map or its digest.
+  if (data.status === 'suspended') {
+    return { ...record, action: 'skipped_suspended', holdCount: holdCountOf(data.refreshHold), note: 'the pull is suspended until a puller decides its holds on the 拉取待确认 page; nothing was applied', durationMs: Date.now() - startedAt }
+  }
   // Batch-refresh step 4 PR-3a follow-up: a GOVERNED project with an earlier execution that did not finish cleanly
   // previews `recovery_pending` (no token). A FAILURE by name (exit non-zero), never a quiet skip — nothing applies to
   // this project until that execution is recovered — with the code a reader can look up instead of "unexpected".
@@ -614,6 +639,12 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   }
   if (!apply.ok || apply.parseError || !apply.json || apply.json.ok !== true) {
     const code = errorCodeOf(apply)
+    // PR-7 (R-62 ②): the project became suspended between the preview and the apply (a computation in between
+    // opened a hold). The server refuses before any write (`details.partial: false` by construction), so this is
+    // the same skip as a suspended preview — exit code unaffected. Only the integer hold count is copied.
+    if (code === 'STOCK_PREP_PULL_SUSPENDED') {
+      return { ...record, action: 'skipped_suspended', phase: 'apply', holdCount: holdCountOf(errorDetailsOf(apply)), note: 'the project became suspended between the preview and the apply; nothing was written', durationMs: Date.now() - startedAt }
+    }
     return {
       ...record,
       action: 'error',
@@ -634,6 +665,7 @@ export function summarize(results, applyFlag) {
     mode: applyFlag ? 'apply' : 'dry-run-only',
     applied: count('applied'),
     skippedManualConfirmRequired: count('skipped_manual_confirm_required'),
+    skippedSuspended: count('skipped_suspended'),
     skippedLargeBomBounded: count('skipped_large_bom_bounded'),
     skippedNotFound: count('skipped_not_found'),
     skippedDryRunOnly: count('skipped_dry_run_only'),

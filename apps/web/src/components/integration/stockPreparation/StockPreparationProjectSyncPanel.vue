@@ -55,6 +55,32 @@
       </p>
     </div>
 
+    <!-- 备料分批拉取第一期 step 4 PR-7 — 「核对」 (design §9.2): ONE more preview, nothing written. Rendered only for a
+         caller who may run the pull, and only while the board says the project is written but not checked; ABSENT
+         otherwise (R-11), so every not-governed project's panel is the DOM it was. The result line never claims
+         「核对通过」 until the board's own re-read says complete AND settled. -->
+    <div v-if="showsCheck || checkLine" class="sp-sync__check" data-testid="stock-prep-project-sync-check-area">
+      <button
+        v-if="showsCheck"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-check"
+        :disabled="busy"
+        @click="runSettlementCheck"
+      >{{ checkBusy ? bi('正在核对…', 'Checking…') : bi('核对', 'Check') }}</button>
+      <p
+        v-if="checkLine"
+        class="sp-sync__hint"
+        data-testid="stock-prep-project-sync-check-result"
+        :data-check="checkResult ? checkResult.outcome : ''"
+        :data-check-phase="checkPhase"
+        role="status"
+      >
+        {{ checkLine.text }}
+        <span v-if="checkLine.next">{{ checkLine.next }}</span>
+      </p>
+    </div>
+
     <!-- R67 ④: 试算 runs as a background job — while it reads PLM this line says so, with the time it
          has taken, instead of one long spinner that a 60 s gateway timeout used to cut off. Also shown
          after a reload when this caller's earlier trial of the project is still running (re-attach). -->
@@ -414,8 +440,20 @@
       >
         {{ bi(noSheetLinkHint.zh, noSheetLinkHint.en) }}
       </p>
+      <!-- PR-7: a SUSPENDED run's work is the puller's holds — the link goes to 「拉取待确认」, PULL tier only. -->
       <button
-        v-if="report.pendingConfirmCount > 0"
+        v-if="report.verdict === 'suspended' && canOpenRefreshQueue"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-open-refresh-queue"
+        @click="emit('navigate-stage', 'refresh-queue')"
+      >
+        {{ bi('去「拉取待确认」处理', 'Go to “Pull holds”') }}<template v-if="suspendedHoldCount !== null && suspendedHoldCount > 0"> ({{ suspendedHoldCount }})</template>
+      </button>
+      <!-- …and never the ledger queue: on a suspended run `pendingConfirmCount` is the plan's manual_confirm tally,
+           not anything queued (the reconcile was deferred). -->
+      <button
+        v-if="report.pendingConfirmCount > 0 && report.verdict !== 'suspended'"
         type="button"
         class="sp-sync__link"
         data-testid="stock-prep-project-sync-open-queue"
@@ -558,6 +596,8 @@ import {
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   createStockPreparationProjectSyncApi,
   runStockPreparationProjectSync,
+  runStockPreparationSettlementCheck,
+  type StockPreparationSettlementCheckResult,
   type StockPreparationMissingComponent,
   type StockPreparationMissingComponentList,
   type StockPreparationDryRunOptions,
@@ -598,6 +638,7 @@ import {
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
+import { STOCK_PREP_REFRESH_STATUS_LABELS_ZH } from '../../../services/integration/stockPreparation/refreshState'
 
 const props = withDefaults(
   defineProps<{
@@ -673,6 +714,16 @@ const props = withDefaults(
      * 项目工作台, which points the reader at 项目备料. Copy only — nothing routes on it.
      */
     noLinkHintContext?: StockPrepNoSheetLinkHintContext
+    /**
+     * 备料分批拉取第一期 step 4 PR-7 — the board's refresh stanza, as values-free inputs (项目备料页 passes them; the
+     * legacy 项目工作台 mount passes none). `refreshStatus` + `refreshSettled` decide whether 「核对」 is offered
+     * (executed_pending_settlement, or complete ∧ NOT settled — never `exportAllowed`); after a check they are
+     * also the ONLY authority for 「核对通过」 — this panel never claims it from its own counts.
+     */
+    refreshStatus?: string | null
+    refreshSettled?: boolean
+    /** Whether the viewer may open 「拉取待确认」 (PULL tier exactly) — the suspended run's link renders only then. */
+    canOpenRefreshQueue?: boolean
   }>(),  {
     runEmphasis: 'primary',
     scope: () => ({}),
@@ -686,6 +737,9 @@ const props = withDefaults(
     fillTarget: null,
     targetApi: null,
     noLinkHintContext: 'workspace',
+    refreshStatus: null,
+    refreshSettled: false,
+    canOpenRefreshQueue: false,
   },
 )
 
@@ -1077,12 +1131,111 @@ async function onRepair(): Promise<void> {
 /** P0-3: the workspace title badge's only window into "a run is happening right now". */
 watch(busy, (value) => emit('busy-changed', value))
 
+// ── 备料分批拉取第一期 step 4 PR-7 — 「核对」 (design §9.2; R-62 ⑦) ─────────────────────────────────────
+//
+// ONE preview, nothing else (projectSync.ts `runStockPreparationSettlementCheck`): a clean computation after the
+// newest execution settles the project server-side. NOT a fifth step — the four-step list is untouched. Offered
+// only to a caller who may run the pull, and only while the board's stanza says the project is written but not
+// checked. THE CLIENT NEVER CLAIMS 「核对通过」 FROM ITS OWN COUNTS: after the check it emits `synced(null)` so the
+// board re-reads its stanza, and only that re-read (`refreshStatus` / `refreshSettled` moving) may say so.
+
+const showsCheck = computed<boolean>(() => {
+  if (!canRun.value) return false
+  const status = props.refreshStatus
+  return status === 'executed_pending_settlement' || (status === 'complete' && props.refreshSettled !== true)
+})
+const checkBusy = ref(false)
+const checkResult = ref<StockPreparationSettlementCheckResult | null>(null)
+/** `submitted` until the board's stanza moves after the check; then `answered` (its own label is shown). */
+const checkPhase = ref<'idle' | 'submitted' | 'answered'>('idle')
+
+watch(() => [props.refreshStatus, props.refreshSettled] as const, () => {
+  if (checkPhase.value === 'submitted') checkPhase.value = 'answered'
+})
+watch(() => props.projectNo, () => {
+  checkResult.value = null
+  checkPhase.value = 'idle'
+})
+
+async function runSettlementCheck(): Promise<void> {
+  if (!showsCheck.value || busy.value || checkBusy.value) return
+  const target = (props.projectNo || projectNo.value).trim()
+  if (!target) return
+  checkBusy.value = true
+  busy.value = true
+  checkResult.value = null
+  checkPhase.value = 'idle'
+  try {
+    const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
+    checkResult.value = await runStockPreparationSettlementCheck(api, target, { dryRun: dryRunOptions() })
+    checkPhase.value = 'submitted'
+  } finally {
+    dryRunProgress.value = null
+    busy.value = false
+    checkBusy.value = false
+  }
+  // The board re-reads its stanza; that re-read is the authority (see above).
+  emit('synced', null)
+}
+
+const checkLine = computed<{ text: string; next: string } | null>(() => {
+  const result = checkResult.value
+  if (!result) return null
+  if (result.outcome === 'settled') {
+    if (checkPhase.value !== 'answered') {
+      return { text: bi('核对已提交:这次试算没有要写入的地方。', 'Check submitted: this preview planned nothing to write.'), next: bi('正在等项目备料页重新读取状态。', 'Waiting for the project page to re-read its state.') }
+    }
+    if (props.refreshStatus === 'complete' && props.refreshSettled === true) {
+      return { text: bi('核对通过:本项目分批拉取状态为「已完成」,可以正式导出。', 'Check passed: this project’s batch refresh reads “complete”; the formal export is open.'), next: '' }
+    }
+    const label = stockPrepRefreshStatusLabel(props.refreshStatus)
+    return {
+      text: bi(`核对已提交;本项目分批拉取状态:${label.zh}。`, `Check submitted; this project’s batch refresh now reads: ${label.en}.`),
+      next: bi('看上面的分批拉取提示。', 'See the batch-refresh note above.'),
+    }
+  }
+  if (result.outcome === 'changes_pending') {
+    const planned = result.planned
+    const n = planned ? planned.add + planned.update + planned.inactive : 0
+    return { text: bi(`核对发现还有 ${n} 处要写入,请再同步一次。`, `The check found ${n} change(s) still to write; sync again.`), next: '' }
+  }
+  if (result.outcome === 'suspended') {
+    const plain = stockPrepSyncVerdictPlain('suspended')
+    return { text: plain ? bi(plain.zh, plain.en) : '', next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '' }
+  }
+  if (result.outcome === 'awaiting_recovery') {
+    const plain = stockPrepSyncVerdictPlain('awaiting_recovery')
+    return { text: plain ? bi(plain.zh, plain.en) : '', next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '' }
+  }
+  const plain = stockPrepSyncReasonPlain(result.reason)
+  return {
+    text: plain ? bi(plain.zh, plain.en) : bi('核对没有完成。', 'The check did not complete.'),
+    next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '',
+  }
+})
+
+function stockPrepRefreshStatusLabel(status: string | null | undefined): { zh: string; en: string } {
+  // A complete-but-unsettled project is 「待核对」, never 「已完成」 (the posture's own word — #6566 review N5).
+  if (status === 'complete') return { zh: '待核对', en: 'awaiting check' }
+  const zh = typeof status === 'string' && Object.prototype.hasOwnProperty.call(STOCK_PREP_REFRESH_STATUS_LABELS_ZH, status)
+    ? STOCK_PREP_REFRESH_STATUS_LABELS_ZH[status as keyof typeof STOCK_PREP_REFRESH_STATUS_LABELS_ZH]
+    : STOCK_PREP_REFRESH_STATUS_LABELS_ZH.unreadable
+  return { zh, en: typeof status === 'string' ? status : 'unreadable' }
+}
+
+/** The suspended run's holds, from the report (values-free integer), or null. */
+const suspendedHoldCount = computed<number | null>(() => {
+  const value = report.value
+  if (!value || value.verdict !== 'suspended') return null
+  return value.refresh?.holdCount ?? null
+})
+
 /**
  * P0-3: lets the workspace's "下一步" bar re-run THIS SAME sync (再同步一次 / go-back-and-resync) —
  * without this the parent would need its own second copy of `onRun`'s logic to drive a resync, and
- * two copies is how the two eventually disagree about what "同步" does.
+ * two copies is how the two eventually disagree about what "同步" does. PR-7: and the bar's 「核对」.
  */
-defineExpose({ run: onRun })
+defineExpose({ run: onRun, runSettlementCheck })
 
 /** Every planned step, with its result once it has one. Steps not reached are still listed. */
 const stepRows = computed(() => STOCK_PREPARATION_PROJECT_SYNC_STEPS.map((descriptor) => {
@@ -1149,9 +1302,13 @@ const verdictNext = computed<string>(() => {
   return bi(plain.zhNext ?? '', plain.enNext ?? '')
 })
 
-/** The one verdict that needs a number in its headline: how many rows are still missing. */
+/** The one verdict that needs a number in its headline: how many rows are still missing. PR-7: and how many holds. */
 const verdictCount = computed<string>(() => {
   const value = report.value
+  if (value && value.verdict === 'suspended') {
+    const holds = suspendedHoldCount.value
+    return holds !== null && holds > 0 ? bi(`有 ${holds} 项待拉取人员确认。`, `${holds} item(s) await the puller’s confirmation.`) : ''
+  }
   if (!value || value.verdict !== 'partial') return ''
   const failedRows = value.written?.failed ?? 0
   if (failedRows <= 0) return ''
@@ -1177,6 +1334,14 @@ const showsSheetLink = computed<boolean>(() => {
 const posture = computed<StockPrepPosture>(() => {
   const value = report.value
   if (!value) return stockPrepPosture({})
+  // PR-7: a suspended / awaiting-recovery run speaks the refresh posture's own words (待确认 N 件 / 上次写入未完成),
+  // the SAME function the board's title reads — never 「等您拿主意」 over a puller's holds.
+  if (value.verdict === 'suspended') {
+    return stockPrepPosture({ busy: busy.value, refreshStatus: 'pending_confirmation', refreshPendingConfirmCount: value.refresh?.holdCount ?? 0 })
+  }
+  if (value.verdict === 'awaiting_recovery') {
+    return stockPrepPosture({ busy: busy.value, refreshStatus: 'failed_pending_recovery' })
+  }
   const pendingDecisionCount = value.queuedDecisionCount > 0 ? value.queuedDecisionCount : value.pendingConfirmCount
   const missingList = value.missingComponents
   const missingComponentsCount = missingList && hasMissingComponents(missingList) ? effectiveDistinctCount(missingList) : 0

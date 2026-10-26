@@ -74,6 +74,7 @@ const {
   STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GATES,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_PULL,
   STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
@@ -1967,10 +1968,12 @@ function theRailVocabularyAndTheLandingRuleHold() {
   // directory union 今天要处理 reads plus the selected project's own board, and a `stock-prep:read`
   // queue watcher must not be handed a page of project numbers.
   const work = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'work')
+  // 备料分批拉取第一期 step 4 PR-7 (register R-62 ①): 拉取待确认 is appended LAST, on the PULL gate — exactly the
+  // six refresh routes' own `requireAccess(req, STOCK_PREP_PULL)`.
   assert.deepEqual(
     work.items.map((item) => item.key),
-    ['home', 'project-board', 'project-query', 'confirmation-queue'],
-    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列',
+    ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue'],
+    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列, and 拉取待确认 last',
   )
   assert.deepEqual(
     work.items.map((item) => item.gate),
@@ -1979,9 +1982,11 @@ function theRailVocabularyAndTheLandingRuleHold() {
       STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
       STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
       STOCK_PREP_RAIL_GATE_ROUTE,
+      STOCK_PREP_RAIL_GATE_PULL,
     ],
-    'rail: 项目查询 rides the operator tier, like the two items it sits beside',
+    'rail: 项目查询 rides the operator tier, like the two items it sits beside; 拉取待确认 rides PULL',
   )
+  assert.equal(STOCK_PREP_RAIL_GATE_PULL, 'pull', 'rail: the PULL gate token')
 
   // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
   // the platform-admin gate they were always on.
@@ -2000,15 +2005,18 @@ function theRailVocabularyAndTheLandingRuleHold() {
   // THE GATE RESOLVER. Per actor, per token, plus the refusal an unknown token must produce for
   // EVERYONE — a mistyped gate must hide a group, never open one.
   const cases = [
-    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
-    // R-33: the pull code re-tiers NO rail item — the 拉取人员 sees exactly the operator's rail.
-    { name: 'puller', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'orphan pull', permissions: [STOCK_PREP_PULL], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false } },
-    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true } },
+    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    // R-33 said "the pull code re-tiers NO rail item". PR-7 (R-62 ①) reverses that for exactly ONE item: the 拉取人员
+    // additionally opens 拉取待确认 (the `pull` gate); every other item answers exactly as for the operator.
+    { name: 'puller', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false, pull: true } },
+    { name: 'orphan pull', permissions: [STOCK_PREP_PULL], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    // The legacy write tier is NOT the pull tier (design §13's "or legacy integration:write" corrected, R-62 ①).
+    { name: 'integration:write only', permissions: ['integration:write'], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false, pull: true } },
+    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true, pull: true } },
   ]
   for (const testCase of cases) {
     for (const gate of STOCK_PREP_RAIL_GATES) {

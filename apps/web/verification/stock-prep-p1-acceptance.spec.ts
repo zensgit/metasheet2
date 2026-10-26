@@ -90,8 +90,9 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
     // of the tablist rather than a descendant of it. `rail.locator(...)` would now find only the 8
     // regular items. There is exactly one rail on this page, so scoping to it bought nothing this
     // count actually needed.
-    await expect(page.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(15)
-    for (const key of ['home', 'project-board', 'project-query', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help']) {
+    // 15 -> 16 是 备料分批拉取第一期 step 4 PR-7 的 拉取待确认(R-62 ①),【工作】的最后一项,PULL 档 —— 平台管理员经梯子满足。
+    await expect(page.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(16)
+    for (const key of ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue', 'getting-started', 'install', 'ops', 'help']) {
       await expect(page.locator(`[data-testid="stock-prep-tab-${key}"]`)).toHaveAttribute('role', 'tab')
     }
     // ...and the tablist witness element itself now owns ONLY the 8 non-folded items directly — the
@@ -99,7 +100,8 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
     // ARIA-correct rather than merely convenient, and it is asserted (both states) by
     // StockPreparationRail.spec.ts's 「aria-controls / aria-expanded ... and aria-owns follows the
     // fold」 case.
-    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(8)
+    // PR-7: 8 -> 9 (拉取待确认).
+    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(9)
 
     // ---- 这条只有真浏览器能答:`hidden` 的全部效力来自 UA 的 `[hidden]{display:none}`,而面板自己
     //      的 `.sp-rail__advanced-panel{display:flex}` 是作者来源、还带 scope 属性,两项都赢它。仓库里
@@ -598,8 +600,9 @@ test.describe('D2 落地裁决(§2.2 / workbenchAccess.stockPrepLandingKey)', ()
     await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'ops')
 
     const rail = page.locator('[data-testid="stock-prep-tabs"]')
-    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(8)
-    for (const key of ['home', 'project-board', 'project-query', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help']) {
+    // PR-7: 8 -> 9 —— `stock-prep:admin` 经梯子满足 PULL,所以 拉取待确认 随码而来。
+    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(9)
+    for (const key of ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue', 'getting-started', 'install', 'ops', 'help']) {
       await expect(rail.locator(`[data-testid="stock-prep-tab-${key}"]`)).toHaveCount(1)
     }
     await expect(page.locator('[data-testid="stock-prep-rail-advanced-toggle"]')).toHaveCount(0)
