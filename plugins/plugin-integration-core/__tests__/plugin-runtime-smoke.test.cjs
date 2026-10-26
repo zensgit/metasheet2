@@ -337,6 +337,38 @@ async function main() {
     await entry.deactivate()
   }
 
+  // --- R10 (batch-refresh step 4 PR-3a, refuter R-10): the REAL activate() hands the routes BOTH refresh
+  // services under the names the routes read (`services.stockPreparationRefreshGovernance.consult`,
+  // `services.stockPreparationContinuationStore.{reconcileHolds, beginExecution, finishExecution}`). A name drift
+  // would 501 every planning route in production; the hermetic route suites build their own services, so only
+  // this seam can see it. A spy on the routes module's registration, installed before a FRESH index load.
+  {
+    const routesPath = require.resolve('../lib/http-routes.cjs')
+    const routesModule = require(routesPath)
+    const originalRegister = routesModule.registerIntegrationRoutes
+    const captured = []
+    routesModule.registerIntegrationRoutes = function registerSpy(input) {
+      captured.push(input && input.services)
+      return originalRegister.apply(this, arguments)
+    }
+    delete require.cache[require.resolve(ENTRY_PATH)]
+    try {
+      const freshEntry = require(ENTRY_PATH)
+      const { context: r10Context } = createMockContext()
+      await freshEntry.activate(r10Context)
+      assert.equal(captured.length, 1, 'R10: activate() registered the routes once')
+      const handed = captured[0]
+      assert.equal(typeof handed.stockPreparationRefreshGovernance.consult, 'function', 'R10: services.stockPreparationRefreshGovernance.consult')
+      for (const method of ['reconcileHolds', 'beginExecution', 'finishExecution']) {
+        assert.equal(typeof handed.stockPreparationContinuationStore[method], 'function', `R10: services.stockPreparationContinuationStore.${method}`)
+      }
+      await freshEntry.deactivate()
+    } finally {
+      routesModule.registerIntegrationRoutes = originalRegister
+      delete require.cache[require.resolve(ENTRY_PATH)]
+    }
+  }
+
   if (previousFeatureFlag === undefined) {
     delete process.env[STOCK_PREPARATION_FEATURE_FLAG]
   } else {

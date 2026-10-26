@@ -5,7 +5,7 @@ const {
   assertLargeBomActionExecutionContract,
 } = require('./stock-preparation-table-actions.cjs')
 const { StockPreparationReadPlanStoreError } = require('./stock-preparation-read-plan-store.cjs')
-const { sameSourceProject } = require('./stock-preparation-source-value-semantics.cjs')
+const { sameSourceProject, SOURCE_PROJECT_COMPARISON_MODES } = require('./stock-preparation-source-value-semantics.cjs')
 
 class StockPreparationReadPlanRuntimeError extends Error {
   constructor(status, code) { super(code); this.status = status; this.code = code }
@@ -85,16 +85,18 @@ async function assertCaseInsensitiveProjectIdentity({ action, bindingScope, veri
   }
 }
 
-async function resolveStockPreparationReadPlanExecution({ resolved, store, snapshotAction, verifyTenant, projectNo, projectTargetStore, projectIdentityRequired = true } = {}) {
+// `onlineReadPlansEnabled` is the caller's reading of the operator switch (stock-preparation-read-plan-switch.cjs);
+// anything but literal true means OFF: no activation pointer is read and the deployment action executes.
+async function resolveStockPreparationReadPlanExecution({ resolved, store, snapshotAction, verifyTenant, projectNo, projectTargetStore, projectIdentityRequired = true, onlineReadPlansEnabled = false } = {}) {
   const { action, bindingScope, sourceScope } = resolved
   if (!bindingScope || !bindingScope.tenantId || bindingScope.workspaceId === undefined) {
     throw new StockPreparationReadPlanRuntimeError(409, 'READ_PLAN_BINDING_SCOPE_INVALID')
   }
-  const active = await readActiveStockPreparationReadPlan(store, {
+  const active = onlineReadPlansEnabled === true ? await readActiveStockPreparationReadPlan(store, {
     ...bindingScope, actionId: action.actionId, systemId: action.source.externalSystemId,
     ...(snapshotAction && snapshotAction.readPlanExecutionIdentity
       ? { expectedGeneration: snapshotAction.readPlanExecutionIdentity.generation } : {}),
-  })
+  }) : null
   let effective = action
   let sourceValidation = null
   if (active !== null) {
@@ -125,4 +127,141 @@ async function resolveStockPreparationReadPlanExecution({ resolved, store, snaps
     sourceScope: active === null ? (resolved.legacySourceScope || sourceScope) : sourceScope }
 }
 
-module.exports = { readActiveStockPreparationReadPlan, resolveStockPreparationReadPlanExecution, StockPreparationReadPlanRuntimeError }
+const REGISTRATION_UNAVAILABLE = 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE'
+const REGISTRATION_MAX_BINDINGS = 64
+const UNDEFINED_TABLE_SQLSTATE = '42P01'
+
+const registrationUnavailable = () => new StockPreparationReadPlanRuntimeError(503, REGISTRATION_UNAVAILABLE)
+
+// Typed code only: neither a store's error text nor any value leaves the registration helper.
+async function registrationRead(read) {
+  try { return await read() } catch (_error) { throw registrationUnavailable() }
+}
+
+function registrationMode(value) {
+  if (value !== undefined && !SOURCE_PROJECT_COMPARISON_MODES.includes(value)) throw registrationUnavailable()
+  return value
+}
+
+// The complete binding list for this tenant/action. No binding store means no binding capability.
+async function readRegistrationBindings(bindingStore, tenantId, actionId) {
+  if (!bindingStore) return []
+  if (typeof bindingStore.listForAction !== 'function') throw registrationUnavailable()
+  const listed = await registrationRead(() => bindingStore.listForAction({ tenantId, actionId }))
+  if (!isPlainRecord(listed) || listed.complete !== true || !Array.isArray(listed.bindings)
+    || listed.bindings.length > REGISTRATION_MAX_BINDINGS) throw registrationUnavailable()
+  const seen = new Set()
+  const projected = listed.bindings.map((binding) => {
+    if (!isPlainRecord(binding) || binding.tenantId !== tenantId || binding.actionId !== actionId
+      || (binding.workspaceId !== null && !isCanonicalText(binding.workspaceId))
+      || !isCanonicalText(binding.externalSystemId) || seen.has(binding.workspaceId)) throw registrationUnavailable()
+    seen.add(binding.workspaceId)
+    return { workspaceId: binding.workspaceId, externalSystemId: binding.externalSystemId }
+  })
+  const key = (entry) => entry.workspaceId === null ? '' : entry.workspaceId
+  return projected.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
+}
+
+const registrationWorkspaces = (deploymentWorkspaceId, bindings) => [...new Set([
+  null,
+  ...(isCanonicalText(deploymentWorkspaceId) ? [deploymentWorkspaceId] : []),
+  ...bindings.map((binding) => binding.workspaceId),
+])]
+
+// Stable identity projection of one activation pointer (null = no pointer at this scope).
+function checkedRegistrationPointer(pointer, tenantId, workspaceId, actionId) {
+  if (pointer === null) return null
+  if (!isPlainRecord(pointer) || !isCanonicalText(pointer.id) || pointer.tenantId !== tenantId || pointer.workspaceId !== workspaceId
+    || pointer.actionId !== actionId || !['active', 'disabled'].includes(pointer.status)
+    || !Number.isSafeInteger(pointer.generation) || pointer.generation < 1
+    || !isCanonicalText(pointer.versionId) || !isCanonicalText(pointer.systemId) || !/^[0-9a-f]{64}$/.test(pointer.contentKey)
+    || (pointer.validationId !== null && pointer.validationId !== undefined && !isCanonicalText(pointer.validationId))) {
+    throw registrationUnavailable()
+  }
+  return {
+    id: pointer.id, status: pointer.status, generation: pointer.generation, versionId: pointer.versionId,
+    systemId: pointer.systemId, contentKey: pointer.contentKey, validationId: pointer.validationId ?? null,
+  }
+}
+
+async function readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces, cachedNull }) {
+  const pointers = []
+  for (const workspaceId of workspaces) {
+    const raw = workspaceId === null && cachedNull
+      ? cachedNull.value
+      : await registrationRead(() => readPlanStore.getActivation({ tenantId, workspaceId, actionId }))
+    pointers.push(checkedRegistrationPointer(raw, tenantId, workspaceId, actionId))
+  }
+  return pointers
+}
+
+// The comparison mode an approved version carries; the version must be exactly what the pointer names.
+function registrationVersionMode(version, pointer, tenantId, workspaceId, actionId) {
+  if (!isPlainRecord(version) || version.status !== 'approved' || version.id !== pointer.versionId
+    || version.actionId !== actionId || version.systemId !== pointer.systemId || version.contentKey !== pointer.contentKey
+    || version.tenantId !== tenantId || version.workspaceId !== workspaceId || !isPlainRecord(version.config)) {
+    throw registrationUnavailable()
+  }
+  const readPlan = version.config.readPlan
+  if (readPlan !== undefined && !isPlainRecord(readPlan)) throw registrationUnavailable()
+  return registrationMode(readPlan === undefined ? undefined : readPlan.sourceProjectComparison)
+}
+
+// Registration-time project-number comparison mode: the strictest of the deployment action and EVERY online
+// read-plan scope of this tenant/action (null scope, the deployment workspace, all bindings). It reads
+// pointers and approved versions only; it never resolves an execution, a source or a credential, and its
+// result is not an execution/source authorization. Returns undefined | 'case-sensitive' | 'case-insensitive'.
+// Residual: the reads are re-checked for stability but are not atomic with a future activation (a case-insensitive
+// activation serializes with registration on the registry lock instead). With the online read-plan switch off
+// (`onlineReadPlansEnabled` not literal true) no online scope can execute, so the deployment's answer is the answer.
+async function resolveStockPreparationProjectRegistrationComparison({ tenantId, actionId, deploymentAction, bindingStore, readPlanStore, onlineReadPlansEnabled = false } = {}) {
+  if (!isCanonicalText(tenantId) || !isCanonicalText(actionId) || !isPlainRecord(deploymentAction)
+    || !isPlainRecord(deploymentAction.source)) throw registrationUnavailable()
+  const deploymentReadPlan = deploymentAction.source.readPlan
+  if (deploymentReadPlan !== undefined && !isPlainRecord(deploymentReadPlan)) throw registrationUnavailable()
+  const deploymentWorkspaceId = deploymentAction.source.workspaceId
+  if (deploymentWorkspaceId !== undefined && deploymentWorkspaceId !== null && !isCanonicalText(deploymentWorkspaceId)) {
+    throw registrationUnavailable()
+  }
+  const deploymentMode = registrationMode(deploymentReadPlan === undefined ? undefined : deploymentReadPlan.sourceProjectComparison)
+  // Deployment CI is already the strictest answer; no optional online module is consulted.
+  if (deploymentMode === 'case-insensitive') return deploymentMode
+  if (onlineReadPlansEnabled !== true) return deploymentMode
+  if (!readPlanStore || typeof readPlanStore.getActivation !== 'function') throw registrationUnavailable()
+  let first
+  try {
+    first = { value: await readPlanStore.getActivation({ tenantId, workspaceId: null, actionId }) }
+  } catch (error) {
+    // Only this first direct single-table read may say the activation table does not exist.
+    if (error && error.code === UNDEFINED_TABLE_SQLSTATE) return deploymentMode
+    throw registrationUnavailable()
+  }
+  const bindings = await readRegistrationBindings(bindingStore, tenantId, actionId)
+  const workspaces = registrationWorkspaces(deploymentWorkspaceId, bindings)
+  const pointers = await readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces, cachedNull: first })
+  const modes = [deploymentMode]
+  for (let index = 0; index < pointers.length; index += 1) {
+    const pointer = pointers[index]
+    if (pointer === null || pointer.status !== 'active') continue
+    const workspaceId = workspaces[index]
+    const version = await registrationRead(() => readPlanStore.getForRuntime({
+      tenantId, workspaceId, id: pointer.versionId, actionId, systemId: pointer.systemId,
+    }))
+    modes.push(registrationVersionMode(version, pointer, tenantId, workspaceId, actionId))
+  }
+  const bindingsAfter = await readRegistrationBindings(bindingStore, tenantId, actionId)
+  const workspacesAfter = registrationWorkspaces(deploymentWorkspaceId, bindingsAfter)
+  const pointersAfter = await readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces: workspacesAfter })
+  if (JSON.stringify([bindings, workspaces, pointers]) !== JSON.stringify([bindingsAfter, workspacesAfter, pointersAfter])) {
+    throw registrationUnavailable()
+  }
+  if (modes.includes('case-insensitive')) return 'case-insensitive'
+  return modes.includes('case-sensitive') ? 'case-sensitive' : undefined
+}
+
+module.exports = {
+  readActiveStockPreparationReadPlan,
+  resolveStockPreparationReadPlanExecution,
+  resolveStockPreparationProjectRegistrationComparison,
+  StockPreparationReadPlanRuntimeError,
+}

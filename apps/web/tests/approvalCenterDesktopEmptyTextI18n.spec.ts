@@ -715,6 +715,8 @@ describe('O-8 / F8-1 — ApprovalCenterView English render scan (urge row, filte
     remindApprovalSpy.mockResolvedValue({ ok: true, data: {} })
     getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
     listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
+    // The row 驳回 dialog this scan opens is offered only to an `approvals:act` holder.
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:act']))
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -727,6 +729,7 @@ describe('O-8 / F8-1 — ApprovalCenterView English render scan (urge row, filte
     vi.clearAllMocks()
     window.localStorage.setItem('metasheet_locale', 'zh-CN')
     useLocale().setLocale('zh-CN')
+    localStorage.removeItem('user_permissions')
   })
 
   async function mountForScan() {

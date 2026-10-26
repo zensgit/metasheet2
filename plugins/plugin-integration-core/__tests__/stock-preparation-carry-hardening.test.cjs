@@ -30,6 +30,7 @@
 // Every guard added for these is itself mutation-covered: disabling it reds a named case here.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -267,7 +268,7 @@ function mount({ canonicalRows = pairRows(), recordsWrapper } = {}) {
     // witnessed in stock-preparation-carry-target-binding.test.cjs (T9-*).
     tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
   }
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, auditDb, provisioning, records, baseRecords }
 }
 

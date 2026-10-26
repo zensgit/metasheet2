@@ -67,12 +67,15 @@ let pointer: ReturnType<typeof activation> | null
 let delay: { path: string; method: string; response: ReturnType<typeof deferred> } | null
 let deny = false
 
+// The binding read's online read-plan switch; undefined omits the field (an older server).
+let onlineReadPlans: boolean | undefined = true
 function routes() {
   h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
     if (url.includes('/source-binding')) return envelope({
       actionId: ACTION, effectiveExternalSystemId: 'sys_bound_workspace', effectiveSourceKind: 'data-source:sql-readonly',
       origin: 'deploy_default', persistedBinding: null, effectiveSourceProblem: null,
       takesEffectWithoutRestart: true, eligibleSources: [],
+      ...(onlineReadPlans === undefined ? {} : { onlineReadPlansEnabled: onlineReadPlans }),
     })
     const parsed = new URL(url, 'https://synthetic.invalid')
     const path = parsed.pathname.slice(SOURCE_PLAN_VERSIONS_ROUTE.length)
@@ -109,6 +112,7 @@ async function manage() {
 }
 
 beforeEach(() => {
+  onlineReadPlans = true
   localStorage.clear()
   h.permissions = ['integration:admin']
   h.locale = 'zh-CN'
@@ -543,5 +547,16 @@ describe('online management in the existing source-binding editor', () => {
     await flush()
     expect(onlineCalls()).toHaveLength(count)
     expect(container.textContent).toBe('')
+  })
+
+  it.each([[false, 'reported off'], [undefined, 'omitted by an older server']])('online read plans %s (%s): no management toggle, no tenant-plan call, offline draft still builds', async (value) => {
+    onlineReadPlans = value
+    await mount()
+    expect(element('plan-management-toggle')).toBeNull()
+    expect(element('plan-management')).toBeNull()
+    await click('source-plan-draft-synthetic')
+    await click('source-plan-draft-preview')
+    expect(element('source-plan-draft-json')).not.toBeNull()
+    expect(onlineCalls()).toHaveLength(0)
   })
 })

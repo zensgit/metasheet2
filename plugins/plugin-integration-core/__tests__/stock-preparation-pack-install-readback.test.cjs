@@ -403,11 +403,81 @@ async function everyUnavailabilityDegradesToLegacy() {
   assert.equal(afterFailed.some((entry) => entry.fieldId === 'ext_neverLanded'), false)
 }
 
+// ---------------------------------------------------------------------------
+// PKS (batch-refresh step 4 PR-3a, TD-22 / refuter R-2): THE STRICT READ for governed computations. Same
+// projection as the loader, but it NEVER degrades: each outcome is a named state the lane refuses on
+// (read_failed -> 503, unavailable -> 501) instead of a guessed legacy band. The loader above is unchanged
+// (its own cases still run first in `main`, byte for byte).
+// ---------------------------------------------------------------------------
+
+async function strictReaderAnswersStatesNeverDegrades() {
+  const { readPackInstalledFieldPropertiesStrict } = require(path.join(LIB, 'stock-preparation-pack-installed-fields.cjs'))
+  const { store, provisioning } = await installOnce()
+  const sqlFault = (code) => Object.assign(new Error(`synthetic ${code} failure tenant-a ext_secret`), { code })
+  const valuesFree = (answer) => {
+    const text = JSON.stringify(answer)
+    assert.equal(text.includes('synthetic'), false, 'no message')
+    assert.equal(text.includes(TENANT_ID) || text.includes(PROJECT_ID), false, 'no scope value')
+    assert.equal(text.includes('ext_secret'), false, 'no field id from an error')
+  }
+
+  // PKS-1 no ledger (store absent, or without listInstalledFieldIds; or a scope it cannot address).
+  for (const packInstallStore of [null, undefined, {}]) {
+    assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore, provisioning, ...SCOPE }), { state: 'unavailable', reason: 'pack_install_ledger' })
+  }
+  assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: store, provisioning, ...SCOPE, tenantId: ' ' }), { state: 'unavailable', reason: 'pack_install_ledger' })
+
+  // PKS-2 the ledger read fails (throws with a SQLSTATE; throws without one; answers a non-answer).
+  const throwing = { async listInstalledFieldIds() { throw sqlFault('42501') } }
+  const failedWithState = await readPackInstalledFieldPropertiesStrict({ packInstallStore: throwing, provisioning, ...SCOPE })
+  assert.deepEqual(failedWithState, { state: 'read_failed', operation: 'ledger_read', sqlState: '42501' })
+  valuesFree(failedWithState)
+  const throwingNoCode = { async listInstalledFieldIds() { throw new Error('synthetic ledger down tenant-a') } }
+  assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: throwingNoCode, provisioning, ...SCOPE }), { state: 'read_failed', operation: 'ledger_read' })
+  for (const answer of [null, {}, { fieldIds: 'ext_x' }, { fieldIds: [1] }, { fieldIds: [''] }]) {
+    const odd = { async listInstalledFieldIds() { return answer } }
+    assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: odd, provisioning, ...SCOPE }), { state: 'read_failed', operation: 'ledger_read' }, JSON.stringify(answer))
+  }
+
+  // PKS-3 an empty ledger is the accurate legacy answer, even on a host without the field read.
+  const emptyStore = createStockPreparationPackInstallStore({ db: createFakeDb(), idGenerator: () => 'ledger_empty' })
+  assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: emptyStore, provisioning, ...SCOPE }), { state: 'no_pack' })
+  assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: emptyStore, provisioning: null, ...SCOPE }), { state: 'no_pack' })
+
+  // PKS-4 candidates exist but the host cannot read fields: unavailable by name, never "no pack".
+  for (const noRead of [null, {}, { readObjectFieldsContent: 'no' }]) {
+    assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: store, provisioning: noRead, ...SCOPE }), { state: 'unavailable', reason: 'pack_field_read' })
+  }
+
+  // PKS-5 the host field read fails (throws; answers a non-object).
+  const hostDown = { async readObjectFieldsContent() { throw sqlFault('08006') } }
+  const fieldFailed = await readPackInstalledFieldPropertiesStrict({ packInstallStore: store, provisioning: hostDown, ...SCOPE })
+  assert.deepEqual(fieldFailed, { state: 'read_failed', operation: 'field_read', sqlState: '08006' })
+  valuesFree(fieldFailed)
+  const hostOdd = { async readObjectFieldsContent() { return [] } }
+  assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: store, provisioning: hostOdd, ...SCOPE }), { state: 'read_failed', operation: 'field_read' })
+
+  // PKS-6 installed: EXACTLY the loader's projection; every candidate gone: no_pack; and the fail-open loader
+  // still answers undefined (with its warning) on the same faults — the not-governed path is unchanged.
+  const strict = await readPackInstalledFieldPropertiesStrict({ packInstallStore: store, provisioning, ...SCOPE })
+  const loaded = await loadPackInstalledFieldProperties({ packInstallStore: store, provisioning, ...SCOPE, logger: SILENT_LOGGER })
+  assert.equal(strict.state, 'installed')
+  assert.deepEqual(strict.installedFieldProperties, loaded)
+  const goneProvisioning = { async readObjectFieldsContent() { return {} } }
+  assert.deepEqual(await readPackInstalledFieldPropertiesStrict({ packInstallStore: store, provisioning: goneProvisioning, ...SCOPE }), { state: 'no_pack' })
+  const warnings = []
+  const logger = { info() {}, warn(message) { warnings.push(message) } }
+  assert.equal(await loadPackInstalledFieldProperties({ packInstallStore: throwing, provisioning, ...SCOPE, logger }), undefined)
+  assert.equal(await loadPackInstalledFieldProperties({ packInstallStore: store, provisioning: hostDown, ...SCOPE, logger }), undefined)
+  assert.equal(warnings.length, 2, 'the loader keeps degrading with a warning')
+}
+
 async function main() {
   await installedPackDrivesPackAwareBands()
   await deletedColumnDropsOut()
   await liveClassificationWinsOverLedgerProvenance()
   await everyUnavailabilityDegradesToLegacy()
+  await strictReaderAnswersStatesNeverDegrades()
 }
 
 // S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test

@@ -394,6 +394,10 @@ function globalHistoryFlagsInSource() {
   // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
   const stockPrepProjectSheets = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*')
     .filter((t) => !t.endsWith('_'))
+  // 在线读取计划 SA-02 (#6324): read by plugin-integration-core only, through its exported predicate; one family by
+  // name shape, `_ENABLED` only (the `_ENABLED_ENV` constant name and refusal codes are not flags).
+  const stockPrepOnlineReadPlans = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_[A-Z_0-9]*')
+    .filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
   // 备料「成员与权限」(S5b, R-39): read by the plugin routes AND the host port, so both trees are scanned;
   // `_ENABLED` only, so the refusal code STOCK_PREP_MEMBERS_PAGE_DISABLED is not mistaken for a flag.
   const stockPrepMembersPage = [
@@ -407,7 +411,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepOnlineReadPlans, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound])].sort()
 }
 
 function grepPluginFlagTokens(pattern) {
@@ -786,6 +790,25 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
     ['archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
+})
+
+test('stock-prep online read-plans switch (SA-02, #6324): boolean, exact true, danger high, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'plugins/plugin-integration-core/lib/stock-preparation-read-plan-switch.cjs#stockPreparationOnlineReadPlansEnabled',
+  )
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'TRUE'), false)
+  assert.equal(isActivated(spec, ' true'), false)
+  assert.equal(isActivated(spec, '1'), false)
+  assert.equal(isActivated(spec, undefined), false)
 })
 
 test('stock-prep project-sheets switch (ADR adr-stock-prep-project-sheets-20261008 S1, R-35): boolean, exact true, danger high, sourced from its exported predicate', () => {

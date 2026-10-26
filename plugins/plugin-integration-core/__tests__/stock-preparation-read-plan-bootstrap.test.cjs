@@ -15,6 +15,14 @@ const entry = require('../index.cjs')
 const { assertStockPreparationReadPlanDeploymentCompatible } = require('../lib/stock-preparation-read-plan-execution.cjs')
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('../lib/stock-preparation-templates.cjs')
 const { FEATURE_FLAG } = require('../lib/sealed-export/stock-preparation-runtime-config.cjs')
+const { ONLINE_READ_PLANS_ENABLED_ENV } = require('../lib/stock-preparation-read-plan-switch.cjs')
+// The real plugin entry reads the online read-plan switch from process.env; these cases serve read plans.
+function withOnlineReadPlans(value) {
+  const previous = process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+  if (value === undefined) delete process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+  else process.env[ONLINE_READ_PLANS_ENABLED_ENV] = value
+  return () => { if (previous === undefined) delete process.env[ONLINE_READ_PLANS_ENABLED_ENV]; else process.env[ONLINE_READ_PLANS_ENABLED_ENV] = previous }
+}
 
 const ACTION = 'plm.stock-preparation.pull-bom.v1'
 const TENANT = 'synthetic-tenant'
@@ -129,6 +137,7 @@ async function call(h, method, route, req) {
 test('real bootstrap injects private management/ledger and never exposes them cross-plugin', async () => {
   const previous = process.env[FEATURE_FLAG]
   process.env[FEATURE_FLAG] = 'false'
+  const restoreOnline = withOnlineReadPlans('true')
   const h = host()
   try {
     await entry.activate(h.context)
@@ -178,6 +187,7 @@ test('real bootstrap injects private management/ledger and never exposes them cr
     assert.doesNotMatch(JSON.stringify(unavailable.body), /MUST-NOT-LEAK|42P01/)
   } finally {
     await entry.deactivate()
+    restoreOnline()
     if (previous === undefined) delete process.env[FEATURE_FLAG]
     else process.env[FEATURE_FLAG] = previous
   }
@@ -186,6 +196,7 @@ test('real bootstrap injects private management/ledger and never exposes them cr
 async function withActivated(options, run) {
   const previous = process.env[FEATURE_FLAG]
   process.env[FEATURE_FLAG] = 'false'
+  const restoreOnline = withOnlineReadPlans('true')
   const h = host(options)
   const start = managementOptions.length
   try {
@@ -194,6 +205,7 @@ async function withActivated(options, run) {
     await run(h, managementOptions[start])
   } finally {
     await entry.deactivate()
+    restoreOnline()
     if (previous === undefined) delete process.env[FEATURE_FLAG]
     else process.env[FEATURE_FLAG] = previous
   }
@@ -238,4 +250,33 @@ test('bootstrap resolver reflects declared and unconfigured deploy config, never
     assert.equal(typeof options.resolveDeploymentAction, 'function')
     await assert.rejects(options.resolveDeploymentAction(ACTION))
   })
+})
+
+test('switch OFF: the real bootstrap hides read-plan management and the pull path never touches the read-plan tables', async () => {
+  const previous = process.env[FEATURE_FLAG]
+  process.env[FEATURE_FLAG] = 'false'
+  const restoreOnline = withOnlineReadPlans(undefined)
+  const h = host()
+  try {
+    await entry.activate(h.context)
+    const admin = request({ query: { managementScope: 'tenant', systemId: SYSTEM } })
+    const before = h.queries.length
+    const listed = await call(h, 'GET', ROOT, admin)
+    assert.equal(listed.statusCode, 404)
+    assert.equal(listed.body.error.code, 'READ_PLAN_MANAGEMENT_DISABLED')
+    assert.equal(h.queries.length, before, 'no metadata or ledger IO while the switch is off')
+    // As if migration 089 had not run: every read-plan statement fails. The pull path must not reach one.
+    h.ledgerFailure = true
+    const dry = await call(h, 'POST', '/api/integration/table-actions/:actionId/dry-run', request({
+      params: { actionId: ACTION }, body: { parameters: { projectNo: 'SYNTHETIC-PROJECT' } },
+    }))
+    assert.ok(!h.queries.slice(before).some(({ sql }) => sql.includes('integration_stock_prep_read_plan_')),
+      'no read-plan table is queried by the pull path while the switch is off')
+    assert.doesNotMatch(JSON.stringify(dry.body), /READ_PLAN_RUNTIME_UNAVAILABLE|READ_PLAN_ACTIVATION/)
+  } finally {
+    await entry.deactivate()
+    restoreOnline()
+    if (previous === undefined) delete process.env[FEATURE_FLAG]
+    else process.env[FEATURE_FLAG] = previous
+  }
 })

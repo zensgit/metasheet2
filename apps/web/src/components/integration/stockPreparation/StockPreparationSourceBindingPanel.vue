@@ -366,11 +366,11 @@
           </button>
         </template>
 
-        <label class="stock-prep-source__draft-management-toggle">
+        <label v-if="onlineReadPlansEnabled" class="stock-prep-source__draft-management-toggle">
           <input v-model="planManagement" type="checkbox" data-testid="stock-prep-plan-management-toggle">
           {{ bi('管理租户级读取计划', 'Manage tenant-level read plans') }}
         </label>
-        <section v-if="planManagement" class="stock-prep-source__draft-online" data-testid="stock-prep-plan-management">
+        <section v-if="onlineReadPlansEnabled && planManagement" class="stock-prep-source__draft-online" data-testid="stock-prep-plan-management">
           <p data-testid="stock-prep-plan-management-scope">
             {{ bi('管理范围：当前登录租户，workspace=null。', 'Management scope: the signed-in tenant, workspace=null.') }}
           </p>
@@ -666,6 +666,7 @@ watch(draft, (next) => {
 }, { flush: 'sync' })
 
 const planManagement = ref(false)
+const onlineReadPlansEnabled = ref(false)
 const planTargetSystemId = ref('')
 const planProjectNo = ref('')
 const selectedPlanVersionId = ref('')
@@ -745,6 +746,7 @@ function invalidateSession(): void {
   errorStatus.value = null
   refusalReason.value = null
   planManagement.value = false
+  onlineReadPlansEnabled.value = false
   planTargetSystemId.value = ''
   resetPlanManagement()
   // An already-issued request may still finish on the server. Keep busy until its
@@ -878,6 +880,10 @@ const planErrorText = computed(() => {
       return bi('当前部署读取规则不能由此配置完整表达，无法激活；保留原配置并联系管理员。', 'This configuration cannot fully express the current deployment read rules, so it cannot be activated; keep the original configuration and contact an administrator.')
     case 'READ_PLAN_DEPLOYMENT_UNAVAILABLE':
       return bi('无法核实部署读取规则，未激活；联系管理员检查配置。', 'The deployment read rules could not be verified, so nothing was activated; contact an administrator to check the configuration.')
+    case 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT':
+      return bi('项目登记中已有只差大小写的项目号，启用不区分大小写会让这些项目无法拉取，因此未激活。请联系管理员先盘点并处理这些重复登记，再激活。', 'The project registry already has project numbers that differ only by letter case. Case-insensitive matching would block those projects, so nothing was activated; contact an administrator to review and resolve the duplicate registrations before activating.')
+    case 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE':
+      return bi('无法核对项目登记中的大小写重复，未激活；请联系管理员检查项目登记。', 'The project registry could not be checked for letter-case duplicates, so nothing was activated; contact an administrator to check the project registry.')
   }
   if (planErrorStatus.value === 401 || planErrorStatus.value === 403) {
     return bi('需要当前登录租户的平台管理权限及相关连接所有权。请重新确认登录身份和目标。', 'The signed-in tenant requires platform management permission and ownership of the relevant connections. Check the session and target.')
@@ -937,14 +943,23 @@ watch(() => view.value?.effectiveExternalSystemId ?? '', (next, previous) => {
   if (previous && next !== previous) clearPlanSample()
 }, { flush: 'sync' })
 
+// The deployment's online read-plan switch, as the last answered source-binding read reports it. A
+// refresh's interim null keeps it; a session switch clears it. Off (or an older server that omits
+// it): no tenant-level management is offered and none of its calls can start.
+watch(view, (next) => {
+  if (next === null) return
+  onlineReadPlansEnabled.value = next.onlineReadPlansEnabled === true
+  if (!onlineReadPlansEnabled.value) planManagement.value = false
+}, { flush: 'sync' })
+
 function capturePlanContext(): PlanContext | null {
   const local = captureContext()
-  if (!local || !planManagement.value || !validPlanTarget.value) return null
+  if (!local || !onlineReadPlansEnabled.value || !planManagement.value || !validPlanTarget.value) return null
   return { local, generation: planGeneration, systemId: planTargetSystemId.value }
 }
 
 function isCurrentPlan(context: PlanContext): boolean {
-  return isCurrent(context.local) && planManagement.value
+  return isCurrent(context.local) && onlineReadPlansEnabled.value && planManagement.value
     && context.generation === planGeneration && context.systemId === planTargetSystemId.value
 }
 

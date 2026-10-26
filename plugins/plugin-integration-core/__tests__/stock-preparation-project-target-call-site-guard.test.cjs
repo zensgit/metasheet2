@@ -62,6 +62,60 @@ const SRC = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
 const CODE = stripComments(SRC)
 const PREFLIGHT_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-preflight.cjs'), 'utf8'))
 const VALIDATION_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-read-plan-validation-runtime.cjs'), 'utf8'))
+const STORE_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-project-target-store.cjs'), 'utf8').replace(/\r\n/g, '\n'))
+
+function assertDeferredRegistration(body) {
+  const comparisonAt = body.indexOf('const comparison = await resolveSourceProjectComparison()')
+  const modeAt = body.indexOf("const strictRegistration = comparison === 'case-insensitive'")
+  assert.ok(comparisonAt !== -1 && modeAt > comparisonAt && modeAt < body.indexOf('if (registered) {'),
+    'the trusted comparison selects strict mode before either replay or create')
+  const prepareAt = body.indexOf('const prepareTarget = async () => {')
+  const prepareEnd = body.indexOf('\n        }\n        if (strictRegistration) {', prepareAt)
+  assert.ok(prepareAt !== -1 && prepareEnd > prepareAt, 'the named preparation callback precedes the strict/default branch')
+  const prepare = body.slice(prepareAt, prepareEnd)
+  assert.ok(!(body.slice(0, prepareAt) + body.slice(prepareEnd)).includes('provisionProjectSheet('), 'all provisioning belongs to the preparation callback')
+  const provision = prepare.indexOf('provisionProjectSheet(')
+  const install = prepare.indexOf('installPacks(createPlan, provisioned.objectId)')
+  const handles = prepare.indexOf('return { sheetId: provisioned.sheetId, objectId: provisioned.objectId }')
+  assert.ok(provision !== -1 && install > provision && handles > install, 'provision then install then return handles, inside the callback')
+
+  const strictAt = body.indexOf('if (strictRegistration) {', prepareEnd)
+  const defaultAt = body.indexOf('\n        } else {', strictAt)
+  const branchEnd = body.indexOf('\n        }\n', defaultAt + 1)
+  assert.ok(strictAt > prepareEnd && defaultAt > strictAt && branchEnd > defaultAt, 'strict and default registration branches are bounded')
+  const compact = (source) => source.replace(/\s/g, '')
+  assert.equal(compact(body.slice(strictAt, defaultAt)), compact(`if (strictRegistration) {
+    registered = await store.create({
+      tenantId, projectNo, createdBy: actor,
+      maxPerTenant: MAX_PROJECT_TARGETS_PER_TENANT,
+      resolveSourceProjectComparison,
+    }, prepareTarget)`), 'only strict registration passes the resolver and deferred preparation to store.create')
+  assert.equal(compact(body.slice(defaultAt, branchEnd)), compact(`} else {
+    const target = await prepareTarget()
+    registered = await store.create({
+      tenantId, projectNo, sheetId: target.sheetId, objectId: target.objectId,
+      createdBy: actor, maxPerTenant: MAX_PROJECT_TARGETS_PER_TENANT,
+      resolveSourceProjectComparison,
+    })`), 'default/case-sensitive prepares outside the store lock, then registers direct handles with the resolver (re-checked under the blocking lock) and no callback')
+  assert.equal((body.match(/await prepareTarget\(\)/g) || []).length, 1, 'only the default branch invokes preparation directly')
+  assert.equal((body.match(/registered = await store\.create\(/g) || []).length, 2, 'exactly the reviewed strict and default registrations exist')
+  const start = STORE_CODE.indexOf('async function create(input = {}, prepareTarget) {')
+  assert.notEqual(start, -1, 'the store accepts the preparation callback')
+  const fn = STORE_CODE.slice(start, STORE_CODE.indexOf('async function transition(', start))
+  const lock = fn.indexOf("await lockRegistration(trx, tenantId, deferred ? 'try' : (resolveSourceProjectComparison ? 'pinned' : 'blocking'))")
+  const guard = fn.indexOf('await assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison })')
+  const callback = fn.indexOf('await prepareTarget()')
+  const insert = fn.indexOf('await trx.insertOne(')
+  assert.ok(lock !== -1 && guard > lock && callback > guard && insert > callback,
+    'same transaction: lock, identity guard, full preparation, then registry insert')
+}
+
+function assertReplayLockInput(body) {
+  const inputAt = body.indexOf('const lockInput = strictRegistration ? { tenantId, projectNo, resolveSourceProjectComparison } : { tenantId, projectNo }')
+  const lockAt = body.indexOf('await store.withActiveRowLocked(lockInput, async (locked) => {')
+  assert.ok(inputAt !== -1 && lockAt > inputAt, 'replay passes the trusted resolver only in strict mode, retaining the default legacy lock input')
+  return lockAt
+}
 
 /** The handler (`    async NAME(req, res) {`) a source offset sits in, or null outside any handler. */
 function handlerAt(offset, code = CODE) {
@@ -378,7 +432,7 @@ check('the five project-sheet routes check the switch BEFORE any IO and the crea
   assert.match(createBody, /normalizeStockPreparationConfirmBody\(requestBody\(req\), VALID_EMPTY_REQUEST_KEYS/, 'an EMPTY closed body')
   assert.match(createBody, /store\.count\(\{ tenantId \}\)[\s\S]*?MAX_PROJECT_TARGETS_PER_TENANT/, 'the cap is checked before provisioning')
   assert.ok(createBody.indexOf('store.count(') < createBody.indexOf('provisionProjectSheet('), 'cap before provision')
-  assert.ok(createBody.indexOf('provisionProjectSheet(') < createBody.indexOf('store.create('), 'provision before register')
+  assertDeferredRegistration(createBody)
   // S2 fix round 1: the grant moved into one `healGrant` closure the replay leg calls FIRST; on the
   // create leg it still runs only after the registry row exists.
   assert.ok(createBody.indexOf('store.create(') < createBody.indexOf('if (!grant) grant = await healGrant(registered)'), 'register before the create leg\'s grant')
@@ -440,8 +494,7 @@ check('C-11 (S4) confirm: the archived-project hook is wired only with the switc
 check('C-12 (S4 fix round 1) the create replay heals only inside the locked re-check of its registry row', () => {
   const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
   const body = CODE.slice(createStart, CODE.indexOf('\n    },', createStart))
-  const lockAt = body.indexOf('await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {')
-  assert.notEqual(lockAt, -1, 'the replay goes through withActiveRowLocked, keyed by the scope tenant and the path number')
+  const lockAt = assertReplayLockInput(body)
   const lockEnd = body.indexOf('\n        })\n', lockAt)
   assert.notEqual(lockEnd, -1, 'the locked callback closes')
   const inside = body.slice(lockAt, lockEnd)
@@ -455,11 +508,19 @@ check('C-12 (S4 fix round 1) the create replay heals only inside the locked re-c
   const fnStart = STORE_CODE.indexOf('async function withActiveRowLocked(')
   assert.notEqual(fnStart, -1, 'the store exposes the locked re-check')
   const fn = STORE_CODE.slice(fnStart, STORE_CODE.indexOf('\n  }\n', fnStart))
-  const lockCall = fn.indexOf('await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)')
+  const lockCall = fn.indexOf("await lockRegistration(trx, tenantId, resolveSourceProjectComparison ? 'try' : 'blocking')")
+  const identityCheck = fn.indexOf('await assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison })')
   const readCall = fn.indexOf('trx.selectOneForUpdate(')
   const statusCheck = fn.indexOf("if (current.status !== 'active') {")
   const callback = fn.indexOf('return fn(rowToPublicTarget(current))')
-  assert.ok(lockCall !== -1 && lockCall < readCall && readCall < statusCheck && statusCheck < callback, 'lock → FOR UPDATE read → active check → callback, in that order, on the transaction handle')
+  assert.ok(lockCall !== -1 && lockCall < identityCheck && identityCheck < readCall && readCall < statusCheck && statusCheck < callback, 'lock → identity check → FOR UPDATE read → active check → callback, in that order, on the transaction handle')
+  for (const [before, after] of [
+    ['strictRegistration ? { tenantId, projectNo, resolveSourceProjectComparison } : { tenantId, projectNo }', 'strictRegistration ? { tenantId, projectNo } : { tenantId, projectNo, resolveSourceProjectComparison }'],
+    ['store.withActiveRowLocked(lockInput,', 'store.withActiveRowLocked({ tenantId, projectNo },'],
+  ]) {
+    assert.equal(body.split(before).length - 1, 1, `one actual replay lock needle: ${before}`)
+    assert.throws(() => assertReplayLockInput(body.replace(before, after)), assert.AssertionError)
+  }
 })
 
 check('C-09 (S2) create: plan + pre-flight before provisioning, install before register; replay: grant heal before the pack heal', () => {
@@ -473,7 +534,6 @@ check('C-09 (S2) create: plan + pre-flight before provisioning, install before r
   const capAt = body.indexOf('await store.count({ tenantId })')
   const provisionAt = body.indexOf('provisionProjectSheet(')
   const installAt = body.indexOf('installPacks(createPlan, provisioned.objectId)')
-  const registerAt = body.indexOf('store.create(')
   // REPLAY leg (S4 fix round 1: inside the locked re-check — C-12 pins the enclosure).
   const replayGrantAt = body.indexOf('const lockedGrant = await healGrant(locked)')
   const replayPlanAt = body.indexOf('const replayPlan = await planPacks()')
@@ -483,7 +543,17 @@ check('C-09 (S2) create: plan + pre-flight before provisioning, install before r
   assert.ok(capAt !== -1 && preflightAt < capAt, 'create: every sheet-independent refusal precedes the cap read')
   assert.ok(provisionAt !== -1 && capAt < provisionAt, 'create: the cap precedes provisioning')
   assert.ok(installAt !== -1 && provisionAt < installAt, 'create: the packs are installed onto the sheet that was just provisioned')
-  assert.ok(registerAt !== -1 && installAt < registerAt, 'create: INSTALL BEFORE REGISTER — a failed install leaves no registered row')
+  assertDeferredRegistration(body)
+  for (const [before, after] of [
+    ["comparison === 'case-insensitive'", "comparison === 'case-sensitive'"],
+    ['}, prepareTarget)', '})'],
+    ['const target = await prepareTarget()', 'const target = prepareTarget()'],
+    ['resolveSourceProjectComparison,\n          })', '\n          })'],
+    ['packs = await installPacks(createPlan, provisioned.objectId)', 'packs = null'],
+  ]) {
+    assert.equal(body.split(before).length - 1, 1, `one actual registration needle: ${before}`)
+    assert.throws(() => assertDeferredRegistration(body.replace(before, after)), assert.AssertionError)
+  }
   assert.ok(replayGrantAt !== -1 && replayPlanAt !== -1 && replayGrantAt < replayPlanAt, 'replay: the G1 grant heal precedes the pack plan')
   assert.ok(healAt !== -1 && replayPlanAt < healAt, 'replay: the pack heal runs through the same install')
   assert.match(body, /getTableAction\(\{\s*actionId: PLM_STOCK_PREPARATION_ACTION_ID,\s*tenantId,\s*targetPurpose: 'readiness',\s*\}\)/, 'the env binding probe is a tenant-scoped readiness lookup')

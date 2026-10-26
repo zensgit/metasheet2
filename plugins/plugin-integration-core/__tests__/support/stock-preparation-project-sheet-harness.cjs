@@ -48,10 +48,15 @@ function makeMemoryDb() {
   // S4 fix round 1: the advisory lock is a REAL per-key FIFO mutex here, released when the
   // transaction's callback settles — so a suite can force the interleaving a missing (or released
   // too early) lock would allow, instead of a lock that only records that it was asked for.
-  const lockTails = new Map()
-  // S3 fix round 2 (F4): the keys a transaction HOLDS right now (blocking or try), so the non-blocking
-  // `tryAdvisoryXactLock` answers exactly what PostgreSQL would: false at once while another transaction holds it.
-  const heldKeys = new Set()
+  // One lock space for blocking AND try acquisition. A blocking lifecycle writer
+  // must also wait behind a registration that acquired the key with try-lock.
+  const lockStates = new Map()
+  const releaseKey = (key) => {
+    const state = lockStates.get(key)
+    const next = state.waiters.shift()
+    if (next) next()
+    else lockStates.delete(key)
+  }
   const rowsOf = (table) => {
     if (!tables.has(table)) tables.set(table, [])
     return tables.get(table)
@@ -66,21 +71,22 @@ function makeMemoryDb() {
       const releases = []
       const trx = {
         ...api,
+        async setTransactionIsolationLevel(level) {
+          assert.equal(level, 'read committed')
+          calls.push(`setTransactionIsolationLevel:${level}`)
+        },
         async advisoryXactLock(key) {
           calls.push(`advisoryXactLock:${key}`)
-          const previous = lockTails.get(key) || Promise.resolve()
-          let release
-          const held = new Promise((resolve) => { release = resolve })
-          lockTails.set(key, previous.then(() => held))
-          await previous
-          heldKeys.add(key)
-          releases.push(() => { heldKeys.delete(key); release() })
+          const state = lockStates.get(key)
+          if (state) await new Promise((resolve) => { state.waiters.push(resolve) })
+          else lockStates.set(key, { waiters: [] })
+          releases.push(() => releaseKey(key))
         },
         async tryAdvisoryXactLock(key) {
           calls.push(`tryAdvisoryXactLock:${key}`)
-          if (heldKeys.has(key)) return false
-          heldKeys.add(key)
-          releases.push(() => { heldKeys.delete(key) })
+          if (lockStates.has(key)) return false
+          lockStates.set(key, { waiters: [] })
+          releases.push(() => releaseKey(key))
           return true
         },
       }
@@ -446,7 +452,9 @@ function baseServices(sourceAdapter) {
     readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     // This synthetic scope explicitly has no activation pointer; absence of the runtime is not legacy.
-    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
+    // This fixture has no online activation at any scope; registration reads metadata,
+    // while execution retains its separate no-active-version contract.
+    stockPreparationReadPlanStore: { async getActivation() { return null }, async getActiveForRuntime() { return null } },
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
   }
 }
@@ -566,9 +574,17 @@ function mountProjectSheetRoutes({
   }
   if (switchOn) process.env[PROJECT_SHEETS_ENABLED_ENV] = 'true'
   if (grantRoleIds) process.env[PROJECT_SHEET_GRANT_ROLE_IDS_ENV] = grantRoleIds.join(',')
+  // Batch-refresh step 4 PR-3a: the REAL refresh governance (reader + continuation store) every planning and
+  // writing route now consults — over the routes' own lock and registry store. A suite that sets
+  // `stockPreparationRefreshGovernance` in `serviceExtras` (even to null: an unwired deployment) opts out.
+  const refresh = Object.prototype.hasOwnProperty.call(serviceExtras, 'stockPreparationRefreshGovernance')
+    ? null
+    : require('./stock-preparation-refresh-governance-wiring.cjs').wireRefreshGovernance(services)
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
+    // PR-3a: the governance environment the routes consult (null when the suite opted out).
+    refresh,
     // PR B: the service objects the routes captured at mount, so a suite can patch one in place (a registry
     // that answers its list read, an audit store whose vocabulary probe refuses).
     services,

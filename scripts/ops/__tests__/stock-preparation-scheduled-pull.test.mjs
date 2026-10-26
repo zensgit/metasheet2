@@ -358,6 +358,37 @@ test('manual_confirm_required is recorded and NEVER applied, even with --apply',
   assert.equal(lines[0].action, 'skipped_manual_confirm_required')
   assert.equal(lines[1].summary.skippedManualConfirmRequired, 1)
   assert.equal(lines[1].summary.failed, 0)
+
+  // Batch-refresh step 4 PR-3a (E-1(c) scheduled-pull leg, refuter R-8): a SUSPENDED preview — the status a governed
+  // project's held pull now answers (no token, canApply false) — is never applied either, and until PR-7 adds
+  // `skipped_suspended` it fails CLOSED as an unknown status: `error`, `failed: true`, non-zero exit. Review round 1:
+  // a `recovery_pending` preview (an earlier execution of a governed project did not finish cleanly) likewise.
+  // Asserted inside this existing subtest on purpose: the ops TAP `# tests` count (EXPECTED_OPS_TESTS_COUNT) does
+  // not move.
+  for (const heldStatus of ['suspended', 'recovery_pending']) {
+    const held = await withMockFetch(
+      (record) => {
+        if (record.url.includes('/dry-run')) {
+          return { json: { ok: true, data: { status: heldStatus, canApply: false, dryRunToken: null, counts: {} } } }
+        }
+        return { status: 500, json: { ok: false, error: { code: 'SHOULD_NOT_BE_CALLED' } } }
+      },
+      () => runMain(['--apply'], BASE_ENV),
+    )
+    assert.equal(held.requests.length, 1, `a ${heldStatus} pull is never applied`)
+    assert.notEqual(held.result.code, 0, `${held.result.stdout}\n${held.result.stderr}`)
+    const heldLines = jsonLines(held.result.stdout)
+    assert.equal(heldLines[0].action, 'error', heldStatus)
+    assert.equal(heldLines[0].failed, true, heldStatus)
+    assert.equal(heldLines[1].summary.failed, 1, heldStatus)
+    // PR-3a follow-up: `recovery_pending` fails by its own code with a recovery note, not as an unexpected status.
+    if (heldStatus === 'recovery_pending') {
+      assert.equal(heldLines[0].error, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
+      assert.match(heldLines[0].note, /recovered/)
+    } else {
+      assert.equal(heldLines[0].error, `unexpected dry-run status: ${heldStatus}`)
+    }
+  }
 })
 
 test('large_bom_bounded is recorded as skipped and NEVER applied', async () => {

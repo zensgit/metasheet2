@@ -47,9 +47,12 @@ const DIAGNOSTICS = [
   { status: 409, code: 'READ_PLAN_GENERATION_CONFLICT', operation: 'activate', zh: '激活记录已被其他操作更新', en: 'Another operation updated the activation record', nextZh: '激活状态', nextEn: 'activation status' },
   { status: 409, code: 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE', operation: 'activate', zh: '当前部署读取规则不能由此配置完整表达，无法激活；保留原配置并联系管理员。', en: 'This configuration cannot fully express the current deployment read rules, so it cannot be activated; keep the original configuration and contact an administrator.', nextZh: '联系管理员', nextEn: 'contact an administrator' },
   { status: 501, code: 'READ_PLAN_DEPLOYMENT_UNAVAILABLE', operation: 'activate', zh: '无法核实部署读取规则，未激活；联系管理员检查配置。', en: 'The deployment read rules could not be verified, so nothing was activated; contact an administrator to check the configuration.', nextZh: '联系管理员检查配置', nextEn: 'contact an administrator to check the configuration' },
+  { status: 409, code: 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT', operation: 'activate', zh: '项目登记中已有只差大小写的项目号', en: 'already has project numbers that differ only by letter case', nextZh: '先盘点并处理这些重复登记', nextEn: 'review and resolve the duplicate registrations' },
+  { status: 503, code: 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE', operation: 'activate', zh: '无法核对项目登记中的大小写重复，未激活', en: 'could not be checked for letter-case duplicates', nextZh: '检查项目登记', nextEn: 'check the project registry' },
 ] as const
-// Deployment refusals are not fixed by reloading or retrying; the only action is the administrator.
-const NO_RELOAD_CODES: readonly string[] = ['READ_PLAN_DEPLOYMENT_INCOMPATIBLE', 'READ_PLAN_DEPLOYMENT_UNAVAILABLE']
+// Deployment and registry refusals are not fixed by reloading or retrying; the only action is the administrator.
+const NO_RELOAD_CODES: readonly string[] = ['READ_PLAN_DEPLOYMENT_INCOMPATIBLE', 'READ_PLAN_DEPLOYMENT_UNAVAILABLE',
+  'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT', 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE']
 
 function diagnosticRefusal(status: number, code: string, ok: unknown = false) {
   return new Response(JSON.stringify({ ok, error: { code, message: POISON, details: { object: POISON }, stack: POISON } }), { status })
@@ -60,6 +63,8 @@ const GENERIC_FAILURES = [
   { label: 'wrong status', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_VALIDATION_CATALOG_UNVERIFIED') },
   { label: 'deployment incompatible wrong status', status: 501, respond: () => diagnosticRefusal(501, 'READ_PLAN_DEPLOYMENT_INCOMPATIBLE') },
   { label: 'deployment unavailable wrong status', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_DEPLOYMENT_UNAVAILABLE') },
+  { label: 'registry conflict wrong status', status: 503, respond: () => diagnosticRefusal(503, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT') },
+  { label: 'registry unavailable wrong status', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE') },
   { label: 'ok true', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_VALIDATION_INCOMPLETE', true) },
   { label: 'ok string', status: 409, respond: () => diagnosticRefusal(409, 'READ_PLAN_VALIDATION_INCOMPLETE', 'false') },
   { label: '2xx refusal', status: 200, respond: () => diagnosticRefusal(200, 'READ_PLAN_VALIDATION_INCOMPLETE') },
@@ -136,12 +141,15 @@ function withReceipt(row: ReturnType<typeof version>) {
   const validation = receipts.get(row.id) ?? null
   return { ...row, validationId: validation?.validationId ?? null, validation }
 }
+// The binding read's online read-plan switch; undefined omits the field (an older server).
+let onlineReadPlans: boolean | undefined = true
 function routes() {
   h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
     if (String(url).includes('/source-binding')) return envelope({
       actionId: ACTION, effectiveExternalSystemId: 'sys_bound_workspace', effectiveSourceKind: 'data-source:sql-readonly',
       origin: 'deploy_default', persistedBinding: null, effectiveSourceProblem: null,
       takesEffectWithoutRestart: true, eligibleSources: [],
+      ...(onlineReadPlans === undefined ? {} : { onlineReadPlansEnabled: onlineReadPlans }),
     })
     const parsed = new URL(url, 'https://synthetic.invalid')
     const path = parsed.pathname.slice(SOURCE_PLAN_VERSIONS_ROUTE.length)
@@ -199,6 +207,7 @@ async function choose(id = 'version_1', project = 'SYN-PROJECT') {
 }
 
 beforeEach(() => {
+  onlineReadPlans = true
   localStorage.clear()
   h.permissions = ['integration:admin']
   h.locale = 'zh-CN'

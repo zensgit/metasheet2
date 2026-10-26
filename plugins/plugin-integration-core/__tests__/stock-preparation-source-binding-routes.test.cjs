@@ -644,6 +644,25 @@ async function main() {
   // -------------------------------------------------------------------------
   // R-17 — the picker.
   // -------------------------------------------------------------------------
+  await run('R-17b the GET reports the online read-plan switch: false unless the env is exactly the literal true, read per request', async () => {
+    const KEY = 'MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED'
+    const had = Object.prototype.hasOwnProperty.call(process.env, KEY)
+    const previous = process.env[KEY]
+    try {
+      const mounted = mount()
+      for (const [value, expected] of [[undefined, false], ['false', false], ['TRUE', false], [' true', false], ['true', true]]) {
+        if (value === undefined) delete process.env[KEY]
+        else process.env[KEY] = value
+        const res = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN })
+        assert.equal(res.statusCode, 200)
+        assert.equal(res.body.data.onlineReadPlansEnabled, expected, String(value))
+      }
+    } finally {
+      if (had) process.env[KEY] = previous
+      else delete process.env[KEY]
+    }
+  })
+
   await run('R-17 the GET offers only bindable sources, in plain language, honouring data-source ownership', async () => {
     const mounted = mount()
     const res = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN })

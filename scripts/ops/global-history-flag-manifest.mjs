@@ -705,6 +705,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
   },
   {
+    key: 'MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "在线读取计划 SA-02 (#6324): the operator switch for ONLINE PLM read plans. Default OFF; exact literal 'true' only (no trim, no case folding), read PER CALL by the plugin route module. Off, the eight read-plan management routes (…/stock-preparation/read-plan-configs: list, save, validate, confirm-sample, approve, retire, activate, deactivate) answer 404 READ_PLAN_MANAGEMENT_DISABLED after the admin gate and before any IO; execution never reads an activation pointer (the read-plan tables of migration 089 are not touched, so the pull path does not depend on that migration); the registration comparison is the deployment action's alone; the unconfigured source preflight skips its pointer probe; work minted while the switch was on is refused before any IO and left unconsumed (a dry-run token 409 TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH, a stored large-BOM job stage 409 READ_PLAN_ACTIVATION_MISSING); and the source-binding read reports onlineReadPlansEnabled:false so the web hides tenant-level read-plan management (the offline JSON draft builder, which writes nothing, stays). On: a platform admin may save, sample-validate, approve and activate a tenant-level read plan, and an ACTIVE plan REPLACES the deployment readPlan for every stock-preparation pull of that tenant (deploy-only blocks such as projectSubtree / batchIdentity refuse activation with 409 READ_PLAN_DEPLOYMENT_INCOMPATIBLE; a case-insensitive plan refuses activation while the project registry already holds a case-folded duplicate group). Turning it OFF again does not delete pointers: pulls fall back to the deployment action, and turning it ON again makes the still-active pointer execute at once. Case-insensitive project comparison configured in the DEPLOYMENT action is unaffected by this switch. Danger=high: an admin-controlled replacement of the read rules a production pull executes; turning it ON is an owner decision.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-read-plan-switch.cjs#stockPreparationOnlineReadPlansEnabled',
+  },
+  {
     key: 'MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS',
     type: 'numeric',
     activationValue: 'numeric row count (default 2000; unset / blank / non-integer / < 1 = 2000; capped at 50000 = XLSX_MAX_ROWS)',

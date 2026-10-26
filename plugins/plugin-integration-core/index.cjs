@@ -30,6 +30,8 @@ const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
 const { createStockPreparationProjectWriteLock } = require('./lib/stock-preparation-project-write-lock.cjs')
+const { createStockPreparationContinuationStore } = require('./lib/stock-preparation-continuation-store.cjs')
+const { createStockPreparationRefreshGovernance } = require('./lib/stock-preparation-refresh-governance.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -97,6 +99,8 @@ let stockPreparationProjectTargetStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
 let stockPreparationProjectWriteLock = null
+let stockPreparationContinuationStore = null
+let stockPreparationRefreshGovernance = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -390,6 +394,16 @@ module.exports = {
     // generation, one row per target sheet (R-52). Every small apply and large chunk takes it and
     // fails closed (501) without it; a lock table that cannot be read or written refuses 503.
     stockPreparationProjectWriteLock = createStockPreparationProjectWriteLock({ db, logger })
+    // Batch-refresh step 4 PR-2 (migrations 102 / 103): the persisted 沿用关系 (continuations + members), the
+    // per-project refresh state, the hold ledger and the execution ledger, and the ONE governance consult every
+    // lane will make (PR-3 wires it; nothing consults it yet). Both fail closed: a read that fails is 503, never
+    // "no continuation"; a reader whose registry lacks PR B's pilot reads answers 501 by name at consult time.
+    stockPreparationContinuationStore = createStockPreparationContinuationStore({ db })
+    stockPreparationRefreshGovernance = createStockPreparationRefreshGovernance({
+      continuationStore: stockPreparationContinuationStore,
+      projectTargetStore: stockPreparationProjectTargetStore,
+      projectWriteLock: stockPreparationProjectWriteLock,
+    })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -580,6 +594,8 @@ module.exports = {
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
         stockPreparationProjectWriteLock,
+        stockPreparationContinuationStore,
+        stockPreparationRefreshGovernance,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,

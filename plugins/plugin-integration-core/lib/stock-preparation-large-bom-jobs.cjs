@@ -25,6 +25,7 @@ const {
 const {
   applyStockPreparationPlan,
   assertHostFencedWriteSupported,
+  assertWriterAdmitsPlan,
   countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
@@ -1535,6 +1536,19 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     // P1-a: the chunk's writes are host-fenced; a host that cannot honour the fence refuses here, before
     // the job is touched (the writer re-checks).
     assertHostFencedWriteSupported(recordsApi, projectWriteGuard)
+    // REFRESH GOVERNANCE GATE (batch-refresh step 4 PR-3a, LB-1; design §7.1 row 11): INSIDE the lease, after
+    // the binding and the host fence, BEFORE the terminal write and before the job turns `running` — every chunk
+    // (a resume of a paused / failed job and every job approved before its project became governed included)
+    // re-consults. Governed => 409 STOCK_PREP_REFRESH_LARGE_LANE_REFUSED, unreadable => 503, retargeted => 409;
+    // a route that did not wire the gate => 501 `chunk_gate_absent`. The verdict is then checked against the
+    // plan with the writer's own zero-IO tripwire HERE, so no writer refusal can fire after `running` (a throw
+    // there would strand the job — F-7 class). On any refusal the job is untouched: no status, checkpoint or
+    // count moves and nothing is stored.
+    if (typeof input.refreshGovernanceGate !== 'function') {
+      throw new StockPreparationProjectWriteLockError(501, 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED', 'a large-BOM chunk needs the refresh governance gate; nothing was written', { reason: 'chunk_gate_absent', partial: false })
+    }
+    const governance = await input.refreshGovernanceGate({ target: cloneJson(job.target), applyJobId: job.jobId })
+    assertWriterAdmitsPlan({ plan, governance, writeFence: projectWriteGuard })
     const start = nextDecisionIndex(job)
     const decisions = plan.decisions
     if (start >= decisions.length) {
@@ -1576,6 +1590,8 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
       // same lease + generation re-checked by the host inside every record write transaction (P1-a).
       writeFence: projectWriteGuard,
       writeFenceRequired: true,
+      // PR-3a (LB-2): the gate's verdict (consulted inside this lease) — the writer re-checks it.
+      governance,
     })
 
     job.counts = mergeCounts(job.counts, applyResult.counts)

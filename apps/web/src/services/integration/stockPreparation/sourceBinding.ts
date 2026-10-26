@@ -113,6 +113,12 @@ export interface StockPreparationSourceBindingView {
    */
   takesEffectWithoutRestart: boolean
   eligibleSources: StockPreparationSourceCandidate[]
+  /**
+   * The deployment's online read-plan switch (MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED). The
+   * page offers tenant-level read-plan management only when this is exactly `true`; an older server
+   * that omits it reads as off, which matches what such a server's switch-off routes answer.
+   */
+  onlineReadPlansEnabled?: boolean
 }
 
 /**

@@ -99,6 +99,16 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
   const { buildStockPreparationTargetDescriptor } = requireCjs('../../../../plugins/plugin-integration-core/lib/stock-preparation-target-provisioning.cjs') as {
     buildStockPreparationTargetDescriptor(): TargetDescriptor
   }
+  // main's governance consult is mandatory even for this non-pilot read-plan fixture.
+  // Own every registry/continuation/refresh table it may read; public is not a fallback fixture.
+  const governanceStorageTables = [
+    'integration_stock_prep_project_target',
+    'integration_stock_prep_continuation',
+    'integration_stock_prep_continuation_member',
+    'integration_stock_prep_refresh_state',
+    'integration_stock_prep_refresh_hold',
+    'integration_stock_prep_refresh_execution',
+  ]
   const targetDescriptor = buildStockPreparationTargetDescriptor()
   const targetSheetId = getObjectSheetId(projectId, targetDescriptor.id)
   const targetFieldIdMap = Object.fromEntries(targetDescriptor.fields.map(field =>
@@ -191,7 +201,7 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
   async function businessSnapshot() {
     const result: Record<string, unknown> = {}
     for (const table of ['project_links', 'folders', 'sales_headers', 'sales_lines', 'parts', 'bom_headers', 'bom_lines', 'bom_lines_alternate',
-      'meta_sheets', 'meta_fields', 'meta_records', 'plugin_multitable_object_registry', 'integration_stock_prep_pack_installs']) {
+      'meta_sheets', 'meta_fields', 'meta_records', 'plugin_multitable_object_registry', 'integration_stock_prep_pack_installs', ...governanceStorageTables]) {
       result[table] = (await fixturePool.query(
         `SELECT to_jsonb(t) AS row FROM ${schema}.${table} t ORDER BY to_jsonb(t)::text`,
       )).rows
@@ -223,6 +233,8 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
       ELEARNING_ENABLED: 'false', ENABLE_YJS_COLLAB: 'false', ENABLE_PLM: 'false',
       DINGTALK_TODO_MIRROR_ENABLED: 'false', AUTOMATION_DURABLE_DELIVERY_ENABLED: 'false',
       DB_SSL: 'false', DB_POOL_MIN: '0', DB_POOL_MAX: '3',
+      // This suite exercises online read plans end to end; the deployment switch defaults OFF.
+      MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED: 'true',
     })) setEnv(name, value)
     setEnv('REDIS_URL')
     fixturePool = new Pool({ connectionString: scopedUrl.toString() })
@@ -234,7 +246,11 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
       '066_create_integration_stock_prep_audit.sql',
       '076_create_integration_stock_prep_pack_installs.sql', '079_create_integration_stock_prep_source_binding.sql',
       '080_extend_stock_prep_audit_source_binding_action.sql', '089_create_integration_stock_prep_read_plan_versions.sql',
-      '100_create_integration_stock_prep_project_write_lock.sql']) {
+      '100_create_integration_stock_prep_project_write_lock.sql',
+      '087_create_integration_stock_prep_project_target.sql',
+      '101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable.sql',
+      '102_create_integration_stock_prep_continuation.sql',
+      '103_create_integration_stock_prep_refresh_state.sql']) {
       await fixturePool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
     }
     await createDataSources(fixtureDb)
@@ -292,7 +308,7 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
     }
     await fixturePool.query('INSERT INTO plugin_multitable_object_registry (sheet_id,project_id,object_id,plugin_name) VALUES ($1,$2,$3,$4)',
       [targetSheetId, projectId, targetDescriptor.id, pluginName])
-    for (const table of ['meta_sheets', 'meta_fields', 'meta_records', 'plugin_multitable_object_registry', 'plugin_kv', 'integration_stock_prep_pack_installs']) {
+    for (const table of ['meta_sheets', 'meta_fields', 'meta_records', 'plugin_multitable_object_registry', 'plugin_kv', 'integration_stock_prep_pack_installs', ...governanceStorageTables]) {
       // search_path includes public for extensions, but every business/storage lookup
       // must resolve to our owned schema rather than an existing public table.
       expect((await fixturePool.query('SELECT n.nspname AS schema FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass($1)', [table])).rows)

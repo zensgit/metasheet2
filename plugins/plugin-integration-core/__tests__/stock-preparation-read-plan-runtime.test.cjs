@@ -10,10 +10,14 @@ const { SOURCE_REVISION_TABLE } = require('../lib/stock-preparation-read-plan-va
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('../lib/stock-preparation-templates.cjs')
 const { createStockPreparationTableActionRegistry } = require('../lib/stock-preparation-table-actions.cjs')
 const { resolveStockPreparationReadPlanExecution } = require('../lib/stock-preparation-read-plan-runtime.cjs')
+const registrationMetadataRuntime = require('../lib/stock-preparation-read-plan-runtime.cjs')
+const { createStockPreparationSourceBindingStore, BINDING_TABLE } = require('../lib/stock-preparation-source-binding-store.cjs')
 const { createStockPreparationProjectTargetStore, PROJECT_TARGET_TABLE } = require('../lib/stock-preparation-project-target-store.cjs')
 const { deriveProjectSheetObjectId, PROJECT_SHEETS_ENABLED_ENV } = require('../lib/stock-preparation-project-targets.cjs')
+const { ONLINE_READ_PLANS_ENABLED_ENV } = require('../lib/stock-preparation-read-plan-switch.cjs')
 const { consumableMap } = require('./support/consumable-storage.cjs')
 const lockKit = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { wireRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 
 // Only the module-local environment is synthetic. No process.env assignment,
 // .env read, network call, customer endpoint or persistent file write occurs.
@@ -25,7 +29,7 @@ function loadRoutes(transform = (source) => source, dependencies = {}, extraEnv 
   routeModule.paths = Module._nodeModulePaths(path.dirname(routePath))
   const originalRequire = routeModule.require.bind(routeModule)
   routeModule.require = (specifier) => dependencies[specifier] || originalRequire(specifier)
-  const env = { MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED: 'true', ...extraEnv }
+  const env = { MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED: 'true', MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED: 'true', ...extraEnv }
   routeModule._compile(`const process = { env: ${JSON.stringify(env)} };\n${transform(routeSource)}`, routePath)
   return routeModule.exports
 }
@@ -131,7 +135,7 @@ function memoryDb() {
 const inert = (methods) => Object.fromEntries(methods.map((name) => [name, async () => { throw new Error(`unexpected synthetic call: ${name}`) }]))
 
 async function mount({ active = true, storeMissing = false, sourceWorkspaceId = null, matchedWorkspaceId = null, register = registerIntegrationRoutes, unconfigured = false, projectSheets = false, deployReadPlan,
-  readPlanExtra, sourceProject, sourceCaseInsensitive = false, projectRegistry, routeTransform, routeDependencies } = {}) {
+  readPlanExtra, sourceProject, sourceCaseInsensitive = false, projectRegistry, routeTransform, routeDependencies, governanceMissing = false } = {}) {
   const { db, state } = memoryDb()
   let sequence = 0
   const ledger = createStockPreparationReadPlanStore({ db, idGenerator: () => `synthetic-${++sequence}` })
@@ -226,6 +230,12 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
     readSourceCompositionConfigStore: inert(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     bridgeAgentChecklistStore: inert(['saveVersion', 'approve', 'retire', 'getForApply']),
   }
+  // Use the real refresh stores/reader over synthetic memory IO and this suite's write lock.
+  const refreshGovernanceEnv = wireRefreshGovernance(services)
+  if (governanceMissing) {
+    delete services.stockPreparationRefreshGovernance
+    delete services.stockPreparationContinuationStore
+  }
   if (storeMissing) delete services.stockPreparationReadPlanStore
   const records = []
   const storage = consumableMap()
@@ -261,7 +271,7 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
     await handler({ user: USER, ...(claimed ? { authenticatedTenantId: TENANT } : {}), body, params: { actionId: ACTION, ...params }, query }, response)
     return response
   }
-  return { call, calls, ledger, state, version, action, storage, services, projectTargets, projectSheetId, projectObjectId }
+  return { call, calls, ledger, state, version, action, storage, services, projectTargets, projectSheetId, projectObjectId, refreshGovernanceEnv }
 }
 
 // Synthetic receipt overlay. The real pair stays approved; only the returned binding nonce changes.
@@ -313,6 +323,34 @@ test('real ledger -> HTTP dry-run -> token -> apply uses approved synthetic plan
   const applied = await f.call(`${BASE}/apply`, { body: { parameters: PARAMS, confirm: { dryRunToken: dry.body.data.dryRunToken } } })
   assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
   assert.equal(f.calls.write.length, 1)
+})
+
+test('refresh governance is required with online read plans ON and OFF before source, target or token IO', async () => {
+  for (const value of ['true', undefined]) {
+    const register = loadRoutes(undefined, {}, { [ONLINE_READ_PLANS_ENABLED_ENV]: value }).registerIntegrationRoutes
+    const options = { register, deployReadPlan: config().readPlan }
+    // The same declared read shape reaches the real planner in both switch states.
+    const control = await mount(options)
+    const accepted = await control.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+    assert.equal(accepted.statusCode, 200, `${String(value)} control: ${JSON.stringify(accepted.body)}`)
+    assert.ok(accepted.body.data.dryRunToken)
+    assert.equal(control.calls.read[0].object, 'SYN_PathLink')
+    assert.equal(control.refreshGovernanceEnv.stepFourRowCount(), 0, 'a not-governed preview does not persist governance rows')
+    const absent = await mount({ ...options, governanceMissing: true })
+    const storageBefore = clone([...absent.storage])
+    for (const route of [`${BASE}/dry-run`]) {
+      const refused = await absent.call(route, { body: { parameters: PARAMS } })
+      assert.equal(refused.statusCode, 501, `${String(value)} ${route}: ${JSON.stringify(refused.body)}`)
+      assert.equal(refused.body.error.code, 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE')
+      assert.equal(refused.body.error.details.reason, 'governance_service')
+      assert.equal(absent.calls.read.length, 0)
+      assert.equal(absent.calls.targetRead.length, 0)
+      assert.equal(absent.calls.write.length, 0)
+      assert.deepEqual([...absent.storage], storageBefore, 'no token is minted without governance')
+      assert.equal(absent.refreshGovernanceEnv.stepFourRowCount(), 0)
+    }
+    if (value === undefined) assert.deepEqual(absent.calls.ledger, [], 'OFF still skips the online ledger')
+  }
 })
 
 test('active online plan refuses deploy-only projectSubtree/batchIdentity before adapter, reads and token writes', async () => {
@@ -617,7 +655,7 @@ test('only absent pointer keeps legacy shape and exact binding scope never adopt
   const registry = createStockPreparationTableActionRegistry({ actions: [f.action], resolveSourceBinding: async () => ({ externalSystemId: SYSTEM, matchedWorkspaceId: null }) })
   const resolved = await registry.getTableActionForExecution({ tenantId: TENANT, workspaceId: 'request-selector' })
   assert.equal(resolved.bindingScope.workspaceId, null)
-  const legacy = await resolveStockPreparationReadPlanExecution({ resolved, store: f.ledger, verifyTenant() { throw new Error('legacy does not demand a new claim') } })
+  const legacy = await resolveStockPreparationReadPlanExecution({ resolved, store: f.ledger, onlineReadPlansEnabled: true, verifyTenant() { throw new Error('legacy does not demand a new claim') } })
   assert.deepEqual(legacy.action, await registry.getTableAction({ tenantId: TENANT }))
   assert.equal(Object.hasOwn(legacy.action, 'readPlanExecutionIdentity'), false)
 })
@@ -848,6 +886,200 @@ const AMBIGUOUS = 'READ_PLAN_PROJECT_IDENTITY_AMBIGUOUS'
 const UNAVAILABLE = 'READ_PLAN_PROJECT_IDENTITY_UNAVAILABLE'
 const TARGET_REQUIRED = 'READ_PLAN_PROJECT_TARGET_REQUIRED'
 
+// Registration metadata is not execution authority. The real ledger below hashes and normalizes
+// each saved config; only its in-memory status/pointer rows are fixtures. No source-validation
+// receipt is minted, and the execution getter must never be called by this metadata helper.
+async function registrationMetadataFixture(options = {}) {
+  const { bindingScopes = [null, 'workspace-synthetic'], activeScope, deploymentWorkspace = null } = options
+  const deploymentComparison = Object.hasOwn(options, 'deploymentComparison') ? options.deploymentComparison : 'case-sensitive'
+  const activeComparison = Object.hasOwn(options, 'activeComparison') ? options.activeComparison : 'case-insensitive'
+  const { db, state } = memoryDb()
+  state[BINDING_TABLE] = bindingScopes.map((workspaceId) => ({ tenant_id: TENANT, workspace_id: workspaceId,
+    action_id: ACTION, external_system_id: SYSTEM }))
+  let sequence = 0
+  const ledger = createStockPreparationReadPlanStore({ db, idGenerator: () => `synthetic-registration-${++sequence}` })
+  if (activeScope !== undefined) {
+    const plan = config(activeComparison === undefined ? {} : { sourceProjectComparison: activeComparison })
+    const saved = await ledger.saveVersion({ tenantId: TENANT, workspaceId: activeScope, actor: USER.id, config: plan })
+    state[VERSION_TABLE].find((row) => row.id === saved.id).status = 'approved'
+    state[ACTIVATION_TABLE].push({ id: 'synthetic-registration-pointer', tenant_id: TENANT, workspace_id: activeScope,
+      action_id: ACTION, system_id: SYSTEM, version_id: saved.id, content_key: saved.contentKey, generation: 1, status: 'active' })
+  }
+  const bindings = createStockPreparationSourceBindingStore({ db })
+  const calls = { activation: [], version: [], bindings: [], execution: 0 }
+  const bindingStore = {
+    ...bindings,
+    async listForAction(input) { calls.bindings.push(clone(input)); return bindings.listForAction(input) },
+  }
+  const readPlanStore = {
+    async getActivation(input) { calls.activation.push(clone(input)); return ledger.getActivation(input) },
+    async getForRuntime(input) { calls.version.push(clone(input)); return ledger.getForRuntime(input) },
+    async getActiveForRuntime() { calls.execution += 1; throw new Error('metadata cannot borrow execution validation') },
+  }
+  const deploymentPlan = config(deploymentComparison === undefined ? {} : { sourceProjectComparison: deploymentComparison }).readPlan
+  const registry = createStockPreparationTableActionRegistry({ actions: [{ actionId: ACTION,
+    source: { externalSystemId: SYSTEM, kind: 'data-source:sql-readonly', workspaceId: deploymentWorkspace, readPlan: deploymentPlan },
+    target: { sheetId: 'synthetic-registration-target', objectId: 'syntheticRegistrationTarget', fieldIdMap: {} },
+  }] })
+  const deploymentAction = await registry.getTableAction({ tenantId: TENANT, actionId: ACTION, targetPurpose: 'readiness' })
+  return { state, ledger, db, bindingStore, readPlanStore, deploymentAction, calls }
+}
+
+function registrationMetadata(fixture, overrides = {}) {
+  assert.equal(typeof registrationMetadataRuntime.resolveStockPreparationProjectRegistrationComparison, 'function', 'registration uses a dedicated metadata export')
+  return registrationMetadataRuntime.resolveStockPreparationProjectRegistrationComparison({ tenantId: TENANT, actionId: ACTION,
+    deploymentAction: fixture.deploymentAction, bindingStore: fixture.bindingStore, readPlanStore: fixture.readPlanStore, onlineReadPlansEnabled: true, ...overrides })
+}
+const registrationMetadataUnavailable = (error) => error && error.status === 503
+  && error.code === 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE' && !/synthetic-private/.test(error.message)
+
+test('registration metadata: deployment CI is strict even without ledger capability; CS/default no-pointer stays legacy', async () => {
+  const strict = await registrationMetadataFixture({ deploymentComparison: 'case-insensitive' })
+  assert.equal(await registrationMetadata(strict, { readPlanStore: undefined, bindingStore: { async listForAction() { throw new Error('must not weaken deployment CI') } } }), 'case-insensitive')
+  assert.equal(strict.calls.execution, 0)
+  for (const deploymentComparison of [undefined, 'case-sensitive']) {
+    const f = await registrationMetadataFixture({ deploymentComparison })
+    const result = await registrationMetadata(f)
+    assert.ok(result === undefined || result === 'case-sensitive', 'legacy modes do not gain a CI registration constraint')
+    assert.equal(f.calls.execution, 0)
+    assert.deepEqual(f.calls.activation[0], { tenantId: TENANT, workspaceId: null, actionId: ACTION }, 'first proof always probes the tenant-null pointer')
+    const absentBinding = await registrationMetadataFixture({ deploymentComparison })
+    assert.ok([undefined, 'case-sensitive'].includes(await registrationMetadata(absentBinding, { bindingStore: undefined })), 'absence of binding capability does not imply unreadable bindings')
+  }
+})
+
+test('registration metadata: real ledger and bindings find CI in null, bound and deployment workspaces without source validation', async () => {
+  for (const activeScope of [null, 'workspace-synthetic', 'deployment-workspace']) {
+    const f = await registrationMetadataFixture({ activeScope,
+      ...(activeScope === 'deployment-workspace' ? { deploymentWorkspace: activeScope } : {}) })
+    assert.equal(await registrationMetadata(f), 'case-insensitive')
+    assert.equal(f.calls.execution, 0)
+    assert.ok(f.calls.version.some((input) => input.workspaceId === activeScope), 'approved metadata was read in the exact pointer scope')
+    assert.ok(f.calls.bindings.length >= 2, 'the complete real binding list is re-read before deciding')
+    assert.ok(f.calls.activation.filter((input) => input.workspaceId === activeScope).length >= 2, 'the pointer is re-read before deciding')
+    assert.equal(f.state[VALIDATION_TABLE].length, 0, 'metadata is usable without a source-validation receipt')
+  }
+})
+
+test('registration metadata: malformed, truncated, duplicate or foreign bindings fail closed', async () => {
+  const binding = (extra = {}) => ({ tenantId: TENANT, actionId: ACTION, workspaceId: 'workspace-synthetic', externalSystemId: SYSTEM, ...extra })
+  const cases = [
+    null, {}, { complete: false, bindings: [] }, { complete: true, bindings: {} },
+    { complete: true, bindings: Array.from({ length: 65 }, (_, index) => binding({ workspaceId: `workspace-${index}` })) },
+    { complete: true, bindings: [binding(), binding()] },
+    ...[{ tenantId: 'foreign' }, { actionId: 'foreign' }, { workspaceId: ' bad ' }, { workspaceId: '' },
+      { externalSystemId: '' }, { externalSystemId: ' bad ' }].map((extra) => ({ complete: true, bindings: [binding(extra)] })),
+  ]
+  for (const result of cases) {
+    const f = await registrationMetadataFixture()
+    await assert.rejects(registrationMetadata(f, { bindingStore: { async listForAction() { return result } } }), registrationMetadataUnavailable)
+  }
+  const f = await registrationMetadataFixture()
+  await assert.rejects(registrationMetadata(f, { bindingStore: {} }), registrationMetadataUnavailable)
+  await assert.rejects(registrationMetadata(f, { bindingStore: { async listForAction() { throw new Error('synthetic-private-binding') } } }), registrationMetadataUnavailable)
+  const complete = await registrationMetadataFixture({ bindingScopes: Array.from({ length: 64 }, (_, index) => `workspace-${index}`) })
+  assert.equal(await registrationMetadata(complete), 'case-sensitive', 'exactly 64 complete real bindings fit the supported bound')
+  for (const workspaceId of ['', ' bad ', 7]) {
+    const invalid = await registrationMetadataFixture()
+    invalid.deploymentAction.source.workspaceId = workspaceId
+    await assert.rejects(registrationMetadata(invalid), registrationMetadataUnavailable)
+    assert.equal(invalid.calls.activation.length, 0, 'an invalid deployment scope fails before ledger IO')
+  }
+})
+
+test('registration metadata: active pointer and approved content must agree in every identity field', async () => {
+  const mutations = [
+    ['pointer missing id', 'activation', (value) => ({ ...value, id: undefined })],
+    ['pointer noncanonical id', 'activation', (value) => ({ ...value, id: ' bad ' })],
+    ['pointer invalid hash', 'activation', (value) => ({ ...value, contentKey: 'not-a-content-key' })],
+    ['pointer invalid status', 'activation', (value) => ({ ...value, status: 'unknown' })],
+    ['pointer invalid generation', 'activation', (value) => ({ ...value, generation: 0 })],
+    ['pointer tenant', 'activation', (value) => ({ ...value, tenantId: 'foreign' })],
+    ['pointer workspace', 'activation', (value) => ({ ...value, workspaceId: 'foreign' })],
+    ['pointer action', 'activation', (value) => ({ ...value, actionId: 'foreign' })],
+    ['pointer version', 'activation', (value) => ({ ...value, versionId: 'foreign' })],
+    ['pointer system', 'activation', (value) => ({ ...value, systemId: 'foreign' })],
+    ['pointer content', 'activation', (value) => ({ ...value, contentKey: '0'.repeat(64) })],
+    ['version tenant', 'version', (value) => ({ ...value, tenantId: 'foreign' })],
+    ['version workspace', 'version', (value) => ({ ...value, workspaceId: 'foreign' })],
+    ['version action', 'version', (value) => ({ ...value, actionId: 'foreign' })],
+    ['version system', 'version', (value) => ({ ...value, systemId: 'foreign' })],
+    ['version id', 'version', (value) => ({ ...value, id: 'foreign' })],
+    ['version content', 'version', (value) => ({ ...value, contentKey: '0'.repeat(64) })],
+    ['version approval', 'version', (value) => ({ ...value, status: 'draft' })],
+    ['stored version config hash', 'stored-version', (value) => ({ ...value, config: { ...value.config, readPlan: { ...value.config.readPlan, maxReadCount: 101 } } })],
+    ['stored version content key', 'stored-version', (value) => ({ ...value, content_key: '0'.repeat(64) })],
+  ]
+  for (const [label, kind, mutate] of mutations) {
+    const f = await registrationMetadataFixture({ activeScope: null })
+    if (kind === 'stored-version') {
+      // Content integrity belongs to the real ledger's checkedRow contract. Mutate persisted
+      // data before getForRuntime validates it, rather than inventing a dishonest producer.
+      Object.assign(f.state[VERSION_TABLE][0], mutate(f.state[VERSION_TABLE][0]))
+      await assert.rejects(registrationMetadata(f), registrationMetadataUnavailable, label)
+      continue
+    }
+    const readPlanStore = { ...f.readPlanStore }
+    const method = kind === 'activation' ? 'getActivation' : 'getForRuntime'
+    readPlanStore[method] = async (input) => {
+      const value = await f.readPlanStore[method](input)
+      return value ? mutate(value) : value
+    }
+    await assert.rejects(registrationMetadata(f, { readPlanStore }), registrationMetadataUnavailable, label)
+    assert.equal(f.calls.execution, 0)
+  }
+})
+
+test('registration metadata: changed pointers or binding lists cannot authorize a stale registration decision', async () => {
+  const f = await registrationMetadataFixture({ activeScope: null })
+  let reads = 0
+  const movingPointer = { ...f.readPlanStore, async getActivation(input) {
+    const value = await f.readPlanStore.getActivation(input)
+    if (input.workspaceId === null && ++reads > 1) return { ...value, generation: value.generation + 1 }
+    return value
+  } }
+  await assert.rejects(registrationMetadata(f, { readPlanStore: movingPointer }), registrationMetadataUnavailable)
+  const replaced = await registrationMetadataFixture({ activeScope: null })
+  let ids = 0
+  await assert.rejects(registrationMetadata(replaced, { readPlanStore: { ...replaced.readPlanStore, async getActivation(input) {
+    const value = await replaced.readPlanStore.getActivation(input)
+    if (input.workspaceId === null && ++ids > 1) return { ...value, id: 'synthetic-replaced-pointer' }
+    return value
+  } } }), registrationMetadataUnavailable, 'a replaced pointer is a change even when its content stays the same')
+  const other = await registrationMetadataFixture({ activeScope: 'workspace-synthetic' })
+  let lists = 0
+  const movingBindings = { ...other.bindingStore, async listForAction(input) {
+    const value = await other.bindingStore.listForAction(input)
+    if (++lists > 1) return { ...value, bindings: value.bindings.filter((row) => row.workspaceId === null) }
+    return value
+  } }
+  await assert.rejects(registrationMetadata(other, { bindingStore: movingBindings }), registrationMetadataUnavailable)
+})
+
+test('registration metadata: only the first null activation exact 42P01 proves a pre-ledger deployment', async () => {
+  const missing = () => Object.assign(new Error('synthetic-private-missing-table'), { code: '42P01' })
+  const first = await registrationMetadataFixture()
+  let initialReads = 0
+  const legacy = await registrationMetadata(first, { readPlanStore: {
+    async getActivation(input) { initialReads += 1; assert.equal(input.workspaceId, null); throw missing() },
+    async getForRuntime() { throw new Error('must not read versions after first table-absent proof') },
+  }, bindingStore: { async listForAction() { throw new Error('must not list after first table-absent proof') } } })
+  assert.ok(legacy === undefined || legacy === 'case-sensitive')
+  assert.equal(initialReads, 1)
+  for (const readPlanStore of [undefined, {}, { async getActivation() { throw new Error('synthetic-private-driver') } },
+    { async getActivation() { throw Object.assign(new Error('synthetic-private-other'), { code: '42P01-extra' }) } }]) {
+    await assert.rejects(registrationMetadata(await registrationMetadataFixture(), { readPlanStore }), registrationMetadataUnavailable)
+  }
+  const later = await registrationMetadataFixture()
+  await assert.rejects(registrationMetadata(later, { readPlanStore: { ...later.readPlanStore, async getActivation(input) {
+    if (input.workspaceId !== null) throw missing()
+    return null
+  } } }), registrationMetadataUnavailable, 'a later workspace activation table error is unavailable, not legacy')
+  const versions = await registrationMetadataFixture({ activeScope: null })
+  await assert.rejects(registrationMetadata(versions, { readPlanStore: { ...versions.readPlanStore, async getForRuntime() { throw missing() } } }), registrationMetadataUnavailable, 'missing versions never imply absent activation table')
+  await assert.rejects(registrationMetadata(await registrationMetadataFixture(), { bindingStore: { async listForAction() { throw missing() } } }), registrationMetadataUnavailable)
+})
+
 function loadRuntimeCopy(transform) {
   const filename = require.resolve('../lib/stock-preparation-read-plan-runtime.cjs')
   const copy = new Module(filename, module)
@@ -941,7 +1173,7 @@ function unitResolved(comparison, projectNo = 'Abc') {
 }
 const noPointer = { async getActiveForRuntime() { return null } }
 const unitRun = (extra = {}) => resolveStockPreparationReadPlanExecution({
-  resolved: unitResolved('case-insensitive'), store: noPointer, verifyTenant: () => TENANT, projectNo: 'Abc', ...extra,
+  resolved: unitResolved('case-insensitive'), store: noPointer, verifyTenant: () => TENANT, projectNo: 'Abc', onlineReadPlansEnabled: true, ...extra,
 })
 const refusal = (status, code) => ({ status, code, message: code })
 
@@ -949,12 +1181,12 @@ test('runtime: absent/case-sensitive modes and the server-internal exemption mak
   const claim = () => { throw new Error('no new tenant claim is demanded here') }
   for (const comparison of [undefined, 'case-sensitive']) {
     const registry = fakeRegistry([targetRow()])
-    const result = await resolveStockPreparationReadPlanExecution({ resolved: unitResolved(comparison), store: noPointer, verifyTenant: claim, projectTargetStore: registry })
+    const result = await resolveStockPreparationReadPlanExecution({ resolved: unitResolved(comparison), store: noPointer, verifyTenant: claim, projectTargetStore: registry, onlineReadPlansEnabled: true })
     assert.equal(result.action.source.externalSystemId, SYSTEM)
     assert.deepEqual(registry.calls, [], String(comparison))
   }
   const registry = fakeRegistry([targetRow()])
-  await resolveStockPreparationReadPlanExecution({ resolved: unitResolved('case-insensitive'), store: noPointer, verifyTenant: claim, projectTargetStore: registry, projectIdentityRequired: false })
+  await resolveStockPreparationReadPlanExecution({ resolved: unitResolved('case-insensitive'), store: noPointer, verifyTenant: claim, projectTargetStore: registry, projectIdentityRequired: false, onlineReadPlansEnabled: true })
   assert.deepEqual(registry.calls, [])
 })
 
@@ -1249,4 +1481,131 @@ test('registry-guard omission mutants are rejected by the real duplicate-registr
       await assert.rejects(() => oracle(mutated), { name: 'AssertionError' })
     })
   }
+})
+
+// ── Online read plans switched OFF (stock-preparation-read-plan-switch.cjs) ────────────────────────────────────────
+// Off is the default: no activation pointer is read anywhere, the deployment action executes, and an in-flight
+// request still carrying a read-plan execution identity is refused.
+test('switch OFF: the real dry-run route reads no activation pointer and never executes the online plan', async () => {
+  for (const value of [undefined, 'false', 'TRUE', ' true']) {
+    const off = loadRoutes(undefined, {}, { [ONLINE_READ_PLANS_ENABLED_ENV]: value })
+    const f = await mount({ register: off.registerIntegrationRoutes })
+    assert.ok(f.version, 'an approved online plan IS active in the ledger')
+    await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+    assert.deepEqual(f.calls.ledger, [], `${String(value)}: no activation pointer is read`)
+    assert.ok(f.calls.read.every((read) => !String(read.object).startsWith('SYN_')), `${String(value)}: the online plan's objects are never read`)
+  }
+})
+
+test('switch OFF: the runtime resolver skips the store, keeps the deployment action, and refuses an in-flight read-plan identity', async () => {
+  const touched = []
+  const throwing = { async getActiveForRuntime(input) { touched.push(input); throw new Error('synthetic-private-store') } }
+  const result = await resolveStockPreparationReadPlanExecution({ resolved: unitResolved(undefined), store: throwing, verifyTenant: () => TENANT })
+  assert.equal(result.action.source.externalSystemId, SYSTEM)
+  assert.equal(result.sourceValidation, null)
+  for (const flag of [undefined, false, 'true', 1]) {
+    await resolveStockPreparationReadPlanExecution({ resolved: unitResolved(undefined), store: throwing, verifyTenant: () => TENANT, onlineReadPlansEnabled: flag })
+  }
+  assert.deepEqual(touched, [], 'only literal true reads the store')
+  const resolved = unitResolved(undefined)
+  const snapshotAction = { ...resolved.action, readPlanExecutionIdentity: { generation: 1 } }
+  await assert.rejects(resolveStockPreparationReadPlanExecution({ resolved, store: throwing, snapshotAction, verifyTenant: () => TENANT }),
+    { status: 409, code: 'READ_PLAN_ACTIVATION_MISSING' })
+  assert.deepEqual(touched, [])
+})
+
+test('switch OFF: the registration comparison is the deployment answer and reads no online scope', async () => {
+  // An online case-insensitive plan IS active at the tenant-null scope; the deployment says case-sensitive.
+  const fixture = await registrationMetadataFixture({ activeScope: null })
+  const on = await registrationMetadata(fixture)
+  assert.equal(on, 'case-insensitive', 'control: with the switch on the online plan tightens the deployment')
+  fixture.calls.activation.length = 0
+  fixture.calls.version.length = 0
+  fixture.calls.bindings.length = 0
+  for (const flag of [undefined, false, 'true']) {
+    const off = await registrationMetadata(fixture, { onlineReadPlansEnabled: flag })
+    assert.equal(off, 'case-sensitive', `${String(flag)}: the deployment's answer`)
+  }
+  assert.deepEqual([fixture.calls.activation, fixture.calls.version, fixture.calls.bindings], [[], [], []], 'no pointer, version or binding read')
+  const failing = { async getActivation() { throw new Error('synthetic-private-ledger') }, async getForRuntime() { throw new Error('synthetic-private-ledger') } }
+  assert.equal(await registrationMetadata(fixture, { readPlanStore: failing, onlineReadPlansEnabled: false }), 'case-sensitive', 'a failing ledger cannot refuse it')
+})
+
+test('switch OFF: unconfigured source-preflight skips the activation probe; ON the same active plan refuses READ_PLAN_ACTION_REQUIRED', async () => {
+  for (const [value, expected] of [['true', 409], [undefined, 200], ['false', 200]]) {
+    const loaded = loadRoutes(undefined, {}, { [ONLINE_READ_PLANS_ENABLED_ENV]: value })
+    const register = (args) => {
+      args.context.config.stockPreparationTableActions = []
+      loaded.registerIntegrationRoutes(args)
+    }
+    const f = await mount({ register })
+    const result = await f.call(PREFLIGHT, { method: 'GET', query: { externalSystemId: SYSTEM } })
+    assert.equal(result.statusCode, expected, `${String(value)}: ${JSON.stringify(result.body)}`)
+    if (expected === 409) {
+      assert.equal(result.body.error.code, 'READ_PLAN_ACTION_REQUIRED')
+      assert.equal(f.calls.ledger.length, 1)
+      assert.equal(f.calls.read.length, 0)
+    } else {
+      assert.deepEqual(f.calls.ledger, [], `${String(value)}: no activation pointer is read`)
+      assert.ok(f.calls.read.length > 0, 'the deployment source is measured as before')
+    }
+  }
+})
+
+// The route module reads the switch per call; this loader hands it a live env object instead of a frozen literal.
+function loadRoutesWithLiveEnv(env) {
+  const routeModule = new Module(routePath, module)
+  routeModule.filename = routePath
+  routeModule.paths = Module._nodeModulePaths(path.dirname(routePath))
+  routeModule.liveEnv = env
+  routeModule._compile(`const process = { env: module.liveEnv };\n${routeSource}`, routePath)
+  return routeModule.exports
+}
+const liveSwitchEnv = () => ({ MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED: 'true', [ONLINE_READ_PLANS_ENABLED_ENV]: 'true' })
+const ioCounts = (f) => ({ ledger: f.calls.ledger.length, adapter: f.calls.adapter.length, created: f.calls.created.length,
+  read: f.calls.read.length, targetRead: f.calls.targetRead.length, write: f.calls.write.length })
+
+test('switch flips at run time (dry-run token): an ON token is refused under OFF before IO and unconsumed; ON again the still-active plan applies it', async () => {
+  const env = liveSwitchEnv()
+  const f = await mount({ register: loadRoutesWithLiveEnv(env).registerIntegrationRoutes })
+  const dry = await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+  assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+  const token = dry.body.data.dryRunToken
+  assert.ok(token)
+  assert.equal(f.calls.read[0].object, 'SYN_PathLink', 'ON: the online plan executes')
+
+  delete env[ONLINE_READ_PLANS_ENABLED_ENV]
+  const before = ioCounts(f)
+  const storageBefore = clone([...f.storage])
+  const refused = await f.call(`${BASE}/apply`, { body: { parameters: PARAMS, confirm: { dryRunToken: token } } })
+  assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+  // The token is bound to the plan-composed action; OFF recomposes the deployment action, so the binding no longer matches.
+  assert.equal(refused.body.error.code, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH')
+  assert.deepEqual(ioCounts(f), before, 'OFF: no pointer read, no adapter, no source or target read, no write')
+  assert.deepEqual([...f.storage], storageBefore, 'OFF: the token is not consumed')
+  await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+  assert.equal(f.calls.ledger.length, before.ledger, 'OFF: a fresh dry-run reads no pointer either')
+  assert.ok(f.calls.read.slice(before.read).every((read) => !String(read.object).startsWith('SYN_')), 'OFF: the online plan is not executed')
+
+  env[ONLINE_READ_PLANS_ENABLED_ENV] = 'true'
+  const resumed = await f.call(`${BASE}/apply`, { body: { parameters: PARAMS, confirm: { dryRunToken: token } } })
+  assert.equal(resumed.statusCode, 200, `ON again: the pointer was never deleted, so the original token applies: ${JSON.stringify(resumed.body)}`)
+  assert.ok(f.calls.ledger.length > before.ledger, 'ON again: the pointer is read')
+  assert.equal(f.calls.write.length, before.write + 1)
+})
+
+test('switch flips at run time (large-BOM job): every stored stage minted under ON is refused READ_PLAN_ACTIVATION_MISSING under OFF before IO', async () => {
+  const env = liveSwitchEnv()
+  const f = await mount({ register: loadRoutesWithLiveEnv(env).registerIntegrationRoutes })
+  const params = await expanded(f)
+  delete env[ONLINE_READ_PLANS_ENABLED_ENV]
+  const before = ioCounts(f)
+  const storageBefore = clone([...f.storage])
+  for (const suffix of ['/run', '/plan', '/apply-jobs', '/apply-jobs/:applyJobId/run']) {
+    const result = await f.call(`${JOBS}/:jobId${suffix}`, { params })
+    assert.equal(result.statusCode, 409, `${suffix}: ${JSON.stringify(result.body)}`)
+    assert.equal(result.body.error.code, 'READ_PLAN_ACTIVATION_MISSING', suffix)
+  }
+  assert.deepEqual(ioCounts(f), before, 'OFF: no pointer read, no adapter, no source or target read, no write')
+  assert.deepEqual([...f.storage], storageBefore, 'OFF: stored jobs are unchanged')
 })

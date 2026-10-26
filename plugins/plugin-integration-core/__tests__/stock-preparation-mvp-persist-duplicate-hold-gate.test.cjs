@@ -62,6 +62,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //      (the dry-run falls back to the deploy-time default: 422 TABLE_ACTION_SOURCE_INVALID)
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -340,10 +341,10 @@ function mount() {
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: services(
+    services: withRefreshGovernance(services(
       createSourceAdapter(duplicateSourceData()),
       createStockPreparationSourceBindingStore({ db: createBindingDb() }),
-    ),
+    )),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, records, lastApplyDigest: null }

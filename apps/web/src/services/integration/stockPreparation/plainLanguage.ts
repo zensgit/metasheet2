@@ -842,8 +842,8 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
   }),
   // 一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008 §4; S2, register R-36). The refusals
   // the project-sheet routes and the per-project resolution can answer. Each one names who acts next;
-  // none of them is cleared by pressing again, so none of them says 「稍后再试」. Values-free: no
-  // project number, no sheet id.
+  // Values-free: no project number, no sheet id. BUSY alone can clear after another create ends;
+  // identity and deployment refusals need the action named in their next line.
   STOCK_PREPARATION_PROJECT_SHEETS_DISABLED: Object.freeze({
     zh: '这套系统还没有开启「一个项目一张备料表」,所以这里没有每个项目自己的备料表。',
     en: 'This system has not switched on "one stock-preparation sheet per project", so there is no per-project sheet here.',
@@ -876,6 +876,36 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     en: 'This project’s stock-preparation sheet was created a moment ago (perhaps by a colleague at the same time).',
     zhNext: '不用再建,直接打开或拉取即可;不会出现两张表。',
     enNext: 'No need to create it again — open it or pull into it. There will never be two sheets.',
+  }),
+  STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT: Object.freeze({
+    zh: '这个项目号的大小写与已登记的项目号冲突,这次没有拉取。',
+    en: 'The letter case of this project number conflicts with a registered project number, so this pull did not run.',
+    zhNext: '请使用原已登记项目号的大小写;不确定时请平台管理员核对登记,不要反复新建。',
+    enNext: 'Use the original registered spelling and letter case. If unsure, ask a platform administrator to check the registration; do not keep creating it.',
+  }),
+  STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE: Object.freeze({
+    zh: '系统暂时无法核对项目号的登记身份,为保护项目数据,这次没有拉取。',
+    en: 'The system cannot verify the registered project identity, so this pull did not run, to protect project data.',
+    zhNext: '请平台管理员核对项目登记和数据库支持,确认后再拉取。',
+    enNext: 'Ask a platform administrator to check project registration and database support before pulling again.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_BUSY: Object.freeze({
+    zh: '系统正在处理另一次项目建表,还不能确认这个项目的备料表可用,这次没有拉取。',
+    en: 'Another project sheet creation is running, and this project’s sheet could not be confirmed ready, so this pull did not run.',
+    zhNext: '等建表操作结束后再点「从PLM拉取数据」;系统会重新核对这个项目,不会自动拉取或发送。',
+    enNext: 'Wait for sheet creation to finish, then press 从PLM拉取数据 again. The system will check this project again; it will not automatically pull or send.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_PREPARE_INVALID: Object.freeze({
+    zh: '新建项目表没有返回可用的表标识,这次没有登记项目表,也没有拉取。',
+    en: 'Sheet creation did not return a usable sheet identifier, so no project sheet was registered and this pull did not run.',
+    zhNext: '请平台管理员核对建表结果和客户包,确认后再操作。',
+    enNext: 'Ask a platform administrator to check the created sheet and customer package before continuing.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '系统无法取得项目建表所需的锁,为避免重复建表,这次没有拉取。',
+    en: 'The system cannot obtain the lock required to create a project sheet, so this pull did not run, to avoid duplicate sheets.',
+    zhNext: '请平台管理员检查数据库锁支持和连接,确认后再操作。',
+    enNext: 'Ask a platform administrator to check database lock support and the connection before continuing.',
   }),
   // S4 (ADR §6, register R-38): the archive / restore refusals. A transition whose starting state no
   // longer holds (a colleague got there first) and a typed confirmation that does not match — none of

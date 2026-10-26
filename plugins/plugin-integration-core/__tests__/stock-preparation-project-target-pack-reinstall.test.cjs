@@ -135,7 +135,7 @@ function mount(options = {}) {
     ...options,
     serviceExtras: {
       // Synthetic no-pointer scope; keep the production fail-closed runtime requirement.
-      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
+      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null }, async getActivation() { return null } },
       ...options.serviceExtras,
     },
   })

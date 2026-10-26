@@ -126,7 +126,7 @@ function memoryDb(bound = bindSource()) {
     },
   }
 }
-function harness(factory = createStockPreparationReadPlanStore, { deployment } = {}) {
+function harness(factory = createStockPreparationReadPlanStore, { deployment, enabled = () => true } = {}) {
   const bound = bindSource()
   const db = memoryDb(bound)
   let sequence = 0
@@ -159,7 +159,7 @@ function harness(factory = createStockPreparationReadPlanStore, { deployment } =
     requestBody: (req) => req.body || {}, requestQuery: (req) => req.query || {}, requestParams: (req) => req.params || {},
     sendOk: (res, data, status = 200) => res.status(status).json({ ok: true, data }), HttpRouteError,
   }
-  const handlers = createStockPreparationReadPlanManagementHandlers({ management, helpers, readSample: async () => {
+  const handlers = createStockPreparationReadPlanManagementHandlers({ management, helpers, enabled, readSample: async () => {
     sourceReads.push('source-read')
     throw new Error('metadata operation performed source IO')
   } })
@@ -559,7 +559,7 @@ test('stale, missing, string and concurrent generations cannot move an activatio
 test('missing metadata boundary fails closed without ledger access', async () => {
   const h = harness()
   const management = createStockPreparationReadPlanManagement({ store: h.store, externalSystemRegistry: {} })
-  const handlers = createStockPreparationReadPlanManagementHandlers({ management, helpers: h.helpers })
+  const handlers = createStockPreparationReadPlanManagementHandlers({ management, helpers: h.helpers, enabled: () => true })
   await rejectsCode(handlers.stockPreparationReadPlanConfigsList({ user: { id: 'synthetic-owner', permissions: ['integration:admin'] },
     authenticatedTenantId: SCOPE.tenantId, query: { managementScope: 'tenant', systemId: 'synthetic-source' } }, {}), 'READ_PLAN_MANAGEMENT_UNAVAILABLE', 501)
   assert.deepEqual(h.db.trace, [])
@@ -600,6 +600,30 @@ test('activation refuses deploy-only projectSubtree and batchIdentity before poi
     assert.equal(h.db.trace.some((event) => /^(insert|update):/.test(event)), false)
     assert.deepEqual(h.db.state[ACTIVATION_TABLE], [])
     assert.equal(h.sourceReads.length, 0)
+  }
+})
+
+test('a case-insensitive activation refused by the project registry surfaces its typed code through the real handler', async () => {
+  for (const [groups, status, code] of [
+    [1, 409, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT'],
+    ['throw', 503, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE'],
+  ]) {
+    const calls = []
+    // Only the registry check is replaced; the real ledger, management and handler run around it.
+    const factory = (options) => createStockPreparationReadPlanStore({ ...options, async countRegistryCaseFoldedGroups(_trx, tenantId) {
+      calls.push(tenantId)
+      if (groups === 'throw') throw new Error('synthetic-private-registry')
+      return groups
+    } })
+    const h = harness(factory)
+    const document = config()
+    document.readPlan.sourceProjectComparison = 'case-insensitive'
+    const draft = await h.call('Save', { body: { managementScope: 'tenant', config: document } })
+    await seedConfirmedStatusFixture(h.store, h.db, { id: draft.id, connectionId: 'synthetic-connection' })
+    await h.mutate('Approve', draft.id)
+    await rejectsCode(h.mutate('Activate', draft.id, undefined, { expectedGeneration: 0 }), code, status)
+    assert.deepEqual(calls, [SCOPE.tenantId], `${code}: the registry is checked once, for the verified tenant`)
+    assert.deepEqual(h.db.state[ACTIVATION_TABLE], [], `${code}: no pointer`)
   }
 })
 
@@ -652,4 +676,45 @@ test('activation checks identity, ownership, version and generation before deplo
   await rejectsCode(h.mutate('Activate', draft.id, undefined, { expectedGeneration: 1 }), 'READ_PLAN_GENERATION_CONFLICT', 409)
   assert.deepEqual(h.deploymentCalls, [])
   assert.deepEqual(h.db.state[ACTIVATION_TABLE], [])
+})
+
+// ── Online read plans switched OFF (stock-preparation-read-plan-switch.cjs) ────────────────────────────────────────
+test('switch OFF: all eight management routes answer 404 READ_PLAN_MANAGEMENT_DISABLED after the admin gate, with zero IO', async () => {
+  for (const value of [false, undefined, 'true', 1]) {
+    const h = harness()
+    const managementCalls = []
+    const spy = Object.fromEntries(['list', 'save', 'validate', 'confirmSample', 'approve', 'retire', 'activate', 'deactivate']
+      .map((method) => [method, async () => { managementCalls.push(method); throw new Error('synthetic management must not run') }]))
+    const handlers = createStockPreparationReadPlanManagementHandlers({ management: spy, helpers: h.helpers, enabled: () => value,
+      readSample: async () => { managementCalls.push('readSample') } })
+    h.db.trace.length = 0
+    const handlerNames = Object.keys(handlers)
+    assert.equal(handlerNames.length, 8)
+    for (const name of handlerNames) {
+      const req = { user: { id: 'synthetic-owner', tenantId: SCOPE.tenantId, permissions: ['integration:admin'] },
+        authenticatedTenantId: SCOPE.tenantId, headers: {}, params: { id: 'synthetic-id' },
+        body: { managementScope: 'tenant', systemId: 'synthetic-source' }, query: { managementScope: 'tenant', systemId: 'synthetic-source' } }
+      await rejectsCode(handlers[name](req, {}), 'READ_PLAN_MANAGEMENT_DISABLED', 404)
+    }
+    assert.deepEqual(managementCalls, [], `${String(value)}: no management method runs`)
+    assert.deepEqual(h.db.trace, [], `${String(value)}: no ledger, registry or source IO`)
+    assert.equal(h.sourceReads.length, 0)
+  }
+})
+
+test('switch OFF: the admin gate still answers first, and the switch is read per request', async () => {
+  let on = false
+  const h = harness(undefined, { enabled: () => on })
+  await assert.rejects(h.handlers.stockPreparationReadPlanConfigsList({ user: { id: 'synthetic-reader', tenantId: SCOPE.tenantId, permissions: [] },
+    authenticatedTenantId: SCOPE.tenantId, headers: {}, params: {}, body: {}, query: { managementScope: 'tenant', systemId: 'synthetic-source' } }, {}),
+  (error) => { assert.notEqual(error.code, 'READ_PLAN_MANAGEMENT_DISABLED'); return true })
+  await rejectsCode(h.call('List'), 'READ_PLAN_MANAGEMENT_DISABLED', 404)
+  on = true
+  const listed = await h.call('List')
+  assert.ok(Array.isArray(listed.versions), 'the same handlers serve once the switch is on')
+})
+
+test('the handler factory refuses to build without the switch reader', () => {
+  const h = harness()
+  assert.throws(() => createStockPreparationReadPlanManagementHandlers({ management: h.management, helpers: h.helpers }), /online read-plan switch/)
 })

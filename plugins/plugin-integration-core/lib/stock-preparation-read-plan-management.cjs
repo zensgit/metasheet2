@@ -47,6 +47,7 @@ const STORE_ERROR_CODES = new Set([
   'READ_PLAN_VALIDATION_STATUS_CONFLICT', 'READ_PLAN_VALIDATION_SUPERSEDED',
   'READ_PLAN_VALIDATION_UNAVAILABLE', 'READ_PLAN_VALIDATION_WRITE_FAILED',
   'READ_PLAN_VALIDATION_IN_PROGRESS',
+  'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT', 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE',
 ])
 
 class StockPreparationReadPlanManagementError extends Error {
@@ -252,13 +253,16 @@ function createStockPreparationReadPlanManagement({ store, externalSystemRegistr
     retire: (identity, input) => transition('retire', identity, input), activate, deactivate, validate, confirmSample })
 }
 
-function createStockPreparationReadPlanManagementHandlers({ management, readSample, helpers } = {}) {
+// `enabled` is the route module's reading of the online read-plan switch (stock-preparation-read-plan-switch.cjs),
+// called per request. It is required: a caller that forgets it cannot leave the routes silently on.
+function createStockPreparationReadPlanManagementHandlers({ management, readSample, helpers, enabled } = {}) {
   const { requireAccess, resolveVerifiedClaimTenantId, requestPrincipal, requestBody, requestQuery,
     requestParams, sendOk, HttpRouteError } = helpers || {}
   if ([requireAccess, resolveVerifiedClaimTenantId, requestPrincipal, requestBody, requestQuery,
     requestParams, sendOk, HttpRouteError].some((entry) => typeof entry !== 'function')) {
     throw new Error('read-plan management requires authenticated route helpers')
   }
+  if (typeof enabled !== 'function') throw new Error('read-plan management requires the online read-plan switch')
   function mapError(error) {
     if (error instanceof StockPreparationReadPlanManagementError) return new HttpRouteError(error.status, error.code, error.code)
     if (error instanceof StockPreparationReadPlanConfigError) return new HttpRouteError(400, 'READ_PLAN_CONFIG_INVALID', 'READ_PLAN_CONFIG_INVALID')
@@ -277,6 +281,11 @@ function createStockPreparationReadPlanManagementHandlers({ management, readSamp
   function handler(method, keys, { read = false, version = false } = {}) {
     return async (req, res) => {
       requireAccess(req, 'admin')
+      // The switch is the SECOND statement, after the admin gate and before any other read: off, every route
+      // (list and get included) is the same 404 with zero IO, so the web can follow the read's answer.
+      if (enabled() !== true) {
+        throw new HttpRouteError(404, 'READ_PLAN_MANAGEMENT_DISABLED', 'online read plans are disabled on this deployment')
+      }
       const tenantId = resolveVerifiedClaimTenantId(req)
       const actor = requestPrincipal(req)
       try {

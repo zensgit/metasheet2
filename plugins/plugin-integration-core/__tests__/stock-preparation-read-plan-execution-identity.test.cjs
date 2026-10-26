@@ -17,6 +17,7 @@ const {
   createStockPreparationReadPlanStore, VERSION_TABLE, ACTIVATION_TABLE, AUDIT_TABLE, VALIDATION_TABLE,
 } = require('../lib/stock-preparation-read-plan-store.cjs')
 const { SOURCE_REVISION_TABLE } = require('../lib/stock-preparation-read-plan-validation-ledger.cjs')
+const { PROJECT_TARGET_TABLE } = require('../lib/stock-preparation-project-target-store.cjs')
 const {
   createLargeBomBackgroundExpansionJob,
   runLargeBomBackgroundExpansionJob,
@@ -74,6 +75,8 @@ function memoryDb(scope) {
     [SOURCE_REVISION_TABLE]: [{ data_source_id: 'synthetic-connection', validation_revision: SOURCE_REVISION,
       tenant_id: scope.tenantId, workspace_id: scope.workspaceId, owner_id: 'binder-one', scope_kind: 'private',
       type: 'postgresql', is_active: true, deleted_at: null }],
+    // An empty project registry: a case-insensitive activation locks and scans it (no group, so it proceeds).
+    [PROJECT_TARGET_TABLE]: [],
   }
   const matches = (row, where) => Object.entries(where).every(([key, value]) => row[key] === value)
   function methods(data) {
@@ -93,6 +96,8 @@ function memoryDb(scope) {
         return [clone(row)]
       },
       async setTransactionIsolationLevel(level) { assert.equal(level, 'read committed') },
+      async advisoryXactLock() {},
+      async countRows(table, where = {}) { return data[table].filter((row) => matches(row, where)).length },
     }
   }
   return {

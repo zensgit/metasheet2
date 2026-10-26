@@ -105,6 +105,7 @@ function bindingPayload(overrides: Record<string, unknown> = {}): Record<string,
     persistedBinding: null,
     effectiveSourceProblem: null,
     takesEffectWithoutRestart: true,
+    onlineReadPlansEnabled: true,
     eligibleSources: [
       candidate({ externalSystemId: DEMO_SOURCE, name: '内置演示源' }),
       candidate(),
@@ -1540,5 +1541,28 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     expect(text(allowed, 'stock-prep-source-confirm')).toContain('不需要重启')
     expect(text(allowed, 'stock-prep-source-confirm')).toContain('立即生效')
     expect(text(allowed, 'stock-prep-source-no-restart')).toContain('不需要重启')
+  })
+
+  it('S-SW1: a binding readback that reports online read plans OFF closes open management and offers no toggle', async () => {
+    installRoutes({ afterSave: confirmedCustomerPayload({ onlineReadPlansEnabled: false }) })
+    const root = await mountPanel()
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    ;(node(root, 'stock-prep-plan-management-toggle') as HTMLInputElement).click()
+    await flush(2)
+    expect(node(root, 'stock-prep-plan-management')).not.toBeNull()
+    const select = node(root, 'stock-prep-source-select') as HTMLSelectElement
+    select.value = CUSTOMER_PLM
+    select.dispatchEvent(new Event('change'))
+    await flush(2)
+    ;(node(root, 'stock-prep-source-save') as HTMLButtonElement).click()
+    await flush(2)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush(3)
+    expect(posted).toHaveLength(1)
+    expect(node(root, 'stock-prep-plan-management')).toBeNull()
+    expect(node(root, 'stock-prep-plan-management-toggle')).toBeNull()
+    // The offline JSON draft builder writes nothing and stays.
+    expect(node(root, 'stock-prep-source-plan-draft-synthetic')).not.toBeNull()
+    expect(h.apiFetch.mock.calls.some(([url]) => String(url).includes('/stock-preparation/read-plan-configs'))).toBe(false)
   })
 })

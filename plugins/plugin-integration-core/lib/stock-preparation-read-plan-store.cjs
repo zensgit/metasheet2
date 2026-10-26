@@ -10,6 +10,7 @@ const { createDb } = require('./db.cjs')
 const { validateStockPreparationReadPlanConfig } = require('./stock-preparation-read-plan-config.cjs')
 const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 const { VALIDATION_TABLE, VALIDATION_ACTIONS, createReadPlanValidationLedger } = require('./stock-preparation-read-plan-validation-ledger.cjs')
+const { lockRegistryAndCountCaseFoldedProjectGroups } = require('./stock-preparation-project-target-store.cjs')
 
 const VERSION_TABLE = 'integration_stock_prep_read_plan_versions'
 const ACTIVATION_TABLE = 'integration_stock_prep_read_plan_activation'
@@ -124,11 +125,24 @@ function auditRow(row) {
     detail, createdAt: row.created_at ?? null }
 }
 
-function createStockPreparationReadPlanStore({ db, idGenerator = crypto.randomUUID, now = Date.now } = {}) {
+function createStockPreparationReadPlanStore({ db, idGenerator = crypto.randomUUID, now = Date.now,
+  countRegistryCaseFoldedGroups = lockRegistryAndCountCaseFoldedProjectGroups } = {}) {
   if (!db || ['select', 'selectOne', 'selectOneForUpdate', 'insertOne', 'updateRow', 'transaction'].some((key) => typeof db[key] !== 'function')) {
     throw new Error('createStockPreparationReadPlanStore: scoped transactional db required')
   }
   if (typeof idGenerator !== 'function') throw new Error('createStockPreparationReadPlanStore: id generator required')
+  if (typeof countRegistryCaseFoldedGroups !== 'function') throw new Error('createStockPreparationReadPlanStore: registry identity check required')
+  // Activating a case-insensitive version serializes with project registration on the registry's tenant lock and
+  // refuses while the registry already holds a case-folded group (archived rows included): such a group would make
+  // both projects ambiguous at runtime the moment the pointer committed. Registry failure is a typed 503.
+  async function assertRegistryAdmitsCaseInsensitive(trx, tenantId) {
+    let groups
+    try { groups = await countRegistryCaseFoldedGroups(trx, tenantId) } catch (_error) {
+      fail(503, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE')
+    }
+    if (!Number.isSafeInteger(groups) || groups < 0) fail(503, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE')
+    if (groups > 0) fail(409, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT')
+  }
   function requireTrx(trx) {
     if (!trx || ['setTransactionIsolationLevel', 'selectOneForKeyShare', 'selectOneForUpdate', 'select', 'insertOne', 'updateRow'].some((key) => typeof trx[key] !== 'function')) {
       fail(500, 'READ_PLAN_TRANSACTION_UNAVAILABLE')
@@ -264,10 +278,15 @@ function createStockPreparationReadPlanStore({ db, idGenerator = crypto.randomUU
     const pointerWhere = { ...whereScope(scope), action_id: hinted.actionId }
     const pointerHintRow = await db.selectOne(ACTIVATION_TABLE, pointerWhere)
     const pointerHint = pointerHintRow ? checkedActivation(pointerHintRow) : null
+    // The locked re-read below must carry the hinted content key, so the hinted config IS the activated config.
+    const caseInsensitive = hinted.config.readPlan.sourceProjectComparison === 'case-insensitive'
     try {
       return await validation.boundary(() => db.transaction(async (trx) => {
         requireTrx(trx)
         await pinLockProtocolIsolation(trx)
+        // Registry lock FIRST, before any source, version or pointer row lock: a registration holds only this
+        // lock (never those rows), so the two cannot wait on each other in a cycle.
+        if (caseInsensitive) await assertRegistryAdmitsCaseInsensitive(trx, scope.tenantId)
         const sources = await validation.lockSources(trx, scope, [
           { systemId: hinted.systemId },
           ...(pointerHint ? [{ systemId: pointerHint.systemId, mode: 'cleanup' }] : []),

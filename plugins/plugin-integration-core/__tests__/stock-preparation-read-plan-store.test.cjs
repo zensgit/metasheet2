@@ -9,6 +9,7 @@ const {
   VERSION_TABLE, ACTIVATION_TABLE, AUDIT_TABLE, VALIDATION_TABLE, createStockPreparationReadPlanStore,
 } = require('../lib/stock-preparation-read-plan-store.cjs')
 const { SOURCE_REVISION_TABLE } = require('../lib/stock-preparation-read-plan-validation-ledger.cjs')
+const { PROJECT_TARGET_TABLE, PROJECT_TARGET_CREATE_LOCK_PREFIX } = require('../lib/stock-preparation-project-target-store.cjs')
 
 function config(systemId = 'source-one') {
   const role = (object, fields) => ({ object, ...Object.fromEntries(fields.map((field) => [field, field])) })
@@ -62,6 +63,7 @@ function memoryDb({ systems = [system()] } = {}) {
     [VERSION_TABLE]: [], [ACTIVATION_TABLE]: [], [AUDIT_TABLE]: [], [VALIDATION_TABLE]: [],
     [SOURCE_REVISION_TABLE]: bound.filter((row) => typeof row.connection_id === 'string').map(sourceRevision),
     integration_external_systems: bound,
+    [PROJECT_TARGET_TABLE]: [],
   }
   const trace = []
   let failAudit = false
@@ -107,6 +109,9 @@ function memoryDb({ systems = [system()] } = {}) {
         return [clone(row)]
       },
       async setTransactionIsolationLevel(level) { trace.push(`isolation:${level}`) },
+      // The project registry's tenant lock and count, used by a case-insensitive activation only.
+      async advisoryXactLock(key) { trace.push(`advisory:${key}`) },
+      async countRows(table, where = {}) { trace.push(`count:${table}`); return data[table].filter((row) => match(row, where)).length },
     }
   }
   return {
@@ -540,3 +545,99 @@ for (const [label, change] of [
     assert.deepEqual((await ledger.get({ ...tenantScope, id: first.id })).config, original)
   })
 }
+
+// Registration/activation serialization. Synthetic registry rows in the same in-memory db; the trace models the
+// statement order only, NOT PostgreSQL locking (the WSL real-PG race probe covers both lock orders).
+const registryRow = (projectNo, status = 'active', tenantId = 'tenant-one') => ({
+  id: `registry-${tenantId}-${projectNo}-${status}`, tenant_id: tenantId, project_no: projectNo,
+  sheet_id: `sheet-${tenantId}-${projectNo}`, object_id: `object-${tenantId}-${projectNo}`, status, created_at: 'synthetic-time',
+})
+async function approvedComparisonVersion(ledger, comparison) {
+  const document = config()
+  if (comparison !== undefined) document.readPlan.sourceProjectComparison = comparison
+  const version = await ledger.saveVersion({ ...tenantScope, actor: 'actor-one', config: document })
+  await seedConfirmedStatusFixture(ledger, version.id)
+  await ledger.approve({ ...tenantScope, id: version.id, actor: 'actor-one' })
+  return version
+}
+const REGISTRY_LOCK = `advisory:${PROJECT_TARGET_CREATE_LOCK_PREFIX}tenant-one`
+
+test('registration serialization: a case-insensitive activation takes the registry lock first and refuses a case-folded group, archived included', async () => {
+  for (const archived of [false, true]) {
+    const db = eligibleDb()
+    const ledger = store(db)
+    const version = await approvedComparisonVersion(ledger, 'case-insensitive')
+    db.state[PROJECT_TARGET_TABLE].push(registryRow('Abc'), registryRow('abc', archived ? 'archived' : 'active'))
+    const beforeTrace = db.trace.length
+    await assert.rejects(ledger.activate({ ...tenantScope, id: version.id, actor: 'actor-one', expectedGeneration: 0 }),
+      { status: 409, code: 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_CONFLICT' })
+    const trace = db.trace.slice(beforeTrace)
+    assert.deepEqual(trace.slice(0, 6), [
+      `selectOne:${VERSION_TABLE}`, `selectOne:${ACTIVATION_TABLE}`, 'transaction', 'isolation:read committed',
+      REGISTRY_LOCK, `count:${PROJECT_TARGET_TABLE}`,
+    ], `archived=${archived}: pin, then the registry lock and scan`)
+    assert.ok(!trace.some((entry) => entry.startsWith('forUpdate:')), 'refused before any source, version or pointer lock')
+    assert.equal(await ledger.getActivation({ ...tenantScope, actionId: config().actionId }), null, 'no pointer was written')
+  }
+})
+
+test('registration serialization: a clean registry or another tenant\'s group admits the case-insensitive activation; a case-sensitive one takes no registry lock', async () => {
+  {
+    const db = eligibleDb()
+    const ledger = store(db)
+    const version = await approvedComparisonVersion(ledger, 'case-insensitive')
+    db.state[PROJECT_TARGET_TABLE].push(registryRow('Abc'), registryRow('Other'),
+      registryRow('Abc', 'active', 'tenant-two'), registryRow('abc', 'active', 'tenant-two'))
+    const beforeTrace = db.trace.length
+    const activation = await ledger.activate({ ...tenantScope, id: version.id, actor: 'actor-one', expectedGeneration: 0 })
+    assert.equal(activation.status, 'active')
+    const trace = db.trace.slice(beforeTrace)
+    const pinAt = trace.indexOf('isolation:read committed')
+    const lockAt = trace.indexOf(REGISTRY_LOCK)
+    assert.ok(pinAt !== -1 && lockAt === pinAt + 1, 'the registry lock is the first statement after the isolation pin')
+    for (const rowLock of ['forUpdate:integration_external_systems', `forUpdate:${VERSION_TABLE}`, `forUpdate:${ACTIVATION_TABLE}`]) {
+      assert.ok(trace.indexOf(rowLock) > lockAt, `${rowLock} comes after the registry lock`)
+    }
+  }
+  for (const comparison of [undefined, 'case-sensitive']) {
+    const db = eligibleDb()
+    const ledger = store(db)
+    const version = await approvedComparisonVersion(ledger, comparison)
+    db.state[PROJECT_TARGET_TABLE].push(registryRow('Abc'), registryRow('abc'))
+    const beforeTrace = db.trace.length
+    const activation = await ledger.activate({ ...tenantScope, id: version.id, actor: 'actor-one', expectedGeneration: 0 })
+    assert.equal(activation.status, 'active')
+    assert.ok(!db.trace.slice(beforeTrace).some((entry) => entry.startsWith('advisory:') || entry === `count:${PROJECT_TARGET_TABLE}`),
+      `${comparison}: no registry lock or scan`)
+  }
+})
+
+test('registration serialization: an untrusted registry refuses the case-insensitive activation with a typed 503 and no pointer', async () => {
+  for (const [label, alter] of [
+    ['no lock capability', (trx) => ({ ...trx, advisoryXactLock: undefined })],
+    ['unstable count', (trx) => {
+      let calls = 0
+      return { ...trx, async countRows(table, where) { return table === PROJECT_TARGET_TABLE ? ++calls : trx.countRows(table, where) } }
+    }],
+    ['malformed row', (trx) => ({
+      ...trx,
+      async countRows(table, where) { return table === PROJECT_TARGET_TABLE ? 1 : trx.countRows(table, where) },
+      async select(table, options) { return table === PROJECT_TARGET_TABLE ? [{ tenant_id: 'tenant-one', project_no: 7 }] : trx.select(table, options) },
+    })],
+    ['throwing read', (trx) => ({ ...trx, async countRows() { throw new Error('synthetic-private-registry') } })],
+  ]) {
+    const db = eligibleDb()
+    const ledger = store(db)
+    const version = await approvedComparisonVersion(ledger, 'case-insensitive')
+    const original = db.transaction
+    db.transaction = (callback) => original((trx) => callback(alter(trx)))
+    await assert.rejects(ledger.activate({ ...tenantScope, id: version.id, actor: 'actor-one', expectedGeneration: 0 }), (error) => {
+      assert.equal(error.status, 503, label)
+      assert.equal(error.code, 'READ_PLAN_ACTIVATION_PROJECT_IDENTITY_UNAVAILABLE', label)
+      assert.doesNotMatch(String(error.message), /synthetic-private/)
+      return true
+    })
+    db.transaction = original
+    assert.equal(await ledger.getActivation({ ...tenantScope, actionId: config().actionId }), null, `${label}: no pointer`)
+  }
+})

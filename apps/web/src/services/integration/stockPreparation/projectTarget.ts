@@ -80,6 +80,7 @@ export type StockPrepProjectTargetPullOutcome = (typeof STOCK_PREP_PROJECT_TARGE
 export const STOCK_PREP_PROJECT_SHEETS_DISABLED_CODE = 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'
 /** A race partner registered the same project a moment ago — the same sheet; carry on. */
 export const STOCK_PREP_PROJECT_TARGET_EXISTS_CODE = 'STOCK_PREPARATION_PROJECT_TARGET_EXISTS'
+const STOCK_PREP_PROJECT_TARGET_BUSY_CODE = 'STOCK_PREPARATION_PROJECT_TARGET_BUSY'
 
 /**
  * The refusal codes the project-sheet flow can meet, each with its own plain-language row in
@@ -92,6 +93,11 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_PROJECT_ARCHIVED',
   'STOCK_PREPARATION_PROJECT_TARGET_LIMIT',
   STOCK_PREP_PROJECT_TARGET_EXISTS_CODE,
+  'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT',
+  'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE',
+  STOCK_PREP_PROJECT_TARGET_BUSY_CODE,
+  'STOCK_PREPARATION_PROJECT_TARGET_PREPARE_INVALID',
+  'STOCK_PREPARATION_PROJECT_TARGET_LOCK_UNAVAILABLE',
   'STOCK_PREPARATION_PROJECT_NO_REQUIRED',
   'STOCK_PREPARATION_PROJECT_TARGET_PACK_INCOMPLETE',
   'STOCK_PREPARATION_PROJECT_TARGET_PACK_INSTALL_FAILED',
@@ -895,7 +901,20 @@ export async function runStockPreparationProjectPull(
     } catch (error) {
       const code = projectTargetErrorCode(error)
       if (isStockPrepProjectSheetsDisabled(error)) return legacy()
-      if (code !== STOCK_PREP_PROJECT_TARGET_EXISTS_CODE) {
+      if (code === STOCK_PREP_PROJECT_TARGET_BUSY_CODE) {
+        // A tenant-wide create may belong to another project. Read only THIS project once;
+        // neither a busy lock nor an unreadable/absent target proves that its sheet exists.
+        const current = await probeStockPreparationProjectTarget(api, projectNo)
+        if (current.kind === 'unreadable') return { kind: 'probe_failed', status: current.status, code: current.code }
+        if (current.kind !== 'state' || current.state.status === 'absent') {
+          return { kind: 'create_refused', status: projectTargetErrorStatus(error), code }
+        }
+        if (current.state.status === 'archived') {
+          return { kind: 'archived', mayRestore: current.state.may.restore, state: current.state }
+        }
+        // Active: the original create consent still applies, but preview/write consent is
+        // still required below. Do not repeat create or claim that this run created the sheet.
+      } else if (code !== STOCK_PREP_PROJECT_TARGET_EXISTS_CODE) {
         return { kind: 'create_refused', status: projectTargetErrorStatus(error), code }
       }
       // EXISTS: a colleague's create won the race — it is this project's one sheet; carry on.

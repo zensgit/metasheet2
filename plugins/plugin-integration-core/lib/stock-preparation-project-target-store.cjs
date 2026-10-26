@@ -35,6 +35,8 @@
 // archive sets it and restore clears it in the same statement.
 
 const crypto = require('node:crypto')
+const { sameSourceProject, SOURCE_PROJECT_COMPARISON_MODES } = require('./stock-preparation-source-value-semantics.cjs')
+const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 
 const PROJECT_TARGET_TABLE = 'integration_stock_prep_project_target'
 // The two unique indexes migration 087 installs. The scope index is the one the create race lands on.
@@ -59,6 +61,20 @@ const PROJECT_TARGET_ABSENT_CODE = 'STOCK_PREPARATION_PROJECT_ABSENT'
 const PROJECT_TARGET_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_ARCHIVED'
 const PROJECT_TARGET_ALREADY_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED'
 const PROJECT_TARGET_NOT_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED'
+
+// P2 (case-insensitive registration): under an effective readPlan `sourceProjectComparison:
+// 'case-insensitive'`, a project number that differs from a registered one only by letter case is REFUSED at
+// registration (never aliased, never rewritten), because both runtime paths would then be ambiguous. The
+// refusals carry no project number. UNAVAILABLE is the fail-closed answer for a mode or a registry scan the
+// store cannot trust; PREPARE_INVALID is a prepare callback that returned no usable handles.
+const PROJECT_TARGET_IDENTITY_CONFLICT_CODE = 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT'
+const PROJECT_TARGET_IDENTITY_UNAVAILABLE_CODE = 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE'
+const PROJECT_TARGET_BUSY_CODE = 'STOCK_PREPARATION_PROJECT_TARGET_BUSY'
+// The transaction handle lacks the isolation / non-blocking lock capabilities the strict registration path needs.
+const PROJECT_TARGET_LOCK_UNAVAILABLE_CODE = 'STOCK_PREPARATION_PROJECT_TARGET_LOCK_UNAVAILABLE'
+const PROJECT_TARGET_PREPARE_INVALID_CODE = 'STOCK_PREPARATION_PROJECT_TARGET_PREPARE_INVALID'
+// The same bound `list` reads with; a tenant above it cannot be scanned completely, so it fails closed.
+const PROJECT_IDENTITY_MAX_ROWS = 1000
 
 // S3 (ADR §5 O2(a), register R-37): THE THREE PROJECT-LEVEL COLUMNS, a CLOSED whitelist. These are
 // the only free-text columns of the registry and `updateProjectFields` is the only writer; a fourth
@@ -328,6 +344,87 @@ function normalizeProjectPullCode(value) {
   return { code: PROJECT_TARGET_PULL_CODE_UNKNOWN, mapped: true }
 }
 
+// P2 (case-insensitive identity): the fail-closed answer for a registry scan the store cannot trust.
+function registryIdentityUnavailableError() {
+  return new StockPreparationProjectTargetStoreError(
+    503,
+    PROJECT_TARGET_IDENTITY_UNAVAILABLE_CODE,
+    'the project registry could not be checked for case-insensitive project identity, so nothing was changed',
+    { field: 'projectNo' },
+  )
+}
+
+/**
+ * EVERY registry row of one tenant, archived included, read on the CALLER'S transaction for an identity
+ * check: count, select, count. A count above the bound, an unstable count, a result that is not an array, or a
+ * row that is not complete and canonical is the typed 503 — never an empty registry that would authorize a write.
+ */
+async function readRegistryRowsForIdentity(trx, tenantId) {
+  try {
+    if (!trx || typeof trx.countRows !== 'function' || typeof trx.select !== 'function') throw registryIdentityUnavailableError()
+    const before = await trx.countRows(PROJECT_TARGET_TABLE, { tenant_id: tenantId })
+    if (!Number.isSafeInteger(before) || before < 0 || before > PROJECT_IDENTITY_MAX_ROWS) throw registryIdentityUnavailableError()
+    const selected = await trx.select(PROJECT_TARGET_TABLE, {
+      where: { tenant_id: tenantId },
+      orderBy: ['created_at', 'ASC'],
+      limit: PROJECT_IDENTITY_MAX_ROWS,
+    })
+    // Do not use allRows here: its legacy fallback turns an invalid response into
+    // an empty registry and would authorize a create when the count is also zero.
+    const rows = Array.isArray(selected) ? selected : selected && selected.rows
+    if (!Array.isArray(rows)) throw registryIdentityUnavailableError()
+    const after = await trx.countRows(PROJECT_TARGET_TABLE, { tenant_id: tenantId })
+    if (after !== before || rows.length !== before) throw registryIdentityUnavailableError()
+    const canonical = (value) => typeof value === 'string' && value.length > 0 && value.trim() === value
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row) || row.tenant_id !== tenantId
+        || !canonical(row.project_no) || !canonical(row.sheet_id) || !canonical(row.object_id)
+        || !PROJECT_TARGET_STATUSES.includes(row.status)) {
+        throw registryIdentityUnavailableError()
+      }
+    }
+    return rows
+  } catch (error) {
+    if (error instanceof StockPreparationProjectTargetStoreError) throw error
+    throw registryIdentityUnavailableError()
+  }
+}
+
+/**
+ * THE ACTIVATION HALF of the registration/activation serialization. A read-plan activation that makes the
+ * tenant's project comparison case-insensitive calls this INSIDE its own transaction — after pinning READ
+ * COMMITTED as that transaction's first statement, and BEFORE it locks any source, version or pointer row. It
+ * takes the SAME per-tenant registry advisory lock every registration takes (blocking: an in-flight registration
+ * finishes first), then counts the groups of registry rows whose project numbers fold together case-insensitively,
+ * archived included. The lock is held until the activation commits, so a registration that runs next re-resolves
+ * its comparison under that lock and sees the committed pointer. Returns the group count only; no project number
+ * leaves this function.
+ */
+async function lockRegistryAndCountCaseFoldedProjectGroups(trx, tenantId) {
+  const tenant = requiredString(tenantId, 'tenantId')
+  if (!trx || typeof trx.advisoryXactLock !== 'function') throw registryIdentityUnavailableError()
+  await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenant}`)
+  const rows = await readRegistryRowsForIdentity(trx, tenant)
+  try {
+    let groups = 0
+    const grouped = new Array(rows.length).fill(false)
+    for (let i = 0; i < rows.length; i += 1) {
+      if (grouped[i]) continue
+      let members = 1
+      for (let j = i + 1; j < rows.length; j += 1) {
+        if (!grouped[j] && sameSourceProject(rows[i].project_no, rows[j].project_no, 'case-insensitive')) {
+          grouped[j] = true
+          members += 1
+        }
+      }
+      if (members > 1) groups += 1
+    }
+    return groups
+  } catch (_error) {
+    throw registryIdentityUnavailableError()
+  }
+}
+
 function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.randomUUID, now = () => new Date() } = {}) {
   if (
     !db ||
@@ -384,6 +481,97 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
   }
 
   /**
+   * The three ways a registry write takes the tenant's lock.
+   * - 'try': the strict (case-insensitive) registration and replay. Pinned READ COMMITTED, then the
+   *   NON-blocking lock: a contender gets BUSY instead of pinning a connection across another's provisioning.
+   * - 'pinned': a default / case-sensitive registration that re-resolves its comparison under the lock. Pinned
+   *   READ COMMITTED, then the ordinary BLOCKING lock (queues, never BUSY), so an activation or registration that
+   *   committed while this one waited is visible to the re-resolution and to the scan.
+   * - 'blocking': the old contract, for a caller that passes no resolver.
+   */
+  async function lockRegistration(trx, tenantId, mode) {
+    if (mode === 'pinned') {
+      if (!trx || typeof trx.setTransactionIsolationLevel !== 'function' || typeof trx.advisoryXactLock !== 'function') {
+        throw new StockPreparationProjectTargetStoreError(503, PROJECT_TARGET_LOCK_UNAVAILABLE_CODE,
+          'the project registry cannot take its registration lock here, so nothing was changed')
+      }
+      // First SQL, as on the strict path: under a REPEATABLE READ default the snapshot would be taken when the
+      // lock statement STARTS, before the wait returns, and the post-lock scan would miss the last holder's row.
+      await pinLockProtocolIsolation(trx)
+      await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+      return
+    }
+    if (mode === 'try') {
+      if (!trx || typeof trx.setTransactionIsolationLevel !== 'function' || typeof trx.tryAdvisoryXactLock !== 'function') {
+        throw new StockPreparationProjectTargetStoreError(503, PROJECT_TARGET_LOCK_UNAVAILABLE_CODE,
+          'the project registry cannot take its non-blocking registration lock here, so nothing was changed')
+      }
+      // First SQL: the post-lock scan must see committed rows even if the role's
+      // default is REPEATABLE READ. Host callbacks need additional pool connections;
+      // waiters must not hold every connection while waiting for this lock.
+      await pinLockProtocolIsolation(trx)
+      if (await trx.tryAdvisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`) !== true) {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_BUSY_CODE,
+          'another project registration is in progress; retry after it finishes')
+      }
+      return
+    }
+    if (!trx || typeof trx.advisoryXactLock !== 'function') {
+      throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock')
+    }
+    await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+  }
+
+  /** The optional trusted mode resolver: absent, or a function. Anything else is a typed 422 before any IO. */
+  function optionalModeResolver(value) {
+    if (value !== undefined && typeof value !== 'function') {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'resolveSourceProjectComparison must be a function', { field: 'resolveSourceProjectComparison' })
+    }
+    return value
+  }
+
+  /** What a prepare callback returned, as the two handles the row stores; anything else fails closed. */
+  function normalizePreparedTarget(value) {
+    const sheetId = value && typeof value === 'object' ? optionalString(value.sheetId) : null
+    const objectId = value && typeof value === 'object' ? optionalString(value.objectId) : null
+    if (!sheetId || !objectId) {
+      throw new StockPreparationProjectTargetStoreError(503, PROJECT_TARGET_PREPARE_INVALID_CODE, 'the prepared project sheet did not return usable handles, so nothing was registered', { field: 'sheetId' })
+    }
+    return { sheetId, objectId }
+  }
+
+  /**
+   * THE ONE IDENTITY GUARD (P2), shared by `create` and `withActiveRowLocked` so the two cannot diverge. It
+   * runs on the transaction handle AFTER the tenant advisory lock is held. The mode comes from the caller's
+   * trusted async resolver (a resolver failure propagates untouched); the mode is therefore re-evaluated
+   * under the registry lock on every call. `undefined` / 'case-sensitive' allow everything. 'case-insensitive'
+   * scans EVERY row of the tenant, archived included, and refuses (409, no values) a row whose project number
+   * differs exactly but matches case-insensitively. An unknown mode, a count above the bound, an unstable
+   * count or an incomplete row is a typed 503. Without a resolver the guard does nothing (the old contract).
+   */
+  async function assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison }) {
+    if (typeof resolveSourceProjectComparison !== 'function') return
+    const mode = await resolveSourceProjectComparison()
+    if (mode !== undefined && !SOURCE_PROJECT_COMPARISON_MODES.includes(mode)) throw registryIdentityUnavailableError()
+    if (mode !== 'case-insensitive') return
+    const rows = await readRegistryRowsForIdentity(trx, tenantId)
+    let conflict = false
+    try {
+      conflict = rows.some((row) => row.project_no !== projectNo && sameSourceProject(row.project_no, projectNo, 'case-insensitive'))
+    } catch (_error) {
+      throw registryIdentityUnavailableError()
+    }
+    if (conflict) {
+      throw new StockPreparationProjectTargetStoreError(
+        409,
+        PROJECT_TARGET_IDENTITY_CONFLICT_CODE,
+        'this tenant already has a stock-preparation project whose number differs only by letter case, so it cannot be registered while case-insensitive source matching is in effect',
+        { field: 'projectNo' },
+      )
+    }
+  }
+
+  /**
    * Register a freshly provisioned sheet as this project's 备料表.
    *
    * THE UNIQUE INDEX IS THE ARBITER. Two pullers who both read ABSENT and both provision land here
@@ -400,18 +588,43 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
    * sheet); this one is the authority. Order pinned by the store suite: transaction → lock → count →
    * insert, all on the transaction handle.
    */
-  async function create(input = {}) {
+  async function create(input = {}, prepareTarget) {
     const { tenantId, projectNo } = scope(input)
-    const sheetId = requiredString(input.sheetId, 'sheetId')
-    const objectId = requiredString(input.objectId, 'objectId')
+    // P2: with the OPTIONAL `prepareTarget` callback (used only by the real create route) the handles are not
+    // known up front: the callback provisions them INSIDE the transaction, after the lock, the identity guard,
+    // the exact-row precheck and the cap. Its host writes are NOT rolled back with this transaction, and it
+    // must not call back into a store method that takes the same tenant lock. Without it, the old
+    // direct-handle contract is unchanged — except that a resolver passed WITHOUT `prepareTarget` (the default /
+    // case-sensitive route leg, whose sheet is already provisioned) re-resolves the comparison under the
+    // BLOCKING lock: a case-insensitive activation that committed after the route's pre-read is honoured here.
+    const deferred = prepareTarget !== undefined
+    if (deferred && typeof prepareTarget !== 'function') {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'prepareTarget must be a function', { field: 'prepareTarget' })
+    }
+    const resolveSourceProjectComparison = optionalModeResolver(input.resolveSourceProjectComparison)
+    if (deferred && resolveSourceProjectComparison === undefined) {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'resolveSourceProjectComparison is required with prepareTarget', { field: 'resolveSourceProjectComparison' })
+    }
+    const sheetId = deferred ? null : requiredString(input.sheetId, 'sheetId')
+    const objectId = deferred ? null : requiredString(input.objectId, 'objectId')
     const createdBy = optionalString(input.createdBy)
     const maxPerTenant = normalizeCap(input.maxPerTenant)
     try {
       return await db.transaction(async (trx) => {
-        if (!trx || typeof trx.advisoryXactLock !== 'function') {
-          throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock')
+        await lockRegistration(trx, tenantId, deferred ? 'try' : (resolveSourceProjectComparison ? 'pinned' : 'blocking'))
+        if (deferred && typeof trx.selectOneForUpdate !== 'function') {
+          throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose selectOneForUpdate')
         }
-        await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+        await assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison })
+        if (deferred) {
+          const current = await trx.selectOneForUpdate(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo })
+          if (current && current.status === 'archived') {
+            throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ARCHIVED_CODE, 'this project\'s stock-preparation sheet is archived; restore it instead of creating a second one', { field: 'projectNo' })
+          }
+          if (current) {
+            throw new StockPreparationProjectTargetStoreError(409, 'STOCK_PREPARATION_PROJECT_TARGET_EXISTS', 'this project already has a registered stock-preparation sheet', { field: 'projectNo' })
+          }
+        }
         if (maxPerTenant !== null) {
           const registered = await trx.countRows(PROJECT_TARGET_TABLE, { tenant_id: tenantId })
           if (registered >= maxPerTenant) {
@@ -423,12 +636,14 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
             )
           }
         }
+        // Only now — lock held, identity clear, row absent, below the cap — is the sheet prepared.
+        const target = deferred ? normalizePreparedTarget(await prepareTarget()) : { sheetId, objectId }
         const row = firstRow(await trx.insertOne(PROJECT_TARGET_TABLE, {
           id: idGenerator(),
           tenant_id: tenantId,
           project_no: projectNo,
-          sheet_id: sheetId,
-          object_id: objectId,
+          sheet_id: target.sheetId,
+          object_id: target.objectId,
           status: 'active',
           created_by: createdBy,
         }))
@@ -528,11 +743,15 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     if (typeof fn !== 'function') {
       throw new Error('withActiveRowLocked: a callback is required')
     }
+    // P2: optional trusted mode resolver; when given, the SAME identity guard `create` runs is applied after
+    // the lock and before the row read and `fn`, in this one transaction.
+    const resolveSourceProjectComparison = optionalModeResolver(input.resolveSourceProjectComparison)
     return db.transaction(async (trx) => {
-      if (!trx || typeof trx.advisoryXactLock !== 'function' || typeof trx.selectOneForUpdate !== 'function') {
-        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock and selectOneForUpdate')
+      if (!trx || typeof trx.selectOneForUpdate !== 'function') {
+        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose selectOneForUpdate')
       }
-      await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+      await lockRegistration(trx, tenantId, resolveSourceProjectComparison ? 'try' : 'blocking')
+      await assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison })
       const current = await trx.selectOneForUpdate(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo })
       if (!current) {
         throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ABSENT_CODE, 'this project has no registered stock-preparation sheet', { field: 'projectNo' })
@@ -692,10 +911,26 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
 
   // ── 备料分批拉取第一期 step 3 PR B (migration 101): the pilot marker ──────────────────────────────
 
+  /**
+   * The handle a pilot read runs ON. `options.executor` (optional) is a scoped-db TRANSACTION handle of the
+   * caller's: the step-4 governance consult passes its REPEATABLE READ snapshot handle so the registry row and
+   * the step-4 rows it is compared with come from ONE snapshot (stock-preparation-continuation-store.cjs
+   * readGovernanceRows, #6514 review X-1). Absent => this store's own db, exactly as before. A handle that
+   * cannot read is refused (a throw is the caller's unreadable, never "not pilot").
+   */
+  function pilotReadHandle(options) {
+    const executor = options && typeof options === 'object' ? options.executor : undefined
+    if (executor === undefined || executor === null) return db
+    if (typeof executor.selectOne !== 'function') {
+      throw new Error('createStockPreparationProjectTargetStore: a pilot read executor must expose selectOne')
+    }
+    return executor
+  }
+
   /** The pilot state of ONE project, by (tenant, project). `null` is ABSENT; a throw is the caller's unreadable. */
-  async function getPilotState(input = {}) {
+  async function getPilotState(input = {}, options = {}) {
     const { tenantId, projectNo } = scope(input)
-    return rowToPilotState(await db.selectOne(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo }))
+    return rowToPilotState(await pilotReadHandle(options).selectOne(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo }))
   }
 
   /**
@@ -704,9 +939,9 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
    * tenant-scoped on purpose (sheet ids are globally unique; the caller compares `tenantId` if it must);
    * a refusal derived from it is values-free, so no tenant learns anything it could not already see.
    */
-  async function getPilotStateBySheetId(input = {}) {
+  async function getPilotStateBySheetId(input = {}, options = {}) {
     const sheetId = requiredString(input.sheetId, 'sheetId')
-    return rowToPilotState(await db.selectOne(PROJECT_TARGET_TABLE, { sheet_id: sheetId }))
+    return rowToPilotState(await pilotReadHandle(options).selectOne(PROJECT_TARGET_TABLE, { sheet_id: sheetId }))
   }
 
   /**
@@ -796,6 +1031,11 @@ module.exports = {
   PROJECT_TARGET_ARCHIVED_CODE,
   PROJECT_TARGET_ALREADY_ARCHIVED_CODE,
   PROJECT_TARGET_NOT_ARCHIVED_CODE,
+  PROJECT_TARGET_IDENTITY_CONFLICT_CODE,
+  PROJECT_TARGET_IDENTITY_UNAVAILABLE_CODE,
+  PROJECT_TARGET_BUSY_CODE,
+  PROJECT_TARGET_LOCK_UNAVAILABLE_CODE,
+  PROJECT_TARGET_PREPARE_INVALID_CODE,
   SCOPE_CONSTRAINT,
   SHEET_CONSTRAINT,
   // S3 (R-37): the project-level column whitelist, its caps and codes; the pull-outcome enum.
@@ -810,6 +1050,8 @@ module.exports = {
   rowToPilotState,
   StockPreparationProjectTargetStoreError,
   createStockPreparationProjectTargetStore,
+  // The activation half of the registration/activation serialization (read-plan store `activate`).
+  lockRegistryAndCountCaseFoldedProjectGroups,
   normalizeProjectFieldsPatch,
   normalizeProjectPullCode,
   __internals: {

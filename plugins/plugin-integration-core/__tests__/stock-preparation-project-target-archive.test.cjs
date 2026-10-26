@@ -45,6 +45,7 @@
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -119,7 +120,7 @@ function mount(options = {}) {
     tenantId: TENANT, projectNo: PROJECT, switchOn: true, ...options,
     serviceExtras: {
       // This synthetic binding has no activation pointer, not a missing read-plan runtime.
-      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
+      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null }, async getActivation() { return null } },
       ...options.serviceExtras,
     },
   })
@@ -662,7 +663,7 @@ function mountLedger({ switchOn = true, registryGetFails = false } = {}) {
   else delete process.env[PROJECT_SHEETS_ENABLED_ENV]
   httpRoutes.registerIntegrationRoutes({
     context: { api: { http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { provisioning, records } }, storage: new Map(), config: {} },
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {

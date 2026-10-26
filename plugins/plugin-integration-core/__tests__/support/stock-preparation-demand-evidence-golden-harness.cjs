@@ -481,14 +481,19 @@ function routeShapedLargeExpansionOptions(tableActions, normalizedAction) {
 
 // EVERY entry point the scenarios drive, in ONE place: a wrapper that the routes put around these
 // (a write lease, a generation binder, an atomic-consume token store) is a change to this function.
-function laneCalls(harness) {
+function laneCalls(harness, { handle = 'wired' } = {}) {
   const { tableActions, largeBomJobs } = harness
   // PR #6501 (sheet write lock): the dry-run through the generation binder, the apply inside the lease
   // with the guard (a records fake without the host write fence gets the kit's fake host fence), and a
   // token store with the atomic consume. The large approval stays UNBOUND (no binder), exactly as on main.
   const writeLockKit = require('./stock-preparation-project-write-lock-kit.cjs')
   const writeLock = writeLockKit.createLibWriteLockHarness()
+  // Batch-refresh step 4 PR-3a (plan-final §2.10): `handle` WIRED = every small leg plans with the route's governance
+  // handle for this NOT-governed project; ABSENT = none does (the dry-run opts out of the kit's injection).
+  const governance = handle === 'wired' ? { refreshGovernance: writeLock.refresh().handleFor('tenant_rgw_default') } : { refreshGovernance: undefined }
   return {
+    handle,
+    governance,
     dryRun: writeLock.wrapDryRun(tableActions.dryRunStockPreparationAction),
     apply: writeLock.wrapApply(tableActions.applyStockPreparationAction),
     createLargeApplyJob: largeBomJobs.createLargeBomCheckpointApplyJob,
@@ -496,9 +501,9 @@ function laneCalls(harness) {
   }
 }
 
-async function observeScenario(harness, scenario) {
+async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
   const { tableActions, largeBomJobs } = harness
-  const lanes = laneCalls(harness)
+  const lanes = laneCalls(harness, { handle })
   const dryRunStockPreparationAction = lanes.dryRun
   const applyStockPreparationAction = lanes.apply
   const {
@@ -530,6 +535,7 @@ async function observeScenario(harness, scenario) {
     plannedAt: PLANNED_AT,
     runId: RUN_ID,
     ...(resolver ? { confirmationDecisionResolver: resolver } : {}),
+    ...lanes.governance,
   })
   const dryRunExpansion = harness.calls[harness.calls.length - 1].result
   observed.dryRun = {
@@ -580,6 +586,7 @@ async function observeScenario(harness, scenario) {
       recordsApi: createRecordsApi(scenario.existingRows || []),
       plannedAt: PLANNED_AT,
       runId: RUN_ID,
+      ...lanes.governance,
     })
     const derived = deriveDecisionCandidates({ projectNo: scenario.projectNo, plan: prepared.plan, sourceRevision: prepared.revision })
     const identities = (list) => list.map((entry) => ({
@@ -607,6 +614,7 @@ async function observeScenario(harness, scenario) {
       recordsApi: createRecordsApi([]),
       plannedAt: PLANNED_AT,
       runId: RUN_ID,
+      ...lanes.governance,
     })
     const stableScope = `${TENANT_ID}\n${action.actionId}\n${prepared.parameters.projectNo}`
     const batchDigest = crypto.createHash('sha256').update(`${stableScope}\n${prepared.archiveRevision}`).digest('hex').slice(0, 32)
@@ -641,8 +649,19 @@ async function observeScenario(harness, scenario) {
     const applyRecords = createRecordsApi([])
     const applyDryRun = await dryRunStockPreparationAction({
       action, parameters, sourceAdapter, recordsApi: applyRecords, tokenStore: applyStore, plannedAt: PLANNED_AT, runId: RUN_ID,
+      ...lanes.governance,
     })
-    const applied = await applyStockPreparationAction({
+    if (handle === 'absent') {
+      // Since PR-3a a fenced write without a consulted verdict is refused by the writer (E-1 layer (b)).
+      await assert.rejects(applyStockPreparationAction({
+        sandboxPolicy: SANDBOX_POLICY, action, parameters, dryRunToken: applyDryRun.dryRunToken, sourceAdapter, recordsApi: applyRecords,
+        tokenStore: applyStore, permission: 'write', plannedAt: PLANNED_AT, runId: RUN_ID, acceptManualConfirmHold: true,
+        acceptDuplicateResolution: true, refreshGovernance: undefined,
+      }), (error) => error.status === 501 && error.code === 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED' && error.details.reason === 'governance_absent')
+      assert.equal(applyRecords.rows.length, 0, 'a handle-absent apply writes nothing')
+      observed.apply = 'refused_governance_absent'
+    }
+    const applied = handle === 'absent' ? null : await applyStockPreparationAction({
       sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters,
@@ -656,7 +675,7 @@ async function observeScenario(harness, scenario) {
       acceptManualConfirmHold: true,
       acceptDuplicateResolution: true,
     })
-    observed.apply = {
+    if (applied) observed.apply = {
       status: applied.status,
       dryRunRevision: applied.dryRunRevision,
       sourceContentRevision: applied.sourceContentRevision,
@@ -716,12 +735,12 @@ async function observeScenario(harness, scenario) {
   return observed
 }
 
-async function observeAll(harness, mode, options) {
+async function observeAll(harness, mode, options, { handle = 'wired' } = {}) {
   const out = {}
   for (const build of SCENARIOS) {
     const scenario = build()
     harness.setMode(mode, options)
-    out[scenario.name] = await observeScenario(harness, scenario)
+    out[scenario.name] = await observeScenario(harness, scenario, { handle })
     out[scenario.name].__expansionCalls = harness.calls.length
     out[scenario.name].__calls = harness.calls
   }
