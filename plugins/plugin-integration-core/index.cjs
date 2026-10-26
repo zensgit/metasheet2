@@ -29,6 +29,7 @@ const { createConfirmationDecisionReconcileLease } = require('./lib/stock-prepar
 const { createStockPreparationProjectWriteLock } = require('./lib/stock-preparation-project-write-lock.cjs')
 const { createStockPreparationContinuationStore } = require('./lib/stock-preparation-continuation-store.cjs')
 const { createStockPreparationRefreshGovernance } = require('./lib/stock-preparation-refresh-governance.cjs')
+const { createStockPreparationGovernedSheetProbe } = require('./lib/stock-preparation-governed-sheet-probe.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -96,6 +97,7 @@ let stockPreparationConfirmationDecisionLease = null
 let stockPreparationProjectWriteLock = null
 let stockPreparationContinuationStore = null
 let stockPreparationRefreshGovernance = null
+let stockPreparationGovernedSheetProbe = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -123,6 +125,7 @@ function buildCapabilityStatus() {
     deadLetters: Boolean(deadLetterStore),
     deadLetterReplay: Boolean(pipelineRunner && typeof pipelineRunner.replayDeadLetter === 'function'),
     staging: Boolean(stagingInstaller),
+    governedSheetProbe: Boolean(stockPreparationGovernedSheetProbe),
     stockPreparationSqlServerSealedSnapshot:
       Boolean(stockPreparationSqlServerRuntime),
   }
@@ -377,6 +380,15 @@ module.exports = {
       projectTargetStore: stockPreparationProjectTargetStore,
       projectWriteLock: stockPreparationProjectWriteLock,
     })
+    // Batch-refresh step 4 PR-6 (design §7.1 rows 17-18, D-21): the GOVERNED-SHEET PROBE for the generic configured
+    // writers — the pipelines target adapter and the ERP feedback writer below, and the C6 write-source the routes
+    // build (services). Built from the SAME continuation store and registry store the governance reads, so
+    // "governed" means one thing in the codebase; it answers by SHEET (a generic writer holds nothing else). A read
+    // that fails refuses the write (503), never "not governed".
+    stockPreparationGovernedSheetProbe = createStockPreparationGovernedSheetProbe({
+      continuationStore: stockPreparationContinuationStore,
+      projectTargetStore: stockPreparationProjectTargetStore,
+    })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -395,7 +407,7 @@ module.exports = {
       .registerAdapter('erp:k3-wise-sqlserver', createK3WiseSqlServerChannelFactory({ queryExecutor: sqlServerQueryExecutor }), { metadata: K3_WISE_SQLSERVER_ADAPTER_METADATA })
       .registerAdapter('bridge:legacy-sql-readonly', createBridgeAgentReadonlyAdapterFactory(), { metadata: BRIDGE_READONLY_ADAPTER_METADATA })
       .registerAdapter('metasheet:staging', createMetaSheetStagingSourceAdapterFactory({ context }), { metadata: METASHEET_STAGING_ADAPTER_METADATA })
-      .registerAdapter('metasheet:multitable', createMetaSheetMultitableTargetAdapterFactory({ context }), { metadata: METASHEET_MULTITABLE_ADAPTER_METADATA })
+      .registerAdapter('metasheet:multitable', createMetaSheetMultitableTargetAdapterFactory({ context, governedSheetProbe: stockPreparationGovernedSheetProbe }), { metadata: METASHEET_MULTITABLE_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-readonly', createDataSourceSqlReadonlySourceAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-write-gated', createDataSourceSqlWriteGatedTargetAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA })
     pipelineRegistry = createPipelineRegistry({ db })
@@ -408,6 +420,8 @@ module.exports = {
     erpFeedbackWriter = createErpFeedbackWriter({
       context,
       logger,
+      // PR-6: a governed stock-prep sheet is refused before any feedback write.
+      governedSheetProbe: stockPreparationGovernedSheetProbe,
     })
     stagingInstaller = {
       listStagingDescriptors,
@@ -567,6 +581,7 @@ module.exports = {
         stockPreparationProjectWriteLock,
         stockPreparationContinuationStore,
         stockPreparationRefreshGovernance,
+        stockPreparationGovernedSheetProbe,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -682,6 +697,7 @@ module.exports = {
     erpFeedbackWriter = null
     pipelineRunner = null
     stagingInstaller = null
+    stockPreparationGovernedSheetProbe = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null
     activeContext = null

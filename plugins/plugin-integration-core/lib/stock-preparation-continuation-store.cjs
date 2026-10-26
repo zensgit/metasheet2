@@ -935,6 +935,47 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     })
   }
 
+  /**
+   * Batch-refresh step 4 PR-6: does ANY step-4 row name this SHEET — the generic configured writers' half of the
+   * governed predicate (lib/stock-preparation-governed-sheet-probe.cjs). A generic writer (the pipelines target
+   * adapter, the C6 write-source, the ERP feedback writer) holds a sheet id and nothing else: no project number, no
+   * proven project scope, no lease. So this reads BY SHEET only, four counts on the store's own db (autocommit; a
+   * point-in-time existence check needs no snapshot), with the same row predicate the consult's `governed` uses
+   * (design §5.1, governance `anyRows`):
+   *   continuation  every status — an ENDED relationship still governs (D3);
+   *   openHold      status 'open' only — a resolved / superseded hold does not;
+   *   state         any refresh-state row;
+   *   execution     any execution row (the consult always reads the newest five, so one row is enough to govern).
+   * Members are not read: a member is inserted with its header in the confirm transaction and `claim_active` mirrors
+   * the header's status (migration 102 CHECK), so a governing member implies a governing header on the same sheet.
+   * Values-free answer: integers only. Throws 503 STORE_FAILED on any failure (never zero), 422 on a blank sheet
+   * id, 501 when the binding cannot count.
+   */
+  async function readSheetGovernanceMarks(input = {}) {
+    const sheetId = isPlainObject(input) ? trimmed(input.sheetId) : null
+    if (!sheetId) throw scopeInvalid('sheetId')
+    if (typeof db.countRows !== 'function') {
+      throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the refresh store binding cannot count rows; refusing to answer whether a sheet is governed', { reason: 'count_rows' })
+    }
+    const T = REFRESH_STORE_TABLES
+    async function count(table, token, where) {
+      let value
+      try {
+        value = await db.countRows(table, where)
+      } catch (error) {
+        throw storeFailed('read_sheet_governance_marks', error, { table: token })
+      }
+      const n = typeof value === 'number' ? value : Number(value)
+      if (!Number.isInteger(n) || n < 0) throw storeFailed('read_sheet_governance_marks', null, { table: token, reason: 'count_malformed' })
+      return n
+    }
+    const continuation = await count(T.continuation, 'continuation', { sheet_id: sheetId })
+    const openHold = await count(T.hold, 'refresh_hold', { sheet_id: sheetId, status: 'open' })
+    const state = await count(T.state, 'refresh_state', { sheet_id: sheetId })
+    const execution = await count(T.execution, 'refresh_execution', { sheet_id: sheetId })
+    return Object.freeze({ ok: true, sheetId, continuation, openHold, state, execution })
+  }
+
   /** One continuation with its members (every status; members claim_active or not), scoped. */
   async function readContinuation(input = {}) {
     const scope = normalizeScope(input)
@@ -1912,6 +1953,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
 
   return Object.freeze({
     readGovernanceRows,
+    readSheetGovernanceMarks,
     readContinuation,
     readHold,
     countOpenHoldsByProjectNo,
