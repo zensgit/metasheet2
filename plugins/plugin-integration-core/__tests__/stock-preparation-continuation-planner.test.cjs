@@ -928,4 +928,66 @@ test('PC-P5 (O-7) inactive remnants + a head dropped by a base rule and expanded
   assert.deepEqual(writesOn(planned, underPath(['P-001', 'S-001'])), [], 'no ADD of the copy')
 })
 
+// ── PR-4: F-15 (design §23.8) and the end route's recorded fact (§8.4 / O-17) ──────────────────────
+
+test('F-15a (PR-4) a SINGLE old S-001 root whose key is duplicate-resolved (`::duplicate:` suffix) is candidate_ambiguous, never a confirmable candidate; the old rows stay protected and no copy is ADDed', async () => {
+  const sheet = (await F.firstPullSheet()).map((row) => (row.componentSourceId === 'S-001'
+    ? F.withRecordRef({ ...row, idempotencyKey: `${row.idempotencyKey}::duplicate:sortLine:sha16:00000000000000aa` }, row[EXISTING_ROW_RECORD_REF].id, 1)
+    : row))
+  const expansion = await F.expand(F.secondPullSource())
+  const planned = F.plan(expansion, sheet, { continuation: F.continuationInput({ demandEvidence: expansion.demandEvidence }) })
+  assert.equal(planned.suspended, true)
+  assert.deepEqual(kinds(planned), ['candidate_ambiguous'], 'one hold, no confirm control')
+  const hold = holdOf(planned, 'candidate_ambiguous')
+  assert.equal(hold.confirmable, false)
+  assert.equal(hold.notConfirmableReason, 'ambiguous_pairing')
+  assert.equal(hold.detail.duplicateResolvedRootKey, true)
+  assert.equal(hold.detail.oldRootKeys.length, 1, 'exactly one old root — the suffix alone decides')
+  assert.equal(planned.counts.inactive, 0, 'the old rows stay protected')
+  assert.deepEqual(writesOn(planned, underPath(['P-001', 'S-001'])), [], 'no ADD of the copy')
+  // The control: the same sheet with the plain key is the confirmable A01 candidate.
+  const control = F.plan(expansion, await F.firstPullSheet(), { continuation: F.continuationInput({ demandEvidence: expansion.demandEvidence }) })
+  assert.equal(holdOf(control, 'continuation_candidate').confirmable, true)
+})
+
+test('F-15b (PR-4) verification of a relationship whose stored old-root key carries the suffix is structure_changed (the parser refuses it, by design — not reconfirmable, old rows still protected)', async () => {
+  const { sheet, expansion, header, members } = await confirmedStory()
+  const suffix = '::duplicate:sortLine:sha16:00000000000000bb'
+  const suffixed = sheet.map((row) => (row.componentSourceId === 'S-001'
+    ? F.withRecordRef({ ...row, idempotencyKey: `${row.idempotencyKey}${suffix}` }, row[EXISTING_ROW_RECORD_REF].id, 1)
+    : row))
+  const tamperedHeader = { ...header, oldRootKey: `${header.oldRootKey}${suffix}` }
+  const tamperedMembers = members.map((member) => (member.position === 0 ? { ...member, oldKey: `${member.oldKey}${suffix}` } : member))
+  const planned = governedPlan(expansion, suffixed, tamperedHeader, tamperedMembers)
+  assert.deepEqual(planned.continuation.verdicts, { [header.id]: 'structure_changed' })
+  const hold = holdOf(planned, 'relationship_reconfirm')
+  assert.equal(hold.confirmable, false)
+  assert.equal(hold.detail.steps.pairing, 'structure_changed')
+  assert.equal(hold.detail.componentNewPositionCount, null, 'no parsable old root => no recorded count (the end route refuses: facts missing)')
+  assert.equal(planned.suspended, true)
+  assert.equal(planned.counts.inactive, 0, 'protection stays applied whatever the verdict')
+})
+
+test('PR-4 (§8.4 / O-17) a relationship_reconfirm hold records componentNewPositionCount — N(c) of the old root\'s component in THIS read: 0 when P-001 is gone (release admissible), 1 when S-001 moved under another parent (never admissible), and the old root\'s own key never counts', async () => {
+  const { sheet, header, members } = await confirmedStory()
+  // P-001 gone: no position of S-001 anywhere in the read.
+  const gone = await F.expand(F.project({ orders: [{ part: 'N-001', qty: 1 }], parts: F.PARTS.slice(), boms: F.S_BOMS }))
+  const gonePlan = governedPlan(gone, sheet, header, members)
+  assert.deepEqual(gonePlan.continuation.verdicts, { [header.id]: 'new_position_removed' })
+  assert.equal(holdOf(gonePlan, 'relationship_reconfirm').detail.componentNewPositionCount, 0)
+  // P-001 gone but S-001 re-ordered alone (its old root key is back in the read): still 0 — the old root's own key never counts.
+  const ownAgain = await F.expand(F.project({ orders: [{ part: 'S-001', qty: 10 }, { part: 'N-001', qty: 1 }], parts: F.PARTS.slice(), boms: F.S_BOMS }))
+  const ownPlan = governedPlan(ownAgain, sheet, header, members)
+  assert.deepEqual(ownPlan.continuation.verdicts, { [header.id]: 'new_position_removed' })
+  assert.equal(holdOf(ownPlan, 'relationship_reconfirm').detail.componentNewPositionCount, 0)
+  // S-001 nested under ANOTHER parent (P-001 gone, Q-001 holds it): one new position of the component.
+  const parts = F.PARTS.concat([F.part('Q-001', 'D100-09', 'OtherAssembly')])
+  const moved = await F.expand(F.project({ orders: [{ part: 'Q-001', qty: 3 }, { part: 'N-001', qty: 1 }], parts, boms: { 'Q-001': [{ part: 'S-001', usage: 2 }], ...F.S_BOMS } }))
+  const movedPlan = governedPlan(moved, sheet, header, members)
+  assert.deepEqual(movedPlan.continuation.verdicts, { [header.id]: 'new_position_removed' })
+  assert.equal(holdOf(movedPlan, 'relationship_reconfirm').detail.componentNewPositionCount, 1)
+  // The count is part of the hold body: it moves the fingerprint, so a changed read opens a new hold row.
+  assert.notEqual(holdOf(gonePlan, 'relationship_reconfirm').fingerprint, holdOf(movedPlan, 'relationship_reconfirm').fingerprint)
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-continuation-planner.test.cjs', tests)
