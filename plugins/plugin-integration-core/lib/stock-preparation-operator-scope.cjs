@@ -187,6 +187,20 @@
 //           generation, asks the host to stamp the sheet closed for grid export and marks the registry
 //           row — keyed by the proven tenant; a header-fillable tenant here would mark another
 //           tenant's project pilot. Set-once; there is no unset surface.
+//       23. GET  …/projects/:projectNo/refresh/holds                       `stockPreparationRefreshHolds`
+//       24. GET  …/projects/:projectNo/refresh/holds/:holdId/evidence      `stockPreparationRefreshHoldEvidence`
+//       25. POST …/projects/:projectNo/refresh/holds/:holdId/keep          `stockPreparationRefreshHoldKeep`
+//       26. POST …/projects/:projectNo/refresh/continuations/confirm       `stockPreparationRefreshContinuationConfirm`
+//       27. GET  …/projects/:projectNo/refresh/continuations/:id           `stockPreparationRefreshContinuationGet`
+//       28. POST …/projects/:projectNo/refresh/continuations/:id/end       `stockPreparationRefreshContinuationEnd`
+//           备料分批拉取第一期 step 4 PR-4 (register R-59), PULL. ONE resolution for the six, in the shared
+//           context builder `stockPreparationRefreshDecisionContext` (http-routes.cjs), at the PULL tier:
+//           the hold page, the evidence and the relationship detail carry the proven tenant's PRIVATE
+//           business values (keys, quantities, before / after cells), and the confirm / keep / end
+//           decide over its step-4 rows and bump its sheet's plan generation. A header-fillable tenant
+//           here would read another tenant's values or confirm a relationship on its sheet; a
+//           TENANTLESS platform admin is refused (403 OPERATOR_SCOPE_TENANT_REQUIRED) — counts are the
+//           board's, values never theirs.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

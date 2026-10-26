@@ -3061,8 +3061,11 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // is (5)'s missing-component list, so its poll proves the scope exactly as (5) does.
   // 备料分批拉取第一期 step 3 PR B (R-53 / R-54) added TWO — the pilot GET and ENABLE (section D, items
   // 21–22): the registry row the read describes and the enable marks is keyed by the proven tenant.
-  assert.equal(callSites, 24, 'G9: twenty-four call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable']) {
+  // 备料分批拉取第一期 step 4 PR-4 (R-59) added ONE call site for SIX routes — the shared decision context
+  // `stockPreparationRefreshDecisionContext` (section D, items 23–28): the hold page, the evidence, the
+  // relationship detail, confirm / keep / end all resolve the PULL-tier scope there, before any host work.
+  assert.equal(callSites, 25, 'G9: twenty-five call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable', 'stockPreparationRefreshDecisionContext', 'stockPreparationRefreshContinuationConfirm']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

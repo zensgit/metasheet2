@@ -948,6 +948,20 @@ test('F-15a (PR-4) a SINGLE old S-001 root whose key is duplicate-resolved (`::d
   // The control: the same sheet with the plain key is the confirmable A01 candidate.
   const control = F.plan(expansion, await F.firstPullSheet(), { continuation: F.continuationInput({ demandEvidence: expansion.demandEvidence }) })
   assert.equal(holdOf(control, 'continuation_candidate').confirmable, true)
+  // Pilot exit (AMB-1): the persisted ambiguous hold is RE-EMITTED and its old rows — the suffixed root included — stay
+  // protected through the re-emitted claim (stored by BASE key, TD-14), so the sweep never reaches them.
+  // The lane's 13-key persisted-hold entry (refresh-lanes pickPersistedHold), from the stored row.
+  const persisted = {
+    kind: hold.kind, fingerprint: hold.fingerprint, confirmable: hold.confirmable, notConfirmableReason: hold.notConfirmableReason || null,
+    shapeToken: hold.shapeToken || null, continuationId: hold.continuationId || null, subject: hold.subject, detail: hold.detail,
+    evidenceFingerprint: hold.evidenceFingerprint || null, comparisonFingerprint: hold.comparisonFingerprint || null, pairingFingerprint: hold.pairingFingerprint || null,
+    runbookOnly: false, continuationRoots: null,
+  }
+  const exited = F.plan(expansion, sheet, { continuation: F.continuationInput({ pilot: false, demandEvidence: expansion.demandEvidence, persistedHolds: [persisted] }) })
+  assert.equal(exited.suspended, true)
+  assert.equal(holdOf(exited, 'candidate_ambiguous').fingerprint, hold.fingerprint, 're-emitted with the stored fingerprint')
+  assert.equal(exited.counts.inactive, 0, 'the suffixed old root stays protected after pilot exit')
+  assert.deepEqual(writesOn(exited, underPath(['P-001', 'S-001'])), [], 'no ADD of the copy after pilot exit')
 })
 
 test('F-15b (PR-4) verification of a relationship whose stored old-root key carries the suffix is structure_changed (the parser refuses it, by design — not reconfirmable, old rows still protected)', async () => {
