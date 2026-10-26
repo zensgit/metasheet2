@@ -1010,3 +1010,198 @@ describe('slice 3b — C2-F1: a write inside the body of an entry or a seam, thr
     expect(unclassified(c, FENCE_HOLDER_LEDGER)).toContain('multitable/provisioning.ts :: patchObjectFieldProperty :: fenceWriterEntry')
   })
 })
+
+
+// ── owning-session migration: preserve the existing ledger, prove the new internal edges ────────────
+
+const LEASE_REGISTRY = 'attendance/w4c0-operation-registry.ts'
+const LEASE_ADMISSION = 'attendance/attendance-owning-session.ts'
+const LEASE_ROLLOUT = 'attendance/w4c3a-rollout-control.ts'
+const LEASE_W7 = 'attendance/w7-context-source-transition.ts'
+const PRIVATE_RUNNER = 'runAttendanceResultOperationOnLeaseV1'
+const LEASE_PROOF_SOURCES = REAL_SOURCES.filter(s => [LEASE_REGISTRY, LEASE_ADMISSION, LEASE_ROLLOUT, LEASE_W7,
+  'multitable/canonical-sheet-fence.ts'].includes(s.rel))
+const OLD_LEASE_HOLDER_COUNTS: ReadonlyArray<readonly [string, number]> = [
+  [`attendance/w4c2-live-scheduled-boundary.ts :: executeLivePunch :: ${W4C0}`, 1],
+  [`attendance/w4c2-live-scheduled-boundary.ts :: probeOnlinePunchReplay :: ${W4C0}`, 1],
+  [`attendance/w4c2-live-scheduled-boundary.ts :: executeOnlinePunch :: ${W4C0}`, 1],
+  [`attendance/w4c2-live-scheduled-boundary.ts :: executeScheduledRunInternal :: ${W4C0}`, 5],
+  [`attendance/w4c2-scheduled-run-ops-worker.ts :: abandonScheduledRunOnceV1 :: ${W4C0}`, 1],
+  [`attendance/w4c2-scheduled-run-ops-worker.ts :: sweepAttendanceScheduledRunsOnceV1 :: ${W4C0}`, 2],
+  [`attendance/w4c3a-import-rollback-boundary.ts :: rollbackImportBatchV1 :: ${W4C0}`, 1],
+  [`attendance/w4c3a-legacy-plan-processor.ts :: runSerializable :: ${W4C0}`, 1],
+  [`attendance/w4c3a-legacy-plan-reservation-host.ts :: reserveLegacyImportPlanV1 :: ${W4C0}`, 1],
+  [`attendance/w4c3a-sync-import-host.ts :: commitSyncImportPlanV1 :: ${W4C0}`, 1],
+  [`attendance/w4c3b-request-operation-boundary.ts :: execute :: ${W4C0}`, 1],
+  [`attendance/w4c3c-record-operation-boundary.ts :: execute :: ${W4C0}`, 1],
+  ['attendance/w4c3a-import-rollback.ts :: rollbackAttendanceImportV1 :: <no in-tree call>', 1],
+  [`${LEASE_ROLLOUT} :: closeLegacyRollbackWindowV1 :: <no in-tree call>`, 1],
+  [`${LEASE_ROLLOUT} :: transitionAttendanceCalculationRolloutV1 :: <no in-tree call>`, 1],
+  [`${LEASE_W7} :: transitionAttendanceW7ContextSourceV1 :: <no in-tree call>`, 1],
+]
+const LEASE_EDGE_LEDGER = [
+  { wrapper: `${LEASE_REGISTRY}#${W4C0}`, admission: `${LEASE_ADMISSION}#withAttendanceExclusiveIdleSessionV1`, target: `${LEASE_REGISTRY}#${PRIVATE_RUNNER}` },
+  { wrapper: `${LEASE_ROLLOUT}#runControlTransaction`, admission: `${LEASE_ADMISSION}#withAttendanceExclusiveIdleSessionV1`, target: `${LEASE_REGISTRY}#${W4C0}` },
+  { wrapper: `${LEASE_ROLLOUT}#transitionAttendanceCalculationRolloutV1`, admission: `${LEASE_ADMISSION}#withAttendanceExclusiveIdleSessionV1`, target: `${LEASE_ROLLOUT}#runControlTransaction` },
+  { wrapper: `${LEASE_W7}#transitionAttendanceW7ContextSourceV1`, admission: `${LEASE_ADMISSION}#withAttendanceExclusiveIdleSessionV1`, target: `${LEASE_REGISTRY}#${W4C0}` },
+].sort((a, b) => a.wrapper.localeCompare(b.wrapper) || a.target.localeCompare(b.target))
+
+function patchLeaseSources(rel: string, anchor: string, replacement: string, extra: CensusSource[] = []): Census {
+  const original = LEASE_PROOF_SOURCES.find(s => s.rel === rel)!.text.replace(/\r\n/g, '\n')
+  expect(original.split(anchor), `${rel}: unique mutation anchor`).toHaveLength(2)
+  return runFenceHolderCensus([...LEASE_PROOF_SOURCES.map(s => s.rel === rel
+    ? { rel, text: original.replace(anchor, replacement) } : s), ...extra])
+}
+
+const LEASE_CALLER = src('multitable/lease-caller.ts', [
+  `import { ${W4C0} } from '../attendance/w4c0-operation-registry'`,
+  'export async function execute() {',
+  '  const session = obtainSession()',
+  `  await ${W4C0}(session, async (trx) => { await trx.query('SELECT 1') })`,
+  '}',
+])
+
+describe('owning-session migration — exact lease delegation', () => {
+  it('retains all 16 old ledger keys, their original counts (21 sites), and all five PUBLIC ADR seams', () => {
+    expect(FENCE_HOLDER_LEDGER.filter(e => e.row === '32').map(e => [e.key, e.count])).toEqual(OLD_LEASE_HOLDER_COUNTS)
+    const counts = countsByKey(REAL.holders)
+    expect(OLD_LEASE_HOLDER_COUNTS.map(([key]) => [key, counts.get(key) ?? 0])).toEqual(OLD_LEASE_HOLDER_COUNTS)
+    expect(OLD_LEASE_HOLDER_COUNTS).toHaveLength(16)
+    expect(OLD_LEASE_HOLDER_COUNTS.reduce((total, [, count]) => total + count, 0)).toBe(21)
+    expect(ADR_SEAMS).toHaveLength(5)
+    expect(REAL.seams).toEqual(expect.arrayContaining(ADR_SEAMS))
+    expect(REAL.leaseRefusals).toEqual([])
+    expect(REAL.leaseDelegations).toEqual(LEASE_EDGE_LEDGER)
+    expect(REAL.ownTransactionSeams).toEqual(expect.arrayContaining([
+      `${LEASE_REGISTRY}#${PRIVATE_RUNNER}`, `${LEASE_REGISTRY}#${W4C0}`, `${LEASE_ROLLOUT}#runControlTransaction`,
+    ]))
+  })
+
+  it('the small proof fixture derives the same four edges; a caller checks only its fenced handler', () => {
+    const c = runFenceHolderCensus([...LEASE_PROOF_SOURCES, LEASE_CALLER])
+    expect(c.leaseRefusals).toEqual([])
+    expect(c.leaseDelegations).toEqual(LEASE_EDGE_LEDGER)
+    const holder = c.holders.find(h => h.key === `multitable/lease-caller.ts :: execute :: ${W4C0}`)!
+    expect(holder.kind).toBe('seam-call')
+    expect(holder.regions).toHaveLength(1)
+    expect(holder.regions[0].queryBinding).toBe('trx')
+  })
+
+  it('an aliased admission import still resolves to the exact module declaration', () => {
+    const sources = LEASE_PROOF_SOURCES.map(s => s.rel === LEASE_REGISTRY ? {
+      rel: s.rel,
+      text: s.text.replace('import { withAttendanceExclusiveIdleSessionV1,', 'import { withAttendanceExclusiveIdleSessionV1 as admit,')
+        .replace('return withAttendanceExclusiveIdleSessionV1(', 'return admit('),
+    } : s)
+    const c = runFenceHolderCensus(sources)
+    expect(c.leaseRefusals).toEqual([])
+    expect(c.leaseDelegations).toEqual(LEASE_EDGE_LEDGER)
+  })
+
+  const delegate = '(lease) => runAttendanceResultOperationOnLeaseV1(lease, body, options)'
+  it.each([
+    ['wrong lease', '(lease) => runAttendanceResultOperationOnLeaseV1(connection, body, options)', 'lease-binding-or-lifetime'],
+    ['wrong handler', '(lease) => runAttendanceResultOperationOnLeaseV1(lease, options, options)', 'lease-binding-or-lifetime'],
+    ['dropped options', '(lease) => runAttendanceResultOperationOnLeaseV1(lease, body, undefined)', 'registry-forwarding'],
+    ['unknown lease binding', '({ query }) => runAttendanceResultOperationOnLeaseV1(query, body, options)', 'lease-binding-or-lifetime'],
+    ['unawaited private call', '(lease) => { runAttendanceResultOperationOnLeaseV1(lease, body, options) }', 'lease-binding-or-lifetime'],
+    ['second private site', '(lease) => { await runAttendanceResultOperationOnLeaseV1(lease, body, options); return await runAttendanceResultOperationOnLeaseV1(lease, body, options) }', 'delegation-site-count'],
+  ])('refuses %s instead of shrinking the ledger', (_name, replacement, reason) => {
+    const c = patchLeaseSources(LEASE_REGISTRY, delegate, replacement)
+    expect(c.leaseRefusals).toContain(`${LEASE_REGISTRY}#${W4C0}: ${reason}`)
+    expect(c.leaseDelegations.some(e => e.wrapper === `${LEASE_REGISTRY}#${W4C0}`)).toBe(false)
+  })
+
+  it.each([
+    ['unawaited admission', 'return withAttendanceExclusiveIdleSessionV1(', 'withAttendanceExclusiveIdleSessionV1(', 'lease-binding-or-lifetime'],
+    ['shadowed admission', '  return withAttendanceExclusiveIdleSessionV1(', '  const withAttendanceExclusiveIdleSessionV1 = foreignAdmission\n  return withAttendanceExclusiveIdleSessionV1(', 'declaration-identity'],
+    ['shadowed private declaration', delegate, '(lease) => { const runAttendanceResultOperationOnLeaseV1 = foreignRunner; return runAttendanceResultOperationOnLeaseV1(lease, body, options) }', 'declaration-identity'],
+  ])('refuses %s', (_name, anchor, replacement, reason) => {
+    const c = patchLeaseSources(LEASE_REGISTRY, anchor, replacement)
+    expect(c.leaseRefusals).toContain(`${LEASE_REGISTRY}#${W4C0}: ${reason}`)
+  })
+
+  it('does not trust a same-named admission from a different module', () => {
+    const c = patchLeaseSources(LEASE_REGISTRY, "from './attendance-owning-session'", "from './fake-admission'", [
+      src('attendance/fake-admission.ts', ['export async function withAttendanceExclusiveIdleSessionV1(value, body) { return body(value) }']),
+    ])
+    expect(c.leaseRefusals).toContain(`${LEASE_REGISTRY}#${W4C0}: declaration-identity`)
+  })
+
+  it.each([
+    ['missing BEGIN', "connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])", "connection.query('SELECT 1', [])"],
+    ['foreign BEGIN connection', "connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])", "other.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])"],
+    ['foreign fence connection', 'await acquireCleaningSessionFences(connection, options.attendanceCleaningSheetIds!, held)', 'await acquireCleaningSessionFences(other, options.attendanceCleaningSheetIds!, held)'],
+    ['foreign body connection', 'const result = await body(connection)', 'const result = await body(other)'],
+    ['unawaited body', 'const result = await body(connection)', 'const result = body(connection)'],
+    ['early COMMIT', 'const result = await body(connection)', "await connection.query('COMMIT', [])\n      const result = await body(connection)"],
+    ['early unlock', 'const result = await body(connection)', 'await releaseCleaningSessionFences(connection, held)\n      const result = await body(connection)'],
+    ['unknown settlement helper', 'const result = await body(connection)', 'await settleElsewhere(connection)\n      const result = await body(connection)'],
+    ['direct private writer', 'const result = await body(connection)', "await connection.query('UPDATE meta_records SET data = $1', [])\n      const result = await body(connection)"],
+    ['indirect private writer', 'const result = await body(connection)', 'await zzLeaseWrite(connection)\n      const result = await body(connection)'],
+  ])('refuses %s in the private transaction', (_name, anchor, replacement) => {
+    const c = patchLeaseSources(LEASE_REGISTRY, anchor, replacement)
+    expect(c.leaseRefusals).toContain(`${LEASE_REGISTRY}: transaction-shape`)
+    expect(c.ownTransactionSeams).not.toContain(`${LEASE_REGISTRY}#${PRIVATE_RUNNER}`)
+  })
+
+  it('a direct write added to the public wrapper is refused, not hidden behind the private seam', () => {
+    const c = patchLeaseSources(LEASE_REGISTRY, '  return withAttendanceExclusiveIdleSessionV1(',
+      "  await foreignQuery('UPDATE meta_records SET data = $1', [])\n  return withAttendanceExclusiveIdleSessionV1(")
+    expect(c.leaseRefusals).toContain(`${LEASE_REGISTRY}#${W4C0}: delegation-shape`)
+  })
+
+  it('admission must await its callback before finally invalidates the lease', () => {
+    const c = patchLeaseSources(LEASE_ADMISSION, 'return await body(lease.facade)', 'return body(lease.facade)')
+    expect(c.leaseRefusals).toContain(`${LEASE_ADMISSION}: admission-lifetime`)
+  })
+
+  it.each([
+    [LEASE_ROLLOUT, 'runControlTransaction', 'return await runAttendanceResultOperationTransactionV1(lease, body)', 'return runAttendanceResultOperationTransactionV1(lease, body)', 'lease-binding-or-lifetime'],
+    [LEASE_ROLLOUT, 'runControlTransaction', 'return await runAttendanceResultOperationTransactionV1(lease, body)', "await lease.query('COMMIT')\n          return await runAttendanceResultOperationTransactionV1(lease, body)", 'delegation-shape'],
+    [LEASE_ROLLOUT, 'transitionAttendanceCalculationRolloutV1', 'return await runControlTransaction(lease, async (trx) => {', 'await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(lease, orgKey)\n        return await runControlTransaction(lease, async (trx) => {', 'delegation-shape'],
+    [LEASE_W7, 'transitionAttendanceW7ContextSourceV1', 'return await runAttendanceResultOperationTransactionV1(lease, async (trx) => {', 'return await runAttendanceResultOperationTransactionV1(other, async (trx) => {', 'lease-binding-or-lifetime'],
+  ])('refuses broken host lease propagation in %s / %s', (rel, name, anchor, replacement, reason) => {
+    const c = patchLeaseSources(rel, anchor, replacement)
+    expect(c.leaseRefusals).toContain(`${rel}#${name}: ${reason}`)
+  })
+
+  it('a newly nested writer at the old two-callee boundary remains visible across the proved delegation', () => {
+    expect(LEASE_PROOF_SOURCES.find(s => s.rel === LEASE_REGISTRY)!.text.split('    held.push(key)')).toHaveLength(2)
+    // The helper is in the SAME module so precise lexical resolution follows it.
+    const sources = LEASE_PROOF_SOURCES.map(s => s.rel === LEASE_REGISTRY ? {
+      rel: s.rel,
+      text: s.text.replace('    held.push(key)', '    await zzLeaseWrite(connection)\n    held.push(key)')
+        + "\nasync function zzLeaseWrite(query) { await query('UPDATE meta_records SET data = $1', []) }\n",
+    } : s)
+    const changed = runFenceHolderCensus([...sources, LEASE_CALLER])
+    expect(changed.leaseRefusals).toEqual([])
+    const holder = changed.holders.find(h => h.key === `multitable/lease-caller.ts :: execute :: ${W4C0}`)!
+    expect(holder.entryWritesVia).toContain(`${PRIVATE_RUNNER}>acquireCleaningSessionFences`)
+    expect(entryWritesViaMismatches(changed, [NONWRITER(holder.key, '32', 'synthetic delegation writer')])).toHaveLength(1)
+  })
+
+  it('does not extend the ordinary two-callee depth to discover a third-level write', () => {
+    const sources = LEASE_PROOF_SOURCES.map(s => s.rel === LEASE_REGISTRY ? {
+      rel: s.rel,
+      text: s.text.replace('    held.push(key)', '    await zzLeaseMiddle(connection)\n    held.push(key)')
+        + "\nasync function zzLeaseMiddle(query) { await zzLeaseDeep(query) }\n"
+        + "async function zzLeaseDeep(query) { await query('UPDATE meta_records SET data = $1', []) }\n",
+    } : s)
+    const c = runFenceHolderCensus([...sources, LEASE_CALLER])
+    expect(c.leaseRefusals).toEqual([])
+    const holder = c.holders.find(h => h.key === `multitable/lease-caller.ts :: execute :: ${W4C0}`)!
+    expect(holder.entryWritesVia).toEqual([]) // Existing documented depth limit; no wider general call graph.
+  })
+
+  it('unknown literal-handler binding refuses, and a helper on another query cannot satisfy the fenced handler', () => {
+    const unknown = { ...LEASE_CALLER, text: LEASE_CALLER.text.replace('async (trx)', 'async ()') }
+    expect(runFenceHolderCensus([...LEASE_PROOF_SOURCES, unknown]).leaseRefusals)
+      .toContain('multitable/lease-caller.ts :: execute: unknown-handler-binding')
+    const wrong = { ...LEASE_CALLER, text: LEASE_CALLER.text.replace("await trx.query('SELECT 1')",
+      `await ${HELPER}(other, 's', snapshot, ['f']); await trx.query('UPDATE meta_records SET data = $1', [])`) }
+    const c = runFenceHolderCensus([...LEASE_PROOF_SOURCES, wrong])
+    const key = `multitable/lease-caller.ts :: execute :: ${W4C0}`
+    expect(mustWireViolations(c, [MUST(key, '32', 'synthetic foreign helper')])[0]).toContain('instead of the fenced query trx')
+  })
+})

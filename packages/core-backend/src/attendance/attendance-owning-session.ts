@@ -143,7 +143,7 @@ function invalidate(state: State): void {
   state.busy = true
 }
 
-function submit(state: State, args: unknown[]): unknown {
+function submit(args: unknown[], state: State): unknown {
   state.busy = true
   state.status = 'unknown'
   return Reflect.apply(Client.prototype.query, state.client, args)
@@ -160,13 +160,13 @@ function rejectedQuery(args: unknown[], error: Error): unknown {
   return Promise.reject(error)
 }
 
-function publicQuery(state: State, args: unknown[], checkout?: Checkout): unknown {
+function publicQuery(args: unknown[], state: State, checkout?: Checkout): unknown {
   // pg's custom submit callback receives its raw protocol connection. Supporting
   // it would let a caller retain that transport and bypass every later lease.
   const input = args[0] as { submit?: unknown } | null | undefined
   if (input && typeof input.submit === 'function') return rejectedQuery(args, refusalError())
   if ((checkout && !current(checkout)) || state.owner) return rejectedQuery(args, refusalError())
-  return submit(state, args)
+  return submit(args, state)
 }
 
 export class AttendanceManagedPgClient extends Client {
@@ -191,7 +191,7 @@ export class AttendanceManagedPgClient extends Client {
   }
 
   query: Client['query'] = ((...args: unknown[]) =>
-    publicQuery(states.get(this)!, args)) as Client['query']
+    publicQuery(args, states.get(this)!)) as Client['query']
 
   _handleBackendKeyData(message: { processID: number; secretKey: number }): void {
     const state = states.get(this)!
@@ -272,7 +272,7 @@ function createFacade(checkout: Checkout): PoolClient {
       if (methods.has(key)) return methods.get(key)
       let method: unknown
       if (key === 'query') {
-        method = (...args: unknown[]) => publicQuery(state, args, checkout)
+        method = (...args: unknown[]) => publicQuery(args, state, checkout)
       } else if (key === 'release') {
         method = (error?: Error | boolean) => {
           requireCurrent()
@@ -442,7 +442,7 @@ function createLease(owner: Owner): Lease {
       // Preserve the existing COMMIT adapter's one-argument native config,
       // including values; other statements retain pg's original two-argument path.
       try {
-        return await submit(owner.session.checkout.state, overrideCommit ? [config] : [config, values]) as {
+        return await submit(overrideCommit ? [config] : [config, values], owner.session.checkout.state) as {
           rows: Array<Record<string, unknown>>
         }
       } catch (error) {

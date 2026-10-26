@@ -44,8 +44,20 @@ Earlier zero-match probes, compile/lint errors, harness oracle corrections and C
 
 Owned UTF8 PG uses verified ledger458 without replaying migrations; each controller records actual stop/postmaster identity and retains data. No real tenant/provider IO.
 
+## Published-head CI adapter repair
+
+Draft #6568 head6481d44 reached12/13 required success. Its backend failed at core85 in the sharding pg mock and two SQL/fence static-guard adapters; later database cleanup failed because setup had not started. The complete failure log and original local three-file reproduction remain retained. Driver39 actually passed in that CI invocation, independently of the overall failed job.
+
+The sharding suite now mocks only its replaced DB adapter, without faking driver protocol/lease trust. Private driver forwarding puts the SQL argument-array carrier first; only six declarations/calls change order. Affected driver39 plus sharding17 passed56/56, real-PG positive smoke2 passed/16 filtered, explicit lint and production validate:all exited0. No other unchanged business suite was replayed.
+
+The fence analyzer proves four exact declaration-keyed lease delegations and the private transaction lifetime. Its full81 assertions passed, retaining the original test bytes,16 ledger keys/21 sites/five public ADR seams and ordinary two-callee depth. Explicit same-path lint comparison introduced0 diagnostics. The W6 analyzer's complete98 assertions now pass with zero skipped. It distinguishes the native SQL argument-array carrier from config.text, retains first-formal/nonempty-caller checks, and separately proves pinned protocol notification and three exact non-SQL facade roles. Unknown/composed/shadowed targets remain refusals within the bounded grammar. The original local-provenance depth4 and closure expansion rounds8 remain; this is not a general JavaScript/proxy/alias proof.
+
+Independent source review identified candidate-helper misclassification of non-SQL array elements and native container aliases; bounded original-source probes confirmed these shapes. A second review identified custom-submit config and returned-method overwrite; both named controls actually red, then passed after the narrow fixes. Earlier intermediate runs (81/83,84/88 and11/12 selected) retain their failures; newly added oracle expectations were corrected to include the expanded caller scan and the existing zero-caller refusal channel. No original assertion or budget was removed. Explicit same-path lint of the four guard/helper files introduced0 diagnostics.
+
+A new published-head CI result remains pending; no whole-product acceptance is implied.
+
 ## Open gates
 
-The explicit53-file test lint comparison has zero introduced errors/warnings; four unchanged pre-existing plugin require errors remain visible under this no-ignore scan. Only our six type imports/two orphan helpers were corrected. Nonsemantic cleanup preserves all eight files' test bodies and the two runtime files' transpiled JavaScript byte-for-byte. Final source/hash audit precedes a separate Draft PR. Affected caller/protocol execution and independent source reviews are recorded above. Published-head required CI and evidence readback remain pending. The conditional recovery-only #6564 does not close original #4844.
+The explicit53-file test lint comparison has zero introduced errors/warnings; four unchanged pre-existing plugin require errors remain visible under this no-ignore scan. Only our six type imports/two orphan helpers were corrected. Nonsemantic cleanup preserves all eight files' test bodies and the two runtime files' transpiled JavaScript byte-for-byte. An updated source/hash audit precedes each normal fast-forward update of Draft #6568. Affected caller/protocol execution and independent source reviews are recorded above. Published-head required CI and evidence readback remain pending. The conditional recovery-only #6564 does not close original #4844.
 
 Manual/owner/W8/PQA/frozen-transfer/performance/live evidence stays separate. No merge/deploy/R71/tag/release/business-config change. Stream/lifecycle OFF; real UAT and business50004 excluded; historical08PUT INCONCLUSIVE.
