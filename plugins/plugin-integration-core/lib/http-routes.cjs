@@ -268,6 +268,24 @@ const ROUTES = [
   // `project_target_grant`.
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', 'stockPreparationProjectFieldsGet'],
   ['PATCH', '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', 'stockPreparationProjectFieldsUpdate'],
+  // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
+  // governed project. All six are the PULL tier (platform admin through the ladder), the tenant from the
+  // host-vouched operator scope (never a header), the project from the path, the sheet from the overlay /
+  // registry; every value-bearing read is audited BEFORE its response (project_board_read, values-free row);
+  // confirm / end run ONE plugin-db transaction with the lock's in-transaction generation bump and the audit
+  // row on the same handle (E03 / E04 / E09). A tenantless platform admin is refused by the scope (403).
+  //   GET  refresh/holds                       the PRIVATE hold page (paged; a read receipt records what was served)
+  //   GET  refresh/holds/:holdId/evidence       the demand facts behind one hold + the history side
+  //   POST refresh/holds/:holdId/keep           「暂不处理」: audit only
+  //   POST refresh/continuations/confirm        a candidate => a new relationship; a reconfirm hold => revision + 1
+  //   GET  refresh/continuations/:id            header + members + evidence snapshot (audited private read)
+  //   POST refresh/continuations/:id/end        an explicit outcome; release admissibility derived server-side
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/refresh/holds', 'stockPreparationRefreshHolds'],
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/evidence', 'stockPreparationRefreshHoldEvidence'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/keep', 'stockPreparationRefreshHoldKeep'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/confirm', 'stockPreparationRefreshContinuationConfirm'],
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id', 'stockPreparationRefreshContinuationGet'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end', 'stockPreparationRefreshContinuationEnd'],
   ['POST', '/api/integration/stock-preparation/project-overview/refresh', 'stockPreparationProjectOverviewRefresh'],
   ['POST', '/api/integration/stock-preparation/project-overview/ensure', 'stockPreparationProjectOverviewEnsure'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
@@ -735,6 +753,9 @@ const {
   sourceBindingDisagreementOf,
   stockPreparationSourceScopeDigest,
 } = require('./stock-preparation-refresh-lanes.cjs')
+// Batch-refresh step 4 PR-4: the puller's decisions over a governed project (the hold page, the evidence, the
+// continuation detail, confirm / keep / end) — server-held inputs only; the routes below build the context.
+const stockPreparationRefreshDecisions = require('./stock-preparation-refresh-decisions.cjs')
 // Batch-refresh step 4 PR-5: the formal-export gate (G0 -> C1 -> rows + file -> C2 -> G1), the ONE machine digest
 // the settlement and the export share, and the ONE predicate every formal surface (export, handoff terminal hop)
 // keys on.
@@ -2260,6 +2281,14 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   // check ids) and the enable (the same, plus the outcome booleans) — handles, enums and check ids only.
   'stockPreparationProjectPilotGet',
   'stockPreparationProjectPilotEnable',
+  // Batch-refresh step 4 PR-4 (R-59): the six refresh decision routes — their typed refusals (the store's, the
+  // lock's, the lanes' and the decision library's) answer as themselves; an untyped escape answers the fixed 500.
+  'stockPreparationRefreshHolds',
+  'stockPreparationRefreshHoldEvidence',
+  'stockPreparationRefreshHoldKeep',
+  'stockPreparationRefreshContinuationConfirm',
+  'stockPreparationRefreshContinuationGet',
+  'stockPreparationRefreshContinuationEnd',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -2818,6 +2847,20 @@ const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_BOARD_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
 ])
+// Batch-refresh step 4 PR-4: the closed allow-lists of the six refresh routes (design §13). The hold page's
+// query is paging + the receipt id; the confirm body binds to the server's own fingerprints and receipt; the
+// end body is the revision, the outcome, a note and — for a release — the id + fingerprint of the hold the page
+// showed (`factsHoldId` / `factsHoldFingerprint`, bound inside the store's transaction); NEVER the release
+// precondition itself, which the store decides under its lock.
+const VALID_STOCK_PREPARATION_REFRESH_HOLDS_QUERY_KEYS = new Set(['tenantId', 'cursor', 'limit', 'holdId', 'pairCursor', 'pairLimit', 'receipt'])
+const VALID_STOCK_PREPARATION_REFRESH_EVIDENCE_QUERY_KEYS = new Set(['tenantId', 'cursor'])
+const VALID_STOCK_PREPARATION_REFRESH_DETAIL_QUERY_KEYS = new Set(['tenantId'])
+const VALID_STOCK_PREPARATION_REFRESH_CONFIRM_REQUEST_KEYS = new Set([
+  'tenantId', 'confirmProjectNo', 'holdId', 'holdFingerprint', 'comparisonFingerprint', 'evidenceFingerprint',
+  'candidateId', 'continuation', 'readReceipt', 'basis', 'acknowledge',
+])
+const VALID_STOCK_PREPARATION_REFRESH_KEEP_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'holdFingerprint'])
+const VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'revision', 'outcome', 'note', 'factsHoldId', 'factsHoldFingerprint'])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
 const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -4651,6 +4694,73 @@ function requireStockPreparationAudit() {
       throw new HttpRouteError(501, 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', 'the stock-prep refresh governance is not available on this deployment; nothing is planned or written without it', { reason: 'governance_service' })
     }
     return { governance: stockPreparationRefreshGovernance, store: stockPreparationContinuationStore }
+  }
+  // Batch-refresh step 4 PR-4: the decision routes need the store's decision transactions, the lock's
+  // in-transaction bump and an audit store that appends inside a transaction — each refused 501 by name.
+  function requireStockPreparationContinuationDecisions() {
+    const { governance, store } = requireStockPreparationRefreshServices()
+    for (const method of ['confirmContinuation', 'reconfirmContinuation', 'endContinuation', 'readContinuation', 'readHold']) {
+      if (typeof store[method] !== 'function') {
+        throw new HttpRouteError(501, 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', 'the continuation store on this deployment cannot decide; nothing is confirmed or ended without it', { reason: 'decision_store' })
+      }
+    }
+    const lock = requireStockPreparationProjectWriteLock()
+    if (typeof lock.bumpGenerationWithin !== 'function') {
+      throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the sheet write lock offers no in-transaction bump; nothing is confirmed or ended without it', { reason: 'bump_within' })
+    }
+    return { governance, store, lock }
+  }
+  // The read receipts (U04) live in the plugin's durable storage, like the dry-run tokens. Built once.
+  let stockPreparationReadReceiptsCache = null
+  function stockPreparationReadReceipts() {
+    if (!stockPreparationReadReceiptsCache) {
+      stockPreparationReadReceiptsCache = stockPreparationRefreshDecisions.createReadReceiptStore({ storage: context && context.storage })
+    }
+    return stockPreparationReadReceiptsCache
+  }
+  /**
+   * THE DECISION CONTEXT every refresh route builds, in this order and only here (PR-4, design §13 / §4.4):
+   * the PULL gate; the closed body / query allow-list; the typed `confirmProjectNo` (pure, before any await);
+   * the host-vouched operator scope (never a header; a tenantless platform admin is refused here); the audit
+   * vocabulary probe; the resolved table action (an archived project refuses a WRITE purpose here) and its
+   * tenant wall; ONE governance consult (503 unreadable / 409 retargeted or tenant mismatch / 501 unwired).
+   */
+  async function stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose, confirmTyped, auditAction, auditMigration }) {
+    if (!user) throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
+    const audit = requireStockPreparationAudit()
+    const projectNo = firstString(requestParams(req).projectNo)
+    if (!projectNo) throw new HttpRouteError(400, 'PROJECT_NO_REQUIRED', 'projectNo is required', { field: 'projectNo' })
+    if (confirmTyped && firstString(input.confirmProjectNo) !== projectNo) {
+      throw new HttpRouteError(400, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID', 'confirmProjectNo must repeat the project number of the path', { field: 'confirmProjectNo' })
+    }
+    const scope = await resolveOperatorValueScope({
+      user,
+      authenticatedTenantId: req.authenticatedTenantId,
+      explicitTenantIds: collectExplicitTenantIds(req, input),
+      tenantPrincipalDirectory,
+      requiredTier: STOCK_PREP_PULL,
+    })
+    await requireStockPreparationAuditVocabulary(audit, auditAction, auditMigration, scope.tenantId)
+    const services = requireStockPreparationContinuationDecisions()
+    const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+      tenantId: scope.tenantId,
+      actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+      projectNo,
+      targetPurpose,
+    }))
+    await assertResolvedProjectTargetTenancy(action, scope.tenantId)
+    const consult = await refreshGovernanceFor(scope.tenantId).consult({ projectNo, sheetId: action.target.sheetId })
+    return Object.freeze({
+      scope: Object.freeze({ tenantId: scope.tenantId, sheetId: action.target.sheetId, projectNo }),
+      actorId: scope.actorId,
+      tenantClaimVerified: scope.tenantClaimVerified,
+      action,
+      consult,
+      store: services.store,
+      projectWriteLock: services.lock,
+      audit,
+      receipts: stockPreparationReadReceipts(),
+    })
   }
   // THE handle a lane hands `computeDryRun` (built by the lane module, so a direct lib test drives the same
   // code): bound to the lane's OWN tenant (TD-6 — the value its tenant wall and its source read already use),
@@ -13122,6 +13232,47 @@ function requireStockPreparationAudit() {
         },
       })
       return sendOk(res, outcome.board)
+    },
+
+    // ── Batch-refresh step 4 PR-4 (design §13): the puller's decisions over a governed project ──────────
+    // Each handler is the context (stockPreparationRefreshDecisionContext) + ONE call into
+    // stock-preparation-refresh-decisions.cjs, which audits every value read before answering and runs the
+    // confirm / end transactions with the lock's in-transaction bump (E03 / E04 / E09).
+    async stockPreparationRefreshHolds(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestQuery(req), VALID_STOCK_PREPARATION_REFRESH_HOLDS_QUERY_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'read', confirmTyped: false, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.listHolds(ctx, input))
+    },
+    async stockPreparationRefreshHoldEvidence(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestQuery(req), VALID_STOCK_PREPARATION_REFRESH_EVIDENCE_QUERY_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'read', confirmTyped: false, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.readHoldEvidence(ctx, firstString(requestParams(req).holdId), input))
+    },
+    async stockPreparationRefreshHoldKeep(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_KEEP_REQUEST_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.keepHold(ctx, firstString(requestParams(req).holdId), input))
+    },
+    async stockPreparationRefreshContinuationConfirm(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_CONFIRM_REQUEST_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.confirm(ctx, input), 201)
+    },
+    async stockPreparationRefreshContinuationGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestQuery(req), VALID_STOCK_PREPARATION_REFRESH_DETAIL_QUERY_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'read', confirmTyped: false, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.readContinuation(ctx, firstString(requestParams(req).id)))
+    },
+    async stockPreparationRefreshContinuationEnd(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.end(ctx, firstString(requestParams(req).id), input))
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the

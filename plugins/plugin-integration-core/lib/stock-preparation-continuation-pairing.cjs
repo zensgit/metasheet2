@@ -830,8 +830,11 @@ function buildContinuationProjection(continuations, members) {
     }
     if (!Number.isInteger(member.position) || member.position < 0) throw projectionInconsistent('a member has no position')
     const ref = Object.freeze({ continuationId, position: member.position })
-    suppressAddKeys.set(newKey, ref)
-    protectInactiveKeys.set(oldKey, ref)
+    // BASE keys (TD-14; the lookups `continuedRefFor` strip the same way). A member key is a raw key by
+    // construction (pairing recomputes every key from its tokens), so the strip is a no-op there — it is the
+    // stated invariant made true for a stored key that somehow carries the suffix (PR-4 F-15b).
+    suppressAddKeys.set(baseKeyOf(newKey), ref)
+    protectInactiveKeys.set(baseKeyOf(oldKey), ref)
     byOldRecordId.set(oldRecordId, ref)
     if (!byContinuation.has(continuationId)) byContinuation.set(continuationId, [])
     byContinuation.get(continuationId).push(member)
@@ -1115,11 +1118,29 @@ function verifyContinuation(context, continuation, members) {
 
   const oldRootTokens = keyPathTokens(continuation.oldRootKey)
   const newRootTokens = keyPathTokens(continuation.newRootKey)
+  // PR-4 (design §8.4, O-17): N(c) of the OLD ROOT's component in THIS read — every raw expansion position of
+  // that component other than the old root's own key (its subtree rows carry other components). Recorded on
+  // the reconfirm hold as a values-free count, so the end route can decide `release_to_normal_refresh` from
+  // the latest computation's recorded facts: zero means the normal refresh afterwards can only SKIP / UPDATE
+  // the old rows (back in the expansion) or mark them missing — no copy exists to be ADDed. `null` when the
+  // old root key cannot be parsed (the end route then refuses: facts missing).
+  let componentNewPositionCount = null
+  if (oldRootTokens) {
+    const oldRootComponent = oldRootTokens[oldRootTokens.length - 1]
+    componentNewPositionCount = 0
+    for (const [entryKey, rows] of rawExpandedKeyed.entries()) {
+      if (entryKey === continuation.oldRootKey) continue
+      if (rows[0] && rows[0].componentSourceId === oldRootComponent) componentNewPositionCount += 1
+    }
+  }
   let pairing = null
   let comparison = null
   let demandFacts = null
   let fingerprints = null
   if (!oldRootTokens || !newRootTokens) {
+    // F-15 (design §23.8): a root key the parser refuses — the planner's `::duplicate:` suffix included — is
+    // structure, deliberately and by construction (TD-14's claim maps are base-keyed, so a stripped root would
+    // protect / suppress BOTH duplicate twins); the detector never emits a confirmable candidate on such a root.
     steps.pairing = 'structure_changed'
   } else {
     const oldClosure = subtreeRows(existingRows, oldRootTokens, (row) => keyOf(row) !== null && isActiveRow(row))
@@ -1178,7 +1199,7 @@ function verifyContinuation(context, continuation, members) {
   if (verdict === 'source_scope_changed') reconfirmable = othersValid
   else if (verdict === 'evidence_changed') reconfirmable = true
   else if (verdict === 'valid' && continuation.status === 'needs_reconfirmation') reconfirmable = RECONFIRMABLE_REASONS.includes(continuation.statusReason)
-  return { verdict, steps, reconfirmable, pairing, comparison, demandFacts, fingerprints }
+  return { verdict, steps, reconfirmable, pairing, comparison, demandFacts, fingerprints, componentNewPositionCount }
 }
 
 function verificationHold(continuation, result) {
@@ -1196,6 +1217,8 @@ function verificationHold(continuation, result) {
     pairingProblems: result.pairing ? result.pairing.problems.map((problem) => problem.reason) : null,
     comparison: result.comparison ? { outcome: result.comparison.outcome, items: result.comparison.items, parentEdgeUsage: result.comparison.parentEdgeUsage } : null,
     demand: result.demandFacts,
+    // PR-4 (§8.4 end admissibility): N(c) of the old root's component in this read — see verifyContinuation.
+    componentNewPositionCount: result.componentNewPositionCount === undefined ? null : result.componentNewPositionCount,
   }
   const fingerprints = result.fingerprints || {}
   if (verdict === 'content_changed' && continuation.status === 'active') {
@@ -1344,13 +1367,20 @@ function detectCandidates(context) {
       || newSubtree.some((row) => keyOf(row) && existingKeyed.has(keyOf(row)))
     const overlaps = newSubtree.some((row) => keyOf(row) && claims.new.get(keyOf(row)).size > 1)
       || oldSubtree.some((row) => claims.old.get(keyOf(row)).size > 1)
+    // F-15 (PR-4; design §23.8): an OLD root whose key is duplicate-resolved (`<base>::duplicate:<kind>:<hash>`,
+    // the row of one of ≥ 2 identical positions an earlier pull ADDed) is ambiguous by construction — the claim
+    // maps are base-keyed (TD-14), so a continuation on it would protect / suppress BOTH twins, and the key
+    // parsers refuse the suffix (verification: structure_changed; the store: new_root_key_unparsable). Never a
+    // confirmable candidate. Raw expansion keys never carry the suffix (the planner mints it on decisions).
+    const duplicateResolvedRoot = roots.some((root) => baseKeyOf(root.key) !== root.key) || positions.some((position) => baseKeyOf(position.key) !== position.key)
+    if (duplicateResolvedRoot) detail.duplicateResolvedRootKey = true
     const unreadablePath = positions.some((position) => !position.tokens) || roots.some((root) => !root.tokens)
     if (twoCopyComponents.has(component)) {
       kind = 'candidate_shape_unresolved'
       shapeToken = 'old_root_still_ordered'
       detail.shapeSubTokens = ['active_nested_copy']
     } else if (occupied) kind = 'candidate_target_occupied'
-    else if (roots.length > 1 || positions.length > 1 || overlaps) kind = 'candidate_ambiguous'
+    else if (roots.length > 1 || positions.length > 1 || overlaps || duplicateResolvedRoot) kind = 'candidate_ambiguous'
     else if (oldSubtree.some((row) => duplicateExistingKeys.has(keyOf(row))) || roots.some((root) => root.rows.length > 1)) kind = 'candidate_old_duplicate'
     else if (existingMissing.some((row) => isActiveRow(row) && (row.componentSourceId === component
       || roots.some((root) => root.tokens && tokensStartWith(pathTokensOf(row) || [], root.tokens))))) kind = 'candidate_keyless_rows'
@@ -1416,7 +1446,8 @@ function detectCandidates(context) {
       if (existingKeyed.has(entryKey)) candidateOccupiedKeys.set(entryKey, hold.fingerprint)
       else candidateSuppressAddKeys.set(entryKey, hold.fingerprint)
     }
-    for (const row of oldSubtree) candidateProtectKeys.set(keyOf(row), hold.fingerprint)
+    // BASE keys (TD-14; see claimOldRootRowSubtree): the sweep's lookup strips, so the claim is stored stripped.
+    for (const row of oldSubtree) candidateProtectKeys.set(baseKeyOf(keyOf(row)), hold.fingerprint)
   }
   return { holds, candidateSuppressAddKeys, candidateOccupiedKeys, candidateProtectKeys }
 }
@@ -1525,7 +1556,9 @@ function claimNewPositionSubtree(context, key, fingerprint, maps) {
 function claimOldRootRowSubtree(context, rootRow, fingerprint, maps) {
   const tokens = pathTokensOf(rootRow)
   const subtree = tokens ? subtreeRows(context.existingRows, tokens, (row) => keyOf(row) !== null && isActiveRow(row)) : [rootRow]
-  for (const row of subtree) claimKey(maps.protect, keyOf(row), fingerprint)
+  // BASE keys (TD-14): an EXISTING row's key may carry the planner's `::duplicate:` suffix (an earlier
+  // duplicate-resolved ADD); the sweep looks its base up, so the claim is stored by base (PR-4 F-15a).
+  for (const row of subtree) claimKey(maps.protect, baseKeyOf(keyOf(row)), fingerprint)
 }
 
 function claimOldRootKeySubtree(context, key, fingerprint, maps) {

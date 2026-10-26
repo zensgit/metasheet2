@@ -388,6 +388,52 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
     control: 'stock-prep-project-pilot-enable',
   }),
+  // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
+  // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
+  // PULL tier. `control: null` until PR-7 lands their page (the handoff precedent): no surface renders them
+  // yet, so F-04 measures nothing for them and the server gate is what the matrix pins.
+  Object.freeze({
+    capability: 'refresh.holds',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.evidence',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/evidence',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.keep',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/keep',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.confirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/confirm',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.continuation',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.end',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
+    control: null,
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

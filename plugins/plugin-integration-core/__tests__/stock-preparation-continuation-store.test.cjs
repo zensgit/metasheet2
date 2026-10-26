@@ -28,9 +28,12 @@
 //         (moved -> 409 STATE_MOVED, nothing persisted), open / keep / supersede by fingerprint, runbook-only holds
 //         survive a clean computation, verdicts move active -> needs_reconfirmation (and never back by themselves),
 //         settlement only for a clean computation, decision_version never moves, a mid-way fault rolls back.
-//   ST-08 end (design §8.4): escalate keeps the hold open as runbook-only; release is admissible only after
-//         new_position_removed with no new position; superseded_by_new_confirmation only inside a confirm; claims
-//         released by an end can be re-claimed; `supersedes` ends and replaces in one transaction.
+//   ST-08 end (design §8.4): escalate keeps the hold open as runbook-only; release is decided INSIDE the transaction
+//         from THE open relationship_reconfirm row's recorded facts (PR-4 review B1: verdict new_position_removed,
+//         componentNewPositionCount 0 — facts_missing / new_position_present otherwise) and bound to the hold the
+//         caller names (`facts`, STALE facts_moved when another row is open); superseded_by_new_confirmation only
+//         inside a confirm; claims released by an end can be re-claimed; `supersedes` ends and replaces in one
+//         transaction.
 //   ST-09 re-confirm (design §8.3): UPDATE in place (same id, revision + 1, active, executed_execution_id cleared),
 //         admissible reasons only.
 //   ST-10 executions: begin -> running; finish succeeded stamps the bound continuations and the self-settling
@@ -343,6 +346,13 @@ test('ST-04 confirm: statement order, rows, the read-back feeds the pure core, d
   assert.deepEqual(order, [
     'trx.selectOneForUpdate:refresh_state',
     'trx.selectOne:refresh_hold',
+    // PR-4 review N2: the project's open holds re-read under the lock (S25), the last read before the bump.
+    'trx.select:refresh_hold',
+    // PR-4 review N3: the unfinished executions re-read AFTER the bump (one read per unfinished status).
+    'trx.select:refresh_execution',
+    'trx.select:refresh_execution',
+    'trx.select:refresh_execution',
+    'trx.select:refresh_execution',
     'trx.insertOne:continuation',
     'trx.insertMany:continuation_member',
     'trx.updateRow:refresh_hold',
@@ -628,8 +638,15 @@ test('ST-08 end: escalate keeps the hold open runbook-only (a clean computation 
   db.log.length = 0
   await expectError(store.endContinuation({ ...endBase, outcome: 'superseded_by_new_confirmation' }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'outcome_confirm_only' })
   assert.equal(db.log.length, 0, 'refused before any statement')
-  const notAdmissible = await expectError(store.endContinuation({ ...endBase, outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'last_verdict' })
+  const structureHold = db.rows(T.hold).find((row) => row.continuation_id === cont.id && row.status === 'open')
+  const notAdmissible = await expectError(store.endContinuation({ ...endBase, outcome: 'release_to_normal_refresh', facts: { holdId: structureHold.id, holdFingerprint: structureHold.fingerprint } }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'last_verdict' })
   assert.equal(notAdmissible.details.lastVerdict, 'structure_changed')
+  assert.equal(notAdmissible.details.recordedVerdict, 'structure_changed')
+  // A release names the hold it decides from (PR-4 review B1): without `facts` it is 400 before any statement.
+  db.log.length = 0
+  await expectError(store.endContinuation({ ...endBase, outcome: 'release_to_normal_refresh' }, hooks), { status: 400, code: CODES.INPUT_INVALID })
+  await expectError(store.endContinuation({ ...endBase, outcome: 'escalate_special_repair', facts: { holdId: structureHold.id, holdFingerprint: structureHold.fingerprint } }, hooks), { status: 400, code: CODES.INPUT_INVALID })
+  assert.equal(db.log.length, 0, 'the facts shape is refused before any statement')
   await expectError(store.endContinuation({ ...endBase, outcome: 'made_up' }, hooks), { status: 400, code: CODES.INPUT_INVALID })
   await expectError(store.endContinuation({ ...endBase, revision: 2, outcome: 'escalate_special_repair' }, hooks), { status: 409, code: CODES.CONFIRM_STALE, reason: 'continuation_revision' })
   assert.equal(db.rows(T.continuation)[0].status, 'needs_reconfirmation', 'nothing ended')
@@ -664,21 +681,59 @@ test('ST-08 end: escalate keeps the hold open runbook-only (a clean computation 
   assert.equal(rows.continuations.length, 1)
   assert.equal(rows.continuations[0].status, 'ended')
   assert.equal(rows.members.length, 0)
-  // Released claims can be re-claimed: the same hold confirms again after the end.
+  // S25 inside the store (PR-4 review N2): while the runbook-only hold is OPEN, a confirm is refused under the
+  // lock — 409 CONFIRM_NOT_ALLOWED runbook_only_hold_open, nothing persisted, no bump.
   await seedHolds(w, [hold], { decisionVersionObserved: 2 })
+  {
+    const before = tablesSnapshot(db)
+    const bumpsBefore = bump.calls.length
+    const refused = await expectError(confirmHold(w, hold), { status: 409, code: CODES.CONFIRM_NOT_ALLOWED, reason: 'runbook_only_hold_open' })
+    assert.deepEqual(refused.details, { reason: 'runbook_only_hold_open', holdCount: 1, partial: false })
+    assert.equal(bump.calls.length, bumpsBefore, 'refused before the bump')
+    assert.equal(tablesSnapshot(db), before, 'nothing persisted')
+  }
+  // The owner-approved runbook closes the escalated hold (the one path out of S25; no store method writes it).
+  for (const row of db.tables.get(T.hold).values()) {
+    if (row.id === escalatedHold.id) { row.status = 'resolved'; row.resolution = 'runbook_closed' }
+  }
+  // Released claims can be re-claimed: the same hold confirms again after the end.
   const again = await confirmHold(w, hold)
   assert.equal(again.revision, 1)
   assert.equal(db.rows(T.continuation).filter((row) => row.claim_active).length, 1)
   assert.equal(db.rows(T.continuation).length, 2)
-  // release_to_normal_refresh: admissible after new_position_removed AND the caller's no-new-position assertion.
+  // release_to_normal_refresh (PR-4 review B1): decided INSIDE the transaction from THE open relationship_reconfirm
+  // row's recorded facts — never from the caller. A hold without the count: facts_missing; count 1:
+  // new_position_present; the hold named by `facts` no longer the open one (superseded by a later computation
+  // that still admits): STALE facts_moved; count 0 named by the caller: released.
   const live = db.rows(T.continuation).find((row) => row.claim_active)
-  await store.reconcileHolds({ ...scope, decisionVersionObserved: 3, holds: [reconfirmHoldFor(live.id, { confirmable: false, verdict: 'new_position_removed' })], verdicts: { [live.id]: 'new_position_removed' }, computation: computation() })
-  await expectError(store.endContinuation({ ...scope, continuationId: live.id, revision: 1, endedBy: PULLER, outcome: 'release_to_normal_refresh' }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'new_position_present' })
-  const released = await store.endContinuation({ ...scope, continuationId: live.id, revision: 1, endedBy: PULLER, outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }, hooks)
+  const reconfirmWithCount = (count, extra = {}) => {
+    const h = reconfirmHoldFor(live.id, { confirmable: false, verdict: 'new_position_removed' })
+    h.detail = { ...h.detail, ...(count === undefined ? {} : { componentNewPositionCount: count }), ...extra }
+    h.fingerprint = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs')).holdFingerprint(h)
+    return h
+  }
+  const openReconfirm = () => db.rows(T.hold).find((row) => row.continuation_id === live.id && row.status === 'open')
+  const factsOf = (row) => ({ holdId: row.id, holdFingerprint: row.fingerprint })
+  const releaseBase = { ...scope, continuationId: live.id, revision: 1, endedBy: PULLER, outcome: 'release_to_normal_refresh' }
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 3, holds: [reconfirmWithCount(undefined)], verdicts: { [live.id]: 'new_position_removed' }, computation: computation() })
+  await expectError(store.endContinuation({ ...releaseBase, facts: factsOf(openReconfirm()) }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'facts_missing' })
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 3, holds: [reconfirmWithCount(1)], verdicts: { [live.id]: 'new_position_removed' }, computation: computation() })
+  const present = await expectError(store.endContinuation({ ...releaseBase, facts: factsOf(openReconfirm()) }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'new_position_present' })
+  assert.equal(present.details.componentNewPositionCount, 1)
+  const shown = openReconfirm()
+  // The next computation keeps count 0 but recomputes the hold (another fingerprint): the caller's facts are stale.
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 3, holds: [reconfirmWithCount(0)], verdicts: { [live.id]: 'new_position_removed' }, computation: computation() })
+  await expectError(store.endContinuation({ ...releaseBase, facts: factsOf(shown) }, hooks), { status: 409, code: CODES.CONFIRM_STALE, reason: 'facts_moved' })
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 3, holds: [reconfirmWithCount(0, { recomputed: true })], verdicts: { [live.id]: 'new_position_removed' }, computation: computation() })
+  await expectError(store.endContinuation({ ...releaseBase, facts: factsOf(shown) }, hooks), { status: 409, code: CODES.CONFIRM_STALE, reason: 'facts_moved' })
+  assert.equal(db.rows(T.continuation).find((row) => row.id === live.id).status, 'needs_reconfirmation', 'nothing released on stale facts')
+  const decidedFrom = openReconfirm()
+  const released = await store.endContinuation({ ...releaseBase, facts: factsOf(decidedFrom) }, hooks)
   assert.equal(released.holdsResolved, 1)
-  const releasedHold = db.rows(T.hold).find((row) => row.continuation_id === live.id)
+  const releasedHold = db.rows(T.hold).find((row) => row.id === decidedFrom.id)
   assert.equal(releasedHold.status, 'resolved')
   assert.equal(releasedHold.resolution, 'continuation_ended')
+  assert.equal(db.rows(T.hold).filter((row) => row.continuation_id === live.id && row.status === 'open').length, 0, 'the superseded recomputations stay superseded; the decided-from row is resolved')
   // `supersedes`: a new confirmation replaces a live continuation in ONE transaction (claims move with it).
   const w3 = await world()
   await seedHolds(w3, [w3.hold])
@@ -1017,7 +1072,7 @@ test('ST-15 end admissibility (review X-2, design §9.3 / §8.4): an ACTIVE cont
   //      both outcomes the end transaction takes (supersede is confirm-only, ST-08), right after the continuation lock.
   await store.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'valid' }, computation: computation({ suspended: false }) })
   assert.equal(db.rows(T.hold).filter((row) => row.status === 'open').length, 0)
-  for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }]) {
+  for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', facts: { holdId: 'hold_named', holdFingerprint: 'f'.repeat(64) } }]) {
     const before = tablesSnapshot(db)
     const bumpsBefore = bump.calls.length
     db.log.length = 0
@@ -1064,6 +1119,11 @@ test('ST-15 end admissibility (review X-2, design §9.3 / §8.4): an ACTIVE cont
     'trx.selectOneForUpdate:refresh_state',
     'trx.selectOneForUpdate:continuation',
     'trx.select:refresh_hold',
+    // PR-4 review N3: the unfinished executions re-read right after the bump, before any write.
+    'trx.select:refresh_execution',
+    'trx.select:refresh_execution',
+    'trx.select:refresh_execution',
+    'trx.select:refresh_execution',
     'trx.updateRow:continuation',
     'trx.updateRow:continuation_member',
     'trx.updateRow:refresh_hold',

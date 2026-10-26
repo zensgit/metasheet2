@@ -486,6 +486,9 @@ function mountProjectSheetRoutes({
   sourceBindingStore = null,
   configExtras = {},
   serviceExtras = {},
+  // PR-4: options for the refresh governance wiring (e.g. `{ lockOnRefreshDb: true }`: one fake db for the store
+  // and the REAL lock, so the decision routes' in-transaction bump runs on the store's handle).
+  refreshOptions = {},
 } = {}) {
   const staging = `${tenantId}:integration-core`
   const routes = new Map()
@@ -569,7 +572,7 @@ function mountProjectSheetRoutes({
   // `stockPreparationRefreshGovernance` in `serviceExtras` (even to null: an unwired deployment) opts out.
   const refresh = Object.prototype.hasOwnProperty.call(serviceExtras, 'stockPreparationRefreshGovernance')
     ? null
-    : require('./stock-preparation-refresh-governance-wiring.cjs').wireRefreshGovernance(services)
+    : require('./stock-preparation-refresh-governance-wiring.cjs').wireRefreshGovernance(services, refreshOptions)
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,

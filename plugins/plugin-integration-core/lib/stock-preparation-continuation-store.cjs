@@ -146,6 +146,9 @@ const REFRESH_STORE_ERROR_CODES = Object.freeze({
   CONFIRM_CONFLICT: 'STOCK_PREP_CONTINUATION_CONFIRM_CONFLICT',
   END_OUTCOME_NOT_ADMISSIBLE: 'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE',
   HOLD_MALFORMED: 'STOCK_PREP_CONTINUATION_HOLD_MALFORMED',
+  // The lanes' token (stock-preparation-refresh-lanes.cjs REFRESH_LANE_ERROR_CODES.RECOVERY_PENDING), spelled here
+  // because the decision transactions re-check the unfinished executions under the state-row lock (PR-4 review).
+  RECOVERY_PENDING: 'STOCK_PREP_REFRESH_RECOVERY_PENDING',
 })
 
 // The consult's reads share ONE snapshot (review X-1): a lib/db.cjs whitelisted isolation level, pinned by the
@@ -283,6 +286,28 @@ function holdMalformed(reason) {
 // Values-free: a closed reason token, the outcome token and, where it helps, the continuation's status token.
 function endNotAdmissible(reason, outcome, extra = {}) {
   return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'this end outcome is not admissible for the relationship as it stands; preview again', { reason, outcome, ...extra })
+}
+
+// O-22 inside the decision transaction (PR-4 review N3): the SAME rows the preview answers on and the apply's
+// in-lease check refuses — every partial / failed / aborted execution and every `running` one. Decided AFTER the
+// bump, so a `running` row of a LIVE lease has already been refused by the bump's WRITE_LOCKED (I2) and every
+// `running` row seen here is a dead run. The same shape as the lanes' refusal (values-free: a count).
+function recoveryPending(openExecutions) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_PENDING, 'an earlier execution of this project did not finish cleanly; nothing is decided until it is recovered', {
+    state: 'failed_pending_recovery',
+    openExecutions,
+    partial: false,
+  })
+}
+
+// The hold a release decides from (PR-4 review B1): the caller names the OPEN relationship_reconfirm hold it was
+// shown (id + fingerprint); the transaction derives admissibility from the open row under the lock and refuses
+// STALE `facts_moved` when that row is not the one named.
+function normalizeFacts(input) {
+  if (!isPlainObject(input)) throw inputInvalid('facts { holdId, holdFingerprint } are required for release_to_normal_refresh', 'facts', 400)
+  if (!nonBlankString(input.holdId)) throw inputInvalid('facts.holdId is required', 'facts.holdId', 400)
+  if (!nonBlankString(input.holdFingerprint)) throw inputInvalid('facts.holdFingerprint is required', 'facts.holdFingerprint', 400)
+  return Object.freeze({ holdId: input.holdId.trim(), holdFingerprint: input.holdFingerprint.trim() })
 }
 
 // A typed error of this store passes through untouched; a database error becomes 503 (or the one 23505 mapping
@@ -1119,6 +1144,44 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     }
   }
 
+  // THE decision transaction (confirm / re-confirm / end). Every statement inside names its own operation; the
+  // one untyped error that can still escape is the wrapper's own COMMIT (a deferred constraint, a connection
+  // dropped at commit — PR-4 review P7): the rows are rolled back, and the caller answers 503 STORE_FAILED
+  // `commit` instead of a generic 500. An error raised before the callback completed is not re-attributed.
+  async function decisionTransaction(callback) {
+    let callbackDone = false
+    try {
+      return await db.transaction(async (rawTrx) => {
+        const result = await callback(rawTrx)
+        callbackDone = true
+        return result
+      })
+    } catch (error) {
+      if (!callbackDone) throw error
+      if (error instanceof StockPreparationRefreshStoreError) throw error
+      if (error && typeof error.code === 'string' && Number.isInteger(error.status)) throw error
+      throw translate(error, 'commit')
+    }
+  }
+
+  // S25 under the state-row lock (PR-4 review N2): the project's OPEN runbook-only holds, re-read on the
+  // transaction handle. An escalation that landed after the caller's consult is seen here.
+  function runbookOnlyOf(openHolds) {
+    return openHolds.filter((row) => row.runbook_only === true)
+  }
+
+  // O-22 under the lock (PR-4 review N3): the unfinished executions, read on the transaction handle AFTER the
+  // bump (the consult's picture is the caller's pre-check; this is the one that counts). Mirrors
+  // readGovernanceRows' per-status reads (the scoped helper's `where` is equality only).
+  async function assertNoUnfinishedExecutionWithin(trx, scope) {
+    let open = 0
+    for (const status of UNFINISHED_EXECUTION_STATUSES) {
+      const rows = await selectAll(trx, REFRESH_STORE_TABLES.execution, { sheet_id: scope.sheetId, project_no: scope.projectNo, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' })
+      open += rows.length
+    }
+    if (open > 0) throw recoveryPending(open)
+  }
+
   async function lockedContinuation(trx, scope, continuationId, { revision } = {}) {
     let row
     try {
@@ -1168,9 +1231,12 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * members read, refused 409 END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` when the claims share nothing
    * (claimsOverlap, review X-3) and `supersedes_incomplete` when the new claims do not cover every old record id
    * and old key digest of it (takeoverGaps, review round 2), then ended as superseded_by_new_confirmation] ->
-   * bumpWithin ->
-   * INSERT header + members (23505 -> 409 CONFIRM_CONFLICT) -> hold resolved -> decision_version + 1 ->
-   * auditWithin. Returns a values-free summary.
+   * the project's open holds re-read (S25: an OPEN runbook-only hold refuses 409 CONFIRM_NOT_ALLOWED
+   * `runbook_only_hold_open` — the caller's consult-time check again, under the lock) -> bumpWithin -> the
+   * unfinished executions re-read (O-22: any refuses 409 RECOVERY_PENDING; a running row of a live lease was the
+   * bump's WRITE_LOCKED) -> INSERT header + members (23505 -> 409 CONFIRM_CONFLICT) -> hold resolved ->
+   * decision_version + 1 -> auditWithin. A COMMIT that fails is 503 STORE_FAILED `commit`. Returns a values-free
+   * summary.
    */
   async function confirmContinuation(input = {}, options = {}) {
     const scope = normalizeScope(input)
@@ -1189,7 +1255,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     const auditWithin = auditHookOf(options)
     const at = clock()
 
-    return db.transaction(async (rawTrx) => {
+    return decisionTransaction(async (rawTrx) => {
       const trx = requireTrx(rawTrx)
       const stateRow = await lockStateRow(trx, scope, { at })
       if (!stateRow) throw confirmStale('state_row_absent')
@@ -1218,7 +1284,12 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         supersededId = previous.id
       }
 
+      // S25 under the lock: the last read before the bump (PR-4 review N2).
+      const runbookOpen = runbookOnlyOf(await openHoldsOf(trx, scope))
+      if (runbookOpen.length > 0) throw confirmNotAllowed('runbook_only_hold_open', { holdCount: runbookOpen.length, partial: false })
+
       const bump = await runBump(trx, scope, BUMP_REASONS.confirm, bumpWithin)
+      await assertNoUnfinishedExecutionWithin(trx, scope)
 
       const continuationId = newId('cont')
       const header = {
@@ -1329,7 +1400,8 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * stale row still hold, A-M4): revision + 1, the hold's fingerprints and the current source identity,
    * `executed_execution_id` cleared (the new revision has not been consumed). Admissible only when the
    * continuation's status_reason is one of RECONFIRMABLE_REASONS AND the hold (`relationship_reconfirm`
-   * about this continuation) is confirmable.
+   * about this continuation) is confirmable. S25 and O-22 are re-checked under the lock exactly as in
+   * `confirmContinuation` (the open holds before the bump, the unfinished executions after it).
    */
   async function reconfirmContinuation(input = {}, options = {}) {
     const scope = normalizeScope(input)
@@ -1346,7 +1418,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     const auditWithin = auditHookOf(options)
     const at = clock()
 
-    return db.transaction(async (rawTrx) => {
+    return decisionTransaction(async (rawTrx) => {
       const trx = requireTrx(rawTrx)
       const stateRow = await lockStateRow(trx, scope, { at })
       if (!stateRow) throw confirmStale('state_row_absent')
@@ -1362,7 +1434,12 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       const detail = isPlainObject(hold.detail) ? hold.detail : {}
       const history = EVIDENCE_HISTORY_STATUSES.includes(detail.history) ? detail.history : 'history_unknown'
 
+      // S25 under the lock: the last read before the bump (PR-4 review N2).
+      const runbookOpen = runbookOnlyOf(await openHoldsOf(trx, scope))
+      if (runbookOpen.length > 0) throw confirmNotAllowed('runbook_only_hold_open', { holdCount: runbookOpen.length, partial: false })
+
       const bump = await runBump(trx, scope, BUMP_REASONS.confirm, bumpWithin)
+      await assertNoUnfinishedExecutionWithin(trx, scope)
       const nextRevision = intOrNull(continuationRow.revision) + 1
       let rows
       try {
@@ -1427,14 +1504,21 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * -> ended` is the end transition; `active -> ended` exists only through a confirm's `supersedes`). An
    * ACTIVE continuation is refused 409 END_OUTCOME_NOT_ADMISSIBLE (reason `status`) whatever the outcome
    * (review X-2). `superseded_by_new_confirmation` is only ever written INSIDE a confirm (`supersedes`), never
-   * here; `release_to_normal_refresh` is admissible only when the continuation's last verdict is
-   * `new_position_removed` AND the caller asserts, from the latest computation's recorded facts, that the
-   * current expansion holds NO new position of the component (`currentExpansionHoldsNoNewPosition: true`) — so
-   * an end can never produce "copies ADDed + old rows swept"; `escalate_special_repair` is admissible only
-   * while at least one OPEN hold names this continuation (reason `no_open_hold` otherwise), and keeps every
-   * such hold OPEN as runbook-only (not confirmable): an open hold derives 待确认 and is never superseded by a
-   * computation nor settled over, so nothing derives 已完成 / export-allowed until an owner-approved runbook
-   * closes it. Every refusal is decided inside the transaction BEFORE the bump and before any row moves.
+   * here; `release_to_normal_refresh` is decided INSIDE the transaction from THE open `relationship_reconfirm`
+   * hold naming this continuation, read under the state-row lock (PR-4 review B1 — the caller's consult is
+   * never trusted for it): no such hold => `no_open_hold`; more than one => `facts_ambiguous` (a computation
+   * emits one verification hold per relationship and supersedes the rest; only a seeded or corrupted store
+   * has two); its recorded `detail.verdict` must be `new_position_removed` and the continuation's own
+   * `last_verdict` too (`last_verdict`); `detail.componentNewPositionCount` must be an integer
+   * (`facts_missing`) equal to 0 (`new_position_present`) — so an end can never produce "copies ADDed + old
+   * rows swept". The caller names the hold it was shown (`facts: { holdId, holdFingerprint }`, required for a
+   * release): a different open row — admissible or not — is 409 CONFIRM_STALE `facts_moved` (the confirm's echo
+   * pattern). S25 is re-checked under the lock for a release (`runbook_only_hold_open`). `escalate_special_repair`
+   * is admissible only while at least one OPEN hold names this continuation (reason `no_open_hold` otherwise),
+   * and keeps every such hold OPEN as runbook-only (not confirmable): an open hold derives 待确认 and is never
+   * superseded by a computation nor settled over, so nothing derives 已完成 / export-allowed until an
+   * owner-approved runbook closes it. Every refusal is decided inside the transaction BEFORE the bump and before
+   * any row moves; after the bump the unfinished executions are re-read (O-22, RECOVERY_PENDING).
    */
   async function endContinuation(input = {}, options = {}) {
     const scope = normalizeScope(input)
@@ -1455,11 +1539,14 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       if (text.length > BASIS_NOTE_MAX_LENGTH) throw inputInvalid(`note exceeds ${BASIS_NOTE_MAX_LENGTH} characters`, 'note', 422)
       note = text || null
     }
+    const release = input.outcome === 'release_to_normal_refresh'
+    const facts = release ? normalizeFacts(input.facts) : null
+    if (!release && input.facts !== undefined && input.facts !== null) throw inputInvalid('facts name the hold a release decides from; this outcome carries none', 'facts', 400)
     const bumpWithin = requireBumpWithin(options)
     const auditWithin = auditHookOf(options)
     const at = clock()
 
-    return db.transaction(async (rawTrx) => {
+    return decisionTransaction(async (rawTrx) => {
       const trx = requireTrx(rawTrx)
       const stateRow = await lockStateRow(trx, scope, { at })
       if (!stateRow) throw confirmStale('state_row_absent')
@@ -1468,23 +1555,33 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       if (continuationRow.status !== 'needs_reconfirmation') {
         throw endNotAdmissible('status', input.outcome, { status: continuationRow.status })
       }
-      if (input.outcome === 'release_to_normal_refresh') {
-        if (continuationRow.last_verdict !== 'new_position_removed' || input.currentExpansionHoldsNoNewPosition !== true) {
-          throw new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'release_to_normal_refresh is admissible only after the new position was removed from the source and the current expansion holds no new position of the component', {
-            reason: continuationRow.last_verdict !== 'new_position_removed' ? 'last_verdict' : 'new_position_present',
-            outcome: input.outcome,
-            lastVerdict: continuationRow.last_verdict || null,
-          })
+      // The project's OPEN holds under the lock (one read): S25 for a release, and the continuation's own holds —
+      // released -> resolved as continuation_ended; escalated -> kept open, runbook-only, never confirmable; a
+      // computation never supersedes a runbook-only hold. Read BEFORE the bump: an escalation with no open hold
+      // to keep would leave nothing suspending the project (review X-2).
+      const openHolds = await openHoldsOf(trx, scope)
+      const holdsAbout = openHolds.filter((row) => row.continuation_id === continuationId)
+      if (release) {
+        const runbookOpen = runbookOnlyOf(openHolds)
+        if (runbookOpen.length > 0) throw endNotAdmissible('runbook_only_hold_open', input.outcome, { holdCount: runbookOpen.length, partial: false })
+        // B1: the facts are THE open relationship_reconfirm row's, read here — never the caller's.
+        const reconfirm = holdsAbout.filter((row) => row.kind === 'relationship_reconfirm')
+        if (reconfirm.length === 0) throw endNotAdmissible('no_open_hold', input.outcome)
+        if (reconfirm.length > 1) throw endNotAdmissible('facts_ambiguous', input.outcome, { holdCount: reconfirm.length })
+        const factsRow = reconfirm[0]
+        const detail = isPlainObject(factsRow.detail) ? factsRow.detail : {}
+        if (detail.verdict !== 'new_position_removed' || continuationRow.last_verdict !== 'new_position_removed') {
+          throw endNotAdmissible('last_verdict', input.outcome, { lastVerdict: continuationRow.last_verdict || null, recordedVerdict: nonBlankString(detail.verdict) ? detail.verdict : null })
         }
-      }
-      // The continuation's own open holds: released -> resolved as continuation_ended; escalated -> kept open,
-      // runbook-only, never confirmable; a computation never supersedes a runbook-only hold. Read BEFORE the
-      // bump: an escalation with no open hold to keep would leave nothing suspending the project (review X-2).
-      const holdsAbout = await selectAll(trx, REFRESH_STORE_TABLES.hold, { sheet_id: scope.sheetId, project_no: scope.projectNo, continuation_id: continuationId, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'read_holds' })
-      if (input.outcome === 'escalate_special_repair' && holdsAbout.length === 0) {
+        if (!Number.isInteger(detail.componentNewPositionCount)) throw endNotAdmissible('facts_missing', input.outcome)
+        if (detail.componentNewPositionCount !== 0) throw endNotAdmissible('new_position_present', input.outcome, { componentNewPositionCount: detail.componentNewPositionCount })
+        // Admissible from the row as it is; now it must be the row the caller was shown.
+        if (factsRow.id !== facts.holdId || factsRow.fingerprint !== facts.holdFingerprint) throw confirmStale('facts_moved')
+      } else if (holdsAbout.length === 0) {
         throw endNotAdmissible('no_open_hold', input.outcome)
       }
       const bump = await runBump(trx, scope, BUMP_REASONS.end, bumpWithin)
+      await assertNoUnfinishedExecutionWithin(trx, scope)
       await endRows(trx, continuationRow, { outcome: input.outcome, endedBy, note, at })
 
       let holdsResolved = 0

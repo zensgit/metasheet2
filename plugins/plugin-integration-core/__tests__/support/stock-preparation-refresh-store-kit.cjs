@@ -37,6 +37,9 @@ const MIGRATION_FILES = Object.freeze({
   // three pilot columns migration 101 adds.
   registry: path.join(MIGRATIONS, '087_create_integration_stock_prep_project_target.sql'),
   registryPilot: path.join(MIGRATIONS, '101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable.sql'),
+  // PR-4: the sheet write lock's row (migration 100), so ONE fake db can serve the store AND the lock — the
+  // decision transactions bump the generation on the store's transaction handle (`bumpGenerationWithin`).
+  lock: path.join(MIGRATIONS, '100_create_integration_stock_prep_project_write_lock.sql'),
 })
 const REGISTRY_TABLE = 'integration_stock_prep_project_target'
 
@@ -140,7 +143,7 @@ function parseSchema(sql) {
  * its `ADD COLUMN IF NOT EXISTS` lines. The registry's CHECKs and unique indexes are NOT modelled (later
  * migrations re-list its CHECKs; the suites only read it through PR B's pilot reads).
  */
-function loadSchema({ registryPilotColumns = true } = {}) {
+function loadSchema({ registryPilotColumns = true, lockTable = false } = {}) {
   const registry = parseSchema(readMigrationText(MIGRATION_FILES.registry))
   if (!registry[REGISTRY_TABLE]) throw new Error('refresh-store kit: migration 087 no longer creates the registry table')
   registry[REGISTRY_TABLE].enums = []
@@ -150,10 +153,14 @@ function loadSchema({ registryPilotColumns = true } = {}) {
     if (added.length !== 3) throw new Error(`refresh-store kit: migration 101 adds ${added.length} registry columns, expected 3`)
     for (const [, name, type] of added) registry[REGISTRY_TABLE].columns[name] = { type, primaryKey: false, notNull: false, default: undefined }
   }
+  // PR-4: the lock row's table (migration 100), columns and defaults only (its lease-shape CHECK is not modelled;
+  // the lock's own kit models none either) — so `bumpGenerationWithin` on the store's handle finds the row.
+  const lock = lockTable ? parseSchema(readMigrationText(MIGRATION_FILES.lock)) : {}
   return {
     ...parseSchema(readMigrationText(MIGRATION_FILES.continuation)),
     ...parseSchema(readMigrationText(MIGRATION_FILES.refreshState)),
     ...registry,
+    ...lock,
   }
 }
 
@@ -215,8 +222,8 @@ function compareValues(left, right) {
   return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0)
 }
 
-function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotColumns = true } = {}) {
-  const schema = loadSchema({ registryPilotColumns })
+function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotColumns = true, lockTable = false } = {}) {
+  const schema = loadSchema({ registryPilotColumns, lockTable })
   const nowFn = clock && typeof clock.now === 'function' ? clock.now : () => new Date()
   const uniques = UNIQUE_INDEXES.filter((index) => !withoutUniqueIndexes.includes(index.name))
   for (const name of withoutUniqueIndexes) {
@@ -457,6 +464,13 @@ function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotCo
       db.lastTransactionHandle = handle
       try {
         const result = await callback(handle)
+        // PR-4: a COMMIT-time fault (`faults.commit`, one shot) — PostgreSQL's deferred-constraint / lost-connection
+        // commit failure: the callback completed, nothing persists, the untyped error surfaces to the caller.
+        const commitFault = faults.commit
+        if (commitFault instanceof Error) {
+          delete faults.commit
+          throw commitFault
+        }
         log.push(['commit', {}])
         return result
       } catch (error) {
