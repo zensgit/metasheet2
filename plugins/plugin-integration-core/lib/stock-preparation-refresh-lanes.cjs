@@ -16,7 +16,11 @@
 //                        then — governed only — the source-binding unanimity check (R-1, TD-21) and the STRICT
 //                        planning inputs (R-2, TD-22: the pack band and the ext mapping the computation plans,
 //                        verifies, settles and writes with). All before any source read.
-//   continuationInputFor the planner's `continuation` input, exactly the 9 keys (O-16 + persistedHolds).
+//   continuationInputFor the planner's `continuation` input, exactly the 10 keys (O-16 + persistedHolds + step 5's
+//                        changePlan: the consult's CONFIRMED change plan with THIS computation's source digest).
+//   change plan (PR-8)   changePlanVerdictOf / previewReviewOf / assertChangePlanCurrent / assertNoReviewPending —
+//                        the token and the execution are bound to a confirmed plan only when the planner matches it;
+//                        a written change awaiting review refuses every write but that controlled update.
 //   isCompleteComputation only a COMPLETE computation reconciles (AMB-2, TD-24).
 //   reconcileComputation the ONE hold reconciliation (CAS on decision_version) of a governed, complete
 //                        computation; never swallowed.
@@ -58,6 +62,10 @@ const REFRESH_LANE_ERROR_CODES = Object.freeze({
   // Re-exported tokens of the store / reader family (one vocabulary for a refusal by any layer).
   STORE_FAILED: 'STOCK_PREP_REFRESH_STORE_FAILED',
   STORE_UNAVAILABLE: 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE',
+  // Step 5 PR-8: the change plan a token / an execution names is no longer what the recompute authorizes (the store
+  // and the writer spell the same literal), and a written change still awaits its review (design §9.3).
+  CHANGE_PLAN_STALE: 'STOCK_PREP_CHANGE_PLAN_STALE',
+  REVIEW_PENDING: 'STOCK_PREP_REFRESH_REVIEW_PENDING',
 })
 
 class StockPreparationRefreshLaneError extends Error {
@@ -229,8 +237,29 @@ function pickPersistedHold(hold, continuations) {
   }
 }
 
-/** EXACTLY the 9-key planner input (O-16's 8 + `persistedHolds`). Never spreads the consult. */
-function continuationInputFor(refresh, { action, expansion }) {
+/**
+ * Step 5 PR-8: the consult's CONFIRMED change plan (values-free summary; at most one — migration 104's partial unique
+ * index), as the planner's `changePlan` input: `{ id, planFingerprint, currentSourceContentDigest, recordIds }` with
+ * THIS computation's source content digest — or null.
+ */
+function changePlanInputFor(consult, sourceContentDigest) {
+  const confirmed = Array.isArray(consult.changePlans) ? consult.changePlans.filter((plan) => plan && plan.status === 'confirmed') : []
+  if (confirmed.length === 0) return null
+  if (confirmed.length > 1 || !nonBlankString(sourceContentDigest)) throw storeFailed('governance', 'change_plan_input')
+  const plan = confirmed[0]
+  return {
+    id: plan.id,
+    planFingerprint: plan.planFingerprint,
+    currentSourceContentDigest: sourceContentDigest,
+    recordIds: Array.isArray(plan.recordIds) ? plan.recordIds.slice() : [],
+  }
+}
+
+/**
+ * EXACTLY the 10-key planner input (O-16's 8 + `persistedHolds` + step 5's `changePlan`). Never spreads the consult.
+ * `sourceContentDigest` is THIS computation's (built before planning; the plan fingerprint binds it).
+ */
+function continuationInputFor(refresh, { action, expansion, sourceContentDigest }) {
   const consult = refresh.consult
   return {
     storeState: 'ok',
@@ -241,7 +270,15 @@ function continuationInputFor(refresh, { action, expansion }) {
     sourceIdentity: refreshSourceIdentity({ action, tenantId: consult.scope.tenantId }),
     specSlotDeclared: specSlotDeclaredFor(action),
     persistedHolds: consult.holds.map((hold) => pickPersistedHold(hold, consult.continuations)),
+    changePlan: changePlanInputFor(consult, sourceContentDigest),
   }
+}
+
+/** The planner's values-free verdict on the confirmed plan (`plan.continuation.changePlan`), or null. */
+function changePlanVerdictOf(dryRun) {
+  const plan = dryRun && dryRun.plan
+  const stanza = plan && isPlainObject(plan.continuation) && isPlainObject(plan.continuation.changePlan) ? plan.continuation.changePlan : null
+  return stanza && nonBlankString(stanza.id) && (stanza.verdict === 'matches' || stanza.verdict === 'stale') ? stanza : null
 }
 
 /**
@@ -300,13 +337,17 @@ function planDigestOf(plan) {
   }))
 }
 
-/** The binding a token records and an execution is begun with: the non-ended continuations, sorted by id. */
-function refreshBindingOf(consult, holdSetFingerprint) {
+/**
+ * The binding a token records and an execution is begun with: the non-ended continuations, sorted by id, and (step 5
+ * PR-8) the confirmed change plan THIS computation authorizes — its id only when the planner's verdict is `matches`.
+ */
+function refreshBindingOf(consult, holdSetFingerprint, changePlanVerdict = null) {
   const continuations = consult.continuations
     .filter((entry) => entry.status !== 'ended')
     .map((entry) => ({ id: entry.id, revision: entry.revision }))
     .sort((left, right) => (left.id < right.id ? -1 : (left.id > right.id ? 1 : 0)))
-  return Object.freeze({ continuations, changePlanId: null, holdSetFingerprint: nonBlankString(holdSetFingerprint) ? holdSetFingerprint : null })
+  const changePlanId = changePlanVerdict && changePlanVerdict.verdict === 'matches' ? changePlanVerdict.id : null
+  return Object.freeze({ continuations, changePlanId, holdSetFingerprint: nonBlankString(holdSetFingerprint) ? holdSetFingerprint : null })
 }
 
 /** The values-free `refreshHold` stanza a governed preview answers beside `evidence`. */
@@ -372,6 +413,10 @@ async function reconcileComputation(dryRun, { lane, settle } = {}) {
   const suspended = plan.suspended === true
   const settlement = settle ? settlementForComputation({ consult, dryRun, template: settle.template }) : null
   const generation = consult.lock && consult.lock.generation
+  // Step 5 PR-8: the planner's verdict on the confirmed plan travels to the reconciliation, which decides under the
+  // state-row lock (a `matches` re-asserts the plan is still confirmed; a `stale` invalidates it — with its audit row,
+  // the handle's `auditWithin` — unless an execution bound to it is running).
+  const changePlanVerdict = changePlanVerdictOf(dryRun)
   const result = await handle.store.reconcileHolds({
     tenantId: consult.scope.tenantId,
     sheetId: consult.scope.sheetId,
@@ -386,13 +431,15 @@ async function reconcileComputation(dryRun, { lane, settle } = {}) {
     },
     verdicts: isPlainObject(plan.continuation) && isPlainObject(plan.continuation.verdicts) ? plan.continuation.verdicts : {},
     ...(settlement ? { settlement } : {}),
-  })
+    ...(changePlanVerdict ? { changePlan: { id: changePlanVerdict.id, verdict: changePlanVerdict.verdict } } : {}),
+  }, typeof handle.auditWithin === 'function' ? { auditWithin: handle.auditWithin } : {})
   const outcome = { result }
   return Object.freeze({
     result,
     suspended: suspended || Number(result.holds && result.holds.open) > 0,
-    binding: refreshBindingOf(consult, result.holdSetFingerprint),
+    binding: refreshBindingOf(consult, result.holdSetFingerprint, changePlanVerdict),
     stanza: refreshHoldStanza(plan, outcome),
+    changePlan: changePlanVerdict,
   })
 }
 
@@ -536,6 +583,66 @@ function assertTokenCarriesNoRefreshBinding(tokenRecord) {
   if (tokenRecord && tokenRecord.refreshBinding !== undefined) throw bindingStale('unexpected_binding')
 }
 
+// ── step 5 PR-8: the change plan and the review on the lanes (design §9.3, §10.3 (2)-(4)) ─────────────
+
+/**
+ * The project's WRITTEN plan awaiting review (at most one), from the consult's rows: `{ pending: true,
+ * pendingReviews }` — values-free — or null. While one exists the formal export is refused (the derived state is
+ * 变更待复核) and the small lane writes ONLY a confirmed change plan's controlled update (design §9.3
+ * "change_pending_review-without-bound-plan" refuses; with a bound plan the update proceeds and absorbs the written
+ * plan's unreviewed fields).
+ */
+function pendingReviewOf(consult) {
+  const written = Array.isArray(consult.changePlans) ? consult.changePlans.filter((plan) => plan && plan.status === 'written') : []
+  return written.length > 0 ? Object.freeze({ pending: true, pendingReviews: written.length }) : null
+}
+
+/**
+ * What a PREVIEW answers about the review: the pending review, unless THIS computation is bound to a confirmed plan it
+ * matches (then the preview mints a token for the controlled update; the review stanza still says a review is pending).
+ * `blocksMint` is the preview's half of the apply's REVIEW_PENDING refusal (never promise an apply that is refused).
+ */
+function previewReviewOf(consult, changePlanVerdict) {
+  const pending = pendingReviewOf(consult)
+  if (!pending) return null
+  const bound = Boolean(changePlanVerdict && changePlanVerdict.verdict === 'matches')
+  return Object.freeze({ ...pending, blocksMint: !bound })
+}
+
+function changePlanStale(reason, extra = {}) {
+  return new StockPreparationRefreshLaneError(409, REFRESH_LANE_ERROR_CODES.CHANGE_PLAN_STALE, 'the confirmed change this preview was planned with is no longer what the server computes; preview again (and confirm again if the change moved)', { reason, partial: false, ...extra })
+}
+
+/**
+ * The apply's change-plan check (before SUSPENDED / BINDING_STALE / TOKEN_MISMATCH, so it answers with its own code): a
+ * token minted for a confirmed plan (`refreshBinding.changePlanId`) is applied only when THIS in-lease recompute still
+ * authorizes that very plan (`matches`); a plan the recompute calls stale (its reconciliation has just invalidated it),
+ * or a confirmed plan that is another one, is 409 STOCK_PREP_CHANGE_PLAN_STALE (`plan_invalidated` / `plan_replaced`).
+ */
+function assertChangePlanCurrent(tokenRecord, changePlanVerdict) {
+  const bound = tokenRecord && isPlainObject(tokenRecord.refreshBinding) && nonBlankString(tokenRecord.refreshBinding.changePlanId)
+    ? tokenRecord.refreshBinding.changePlanId
+    : null
+  if (!bound) return
+  if (!changePlanVerdict || changePlanVerdict.id !== bound) throw changePlanStale('plan_replaced')
+  if (changePlanVerdict.verdict !== 'matches') throw changePlanStale('plan_invalidated', changePlanVerdict.reason ? { planReason: changePlanVerdict.reason } : {})
+}
+
+/**
+ * 变更待复核 (C04 / C12; design §9.3): a written change awaits a person's review, and THIS apply is not the controlled
+ * update of a confirmed plan the recompute matches => 409 STOCK_PREP_REFRESH_REVIEW_PENDING, before any write.
+ */
+function assertNoReviewPending(consult, changePlanVerdict) {
+  const review = previewReviewOf(consult, changePlanVerdict)
+  if (review && review.blocksMint) {
+    throw new StockPreparationRefreshLaneError(409, REFRESH_LANE_ERROR_CODES.REVIEW_PENDING, 'a written change of this project awaits its review; nothing else is written until it is reviewed', {
+      state: 'change_pending_review',
+      pendingReviews: review.pendingReviews,
+      partial: false,
+    })
+  }
+}
+
 // ── the execution ledger (TD-9, design §9.2-9.3) ─────────────────────────────────────────────────
 
 /**
@@ -655,14 +762,19 @@ function createRefreshGovernanceHandle({
   projectId,
   defaultObjectId,
   extFieldMapping = null,
+  auditWithin = null,
 } = {}) {
   const services = () => resolveServices()
   const store = Object.freeze({
-    reconcileHolds: (input) => services().store.reconcileHolds(input),
+    reconcileHolds: (input, options) => services().store.reconcileHolds(input, options),
     beginExecution: (input) => services().store.beginExecution(input),
     finishExecution: (input) => services().store.finishExecution(input),
   })
   return Object.freeze({
+    // Step 5 PR-8 (refutation m2, C08 「每一步的状态、导出结果与审计可见」): the audit row a reconciliation appends ON ITS
+    // OWN TRANSACTION when it invalidates a confirmed change plan. Null when the route wired none — the store then
+    // refuses that invalidation 501 by name (a plan never disappears unaudited).
+    auditWithin: typeof auditWithin === 'function' ? auditWithin : null,
     consult: async ({ projectNo, sheetId } = {}) => services().governance.consult({ tenantId, projectNo, sheetId }),
     assertSourceBindingUnanimous: (action) => assertRefreshSourceBindingUnanimous({ sourceBindingStore, tenantId, action }),
     planningInputs: async (action) => ({
@@ -690,6 +802,13 @@ function packInstalledFields() {
 module.exports = {
   REFRESH_LANE_ERROR_CODES,
   StockPreparationRefreshLaneError,
+  // Step 5 PR-8.
+  assertChangePlanCurrent,
+  assertNoReviewPending,
+  changePlanInputFor,
+  changePlanVerdictOf,
+  pendingReviewOf,
+  previewReviewOf,
   assertNoRunbookOnlyHold,
   assertNoUnfinishedExecution,
   assertPullNotSuspended,

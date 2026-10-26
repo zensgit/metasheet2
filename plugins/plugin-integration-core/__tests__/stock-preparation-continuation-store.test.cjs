@@ -202,9 +202,11 @@ function derivedState(w, { pilot = { enabled: true }, lock = FREE_LOCK } = {}) {
 test('ST-01 migrations 102 / 103: tables, vocabularies set-equal to the pure core, unique indexes, claim mirror, no DROP, no audit re-listing, the G10 / Q-B notes', () => {
   const sql102 = kit.readMigrationText(kit.MIGRATION_FILES.continuation)
   const sql103 = kit.readMigrationText(kit.MIGRATION_FILES.refreshState)
-  const both = `${sql102}\n${sql103}`
+  // Step 5 PR-8: REFRESH_STORE_TABLES names the change-plan table too (migration 104; its own suite pins it).
+  const sql104 = kit.readMigrationText(kit.MIGRATION_FILES.changePlan)
+  const both = `${sql102}\n${sql103}\n${sql104}`
   for (const table of Object.values(T)) assert.ok(both.includes(`CREATE TABLE IF NOT EXISTS ${table} (`), table)
-  for (const sql of [sql102, sql103]) {
+  for (const sql of [sql102, sql103, sql104]) {
     assert.doesNotMatch(sql, /\bDROP\s+TABLE\b/i, 'forward migration must not drop tables')
     assert.match(sql, /up-only/, 'the header states the migration is up-only (no down())')
     assert.doesNotMatch(sql, /ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(/, 'D9: no audit vocabulary re-listing (the audit-migration test would elect this file)')
@@ -1003,7 +1005,7 @@ test('ST-14 one consult snapshot (review X-1): every read in ONE transaction pin
   assert.deepEqual(log[1], ['trx.setTransactionIsolationLevel', 'repeatable read'], 'the pin is the transaction\'s FIRST statement')
   assert.deepEqual(log[log.length - 1], ['commit', null])
   const reads = log.slice(2, -1)
-  assert.equal(reads.length, 18, 'continuations x2, members x2, holds x2, states x2, executions (2 newest + 8 unfinished)')
+  assert.equal(reads.length, 22, 'continuations x2, members x2, holds x2, states x2, executions (2 newest + 8 unfinished), change plans (PR-8: 2 pending statuses x 2)')
   assert.ok(reads.every(([method]) => method === 'trx.select'), `every read on the transaction handle, none in autocommit: ${JSON.stringify(reads)}`)
   // readFirst: once, on THE transaction handle, after BEGIN + the pin, before any step-4 read.
   assert.equal(seen.length, 1)

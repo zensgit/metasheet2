@@ -5,7 +5,7 @@
 //
 //   RL-01 the persisted-hold pick: exactly the 13 PHK keys, the STORED fingerprint and body verbatim,
 //         continuationRoots from the named continuation of ANY status, never the row id / scope / timestamps.
-//   RL-02 the planner input: exactly 9 keys (O-16 + persistedHolds), never a spread consult; the normalizer takes it.
+//   RL-02 the planner input: exactly 10 keys (O-16 + persistedHolds + step 5's changePlan), never a spread consult; the normalizer takes it.
 //   RL-03 the straddle mapping maps ONLY the two straddle shapes (P3-G9).
 //   RL-04 the verdict, the completeness predicate (TD-24), the binding (sorted, non-ended), the plan digest.
 //   RL-05 the refusals from ROWS (O-22: own lease vs another / failed), runbook-only (O-15), suspension, binding.
@@ -73,11 +73,13 @@ test('RL-01 pickPersistedHold copies exactly the 13 PHK keys (stored fingerprint
   assert.equal(normalized[0].fingerprint, picked.fingerprint)
 })
 
-test('RL-02 continuationInputFor builds EXACTLY the 9-key planner input (never a spread consult), and the pure core normalizes it', () => {
+test('RL-02 continuationInputFor builds EXACTLY the 10-key planner input (never a spread consult), and the pure core normalizes it', () => {
   const refresh = { consult: consultWith({ holds: [holdRow()], continuations: [] }), governed: true }
   const action = { actionId: 'plm.stock-preparation.pull-bom.v1', source: { externalSystemId: 'plm_rl', readPlan: { part: { specField: 'Spec' } } }, target: { sheetId: SCOPE.sheetId } }
   const input = lanes.continuationInputFor(refresh, { action, expansion: { demandEvidence: { observations: [] } } })
-  assert.deepEqual(Object.keys(input).sort(), ['continuations', 'demandEvidence', 'members', 'persistedHolds', 'pilot', 'projectNo', 'sourceIdentity', 'specSlotDeclared', 'storeState'])
+  assert.deepEqual(Object.keys(input).sort(), ['changePlan', 'continuations', 'demandEvidence', 'members', 'persistedHolds', 'pilot', 'projectNo', 'sourceIdentity', 'specSlotDeclared', 'storeState'])
+  // Step 5 PR-8: no confirmed change plan in the consult => `changePlan: null` (the key is always present).
+  assert.equal(input.changePlan, null)
   assert.equal(input.pilot, false)
   assert.equal(input.specSlotDeclared, true)
   assert.equal(input.sourceIdentity.sourceScopeDigest, lanes.stockPreparationSourceScopeDigest({ tenantId: SCOPE.tenantId, actionId: action.actionId, externalSystemId: 'plm_rl' }))

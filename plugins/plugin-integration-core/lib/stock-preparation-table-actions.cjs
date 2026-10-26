@@ -82,6 +82,8 @@ const {
 // refusals, the execution ledger). The lane module requires this module only lazily (its one call back is the
 // source-content digest), so this top-level require is cycle-free.
 const {
+  assertChangePlanCurrent,
+  assertNoReviewPending,
   assertNoUnfinishedExecution,
   assertPullNotSuspended,
   assertRefreshBindingCurrent,
@@ -94,6 +96,7 @@ const {
   mapContinuationStraddle,
   planDigestOf,
   previewRecoveryRechecked,
+  previewReviewOf,
   reconcileComputation,
   selfSettlementFor,
 } = require('./stock-preparation-refresh-lanes.cjs')
@@ -2455,6 +2458,10 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     runOnlyReview,
     tableScopeReview,
   })
+  // #6475 round 2: the content half of the read (see buildSourceContentRevision) — built ONCE, BEFORE planning (step 5
+  // PR-8: a confirmed change plan is bound to the source content digest of the computation that opened its holds, and
+  // the planner compares it with THIS one); the same value rides the result below.
+  const sourceContentRevision = buildSourceContentRevision({ action, parameters, expansion })
   // PR-3a: BOTH planner calls (the first plan and the re-plan after the ledger readback) carry the projection
   // for a governed project (P3-G10), and a straddling consult maps to a retryable 409 (P3-G9).
   const planConflicts = mapContinuationStraddle(planStockPreparationConflicts)
@@ -2482,8 +2489,8 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       // W4 carry: threaded from the deploy-time action config (undefined when the
       // config never opted in — the planner is then byte-identical to pre-wiring).
       carryPolicy: action.carryPolicy,
-      // PR-3a (O-16 + AMB-1): exactly the 9-key continuation input, governed only; absent otherwise.
-      ...(refresh && refresh.governed ? { continuation: continuationInputFor(refresh, { action, expansion }) } : {}),
+      // PR-3a (O-16 + AMB-1) + PR-8 (`changePlan`): exactly the 10-key continuation input, governed only; absent otherwise.
+      ...(refresh && refresh.governed ? { continuation: continuationInputFor(refresh, { action, expansion, sourceContentDigest: stockPreparationSourceContentDigest(sourceContentRevision) }) } : {}),
     })
   }
   let plan = planWithReview(conflictPolicyReview)
@@ -2520,7 +2527,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     revision,
     // #6475 round 2: the content half only — see buildSourceContentRevision. NOT an input to
     // `revision` (which keeps hashing exactly what it always did, so no token or batch id moves).
-    sourceContentRevision: buildSourceContentRevision({ action, parameters, expansion }),
+    sourceContentRevision,
     // PR-3a (O-2): a SUSPENDED plan is never applicable — no token, no `small_preview` bump; a governed
     // computation over an incomplete read is never applicable either. `plan.suspended` is absent on every
     // not-governed plan, so that term is true and the not-governed answer is unchanged.
@@ -2582,6 +2589,14 @@ function dryRunStatus(dryRun, outcome = null) {
   if (outcome && outcome.suspended === true) return 'suspended'
   if (dryRun.canApply) return dryRun.plan.valid ? 'ready' : 'manual_confirm_required'
   return 'failed'
+}
+
+// Step 5 PR-8: `review_pending` (a written change awaits its review and this preview is not its controlled update)
+// replaces only what would otherwise read as applicable — recovery_pending and suspended keep precedence; not_found /
+// large_bom_bounded / failed say something else about the read and stay.
+function withReviewStatus(status, review) {
+  if (review && review.blocksMint && (status === 'ready' || status === 'manual_confirm_required')) return 'review_pending'
+  return status
 }
 
 // D-C FAIL-CLOSED. Once `rowErrors` is a bounded SAMPLE, "no hard-blocking entry in the array" stops
@@ -2683,9 +2698,13 @@ async function dryRunStockPreparationAction(input = {}) {
   // pilot guard and BEFORE the token block, so a store failure (503) or a decision that landed since the consult
   // (409 STATE_MOVED) leaves no token and no `small_preview` bump. A settling preview settles here.
   const refreshOutcome = await reconcileComputation(dryRun, { lane: 'small_preview', ...(recovery ? {} : { settle: { template: action.template } }) })
-  // A preview mints only when it is applicable, its reconcile left the pull unsuspended (no hold open) and no
-  // earlier execution awaits recovery.
-  const mintable = dryRun.canApply && !(refreshOutcome && refreshOutcome.suspended) && !recovery
+  // Step 5 PR-8 (design §9.3, C04 / C12): a WRITTEN change awaiting review (变更待复核). The preview still reconciled and
+  // settled above (the 核对 of what the controlled update wrote); it mints no token unless THIS computation is the
+  // controlled update of a confirmed plan it matches — the apply's REVIEW_PENDING refusal, answered in advance.
+  const review = dryRun.refresh && dryRun.refresh.governed ? previewReviewOf(dryRun.refresh.consult, refreshOutcome ? refreshOutcome.changePlan : null) : null
+  // A preview mints only when it is applicable, its reconcile left the pull unsuspended (no hold open), no
+  // earlier execution awaits recovery and no written change awaits its review (unless this IS a bound update).
+  const mintable = dryRun.canApply && !(refreshOutcome && refreshOutcome.suspended) && !recovery && !(review && review.blocksMint)
   let dryRunToken = null
   if (mintable) {
     // PLAN GENERATION (batch-refresh phase 0 step 1): an applicable preview SUPERSEDES every earlier
@@ -2717,7 +2736,7 @@ async function dryRunStockPreparationAction(input = {}) {
     : null
   return {
     action: publicActionMetadata(action),
-    status: recovery ? 'recovery_pending' : dryRunStatus(dryRun, refreshOutcome),
+    status: recovery ? 'recovery_pending' : withReviewStatus(dryRunStatus(dryRun, refreshOutcome), review),
     largeBom: isLargeBomBoundedExpansion(dryRun.expansion),
     boundedPreview: largeBomBoundedPreview(dryRun.expansion),
     dryRunToken,
@@ -2762,6 +2781,9 @@ async function dryRunStockPreparationAction(input = {}) {
     // Review round 1: the values-free recovery stanza (a count) of a governed preview awaiting recovery; absent
     // otherwise (every not-governed response is byte-identical).
     ...(recovery ? { refreshRecovery: recovery } : {}),
+    // Step 5 PR-8: the values-free review stanza (a count and whether it blocks this preview's token) of a governed
+    // project whose written change awaits review; absent otherwise.
+    ...(review ? { refreshReview: { pending: true, pendingReviews: review.pendingReviews, blocksMint: review.blocksMint } } : {}),
     // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
     // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
     // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
@@ -3188,7 +3210,13 @@ async function applyStockPreparationAction(input = {}) {
     if (!dryRun.refresh.complete) {
       throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_NOT_APPLYABLE', 'current dry-run is not applyable', { reason: 'refresh_incomplete_computation', partial: false })
     }
+    // Step 5 PR-8 (design §10.3 (2), §9.3): a token minted for a confirmed change plan applies only while THIS in-lease
+    // recompute still authorizes that plan (else 409 STOCK_PREP_CHANGE_PLAN_STALE — its reconciliation above has just
+    // invalidated it); before SUSPENDED / BINDING_STALE / TOKEN_MISMATCH, so the specific code answers.
+    assertChangePlanCurrent(tokenRecord, refreshOutcome.changePlan)
     assertPullNotSuspended(dryRun, refreshOutcome)
+    // A written change awaiting review refuses every write but the controlled update of a plan this recompute matches.
+    assertNoReviewPending(dryRun.refresh.consult, refreshOutcome.changePlan)
     assertRefreshBindingCurrent(tokenRecord, refreshOutcome)
   } else {
     assertTokenCarriesNoRefreshBinding(tokenRecord)

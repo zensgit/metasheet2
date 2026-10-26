@@ -49,6 +49,12 @@
 // and hold rows are never both locked by one transaction. Before PR-3a a settling finish locked execution ->
 // continuation -> state and could deadlock a concurrent preview's reconcile (state -> hold -> continuation);
 // the real-DB case S3A-17 proves both interleavings.
+// Step 5 (PR-8) adds the CHANGE-PLAN rows, always taken AFTER the continuation rows of the same transaction and never
+// before a state row it takes: confirmChangePlan (state -> continuations -> plans -> lock row -> inserts / hold
+// resolutions), completeChangeReview (state -> plan), reconcileHolds (state -> holds -> continuations -> plan, the
+// executions only read), a change-plan-bound beginExecution (state -> plan -> the execution INSERT) and
+// finishExecution (execution -> continuations -> plans; a settling one takes the state row first). Holds are written
+// only under the state row, so the confirm resolving holds after it locked plan rows opens no cycle.
 //
 // THE CONSULT READ IS ONE SNAPSHOT (review X-1). The CAS above only holds if the decision_version the consult
 // observed and the holds / continuations / members it planned from are ONE point in time. `readGovernanceRows`
@@ -77,15 +83,24 @@
 // need them; the CONSULT ANSWER IS SERVER-HELD and never a response body. Every error raised here carries
 // handles, closed tokens, counts and SQLSTATE class codes only.
 //
+// THE CHANGE PLAN (batch-refresh step 5 PR-8, migration 104; design §10.3 (1)-(5), plan §3.4). The consult reads the
+// PENDING plans (`confirmed` and `written`) in its snapshot, values-free summaries only. `confirmChangePlan` turns the
+// WHOLE open content-class hold set into one `confirmed` plan (every admissibility fact decided under the state-row
+// lock); `completeChangeReview` turns the `written` plan into `reviewed`; `reconcileHolds` invalidates a confirmed plan
+// whose change set a computation no longer finds (`source_changed`) — never one an execution is writing; a bound
+// `beginExecution` re-asserts the plan under the lock; `finishExecution` marks it `written` (absorbing the unreviewed
+// fields of the previous written plan, so no written change ever escapes review) or `invalidated(execution_failed)`.
+//
 // NOT HERE: no route, no lane consult (PR-3), no `bumpGenerationWithin` (PR-4), no audit vocabulary (D9),
-// no env flag (D-3), no change-plan table (step 5: `changePlans` is answered as a literal empty list by the
-// governance reader until migration N+2 exists).
+// no env flag (D-3).
 // ---------------------------------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
 
 const { sheetWriteScopeKey } = require('./stock-preparation-project-write-lock.cjs')
 const pairing = require('./stock-preparation-continuation-pairing.cjs')
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require('./stock-preparation-templates.cjs')
+const { __internals: plannerInternals } = require('./stock-preparation-conflict-planner.cjs')
 
 const {
   CONTINUATION_ERROR_CODES,
@@ -94,6 +109,13 @@ const {
   NOT_CONFIRMABLE_REASONS,
   RECONFIRMABLE_REASONS,
   SHAPE_TOKENS,
+  VOLATILE_DETAIL_KEYS,
+  canonicalChangeValue,
+  changePlanFingerprintOf,
+  changePlanRecordsFromHolds,
+  isContentClassHold,
+  isStructureClassHold,
+  plannedContentDigestOf,
 } = pairing
 const { canonicalJson, subjectDigest } = pairing.__internals
 
@@ -103,6 +125,8 @@ const REFRESH_STORE_TABLES = Object.freeze({
   state: 'integration_stock_prep_refresh_state',
   hold: 'integration_stock_prep_refresh_hold',
   execution: 'integration_stock_prep_refresh_execution',
+  // Step 5 PR-8 (migration 104).
+  changePlan: 'integration_stock_prep_change_plan',
 })
 
 // ── closed vocabularies (migrations 102 / 103 CHECKs; pinned against the pure core by the unit suite) ──
@@ -123,8 +147,17 @@ const EXECUTION_STATUSES = Object.freeze(['running', 'succeeded', 'partial', 'fa
 const EXECUTION_FINISH_STATUSES = Object.freeze(['succeeded', 'partial', 'failed', 'aborted'])
 const UNFINISHED_EXECUTION_STATUSES = Object.freeze(['running', 'partial', 'failed', 'aborted'])
 const VERIFIED_RESULTS = Object.freeze(['landed', 'nothing_landed', 'mixed', 'unknown'])
-const BUMP_REASONS = Object.freeze({ confirm: 'continuation_confirm', end: 'continuation_end' })
+const BUMP_REASONS = Object.freeze({ confirm: 'continuation_confirm', end: 'continuation_end', changePlan: 'change_plan_confirm' })
 const BASIS_NOTE_MAX_LENGTH = 2000
+// Step 5 PR-8 (migration 104 CHECKs; pinned against the SQL by the change-plan store suite).
+const CHANGE_PLAN_STATUSES = Object.freeze(['confirmed', 'written', 'reviewed', 'invalidated', 'superseded'])
+const CHANGE_PLAN_PENDING_STATUSES = Object.freeze(['confirmed', 'written'])
+const CHANGE_PLAN_INVALIDATED_REASONS = Object.freeze(['source_changed', 'execution_failed'])
+const REVIEW_CONCLUSIONS = Object.freeze(['handled', 'handled_with_notes'])
+const REVIEW_NOTES_MAX_LENGTH = 2000
+// Q-8 (refutation note 6): a change plan binds at most this many records (the hold read ceiling); a larger content
+// change is refused `too_many_records` (no confirm control) — stated in the PR body.
+const CHANGE_PLAN_RECORD_CEILING = 5000
 // Registry-note rule (project-target-store.cjs): C0 / DEL / C1 and the Unicode line separators (U+2028 /
 // U+2029, built from char codes so no literal separator byte sits in this source) are refused.
 const CONTROL_CHARACTER_PATTERN = new RegExp(`[\\x00-\\x1F\\x7F-\\x9F${String.fromCharCode(0x2028)}${String.fromCharCode(0x2029)}]`)
@@ -149,6 +182,13 @@ const REFRESH_STORE_ERROR_CODES = Object.freeze({
   // The lanes' token (stock-preparation-refresh-lanes.cjs REFRESH_LANE_ERROR_CODES.RECOVERY_PENDING), spelled here
   // because the decision transactions re-check the unfinished executions under the state-row lock (PR-4 review).
   RECOVERY_PENDING: 'STOCK_PREP_REFRESH_RECOVERY_PENDING',
+  // Step 5 PR-8: the change plan and the review (the writer's stop spells CHANGE_PLAN_STALE too,
+  // stock-preparation-apply-writer.cjs CHANGE_PLAN_STALE_CODE).
+  CHANGE_PLAN_STALE: 'STOCK_PREP_CHANGE_PLAN_STALE',
+  CHANGE_PLAN_NOT_ALLOWED: 'STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED',
+  CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT: 'STOCK_PREP_CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT',
+  CHANGE_REVIEW_STALE: 'STOCK_PREP_CHANGE_REVIEW_STALE',
+  CHANGE_REVIEW_BLOCKED: 'STOCK_PREP_CHANGE_REVIEW_BLOCKED',
 })
 
 // The consult's reads share ONE snapshot (review X-1): a lib/db.cjs whitelisted isolation level, pinned by the
@@ -157,7 +197,7 @@ const CONSULT_SNAPSHOT_ISOLATION = 'repeatable read'
 
 // Paging: the scoped helper clamps a page at 10000; the ceilings bound what one consult may hold in memory.
 const READ_PAGE_SIZE = 1000
-const READ_CEILINGS = Object.freeze({ continuation: 5000, member: 20000, hold: 5000, state: 100, execution: 5000 })
+const READ_CEILINGS = Object.freeze({ continuation: 5000, member: 20000, hold: 5000, state: 100, execution: 5000, changePlan: 100 })
 const NEWEST_EXECUTIONS = 5
 
 class StockPreparationRefreshStoreError extends Error {
@@ -298,6 +338,31 @@ function recoveryPending(openExecutions) {
     openExecutions,
     partial: false,
   })
+}
+
+// ── step 5 PR-8: the change plan's refusals (values-free: a closed reason token, counts) ─────────────────────────
+
+// The change being confirmed / executed is no longer what the server computes: read the page (or preview) again.
+function changePlanStale(reason, extra = {}) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_STALE, 'the change plan is no longer what the server computes; read the page again (or preview again)', { reason, partial: false, ...extra })
+}
+
+function changePlanNotAllowed(reason, extra = {}) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_NOT_ALLOWED, 'this change cannot be confirmed as a change plan', { reason, partial: false, ...extra })
+}
+
+// C07: a structure change anywhere on the project keeps the whole pull suspended; the content path cannot release it.
+function structureChangePresent(holdCount) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT, 'a structure change is open on this project; a content change plan is not confirmed while it is', { holdCount, partial: false })
+}
+
+function reviewStale(reason, extra = {}) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_REVIEW_STALE, 'the change being reviewed is no longer what the sheet holds; read the page again', { reason, partial: false, ...extra })
+}
+
+// C12: the review does not complete while anything else on the project is unfinished.
+function reviewBlocked(reason, extra = {}) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_REVIEW_BLOCKED, 'something else on this project is still open; the review completes after it', { reason, partial: false, ...extra })
 }
 
 // The hold a release decides from (PR-4 review B1): the caller names the OPEN relationship_reconfirm hold it was
@@ -557,6 +622,93 @@ function rowToExecution(row) {
   }
 }
 
+function jsonArrayOf(value) {
+  const parsed = jsonOrNull(value)
+  return Array.isArray(parsed) ? parsed : []
+}
+
+// Step 5 PR-8: the FULL change-plan row (PRIVATE: `recordSet` and `reviewNotes` carry business values) — for the
+// audited pull-tier read and the store's own transactions only.
+function rowToChangePlan(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    sheetId: row.sheet_id,
+    projectNo: row.project_no,
+    status: row.status,
+    planFingerprint: row.plan_fingerprint,
+    sourceContentDigest: row.source_content_digest,
+    plannedContentDigest: row.planned_content_digest,
+    recordCount: intOrNull(row.record_count),
+    writeRecordCount: intOrNull(row.write_record_count),
+    recordSet: jsonArrayOf(row.record_set),
+    absorbedChangePlanIds: jsonArrayOf(row.absorbed_change_plan_ids),
+    holdIds: jsonArrayOf(row.hold_ids),
+    holdSetFingerprint: row.hold_set_fingerprint,
+    continuationIds: jsonArrayOf(row.continuation_ids),
+    reviewBaselineDigest: row.review_baseline_digest,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: isoOrNull(row.confirmed_at),
+    confirmedGeneration: intOrNull(row.confirmed_generation),
+    confirmedGenerationToken: row.confirmed_generation_token,
+    confirmedFencingEpoch: intOrNull(row.confirmed_fencing_epoch),
+    executionId: row.execution_id ?? null,
+    writtenAt: isoOrNull(row.written_at),
+    writtenContentDigest: row.written_content_digest ?? null,
+    reviewedBy: row.reviewed_by ?? null,
+    reviewedAt: isoOrNull(row.reviewed_at),
+    reviewConclusion: row.review_conclusion ?? null,
+    reviewNotes: row.review_notes ?? null,
+    reviewedContentDigest: row.reviewed_content_digest ?? null,
+    invalidatedAt: isoOrNull(row.invalidated_at),
+    invalidatedReason: row.invalidated_reason ?? null,
+    supersededAt: isoOrNull(row.superseded_at),
+    supersededBy: row.superseded_by ?? null,
+    createdAt: isoOrNull(row.created_at),
+    updatedAt: isoOrNull(row.updated_at),
+  }
+}
+
+// The record ids a plan WRITES (values-free handles): what the planner forces content detection on after a pilot exit
+// (refutation M4) and what a summary may carry. Review-only fields are excluded.
+function writeRecordIdsOf(recordSet) {
+  const ids = new Set()
+  for (const record of Array.isArray(recordSet) ? recordSet : []) {
+    if (!isPlainObject(record) || !nonBlankString(record.recordId) || !isPlainObject(record.fields)) continue
+    if (Object.values(record.fields).some((cell) => isPlainObject(cell) && cell.reviewOnly !== true)) ids.add(record.recordId)
+  }
+  return Array.from(ids).sort()
+}
+
+// The VALUES-FREE projection the consult answers (never `record_set`, never the notes): handles, closed tokens,
+// digests, counts, server clocks — plus the scope triple the governance reader asserts (refutation m3).
+function rowToChangePlanSummary(row) {
+  if (!row) return null
+  return Object.freeze({
+    id: row.id,
+    tenantId: row.tenant_id,
+    sheetId: row.sheet_id,
+    projectNo: row.project_no,
+    status: row.status,
+    planFingerprint: row.plan_fingerprint,
+    sourceContentDigest: row.source_content_digest,
+    plannedContentDigest: row.planned_content_digest,
+    recordCount: intOrNull(row.record_count),
+    writeRecordCount: intOrNull(row.write_record_count),
+    holdSetFingerprint: row.hold_set_fingerprint,
+    continuationIds: Object.freeze(jsonArrayOf(row.continuation_ids).slice()),
+    executionId: row.execution_id ?? null,
+    writtenContentDigest: row.written_content_digest ?? null,
+    reviewBaselineDigest: row.review_baseline_digest,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: isoOrNull(row.confirmed_at),
+    writtenAt: isoOrNull(row.written_at),
+    recordIds: Object.freeze(writeRecordIdsOf(jsonArrayOf(row.record_set))),
+    absorbedCount: jsonArrayOf(row.absorbed_change_plan_ids).length,
+  })
+}
+
 // ── input validation ──────────────────────────────────────────────────────────────────────────────
 
 function normalizeScope(input = {}) {
@@ -788,6 +940,105 @@ function continuationFactsFromHold(hold, scope) {
   })
 }
 
+// ── step 5 PR-8: change-plan inputs (a PULLER's request: 400; what the planner / lane hands over: 500) ────────
+
+function normalizeNamedHolds(input) {
+  if (!Array.isArray(input) || input.length === 0) throw inputInvalid('holds must name every open content hold as { id, fingerprint }', 'holds', 400)
+  const out = new Map()
+  input.forEach((entry, index) => {
+    if (!isPlainObject(entry) || !nonBlankString(entry.id) || !nonBlankString(entry.fingerprint)) throw inputInvalid(`holds[${index}] needs { id, fingerprint }`, `holds[${index}]`, 400)
+    const id = entry.id.trim()
+    if (out.has(id)) throw inputInvalid('a hold is named twice', `holds[${index}]`, 400)
+    out.set(id, entry.fingerprint.trim())
+  })
+  return out
+}
+
+function normalizeChangePlanEcho(input) {
+  if (!isPlainObject(input)) throw inputInvalid('the echoed plan fingerprints are required', 'echo', 400)
+  const out = {}
+  for (const field of ['holdSetFingerprint', 'planFingerprint', 'sourceContentDigest']) {
+    if (!nonBlankString(input[field])) throw inputInvalid(`echo.${field} is required`, `echo.${field}`, 400)
+    out[field] = input[field].trim()
+  }
+  return Object.freeze(out)
+}
+
+// The combined confirm of a `candidate_content_differs` hold (design §10.3 (5)): the candidate it confirms (its
+// pairing fingerprint, as the page showed it) and the demand basis — the continuation confirm's own inputs.
+function normalizeCandidateDecisions(input) {
+  const out = new Map()
+  if (input === undefined || input === null) return out
+  if (!Array.isArray(input)) throw inputInvalid('candidates must be an array', 'candidates', 400)
+  input.forEach((entry, index) => {
+    if (!isPlainObject(entry) || !nonBlankString(entry.holdId) || !nonBlankString(entry.candidateId)) throw inputInvalid(`candidates[${index}] needs { holdId, candidateId, basis }`, `candidates[${index}]`, 400)
+    const holdId = entry.holdId.trim()
+    if (out.has(holdId)) throw inputInvalid('a candidate is named twice', `candidates[${index}]`, 400)
+    out.set(holdId, Object.freeze({ candidateId: entry.candidateId.trim(), basis: normalizeBasis(entry.basis) }))
+  })
+  return out
+}
+
+// What a computation hands the reconciliation about the confirmed plan it planned with (the lane's planner verdict).
+function normalizeChangePlanVerdict(input) {
+  if (input === undefined || input === null) return null
+  if (!isPlainObject(input) || !nonBlankString(input.id) || !['matches', 'stale'].includes(input.verdict)) {
+    throw inputInvalid('changePlan needs { id, verdict: matches | stale }', 'changePlan')
+  }
+  return Object.freeze({ id: input.id.trim(), verdict: input.verdict })
+}
+
+function templateFieldsOf(template) {
+  return plannerInternals.fieldMapForTemplate(normalizeStockPreparationTemplate(template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE))
+}
+
+function normalizeReviewNotes(input) {
+  if (input === undefined || input === null) return null
+  if (typeof input !== 'string') throw inputInvalid('notes must be a string', 'notes', 422)
+  if (CONTROL_CHARACTER_PATTERN.test(input)) throw inputInvalid('notes must not contain control characters', 'notes', 400)
+  const text = input.trim()
+  if (text.length > REVIEW_NOTES_MAX_LENGTH) throw inputInvalid(`notes exceed ${REVIEW_NOTES_MAX_LENGTH} characters`, 'notes', 422)
+  return text || null
+}
+
+// The post-change pair the planner recorded on a relationship / candidate content hold (C04 / C11): the comparison
+// and evidence fingerprints the relationship verifies with ONCE the after-values are written — the stamp a confirm
+// writes, so the re-preview neither re-raises the hold nor, after the write, asks for a reconfirmation.
+function postChangeOf(hold) {
+  const post = isPlainObject(hold.detail) ? hold.detail.postChange : null
+  if (!isPlainObject(post) || !nonBlankString(post.comparisonFingerprint) || !nonBlankString(post.evidenceFingerprint)) throw holdMalformed('postchange_missing')
+  return Object.freeze({ comparisonFingerprint: post.comparisonFingerprint, evidenceFingerprint: post.evidenceFingerprint })
+}
+
+// Absorb the UNREVIEWED fields of a superseded written plan into the plan being written (B1): every field the new plan
+// does not WRITE enters it review-only — before = after = the value the older write left on the sheet, baseline = the
+// last REVIEWED value (the older field's own baseline, else its before). Nothing written ever leaves review scope.
+function absorbIntoRecordSet(recordSet, olderSet) {
+  const byId = new Map(recordSet.map((record) => [record.recordId, { ...record, fields: { ...record.fields } }]))
+  let absorbedFields = 0
+  for (const older of Array.isArray(olderSet) ? olderSet : []) {
+    if (!isPlainObject(older) || !nonBlankString(older.recordId) || !isPlainObject(older.fields)) continue
+    for (const [fieldId, cell] of Object.entries(older.fields)) {
+      if (!isPlainObject(cell)) continue
+      const target = byId.get(older.recordId)
+      if (target && isPlainObject(target.fields[fieldId])) continue
+      const baseline = cell.baseline !== undefined ? cell.baseline : cell.before
+      const absorbed = {
+        before: cell.after === undefined ? null : cell.after,
+        after: cell.after === undefined ? null : cell.after,
+        afterCanonical: cell.afterCanonical === undefined ? null : cell.afterCanonical,
+        baseline: baseline === undefined ? null : baseline,
+        reviewOnly: true,
+      }
+      if (target) target.fields[fieldId] = absorbed
+      else byId.set(older.recordId, { recordId: older.recordId, key: older.key, root: older.root === true, inContinuation: older.inContinuation || null, fields: { [fieldId]: absorbed } })
+      absorbedFields += 1
+    }
+  }
+  const out = Array.from(byId.values()).sort((left, right) => (left.recordId < right.recordId ? -1 : (left.recordId > right.recordId ? 1 : 0)))
+  return { recordSet: out, absorbedFields }
+}
+
 // ── the store ─────────────────────────────────────────────────────────────────────────────────────
 
 function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) {
@@ -923,6 +1174,15 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         executionLists.push(await selectAll(snapshot, T.execution, { ...byProject, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' }))
       }
       const executions = unionById(...executionLists)
+      // Step 5 PR-8 (O-19): the PENDING change plans — `confirmed` (awaiting its controlled update) and `written`
+      // (awaiting review) — by (sheet, project) AND by (tenant, project), one read per status (equality WHERE only),
+      // in the SAME snapshot. Values-free summaries: `record_set` / `review_notes` never leave the store here.
+      const changePlanLists = []
+      for (const status of CHANGE_PLAN_PENDING_STATUSES) {
+        changePlanLists.push(await selectAll(snapshot, T.changePlan, { ...bySheetProject, status }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' }))
+        changePlanLists.push(await selectAll(snapshot, T.changePlan, { ...byProject, status }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' }))
+      }
+      const changePlans = unionById(...changePlanLists)
       return Object.freeze({
         ok: true,
         scope,
@@ -931,6 +1191,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         holds: holds.map(rowToHold),
         states: states.map(rowToState),
         executions: executions.map(rowToExecution),
+        changePlans: changePlans.map(rowToChangePlanSummary),
       })
     })
   }
@@ -1025,6 +1286,26 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     if (!row) return null
     assertScopedRow(row, scope, 'hold')
     return rowToHold(row)
+  }
+
+  /**
+   * Step 5 PR-8: one change plan by id, scoped (any status), the FULL row (PRIVATE record set and notes) — for the
+   * audited pull-tier read only. Another tenant's row is TENANT_MISMATCH and another sheet / project's row is
+   * `change_plan_scope` (the decisions lib answers both as its 404, never an existence oracle).
+   */
+  async function readChangePlan(input = {}) {
+    const scope = normalizeScope(input)
+    const changePlanId = trimmed(input.changePlanId)
+    if (!changePlanId) throw scopeInvalid('changePlanId')
+    let row
+    try {
+      row = await db.selectOne(REFRESH_STORE_TABLES.changePlan, { id: changePlanId })
+    } catch (error) {
+      throw translate(error, 'read_change_plan')
+    }
+    if (!row) return null
+    assertScopedRow(row, scope, 'change_plan')
+    return rowToChangePlan(row)
   }
 
   // ── transaction building blocks ───────────────────────────────────────────────────────────────
@@ -1628,6 +1909,484 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     })
   }
 
+  // ── step 5 PR-8: the change plan (design §10.3 (1), (4), (5); plan §3.4 steps 2 and 5) ─────────────────────
+
+  // The project's plan rows of one status, read and then locked FOR UPDATE one by one in ascending id order. Callers
+  // take `confirmed` rows before `written` rows (the finish does the same), so no two plan-locking transactions wait
+  // on each other in a cycle.
+  async function lockedPlansOf(trx, scope, status) {
+    const rows = await selectAll(trx, REFRESH_STORE_TABLES.changePlan, { sheet_id: scope.sheetId, project_no: scope.projectNo, status }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' })
+    const locked = []
+    for (const row of rows.slice().sort((left, right) => (left.id < right.id ? -1 : (left.id > right.id ? 1 : 0)))) {
+      let current
+      try {
+        current = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: row.id })
+      } catch (error) {
+        throw translate(error, 'change_plan_lock')
+      }
+      if (!current) continue
+      if (current.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
+      if (current.status !== status) throw changePlanStale('plan_moved')
+      locked.push(current)
+    }
+    return locked
+  }
+
+  // A relationship a change plan re-stamps, locked; the continuation store's own STALE reasons re-raised as the
+  // change plan's (one vocabulary per route).
+  async function lockedPlanContinuation(trx, scope, continuationId) {
+    try {
+      return await lockedContinuation(trx, scope, continuationId)
+    } catch (error) {
+      if (error instanceof StockPreparationRefreshStoreError && error.code === REFRESH_STORE_ERROR_CODES.CONFIRM_STALE) {
+        throw changePlanStale('continuation_moved', { continuationReason: error.details && error.details.reason ? error.details.reason : null })
+      }
+      throw error
+    }
+  }
+
+  // The combined confirm's relationship (design §10.3 (5), C11): exactly the continuation confirm's header + members,
+  // stamped with the hold's POST-CHANGE fingerprints instead of its current ones — otherwise the relationship would
+  // verify `evidence_changed` right after the controlled update writes the after-values.
+  async function insertCombinedContinuation(trx, scope, { hold, facts, post, basis, sourceIdentity, confirmedBy, at, bump }) {
+    const continuationId = newId('cont')
+    if (!nonBlankString(hold.pairingFingerprint)) throw holdMalformed('fingerprints_missing')
+    try {
+      await trx.insertOne(REFRESH_STORE_TABLES.continuation, {
+        id: continuationId,
+        tenant_id: scope.tenantId,
+        sheet_id: scope.sheetId,
+        project_no: scope.projectNo,
+        write_scope_key: scope.writeScopeKey,
+        status: 'active',
+        status_reason: null,
+        revision: 1,
+        old_root_record_id: facts.oldRootRecordId,
+        old_root_key: facts.oldRootKey,
+        old_root_component_source_id: facts.oldRootComponentSourceId,
+        new_parent_component_source_id: facts.newParentComponentSourceId,
+        new_root_path_tokens: facts.newRootPathTokens,
+        new_root_key: facts.newRootKey,
+        new_root_key_digest: keyDigest(facts.newRootKey),
+        parent_edge_usage: facts.parentEdgeUsage,
+        external_system_id: sourceIdentity.externalSystemId,
+        source_scope_digest: sourceIdentity.sourceScopeDigest,
+        read_plan_digest: sourceIdentity.readPlanDigest,
+        pairing_fingerprint: hold.pairingFingerprint,
+        comparison_fingerprint: post.comparisonFingerprint,
+        evidence_fingerprint: post.evidenceFingerprint,
+        evidence_history_status: facts.history,
+        evidence_snapshot: facts.evidenceSnapshot,
+        demand_basis: basis.kind,
+        basis_note: basis.note,
+        applicability_scope: 'this_project_this_position',
+        confirmed_by: confirmedBy,
+        confirmed_at: at,
+        confirmed_generation: bump.generation,
+        confirmed_generation_token: bump.generationToken,
+        confirmed_fencing_epoch: bump.fencingEpoch,
+        executed_execution_id: null,
+        claim_active: true,
+        created_at: at,
+        updated_at: at,
+      })
+    } catch (error) {
+      throw translate(error, 'continuation_insert', { onUnique: confirmConflict })
+    }
+    const memberRows = facts.members.map((member) => ({
+      id: newId('contm'),
+      continuation_id: continuationId,
+      tenant_id: scope.tenantId,
+      sheet_id: scope.sheetId,
+      project_no: scope.projectNo,
+      write_scope_key: scope.writeScopeKey,
+      position: member.position,
+      relative_path_tokens: member.relativePathTokens,
+      component_source_id: member.componentSourceId,
+      old_record_id: member.oldRecordId,
+      old_key: member.oldKey,
+      old_key_digest: keyDigest(member.oldKey),
+      new_key: member.newKey,
+      new_key_digest: keyDigest(member.newKey),
+      old_row_content_digest: member.oldRowContentDigest,
+      claim_active: true,
+      created_at: at,
+      updated_at: at,
+    }))
+    try {
+      if (typeof trx.insertMany === 'function') await trx.insertMany(REFRESH_STORE_TABLES.member, memberRows)
+      else for (const row of memberRows) await trx.insertOne(REFRESH_STORE_TABLES.member, row)
+    } catch (error) {
+      throw translate(error, 'member_insert', { onUnique: confirmConflict })
+    }
+    return { continuationId, memberCount: memberRows.length, oldRecordIds: facts.members.map((member) => member.oldRecordId) }
+  }
+
+  // C04 / plan §3.4 实施细则 3 「沿用行的内容变更在同一次变更计划确认中续接关系指纹」: the relationship keeps its pairing
+  // and its demand; its comparison / evidence fingerprints become the POST-CHANGE pair, revision + 1, and its current
+  // revision is unconsumed again (the controlled update's execution consumes it). A `needs_reconfirmation` relationship
+  // whose only failing step is content (refutation M3; re-confirmable status reason checked by the caller) is
+  // re-activated in the same statement, with the current source identity — exactly what a re-confirm writes.
+  async function restampContinuation(trx, { row, post, reactivate, hold, sourceIdentity, confirmedBy, at, bump }) {
+    const set = {
+      comparison_fingerprint: post.comparisonFingerprint,
+      evidence_fingerprint: post.evidenceFingerprint,
+      revision: intOrNull(row.revision) + 1,
+      confirmed_by: confirmedBy,
+      confirmed_at: at,
+      confirmed_generation: bump.generation,
+      confirmed_generation_token: bump.generationToken,
+      confirmed_fencing_epoch: bump.fencingEpoch,
+      executed_execution_id: null,
+      updated_at: at,
+    }
+    if (reactivate) {
+      const detail = isPlainObject(hold.detail) ? hold.detail : {}
+      const history = EVIDENCE_HISTORY_STATUSES.includes(detail.history) ? detail.history : 'history_unknown'
+      Object.assign(set, {
+        status: 'active',
+        status_reason: null,
+        external_system_id: sourceIdentity.externalSystemId,
+        source_scope_digest: sourceIdentity.sourceScopeDigest,
+        read_plan_digest: sourceIdentity.readPlanDigest,
+        ...(nonBlankString(hold.pairingFingerprint) ? { pairing_fingerprint: hold.pairingFingerprint } : {}),
+        evidence_history_status: history,
+        evidence_snapshot: {
+          scheme: SCHEMES.evidenceSnapshot,
+          holdId: hold.id,
+          holdFingerprint: hold.fingerprint,
+          pairs: detail.pairs === undefined ? null : detail.pairs,
+          comparison: detail.comparison === undefined ? null : detail.comparison,
+          demand: detail.demand === undefined ? null : detail.demand,
+          history,
+        },
+      })
+    }
+    let rows
+    try {
+      rows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.continuation, set, { id: row.id, revision: intOrNull(row.revision), status: row.status, claim_active: true }))
+    } catch (error) {
+      throw translate(error, 'continuation_restamp')
+    }
+    if (rows.length !== 1) throw changePlanStale('continuation_moved')
+    return rows[0]
+  }
+
+  /**
+   * THE CHANGE-PLAN CONFIRM (design §10.3 (1) and (5); plan §3.4 step 2; register R-63 ②-⑤). The puller confirms the
+   * WHOLE open content-class hold set as ONE plan, bound to the state row's hold-set fingerprint, the source content
+   * digest of the computation that opened the holds and the plan fingerprint (the record set's before / after + that
+   * digest). Every admissibility fact is decided HERE, under the state-row lock, from the rows (the PR-4 lesson —
+   * the consult is a snapshot): state FOR UPDATE -> the echoed hold-set fingerprint / source digest -> the open holds
+   * re-read (S25: any runbook-only hold refuses `runbook_only_hold_open`; C07: any structure-class hold refuses
+   * STRUCTURE_CHANGE_PRESENT; the named set must be EXACTLY the open content-class set, each with its fingerprint) ->
+   * the record set DERIVED from those rows and its fingerprint recomputed -> the combined candidates (pairing
+   * fingerprint echoed, post-change pair present) -> every relationship a content hold names FOR UPDATE (active; or
+   * needs_reconfirmation with a re-confirmable reason, M3) -> the pending plans FOR UPDATE (confirmed, then written) ->
+   * `bumpWithin(change_plan_confirm)` -> the unfinished executions re-read (RECOVERY_PENDING) -> the combined
+   * relationships INSERTED with the post-change stamps -> the named relationships re-stamped (revision + 1) -> the
+   * confirmed plan superseded -> the plan INSERTED (review baselines carried from the written plan) -> the holds
+   * resolved (`change_plan_confirmed`) -> decision_version + 1 -> `auditWithin`. A COMMIT failure is 503 `commit`.
+   */
+  async function confirmChangePlan(input = {}, options = {}) {
+    const scope = normalizeScope(input)
+    const confirmedBy = trimmed(input.confirmedBy)
+    if (!confirmedBy) throw scopeInvalid('confirmedBy')
+    const named = normalizeNamedHolds(input.holds)
+    const echo = normalizeChangePlanEcho(input.echo)
+    const candidates = normalizeCandidateDecisions(input.candidates)
+    const sourceIdentity = normalizeSourceIdentity(input.sourceIdentity)
+    const templateFields = templateFieldsOf(input.template)
+    const bumpWithin = requireBumpWithin(options)
+    const auditWithin = auditHookOf(options)
+    const at = clock()
+
+    return decisionTransaction(async (rawTrx) => {
+      const trx = requireTrx(rawTrx)
+      const stateRow = await lockStateRow(trx, scope, { at })
+      if (!stateRow) throw changePlanStale('state_row_absent')
+      if ((stateRow.hold_set_fingerprint ?? null) !== echo.holdSetFingerprint) throw changePlanStale('hold_set_moved')
+      if ((stateRow.last_computation_source_content_digest ?? null) !== echo.sourceContentDigest) throw changePlanStale('source_moved')
+
+      const openRows = await openHoldsOf(trx, scope)
+      const runbookOpen = runbookOnlyOf(openRows)
+      if (runbookOpen.length > 0) throw changePlanNotAllowed('runbook_only_hold_open', { holdCount: runbookOpen.length })
+      const open = openRows.map(rowToHold)
+      const structureOpen = open.filter(isStructureClassHold)
+      if (structureOpen.length > 0) throw structureChangePresent(structureOpen.length)
+      const content = open.filter(isContentClassHold)
+      if (content.length === 0) throw changePlanStale('no_content_hold')
+      if (content.length !== named.size || content.some((hold) => !named.has(hold.id))) {
+        throw changePlanStale('hold_set_incomplete', { openContentHolds: content.length, named: named.size })
+      }
+      for (const hold of content) {
+        if (hold.fingerprint !== named.get(hold.id)) throw changePlanStale('hold_fingerprint')
+      }
+
+      let records
+      try {
+        records = changePlanRecordsFromHolds(content)
+      } catch (error) {
+        const reason = error && error.details && typeof error.details.reason === 'string' ? error.details.reason : 'records_malformed'
+        if (reason === 'record_unbound') throw changePlanNotAllowed('record_unbound')
+        throw holdMalformed(reason)
+      }
+      if (records.length === 0) throw holdMalformed('no_change')
+      if (records.length > CHANGE_PLAN_RECORD_CEILING) throw changePlanNotAllowed('too_many_records', { recordCount: records.length, ceiling: CHANGE_PLAN_RECORD_CEILING })
+      if (changePlanFingerprintOf({ projectNo: scope.projectNo, records, sourceContentDigest: echo.sourceContentDigest }) !== echo.planFingerprint) {
+        throw changePlanStale('plan_fingerprint')
+      }
+
+      // The combined confirm (§10.3 (5)): every open candidate content hold names its candidate decision.
+      const candidateHolds = content.filter((hold) => hold.kind === 'candidate_content_differs')
+      if (candidateHolds.length !== candidates.size || candidateHolds.some((hold) => !candidates.has(hold.id))) {
+        throw changePlanStale('candidate_set', { openCandidates: candidateHolds.length, named: candidates.size })
+      }
+      const combined = candidateHolds.map((hold) => {
+        const decision = candidates.get(hold.id)
+        if ((hold.pairingFingerprint || null) !== decision.candidateId) throw changePlanStale('candidate')
+        return { hold, decision, facts: continuationFactsFromHold(hold, scope), post: postChangeOf(hold) }
+      })
+
+      // The relationships a content hold names, locked in ascending id order (one verification hold per relationship).
+      const relationshipHolds = content.filter((hold) => hold.kind === 'relationship_content_change' || hold.kind === 'relationship_reconfirm')
+      const byContinuation = new Map()
+      for (const hold of relationshipHolds) {
+        if (!nonBlankString(hold.continuationId)) throw holdMalformed('continuation_missing')
+        if (byContinuation.has(hold.continuationId)) throw holdMalformed('continuation_repeats')
+        byContinuation.set(hold.continuationId, hold)
+      }
+      const restamps = []
+      for (const continuationId of Array.from(byContinuation.keys()).sort()) {
+        const hold = byContinuation.get(continuationId)
+        const post = postChangeOf(hold)
+        const row = await lockedPlanContinuation(trx, scope, continuationId)
+        const reactivate = hold.kind === 'relationship_reconfirm'
+        if (!reactivate && row.status !== 'active') throw changePlanStale('continuation_moved')
+        if (reactivate) {
+          if (row.status !== 'needs_reconfirmation') throw changePlanStale('continuation_moved')
+          if (!RECONFIRMABLE_REASONS.includes(row.status_reason)) throw changePlanNotAllowed('reconfirm_not_admissible', { statusReason: row.status_reason || null })
+        }
+        restamps.push({ hold, row, post, reactivate })
+      }
+
+      // The pending plans, confirmed rows first, then written rows (the finish's order).
+      const confirmedPlans = await lockedPlansOf(trx, scope, 'confirmed')
+      const writtenPlans = await lockedPlansOf(trx, scope, 'written')
+
+      const bump = await runBump(trx, scope, BUMP_REASONS.changePlan, bumpWithin)
+      await assertNoUnfinishedExecutionWithin(trx, scope)
+
+      const createdContinuations = []
+      for (const entry of combined) {
+        createdContinuations.push(await insertCombinedContinuation(trx, scope, { hold: entry.hold, facts: entry.facts, post: entry.post, basis: entry.decision.basis, sourceIdentity, confirmedBy, at, bump }))
+      }
+      for (const entry of restamps) {
+        await restampContinuation(trx, { ...entry, sourceIdentity, confirmedBy, at, bump })
+      }
+
+      // The record set as stored: canonical after values (the review digest) and, for every field an earlier write
+      // left unreviewed, the review baseline it carries (C06: the last REVIEWED value, never the intermediate).
+      const changePlanId = newId('chp')
+      const earlierById = new Map()
+      for (const plan of writtenPlans) {
+        for (const record of jsonArrayOf(plan.record_set)) if (isPlainObject(record) && nonBlankString(record.recordId)) earlierById.set(record.recordId, record)
+      }
+      const continuationOfOldRecord = new Map()
+      for (const created of createdContinuations) for (const oldRecordId of created.oldRecordIds) continuationOfOldRecord.set(oldRecordId, created.continuationId)
+      const recordSet = records.map((record) => {
+        const earlier = earlierById.get(record.recordId)
+        const fields = {}
+        for (const [fieldId, cell] of Object.entries(record.fields)) {
+          const earlierCell = earlier && isPlainObject(earlier.fields) && isPlainObject(earlier.fields[fieldId]) ? earlier.fields[fieldId] : null
+          fields[fieldId] = {
+            before: cell.before,
+            after: cell.after,
+            afterCanonical: canonicalChangeValue(cell.after, templateFields.get(fieldId)),
+            ...(earlierCell ? { baseline: earlierCell.baseline !== undefined ? earlierCell.baseline : earlierCell.before } : {}),
+          }
+        }
+        return {
+          recordId: record.recordId,
+          key: record.key,
+          root: record.root === true,
+          inContinuation: record.inContinuation || continuationOfOldRecord.get(record.recordId) || null,
+          fields,
+        }
+      })
+
+      let supersededCount = 0
+      for (const plan of confirmedPlans) {
+        let rows
+        try {
+          rows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, { status: 'superseded', superseded_at: at, superseded_by: changePlanId, updated_at: at }, { id: plan.id, status: 'confirmed' }))
+        } catch (error) {
+          throw translate(error, 'change_plan_supersede')
+        }
+        if (rows.length !== 1) throw changePlanStale('plan_moved')
+        supersededCount += 1
+      }
+
+      const continuationIds = Array.from(new Set([...restamps.map((entry) => entry.row.id), ...createdContinuations.map((entry) => entry.continuationId)])).sort()
+      const holdIds = content.map((hold) => hold.id).sort()
+      try {
+        await trx.insertOne(REFRESH_STORE_TABLES.changePlan, {
+          id: changePlanId,
+          tenant_id: scope.tenantId,
+          sheet_id: scope.sheetId,
+          project_no: scope.projectNo,
+          write_scope_key: scope.writeScopeKey,
+          status: 'confirmed',
+          plan_fingerprint: echo.planFingerprint,
+          source_content_digest: echo.sourceContentDigest,
+          planned_content_digest: plannedContentDigestOf(recordSet),
+          record_count: recordSet.length,
+          write_record_count: recordSet.length,
+          record_set: recordSet,
+          absorbed_change_plan_ids: [],
+          hold_ids: holdIds,
+          hold_set_fingerprint: echo.holdSetFingerprint,
+          continuation_ids: continuationIds,
+          review_baseline_digest: nonBlankString(stateRow.reviewed_content_digest) ? stateRow.reviewed_content_digest : 'none',
+          confirmed_by: confirmedBy,
+          confirmed_at: at,
+          confirmed_generation: bump.generation,
+          confirmed_generation_token: bump.generationToken,
+          confirmed_fencing_epoch: bump.fencingEpoch,
+          created_at: at,
+          updated_at: at,
+        })
+      } catch (error) {
+        throw translate(error, 'change_plan_insert', { onUnique: confirmConflict })
+      }
+
+      const openById = new Map(openRows.map((row) => [row.id, row]))
+      for (const hold of content) await resolveHold(trx, openById.get(hold.id), { resolution: 'change_plan_confirmed', resolvedBy: confirmedBy, at })
+      const state = await advanceDecision(trx, scope, stateRow, at)
+      await runAudit(trx, auditWithin, {
+        operation: 'change_plan_confirmed',
+        changePlanId,
+        recordCount: recordSet.length,
+        holdCount: holdIds.length,
+        continuationCount: continuationIds.length,
+        createdContinuationCount: createdContinuations.length,
+        supersededCount,
+        generationToken: bump.generationToken,
+      })
+      return Object.freeze({
+        changePlanId,
+        recordCount: recordSet.length,
+        holdCount: holdIds.length,
+        continuationIds: Object.freeze(continuationIds),
+        createdContinuationIds: Object.freeze(createdContinuations.map((entry) => entry.continuationId)),
+        supersededCount,
+        generation: bump,
+        decisionVersion: intOrNull(state.decision_version),
+        state: 'confirmed_pending_execution',
+        nextStep: 'preview_again',
+      })
+    })
+  }
+
+  /**
+   * THE REVIEW (design §10.3 (4); plan §3.4 step 5; C05 / C06 / C11 / C12; register R-63 ⑦). Binds the `written` plan to
+   * the content the sheet holds NOW: `currentContentDigest` is what the caller computed from its audited sheet read
+   * (under `assertNoLiveWriter`), `echoDigest` what the reviewer's page showed — both must equal the plan's
+   * `written_content_digest`. Under the state-row lock: the plan FOR UPDATE (still `written`), the digests, no OTHER open
+   * hold (C12: `hold_open`), no confirmed plan awaiting its update (`change_plan_pending` — its baselines were carried
+   * from this plan), no unfinished execution (RECOVERY_PENDING) -> the plan `reviewed` -> the state's
+   * reviewed_content_digest / reviewed_at / reviewed_by, decision_version + 1 (NO generation bump: nothing written
+   * changes) -> `auditWithin`. The same principal may review what they confirmed — a separate operation (C11).
+   */
+  async function completeChangeReview(input = {}, options = {}) {
+    const scope = normalizeScope(input)
+    const changePlanId = trimmed(input.changePlanId)
+    if (!changePlanId) throw scopeInvalid('changePlanId')
+    const reviewedBy = trimmed(input.reviewedBy)
+    if (!reviewedBy) throw scopeInvalid('reviewedBy')
+    if (!nonBlankString(input.echoDigest)) throw inputInvalid('the reviewed content digest is required', 'contentDigest', 400)
+    if (!nonBlankString(input.currentContentDigest)) throw inputInvalid('the current content digest is required', 'currentContentDigest')
+    if (!REVIEW_CONCLUSIONS.includes(input.conclusion)) throw inputInvalid('conclusion is not a review conclusion', 'conclusion', 400)
+    const notes = normalizeReviewNotes(input.notes)
+    if (input.conclusion === 'handled_with_notes' && !notes) throw inputInvalid('a review with notes needs the notes', 'notes', 400)
+    const echoDigest = input.echoDigest.trim()
+    const currentContentDigest = input.currentContentDigest.trim()
+    const auditWithin = auditHookOf(options)
+    const at = clock()
+
+    return decisionTransaction(async (rawTrx) => {
+      const trx = requireTrx(rawTrx)
+      const stateRow = await lockStateRow(trx, scope, { at })
+      if (!stateRow) throw reviewStale('state_row_absent')
+      let plan
+      try {
+        plan = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: changePlanId })
+      } catch (error) {
+        throw translate(error, 'change_plan_lock')
+      }
+      if (!plan) throw reviewStale('plan_absent')
+      if (plan.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
+      if (plan.sheet_id !== scope.sheetId || plan.project_no !== scope.projectNo) throw reviewStale('plan_scope')
+      if (plan.status !== 'written') {
+        throw reviewStale(plan.status === 'superseded' ? 'plan_replaced' : (plan.status === 'reviewed' ? 'already_reviewed' : 'not_written'), { status: plan.status })
+      }
+      if (plan.written_content_digest !== echoDigest) throw reviewStale('echo_moved')
+      if (echoDigest !== currentContentDigest) throw reviewStale('content_moved')
+      const open = await openHoldsOf(trx, scope)
+      if (open.length > 0) throw reviewBlocked('hold_open', { holdCount: open.length })
+      const confirmed = await selectAll(trx, REFRESH_STORE_TABLES.changePlan, { sheet_id: scope.sheetId, project_no: scope.projectNo, status: 'confirmed' }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' })
+      if (confirmed.length > 0) throw reviewBlocked('change_plan_pending', { pendingPlans: confirmed.length })
+      await assertNoUnfinishedExecutionWithin(trx, scope)
+
+      let rows
+      try {
+        rows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, {
+          status: 'reviewed',
+          reviewed_by: reviewedBy,
+          reviewed_at: at,
+          review_conclusion: input.conclusion,
+          review_notes: notes,
+          reviewed_content_digest: echoDigest,
+          updated_at: at,
+        }, { id: plan.id, status: 'written' }))
+      } catch (error) {
+        throw translate(error, 'change_plan_review')
+      }
+      if (rows.length !== 1) throw reviewStale('plan_moved')
+      const decisionVersion = intOrNull(stateRow.decision_version) || 0
+      let stateRows
+      try {
+        stateRows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.state, {
+          version: (intOrNull(stateRow.version) || 0) + 1,
+          decision_version: decisionVersion + 1,
+          reviewed_content_digest: echoDigest,
+          reviewed_at: at,
+          reviewed_by: reviewedBy,
+          updated_at: at,
+        }, { id: stateRow.id, decision_version: decisionVersion }))
+      } catch (error) {
+        throw translate(error, 'state_review')
+      }
+      if (stateRows.length !== 1) throw stateMoved('decision_version')
+      await runAudit(trx, auditWithin, {
+        operation: 'change_review_completed',
+        changePlanId: plan.id,
+        recordCount: intOrNull(plan.record_count),
+        conclusion: input.conclusion,
+        notesPresent: notes !== null,
+        sameActorAsConfirm: plan.confirmed_by === reviewedBy,
+      })
+      return Object.freeze({
+        changePlanId: plan.id,
+        status: 'reviewed',
+        recordCount: intOrNull(plan.record_count),
+        reviewedContentDigest: echoDigest,
+        decisionVersion: intOrNull(stateRows[0].decision_version),
+        nextStep: 'preview_again',
+      })
+    })
+  }
+
   // ── hold reconciliation (design §8.4) ─────────────────────────────────────────────────────────
 
   /**
@@ -1638,7 +2397,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * `settlement` only for a clean computation with zero pending decisions (§9.2). Never bumps
    * decision_version. A store failure is 503: a computation never answers "clean" with an unrecorded state.
    */
-  async function reconcileHolds(input = {}) {
+  async function reconcileHolds(input = {}, options = {}) {
     const scope = normalizeScope(input)
     const observed = input.decisionVersionObserved === undefined || input.decisionVersionObserved === null ? 0 : input.decisionVersionObserved
     if (!Number.isInteger(observed) || observed < 0) throw inputInvalid('decisionVersionObserved must be a non-negative integer', 'decisionVersionObserved')
@@ -1653,6 +2412,9 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     const verdicts = normalizeVerdicts(input.verdicts)
     const settlement = normalizeSettlement(input.settlement)
     if (settlement && (incoming.length > 0 || computation.suspended)) throw inputInvalid('a settlement needs a clean computation (no holds, not suspended)', 'settlement')
+    // Step 5 PR-8: the computation's verdict on the CONFIRMED change plan it planned with (null when none).
+    const changePlan = normalizeChangePlanVerdict(input.changePlan)
+    const auditWithin = auditHookOf(options)
     const at = clock()
 
     return db.transaction(async (rawTrx) => {
@@ -1670,7 +2432,14 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         const existing = openByFingerprint.get(hold.fingerprint)
         if (existing) {
           try {
-            await trx.updateRow(REFRESH_STORE_TABLES.hold, { last_seen_at: at, updated_at: at }, { id: existing.id, status: 'open' })
+            // PR-8 (M2): a kind whose body carries per-computation observations outside its fingerprint (the record
+            // version, the human-column presence of a content change) gets them refreshed; every other body is
+            // byte-identical by fingerprint and is left as stored.
+            await trx.updateRow(REFRESH_STORE_TABLES.hold, {
+              last_seen_at: at,
+              updated_at: at,
+              ...(VOLATILE_DETAIL_KEYS[hold.kind] ? { detail: hold.detail } : {}),
+            }, { id: existing.id, status: 'open' })
           } catch (error) {
             throw translate(error, 'hold_keep')
           }
@@ -1756,6 +2525,66 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         if (rows.length !== 1) throw stateMoved('continuation_moved')
       }
 
+      // Step 5 PR-8 — THE CONFIRMED CHANGE PLAN, decided under the state-row lock (refutation B2):
+      //   `matches`  the plan must STILL be `confirmed`: a concurrent computation may have invalidated it after this
+      //              one's consult (the CAS above is on decision_version, which a reconcile never moves) — refused 409
+      //              CHANGE_PLAN_STALE, so an apply never writes a voided plan and a preview never mints for one;
+      //   `stale`    the computation no longer finds the plan's change set (C02, D-13: read-tier previews included):
+      //              `invalidated(source_changed)` + an audit row on this handle — EXCEPT while an execution bound to
+      //              the plan is `running` (read here, on this handle, never from the consult): a computation that
+      //              read the sheet mid-write must not void the plan whose write is landing; the execution's finish
+      //              decides (written / execution_failed). A plan already invalidated is left as is; one written or
+      //              superseded since the consult means this computation planned against a past state (STATE_MOVED).
+      let changePlanOutcome = null
+      if (changePlan) {
+        let planRow
+        try {
+          planRow = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: changePlan.id })
+        } catch (error) {
+          throw translate(error, 'change_plan_lock')
+        }
+        if (!planRow) throw stateMoved('change_plan_moved')
+        if (planRow.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
+        if (planRow.sheet_id !== scope.sheetId || planRow.project_no !== scope.projectNo) throw inputInvalid('the change plan belongs to another scope', 'changePlan.id')
+        if (changePlan.verdict === 'matches') {
+          if (planRow.status !== 'confirmed') throw changePlanStale(planRow.status === 'superseded' ? 'plan_replaced' : 'plan_invalidated', { status: planRow.status })
+          changePlanOutcome = Object.freeze({ id: planRow.id, verdict: 'matches', status: 'confirmed', invalidated: false, deferred: false })
+        } else if (planRow.status === 'confirmed') {
+          const running = await selectAll(trx, REFRESH_STORE_TABLES.execution, { sheet_id: scope.sheetId, project_no: scope.projectNo, status: 'running' }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' })
+          const bound = running.filter((row) => {
+            const binding = jsonOrNull(row.refresh_binding)
+            return isPlainObject(binding) && binding.changePlanId === planRow.id
+          })
+          if (bound.length > 0) {
+            changePlanOutcome = Object.freeze({ id: planRow.id, verdict: 'stale', status: 'confirmed', invalidated: false, deferred: true })
+          } else {
+            if (!auditWithin) {
+              throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'a change plan is invalidated only with its audit row; the invalidation audit hook is not wired', { reason: 'invalidation_audit_missing' })
+            }
+            let rows
+            try {
+              rows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, { status: 'invalidated', invalidated_reason: 'source_changed', invalidated_at: at, updated_at: at }, { id: planRow.id, status: 'confirmed' }))
+            } catch (error) {
+              throw translate(error, 'change_plan_invalidate')
+            }
+            if (rows.length !== 1) throw stateMoved('change_plan_moved')
+            await runAudit(trx, auditWithin, {
+              operation: 'change_plan_invalidated',
+              changePlanId: planRow.id,
+              reason: 'source_changed',
+              lane: computation.lane,
+              recordCount: intOrNull(planRow.record_count),
+              generationToken: computation.generationToken,
+            })
+            changePlanOutcome = Object.freeze({ id: planRow.id, verdict: 'stale', status: 'invalidated', invalidated: true, deferred: false })
+          }
+        } else if (planRow.status === 'invalidated') {
+          changePlanOutcome = Object.freeze({ id: planRow.id, verdict: 'stale', status: 'invalidated', invalidated: false, deferred: false })
+        } else {
+          throw stateMoved('change_plan_moved')
+        }
+      }
+
       const remainingOpen = await openHoldsOf(trx, scope)
       const set = {
         version: (intOrNull(stateRow.version) || 0) + 1,
@@ -1790,6 +2619,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         holds: Object.freeze({ opened, kept, superseded, open: remainingOpen.length }),
         reconfirmations,
         settled: Boolean(settlement && remainingOpen.length === 0),
+        changePlan: changePlanOutcome,
       })
     })
   }
@@ -1815,40 +2645,72 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     }
     const startedBy = trimmed(input.startedBy)
     if (!startedBy) throw scopeInvalid('startedBy')
+    if (binding.changePlanId !== undefined && binding.changePlanId !== null && !nonBlankString(binding.changePlanId)) {
+      throw inputInvalid('refreshBinding.changePlanId must be a string when given', 'refreshBinding.changePlanId')
+    }
+    const changePlanId = nonBlankString(binding.changePlanId) ? binding.changePlanId.trim() : null
     const at = clock()
     const id = newId('execution')
-    let row
-    try {
-      row = firstRow(await db.insertOne(REFRESH_STORE_TABLES.execution, {
-        id,
-        tenant_id: scope.tenantId,
-        sheet_id: scope.sheetId,
-        project_no: scope.projectNo,
-        write_scope_key: scope.writeScopeKey,
-        lane: input.lane,
-        lease_run_id: guard.leaseRunId,
-        lease_id: guard.leaseId,
-        fencing_epoch: guard.fencingEpoch,
-        generation: guard.generation,
-        generation_token: guard.generationToken,
-        token_revision: input.tokenRevision,
-        plan_digest: input.planDigest,
-        planned_counts: input.plannedCounts,
-        refresh_binding: {
-          continuations: binding.continuations.map((entry) => ({ id: entry.id, revision: entry.revision })),
-          changePlanId: nonBlankString(binding.changePlanId) ? binding.changePlanId : null,
-          holdSetFingerprint: nonBlankString(binding.holdSetFingerprint) ? binding.holdSetFingerprint : null,
-        },
-        status: 'running',
-        started_by: startedBy,
-        started_at: at,
-        created_at: at,
-        updated_at: at,
-      }))
-    } catch (error) {
-      throw translate(error, 'execution_begin')
+    const executionRow = {
+      id,
+      tenant_id: scope.tenantId,
+      sheet_id: scope.sheetId,
+      project_no: scope.projectNo,
+      write_scope_key: scope.writeScopeKey,
+      lane: input.lane,
+      lease_run_id: guard.leaseRunId,
+      lease_id: guard.leaseId,
+      fencing_epoch: guard.fencingEpoch,
+      generation: guard.generation,
+      generation_token: guard.generationToken,
+      token_revision: input.tokenRevision,
+      plan_digest: input.planDigest,
+      planned_counts: input.plannedCounts,
+      refresh_binding: {
+        continuations: binding.continuations.map((entry) => ({ id: entry.id, revision: entry.revision })),
+        changePlanId,
+        holdSetFingerprint: nonBlankString(binding.holdSetFingerprint) ? binding.holdSetFingerprint : null,
+      },
+      status: 'running',
+      started_by: startedBy,
+      started_at: at,
+      created_at: at,
+      updated_at: at,
     }
-    return rowToExecution(row || { id })
+    if (!changePlanId) {
+      let row
+      try {
+        row = firstRow(await db.insertOne(REFRESH_STORE_TABLES.execution, executionRow))
+      } catch (error) {
+        throw translate(error, 'execution_begin')
+      }
+      return rowToExecution(row || { id })
+    }
+    // Step 5 PR-8 (refutation B2): an execution bound to a change plan is begun UNDER THE STATE-ROW LOCK with the plan
+    // asserted `confirmed` — the lock every reconciliation takes first, so a concurrent computation either invalidated
+    // the plan before this begin (refused here, nothing written) or sees this `running` row and leaves the plan alone.
+    return db.transaction(async (rawTrx) => {
+      const trx = requireTrx(rawTrx)
+      const stateRow = await lockStateRow(trx, scope, { at })
+      if (!stateRow) throw changePlanStale('state_row_absent')
+      let plan
+      try {
+        plan = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: changePlanId })
+      } catch (error) {
+        throw translate(error, 'change_plan_lock')
+      }
+      if (!plan) throw changePlanStale('plan_absent')
+      if (plan.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
+      if (plan.sheet_id !== scope.sheetId || plan.project_no !== scope.projectNo) throw changePlanStale('plan_scope')
+      if (plan.status !== 'confirmed') throw changePlanStale(plan.status === 'superseded' ? 'plan_replaced' : 'plan_invalidated', { status: plan.status })
+      let row
+      try {
+        row = firstRow(await trx.insertOne(REFRESH_STORE_TABLES.execution, executionRow))
+      } catch (error) {
+        throw translate(error, 'execution_begin')
+      }
+      return rowToExecution(row || { id })
+    })
   }
 
   /**
@@ -1947,7 +2809,82 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
           if (stateRows.length !== 1) throw stateMoved('version')
         }
       }
-      return Object.freeze({ ...rowToExecution(finished), continuationsConsumed: consumed, settled: Boolean(settlement) })
+
+      // Step 5 PR-8 — the change plan this execution was bound to (begun under the state lock with the plan asserted
+      // `confirmed`; no computation invalidates a plan while its bound execution runs, so it is still `confirmed`
+      // here — a miss is a defect, never silent):
+      //   succeeded            -> `written` (+ execution id, written_at, written_content_digest). The previous
+      //                           `written` plan (at most one) is SUPERSEDED FIRST and every field of it this plan
+      //                           does not write enters this plan's record set review-only (B1: a written change
+      //                           leaves `written` only by a review or by this absorption — never escapes review);
+      //   partial / failed /   -> `invalidated(execution_failed)` + execution id. The previous written plan stays
+      //   aborted                 `written` (its review still pending); what this run may have landed is step 6's
+      //                           verify-and-close to account for (F-16 — the project derives 失败待恢复 until then).
+      let changePlanOutcome = null
+      const bindingRecord = jsonOrNull(row.refresh_binding)
+      const changePlanId = isPlainObject(bindingRecord) && nonBlankString(bindingRecord.changePlanId) ? bindingRecord.changePlanId : null
+      if (changePlanId) {
+        let planRow
+        try {
+          planRow = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: changePlanId })
+        } catch (error) {
+          throw translate(error, 'change_plan_lock')
+        }
+        if (!planRow || planRow.tenant_id !== scope.tenantId || planRow.sheet_id !== scope.sheetId || planRow.project_no !== scope.projectNo) throw stateMoved('change_plan_scope')
+        if (planRow.status !== 'confirmed') throw stateMoved('change_plan_moved')
+        if (input.status === 'succeeded') {
+          const older = await lockedPlansOf(trx, scope, 'written')
+          let recordSet = jsonArrayOf(planRow.record_set)
+          const absorbedIds = jsonArrayOf(planRow.absorbed_change_plan_ids).slice()
+          let absorbedFields = 0
+          for (const previous of older) {
+            const absorbed = absorbIntoRecordSet(recordSet, jsonArrayOf(previous.record_set))
+            recordSet = absorbed.recordSet
+            absorbedFields += absorbed.absorbedFields
+            for (const id of [previous.id, ...jsonArrayOf(previous.absorbed_change_plan_ids)]) if (!absorbedIds.includes(id)) absorbedIds.push(id)
+            let superseded
+            try {
+              superseded = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, { status: 'superseded', superseded_at: at, superseded_by: planRow.id, updated_at: at }, { id: previous.id, status: 'written' }))
+            } catch (error) {
+              throw translate(error, 'change_plan_supersede')
+            }
+            if (superseded.length !== 1) throw stateMoved('change_plan_moved')
+          }
+          let written
+          try {
+            written = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, {
+              status: 'written',
+              execution_id: executionId,
+              written_at: at,
+              written_content_digest: plannedContentDigestOf(recordSet),
+              record_set: recordSet,
+              record_count: recordSet.length,
+              absorbed_change_plan_ids: absorbedIds,
+              updated_at: at,
+            }, { id: planRow.id, status: 'confirmed' }))
+          } catch (error) {
+            throw translate(error, 'change_plan_written')
+          }
+          if (written.length !== 1) throw stateMoved('change_plan_moved')
+          changePlanOutcome = Object.freeze({ id: planRow.id, status: 'written', absorbedPlans: older.length, absorbedFields })
+        } else {
+          let invalidated
+          try {
+            invalidated = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, {
+              status: 'invalidated',
+              invalidated_reason: 'execution_failed',
+              invalidated_at: at,
+              execution_id: executionId,
+              updated_at: at,
+            }, { id: planRow.id, status: 'confirmed' }))
+          } catch (error) {
+            throw translate(error, 'change_plan_invalidate')
+          }
+          if (invalidated.length !== 1) throw stateMoved('change_plan_moved')
+          changePlanOutcome = Object.freeze({ id: planRow.id, status: 'invalidated', reason: 'execution_failed' })
+        }
+      }
+      return Object.freeze({ ...rowToExecution(finished), continuationsConsumed: consumed, settled: Boolean(settlement), changePlan: changePlanOutcome })
     })
   }
 
@@ -1956,6 +2893,10 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     readSheetGovernanceMarks,
     readContinuation,
     readHold,
+    // Step 5 PR-8.
+    readChangePlan,
+    confirmChangePlan,
+    completeChangeReview,
     countOpenHoldsByProjectNo,
     confirmContinuation,
     reconfirmContinuation,
@@ -1985,6 +2926,13 @@ module.exports = {
   VERIFIED_RESULTS,
   BUMP_REASONS,
   BASIS_NOTE_MAX_LENGTH,
+  // Step 5 PR-8 (migration 104).
+  CHANGE_PLAN_STATUSES,
+  CHANGE_PLAN_PENDING_STATUSES,
+  CHANGE_PLAN_INVALIDATED_REASONS,
+  CHANGE_PLAN_RECORD_CEILING,
+  REVIEW_CONCLUSIONS,
+  REVIEW_NOTES_MAX_LENGTH,
   READ_CEILINGS,
   NEWEST_EXECUTIONS,
   CONSULT_SNAPSHOT_ISOLATION,
@@ -1998,6 +2946,10 @@ module.exports = {
     rowToHold,
     rowToState,
     rowToExecution,
+    rowToChangePlan,
+    rowToChangePlanSummary,
+    absorbIntoRecordSet,
+    writeRecordIdsOf,
     continuationFactsFromHold,
     claimsOverlap,
     takeoverGaps,

@@ -65,12 +65,13 @@
 //
 // THE ANSWER is frozen and server-held (it carries the PRIVATE member keys the planner's projection needs;
 // it is never a response body): `{ ok: true, scope, governed, pilot, registry, continuations, members, holds,
-// state, executions, changePlans: [], lock: { state, generation }, decisionVersionObserved }` — exactly
+// state, executions, changePlans, lock: { state, generation }, decisionVersionObserved }` — exactly
 // what lib/stock-preparation-refresh-state.cjs `readProjectRefreshState` derives from and, through
 // `plannerSlice`, what the pure core's `normalizeContinuationInput` accepts (non-ended headers with
-// `memberCount`, claim_active members). `changePlans` is a literal empty list until step 5's migration exists.
+// `memberCount`, claim_active members). `changePlans` (step 5 PR-8, migration 104; O-19 closed) are the PENDING
+// plans — `confirmed` and `written` — as the store's values-free summaries, read in the same snapshot.
 //
-// `governed` = pilot.enabled === true || any durable step-4 row for (tenant, project) on any sheet — the
+// `governed` = pilot.enabled === true || any durable step-4 / step-5 row for (tenant, project) on any sheet — the
 // registry marker alone or persisted rows alone both govern (D3 / C10 / U07: clearing the pilot marker
 // never releases protection that rows hold).
 //
@@ -279,6 +280,10 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     assertRows(rows.holds, scope, 'continuation', 'refresh_hold')
     assertRows(rows.states, scope, 'continuation', 'refresh_state')
     assertRows(rows.executions, scope, 'continuation', 'refresh_execution')
+    // Step 5 PR-8 (O-19 closed): the pending change plans the store read in the same snapshot (values-free summaries
+    // carrying their scope triple). A store answer without the list is unreadable by name, never "no plan".
+    if (!Array.isArray(rows.changePlans)) throw storeFailed('continuation', 'read_change_plans', null)
+    assertRows(rows.changePlans, scope, 'continuation', 'change_plan')
     if (rows.states.length > 1) throw retargeted('continuation', 'refresh_state', 'multiple_state_rows')
 
     let lockState
@@ -307,6 +312,7 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     const state = rows.states[0] || null
     const pilot = pilotOf(registry)
     const anyRows = continuations.length > 0 || rows.members.length > 0 || rows.holds.length > 0 || state !== null || rows.executions.length > 0
+      || rows.changePlans.length > 0
     return Object.freeze({
       ok: true,
       scope,
@@ -318,7 +324,7 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
       holds: Object.freeze(rows.holds.slice()),
       state,
       executions: Object.freeze(rows.executions.slice()),
-      changePlans: Object.freeze([]),
+      changePlans: Object.freeze(rows.changePlans.slice()),
       lock,
       decisionVersionObserved: state ? state.decisionVersion : 0,
     })
