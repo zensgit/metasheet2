@@ -53,7 +53,7 @@ if [[ "$RUN_HEALTHCHECK" == "1" ]]; then
     BASE_URL="$BASE_URL" \
     API_BASE="$API_BASE" \
     CHECK_NGINX="$CHECK_NGINX" \
-    SERVICE_MANAGER=auto \
+    SERVICE_MANAGER="$SERVICE_MANAGER" \
     "${ROOT_DIR}/scripts/ops/attendance-onprem-healthcheck.sh"
 fi
 
