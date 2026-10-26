@@ -109,13 +109,22 @@ function serializeTransactions(db) {
 
 function createRefreshGovernanceEnv(options = {}) {
   const clock = options.clock || refreshKit.createClock()
-  const db = serializeTransactions(options.refreshDb || refreshKit.createFakeRefreshDb({ clock, registryPilotColumns: options.registryPilotColumns !== false }))
+  // PR-4 `lockOnRefreshDb`: ONE fake db serves the store AND the REAL lock module (the lock table of migration
+  // 100 modelled beside the five step-4 tables), so a route suite drives the real composition — the decision
+  // transaction's `bumpGenerationWithin` on the store's transaction handle, a lease the routes take on the same
+  // row. The lock built here is the suite's lock (`lockOf` / `lock` are then ignored).
+  const lockOnRefreshDb = options.lockOnRefreshDb === true
+  const db = serializeTransactions(options.refreshDb || refreshKit.createFakeRefreshDb({ clock, registryPilotColumns: options.registryPilotColumns !== false, lockTable: lockOnRefreshDb }))
   let n = 0
   const idPrefix = options.idPrefix || 'rgw'
   const store = createStockPreparationContinuationStore({ db, now: clock.now, idGenerator: (kind) => `${kind}_${idPrefix}_${String((n += 1)).padStart(4, '0')}` })
   const registryStore = createStockPreparationProjectTargetStore({ db })
+  const sharedLock = lockOnRefreshDb
+    ? require(path.join(LIB, 'stock-preparation-project-write-lock.cjs')).createStockPreparationProjectWriteLock({ db, now: clock.now, ...(options.lockOptions || {}) })
+    : null
   let fallbackLock = null
   function currentLock() {
+    if (sharedLock) return sharedLock
     const lock = typeof options.lockOf === 'function' ? options.lockOf() : options.lock
     if (lock) return lock
     if (!fallbackLock) {
@@ -264,6 +273,8 @@ function wireRefreshGovernance(services, options = {}) {
   })
   services.stockPreparationRefreshGovernance = env.governance
   services.stockPreparationContinuationStore = env.store
+  // PR-4: the routes' lock IS the env's shared lock when the suite asked for one db (see createRefreshGovernanceEnv).
+  if (options.lockOnRefreshDb === true) services.stockPreparationProjectWriteLock = env.lock()
   if (options.wirePackInstallStore === true) services.stockPreparationPackInstallStore = env.packInstallStore
   if (options.sourceBindingStore && options.wireSourceBindingStore === true) services.stockPreparationSourceBindingStore = options.sourceBindingStore
   return env

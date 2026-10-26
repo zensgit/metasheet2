@@ -650,6 +650,65 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '下面列出的每一项都通过后才能启用;什么都没有改动。',
     enNext: 'Every listed check must pass before it can be enabled; nothing was changed.',
   }),
+  /**
+   * 备料分批拉取第一期 step 4 PR-4 — the puller's confirm / end routes (plugin stock-preparation-refresh-decisions.cjs
+   * and the continuation store). Every one of these means "nothing was confirmed, nothing was ended": the decision
+   * runs in one transaction and every refusal rolls it back. The page (PR-7) renders these beside the hold.
+   */
+  STOCK_PREP_CONTINUATION_CONFIRM_NOT_PILOT: Object.freeze({
+    zh: '这个项目不是分批拉取的试点项目,不能在这里确认沿用关系;什么都没有改动。',
+    en: 'This project is not a batch-refresh pilot, so a relationship cannot be confirmed here; nothing was changed.',
+    zhNext: '请联系负责人确认项目是否应启用试点。',
+    enNext: 'Ask the owner whether this project should be enabled as a pilot.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_STALE: Object.freeze({
+    zh: '页面上的这条待确认项已经不是系统现在算出的结果,没有确认。',
+    en: 'This item is no longer what the server computes now, so it was not confirmed.',
+    zhNext: '请重新打开待确认列表后再确认。',
+    enNext: 'Reopen the list of holds, then confirm again.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED: Object.freeze({
+    zh: '这条待确认项现在不能确认(需要专项处理或别的前置步骤);什么都没有改动。',
+    en: 'This hold cannot be confirmed right now (it needs specialist handling or another step first); nothing was changed.',
+    zhNext: '看页面上标出的原因;需要时联系负责人。',
+    enNext: 'See the reason shown beside it; ask the owner if needed.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_CONFLICT: Object.freeze({
+    zh: '另一条确认已经占用了这些旧行或新位置,这次没有确认。',
+    en: 'Another confirmation already claims these old rows or this new position, so this one was not recorded.',
+    zhNext: '请重新试算并重新打开待确认列表。',
+    enNext: 'Preview again and reopen the list of holds.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE: Object.freeze({
+    zh: '还没有读完这条待确认项的全部对照页,不能确认。',
+    en: 'Not every page of this hold has been read yet, so it cannot be confirmed.',
+    zhNext: '把这条待确认项的每一页都看完后再确认。',
+    enNext: 'Read every page of this hold, then confirm.',
+  }),
+  STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE: Object.freeze({
+    zh: '按关系现在的状态,这个结束方式不允许;什么都没有改动。',
+    en: 'This way of ending the relationship is not allowed in its current state; nothing was changed.',
+    zhNext: '请重新试算后再看可用的处理方式。',
+    enNext: 'Preview again, then see which outcomes are available.',
+  }),
+  STOCK_PREP_REFRESH_RECOVERY_PENDING: Object.freeze({
+    zh: '这个项目有一次没有正常结束的写入,恢复之前不能确认或结束沿用关系。',
+    en: 'An earlier write of this project did not finish cleanly; nothing can be confirmed or ended until it is recovered.',
+    zhNext: '请联系平台管理员按手册恢复。',
+    enNext: 'Ask the platform admin to recover it per the runbook.',
+  }),
+  STOCK_PREP_REFRESH_HOLD_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这条待确认项。',
+    en: 'This project has no such hold.',
+    zhNext: '请重新打开待确认列表。',
+    enNext: 'Reopen the list of holds.',
+  }),
+  STOCK_PREP_CONTINUATION_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这条沿用关系。',
+    en: 'This project has no such relationship.',
+    zhNext: '请重新打开项目备料页。',
+    enNext: 'Reopen the project page.',
+  }),
   STOCK_PREPARATION_CONFIRM_REQUEST_FAILED: Object.freeze({
     zh: '这一步没有保存成功,数据没有变化。',
     en: 'That did not save; nothing was changed.',

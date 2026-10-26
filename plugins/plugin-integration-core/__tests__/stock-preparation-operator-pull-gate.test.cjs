@@ -1310,8 +1310,13 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
     pullTier.map((entry) => entry.capability).sort(),
     // S3 fix round 1 (R6): + the overview ENSURE — creating the read-only overview is provisioning, the
     // PULL tier's (R-35), so the OPERATE refresh no longer creates it.
-    ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore'],
-    'P-14: exactly four PULL-tier manifest capabilities — create, archive, restore, overview ensure',
+    [
+      'projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore',
+      // Batch-refresh step 4 PR-4 (R-59, D-14): the puller confirms — the six refresh routes (the private hold page,
+      // the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end) are PULL members.
+      'refresh.confirm', 'refresh.continuation', 'refresh.end', 'refresh.evidence', 'refresh.holds', 'refresh.keep',
+    ],
+    'P-14: exactly ten PULL-tier manifest capabilities — create, archive, restore, overview ensure and the six refresh routes',
   )
   for (const entry of pullTier) {
     for (const [user, expected, who] of [
