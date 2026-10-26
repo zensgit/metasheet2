@@ -228,7 +228,12 @@ test('EG-12b the census: EVERY refusal constructor PR-3a adds, driven with senti
   await capture('writer_malformed', () => writer.assertWriterAdmitsPlan({ plan: sentinelPlan, governance: { consulted: true, verdict: SENTINEL, generationToken: SENTINEL }, writeFence: fence }))
   await capture('writer_mismatch', () => writer.assertWriterAdmitsPlan({ plan: sentinelPlan, governance: { consulted: true, verdict: 'not_governed', generationToken: 'gen-eg-1' }, writeFence: fence }))
   await capture('writer_stale', () => writer.assertWriterAdmitsPlan({ plan: sentinelPlan, governance: { consulted: true, verdict: 'projected', generationToken: SENTINEL }, writeFence: fence }))
-  assert.equal(caught.length, 19)
+  // PR-3a follow-up: the preview's re-consult finds the lease-less `running` row finished (sentinel ids on the rows).
+  await capture('execution_finished_during_preview', () => lanes.previewRecoveryRechecked({
+    consult: { ok: true, scope: { tenantId: TENANT, sheetId: SENTINEL, projectNo: SENTINEL }, executions: [{ id: SENTINEL, status: 'running', leaseId: SENTINEL, errorCodes: [SENTINEL] }], lock: { state: { leaseLive: false }, generation: { leaseId: SENTINEL } } },
+    handle: { consult: async () => ({ ok: true, executions: [{ id: SENTINEL, status: 'succeeded', leaseId: SENTINEL }], lock: { state: { leaseLive: false }, generation: { leaseId: null } } }) },
+  }))
+  assert.equal(caught.length, 20)
   for (const [label, error] of caught) {
     assert.equal(typeof error.code, 'string', `${label}: a typed refusal`)
     assertClean(`EG-12b ${label}`, { message: error.message, code: error.code, details: error.details })
