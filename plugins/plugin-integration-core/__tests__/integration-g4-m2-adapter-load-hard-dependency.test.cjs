@@ -257,9 +257,9 @@ const ROUTE_PUBLIC_PROJECTION_FORMS = Object.freeze([
     why: 'source-binding admission check: kind + accessibility of a candidate row. Nothing downstream builds an adapter from it.',
   },
   {
-    exact: 'function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf }) {',
+    exact: 'function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf, governedSheetProbe }) {',
     count: 1,
-    why: 'the PARAMETER that receives the `getExternalSystem: (input) => …` seam rostered above (K3 B4 same-INSTANCE comparison: kind + baseUrl, no adapter). On the roster because the match is on the IDENTIFIER, not on `.name` / `\'name\'` — a binding created by destructuring is exactly the form that used to be invisible.',
+    why: 'the PARAMETER that receives the `getExternalSystem: (input) => …` seam rostered above (K3 B4 same-INSTANCE comparison: kind + baseUrl, no adapter). On the roster because the match is on the IDENTIFIER, not on `.name` / `\'name\'` — a binding created by destructuring is exactly the form that used to be invisible. (Batch-refresh step 4 PR-6 appended `governedSheetProbe`: the server-held governed-sheet probe the multitable write-source is built with — plugin-SQL reads of the stock-prep registry / refresh tables, never an external-system read and never an adapter load.)',
   },
   {
     exact: "if (typeof externalSystems.getExternalSystemAdapterConfig !== 'function') return null",

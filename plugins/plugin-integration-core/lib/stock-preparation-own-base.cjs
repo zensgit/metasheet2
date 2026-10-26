@@ -133,6 +133,19 @@ function isStockPreparationProjectSheetObjectId(value) {
   return typeof value === 'string' && STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN.test(value)
 }
 
+// Batch-refresh step 4 PR-6 (design §7.1 rows 17-18): THE stock-preparation object-id NAMESPACE. Every object the
+// stock-prep lanes provision sits in it — the env main sheet `plm_stock_preparation_main`, every
+// `plm_stock_preparation_sandbox_*` sheet (the per-project `_p_<24 hex>` sheets included) and the MVP / ledger /
+// overview satellites. A generic configured writer (pipelines target adapter, C6 write-source, ERP feedback) that
+// was built WITHOUT the governed-sheet probe refuses an object id in this namespace (501
+// STOCK_PREP_GOVERNED_SHEET_PROBE_UNWIRED) instead of writing it unchecked. A PREFIX, not the exact project-sheet
+// pattern above, on purpose: the env main sheet and a hand-named sandbox sheet can be governed too.
+const STOCK_PREPARATION_OBJECT_ID_NAMESPACE_PREFIX = 'plm_stock_preparation'
+
+function isStockPreparationNamespaceObjectId(value) {
+  return typeof value === 'string' && value.startsWith(STOCK_PREPARATION_OBJECT_ID_NAMESPACE_PREFIX)
+}
+
 const STOCK_PREPARATION_PROJECT_SHEET_DIGEST_LENGTH = 24
 
 /**
@@ -305,6 +318,8 @@ module.exports = {
   STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX,
   STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN,
   isStockPreparationProjectSheetObjectId,
+  STOCK_PREPARATION_OBJECT_ID_NAMESPACE_PREFIX,
+  isStockPreparationNamespaceObjectId,
   deriveStockPreparationProjectSheetObjectId,
   OWN_BASE_SOURCES,
   stockPreparationOwnBaseEnabled,

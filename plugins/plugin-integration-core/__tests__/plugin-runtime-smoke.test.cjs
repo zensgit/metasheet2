@@ -204,9 +204,12 @@ async function main() {
     deadLetters: statusResult.deadLetters,
     deadLetterReplay: statusResult.deadLetterReplay,
     staging: statusResult.staging,
+    governedSheetProbe: statusResult.governedSheetProbe,
     stockPreparationSqlServerSealedSnapshot:
       statusResult.stockPreparationSqlServerSealedSnapshot,
   }, 'status capabilities mirror flat readiness fields')
+  // Batch-refresh step 4 PR-6: the generic configured writers' governed-sheet probe is built on every activation.
+  assert.equal(statusResult.governedSheetProbe, true, 'status reports the governed-sheet probe for the generic writers')
 
   // --- 5b. Comm API exposes registry methods ----------------------------
   assert.equal(typeof commApi.upsertExternalSystem, 'function', 'comm api exposes upsertExternalSystem')

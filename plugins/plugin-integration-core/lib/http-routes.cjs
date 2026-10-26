@@ -2929,7 +2929,7 @@ function normalizeC6WriteApplyBody(body = {}) {
 // is deliberately loaded config-only.
 const ADAPTER_BACKED_C6_TARGET_KINDS = new Set([K3_WISE_C6_WRITE_TARGET_KIND])
 
-function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf }) {
+function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf, governedSheetProbe }) {
   // K3WriteDecision (owner, 20260805): the K3 connector rides the same C6 dry-run->apply
   // lifecycle via its own profile + adapter-backed write source. `enforcedMaxRows` pins the
   // plan-level source read to the profile's frozen cap — a caller-supplied maxRows is
@@ -3042,7 +3042,9 @@ function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegi
     })
     return {
       planTargetSystem: { ...targetSystem, config: flatConfig },
-      dataSourceWrites: createMetaSheetMultitableWriteSource({ system: targetSystem, context }),
+      // Batch-refresh step 4 PR-6: the governed-sheet probe (server-held, from index.cjs services) — the
+      // write-source refuses a governed stock-prep sheet in `test()` (before the mint / before any row).
+      dataSourceWrites: createMetaSheetMultitableWriteSource({ system: targetSystem, context, governedSheetProbe }),
       targetWriteProfile: MULTITABLE_WRITE_PROFILE,
     }
   }
@@ -4637,6 +4639,9 @@ function requireStockPreparationAudit() {
   // the lane, before any source read — and never silently plans the pre-step-4 way (P3-G2).
   const stockPreparationRefreshGovernance = services.stockPreparationRefreshGovernance || null
   const stockPreparationContinuationStore = services.stockPreparationContinuationStore || null
+  // Batch-refresh step 4 PR-6: the governed-sheet probe the C6 multitable write-source is built with (index.cjs
+  // builds it from the same stores). Absent => the write-source applies its not-wired rule (namespace objects 501).
+  const stockPreparationGovernedSheetProbe = services.stockPreparationGovernedSheetProbe || null
   function requireStockPreparationRefreshServices() {
     if (!stockPreparationRefreshGovernance || typeof stockPreparationRefreshGovernance.consult !== 'function'
       || !stockPreparationContinuationStore
@@ -7408,7 +7413,7 @@ function requireStockPreparationAudit() {
         role: 'source',
         principal: ownerPrincipal,
       })
-      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
+      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, governedSheetProbe: stockPreparationGovernedSheetProbe,
         getExternalSystem: (input) => externalSystems.getExternalSystem(input),
         instanceDigestOf: typeof externalSystems.getExternalSystemInstanceDigest === 'function'
           ? (input) => externalSystems.getExternalSystemInstanceDigest(input)
@@ -7558,7 +7563,7 @@ function requireStockPreparationAudit() {
       try {
         // SAME resolution as dry-run (server-side, by target kind) so the apply recompute
         // reproduces the dry-run revision; the multitable write-source writes own sheets only.
-        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
+        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, governedSheetProbe: stockPreparationGovernedSheetProbe,
         getExternalSystem: (input) => externalSystems.getExternalSystem(input),
         instanceDigestOf: typeof externalSystems.getExternalSystemInstanceDigest === 'function'
           ? (input) => externalSystems.getExternalSystemInstanceDigest(input)
