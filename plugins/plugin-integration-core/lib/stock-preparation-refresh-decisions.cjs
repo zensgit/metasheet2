@@ -16,7 +16,9 @@
 //                                                                  relationship_reconfirm => reconfirmContinuation
 //   keepHold            POST …/refresh/holds/:holdId/keep          「暂不处理」: audit only, nothing changes
 //   end                 POST …/refresh/continuations/:id/end       endContinuation with an outcome; the release
-//                                                                  precondition is DERIVED here, never read from the body
+//                                                                  precondition is decided by the STORE under its
+//                                                                  lock, never read from the body; the body may name
+//                                                                  the hold it was shown (factsHoldId + fingerprint)
 //
 // WHAT THE ROUTE HANDS IN (lib/http-routes.cjs builds it once per request, in this order, and only a route
 // builds it): the gate (`stock-prep:pull`), the body allow-list, the typed `confirmProjectNo`, the host-vouched
@@ -31,10 +33,15 @@
 // "retry after it finishes"); S25 — an OPEN runbook-only hold (an escalated relationship under specialist
 // repair) refuses a confirm, a re-confirm and `release_to_normal_refresh` (`runbook_only_hold_open`), never an
 // escalation or 「暂不处理」; the hold by id (404 for absent AND for another scope's row — the board's rule,
-// never an existence oracle); the kind and `confirmable`; the read receipt; the echoed fingerprints. THEN the
-// store's transaction: state row FOR UPDATE, hold re-read, `bumpGenerationWithin` on the handle (the lock's
-// WRITE_LOCKED / contention / holder_in_write roll it back), rows, hold resolved, decision_version + 1, the
-// audit row INSERTED ON THE SAME HANDLE (E09: an audit failure rolls the decision back).
+// never an existence oracle); the kind and `confirmable`; the read receipt; the echoed fingerprints. These are
+// the consult's picture — a fast, precise refusal that never takes the state row. THEN the store's transaction,
+// which decides for itself under the state-row lock (PR-4 execution review B1 / N2 / N3): state row FOR UPDATE,
+// hold re-read, the open holds re-read (S25 again: `runbook_only_hold_open`), for a release the facts of THE
+// open relationship_reconfirm row (never the caller's) bound to the hold the puller was shown (`facts_moved`),
+// `bumpGenerationWithin` on the handle (the lock's WRITE_LOCKED / contention / holder_in_write roll it back),
+// the unfinished executions re-read (RECOVERY_PENDING again), rows, hold resolved, decision_version + 1, the
+// audit row INSERTED ON THE SAME HANDLE (E09: an audit failure rolls the decision back; a COMMIT failure is 503
+// STORE_FAILED `commit`).
 //
 // THE READ RECEIPT (U04 「只返回字段名/计数时不允许盲确认」). A values-free record in plugin durable storage
 // (the dry-run token's store), keyed by a random id: `{ tenantId, sheetId, projectNo, actorId, holds: { [holdId]:
@@ -497,19 +504,9 @@ async function listHolds(ctx, query = {}) {
     next = pageStart + limit < open.length ? pageHolds[pageHolds.length - 1].id : null
   }
   const entries = pageHolds.map((hold) => holdPayload(hold, { pairPageIndex: holdId ? pairCursor : 0, pairLimit }))
-  const readReceipt = await ctx.receipts.record({
-    receiptId,
-    scope: ctx.scope,
-    actorId: ctx.actorId,
-    pages: entries.map((entry) => ({
-      holdId: entry.id,
-      fingerprint: entry.fingerprint,
-      comparisonFingerprint: entry.comparisonFingerprint,
-      evidenceFingerprint: entry.evidenceFingerprint,
-      pairPageCount: entry.pairPage ? entry.pairPage.count : 1,
-      pairPageIndex: entry.pairPage ? entry.pairPage.index : 0,
-    })),
-  })
+  const refresh = refreshSummary(ctx.consult)
+  // Order (PR-4 review note 0): the audit row FIRST, then the receipt, then the body. A page the audit store
+  // refused was never served, so the receipt must not vouch for it (a confirm trusts the receipt, not the audit).
   await ctx.audit.append(auditReadRow(ctx, REFRESH_DECISION_AUDIT.modes.holdRead, {
     operation: 'refresh_hold_read',
     page: Math.floor(pageStart / limit),
@@ -518,8 +515,25 @@ async function listHolds(ctx, query = {}) {
     openHolds: open.length,
     kinds: countBy(entries.map((entry) => entry.kind)),
   }))
+  // A project that is NOT governed (no step-4 row at all) has nothing to confirm: no receipt is issued for it
+  // (PR-4 review N4 — a receipt is a plugin_kv row that is never swept; the page is 200 for any pull-tier caller).
+  const readReceipt = refresh.status === 'not_governed'
+    ? null
+    : await ctx.receipts.record({
+      receiptId,
+      scope: ctx.scope,
+      actorId: ctx.actorId,
+      pages: entries.map((entry) => ({
+        holdId: entry.id,
+        fingerprint: entry.fingerprint,
+        comparisonFingerprint: entry.comparisonFingerprint,
+        evidenceFingerprint: entry.evidenceFingerprint,
+        pairPageCount: entry.pairPage ? entry.pairPage.count : 1,
+        pairPageIndex: entry.pairPage ? entry.pairPage.index : 0,
+      })),
+    })
   return Object.freeze({
-    refresh: refreshSummary(ctx.consult),
+    refresh,
     holdSetFingerprint: ctx.consult.state && ctx.consult.state.holdSetFingerprint ? ctx.consult.state.holdSetFingerprint : null,
     decisionVersion: ctx.consult.decisionVersionObserved,
     page: { holds: entries, next, limit, pairLimit },
@@ -829,14 +843,30 @@ function normalizeEndBody(body) {
   if (!Number.isInteger(body.revision) || body.revision < 1) throw requestInvalid('revision', 'revision must be a positive integer')
   if (!END_OUTCOMES.includes(body.outcome)) throw requestInvalid('outcome', 'outcome is not an end outcome')
   if (body.note !== undefined && body.note !== null && typeof body.note !== 'string') throw requestInvalid('note')
-  return Object.freeze({ revision: body.revision, outcome: body.outcome, note: typeof body.note === 'string' ? body.note : null })
+  // The hold a release decides from, as the page showed it (PR-4 review B1): both keys or neither; a release
+  // without them binds to the request's own consult (below); any other outcome carries none.
+  const factsGiven = ['factsHoldId', 'factsHoldFingerprint'].filter((field) => body[field] !== undefined && body[field] !== null)
+  let facts = null
+  if (factsGiven.length > 0) {
+    if (body.outcome !== 'release_to_normal_refresh') throw requestInvalid(factsGiven[0], `${factsGiven[0]} names the hold a release decides from; this outcome carries none`)
+    const holdId = trimmed(body.factsHoldId)
+    const holdFingerprint = trimmed(body.factsHoldFingerprint)
+    if (!holdId) throw requestInvalid('factsHoldId', 'factsHoldId must name the open relationship_reconfirm hold the release decides from')
+    if (!holdFingerprint) throw requestInvalid('factsHoldFingerprint', 'factsHoldFingerprint must repeat that hold\'s fingerprint')
+    facts = Object.freeze({ holdId, holdFingerprint })
+  }
+  return Object.freeze({ revision: body.revision, outcome: body.outcome, note: typeof body.note === 'string' ? body.note : null, facts })
 }
 
 /**
- * The end (§8.4). `release_to_normal_refresh` is admissible only when the OPEN relationship_reconfirm hold naming
- * the continuation recorded `new_position_removed` with `componentNewPositionCount === 0` — DERIVED here from the
- * latest computation's recorded facts (O-17); the body cannot carry it (the route's allow-list refuses the key).
- * `superseded_by_new_confirmation` is confirm-only (the store refuses it before any statement).
+ * The end (§8.4). `release_to_normal_refresh` is decided by the STORE, inside its transaction, from THE open
+ * relationship_reconfirm hold naming the continuation as it is under the state-row lock (`new_position_removed`
+ * with `componentNewPositionCount === 0`; PR-4 review B1 — the consult is a snapshot, a computation may land
+ * after it). This module only BINDS the release to the hold the puller was shown: the body's `factsHoldId` +
+ * `factsHoldFingerprint` (PR-7 sends them), else the request's own consult's open relationship_reconfirm hold —
+ * the store refuses STALE `facts_moved` when the row under the lock is another one. The body cannot carry the
+ * precondition itself (the route's allow-list refuses the key). `superseded_by_new_confirmation` is
+ * confirm-only (the store refuses it before any statement).
  */
 async function end(ctx, continuationId, body) {
   assertDecisionContext(ctx)
@@ -854,22 +884,12 @@ async function end(ctx, continuationId, body) {
     })
   }
   const found = await readContinuationById(ctx, id)
-  let currentExpansionHoldsNoNewPosition = false
-  if (input.outcome === 'release_to_normal_refresh') {
+  let facts = input.facts
+  if (input.outcome === 'release_to_normal_refresh' && !facts) {
     const about = consult.holds.filter((hold) => hold.status === 'open' && hold.kind === 'relationship_reconfirm' && hold.continuationId === id)
     if (about.length === 0) throw new StockPreparationRefreshDecisionError(409, REFRESH_DECISION_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'no open computation names this relationship; preview again, then end it', { reason: 'no_open_hold', outcome: input.outcome })
     const latest = sortHolds(about)[about.length - 1]
-    const detail = isPlainObject(latest.detail) ? latest.detail : {}
-    if (detail.verdict !== 'new_position_removed') {
-      throw new StockPreparationRefreshDecisionError(409, REFRESH_DECISION_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'release_to_normal_refresh is admissible only after the new position was removed from the source', { reason: 'last_verdict', outcome: input.outcome, lastVerdict: nonBlankString(detail.verdict) ? detail.verdict : null })
-    }
-    if (!Number.isInteger(detail.componentNewPositionCount)) {
-      throw new StockPreparationRefreshDecisionError(409, REFRESH_DECISION_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'the latest computation recorded no position facts for this component; preview again, then end it', { reason: 'facts_missing', outcome: input.outcome })
-    }
-    if (detail.componentNewPositionCount !== 0) {
-      throw new StockPreparationRefreshDecisionError(409, REFRESH_DECISION_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'the current expansion still holds a position of this component; releasing would copy it', { reason: 'new_position_present', outcome: input.outcome, componentNewPositionCount: detail.componentNewPositionCount })
-    }
-    currentExpansionHoldsNoNewPosition = true
+    facts = Object.freeze({ holdId: latest.id, holdFingerprint: latest.fingerprint })
   }
   const hooks = decisionHooks(ctx, {
     mode: REFRESH_DECISION_AUDIT.modes.ended,
@@ -889,7 +909,7 @@ async function end(ctx, continuationId, body) {
     outcome: input.outcome,
     note: input.note,
     endedBy: ctx.actorId,
-    currentExpansionHoldsNoNewPosition,
+    ...(facts ? { facts } : {}),
   }, hooks)
   return Object.freeze({
     continuationId: ended.continuationId,

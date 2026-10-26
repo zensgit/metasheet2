@@ -2587,7 +2587,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         }
         // ACTIVE with no hold (the next computation verifies it valid and supersedes the content hold): both outcomes refused.
         await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'valid' }, computation: computation({ suspended: false }) })
-        for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }]) {
+        for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', facts: { holdId: 'hold_named', holdFingerprint: 'f'.repeat(64) } }]) {
           const before = await sheetFingerprint(scope.sheetId)
           const refused = await settle(storeA.endContinuation({ ...endBase, ...extra }, { bumpWithin: testBumpWithin }))
           expect(refused.ok, extra.outcome).toBe(false)
@@ -4529,6 +4529,11 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //         value read in integration_stock_prep_audit, values-free.
         //   S4-07 U04 on the real stack: holds paged by cursor, pairs by pairCursor with the receipt extended; a confirm
         //         with a half-read receipt is 409 READ_RECEIPT_INCOMPLETE and 201 after the last page; no receipt => 400.
+        //   S4-04b E09, the other direction (review P7): a DEFERRED constraint trigger fails the decision's COMMIT => the
+        //         ROUTE confirm answers 503 STORE_FAILED commit; nothing persisted, NO audit row; then commits.
+        //   S4-08 review B1 / N2 / N3 at the lib level with the route-built context (sequential form): a computation, an
+        //         escalation or a failed apply landing between the consult and the transaction is refused UNDER THE LOCK
+        //         (new_position_present / facts_moved / runbook_only_hold_open / RECOVERY_PENDING), nothing persisted.
         describe('S4 step-4 PR-4 decisions (real Postgres, real lock, real host)', () => {
           const decisionsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-decisions.cjs')) as any
           const { REFRESH_DECISION_ERROR_CODES: DC } = decisionsLib
@@ -5122,6 +5127,218 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               continuations: 1,
             })
           }, 240000)
+          test('S4-04b (E09, the other direction — review P7) the decision transaction fails AT COMMIT: a DEFERRABLE INITIALLY DEFERRED constraint trigger on this tenant\'s refresh-state row raising 42501 at commit; the ROUTE confirm answers 503 STORE_FAILED commit (never a generic 500); every step-4 row, the lock row and the main sheet byte-identical, the hold open, no continuation and NO audit row (the audit insert rode the rolled-back transaction); with the trigger gone the same body commits with exactly one audit row', async () => {
+            const st = await suspendedPilot('s404b')
+            const row = await openCandidate(st)
+            const fn = `s4_commit_fault_${TOKEN}`
+            await q(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN IF NEW.tenant_id = '${st.tenantId}' THEN RAISE EXCEPTION 's4 commit fault' USING ERRCODE = '42501'; END IF; RETURN NULL; END $fn$`)
+            await q(`CREATE CONSTRAINT TRIGGER ${fn} AFTER UPDATE ON ${RT.state} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${fn}()`)
+            try {
+              const before = await sheetFingerprint(st.sheetId)
+              const main0 = await st.main()
+              const lock0 = await lockRowOf(st.key)
+              const bound = await readAndBind(st, row)
+              const refused = await refreshCall(st, 'POST', RP.confirm, { body: bound.body })
+              const observed: Record<string, unknown> = {
+                status: refused.statusCode,
+                code: errorOf(refused).code,
+                details: errorOf(refused).details,
+                unchanged: (await sheetFingerprint(st.sheetId)) === before,
+                mainUnchanged: sameJson(await st.main(), main0),
+                lockUnchanged: sameJson(await lockRowOf(st.key), lock0),
+                holdOpen: (await st.holds()).find((entry: any) => entry.id === row.id).status,
+                continuations: await countWhere(RT.continuation, 'tenant_id = $1', [st.tenantId]),
+                confirmedAudits: (await auditRows(st.tenantId)).filter((entry: any) => entry.mode === 'continuation_confirmed').length,
+              }
+              await q(`DROP TRIGGER IF EXISTS ${fn} ON ${RT.state}`)
+              await q(`DROP FUNCTION IF EXISTS ${fn}()`)
+              const committed = await refreshCall(st, 'POST', RP.confirm, { body: bound.body })
+              observed.afterRepair = { status: committed.statusCode, continuations: await countWhere(RT.continuation, 'tenant_id = $1', [st.tenantId]), confirmedAudits: (await auditRows(st.tenantId)).filter((entry: any) => entry.mode === 'continuation_confirmed').length }
+              console.log(`[S4-04b] ${JSON.stringify(observed)}`)
+              expect(observed).toEqual({
+                status: 503,
+                code: RC.STORE_FAILED,
+                details: { operation: 'commit', sqlState: '42501', partial: false },
+                unchanged: true,
+                mainUnchanged: true,
+                lockUnchanged: true,
+                holdOpen: 'open',
+                continuations: 0,
+                confirmedAudits: 0,
+                afterRepair: { status: 201, continuations: 1, confirmedAudits: 1 },
+              })
+            } finally {
+              await q(`DROP TRIGGER IF EXISTS ${fn} ON ${RT.state}`).catch(() => {})
+              await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+            }
+          }, 240000)
+
+          // S4-08 drives the decisions LIB (the exact code the six handlers call) with the context the route builds —
+          // real store, real lock, real audit store, real governance consult on PostgreSQL — in the SEQUENTIAL form the
+          // execution review used (P6 / P11 / P12): the consult, then what lands, then the decision with the earlier
+          // consult. The route itself cannot be paused between its consult and its transaction; the in-request window
+          // is proven by the hermetic RT-C7 / RT-C8 / RT-E5 / RT-E6 (the kit's pause hook).
+          test('S4-08 (review B1 / N2 / N3, lib level on real PostgreSQL with the route-built context, sequential form) — (a) a computation lands between the end\'s consult and its transaction: N(c) 0 -> 1 => 409 END_OUTCOME_NOT_ADMISSIBLE new_position_present from the open row under the lock (consult-bound and body-bound alike); N(c) 0 -> 0 recomputed => 409 CONFIRM_STALE facts_moved; the relationship stays needs_reconfirmation with its claims, no bump, no audit row; a fresh consult then releases; (b) relationship A escalated between B\'s consult and B\'s release => 409 runbook_only_hold_open under the lock; (c) an apply fails and releases between the confirm\'s consult and its transaction => 409 RECOVERY_PENDING after the bump, the bump rolled back (lock row unchanged), nothing confirmed', async () => {
+            const fixture = await refreshKit.candidateHoldFixture()
+            const audit = auditStoreLib.createStockPreparationAuditStore({ db: hostLikeDb() })
+            const errOf = (settled: any) => (settled.ok ? 'committed' : {
+              status: settled.error.status,
+              code: settled.error.code,
+              reason: settled.error.details && settled.error.details.reason,
+              ...(settled.error.details && settled.error.details.componentNewPositionCount !== undefined ? { count: settled.error.details.componentNewPositionCount } : {}),
+              ...(settled.error.details && settled.error.details.state !== undefined ? { state: settled.error.details.state, openExecutions: settled.error.details.openExecutions } : {}),
+            })
+            const reconfirmWithCount = (continuationId: string, count: number | undefined, extra: Record<string, unknown> = {}) => {
+              const hold = refreshKit.reconfirmHoldFor(continuationId, { confirmable: false, verdict: 'new_position_removed' })
+              hold.detail = { ...hold.detail, ...(count === undefined ? {} : { componentNewPositionCount: count }), ...extra }
+              hold.fingerprint = pairingLib.holdFingerprint(hold)
+              return hold
+            }
+            async function stackFor(label: string) {
+              const st = await s3aStack(label, { pilot: true })
+              const receiptMap = new Map<string, unknown>()
+              const receipts = decisionsLib.createReadReceiptStore({ storage: { get: async (key: string) => (receiptMap.has(key) ? receiptMap.get(key) : null), set: async (key: string, value: unknown) => { receiptMap.set(key, value) } } })
+              const action = { actionId: st.action.actionId, source: st.action.source }
+              const consult = () => st.refresh.governance.consult(st.scope)
+              const ctxOf = (consultValue: any) => ({ scope: st.scope, actorId: st.users.puller.id, tenantClaimVerified: true, action, consult: consultValue, store: st.refresh.store, projectWriteLock: st.lock, audit, receipts })
+              const seed = (holds: any[], verdicts: Record<string, string> = {}) => decisionVersionOf(st.scope).then((observed) => seedOpenHolds(st.refresh.store, st.scope, holds, observed, verdicts))
+              const confirmDirect = async (hold: any) => {
+                const idOf = await seed([hold])
+                return st.refresh.store.confirmContinuation(confirmInput(st.scope, idOf(hold), hold, fixture, { confirmedBy: st.users.puller.id }), { bumpWithin: st.lock.bumpGenerationWithin })
+              }
+              const rowOf = async (id: string) => (await q(`SELECT status, claim_active, revision, ended_outcome FROM ${RT.continuation} WHERE id = $1`, [id])).rows[0]
+              const openAbout = async (id: string) => (await q(`SELECT id, fingerprint, (detail->>'componentNewPositionCount')::int AS n FROM ${RT.hold} WHERE sheet_id = $1 AND continuation_id = $2 AND status = 'open' ORDER BY opened_at, id`, [st.sheetId, id])).rows
+              const audits = async (mode: string) => (await auditRows(st.tenantId)).filter((entry: any) => entry.mode === mode).length
+              return { st, store: st.refresh.store, consult, ctxOf, seed, confirmDirect, rowOf, openAbout, audits }
+            }
+            const observed: Record<string, unknown> = {}
+            // (a) the release facts: THE open relationship_reconfirm row under the lock, bound to the hold shown.
+            {
+              const w = await stackFor('s408a')
+              const confirmed = await w.confirmDirect(fixture.hold)
+              const id = confirmed.continuationId
+              await w.seed([reconfirmWithCount(id, 0)], { [id]: 'new_position_removed' })
+              const consultT0 = await w.consult()
+              const shown = (await w.openAbout(id))[0]
+              await w.seed([reconfirmWithCount(id, 1)], { [id]: 'new_position_removed' })
+              const landed = (await w.openAbout(id))[0]
+              const lock0 = await lockRowOf(w.st.key)
+              const staleConsultBound = await settle(decisionsLib.end(w.ctxOf(consultT0), id, { revision: 1, outcome: 'release_to_normal_refresh' }))
+              const staleBodyBound = await settle(decisionsLib.end(w.ctxOf(consultT0), id, { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: landed.id, factsHoldFingerprint: landed.fingerprint }))
+              await w.seed([reconfirmWithCount(id, 0, { recomputed: true })], { [id]: 'new_position_removed' })
+              const recomputedConsultBound = await settle(decisionsLib.end(w.ctxOf(consultT0), id, { revision: 1, outcome: 'release_to_normal_refresh' }))
+              const recomputedBodyBound = await settle(decisionsLib.end(w.ctxOf(consultT0), id, { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: landed.id, factsHoldFingerprint: landed.fingerprint }))
+              const row = await w.rowOf(id)
+              observed.a = {
+                shownCount: shown.n,
+                landedCount: landed.n,
+                fingerprintsDiffer: shown.fingerprint !== landed.fingerprint,
+                staleConsultBound: errOf(staleConsultBound),
+                staleBodyBoundToLanded: errOf(staleBodyBound),
+                recomputedConsultBound: errOf(recomputedConsultBound),
+                recomputedBodyBoundToLanded: errOf(recomputedBodyBound),
+                afterRefusals: {
+                  status: row.status,
+                  claimActive: row.claim_active,
+                  activeMembers: await countWhere(RT.member, 'continuation_id = $1 AND claim_active = true', [id]),
+                  openAbout: (await w.openAbout(id)).length,
+                  lockUnchanged: sameJson(await lockRowOf(w.st.key), lock0),
+                  endedAudits: await w.audits('continuation_ended'),
+                },
+              }
+              const fresh = await settle(decisionsLib.end(w.ctxOf(await w.consult()), id, { revision: 1, outcome: 'release_to_normal_refresh' }))
+              observed.aFresh = fresh.ok
+                ? { status: fresh.value.status, endedOutcome: fresh.value.endedOutcome, holdsResolved: fresh.value.holdsResolved, claimActive: (await w.rowOf(id)).claim_active, endedAudits: await w.audits('continuation_ended') }
+                : errOf(fresh)
+            }
+            // (b) S25 under the lock for a release: A escalated after B's consult.
+            {
+              const w = await stackFor('s408b')
+              const a = await w.confirmDirect(refreshKit.disjointCandidateHold(fixture.hold, { parentId: 'Y-001', suffix: '_s408b1' }))
+              const b = await w.confirmDirect(refreshKit.disjointCandidateHold(fixture.hold, { parentId: 'Y-002', suffix: '_s408b2' }))
+              const holdA = refreshKit.reconfirmHoldFor(a.continuationId, { confirmable: false, verdict: 'source_scope_changed' })
+              await w.seed([holdA, reconfirmWithCount(b.continuationId, 0)], { [a.continuationId]: 'source_scope_changed', [b.continuationId]: 'new_position_removed' })
+              const consultT0 = await w.consult()
+              const runbookAtConsult = consultT0.holds.filter((hold: any) => hold.runbookOnly === true).length
+              const escalated = await settle(decisionsLib.end(w.ctxOf(consultT0), a.continuationId, { revision: 1, outcome: 'escalate_special_repair' }))
+              const lock0 = await lockRowOf(w.st.key)
+              const release = await settle(decisionsLib.end(w.ctxOf(consultT0), b.continuationId, { revision: 1, outcome: 'release_to_normal_refresh' }))
+              observed.b = {
+                runbookAtConsult,
+                escalate: errOf(escalated),
+                runbookNow: await countWhere(RT.hold, `sheet_id = $1 AND status = 'open' AND runbook_only = true`, [w.st.sheetId]),
+                releaseWithStaleConsult: errOf(release),
+                bStatus: (await w.rowOf(b.continuationId)).status,
+                lockUnchanged: sameJson(await lockRowOf(w.st.key), lock0),
+                endedAudits: await w.audits('continuation_ended'),
+              }
+            }
+            // (c) RECOVERY_PENDING under the lock: an apply fails and releases after the confirm's consult.
+            {
+              const w = await stackFor('s408c')
+              const idOf = await w.seed([fixture.hold])
+              const holdId = idOf(fixture.hold)
+              const consultT0 = await w.consult()
+              const ctxT0 = w.ctxOf(consultT0)
+              const first = await decisionsLib.listHolds(ctxT0, { holdId })
+              const entry = first.page.holds.find((item: any) => item.id === holdId)
+              let receipt = first.readReceipt
+              const pages = entry.pairPage ? entry.pairPage.count : 1
+              for (let index = 1; index < pages; index += 1) receipt = (await decisionsLib.listHolds(ctxT0, { holdId, pairCursor: index, receipt: receipt.id })).readReceipt
+              const body = { holdId, holdFingerprint: entry.fingerprint, comparisonFingerprint: entry.comparisonFingerprint, evidenceFingerprint: entry.evidenceFingerprint, candidateId: entry.pairingFingerprint, readReceipt: receipt.id, basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } }
+              const recoveryAtConsult = refreshLanes.previewRecoveryOf(consultT0)
+              const grant = await w.st.lock.acquire(w.st.key, { purpose: 'small_apply', runId: 's4-08c-apply', tenantId: w.st.tenantId })
+              const guard = w.st.lock.createGuard(grant)
+              const execution = await w.store.beginExecution({ ...w.st.scope, lane: 'small_apply', guard: { leaseRunId: 's4-08c-apply', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: grant.generation, generationToken: grant.generationToken }, tokenRevision: 'rev_s408c', planDigest: 'plan_s408c', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: w.st.users.puller.id })
+              await w.store.finishExecution({ ...w.st.scope, executionId: execution.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['SYNTHETIC'] })
+              await guard.release()
+              const lock0 = await lockRowOf(w.st.key)
+              const stale = await settle(decisionsLib.confirm(ctxT0, body))
+              observed.c = {
+                recoveryAtConsult,
+                leaseFreeBeforeConfirm: lock0.lease_id === null,
+                staleConfirm: errOf(stale),
+                continuations: await countWhere(RT.continuation, 'tenant_id = $1', [w.st.tenantId]),
+                holdOpen: (await w.st.holds()).find((row: any) => row.id === holdId).status,
+                lockUnchanged: sameJson(await lockRowOf(w.st.key), lock0),
+                confirmedAudits: await w.audits('continuation_confirmed'),
+                freshPreviewRecovery: refreshLanes.previewRecoveryOf(await w.consult()),
+              }
+            }
+            console.log(`[S4-08] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              a: {
+                shownCount: 0,
+                landedCount: 1,
+                fingerprintsDiffer: true,
+                staleConsultBound: { status: 409, code: RC.END_OUTCOME_NOT_ADMISSIBLE, reason: 'new_position_present', count: 1 },
+                staleBodyBoundToLanded: { status: 409, code: RC.END_OUTCOME_NOT_ADMISSIBLE, reason: 'new_position_present', count: 1 },
+                recomputedConsultBound: { status: 409, code: RC.CONFIRM_STALE, reason: 'facts_moved' },
+                recomputedBodyBoundToLanded: { status: 409, code: RC.CONFIRM_STALE, reason: 'facts_moved' },
+                afterRefusals: { status: 'needs_reconfirmation', claimActive: true, activeMembers: 4, openAbout: 1, lockUnchanged: true, endedAudits: 0 },
+              },
+              aFresh: { status: 'ended', endedOutcome: 'release_to_normal_refresh', holdsResolved: 1, claimActive: false, endedAudits: 1 },
+              b: {
+                runbookAtConsult: 0,
+                escalate: 'committed',
+                runbookNow: 1,
+                releaseWithStaleConsult: { status: 409, code: RC.END_OUTCOME_NOT_ADMISSIBLE, reason: 'runbook_only_hold_open' },
+                bStatus: 'needs_reconfirmation',
+                lockUnchanged: true,
+                endedAudits: 1,
+              },
+              c: {
+                recoveryAtConsult: null,
+                leaseFreeBeforeConfirm: true,
+                staleConfirm: { status: 409, code: RC.RECOVERY_PENDING, reason: undefined, state: 'failed_pending_recovery', openExecutions: 1 },
+                continuations: 0,
+                holdOpen: 'open',
+                lockUnchanged: true,
+                confirmedAudits: 0,
+                freshPreviewRecovery: { pending: true, openExecutions: 1 },
+              },
+            })
+          }, 300000)
         })
       })
     })

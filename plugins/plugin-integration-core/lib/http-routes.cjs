@@ -2836,7 +2836,9 @@ const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_BOARD_QUERY_KEYS = new Set([
 ])
 // Batch-refresh step 4 PR-4: the closed allow-lists of the six refresh routes (design §13). The hold page's
 // query is paging + the receipt id; the confirm body binds to the server's own fingerprints and receipt; the
-// end body is the revision, the outcome and a note — NEVER the release precondition, which the server derives.
+// end body is the revision, the outcome, a note and — for a release — the id + fingerprint of the hold the page
+// showed (`factsHoldId` / `factsHoldFingerprint`, bound inside the store's transaction); NEVER the release
+// precondition itself, which the store decides under its lock.
 const VALID_STOCK_PREPARATION_REFRESH_HOLDS_QUERY_KEYS = new Set(['tenantId', 'cursor', 'limit', 'holdId', 'pairCursor', 'pairLimit', 'receipt'])
 const VALID_STOCK_PREPARATION_REFRESH_EVIDENCE_QUERY_KEYS = new Set(['tenantId', 'cursor'])
 const VALID_STOCK_PREPARATION_REFRESH_DETAIL_QUERY_KEYS = new Set(['tenantId'])
@@ -2845,7 +2847,7 @@ const VALID_STOCK_PREPARATION_REFRESH_CONFIRM_REQUEST_KEYS = new Set([
   'candidateId', 'continuation', 'readReceipt', 'basis', 'acknowledge',
 ])
 const VALID_STOCK_PREPARATION_REFRESH_KEEP_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'holdFingerprint'])
-const VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'revision', 'outcome', 'note'])
+const VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'revision', 'outcome', 'note', 'factsHoldId', 'factsHoldFingerprint'])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
 const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([

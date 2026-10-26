@@ -464,6 +464,13 @@ function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotCo
       db.lastTransactionHandle = handle
       try {
         const result = await callback(handle)
+        // PR-4: a COMMIT-time fault (`faults.commit`, one shot) — PostgreSQL's deferred-constraint / lost-connection
+        // commit failure: the callback completed, nothing persists, the untyped error surfaces to the caller.
+        const commitFault = faults.commit
+        if (commitFault instanceof Error) {
+          delete faults.commit
+          throw commitFault
+        }
         log.push(['commit', {}])
         return result
       } catch (error) {

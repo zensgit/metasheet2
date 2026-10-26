@@ -15,20 +15,30 @@
 //   RT-U04  pagination (holds by cursor, a hold's pairs by pairCursor); the read receipt covers the pages served;
 //           a confirm without the receipt / fingerprints / candidateId / acknowledge is 400; an incomplete receipt
 //           is 409 READ_RECEIPT_INCOMPLETE; the body cannot carry the end's release precondition (400)
-//   RT-C    the confirm: NOT_PILOT; RECOVERY_PENDING; S25 runbook-only hold open; STALE (fingerprint, candidate,
-//           hold not open); NOT_ALLOWED (kind, not confirmable); WRITE_LOCKED while a lease is live, nothing
-//           persisted, then 201 after release with the generation bumped IN the transaction (reason
-//           continuation_confirm), the hold resolved, decision_version + 1 and the audit row on the handle
+//   RT-C    the confirm: NOT_PILOT; RECOVERY_PENDING; S25 runbook-only hold open (both from the consult, before
+//           the state row is taken); STALE (fingerprint, candidate, hold not open); NOT_ALLOWED (kind, not
+//           confirmable); WRITE_LOCKED while a lease is live, nothing persisted, then 201 after release with the
+//           generation bumped IN the transaction (reason continuation_confirm), the hold resolved,
+//           decision_version + 1 and the audit row on the handle
+//   RT-C7   S25 UNDER THE LOCK: an escalation lands between the consult and the transaction => the store refuses
+//           runbook_only_hold_open under the state-row lock (confirm and re-confirm), nothing persisted
+//   RT-C8   RECOVERY_PENDING UNDER THE LOCK: an apply fails and releases in that window => the store re-reads the
+//           executions AFTER its bump and refuses; the bump rolls back with it
 //   RT-E09  the audit append inside the transaction fails => 503, rollback: no continuation, generation
-//           unchanged, hold still open
+//           unchanged, hold still open; RT-E09b a COMMIT-time failure => 503 STORE_FAILED `commit`, rollback
 //   RT-RC   the re-confirm through the same route (relationship_reconfirm + { id, revision }) => revision 2
-//   RT-E    the end: an ACTIVE relationship refused; release only with the recorded componentNewPositionCount 0
-//           (1 => new_position_present, absent => facts_missing), never from the body; escalate keeps the hold
-//           runbook-only; superseded_by_new_confirmation is confirm-only
+//   RT-E    the end: an ACTIVE relationship refused; release decided by the STORE under the lock from THE open
+//           relationship_reconfirm row (componentNewPositionCount 0; 1 => new_position_present, absent =>
+//           facts_missing), never from the body; escalate keeps the hold runbook-only;
+//           superseded_by_new_confirmation is confirm-only
+//   RT-E5   a computation lands between the end's consult and its transaction => new_position_present /
+//           CONFIRM_STALE facts_moved from the open row under the lock (the release binds to the hold shown)
+//   RT-E6   S25 under the lock for a release (another relationship escalated in that window)
+//   RT-E7   the body names the hold the page showed (factsHoldId + factsHoldFingerprint): facts_moved otherwise
 //   RT-K    「暂不处理」: audit only, nothing persisted, STALE on a moved fingerprint
 //   RT-EV   the evidence: the demand facts of the computation that opened the hold; history_unknown, then the
 //           relationship snapshot once a relationship claims the old root; the continuation detail
-//   RT-NG   a registered, NOT-governed project: not_governed, no holds, no step-4 row written by a read
+//   RT-NG   a registered, NOT-governed project: not_governed, no holds, no receipt, no step-4 row written by a read
 // Synthetic values only; the pilot column is seeded directly (pilot enable is impossible on this build: the
 // readiness marker CONTINUATION_SUPPORT_VERSION is 0).
 
@@ -169,6 +179,26 @@ async function readAndBind(st, row, hold, { pairLimit } = {}) {
   }
 }
 
+// Whether the request's store transaction took the state row FOR UPDATE (reset `st.env.db.log` before the call): a
+// consult-time refusal never does; a refusal decided under the lock always does.
+function stateRowTaken(st) {
+  return st.env.db.statements('trx.').some(([method, table]) => method === 'trx.selectOneForUpdate' && table === REFRESH_STORE_TABLES.state)
+}
+
+// A ONE-SHOT pause on the request's pre-transaction read by id (the kit's `pauses` hook fires for autocommit and
+// transaction reads alike, so the shot is spent on the first match — the route's own `readHoldById` /
+// `readContinuationById`, which run after the consult and before the store's transaction). What `between` does
+// lands exactly in the window the execution review's P6 / P8 / P9 / P11 / P12 constructed.
+function pauseBeforeTransaction(st, table, id, between) {
+  let armed = true
+  st.env.db.pauses.selectOne = async (args) => {
+    if (!armed || args.table !== REFRESH_STORE_TABLES[table] || !args.where || args.where.id !== id) return
+    armed = false
+    await between()
+  }
+  return () => { delete st.env.db.pauses.selectOne; return armed === false }
+}
+
 async function everyRoute(st, options = {}, { holdId = 'hold_rd_absent', continuationId = 'cont_rd_absent' } = {}) {
   return [
     ['holds', await listHolds(st, {}, options)],
@@ -274,6 +304,34 @@ test('RT-U03d by-id reads are never an existence oracle: another tenant\'s hold 
     }
     assert.deepEqual(answers.foreign, answers.unknown, 'same path, same answer')
     assert.deepEqual(answers.unknown, { evidence: CODES.HOLD_NOT_FOUND, keep: CODES.HOLD_NOT_FOUND, confirm: CODES.HOLD_NOT_FOUND, detail: CODES.CONTINUATION_NOT_FOUND, end: CODES.CONTINUATION_NOT_FOUND })
+    assert.deepEqual(st.audits(), [], 'a miss is not a value read')
+    // The SAME tenant, another sheet + project (the store answers STALE *_scope, the route the same 404 — review
+    // note 6: this leg pins the route-level `/_scope$/` translation; the other tenant's leg pins TENANT_MISMATCH).
+    // The other project's holds carry ITS project number in every key (the store refuses HOLD_MALFORMED otherwise).
+    const sameTenantScope = { tenantId: TENANT, sheetId: 'sheet_rd_same_tenant', projectNo: 'PRJ-RD-OTHER' }
+    const reproject = (hold) => {
+      const h = JSON.parse(JSON.stringify(hold).split(PROJECT).join('PRJ-RD-OTHER'))
+      h.fingerprint = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs')).holdFingerprint(h)
+      return h
+    }
+    await st.env.seedHolds(sameTenantScope, [reproject(fixture.hold)])
+    const sameTenantHold = st.holds().find((row) => row.sheet_id === sameTenantScope.sheetId && row.status === 'open')
+    assert.ok(sameTenantHold, 'the other project\'s hold is open on its own sheet')
+    const sameTenantCont = await st.env.seedConfirmedContinuation(sameTenantScope, reproject(refreshKit.disjointCandidateHold(fixture.hold)), { sourceIdentity: fixture.sourceIdentity })
+    const bodies = {}
+    for (const [label, holdId, continuationId] of [['sameTenant', sameTenantHold.id, sameTenantCont.continuationId], ['unknown', 'hold_rd_unknown', 'cont_rd_unknown']]) {
+      bodies[label] = {
+        evidence: JSON.stringify((await evidence(st, holdId)).body),
+        keep: JSON.stringify((await keep(st, holdId)).body),
+        confirm: JSON.stringify((await confirm(st, { holdId, holdFingerprint: 'a'.repeat(64), comparisonFingerprint: 'b'.repeat(64), evidenceFingerprint: 'c'.repeat(64), candidateId: 'd'.repeat(64), readReceipt: 'e'.repeat(32), basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } })).body),
+        detail: JSON.stringify((await detail(st, continuationId)).body),
+        end: JSON.stringify((await end(st, continuationId, { revision: 1, outcome: 'escalate_special_repair' })).body),
+        holdsPage: JSON.stringify((await listHolds(st, { holdId })).body),
+      }
+    }
+    assert.deepEqual(bodies.sameTenant, bodies.unknown, 'same tenant, another scope: byte-identical to the unknown-id bodies')
+    assert.equal(JSON.parse(bodies.unknown.evidence).error.code, CODES.HOLD_NOT_FOUND)
+    assert.equal(JSON.parse(bodies.unknown.holdsPage).error.code, CODES.HOLD_NOT_FOUND)
     assert.deepEqual(st.audits(), [], 'a miss is not a value read')
     const typed = await keep(st, foreignHold.id, { confirmProjectNo: 'PRJ-OTHER' })
     assert.equal(typed.statusCode, 400)
@@ -390,6 +448,23 @@ test('RT-U04b a hold\'s pairs are paged (pairLimit, pairCursor on one hold); the
     assert.equal(errorOf(half).code, CODES.READ_RECEIPT_INCOMPLETE)
     assert.deepEqual(errorOf(half).details, { reason: 'pages_missing', pagesServed: 1, pageCount: 2, partial: false })
     assert.equal(st.continuations().length, 0, 'nothing confirmed')
+    // Review note 0: the audit row is appended BEFORE the receipt records the page. Page 1 requested while the
+    // audit store is down => 503 with no body, the stored receipt still says [0], and a confirm is still
+    // pages_missing — a page the server refused was never served, so the receipt never vouches for it.
+    const append = st.h.services.stockPreparationAuditStore.append
+    st.h.services.stockPreparationAuditStore.append = async () => { throw Object.assign(new Error('synthetic audit outage'), { status: 503, code: 'AUDIT_STORE_DOWN' }) }
+    try {
+      const refused = await listHolds(st, { holdId: row.id, pairLimit: 3, pairCursor: 1, receipt: first.readReceipt.id })
+      assert.equal(refused.statusCode, 503, JSON.stringify(refused.body))
+      assert.equal(refused.body.data, undefined, 'no body')
+    } finally {
+      st.h.services.stockPreparationAuditStore.append = append
+    }
+    const stored = await st.h.context.storage.get(`${READ_RECEIPT_KEY_PREFIX}${first.readReceipt.id}`)
+    assert.deepEqual(stored.holds[row.id].pairPagesServed, [0], 'the refused page is not on the receipt')
+    const stillHalf = await confirm(st, { holdId: row.id, holdFingerprint: hold.fingerprint, comparisonFingerprint: hold.comparisonFingerprint, evidenceFingerprint: hold.evidenceFingerprint, candidateId: hold.pairingFingerprint, readReceipt: first.readReceipt.id, basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } })
+    assert.equal(stillHalf.statusCode, 409, JSON.stringify(stillHalf.body))
+    assert.deepEqual(errorOf(stillHalf).details, { reason: 'pages_missing', pagesServed: 1, pageCount: 2, partial: false })
     const second = dataOf(await listHolds(st, { holdId: row.id, pairLimit: 3, pairCursor: 1, receipt: first.readReceipt.id }))
     assert.deepEqual(second.page.holds[0].pairPage, { index: 1, count: 2, size: 3, next: null })
     assert.equal(second.page.holds[0].candidates[0].pairs.length, 1)
@@ -440,6 +515,21 @@ test('RT-U04c a confirm without the receipt, a fingerprint, the candidateId or t
     const precondition = await end(st, 'cont_rd_absent', { revision: 1, outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true })
     assert.equal(precondition.statusCode, 400)
     assert.equal(errorOf(precondition).details.field, 'currentExpansionHoldsNoNewPosition')
+    // The hold a release decides from MAY be named (review B1; PR-7 sends both keys): accepted by the allow-list
+    // and the normalizer (an absent relationship is then the usual 404), refused on another outcome or half given.
+    const named = await end(st, 'cont_rd_absent', { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: 'hold_rd_x', factsHoldFingerprint: 'f'.repeat(64) })
+    assert.equal(named.statusCode, 404, JSON.stringify(named.body))
+    assert.equal(errorOf(named).code, CODES.CONTINUATION_NOT_FOUND)
+    for (const [label, b, field] of [
+      ['facts on an escalation', { revision: 1, outcome: 'escalate_special_repair', factsHoldId: 'hold_rd_x', factsHoldFingerprint: 'f'.repeat(64) }, 'factsHoldId'],
+      ['facts id only', { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: 'hold_rd_x' }, 'factsHoldFingerprint'],
+      ['facts fingerprint only', { revision: 1, outcome: 'release_to_normal_refresh', factsHoldFingerprint: 'f'.repeat(64) }, 'factsHoldId'],
+      ['facts fingerprint typed', { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: 'hold_rd_x', factsHoldFingerprint: 7 }, 'factsHoldFingerprint'],
+    ]) {
+      const res = await end(st, 'cont_rd_absent', b)
+      assert.equal(res.statusCode, 400, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(errorOf(res).details.field, field, label)
+    }
     for (const [label, b] of [['revision 0', { revision: 0, outcome: 'escalate_special_repair' }], ['bad outcome', { revision: 1, outcome: 'made_up' }], ['note not a string', { revision: 1, outcome: 'escalate_special_repair', note: 5 }]]) {
       const res = await end(st, 'cont_rd_absent', b)
       assert.equal(res.statusCode, 400, label)
@@ -476,6 +566,7 @@ test('RT-C2 RECOVERY_PENDING: an execution that did not finish cleanly refuses t
     const { body } = await readAndBind(st, row, hold)
     await st.env.seedExecution(st.scope, { status: 'failed' })
     const before = st.env.snapshot()
+    st.env.db.log.length = 0
     const res = await confirm(st, body)
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(errorOf(res).code, CODES.RECOVERY_PENDING)
@@ -483,6 +574,8 @@ test('RT-C2 RECOVERY_PENDING: an execution that did not finish cleanly refuses t
     const ended = await end(st, 'cont_rd_absent', { revision: 1, outcome: 'escalate_special_repair' })
     assert.equal(errorOf(ended).code, CODES.RECOVERY_PENDING)
     assert.equal(st.env.snapshot(), before)
+    // Both refused from the consult, before the transaction (the store's in-lock re-check is the second line: RT-C8).
+    assert.equal(stateRowTaken(st), false, 'no state row FOR UPDATE on a consult-time refusal')
   } finally { st.restore() }
   // The live-lease exemption: a running row under the lease the routes' lock holds right now.
   const live = mount()
@@ -500,10 +593,14 @@ test('RT-C2 RECOVERY_PENDING: an execution that did not finish cleanly refuses t
   } finally { live.restore() }
 })
 
-test('RT-C3 (S25) an OPEN runbook-only hold (an escalated relationship): the confirm of another candidate is 409 NOT_ALLOWED runbook_only_hold_open and a release is 409 END_OUTCOME_NOT_ADMISSIBLE runbook_only_hold_open; 「暂不处理」 and an escalation stay allowed', async () => {
+test('RT-C3 (S25) an OPEN runbook-only hold (an escalated relationship): the confirm of another candidate is 409 NOT_ALLOWED runbook_only_hold_open and a release is 409 END_OUTCOME_NOT_ADMISSIBLE runbook_only_hold_open — both from the consult, before the state row is taken; 「暂不处理」 and an escalation stay allowed', async () => {
   const st = mount()
   try {
     const fixture = await refreshKit.candidateHoldFixture()
+    // A second relationship (confirmed BEFORE the escalation: the store's own S25, under the lock, refuses a confirm
+    // once a runbook-only hold is open — the kit's seeding goes through the store).
+    const secondHold = refreshKit.disjointCandidateHold(fixture.hold, { parentId: 'Y-001', suffix: '_rd2' })
+    const second = await st.env.seedConfirmedContinuation(st.scope, secondHold, { sourceIdentity: fixture.sourceIdentity })
     const escalated = await st.env.seedEscalatedContinuation(st.scope, fixture.hold, { sourceIdentity: fixture.sourceIdentity })
     assert.ok(st.holds().some((row) => row.status === 'open' && row.runbook_only === true), 'the escalated hold is open, runbook-only')
     // Another, disjoint candidate (other old rows, other new position) is open beside it.
@@ -513,20 +610,23 @@ test('RT-C3 (S25) an OPEN runbook-only hold (an escalated relationship): the con
     assert.ok(otherRow)
     const { body } = await readAndBind(st, otherRow, other)
     const before = st.env.snapshot()
+    st.env.db.log.length = 0
     const res = await confirm(st, body)
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(errorOf(res).code, CODES.CONFIRM_NOT_ALLOWED)
     assert.deepEqual(errorOf(res).details, { reason: 'runbook_only_hold_open', holdCount: 1, partial: false })
+    // The consult-time refusal never takes the state row (the store's in-lock S25 is the second line: RT-C7).
+    assert.equal(st.env.db.statements('trx.').some(([method, table]) => method === 'trx.selectOneForUpdate' && table === REFRESH_STORE_TABLES.state), false, 'refused from the consult, before the transaction')
     const kept = await keep(st, otherRow.id)
     assert.equal(kept.statusCode, 200, JSON.stringify(kept.body))
-    // A second relationship that needs reconfirmation: release refused by S25, escalate admitted.
-    const secondHold = refreshKit.disjointCandidateHold(fixture.hold, { parentId: 'Y-001', suffix: '_rd2' })
-    const second = await st.env.seedConfirmedContinuation(st.scope, secondHold, { sourceIdentity: fixture.sourceIdentity })
+    // The second relationship needs reconfirmation: release refused by S25 (consult-time, no state row), escalate admitted.
     await st.env.seedHolds(st.scope, [refreshKit.reconfirmHoldFor(second.continuationId, { verdict: 'new_position_removed' })], { verdicts: { [second.continuationId]: 'new_position_removed' } })
+    st.env.db.log.length = 0
     const release = await end(st, second.continuationId, { revision: 1, outcome: 'release_to_normal_refresh' })
     assert.equal(release.statusCode, 409, JSON.stringify(release.body))
     assert.equal(errorOf(release).code, CODES.END_OUTCOME_NOT_ADMISSIBLE)
     assert.equal(errorOf(release).details.reason, 'runbook_only_hold_open')
+    assert.equal(st.env.db.statements('trx.').some(([method, table]) => method === 'trx.selectOneForUpdate' && table === REFRESH_STORE_TABLES.state), false, 'refused from the consult, before the transaction')
     const escalate = await end(st, second.continuationId, { revision: 1, outcome: 'escalate_special_repair', note: 'second' })
     assert.equal(escalate.statusCode, 200, JSON.stringify(escalate.body))
     assert.equal(escalate.body.data.holdsEscalated, 1)
@@ -674,6 +774,123 @@ test('RT-E09 the audit append INSIDE the transaction fails => 503 STORE_FAILED (
   } finally { st.restore() }
 })
 
+test('RT-E09b the transaction fails AT COMMIT (a deferred constraint, a connection lost at commit — review P7): the store answers 503 STORE_FAILED { operation: commit, sqlState } instead of a generic 500, every step-4 row and the generation as before (the bump rolled back); the same body then commits', async () => {
+  const st = mount()
+  try {
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBind(st, row, hold)
+    await st.env.lock().bumpGeneration(sheetWriteScopeKey(st.sheetId), { reason: 'small_preview', tenantId: TENANT })
+    const gen0 = { generation: st.lockRow().generation, token: st.lockRow().generation_token }
+    const before = st.env.snapshot()
+    // Armed after the route's consult (its own transaction) and before the store's: the decision's COMMIT fails.
+    const release = pauseBeforeTransaction(st, 'hold', row.id, async () => {
+      st.env.db.faults.commit = Object.assign(new Error('synthetic commit-time failure'), { code: '42501' })
+    })
+    const res = await confirm(st, body)
+    assert.equal(release(), true)
+    assert.equal(st.env.db.faults.commit, undefined, 'the one-shot fault fired')
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, REFRESH_STORE_ERROR_CODES.STORE_FAILED)
+    assert.deepEqual(errorOf(res).details, { operation: 'commit', sqlState: '42501', partial: false })
+    assert.equal(st.env.snapshot(), before, 'every step-4 row as before')
+    assert.equal(st.continuations().length, 0)
+    assert.equal(st.holds().find((entry) => entry.id === row.id).status, 'open')
+    assert.deepEqual({ generation: st.lockRow().generation, token: st.lockRow().generation_token }, gen0, 'the bump rolled back')
+    const done = await confirm(st, body)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(st.lockRow().generation, gen0.generation + 1)
+  } finally { st.restore() }
+})
+
+test('RT-C7 S25 UNDER THE LOCK (review N2 / P9): another relationship is escalated — its hold turns runbook-only — between the confirm\'s consult and its transaction; the store refuses 409 CONFIRM_NOT_ALLOWED runbook_only_hold_open under the state-row lock, nothing confirmed, no bump; the re-confirm path likewise', async () => {
+  const st = mount()
+  try {
+    const fixture = await refreshKit.candidateHoldFixture()
+    const second = refreshKit.disjointCandidateHold(fixture.hold)
+    const confirmed2 = await st.env.seedConfirmedContinuation(st.scope, second, { sourceIdentity: fixture.sourceIdentity })
+    const reconfirm2 = refreshKit.reconfirmHoldFor(confirmed2.continuationId)
+    await st.env.seedHolds(st.scope, [fixture.hold, reconfirm2], { verdicts: { [confirmed2.continuationId]: 'source_scope_changed' } })
+    const row = st.holds().find((entry) => entry.fingerprint === fixture.hold.fingerprint && entry.status === 'open')
+    const { body } = await readAndBind(st, row, fixture.hold)
+    const lock0 = JSON.stringify(st.lockRow())
+    let interleaved = null
+    const release = pauseBeforeTransaction(st, 'hold', row.id, async () => {
+      await st.env.store.endContinuation({ ...st.scope, continuationId: confirmed2.continuationId, revision: 1, outcome: 'escalate_special_repair', endedBy: 'u_rd_other' }, { bumpWithin: (trx, key, options) => st.env.lock().bumpGenerationWithin(trx, key, options) })
+      interleaved = { runbookOpen: st.holds().filter((entry) => entry.status === 'open' && entry.runbook_only === true).length, snapshot: st.env.snapshot(), lock: JSON.stringify(st.lockRow()) }
+      st.env.db.log.length = 0
+    })
+    const res = await confirm(st, body)
+    assert.equal(release(), true, 'the pause fired once')
+    assert.equal(interleaved.runbookOpen, 1)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, CODES.CONFIRM_NOT_ALLOWED)
+    assert.deepEqual(errorOf(res).details, { reason: 'runbook_only_hold_open', holdCount: 1, partial: false })
+    assert.equal(stateRowTaken(st), true, 'decided under the lock — the consult saw no runbook-only hold')
+    assert.equal(st.env.snapshot(), interleaved.snapshot, 'nothing confirmed')
+    assert.equal(JSON.stringify(st.lockRow()), interleaved.lock, 'no bump (refused before it)')
+    assert.notEqual(JSON.stringify(st.lockRow()), lock0, 'the escalation itself did bump')
+    assert.equal(st.continuations().filter((entry) => entry.status === 'active').length, 0)
+    assert.equal(st.audits().filter((entry) => entry.mode === REFRESH_DECISION_AUDIT.modes.confirmed).length, 0)
+  } finally { st.restore() }
+  // The re-confirm path: the relationship_reconfirm hold of relationship B confirmed while A is escalated in the gap.
+  const rc = mount()
+  try {
+    const fixture = await refreshKit.candidateHoldFixture()
+    const a = await rc.env.seedConfirmedContinuation(rc.scope, fixture.hold, { sourceIdentity: fixture.sourceIdentity })
+    const b = await rc.env.seedConfirmedContinuation(rc.scope, refreshKit.disjointCandidateHold(fixture.hold), { sourceIdentity: fixture.sourceIdentity })
+    const reconfirmA = refreshKit.reconfirmHoldFor(a.continuationId)
+    const reconfirmB = refreshKit.reconfirmHoldFor(b.continuationId)
+    await rc.env.seedHolds(rc.scope, [reconfirmA, reconfirmB], { verdicts: { [a.continuationId]: 'source_scope_changed', [b.continuationId]: 'source_scope_changed' } })
+    const rowB = rc.holds().find((entry) => entry.fingerprint === reconfirmB.fingerprint && entry.status === 'open')
+    const page = dataOf(await listHolds(rc))
+    const release = pauseBeforeTransaction(rc, 'hold', rowB.id, async () => {
+      await rc.env.store.endContinuation({ ...rc.scope, continuationId: a.continuationId, revision: 1, outcome: 'escalate_special_repair', endedBy: 'u_rd_other' }, { bumpWithin: (trx, key, options) => rc.env.lock().bumpGenerationWithin(trx, key, options) })
+      rc.env.db.log.length = 0
+    })
+    const res = await confirm(rc, { holdId: rowB.id, holdFingerprint: reconfirmB.fingerprint, comparisonFingerprint: reconfirmB.comparisonFingerprint, evidenceFingerprint: reconfirmB.evidenceFingerprint, continuation: { id: b.continuationId, revision: 1 }, readReceipt: page.readReceipt.id, acknowledge: { historyUnknown: true } })
+    assert.equal(release(), true)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).details.reason, 'runbook_only_hold_open')
+    assert.equal(stateRowTaken(rc), true)
+    assert.equal(rc.continuations().find((entry) => entry.id === b.continuationId).status, 'needs_reconfirmation')
+    assert.equal(rc.continuations().find((entry) => entry.id === b.continuationId).revision, 1)
+  } finally { rc.restore() }
+})
+
+test('RT-C8 RECOVERY_PENDING UNDER THE LOCK (review N3 / P6): an apply begins, fails and releases its lease between the confirm\'s consult and its transaction; the store re-reads the executions AFTER its bump and refuses 409 STOCK_PREP_REFRESH_RECOVERY_PENDING — the bump rolled back with it (generation unchanged), nothing confirmed', async () => {
+  const st = mount()
+  try {
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBind(st, row, hold)
+    await st.env.lock().bumpGeneration(sheetWriteScopeKey(st.sheetId), { reason: 'small_preview', tenantId: TENANT })
+    const gen0 = { generation: st.lockRow().generation, token: st.lockRow().generation_token }
+    let interleaved = null
+    const release = pauseBeforeTransaction(st, 'hold', row.id, async () => {
+      // The apply of another session: a lease, an execution that fails, the lease released — all before the confirm's transaction.
+      const lock = st.env.lock()
+      const grant = await lock.acquire(sheetWriteScopeKey(st.sheetId), { purpose: 'small_apply', runId: 'rd-c8-apply', tenantId: TENANT })
+      await st.env.seedExecution(st.scope, { status: 'failed', leaseId: grant.leaseId, leaseRunId: 'rd-c8-apply' })
+      await lock.createGuard(grant).release()
+      interleaved = { snapshot: st.env.snapshot(), leaseFree: st.lockRow().lease_id === null }
+      st.env.db.log.length = 0
+    })
+    const res = await confirm(st, body)
+    assert.equal(release(), true, 'the pause fired once')
+    assert.equal(interleaved.leaseFree, true)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, CODES.RECOVERY_PENDING)
+    assert.deepEqual(errorOf(res).details, { state: 'failed_pending_recovery', openExecutions: 1, partial: false })
+    assert.equal(stateRowTaken(st), true, 'decided under the lock — the consult saw no unfinished execution')
+    const trx = st.env.db.statements('trx.').map(([method, table]) => `${method}:${table}`)
+    assert.ok(trx.includes(`trx.updateRow:${PROJECT_WRITE_LOCK_TABLE}`), 'the bump ran inside the transaction')
+    assert.ok(trx.indexOf(`trx.select:${REFRESH_STORE_TABLES.execution}`) > trx.indexOf(`trx.updateRow:${PROJECT_WRITE_LOCK_TABLE}`), 'the executions are re-read AFTER the bump')
+    assert.equal(st.env.snapshot(), interleaved.snapshot, 'nothing confirmed')
+    assert.deepEqual({ generation: st.lockRow().generation, token: st.lockRow().generation_token }, gen0, 'the bump rolled back')
+    assert.equal(st.env.db.log.map(([method]) => method).filter((method) => method === 'rollback').length >= 1, true)
+    assert.equal(st.holds().find((entry) => entry.id === row.id).status, 'open')
+  } finally { st.restore() }
+})
+
 // ── RT-RC: the re-confirm ────────────────────────────────────────────────────────────────────────
 
 test('RT-RC a relationship_reconfirm hold is confirmed through the SAME route with { continuation: { id, revision } } (no candidateId, no basis): revision 2, active, the hold resolved, reason continuation_confirm; a candidateId on it, a wrong id or a wrong revision are refused', async () => {
@@ -762,14 +979,21 @@ test('RT-E2/E3 release_to_normal_refresh is admissible ONLY from the recorded fa
       const { confirmed } = await needsReconfirmation(st, { count, verdict })
       const before = st.env.snapshot()
       const gen0 = st.lockRow() ? st.lockRow().generation : 0
+      const lock0 = JSON.stringify(st.lockRow())
+      st.env.db.log.length = 0
       const res = await end(st, confirmed.continuationId, { revision: 1, outcome: 'release_to_normal_refresh', note: 'release' })
       assert.equal(res.statusCode, expected.status, `${label}: ${JSON.stringify(res.body)}`)
       if (expected.status === 409) {
         assert.equal(errorOf(res).code, CODES.END_OUTCOME_NOT_ADMISSIBLE, label)
         assert.equal(errorOf(res).details.reason, expected.reason, label)
         assert.equal(errorOf(res).details.outcome, 'release_to_normal_refresh', label)
+        if (expected.reason === 'new_position_present') assert.equal(errorOf(res).details.componentNewPositionCount, 1, label)
+        if (expected.reason === 'last_verdict') assert.deepEqual([errorOf(res).details.lastVerdict, errorOf(res).details.recordedVerdict], ['structure_changed', 'structure_changed'], label)
+        // Decided by the STORE from the open row under the lock (review B1): the state row was taken.
+        assert.equal(stateRowTaken(st), true, `${label}: decided under the lock`)
         assert.equal(st.env.snapshot(), before, `${label}: nothing persisted`)
         assert.equal(st.continuations()[0].status, 'needs_reconfirmation', label)
+        assert.equal(JSON.stringify(st.lockRow()), lock0, `${label}: no bump`)
       } else {
         assert.deepEqual(res.body.data, { continuationId: confirmed.continuationId, status: 'ended', endedOutcome: 'release_to_normal_refresh', holdsResolved: 1, holdsEscalated: 0, decisionVersion: 2, nextStep: 'preview_again' })
         const cont = st.continuations()[0]
@@ -819,6 +1043,110 @@ test('RT-E4 escalate_special_repair keeps the relationship\'s hold OPEN and runb
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(errorOf(res).details.reason, 'no_open_hold')
   } finally { bare.restore() }
+})
+
+test('RT-E5 THE RELEASE FACTS UNDER THE LOCK (review B1 / P8 / P11): a computation lands between the end\'s consult and its transaction — (a) it records N(c)=1: 409 new_position_present from the open row under the lock; (b) it keeps N(c)=0 but recomputes the hold (another fingerprint): 409 CONFIRM_STALE facts_moved (the release binds to the hold the puller was shown); the body\'s own binding likewise; the relationship stays needs_reconfirmation, no bump, no audit row', async () => {
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  for (const [label, nextCount, extraDetail, bodyBinds, expectedCode, expectedReason] of [
+    ['N(c) 0 -> 1', 1, {}, false, CODES.END_OUTCOME_NOT_ADMISSIBLE, 'new_position_present'],
+    ['N(c) 0 -> 0 recomputed', 0, { recomputed: true }, false, CODES.CONFIRM_STALE, 'facts_moved'],
+    ['N(c) 0 -> 1, body binds', 1, {}, true, CODES.END_OUTCOME_NOT_ADMISSIBLE, 'new_position_present'],
+    ['N(c) 0 -> 0 recomputed, body binds', 0, { recomputed: true }, true, CODES.CONFIRM_STALE, 'facts_moved'],
+  ]) {
+    const st = mount()
+    try {
+      const { confirmed, hold } = await needsReconfirmation(st, { count: 0 })
+      const id = confirmed.continuationId
+      const shown = st.holds().find((row) => row.status === 'open' && row.continuation_id === id)
+      const lock0 = JSON.stringify(st.lockRow())
+      let interleaved = null
+      const release = pauseBeforeTransaction(st, 'continuation', id, async () => {
+        const fresh = refreshKit.reconfirmHoldFor(id, { confirmable: false, verdict: 'new_position_removed' })
+        fresh.detail = { ...fresh.detail, componentNewPositionCount: nextCount, ...extraDetail }
+        fresh.fingerprint = pairing.holdFingerprint(fresh)
+        await st.env.seedHolds(st.scope, [fresh], { verdicts: { [id]: 'new_position_removed' } })
+        interleaved = { open: st.holds().filter((row) => row.status === 'open' && row.continuation_id === id).map((row) => ({ id: row.id, count: row.detail.componentNewPositionCount })), shownNow: st.holds().find((row) => row.id === shown.id).status, snapshot: st.env.snapshot() }
+        st.env.db.log.length = 0
+      })
+      const res = await end(st, id, { revision: 1, outcome: 'release_to_normal_refresh', ...(bodyBinds ? { factsHoldId: shown.id, factsHoldFingerprint: hold.fingerprint } : {}) })
+      assert.equal(release(), true, `${label}: the pause fired once`)
+      assert.equal(interleaved.open.length, 1, label)
+      assert.notEqual(interleaved.open[0].id, shown.id, `${label}: the computation opened another hold`)
+      assert.equal(interleaved.shownNow, 'superseded', label)
+      assert.equal(res.statusCode, 409, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(errorOf(res).code, expectedCode, label)
+      assert.equal(errorOf(res).details.reason, expectedReason, label)
+      if (expectedReason === 'new_position_present') assert.equal(errorOf(res).details.componentNewPositionCount, 1, label)
+      assert.equal(stateRowTaken(st), true, `${label}: decided under the lock — the consult saw N(c)=0 on the hold the page showed`)
+      assert.equal(st.env.snapshot(), interleaved.snapshot, `${label}: nothing persisted`)
+      assert.equal(st.continuations()[0].status, 'needs_reconfirmation', label)
+      assert.equal(st.continuations()[0].claim_active, true, label)
+      assert.ok(st.members().every((member) => member.claim_active === true), `${label}: the old rows keep their protection`)
+      assert.equal(JSON.stringify(st.lockRow()), lock0, `${label}: no bump`)
+      assert.equal(st.audits().filter((entry) => entry.mode === REFRESH_DECISION_AUDIT.modes.ended).length, 0, label)
+    } finally { st.restore() }
+  }
+})
+
+test('RT-E6 S25 UNDER THE LOCK for a release (review N2 / P12): relationship A is escalated between B\'s consult and B\'s release transaction; the store refuses 409 END_OUTCOME_NOT_ADMISSIBLE runbook_only_hold_open under the lock, B stays needs_reconfirmation', async () => {
+  const st = mount()
+  try {
+    const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+    const fixture = await refreshKit.candidateHoldFixture()
+    const a = await st.env.seedConfirmedContinuation(st.scope, fixture.hold, { sourceIdentity: fixture.sourceIdentity })
+    const b = await st.env.seedConfirmedContinuation(st.scope, refreshKit.disjointCandidateHold(fixture.hold), { sourceIdentity: fixture.sourceIdentity })
+    const holdA = refreshKit.reconfirmHoldFor(a.continuationId, { confirmable: false, verdict: 'source_scope_changed' })
+    const holdB = refreshKit.reconfirmHoldFor(b.continuationId, { confirmable: false, verdict: 'new_position_removed' })
+    holdB.detail = { ...holdB.detail, componentNewPositionCount: 0 }
+    holdB.fingerprint = pairing.holdFingerprint(holdB)
+    await st.env.seedHolds(st.scope, [holdA, holdB], { verdicts: { [a.continuationId]: 'source_scope_changed', [b.continuationId]: 'new_position_removed' } })
+    let interleaved = null
+    const release = pauseBeforeTransaction(st, 'continuation', b.continuationId, async () => {
+      await st.env.store.endContinuation({ ...st.scope, continuationId: a.continuationId, revision: 1, outcome: 'escalate_special_repair', endedBy: 'u_rd_other' }, { bumpWithin: (trx, key, options) => st.env.lock().bumpGenerationWithin(trx, key, options) })
+      interleaved = { runbookOpen: st.holds().filter((row) => row.status === 'open' && row.runbook_only === true).length, snapshot: st.env.snapshot(), lock: JSON.stringify(st.lockRow()) }
+      st.env.db.log.length = 0
+    })
+    const res = await end(st, b.continuationId, { revision: 1, outcome: 'release_to_normal_refresh' })
+    assert.equal(release(), true, 'the pause fired once')
+    assert.equal(interleaved.runbookOpen, 1)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, CODES.END_OUTCOME_NOT_ADMISSIBLE)
+    assert.deepEqual(errorOf(res).details, { reason: 'runbook_only_hold_open', outcome: 'release_to_normal_refresh', holdCount: 1, partial: false })
+    assert.equal(stateRowTaken(st), true, 'decided under the lock — the consult saw no runbook-only hold')
+    assert.equal(st.env.snapshot(), interleaved.snapshot, 'nothing persisted')
+    assert.equal(JSON.stringify(st.lockRow()), interleaved.lock, 'no bump')
+    assert.equal(st.continuations().find((row) => row.id === b.continuationId).status, 'needs_reconfirmation')
+    // The control: with the runbook hold closed by the owner's runbook (no store method writes it), the same release commits.
+    for (const row of st.env.db.tables.get(REFRESH_STORE_TABLES.hold).values()) {
+      if (row.status === 'open' && row.runbook_only === true) { row.status = 'resolved'; row.resolution = 'runbook_closed' }
+    }
+    const done = await end(st, b.continuationId, { revision: 1, outcome: 'release_to_normal_refresh' })
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body))
+  } finally { st.restore() }
+})
+
+test('RT-E7 the body names the hold the page showed (factsHoldId + factsHoldFingerprint, review B1): the open hold named with its fingerprint => 200; another id or another fingerprint => 409 CONFIRM_STALE facts_moved (facts admissible, the row not the one shown), nothing persisted', async () => {
+  const st = mount()
+  try {
+    const { confirmed, hold } = await needsReconfirmation(st, { count: 0 })
+    const id = confirmed.continuationId
+    const shown = st.holds().find((row) => row.status === 'open' && row.continuation_id === id)
+    const before = st.env.snapshot()
+    for (const [label, facts] of [
+      ['another id', { factsHoldId: 'hold_rd_elsewhere', factsHoldFingerprint: hold.fingerprint }],
+      ['another fingerprint', { factsHoldId: shown.id, factsHoldFingerprint: 'g'.repeat(64) }],
+    ]) {
+      const res = await end(st, id, { revision: 1, outcome: 'release_to_normal_refresh', ...facts })
+      assert.equal(res.statusCode, 409, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(errorOf(res).code, CODES.CONFIRM_STALE, label)
+      assert.equal(errorOf(res).details.reason, 'facts_moved', label)
+      assert.equal(st.env.snapshot(), before, `${label}: nothing persisted`)
+    }
+    const done = await end(st, id, { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: shown.id, factsHoldFingerprint: hold.fingerprint })
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body))
+    assert.equal(done.body.data.endedOutcome, 'release_to_normal_refresh')
+    assert.equal(st.holds().find((row) => row.id === shown.id).resolution, 'continuation_ended')
+  } finally { st.restore() }
 })
 
 // ── RT-K: 「暂不处理」 ─────────────────────────────────────────────────────────────────────────────
@@ -887,7 +1215,7 @@ test('RT-EV the evidence behind a hold: the demand facts the computation recorde
 
 // ── RT-NG ────────────────────────────────────────────────────────────────────────────────────────
 
-test('RT-NG a registered project that is NOT governed: the hold page answers not_governed with no holds, a receipt is still issued, and no step-4 row is written by any read; the build marker stays 0 (pilot enable impossible — the pilot column is seeded directly by these cases)', async () => {
+test('RT-NG a registered project that is NOT governed: the hold page answers not_governed with no holds and NO receipt (nothing to confirm; a receipt is a plugin_kv row that is never swept — PR-4 review N4), the read is still audited, and no step-4 row is written by any read; the build marker stays 0 (pilot enable impossible — the pilot column is seeded directly by these cases)', async () => {
   assert.equal(CONTINUATION_SUPPORT_VERSION, 0)
   const st = mount({ pilot: false })
   try {
@@ -896,11 +1224,13 @@ test('RT-NG a registered project that is NOT governed: the hold page answers not
     assert.equal(page.refresh.governed, 'none')
     assert.deepEqual(page.page.holds, [])
     assert.equal(page.holdSetFingerprint, null)
-    assert.match(page.readReceipt.id, /^[0-9a-f]{32}$/)
+    assert.equal(page.readReceipt, null, 'no receipt for a project with nothing to confirm')
+    assert.deepEqual(st.receipts(), [], 'no receipt stored')
     await evidence(st, 'hold_rd_absent')
     await detail(st, 'cont_rd_absent')
     assert.equal(st.env.stepFourRowCount(), 0, 'reads never write')
     assert.equal(st.audits().length, 1, 'the empty page is still an audited read')
+    assert.equal(st.audits()[0].mode, REFRESH_DECISION_AUDIT.modes.holdRead)
   } finally { st.restore() }
 })
 

@@ -94,6 +94,9 @@ test('RD-R2 verify is strict on every point and ok only with every pair page ser
   assert.deepEqual(await receipts.verify({ receiptId: one.id, scope: SCOPE, actorId: 'u_b', hold: current }), { ok: false, reason: 'receipt_actor', pagesServed: 0, pageCount: null })
   assert.deepEqual(await receipts.verify({ receiptId: one.id, scope: SCOPE, actorId: 'u_a', hold: { ...current, id: 'hold_b' } }), { ok: false, reason: 'hold_not_in_receipt', pagesServed: 0, pageCount: null })
   assert.deepEqual(await receipts.verify({ receiptId: one.id, scope: SCOPE, actorId: 'u_a', hold: { ...current, evidenceFingerprint: 'moved' } }), { ok: false, reason: 'fingerprint_moved', pagesServed: 1, pageCount: 2 })
+  // Each of the three fingerprints is its own leg (review note 7: the hold fingerprint's leg was unpinned).
+  assert.deepEqual(await receipts.verify({ receiptId: one.id, scope: SCOPE, actorId: 'u_a', hold: { ...current, fingerprint: 'moved' } }), { ok: false, reason: 'fingerprint_moved', pagesServed: 1, pageCount: 2 })
+  assert.deepEqual(await receipts.verify({ receiptId: one.id, scope: SCOPE, actorId: 'u_a', hold: { ...current, comparisonFingerprint: 'moved' } }), { ok: false, reason: 'fingerprint_moved', pagesServed: 1, pageCount: 2 })
   assert.deepEqual(await receipts.verify({ receiptId: one.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: false, reason: 'pages_missing', pagesServed: 1, pageCount: 2 })
   await receipts.record({ receiptId: one.id, scope: SCOPE, actorId: 'u_a', pages: [page(a, 1, 2)] })
   assert.deepEqual(await receipts.verify({ receiptId: one.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: true, pagesServed: 2, pageCount: 2 })
@@ -160,9 +163,22 @@ test('RD-B1 the confirm and end body normalizers refuse field by field (400, the
     const body = label === 'not an object' ? mutate() : (() => { const b = JSON.parse(JSON.stringify(good)); mutate(b); return b })()
     assert.throws(() => normalizeConfirmBody(body), (error) => error.status === 400 && error.code === CODES.REQUEST_INVALID && error.details.field === field, label)
   }
-  assert.deepEqual(normalizeEndBody({ revision: 2, outcome: 'escalate_special_repair', note: 'why' }), { revision: 2, outcome: 'escalate_special_repair', note: 'why' })
-  for (const [body, field] of [[{ revision: 0, outcome: 'escalate_special_repair' }, 'revision'], [{ revision: 1, outcome: 'nope' }, 'outcome'], [{ revision: 1, outcome: 'escalate_special_repair', note: 1 }, 'note'], ['x', 'body']]) {
-    assert.throws(() => normalizeEndBody(body), (error) => error.status === 400 && error.details.field === field)
+  assert.deepEqual(normalizeEndBody({ revision: 2, outcome: 'escalate_special_repair', note: 'why' }), { revision: 2, outcome: 'escalate_special_repair', note: 'why', facts: null })
+  // PR-4 review B1: a release may name the hold the page showed (both keys, trimmed); never on another outcome.
+  assert.deepEqual(normalizeEndBody({ revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: ' hold_7 ', factsHoldFingerprint: 'f'.repeat(64) }), { revision: 1, outcome: 'release_to_normal_refresh', note: null, facts: { holdId: 'hold_7', holdFingerprint: 'f'.repeat(64) } })
+  assert.deepEqual(normalizeEndBody({ revision: 1, outcome: 'release_to_normal_refresh' }).facts, null, 'without the keys the release binds to the consult (decisions.end)')
+  for (const [body, field] of [
+    [{ revision: 0, outcome: 'escalate_special_repair' }, 'revision'],
+    [{ revision: 1, outcome: 'nope' }, 'outcome'],
+    [{ revision: 1, outcome: 'escalate_special_repair', note: 1 }, 'note'],
+    ['x', 'body'],
+    [{ revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: 'hold_7' }, 'factsHoldFingerprint'],
+    [{ revision: 1, outcome: 'release_to_normal_refresh', factsHoldFingerprint: 'f'.repeat(64) }, 'factsHoldId'],
+    [{ revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: ' ', factsHoldFingerprint: 'f'.repeat(64) }, 'factsHoldId'],
+    [{ revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: 'hold_7', factsHoldFingerprint: 7 }, 'factsHoldFingerprint'],
+    [{ revision: 1, outcome: 'escalate_special_repair', factsHoldId: 'hold_7', factsHoldFingerprint: 'f'.repeat(64) }, 'factsHoldId'],
+  ]) {
+    assert.throws(() => normalizeEndBody(body), (error) => error.status === 400 && error.details.field === field, JSON.stringify(body))
   }
 })
 
