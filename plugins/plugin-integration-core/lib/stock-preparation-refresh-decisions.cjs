@@ -256,11 +256,15 @@ function createReadReceiptStore({ storage, now, idGenerator } = {}) {
     return !Number.isFinite(at) || at <= clock().getTime()
   }
 
+  // A COPY of the stored record (step-4 review follow-ups, #6565 delta N-1): `record` mutates what it loaded before
+  // `set`, and over a live-reference storage (any memory-backed deployment) a throwing `set` would otherwise leave
+  // a page the caller was never served on the stored receipt. The record is JSON-shaped (strings, numbers,
+  // arrays), so a JSON round trip is exact.
   async function load(id) {
     const key = validId(id)
     if (!key) return null
     const record = await requireStorage().get(receiptKey(key))
-    return isPlainObject(record) ? record : null
+    return isPlainObject(record) ? JSON.parse(JSON.stringify(record)) : null
   }
 
   function publicView(record) {
