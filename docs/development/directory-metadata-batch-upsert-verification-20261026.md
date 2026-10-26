@@ -29,3 +29,13 @@ Owned baseline/fix/mutation logs have distinct filenames and independent SHA256 
 ## Remaining delivery gates
 
 Current-head required CI must finish success with actual new unit/DB file execution, whole production/preview file and appropriate neighbor summaries. Preserve local phase boundaries; do not describe the staged filtered runs as a fresh all-suite invocation. PR remains Draft with exact final source/head/clean/body readback. This proof does not establish the2000-user staging runtime target, formal parent/W8/owner acceptance, live provider behavior, production or deployment. No merge/deploy/R71/tag/release/config changes; Stream/lifecycle OFF; realUAT/business50004 excluded; historical08PUTINCONCLUSIVE.
+
+## CI syntax-guard adaptation
+
+The first published head 93ac6299449bc7a40712e6b79296b283a0682a06 failed one unique OpenId unit case at core85: the guard still required the removed scalar per-account query syntax. Its three repeated FAIL lines describe one case. The later database cleanup failure occurred before DB setup had run; its gate was not changed.
+
+Only that existing case/import and these two documents change. The guard now pins the exact batch-helper import and unique production delegation, the same transaction query callback and normalized user list, absence of a competing inline account INSERT, and a single account SQL source. It invokes the real batch helper and requires exactly one query whose SQL and all 16 ordered parameters equal the protected original scalar statement. The other 29 cases/hooks and OpenId conflict assertions are byte-identical.
+
+Actual focused original reproduction: 1 matching failure and 1 SQL-semantic positive control, 28 filtered exclusions. Corrected whole affected file: 30/30 actual passed, zero skip. Selecting wrong helper SQL: 1 matching red/29 excluded. Replacing only the production account query callback: 1 matching red/29 excluded. Runtime bytes restored exactly after both. Explicit changed-test lint: exit0. A nonproduct controller postcheck initially expected two callbacks rather than four; its completed 30-pass and SQL-mutation evidence was retained, and only the missing delegation mutation/lint ran in the resumed controller.
+
+All seven original nondocument candidate inputs remain hash-identical. Existing production quality evidence is carried by that identity and the actual production TypeScript file list excluding this unit test; validate:all was not replayed. Independent source review confirmed the guard purpose remains enforced; its snapshot preceded the resumed mutation/lint, which the main audit separately verified. New-head required CI remains pending; no old-head success is credited.

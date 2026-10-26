@@ -34,6 +34,8 @@ vi.mock('../../src/auth/invite-tokens', () => ({
   issueInviteToken: vi.fn(() => 'invite-token-fixed'),
 }))
 
+import { upsertDirectoryAccountMetadataRows } from '../../src/directory/directory-metadata-batch-upsert'
+
 import {
   DirectoryValidationError,
   __directorySyncInternalsForTests,
@@ -275,13 +277,25 @@ describe('directory sync upsert — openId is not overwritten with NULL', () => 
   // real Postgres by directory-dingtalk-openid-grant-path.db.test.ts).
   const statement = __directorySyncInternalsForTests.DIRECTORY_ACCOUNT_UPSERT_SQL
 
-  it('is the statement the sync loop runs', () => {
+  it('is the statement the sync loop runs', async () => {
     const source = readFileSync(
       fileURLToPath(new URL('../../src/directory/directory-sync.ts', import.meta.url)),
       'utf8',
     )
-    expect(source).toMatch(/const accountUpsert = await client\.query\(\s*DIRECTORY_ACCOUNT_UPSERT_SQL,/)
-    expect(source.match(/INSERT INTO directory_accounts \(/g)?.length).toBe(1)
+    expect(source).toMatch(/import\s*\{[^}]*\bupsertDirectoryAccountMetadataRows\b[^}]*\}\s*from '\.\/directory-metadata-batch-upsert'/)
+    expect(source.match(/\bupsertDirectoryAccountMetadataRows\s*\(/g)).toHaveLength(1)
+    expect(source).toMatch(/await upsertDirectoryAccountMetadataRows\(\s*\(sql, params\) => client\.query\(sql, params\),\s*userList\.map\(/)
+    expect(source).not.toContain('INSERT INTO directory_accounts (')
+    const batchSource = readFileSync(
+      fileURLToPath(new URL('../../src/directory/directory-metadata-batch-upsert.ts', import.meta.url)),
+      'utf8',
+    )
+    expect(batchSource.match(/INSERT INTO directory_accounts \(/g)).toHaveLength(1)
+    const row = Array.from({ length: 16 }, (_, index) => `bind-${index}`)
+    const execute = vi.fn(async (_sql: string, _params: unknown[]) => ({ rows: [{ created: true }] }))
+    expect(await upsertDirectoryAccountMetadataRows(execute, [row])).toEqual({ createdCount: 1, updatedCount: 0 })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute).toHaveBeenCalledWith(statement, row)
   })
 
   function accountUpsertConflictClause(): string {

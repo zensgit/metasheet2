@@ -24,3 +24,5 @@ The existing sync already batches account-department relations, but still issues
 | G6 quality/CI | Explicit changed-file lint and validate:all, real-DB two-point registration/strict corpus where a new DB file is added; current-head required CI success with actual named targets; exact source/HEAD/clean and final PR body readback. |
 
 All PRs remain Draft. No merge, deploy, R71/tag/release, real provider/customer access or business configuration changes. Stream/lifecycle OFF; real UAT and business50004 excluded. Historical08PUT remains INCONCLUSIVE. This Draft has no owner/parent/W8/staging acceptance effect.
+
+G6 guard maintenance: after extracting the scalar metadata loops, the existing OpenId SQL-source guard must follow the one production batch delegation and dynamically require its singleton SQL/ordered binds to equal the original trusted statement. Do not waive the conflict semantics, transaction identity, original cases or budgets.
