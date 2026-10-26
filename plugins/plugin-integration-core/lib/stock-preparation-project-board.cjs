@@ -116,6 +116,7 @@ const {
   __internals: { lastExportAtFor },
 } = require('./stock-preparation-operator-project-directory.cjs')
 const { optionalString } = require('./stock-preparation-common.cjs')
+const { readProjectRefreshState } = require('./stock-preparation-refresh-state.cjs')
 // THE PULL-TARGET READS LIVE IN ONE MODULE, SHARED WITH THE DIRECTORY. `resolveOwnBoundSheet` (the
 // tenant gate on `action.target`), `parsePlmRefreshTimestampMs` and `readPullTargetRowFacts` were
 // defined in THIS file until the operator project directory needed the same three facts out of the
@@ -197,7 +198,29 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
   'fillTarget',
   'directoryReady',
   'ledgerReady',
+  // PR-5 (batch-refresh step 4, design §11 / §13): the project's derived refresh state —
+  // `readProjectRefreshState`'s own values-free object (status token, zh label, governed, exportAllowed,
+  // settled, counts; `unreadable: { reason, store?, operation? }` when it could not be read).
+  'refresh',
 ])
+
+/**
+ * PR-5: the board's `refresh` stanza. The reader's refusals (409 RETARGETED / TENANT_MISMATCH, 422) are
+ * RETHROWN — a refusal is not a state to display; a reader that is not wired, or a project with no bound
+ * sheet to consult, answers the `unreadable` state with a closed-shape reason.
+ */
+async function readRefreshStanza({ readRefreshState, projectNo, boundTarget }) {
+  const sheetId = boundTarget && optionalString(boundTarget.sheetId)
+  if (typeof readRefreshState !== 'function') {
+    return readProjectRefreshState({ ok: false, failure: { store: 'governance', operation: 'reader_absent' } })
+  }
+  if (!sheetId) {
+    return readProjectRefreshState({ ok: false, failure: { store: 'registry', operation: 'bound_target_absent' } })
+  }
+  const read = await readRefreshState({ projectNo, sheetId })
+  const state = read && typeof read === 'object' && read.state && typeof read.state === 'object' ? read.state : null
+  return state || readProjectRefreshState({ ok: false, failure: { store: 'governance', operation: 'reader_shape' } })
+}
 
 /**
  * The closed `mode` set for the audit row. Two values, and the miss is one of them: a board read that
@@ -268,6 +291,12 @@ async function readOperatorProjectBoard({
   projectNo,
   boundTarget,
   audit,
+  // PR-5 (design §11 / §13, O-18): the governance reader's `readRefreshState({ projectNo, sheetId })`
+  // — the route binds the tenant; the board serializes ONLY its `.state` (the consult is private).
+  // Absent reader / no bound sheet: the stanza is `unreadable` by name, never a fabricated "complete".
+  readRefreshState = null,
+  // PR-5: the tenant's open refresh holds by project number (see listOperatorProjectDirectory).
+  refreshHoldCounts = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationProjectBoardError(
@@ -299,6 +328,7 @@ async function readOperatorProjectBoard({
     // The board projects its own frozen key set, so it may consume the pending INDEX in process; the
     // directory route, whose response shape is frozen and asserted, does not ask for it.
     includePendingIndex: true,
+    refreshHoldCounts,
   })
 
   const match = directory.projects.find((project) => optionalString(project.projectNo) === wanted) || null
@@ -412,6 +442,10 @@ async function readOperatorProjectBoard({
     fillTarget,
     directoryReady: directory.directoryReady,
     ledgerReady: directory.ledgerReady,
+    // PR-5: the project's refresh state — a values-free stanza (tokens, counts, booleans), the ONE
+    // derived state every formal surface keys on. `unreadable` carries its own reason when the sheet is
+    // not bound or the reader is not wired; three distinct answers, never zero (design D8 / §9.5).
+    refresh: await readRefreshStanza({ readRefreshState, projectNo: wanted, boundTarget }),
   }
 
   return {

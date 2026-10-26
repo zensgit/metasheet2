@@ -112,6 +112,9 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
   // Never stored (operatorHomeMemory.ts admits no `archived` — it is a live registry fact), handled
   // so a hand-written value cannot reach an undefined branch.
   if (key === 'archived') return stockPrepPosture({ archived: true })
+  // PR-5: a remembered blocked refresh state keeps its key; the state token itself is not stored, so the
+  // generic wording (「刷新未完成」) renders until the live board says which state it is.
+  if (key === 'blocked_pull_state') return stockPrepPosture({ refreshStatus: 'unknown' })
   return stockPrepPosture({})
 }
 
@@ -219,12 +222,14 @@ export function partitionOperatorHomeCards(cards: readonly StockPrepHomeCard[]):
 const CARD_RANK: Record<StockPrepPostureKey, number> = {
   pending_decision: 0,
   blocked: 1,
-  running: 2,
-  ready: 3,
-  unknown: 4,
-  not_pulled: 5,
-  not_yours: 6,
-  archived: 7,
+  // PR-5: an unfinished refresh state sits with the two action-needing badges, above 正在跑 / 可以导出.
+  blocked_pull_state: 2,
+  running: 3,
+  ready: 4,
+  unknown: 5,
+  not_pulled: 6,
+  not_yours: 7,
+  archived: 8,
 }
 
 export function sortOperatorHomeCards(cards: readonly StockPrepHomeCard[]): StockPrepHomeCard[] {

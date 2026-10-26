@@ -2943,6 +2943,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           largeRun: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run',
           largePlan: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan',
           largeApprove: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs',
+          // PR-5 (S5): the formal export.
+          export: '/api/integration/stock-preparation/prep-lines/export',
         }
         const RETARGETED = 'STOCK_PREP_REFRESH_TARGET_RETARGETED'
         const s3aSheets: string[] = []
@@ -2981,7 +2983,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           return hold
         }
 
-        async function s3aStack(label: string, options: { pilot?: boolean; register?: boolean; switchOn?: boolean; data?: any; refresh?: any } = {}) {
+        // PR-5 (S5): `routeLock` replaces the lock the ROUTES are handed (a hookable view over the same table); `serviceExtras`
+        // are merged last (the S5 xlsx builder with its hook). Both additive; every earlier case passes neither.
+        async function s3aStack(label: string, options: { pilot?: boolean; register?: boolean; switchOn?: boolean; data?: any; refresh?: any; routeLock?: any; serviceExtras?: Record<string, any> } = {}) {
           const { pilot = true, register = true, switchOn = true } = options
           const tenantId = tenantFor(`s3a_${label}`)
           const projectNo: string = CF.PROJECT_NO
@@ -3044,7 +3048,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             ...base,
             externalSystemRegistry: { ...base.externalSystemRegistry, async listExternalSystems() { return [] } },
             pipelineRegistry: { ...base.pipelineRegistry, async listPipelines() { return [] } },
-            stockPreparationProjectWriteLock: lock,
+            stockPreparationProjectWriteLock: options.routeLock || lock,
             stockPreparationProjectTargetStore: registry,
             stockPreparationAuditStore: auditStoreLib.createStockPreparationAuditStore({ db }),
             stockPreparationPackInstallStore: packInstallStoreLib.createStockPreparationPackInstallStore({ db }),
@@ -3052,6 +3056,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
             stockPreparationRefreshGovernance: refresh.governance,
             stockPreparationContinuationStore: refresh.store,
+            // PR-5 (S5): the export's workbook builder — a JSON buffer, so a case can read the headers and rows back.
+            stockPreparationXlsxExport: { async buildWorkbookBuffer(params: any) { return Buffer.from(JSON.stringify(params), 'utf8') } },
+            ...(options.serviceExtras || {}),
           }
           httpRoutesLib.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
           const users = {
@@ -3094,6 +3101,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             largeRun: (jobId: string, user: any = users.admin) => call('POST', PATHS.largeRun, user, {}, { jobId }),
             largePlan: (jobId: string, user: any = users.admin) => call('POST', PATHS.largePlan, user, {}, { jobId }),
             largeApprove: (jobId: string, user: any = users.admin) => call('POST', PATHS.largeApprove, user, { confirm: { acceptManualConfirmHold: true } }, { jobId }),
+            // PR-5 (S5): the formal export through the REAL route, under the same switch handling as every lane.
+            exportLines: (user: any = users.puller) => withEnv({}, () => callRoute(routes, 'GET', PATHS.export, { user, query: { projectNo }, params: {} })),
             // A token the apply route will consume and bind: the CURRENT generation of the sheet, no bump.
             async mintToken(revision: string, sheetKey: string = key) {
               const generation = await lock.readGeneration(sheetKey)
@@ -4493,6 +4502,491 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               client.release()
               if (tenantId) await cleanupLarge(tenantId)
             }
+          }, 300000)
+        })
+
+        // ── S5: batch-refresh step 4 PR-5 — THE FORMAL-EXPORT GATE on the real stack ─────────────────────────────
+        // Nested in S3A for its stack (`s3aStack` + `exportLines`), its fixtures and its cleanup. Each case drives the
+        // REAL export route over the production host, lock, registry, the REAL refresh reader and store, and real
+        // migrations 100-103 (design §11, §23.7 O-21 as replaced; plan §5.3 U01 / U02 / U07 / C10):
+        //   S5-01 (U01) every unfinished state, each produced by the real lanes or the real store (pending_confirmation,
+        //         confirmed_pending_execution, executed_pending_settlement, failed_pending_recovery, executing): the
+        //         export is 409 BLOCKED naming the state, nothing streamed, one export_refused audit row, zero delivered;
+        //         the overview posture over the SAME derived state is never 「可以导出」 — with no confirmation ledger at
+        //         all (the pending count is not an input).
+        //   S5-02 (U02, G8) the clean governed flow to 已完成 (first pull, suspended second pull, confirm, re-preview and
+        //         apply, the settling preview): 200 with the 沿用说明 column on exactly the four continued rows, the S
+        //         root once with its own quantity, the audit row's tokens; then the interleavings on the SAME sheet
+        //         through hookable lock views: (a) a lease taken after G0 => executing; (b) a lease taken and released
+        //         during the file build => G1 epoch moved; (c) a bump during the build => G1 token moved; (d) a lease
+        //         live at G1; (e) THE REVIEWER'S zero-write FAILED execution inside C2's snapshot-to-lock-read gap:
+        //         both consults answer complete, the digest is intact, G1's epoch refuses; afterwards failed_pending_recovery;
+        //         (f) the same failure before G0 => C1 refuses; (g) the positive control: a zero-write SELF-SETTLED
+        //         success before G0 => 200.
+        //   S5-03 (B-M6 / A12) a human fill after the settlement exports; a HOST-side machine write refuses
+        //         SHEET_CHANGED_SINCE_SETTLEMENT; the next preview raises the content hold and the export stays refused.
+        //   S5-04 (A11) the step-4 tables absent from the store binding (42P01): 503 STATE_UNREADABLE, never complete.
+        //   S5-05 (C10 (c) / U07, E-2) pilot exit with an open hold: still 409; switch off with a pilot registry row on
+        //         the managed sheet: 409 RETARGETED before any row read — both audited export_refused.
+        //   S5-06 (C09) a registered NOT-governed project: 200 with the pre-PR-5 headers and audit detail keys; 0
+        //         step-4 rows written by the export.
+        describe('S5 step-4 formal export gate (real Postgres, real lock, real host, real reader)', () => {
+          const overviewLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-overview.cjs')) as any
+          const prepLineExportLib = require(path.join(PLUGIN_LIB, 'stock-preparation-prep-line-export.cjs')) as any
+          const EXPORT_HEADERS: string[] = prepLineExportLib.EXPORT_COLUMNS.map((column: any) => column.label)
+          const CODE_INDEX: number = prepLineExportLib.EXPORT_COLUMNS.findIndex((column: any) => column.id === 'componentCode')
+          const QTY_INDEX: number = prepLineExportLib.EXPORT_COLUMNS.findIndex((column: any) => column.id === 'totalQuantity')
+          const BLOCKED = 'STOCK_PREP_EXPORT_BLOCKED'
+          const STATE_CHANGED = 'STOCK_PREP_EXPORT_STATE_CHANGED'
+          const SHEET_CHANGED = 'STOCK_PREP_EXPORT_SHEET_CHANGED_SINCE_SETTLEMENT'
+          const UNREADABLE = 'STOCK_PREP_EXPORT_STATE_UNREADABLE'
+
+          // A hookable view of one lock module (the real table underneath): `beforeReadState(n)`, `beforeReadGeneration(n)`,
+          // `afterReadGeneration(n, answer)`, counted per view; `reset()` between export calls.
+          function hookable(raw: any) {
+            const hooks: Record<string, any> = {}
+            const counters = { readState: 0, readGeneration: 0 }
+            const view = Object.freeze({
+              ...raw,
+              readState: async (scopeKey: string) => {
+                counters.readState += 1
+                if (hooks.beforeReadState) await hooks.beforeReadState(counters.readState)
+                return raw.readState(scopeKey)
+              },
+              readGeneration: async (scopeKey: string) => {
+                counters.readGeneration += 1
+                if (hooks.beforeReadGeneration) await hooks.beforeReadGeneration(counters.readGeneration)
+                const answer = await raw.readGeneration(scopeKey)
+                if (hooks.afterReadGeneration) await hooks.afterReadGeneration(counters.readGeneration, answer)
+                return answer
+              },
+            })
+            return { view, hooks, counters, reset() { counters.readState = 0; counters.readGeneration = 0; for (const key of Object.keys(hooks)) delete hooks[key] } }
+          }
+
+          /** The export audit rows of one tenant: delivered vs refused details (values-free). */
+          async function exportAudit(tenantId: string) {
+            const rows = (await q('SELECT mode, detail FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = $2 ORDER BY created_at, id', [tenantId, 'prep_line_export'])).rows
+            return {
+              delivered: rows.filter((row: any) => row.mode !== 'export_refused').map((row: any) => row.detail),
+              refused: rows.filter((row: any) => row.mode === 'export_refused').map((row: any) => row.detail),
+            }
+          }
+          const answerOf = (res: any) => {
+            const error = errorOf(res)
+            const details = error.details || {}
+            return `${res.statusCode}:${error.code || 'ok'}:${details.reason || ''}:${details.status || ''}`
+          }
+          const workbookOf = (res: any) => (res.statusCode === 200 && Buffer.isBuffer(res.body) ? JSON.parse(res.body.toString('utf8')) : null)
+          const streamed = (res: any) => Buffer.isBuffer(res.body)
+          const postureOf = (state: any) => overviewLib.projectOverviewPosture({ pulledRowCount: 4, refreshStatus: state.status, refreshSettled: state.settled, refreshPendingConfirmCount: state.counts ? state.counts.pendingConfirm : 0 }).key
+
+          /** A stack whose route lock and reader lock are hookable views over the real table; the reader's answers are recorded. */
+          async function s5Stack(label: string, options: Record<string, any> = {}) {
+            const rawLock = createStockPreparationProjectWriteLock({ db: hostLikeDb() })
+            const route = hookable(rawLock)
+            const reader = hookable(rawLock)
+            const store = continuationStoreLib.createStockPreparationContinuationStore({ db: hostLikeDb() })
+            const governance = refreshGovernanceLib.createStockPreparationRefreshGovernance({
+              continuationStore: store,
+              projectTargetStore: projectTargetStoreLib.createStockPreparationProjectTargetStore({ db: hostLikeDb() }),
+              projectWriteLock: reader.view,
+            })
+            const seen: string[] = []
+            const governanceView = Object.freeze({
+              ...governance,
+              readRefreshState: async (scope: any) => {
+                const read = await governance.readRefreshState(scope)
+                seen.push(read.state.status)
+                return read
+              },
+            })
+            const xlsx = { calls: 0, hooks: {} as Record<string, any> }
+            const st = await s3aStack(label, {
+              pilot: true,
+              ...options,
+              refresh: { governance: governanceView, store },
+              routeLock: route.view,
+              serviceExtras: {
+                stockPreparationXlsxExport: {
+                  async buildWorkbookBuffer(params: any) {
+                    xlsx.calls += 1
+                    if (xlsx.hooks.afterBuild) await xlsx.hooks.afterBuild()
+                    return Buffer.from(JSON.stringify(params), 'utf8')
+                  },
+                },
+              },
+            })
+            return {
+              ...st, route, reader, xlsx, rawLock, seen,
+              resetHooks() { route.reset(); reader.reset(); xlsx.hooks = {}; seen.length = 0 },
+              settledDigest: async () => ((await q(`SELECT settled_sheet_machine_digest AS d FROM ${RT.state} WHERE sheet_id = $1 AND project_no = $2`, [st.sheetId, st.projectNo])).rows[0] || {}).d || null,
+            }
+          }
+
+          /** The clean governed flow to 已完成: first pull applied, second pull suspended, confirm, re-preview + apply, the settling preview. */
+          async function settledContinuation(st: any) {
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource()
+            const suspended = await st.dryRun()
+            expect(suspended.body.data.status, JSON.stringify(suspended.body)).toBe('suspended')
+            const confirmed = await confirmOpenCandidate(st)
+            const ready = await st.dryRun()
+            expect(ready.body.data.status, JSON.stringify(ready.body)).toBe('ready')
+            const applied = await st.apply(st.users.puller, ready.body.data.dryRunToken)
+            expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+            expect(applied.body.data.status).toBe('succeeded')
+            // 已执行待核对: the export refuses until a clean computation settles the written rows.
+            const unsettled = await st.exportLines()
+            expect(answerOf(unsettled)).toBe(`409:${BLOCKED}:state:executed_pending_settlement`)
+            expect(streamed(unsettled)).toBe(false)
+            const settling = await st.dryRun()
+            expect(settling.body.data.status, JSON.stringify(settling.body)).toBe('ready')
+            return { confirmed }
+          }
+
+          /** A WHOLE zero-write execution on the real lock and store: acquire (epoch + 1), begin, finish, release. */
+          async function zeroWriteRun(st: any, status: 'failed' | 'succeeded', { settle = false }: { settle?: boolean } = {}) {
+            const runId = `s5_${status}_${TOKEN}_${Date.now().toString(36)}`
+            const grant = await st.rawLock.acquire(st.key, { purpose: 'small_apply', runId, tenantId: st.tenantId })
+            const gen = await st.rawLock.readGeneration(st.key)
+            const begun = await st.refresh.store.beginExecution({
+              ...st.scope, lane: 'small_apply',
+              guard: { leaseRunId: runId, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
+              tokenRevision: 'rev_s5', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s5',
+            })
+            await st.refresh.store.finishExecution({
+              ...st.scope, executionId: begun.id, status, written: 0, attemptedWrites: 0,
+              ...(settle ? { settlement: { generationToken: gen.generationToken, sourceContentDigest: 'c'.repeat(64), sheetMachineDigest: await st.settledDigest() } } : {}),
+            })
+            await st.rawLock.createGuard(grant).release()
+            return begun
+          }
+
+          test('S5-01 (U01) every unfinished state refuses the formal export 409 BLOCKED naming it, streams nothing and audits export_refused; the overview posture over the same derived state is never 可以导出; no confirmation ledger exists on this stack (the pending count is not an input)', async () => {
+            const observed: Record<string, unknown> = {}
+            // pending_confirmation: the second pull of a pilot project is suspended by its candidate hold.
+            {
+              const st = await s3aStack('s5_01p', { pilot: true })
+              await firstPullApplied(st)
+              st.state.data = CF.secondPullSource()
+              expect((await st.dryRun()).body.data.status).toBe('suspended')
+              const res = await st.exportLines()
+              const state = derive(await st.refresh.governance.consult(st.scope))
+              const audit = await exportAudit(st.tenantId)
+              observed.pending_confirmation = { answer: answerOf(res), streamed: streamed(res), posture: postureOf(state), refused: audit.refused.length, delivered: audit.delivered.length, refusal: audit.refused[0] && audit.refused[0].refusal }
+              // confirmed_pending_execution: the candidate confirmed through the REAL store, not yet executed.
+              await confirmOpenCandidate(st)
+              const res2 = await st.exportLines()
+              const state2 = derive(await st.refresh.governance.consult(st.scope))
+              observed.confirmed_pending_execution = { answer: answerOf(res2), streamed: streamed(res2), posture: postureOf(state2) }
+            }
+            // executed_pending_settlement: the first pull wrote four rows; no clean computation has settled them yet.
+            {
+              const st = await s3aStack('s5_01e', { pilot: true })
+              await firstPullApplied(st)
+              const res = await st.exportLines()
+              const state = derive(await st.refresh.governance.consult(st.scope))
+              observed.executed_pending_settlement = { answer: answerOf(res), streamed: streamed(res), posture: postureOf(state) }
+              // failed_pending_recovery: a settled project, then a seeded FAILED execution (S3A-13's recipe).
+              expect((await st.dryRun()).body.data.status).toBe('ready')
+              const gen = await st.generation()
+              const begun = await st.refresh.store.beginExecution({
+                ...st.scope, lane: 'small_apply',
+                guard: { leaseRunId: `run_s5_dead_${TOKEN}`, leaseId: `lease_s5_dead_${TOKEN}`, fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken },
+                tokenRevision: 'rev_s5_dead', planDigest: 'a'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s5_dead',
+              })
+              await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 1, attemptedWrites: 1, errorCodes: ['E_S5'] })
+              const res2 = await st.exportLines()
+              const state2 = derive(await st.refresh.governance.consult(st.scope))
+              observed.failed_pending_recovery = { answer: answerOf(res2), streamed: streamed(res2), posture: postureOf(state2) }
+            }
+            // executing: a live lease on the sheet (a writer in flight).
+            {
+              const st = await s3aStack('s5_01x', { pilot: true })
+              await firstPullApplied(st)
+              expect((await st.dryRun()).body.data.status).toBe('ready')
+              const grant = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: `run_s5_live_${TOKEN}`, tenantId: st.tenantId })
+              try {
+                const res = await st.exportLines()
+                const state = derive(await st.refresh.governance.consult(st.scope))
+                observed.executing = { answer: answerOf(res), streamed: streamed(res), posture: postureOf(state) }
+              } finally {
+                await st.lock.createGuard(grant).release()
+              }
+            }
+            console.log(`[S5-01] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              pending_confirmation: { answer: `409:${BLOCKED}:state:pending_confirmation`, streamed: false, posture: 'blocked_pull_state', refused: 1, delivered: 0, refusal: BLOCKED },
+              confirmed_pending_execution: { answer: `409:${BLOCKED}:state:confirmed_pending_execution`, streamed: false, posture: 'blocked_pull_state' },
+              executed_pending_settlement: { answer: `409:${BLOCKED}:state:executed_pending_settlement`, streamed: false, posture: 'blocked_pull_state' },
+              failed_pending_recovery: { answer: `409:${BLOCKED}:state:failed_pending_recovery`, streamed: false, posture: 'blocked_pull_state' },
+              executing: { answer: `409:${BLOCKED}:state:executing`, streamed: false, posture: 'blocked_pull_state' },
+            })
+          }, 300000)
+
+          test('S5-02 (U02, G8, O-21) the clean governed flow exports 200 with the 沿用说明 column and no duplicated quantity; then, on the same sheet, every interleaving — a lease after G0, a lease taken and released during the build, a bump during the build, a lease live at G1, THE REVIEWER\'S zero-write failure inside C2\'s snapshot-to-lock-read gap, the same failure before G0 — refuses with nothing streamed; a zero-write self-settled success is the positive control', async () => {
+            const st = await s5Stack('s5_02')
+            const { confirmed } = await settledContinuation(st)
+            const observed: Record<string, unknown> = {}
+            st.resetHooks()
+            const clean = await st.exportLines()
+            const workbook = workbookOf(clean)
+            const audit0 = await exportAudit(st.tenantId)
+            const noted = workbook ? workbook.rows.filter((row: any[]) => row[row.length - 1] !== '') : []
+            const codes: string[] = workbook ? workbook.rows.map((row: any[]) => row[CODE_INDEX]) : []
+            observed.clean = {
+              status: clean.statusCode,
+              headers: workbook ? (workbook.headers.slice(0, -1).join('|') === EXPORT_HEADERS.join('|') ? 'export_columns' : 'other') : null,
+              lastHeader: workbook ? workbook.headers[workbook.headers.length - 1] : null,
+              notedRows: noted.length,
+              note: noted.length ? noted[0][noted[0].length - 1] : null,
+              sRootRows: codes.filter((code) => code === 'D100-01-03').length,
+              sRootQty: workbook ? (workbook.rows.find((row: any[]) => row[CODE_INDEX] === 'D100-01-03') || [])[QTY_INDEX] : null,
+              duplicatedCodes: codes.length - new Set(codes).size,
+              consults: st.seen.slice(),
+              routeGenerationReads: st.route.counters.readGeneration,
+              delivered: audit0.delivered.length,
+              deliveredDetail: audit0.delivered[audit0.delivered.length - 1],
+              refusedBefore: audit0.refused.length,
+            }
+            // (a) a lease taken right after G0: C1 derives executing.
+            st.resetHooks()
+            let grant: any = null
+            st.route.hooks.afterReadGeneration = async (n: number) => { if (n === 1) grant = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: `run_s5_a_${TOKEN}`, tenantId: st.tenantId }) }
+            const a = await st.exportLines()
+            await st.lock.createGuard(grant).release()
+            observed.leaseAfterG0 = { answer: answerOf(a), streamed: streamed(a) }
+            // (b) a lease taken AND released while the file is built (no execution row): only the epoch moved.
+            st.resetHooks()
+            st.xlsx.hooks.afterBuild = async () => { const g = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: `run_s5_b_${TOKEN}`, tenantId: st.tenantId }); await st.lock.createGuard(g).release() }
+            const b = await st.exportLines()
+            observed.leaseDuringBuild = { answer: answerOf(b), streamed: streamed(b), epochMoved: errorOf(b).details && errorOf(b).details.epochMoved, generationMoved: errorOf(b).details && errorOf(b).details.generationMoved, consults: st.seen.slice() }
+            // (c) a bump (an applicable preview) while the file is built: the token moved.
+            st.resetHooks()
+            st.xlsx.hooks.afterBuild = async () => { await st.lock.bumpGeneration(st.key, { reason: 'small_preview', tenantId: st.tenantId }) }
+            const c = await st.exportLines()
+            observed.bumpDuringBuild = { answer: answerOf(c), streamed: streamed(c), generationMoved: errorOf(c).details && errorOf(c).details.generationMoved }
+            // (d) a lease live at G1 (taken after C2's lock read, still held).
+            st.resetHooks()
+            grant = null
+            st.route.hooks.beforeReadGeneration = async (n: number) => { if (n === 2) grant = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: `run_s5_d_${TOKEN}`, tenantId: st.tenantId }) }
+            const d = await st.exportLines()
+            await st.lock.createGuard(grant).release()
+            observed.leaseAtG1 = { answer: answerOf(d), streamed: streamed(d) }
+            // Control: nothing moved since — the export is deliverable again (the gate wrote nothing).
+            st.resetHooks()
+            const again = await st.exportLines()
+            observed.again = { status: again.statusCode, consults: st.seen.slice() }
+            // (e) THE REVIEWER'S interleaving: C2's REPEATABLE READ snapshot is taken (complete, settled); before C2's lock
+            //     read a WHOLE zero-write FAILED execution lands (acquire = epoch + 1, begin, finish failed, release); C2's lock
+            //     read sees no lease, so C2 derives complete; the digest is intact (nothing written); G1's epoch refuses.
+            st.resetHooks()
+            const executionsBefore = (await st.executions()).length
+            st.reader.hooks.beforeReadState = async (n: number) => { if (n === 2) await zeroWriteRun(st, 'failed') }
+            const e = await st.exportLines()
+            observed.reviewerGap = {
+              answer: answerOf(e), streamed: streamed(e),
+              epochMoved: errorOf(e).details && errorOf(e).details.epochMoved, generationMoved: errorOf(e).details && errorOf(e).details.generationMoved,
+              consults: st.seen.slice(), executionsAdded: (await st.executions()).length - executionsBefore,
+              failedRows: (await st.executions()).filter((row: any) => row.status === 'failed').length,
+            }
+            // Afterwards the state is honest: C1 of the next export sees the failure.
+            st.resetHooks()
+            const after = await st.exportLines()
+            observed.afterReviewerGap = { answer: answerOf(after), streamed: streamed(after) }
+            const auditEnd = await exportAudit(st.tenantId)
+            observed.audit = { delivered: auditEnd.delivered.length, refused: auditEnd.refused.length, refusals: auditEnd.refused.map((row: any) => `${row.refusal}:${row.reason || ''}`) }
+            console.log(`[S5-02] ${JSON.stringify(observed)}`)
+            const handle = String(confirmed.continuationId).slice(-8)
+            expect(observed).toEqual({
+              clean: {
+                status: 200, headers: 'export_columns', lastHeader: '沿用说明', notedRows: 4, note: `由 D100-01 沿用（父边用量 2，关系 ${handle}）`,
+                sRootRows: 1, sRootQty: 10, duplicatedCodes: 0, consults: ['complete', 'complete'], routeGenerationReads: 2,
+                delivered: 1, deliveredDetail: { operation: 'prep_line_export', totalRowCount: 6, activeRowCount: 6, columnCount: 29, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 },
+                refusedBefore: 1,
+              },
+              leaseAfterG0: { answer: `409:${BLOCKED}:state:executing`, streamed: false },
+              leaseDuringBuild: { answer: `409:${STATE_CHANGED}:generation_moved:`, streamed: false, epochMoved: true, generationMoved: false, consults: ['complete', 'complete'] },
+              bumpDuringBuild: { answer: `409:${STATE_CHANGED}:generation_moved:`, streamed: false, generationMoved: true },
+              leaseAtG1: { answer: `409:${STATE_CHANGED}:lease_in_flight:`, streamed: false },
+              again: { status: 200, consults: ['complete', 'complete'] },
+              reviewerGap: { answer: `409:${STATE_CHANGED}:generation_moved:`, streamed: false, epochMoved: true, generationMoved: false, consults: ['complete', 'complete'], executionsAdded: 1, failedRows: 1 },
+              afterReviewerGap: { answer: `409:${BLOCKED}:state:failed_pending_recovery`, streamed: false },
+              audit: { delivered: 2, refused: 7, refusals: [`${BLOCKED}:state`, `${BLOCKED}:state`, `${STATE_CHANGED}:generation_moved`, `${STATE_CHANGED}:generation_moved`, `${STATE_CHANGED}:lease_in_flight`, `${STATE_CHANGED}:generation_moved`, `${BLOCKED}:state`] },
+            })
+            // (f) the same failure completed BEFORE G0, on a fresh settled sheet: C1's own snapshot refuses it.
+            const f = await s5Stack('s5_02f')
+            await settledContinuation(f)
+            await zeroWriteRun(f, 'failed')
+            f.resetHooks()
+            const fRes = await f.exportLines()
+            // (g) the positive control: a zero-write SELF-SETTLED success before G0 on another fresh settled sheet: 200.
+            const g = await s5Stack('s5_02g')
+            await settledContinuation(g)
+            await zeroWriteRun(g, 'succeeded', { settle: true })
+            g.resetHooks()
+            const gRes = await g.exportLines()
+            const tail = { failureBeforeG0: { answer: answerOf(fRes), streamed: streamed(fRes), consults: f.seen.slice() }, selfSettledSuccess: { status: gRes.statusCode, refreshState: ((await exportAudit(g.tenantId)).delivered.pop() || {}).refreshState, consults: g.seen.slice() } }
+            console.log(`[S5-02 f/g] ${JSON.stringify(tail)}`)
+            expect(tail).toEqual({
+              failureBeforeG0: { answer: `409:${BLOCKED}:state:failed_pending_recovery`, streamed: false, consults: ['failed_pending_recovery'] },
+              selfSettledSuccess: { status: 200, refreshState: 'complete', consults: ['complete', 'complete'] },
+            })
+          }, 600000)
+
+          test('S5-03 (B-M6 / A12) after the settlement a human fill still exports; a HOST-side machine-column write refuses SHEET_CHANGED_SINCE_SETTLEMENT (the file built, nothing streamed); the next preview raises the content hold and the export stays refused pending_confirmation', async () => {
+            const st = await s5Stack('s5_03')
+            await settledContinuation(st)
+            const fields = st.target.fieldIdMap
+            const rows = await st.rows()
+            const root = rows.find((row: any) => row.data[fields.componentSourceId || 'componentSourceId'] === 'S-001' && JSON.parse(String(row.data[fields.path || 'path'])).length === 1)
+            expect(root, 'the old S-001 root row').toBeTruthy()
+            await st.multitable.records.patchRecord({ sheetId: st.sheetId, recordId: root.id, changes: { [fields.notes || 'notes']: 'synthetic human fill' } })
+            st.resetHooks()
+            const human = await st.exportLines()
+            await st.multitable.records.patchRecord({ sheetId: st.sheetId, recordId: root.id, changes: { [fields.material || 'material']: 'M-HOST-EDITED' } })
+            st.resetHooks()
+            const machine = await st.exportLines()
+            const preview = await st.dryRun()
+            st.resetHooks()
+            const afterPreview = await st.exportLines()
+            const observed = {
+              human: { status: human.statusCode, streamed: streamed(human) },
+              machine: { answer: answerOf(machine), streamed: streamed(machine), fileBuilt: st.xlsx.calls > 0 },
+              preview: preview.body.data && preview.body.data.status,
+              afterPreview: { answer: answerOf(afterPreview), streamed: streamed(afterPreview) },
+            }
+            console.log(`[S5-03] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              human: { status: 200, streamed: true },
+              machine: { answer: `409:${SHEET_CHANGED}:machine_columns_changed:`, streamed: false, fileBuilt: true },
+              preview: 'suspended',
+              afterPreview: { answer: `409:${BLOCKED}:state:pending_confirmation`, streamed: false },
+            })
+          }, 300000)
+
+          test('S5-04 (A11 / G1) the step-4 tables ABSENT from the store binding (42P01 — a pre-102/103 database; the registry readable): the export is 503 STATE_UNREADABLE naming the store, nothing streamed, one export_refused row — never complete', async () => {
+            const client = await poolManager.get().getInternalPool().connect()
+            const schema = `s5_nostep4_${TOKEN}`
+            try {
+              await client.query(`CREATE SCHEMA ${schema}`)
+              await client.query(`CREATE VIEW ${schema}.integration_stock_prep_project_target AS SELECT * FROM public.integration_stock_prep_project_target`)
+              await client.query(`SET search_path TO ${schema}`)
+              const st = await s3aStack('s5_04', { pilot: false, refresh: realRefreshServices(dbOn(client)) })
+              const res = await st.exportLines()
+              const audit = await exportAudit(st.tenantId)
+              const observed = { answer: answerOf(res), store: errorOf(res).details && errorOf(res).details.store, streamed: streamed(res), refused: audit.refused.length, delivered: audit.delivered.length, refusal: audit.refused[0] && `${audit.refused[0].refusal}:${audit.refused[0].store}` }
+              console.log(`[S5-04] ${JSON.stringify(observed)}`)
+              expect(observed).toEqual({ answer: `503:${UNREADABLE}:unreadable:`, store: 'continuation', streamed: false, refused: 1, delivered: 0, refusal: `${UNREADABLE}:continuation` })
+            } finally {
+              await client.query('RESET search_path').catch(() => {})
+              await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
+              client.release()
+            }
+          }, 300000)
+
+          test('S5-05 (C10 (c) / U07, E-2) pilot exit with an open hold keeps the export refused; switch OFF with a pilot registry row on the managed sheet refuses 409 RETARGETED before any row read — both audited export_refused, nothing streamed', async () => {
+            const exit = await s3aStack('s5_05x', { pilot: true })
+            await firstPullApplied(exit)
+            exit.state.data = CF.secondPullSource()
+            expect((await exit.dryRun()).body.data.status).toBe('suspended')
+            await exit.pilotExit()
+            const afterExit = await exit.exportLines()
+            const exitAudit = await exportAudit(exit.tenantId)
+            const retargeted = await s3aStack('s5_05r', { pilot: true, switchOn: false })
+            const envMain0 = await retargeted.main(retargeted.envTarget.sheetId)
+            const res = await retargeted.exportLines()
+            const rAudit = await exportAudit(retargeted.tenantId)
+            const observed = {
+              pilotExit: { answer: answerOf(afterExit), streamed: streamed(afterExit), refused: exitAudit.refused.length, delivered: exitAudit.delivered.length },
+              retarget: { answer: answerOf(res), streamed: streamed(res), refused: rAudit.refused.length, refusal: rAudit.refused[0] && rAudit.refused[0].refusal, envUnchanged: sameJson(await retargeted.main(retargeted.envTarget.sheetId), envMain0), stepFourRows: await retargeted.stepFourRows() },
+            }
+            console.log(`[S5-05] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              pilotExit: { answer: `409:${BLOCKED}:state:pending_confirmation`, streamed: false, refused: 1, delivered: 0 },
+              retarget: { answer: `409:${RETARGETED}:project_registered_on_another_sheet:`, streamed: false, refused: 1, refusal: RETARGETED, envUnchanged: true, stepFourRows: 0 },
+            })
+          }, 300000)
+
+          test('S5-06 (C09, O-9) a registered NOT-governed project exports 200 with the pre-PR-5 headers and audit detail keys; the export writes no step-4 row; under a LIVE lease the same project is refused 409 lease_in_flight (the derived state hides the lease — the gate\'s own lock read sees it) and exports again once released', async () => {
+            const st = await s3aStack('s5_06', { pilot: false })
+            await firstPullApplied(st)
+            expect(await st.stepFourRows()).toBe(0)
+            const res = await st.exportLines()
+            const workbook = workbookOf(res)
+            const audit = await exportAudit(st.tenantId)
+            const grant = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: `run_s5_06_live_${TOKEN}`, tenantId: st.tenantId })
+            let leased: any
+            try {
+              leased = await st.exportLines()
+            } finally {
+              await st.lock.createGuard(grant).release()
+            }
+            const released = await st.exportLines()
+            const auditEnd = await exportAudit(st.tenantId)
+            const observed = {
+              status: res.statusCode,
+              headers: workbook ? (workbook.headers.join('|') === EXPORT_HEADERS.join('|') ? 'export_columns_exactly' : 'other') : null,
+              rows: workbook ? workbook.rows.length : null,
+              detailKeys: audit.delivered[0] ? Object.keys(audit.delivered[0]).sort() : null,
+              columnCount: audit.delivered[0] && audit.delivered[0].columnCount,
+              refused: audit.refused.length,
+              stepFourRows: await st.stepFourRows(),
+              governed: (await st.refresh.governance.consult(st.scope)).governed,
+              derivedUnderLease: 'see below',
+              underLease: { answer: answerOf(leased), streamed: streamed(leased) },
+              afterRelease: released.statusCode,
+              audit: { delivered: auditEnd.delivered.length, refused: auditEnd.refused.length },
+            }
+            // The derived state of an ungoverned project never shows a lease (O-9): the refusal above came from G0.
+            const live = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: `run_s5_06_probe_${TOKEN}`, tenantId: st.tenantId })
+            try {
+              observed.derivedUnderLease = derive(await st.refresh.governance.consult(st.scope)).status
+            } finally {
+              await st.lock.createGuard(live).release()
+            }
+            console.log(`[S5-06] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              status: 200, headers: 'export_columns_exactly', rows: 4, detailKeys: ['activeRowCount', 'columnCount', 'operation', 'totalRowCount'], columnCount: 28, refused: 0, stepFourRows: 0, governed: false,
+              derivedUnderLease: 'not_governed',
+              underLease: { answer: `409:${BLOCKED}:lease_in_flight:not_governed`, streamed: false },
+              afterRelease: 200,
+              audit: { delivered: 2, refused: 1 },
+            })
+          }, 300000)
+
+          test('S5-07 (O-9 answered, D-16) a PILOT project whose rows were pulled before it became pilot (no step-4 row at all) derives complete but is NOT settled: the export is 409 BLOCKED not_settled; one clean preview settles it (the state row and its digest appear) and the export is 200 without a 沿用说明 column', async () => {
+            const st = await s3aStack('s5_07', { pilot: false })
+            await firstPullApplied(st)
+            expect(await st.stepFourRows()).toBe(0)
+            await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_s5_07_admin'])
+            const before = derive(await st.refresh.governance.consult(st.scope))
+            const unsettled = await st.exportLines()
+            const settling = await st.dryRun()
+            const after = derive(await st.refresh.governance.consult(st.scope))
+            const res = await st.exportLines()
+            const workbook = workbookOf(res)
+            const audit = await exportAudit(st.tenantId)
+            const observed = {
+              before: { status: before.status, settled: before.settled, governed: before.governed },
+              unsettled: { answer: answerOf(unsettled), streamed: streamed(unsettled) },
+              settlingPreview: settling.body.data && settling.body.data.status,
+              after: { status: after.status, settled: after.settled },
+              settledDigestPresent: Boolean(((await q(`SELECT settled_sheet_machine_digest AS d FROM ${RT.state} WHERE sheet_id = $1 AND project_no = $2`, [st.sheetId, st.projectNo])).rows[0] || {}).d),
+              exported: { status: res.statusCode, lastHeader: workbook ? workbook.headers[workbook.headers.length - 1] : null, headerCount: workbook ? workbook.headers.length : null },
+              audit: { refused: audit.refused.map((row: any) => `${row.refusal}:${row.reason}`), delivered: audit.delivered.map((row: any) => `${row.refreshState}:${row.continuationCount}`) },
+            }
+            console.log(`[S5-07] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              before: { status: 'complete', settled: false, governed: 'pilot' },
+              unsettled: { answer: `409:${BLOCKED}:not_settled:complete`, streamed: false },
+              settlingPreview: 'ready',
+              after: { status: 'complete', settled: true },
+              settledDigestPresent: true,
+              exported: { status: 200, lastHeader: EXPORT_HEADERS[EXPORT_HEADERS.length - 1], headerCount: EXPORT_HEADERS.length },
+              audit: { refused: [`${BLOCKED}:not_settled`], delivered: ['complete:0'] },
+            })
           }, 300000)
         })
       })
