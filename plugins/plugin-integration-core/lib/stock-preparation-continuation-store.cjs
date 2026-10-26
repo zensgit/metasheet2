@@ -347,6 +347,14 @@ function changePlanStale(reason, extra = {}) {
   return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_STALE, 'the change plan is no longer what the server computes; read the page again (or preview again)', { reason, partial: false, ...extra })
 }
 
+// Why a plan that is no longer `confirmed` cannot be planned / executed: replaced by a later confirm, already written
+// (its controlled update ran), or invalidated.
+function planStatusReason(status) {
+  if (status === 'superseded') return 'plan_replaced'
+  if (status === 'written' || status === 'reviewed') return 'plan_written'
+  return 'plan_invalidated'
+}
+
 function changePlanNotAllowed(reason, extra = {}) {
   return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_NOT_ALLOWED, 'this change cannot be confirmed as a change plan', { reason, partial: false, ...extra })
 }
@@ -2547,7 +2555,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         if (planRow.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
         if (planRow.sheet_id !== scope.sheetId || planRow.project_no !== scope.projectNo) throw inputInvalid('the change plan belongs to another scope', 'changePlan.id')
         if (changePlan.verdict === 'matches') {
-          if (planRow.status !== 'confirmed') throw changePlanStale(planRow.status === 'superseded' ? 'plan_replaced' : 'plan_invalidated', { status: planRow.status })
+          if (planRow.status !== 'confirmed') throw changePlanStale(planStatusReason(planRow.status), { status: planRow.status })
           changePlanOutcome = Object.freeze({ id: planRow.id, verdict: 'matches', status: 'confirmed', invalidated: false, deferred: false })
         } else if (planRow.status === 'confirmed') {
           const running = await selectAll(trx, REFRESH_STORE_TABLES.execution, { sheet_id: scope.sheetId, project_no: scope.projectNo, status: 'running' }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' })
@@ -2702,7 +2710,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       if (!plan) throw changePlanStale('plan_absent')
       if (plan.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
       if (plan.sheet_id !== scope.sheetId || plan.project_no !== scope.projectNo) throw changePlanStale('plan_scope')
-      if (plan.status !== 'confirmed') throw changePlanStale(plan.status === 'superseded' ? 'plan_replaced' : 'plan_invalidated', { status: plan.status })
+      if (plan.status !== 'confirmed') throw changePlanStale(planStatusReason(plan.status), { status: plan.status })
       let row
       try {
         row = firstRow(await trx.insertOne(REFRESH_STORE_TABLES.execution, executionRow))
