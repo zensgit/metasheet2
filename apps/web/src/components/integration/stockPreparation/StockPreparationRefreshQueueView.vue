@@ -552,7 +552,8 @@ function confirmBodyFor(hold: StockPrepRefreshHold): StockPrepRefreshConfirmBody
 }
 
 function confirmWhy(hold: StockPrepRefreshHold): string {
-  if (!hold.confirmable) return bi('这一项现在不能确认。', 'This item cannot be confirmed right now.')
+  // PR-7b: the reason itself is the worded line under the title (stock-prep-refresh-not-confirmable); point to it.
+  if (!hold.confirmable) return bi('原因见上。', 'See the reason above.')
   if (!holdFingerprintsPresent(hold)) return bi('这一项还缺对照或需求依据的记录,不能确认。', 'This item lacks a comparison or evidence record, so it cannot be confirmed.')
   if (!receiptCompleteFor(receipt.value, hold.id)) return bi('先把这一项的每一页对照都打开看过。', 'Open every comparison page of this item first.')
   if (hold.history === 'history_unknown' && historyAck[hold.id] !== true) return bi('先勾选「我知道这份需求的历史无法查证」。', 'Tick “I understand this demand’s history cannot be verified” first.')

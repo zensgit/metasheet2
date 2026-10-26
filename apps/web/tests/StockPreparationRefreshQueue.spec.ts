@@ -685,6 +685,8 @@ describe('「拉取待确认」 — StockPreparationRefreshQueueView (RQ)', () =
       const cells = [...el.querySelectorAll('table[data-testid="stock-prep-refresh-comparison"] tbody tr td:last-child')].map((cell) => cell.textContent?.trim() ?? '')
       expect(cells, `${hold.kind}: the comparison column reads words`).toEqual(['一致', '不同', '缺数据,没法比较', '规格列没有声明,不比较', '根件的订单数量,不参与比较'])
     }
+    // The greyed confirm of a non-confirmable relationship points at the worded reason instead of repeating it.
+    expect(holdEl(root, 'relationship_reconfirm').querySelector('[data-testid="stock-prep-refresh-confirm-why"]')?.textContent?.trim()).toBe('原因见上。')
     // No raw server token anywhere in the page's text.
     const text = root.textContent ?? ''
     for (const token of [...pairing.HOLD_KINDS, ...pairing.NOT_CONFIRMABLE_REASONS, ...pairing.SHAPE_TOKENS, ...store.EVIDENCE_HISTORY_STATUSES, ...statuses]) {
