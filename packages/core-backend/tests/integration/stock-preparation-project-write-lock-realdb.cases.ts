@@ -5733,6 +5733,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const observed = { answer: answerOf(res), store: errorOf(res).details && errorOf(res).details.store, streamed: streamed(res), refused: audit.refused.length, delivered: audit.delivered.length, refusal: audit.refused[0] && `${audit.refused[0].refusal}:${audit.refused[0].store}` }
               console.log(`[S5-04] ${JSON.stringify(observed)}`)
               expect(observed).toEqual({ answer: `503:${UNREADABLE}:unreadable:`, store: 'continuation', streamed: false, refused: 1, delivered: 0, refusal: `${UNREADABLE}:continuation` })
+              // Step-4 review follow-ups (item 1, #6566 N1): the row keeps the export's own operation through the real
+              // jsonb round trip; the store's operation rides along as storeOperation.
+              expect({ operation: audit.refused[0].operation, storeOperation: audit.refused[0].storeOperation }).toEqual({ operation: 'prep_line_export', storeOperation: 'read_continuations' })
             } finally {
               await client.query('RESET search_path').catch(() => {})
               await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
