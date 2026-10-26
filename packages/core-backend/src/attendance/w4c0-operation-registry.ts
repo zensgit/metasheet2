@@ -37,6 +37,7 @@ import type {
   VerifiedAttendanceOperationIdentityV1,
   VerifiedAttendanceOrgIdentityV1,
 } from './w4c0-identity'
+import { withAttendanceExclusiveIdleSessionV1, type AttendanceOwningSessionV1, type AttendanceSessionLeaseV1 } from './attendance-owning-session'
 import { canonicalSheetFenceKey } from '../multitable/canonical-sheet-fence'
 import {
   SettlementCoordinationRestartSignalV1,
@@ -46,6 +47,7 @@ import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
   assertConnectionIsIdleV1,
+  AttendanceW4IdentityError,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
   deriveAttendanceOperationCandidateIdentityV1,
@@ -1112,22 +1114,27 @@ async function releaseCleaningSessionFences(
 }
 
 export async function runAttendanceResultOperationTransactionV1<T>(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
   options?: { readonly attendanceCleaningAuthority: true; readonly attendanceCleaningSheetIds: readonly string[] },
 ): Promise<T> {
   if (options !== undefined && (options.attendanceCleaningAuthority !== true
     || !Array.isArray(options.attendanceCleaningSheetIds) || options.attendanceCleaningSheetIds.length < 1
     || options.attendanceCleaningSheetIds.length > 2)) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
-  // Gate E (#4844) first batch: `connection` is CALLER-supplied. PostgreSQL only WARNs on a
-  // nested `BEGIN` (never errors) — on a dirty caller connection this function's own `COMMIT`
-  // below would durably publish the caller's uncommitted writes, strictly worse than a merely
-  // wrong snapshot: this function actually commits. Proven idle exactly ONCE, BEFORE the retry
-  // loop (not inside it) — the loop's own `ROLLBACK` on a failed attempt already restores idle
-  // between attempts, so the precondition is "idle on entry", not "idle every iteration".
-  // Reuses the EXISTING exported probe (w4c0-identity.ts) rather than building a second one —
-  // see that function's own doc comment for the SAVEPOINT-probe proof and refusal code
-  // (`W4C0_CONNECTION_NOT_IDLE`, never a raw SQLSTATE).
+  return withAttendanceExclusiveIdleSessionV1(
+    connection,
+    (lease) => runAttendanceResultOperationOnLeaseV1(lease, body, options),
+    () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'),
+  )
+}
+
+async function runAttendanceResultOperationOnLeaseV1<T>(
+  connection: AttendanceSessionLeaseV1,
+  body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
+  options?: { readonly attendanceCleaningAuthority: true; readonly attendanceCleaningSheetIds: readonly string[] },
+): Promise<T> {
+  // Admission owns this same session until retries, settlement and unlock finish.
+  // A borrowed connection refuses before this runner can BEGIN or roll it back.
   await assertConnectionIsIdleV1(connection)
   let attempt = 0
   // W4_TRANSACTION_MAX_RETRIES retries => up to (1 + retries) attempts.

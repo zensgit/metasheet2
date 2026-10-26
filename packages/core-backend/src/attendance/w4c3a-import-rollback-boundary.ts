@@ -1,3 +1,4 @@
+import type { AttendanceOwningSessionV1 } from './attendance-owning-session'
 import {
   AttendanceW4AuthorizationError,
   createAuthorizedAttendanceWriteContextV1,
@@ -71,7 +72,7 @@ export interface AttendanceImportRollbackBoundaryV1 {
 
 export interface AttendanceImportRollbackBoundaryDependenciesV1 {
   acquireConnection(): Promise<{
-    client: AttendanceW4TransactionClientV1
+    client: AttendanceOwningSessionV1
     /** pg's `release(err?)`: a truthy error destroys the connection instead of returning it. */
     release(error?: Error): void
   }>

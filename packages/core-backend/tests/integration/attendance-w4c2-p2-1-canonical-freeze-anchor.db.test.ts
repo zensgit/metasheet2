@@ -1,3 +1,4 @@
+import { AttendanceManagedPgPool } from '../../src/attendance/attendance-owning-session'
 // Current layer split: the original 16 guards below drive the real legacy
 // canonical boundary over PostgreSQL. Their historical route-shape rationale
 // remains below. Strict effective-timezone HTTP behavior is tested separately
@@ -139,7 +140,7 @@ import * as path from 'path'
 import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
 import {
   assertLegacyPunchResponseGoldenShapeResolvedV1,
 } from '../utils/attendance-w4c2-golden-response'
@@ -511,7 +512,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    pool = new Pool({ connectionString: dbUrl })
+    pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
     legacyDriver = createLegacyLivePunchBoundaryDriver(pool)
 
     // Group A fixtures.

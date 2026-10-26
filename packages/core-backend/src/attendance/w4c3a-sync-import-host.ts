@@ -1,3 +1,4 @@
+import type { AttendanceOwningSessionV1 } from './attendance-owning-session'
 import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a P06 — core-owned modern synchronous import commit host.
@@ -85,7 +86,7 @@ import {
   type AttendanceSyncImportResponseV1,
 } from './w4c3a-sync-import-kernel'
 
-export type AttendanceSyncImportHostConnectionV1 = AttendanceW4TransactionClientV1
+export type AttendanceSyncImportHostConnectionV1 = AttendanceOwningSessionV1
 
 export type AttendanceSyncImportHostDepsV1 = Readonly<{
   acquireConnection(): Promise<{

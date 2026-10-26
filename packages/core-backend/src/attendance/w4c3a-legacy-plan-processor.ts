@@ -1,3 +1,4 @@
+import { withAttendanceExclusiveIdleSessionV1, type AttendanceOwningSessionV1, type AttendanceSessionLeaseV1 } from './attendance-owning-session'
 import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a core-owned canonical legacy-plan processor (P07/P08 recovery).
@@ -11,6 +12,7 @@ import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezon
  * Authority: P08 restart-recovery blueprint + OD-W4C-56/57/58/59/60.
  */
 import {
+  AttendanceW4IdentityError,
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceImportReservationLocksV1,
@@ -49,9 +51,7 @@ import {
   type VerifiedAttendanceLegacyPlanV1,
 } from './w4c3a-legacy-plan-worker'
 
-export type AttendanceLegacyPlanProcessorConnectionV1 = AttendanceW4TransactionClientV1 & {
-  release?(): void
-}
+export type AttendanceLegacyPlanProcessorConnectionV1 = AttendanceOwningSessionV1
 
 export type AttendanceLegacyPlanProcessorDepsV1 = Readonly<{
   /**
@@ -179,7 +179,7 @@ export async function acquireAttendanceLegacyPlanClass11V1(
 }
 
 function assembleCallbacks(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceSessionLeaseV1,
 ): AttendanceLegacyPlanWorkerCallbacksV1<AttendanceW4TransactionClientV1> {
   // Repository is org-scoped; worker passes candidate.orgId explicitly.
   // A fresh repository is created per transaction client.
@@ -354,9 +354,11 @@ export function createAttendanceLegacyPlanProcessorV1(
       const acquired = await deps.acquireConnection()
       let discard: Error | undefined
       try {
-        const callbacks = assembleCallbacks(acquired.client)
-        const worker = createAttendanceLegacyPlanWorkerV1(callbacks)
-        return await worker.process(jobId)
+        return await withAttendanceExclusiveIdleSessionV1(acquired.client, async (lease) => {
+          const callbacks = assembleCallbacks(lease)
+          const worker = createAttendanceLegacyPlanWorkerV1(callbacks)
+          return await worker.process(jobId)
+        }, () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'))
       } catch (error) {
         // Settlement coordination (r6.1 §1.1 P1-1): a connection whose state the runner could not vouch for is
         // destroyed, not returned; every other error returns it as before. The error itself goes up unchanged.

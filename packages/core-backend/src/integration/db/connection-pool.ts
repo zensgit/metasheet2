@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { PoolClient, PoolConfig, QueryResult, QueryResultRow } from 'pg';
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
+import { AttendanceManagedPgPool } from '../../attendance/attendance-owning-session'
 import { noteSettlementCoordinationMainPoolAccessV1 } from '../../attendance/coordination/settlement-coordination-context'
 import { Logger } from '../../core/logger'
 import type { RecoveryArchiveTransactionDepthProbe } from '../../multitable/recovery-archive-crypto'
@@ -101,7 +102,7 @@ export class ConnectionPool {
   })
 
   constructor(opts: ConnectionPoolOptions) {
-    this.pool = new Pool(opts)
+    this.pool = new AttendanceManagedPgPool(opts)
     noteSettlementCoordinationNestingOnConnect(this.pool, opts.name || 'main')
     this.slowMs = opts.slowQueryMs || parseInt(process.env.DB_SLOW_MS || '500', 10)
     this.name = opts.name || 'main'

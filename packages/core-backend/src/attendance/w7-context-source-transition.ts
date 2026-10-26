@@ -71,10 +71,12 @@
  * adds: every promotion into the group arm of the ladder is refused by the
  * producer-delivery declaration (`w7-context-source-delivery.ts`).
  */
+import { withAttendanceExclusiveIdleSessionV1, type AttendanceOwningSessionV1, type AttendanceSessionLeaseV1 } from './attendance-owning-session'
 import { createHash } from 'node:crypto'
 import {
   acquireAttendanceCalculationRolloutLock,
   assertConnectionIsIdleV1,
+  AttendanceW4IdentityError,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
   type AttendanceW4TransactionClientV1,
@@ -658,7 +660,7 @@ function isLockNotAvailable(error: unknown): boolean {
  * returned.
  */
 async function acquireContextSourceLockSessionExclusive(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceSessionLeaseV1,
   key: bigint,
 ): Promise<void> {
   await assertConnectionIsIdleV1(connection)
@@ -1494,7 +1496,7 @@ async function buildContextSourcePlan(
  * lock, is ever authoritative.
  */
 export async function planAttendanceW7ContextSourceTransitionV1(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   rawInput: AttendanceW7ContextSourceTransitionPlanInputV1,
 ): Promise<AttendanceW7ContextSourceTransitionPlanV1> {
   if (typeof rawInput !== 'object' || rawInput === null) {
@@ -1519,17 +1521,23 @@ export async function planAttendanceW7ContextSourceTransitionV1(
   if (planCompareWindow && planCompareWindow.from > planCompareWindow.to) {
     fail('W7_CONTEXT_SOURCE_TRANSITION_COMPARE_WINDOW_INVALID')
   }
-  await assertConnectionIsIdleV1(connection)
-  await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
-  try {
-    await connection.query("SELECT set_config('statement_timeout', $1, true)", [
-      String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
-    ])
-    await insidePlanTransactionForTests?.(connection)
-    return await buildContextSourcePlan(connection, orgId, targetState, planCompareWindow)
-  } finally {
-    await connection.query('ROLLBACK').catch(() => undefined)
-  }
+  return withAttendanceExclusiveIdleSessionV1(
+    connection,
+    async (lease) => {
+      await assertConnectionIsIdleV1(lease)
+      await lease.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      try {
+        await lease.query("SELECT set_config('statement_timeout', $1, true)", [
+          String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
+        ])
+        await insidePlanTransactionForTests?.(lease)
+        return await buildContextSourcePlan(lease, orgId, targetState, planCompareWindow)
+      } finally {
+        await lease.query('ROLLBACK').catch(() => undefined)
+      }
+    },
+    () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,7 +1552,7 @@ export type AttendanceW7ContextSourceTransitionResultV1 = Readonly<{
 }>
 
 export async function transitionAttendanceW7ContextSourceV1(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   rawInput: AttendanceW7ContextSourceTransitionInputV1,
 ): Promise<AttendanceW7ContextSourceTransitionResultV1> {
   // PHASE 0 — pure validation. Nothing below this line has touched the
@@ -1558,157 +1566,163 @@ export async function transitionAttendanceW7ContextSourceV1(
   // strictly BEFORE any transaction is opened. See
   // `acquireContextSourceLockSessionExclusive` for why session scope is
   // load-bearing rather than stylistic.
-  await acquireContextSourceLockSessionExclusive(connection, advisoryKey)
-  try {
-    // Inside the try, not before it: a throwing test hook must still release
-    // the lock through the `finally` below rather than leak it.
-    await afterExclusiveLockForTests?.()
-    return await runAttendanceResultOperationTransactionV1(connection, async (trx) => {
-      // PHASE 2 — inside SERIALIZABLE, ZERO DML except the bootstrap INSERT
-      // that materializes the ladder's base row.
-      const orgAllowlisted = isAttendanceW7ContextSourceOrgAllowlistedV1(input.orgId)
-      if (!orgAllowlisted) fail(PREDICATE_REFUSAL_CODES.ORG_ALLOWLISTED)
+  return withAttendanceExclusiveIdleSessionV1(
+    connection,
+    async (lease) => {
+      await acquireContextSourceLockSessionExclusive(lease, advisoryKey)
+      try {
+        // Inside the try, not before it: a throwing test hook must still release
+        // the lock through the `finally` below rather than leak it.
+        await afterExclusiveLockForTests?.()
+        return await runAttendanceResultOperationTransactionV1(lease, async (trx) => {
+          // PHASE 2 — inside SERIALIZABLE, ZERO DML except the bootstrap INSERT
+          // that materializes the ladder's base row.
+          const orgAllowlisted = isAttendanceW7ContextSourceOrgAllowlistedV1(input.orgId)
+          if (!orgAllowlisted) fail(PREDICATE_REFUSAL_CODES.ORG_ALLOWLISTED)
 
-      const persisted = await lockContextSourceRowForBootstrapOrRead(
-        trx,
-        input.orgId,
-        input.actorId,
-        input.engineVersion,
-        input.expectedState,
-        input.targetState,
-        orgAllowlisted,
-      )
+          const persisted = await lockContextSourceRowForBootstrapOrRead(
+            trx,
+            input.orgId,
+            input.actorId,
+            input.engineVersion,
+            input.expectedState,
+            input.targetState,
+            orgAllowlisted,
+          )
 
-      // A stale caller belief about current state/version is rejected under
-      // lock, with zero further DML, even though the input-time matrix check
-      // already passed against the CLAIMED pair.
-      if (persisted.state !== input.expectedState || persisted.version !== input.expectedVersion) {
-        fail('W7_CONTEXT_SOURCE_TRANSITION_STALE_EXPECTED_STATE')
-      }
-      const currentState = persisted.state
+          // A stale caller belief about current state/version is rejected under
+          // lock, with zero further DML, even though the input-time matrix check
+          // already passed against the CLAIMED pair.
+          if (persisted.state !== input.expectedState || persisted.version !== input.expectedVersion) {
+            fail('W7_CONTEXT_SOURCE_TRANSITION_STALE_EXPECTED_STATE')
+          }
+          const currentState = persisted.state
 
-      // Second matrix check, against the PERSISTED state. Defense in depth and
-      // documented as such: once the staleness check above has passed,
-      // `currentState` is provably identical to `input.expectedState` and the
-      // pair was already matrix-validated at input time, so this call is
-      // currently redundant with them. It is kept against a future refactor
-      // that decouples `currentState` from the staleness check — never trusting
-      // the caller's claim alone, only currently redundant with it.
-      const row = findAttendanceW7ContextSourceTransitionRowV1(currentState, input.targetState)
-      if (!row) fail(PREDICATE_REFUSAL_CODES.LEGAL_TRANSITION_PAIR)
+          // Second matrix check, against the PERSISTED state. Defense in depth and
+          // documented as such: once the staleness check above has passed,
+          // `currentState` is provably identical to `input.expectedState` and the
+          // pair was already matrix-validated at input time, so this call is
+          // currently redundant with them. It is kept against a future refactor
+          // that decouples `currentState` from the staleness check — never trusting
+          // the caller's claim alone, only currently redundant with it.
+          const row = findAttendanceW7ContextSourceTransitionRowV1(currentState, input.targetState)
+          if (!row) fail(PREDICATE_REFUSAL_CODES.LEGAL_TRANSITION_PAIR)
 
-      // The predicate set, evaluated INSIDE this transaction — never a reused
-      // preflight result.
-      const evaluation = await evaluatePredicates(
-        trx,
-        input.orgId,
-        currentState,
-        input.targetState,
-        orgAllowlisted,
-        true,
-        true,
-        // Pair-required and shape-validated in phase 0; `null` on every pair
-        // that is not the compare pair.
-        input.compareWindow,
-        // Phase 0 already validated the (resume-widened) reference set.
-        true,
-      )
-      // Each applicable failing predicate raises its OWN refusal code, in the
-      // enumeration's order, so a caller can tell which criterion blocked it
-      // and a test can seed exactly one failure and assert exactly one code.
-      for (const predicate of evaluation.predicates) {
-        // `pass !== true` mirrors `blocked` exactly: an applicable criterion the
-        // boundary could not evaluate must refuse, never proceed.
-        //
-        // UNREACHABLE ON ANY LIVE PATH TODAY, and stated with the evidence
-        // rather than as a claim: the writer calls `evaluatePredicates` with all
-        // three gating flags `true` (after its own allowlist refusal) and with
-        // `resumeEvidenceValidated: true`, so no applicable predicate can be
-        // `pass: null` here. Loosening THIS comparison to `pass === false`
-        // leaves the whole battery green — measured, not assumed. The
-        // `blocked` twin in the reporter is the one that is observable, and it
-        // IS pinned (see the P3-4 leg in the real-PG suite).
-        //
-        // Kept deliberately, on the same footing as the second
-        // `findLegalTransition` call this file already documents as
-        // redundant-but-retained: the gate and the report must not be able to
-        // disagree under a future edit that makes an unevaluated predicate
-        // reachable on the write path.
-        if (predicate.applicable && predicate.pass !== true) {
-          fail(PREDICATE_REFUSAL_CODES[predicate.code])
-        }
-      }
+          // The predicate set, evaluated INSIDE this transaction — never a reused
+          // preflight result.
+          const evaluation = await evaluatePredicates(
+            trx,
+            input.orgId,
+            currentState,
+            input.targetState,
+            orgAllowlisted,
+            true,
+            true,
+            // Pair-required and shape-validated in phase 0; `null` on every pair
+            // that is not the compare pair.
+            input.compareWindow,
+            // Phase 0 already validated the (resume-widened) reference set.
+            true,
+          )
+          // Each applicable failing predicate raises its OWN refusal code, in the
+          // enumeration's order, so a caller can tell which criterion blocked it
+          // and a test can seed exactly one failure and assert exactly one code.
+          for (const predicate of evaluation.predicates) {
+            // `pass !== true` mirrors `blocked` exactly: an applicable criterion the
+            // boundary could not evaluate must refuse, never proceed.
+            //
+            // UNREACHABLE ON ANY LIVE PATH TODAY, and stated with the evidence
+            // rather than as a claim: the writer calls `evaluatePredicates` with all
+            // three gating flags `true` (after its own allowlist refusal) and with
+            // `resumeEvidenceValidated: true`, so no applicable predicate can be
+            // `pass: null` here. Loosening THIS comparison to `pass === false`
+            // leaves the whole battery green — measured, not assumed. The
+            // `blocked` twin in the reporter is the one that is observable, and it
+            // IS pinned (see the P3-4 leg in the real-PG suite).
+            //
+            // Kept deliberately, on the same footing as the second
+            // `findLegalTransition` call this file already documents as
+            // redundant-but-retained: the gate and the report must not be able to
+            // disagree under a future edit that makes an unevaluated predicate
+            // reachable on the write path.
+            if (predicate.applicable && predicate.pass !== true) {
+              fail(PREDICATE_REFUSAL_CODES[predicate.code])
+            }
+          }
 
-      // PHASE 3 — the only two DML statements of the transition, in a fixed
-      // order: the EVENT insert first, the STATE update second. Both share one
-      // transaction, so either order would be atomic; this ordering also lets
-      // the two failure-injection seams independently exercise "a failed event
-      // insert leaves state/version unchanged" and "a failed state update
-      // leaves no event".
-      await beforeEventInsertForTests?.()
-      await trx.query(
-        `INSERT INTO attendance_calculation_context_source_events
+          // PHASE 3 — the only two DML statements of the transition, in a fixed
+          // order: the EVENT insert first, the STATE update second. Both share one
+          // transaction, so either order would be atomic; this ordering also lets
+          // the two failure-injection seams independently exercise "a failed event
+          // insert leaves state/version unchanged" and "a failed state update
+          // leaves no event".
+          await beforeEventInsertForTests?.()
+          await trx.query(
+            `INSERT INTO attendance_calculation_context_source_events
            (org_id, prior_state, new_state, reason_code, engine_version, actor_id, evidence)
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-        [
-          input.orgId,
-          currentState,
-          input.targetState,
-          input.reasonCode,
-          input.engineVersion,
-          input.actorId,
-          JSON.stringify({
-            schemaVersion: 1,
-            manifestSha256: input.evidenceManifestSha256,
-            correlationId: input.correlationId,
-            targetState: input.targetState,
-            ladderRole: row.ladderRole,
-            preconditionCounts: {
-              incompleteOperations: evaluation.counts.incompleteOperations,
-              unresolvedReviews: evaluation.counts.unresolvedReviews,
-              defectiveRequestSnapshots: evaluation.counts.defectiveRequestSnapshots,
-              defectiveRequestSnapshotsByCell: evaluation.counts.defectiveRequestSnapshotsByCell,
-              undeliveredStateProducers: evaluation.counts.undeliveredStateProducers,
-              undeliveredCompareEvidence: evaluation.counts.undeliveredCompareEvidence,
-              suspendSourceWritersInFlight: evaluation.counts.suspendSourceWritersInFlight,
-            },
-            references: input.evidenceReferences,
-            // Recorded VERBATIM: the compare window is operator-declared
-            // evidence, and a promotion justified by a window nobody can later
-            // recover is not auditable. `null` on every non-compare pair.
-            compareWindow: input.compareWindow,
-          }),
-        ],
-      )
-      await beforeStateUpdateForTests?.()
-      await trx.query(
-        `UPDATE attendance_calculation_context_source_state
+            [
+              input.orgId,
+              currentState,
+              input.targetState,
+              input.reasonCode,
+              input.engineVersion,
+              input.actorId,
+              JSON.stringify({
+                schemaVersion: 1,
+                manifestSha256: input.evidenceManifestSha256,
+                correlationId: input.correlationId,
+                targetState: input.targetState,
+                ladderRole: row.ladderRole,
+                preconditionCounts: {
+                  incompleteOperations: evaluation.counts.incompleteOperations,
+                  unresolvedReviews: evaluation.counts.unresolvedReviews,
+                  defectiveRequestSnapshots: evaluation.counts.defectiveRequestSnapshots,
+                  defectiveRequestSnapshotsByCell: evaluation.counts.defectiveRequestSnapshotsByCell,
+                  undeliveredStateProducers: evaluation.counts.undeliveredStateProducers,
+                  undeliveredCompareEvidence: evaluation.counts.undeliveredCompareEvidence,
+                  suspendSourceWritersInFlight: evaluation.counts.suspendSourceWritersInFlight,
+                },
+                references: input.evidenceReferences,
+                // Recorded VERBATIM: the compare window is operator-declared
+                // evidence, and a promotion justified by a window nobody can later
+                // recover is not auditable. `null` on every non-compare pair.
+                compareWindow: input.compareWindow,
+              }),
+            ],
+          )
+          await beforeStateUpdateForTests?.()
+          await trx.query(
+            `UPDATE attendance_calculation_context_source_state
             SET state = $2, prior_state = state, engine_version = $3, reason_code = $4,
                 actor_id = $5, changed_at = now(), version = version + 1
           WHERE org_id = $1`,
-        [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
-      )
-      return Object.freeze({
-        orgId: input.orgId,
-        state: input.targetState,
-        priorState: currentState,
-        version: persisted.version + 1,
-      })
-    })
-  } finally {
-    // PHASE 4 — released unconditionally, including on every throwing path
-    // above: a normal success or a precondition rejection must never leave the
-    // session holding this lock for the next checkout of this pooled
-    // connection.
-    //
-    // The `.catch(() => undefined)` is deliberate, not sloppy: a `finally` that
-    // itself throws REPLACES whatever the `try` returned or threw — so an
-    // unguarded release failure (e.g. a dropped connection) would turn an
-    // already-COMMITTED transition into a thrown exception, or replace a typed
-    // refusal with an opaque connection error. Both are strictly worse than a
-    // lock outliving this call by one dropped connection's remaining lifetime,
-    // and PostgreSQL releases session-level advisory locks automatically once
-    // the server observes that connection close.
-    await releaseContextSourceLockSessionExclusive(connection, advisoryKey).catch(() => undefined)
-  }
+            [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
+          )
+          return Object.freeze({
+            orgId: input.orgId,
+            state: input.targetState,
+            priorState: currentState,
+            version: persisted.version + 1,
+          })
+        })
+      } finally {
+        // PHASE 4 — released unconditionally, including on every throwing path
+        // above: a normal success or a precondition rejection must never leave the
+        // session holding this lock for the next checkout of this pooled
+        // connection.
+        //
+        // The `.catch(() => undefined)` is deliberate, not sloppy: a `finally` that
+        // itself throws REPLACES whatever the `try` returned or threw — so an
+        // unguarded release failure (e.g. a dropped connection) would turn an
+        // already-COMMITTED transition into a thrown exception, or replace a typed
+        // refusal with an opaque connection error. Both are strictly worse than a
+        // lock outliving this call by one dropped connection's remaining lifetime,
+        // and PostgreSQL releases session-level advisory locks automatically once
+        // the server observes that connection close.
+        await releaseContextSourceLockSessionExclusive(lease, advisoryKey).catch(() => undefined)
+      }
+    },
+    () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'),
+  )
 }
