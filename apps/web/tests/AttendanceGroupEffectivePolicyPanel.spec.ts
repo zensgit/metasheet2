@@ -273,7 +273,7 @@ describe('AttendanceGroupEffectivePolicyPanel', () => {
     const rows = Array.from(container!.querySelectorAll('.attendance-group-effective-policy-panel__domain-row'))
     const membershipRow = rows.find((row) => row.textContent?.includes('Membership'))
     expect(membershipRow?.textContent).toContain('Unrecognized')
-    expect(membershipRow?.textContent).not.toMatch(/Effective|Org default|Preview only|Needs configuration|Conflict/)
+    expect(membershipRow?.textContent).not.toMatch(/Effective|Org default|Inherited from organization|Preview only|Needs configuration|Conflict/)
   })
 
   it('navigates via the injected router for a group_context_route editorRef (schedule domain)', async () => {

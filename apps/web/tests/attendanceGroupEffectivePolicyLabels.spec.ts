@@ -39,10 +39,10 @@ describe('attendanceGroupEffectivePolicyLabels — §5.5 exhaustive display maps
   it('maps every AttendanceGroupEffectivePolicySourceLabelV1 member to exact bilingual text', () => {
     const expected: Record<AttendanceGroupEffectivePolicySourceLabelV1, string> = {
       effective: 'Effective|生效中',
-      org_inherited: 'Org default|继承组织默认',
+      org_inherited: 'Inherited from organization|继承组织默认',
       preview_only: 'Preview only|仅预览',
       needs_configuration: 'Needs configuration|待配置',
-      conflict_action_required: 'Conflict — action required|存在冲突，需处理',
+      conflict_action_required: 'Conflict - action required|存在冲突，需处理',
     }
     for (const value of ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1) {
       expect(attendanceGroupEffectivePolicySourceLabelText(value, tr)).toBe(expected[value])

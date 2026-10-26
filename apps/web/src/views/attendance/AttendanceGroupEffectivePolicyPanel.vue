@@ -101,6 +101,17 @@
           >
             {{ tr('Open', '前往') }}
           </button>
+          <dl v-if="row.details.length" class="attendance-group-effective-policy-panel__domain-details">
+            <div
+              v-for="detail in row.details"
+              :key="detail.key"
+              class="attendance-group-effective-policy-panel__detail-row"
+              :data-attendance-w6-effective-policy-detail="detail.key"
+            >
+              <dt>{{ detail.label }}</dt>
+              <dd>{{ detail.value }}</dd>
+            </div>
+          </dl>
         </li>
       </ul>
 
@@ -192,6 +203,7 @@ import {
   type AttendanceGroupEffectivePolicyStageActionV1,
   type AttendanceGroupEffectivePolicyDomainSummaryKeyV1,
 } from './attendanceGroupEffectivePolicyLabels'
+import { attendanceGroupEffectivePolicyDetails } from './attendanceGroupEffectivePolicyDetails'
 
 const props = defineProps<{
   groupId: string
@@ -317,6 +329,7 @@ interface DomainRow {
   key: AttendanceGroupEffectivePolicyDomainSummaryKeyV1
   domainText: string
   labelText: string
+  details: ReturnType<typeof attendanceGroupEffectivePolicyDetails>
   nav: AttendanceGroupEffectivePolicyEditorNavigationV1 | null
   editorRef: AttendanceGroupEffectivePolicyEditorRefV1 | null
 }
@@ -341,6 +354,7 @@ const domainRows = computed<DomainRow[]>(() => {
       key: key as AttendanceGroupEffectivePolicyDomainSummaryKeyV1,
       domainText: attendanceGroupEffectivePolicyDomainText(domainEnumValue, tr),
       labelText,
+      details: attendanceGroupEffectivePolicyDetails(key as AttendanceGroupEffectivePolicyDomainSummaryKeyV1, summary, tr),
       nav,
       editorRef,
     })
@@ -440,9 +454,25 @@ const conflictRows = computed<ConflictRow[]>(() => {
 }
 .attendance-group-effective-policy-panel__domain-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   font-size: 12px;
+}
+.attendance-group-effective-policy-panel__domain-details {
+  flex-basis: 100%;
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+.attendance-group-effective-policy-panel__detail-row {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) minmax(0, 1fr);
+  gap: 8px;
+}
+.attendance-group-effective-policy-panel__detail-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .attendance-group-effective-policy-panel__conflicts ul {
   list-style: none;

@@ -152,8 +152,8 @@ describe('W6 generic policy workspace', () => {
     expect(apiFetch).toHaveBeenCalledTimes(1)
     expect([...container.querySelectorAll('.attendance-group-effective-policy-panel__domain-label')]
       .map(node => node.textContent)).toEqual([
-      'Effective', 'Org default', 'Preview only', 'Needs configuration',
-      'Conflict — action required', 'Org default', 'Effective',
+      'Effective', 'Inherited from organization', 'Preview only', 'Needs configuration',
+      'Conflict - action required', 'Inherited from organization', 'Effective',
     ])
     click('[data-attendance-w6-effective-policy-domain-nav="rules"]')
     expect(state.route.mock.calls).toEqual([['rules', 'rule-sets']])

@@ -109,10 +109,10 @@ export type AttendanceGroupFixedScheduleStateV1 = (typeof ATTENDANCE_GROUP_FIXED
 
 const SOURCE_LABEL_TEXT: Record<AttendanceGroupEffectivePolicySourceLabelV1, (tr: TranslateFn) => string> = {
   effective: (tr) => tr('Effective', '生效中'),
-  org_inherited: (tr) => tr('Org default', '继承组织默认'),
+  org_inherited: (tr) => tr('Inherited from organization', '继承组织默认'),
   preview_only: (tr) => tr('Preview only', '仅预览'),
   needs_configuration: (tr) => tr('Needs configuration', '待配置'),
-  conflict_action_required: (tr) => tr('Conflict — action required', '存在冲突，需处理'),
+  conflict_action_required: (tr) => tr('Conflict - action required', '存在冲突，需处理'),
 }
 
 export function attendanceGroupEffectivePolicySourceLabelText(

@@ -5674,9 +5674,9 @@
                     >
                       <div class="attendance__work-time-drawer-header">
                         <div>
-                          <h6 id="attendance-group-rule-policy-drawer-title">{{ tr('Rule policy settings', '规则策略设置') }}</h6>
+                          <h6 id="attendance-group-rule-policy-drawer-title">{{ attendanceGroupPolicyWorkspaceEnabled ? tr('Rule configuration reference', '规则配置参考') : tr('Rule policy settings', '规则策略设置') }}</h6>
                           <span class="attendance__field-hint">
-                            {{ tr('This drawer summarizes the group rule link; rule contents remain in Rule Sets.', '此抽屉汇总考勤组关联的规则；规则内容仍在规则集中维护。') }}
+                            {{ attendanceGroupPolicyWorkspaceEnabled ? tr("These are current editor/catalog values, not the saved group's effective policy. View source and effect in Group effective policy.", '此处为当前编辑器与目录中的配置参考，不代表已保存考勤组的有效策略。来源与生效状态请查看组有效策略。') : tr('This drawer summarizes the group rule link; rule contents remain in Rule Sets.', '此抽屉汇总考勤组关联的规则；规则内容仍在规则集中维护。') }}
                           </span>
                         </div>
                         <button
@@ -5690,9 +5690,9 @@
                       </div>
 
                       <div class="attendance__work-time-drawer-body" data-attendance-group-rule-policy-scope>
-                        <strong>{{ tr('Group rule link', '考勤组规则关联') }}</strong>
+                        <strong>{{ attendanceGroupPolicyWorkspaceEnabled ? tr('Current editor rule selection', '当前编辑器规则选择') : tr('Group rule link', '考勤组规则关联') }}</strong>
                         <span>
-                          {{ tr('The selected rule set is reused by the group; this panel does not create group-owned rule overrides.', '考勤组复用已选规则集；此面板不会创建考勤组级规则覆盖。') }}
+                          {{ attendanceGroupPolicyWorkspaceEnabled ? tr('Changing this selection does not change the saved group until its existing Save command succeeds.', '此选择须在原有保存操作成功后才会修改已保存的考勤组。') : tr('The selected rule set is reused by the group; this panel does not create group-owned rule overrides.', '考勤组复用已选规则集；此面板不会创建考勤组级规则覆盖。') }}
                         </span>
                       </div>
 
@@ -5883,9 +5883,9 @@
                     >
                       <div class="attendance__work-time-drawer-header">
                         <div>
-                          <h6 id="attendance-group-punch-method-drawer-title">{{ tr('Punch method settings', '打卡方式设置') }}</h6>
+                          <h6 id="attendance-group-punch-method-drawer-title">{{ attendanceGroupPolicyWorkspaceEnabled ? tr('Punch configuration reference', '打卡配置参考') : tr('Punch method settings', '打卡方式设置') }}</h6>
                           <span class="attendance__field-hint">
-                            {{ tr('Current enforcement comes from workspace settings; this drawer is read-only for attendance groups.', '当前打卡校验来自工作区设置；此抽屉对考勤组保持只读。') }}
+                            {{ attendanceGroupPolicyWorkspaceEnabled ? tr("These are the loaded organization settings; this reference does not evaluate the selected group's current effective policy.", '此处仅为已加载的组织设置参考，不评估当前考勤组的有效策略。') : tr('Current enforcement comes from workspace settings; this drawer is read-only for attendance groups.', '当前打卡校验来自工作区设置；此抽屉对考勤组保持只读。') }}
                           </span>
                         </div>
                         <button
@@ -5899,9 +5899,9 @@
                       </div>
 
                       <div class="attendance__work-time-drawer-body" data-attendance-group-punch-method-scope>
-                        <strong>{{ tr('Workspace-level policy', '工作区级策略') }}</strong>
+                        <strong>{{ attendanceGroupPolicyWorkspaceEnabled ? tr('Organization settings reference', '组织设置参考') : tr('Workspace-level policy', '工作区级策略') }}</strong>
                         <span>
-                          {{ tr('These settings apply to every attendance group until group-owned punch policies are designed and persisted.', '这些设置当前适用于所有考勤组；考勤组级打卡策略需等后续设计与持久化契约。') }}
+                          {{ attendanceGroupPolicyWorkspaceEnabled ? tr('Saved-group source and effect are shown in the group effective-policy panel; no policy is evaluated or changed here.', '已保存考勤组的来源与生效状态以组有效策略汇总为准；此处不评估或修改策略。') : tr('These settings apply to every attendance group until group-owned punch policies are designed and persisted.', '这些设置当前适用于所有考勤组；考勤组级打卡策略需等后续设计与持久化契约。') }}
                         </span>
                       </div>
 
