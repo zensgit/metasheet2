@@ -1032,4 +1032,87 @@ test('SL-R3 a preview awaiting recovery NEVER settles: an OLDER failed execution
   assert.equal((await w.derived()).status, 'failed_pending_recovery')
 })
 
+// ── SL-R4..R6: the preview's ONE re-consult (PR-3a follow-up, delta verification 2026-10-26) ─────────────────
+// The consult reads the executions inside its snapshot and the lock AFTER it (refresh-governance.cjs header): a run
+// that finished between the two looks like a dead `running` row. The preview re-consults once before it answers
+// `recovery_pending` on such rows only.
+
+// A handle whose consults and reconciliations are counted; `afterFirstConsult` runs once the FIRST consult has
+// answered — what a run that finishes between the consult's snapshot and its lock read leaves behind.
+function recheckHandle(w, { afterFirstConsult } = {}) {
+  const calls = { consult: 0, reconcileHolds: 0 }
+  const handle = w.handle({
+    resolveServices: () => ({
+      governance: {
+        consult: async (input) => {
+          const answer = await w.env.governance.consult(input)
+          calls.consult += 1
+          if (calls.consult === 1 && afterFirstConsult) await afterFirstConsult()
+          return answer
+        },
+      },
+      store: {
+        reconcileHolds: async (input) => { calls.reconcileHolds += 1; return w.env.store.reconcileHolds(input) },
+        beginExecution: (input) => w.env.store.beginExecution(input),
+        finishExecution: (input) => w.env.store.finishExecution(input),
+      },
+    }),
+  })
+  return { handle, calls }
+}
+
+test('SL-R4 (follow-up) the answer rests ONLY on a lease-less `running` row and that run finishes cleanly before the preview consults again (the snapshot / lock-read straddle): ONE re-consult, then 409 STOCK_PREP_PULL_STATE_MOVED execution_finished_during_preview — nothing reconciled, no token, no bump, no write; the next preview is ready', async () => {
+  const w = await world()
+  await w.firstPullApplied()
+  const execution = await w.env.seedExecution(SCOPE, { status: 'running' })
+  const { handle, calls } = recheckHandle(w, {
+    afterFirstConsult: () => w.env.store.finishExecution({ ...SCOPE, executionId: execution.id, status: 'succeeded', written: 0, attemptedWrites: 0 }),
+  })
+  const generation = await w.generation()
+  const tokens = w.tokenStore.map.size
+  const writes = w.sheet.writes()
+  const refused = await expectCode(w.dryRun({ refreshGovernance: handle }), { status: 409, code: 'STOCK_PREP_PULL_STATE_MOVED', reason: 'execution_finished_during_preview' })
+  assert.equal(refused.details.partial, false)
+  assert.equal(calls.consult, 2, 'the planning consult and ONE re-consult')
+  assert.equal(calls.reconcileHolds, 0, 'refused before the reconciliation')
+  assert.equal(w.tokenStore.map.size, tokens, 'no token')
+  const after = await w.generation()
+  assert.deepEqual([after.generation, after.generationToken], [generation.generation, generation.generationToken], 'no bump')
+  assert.equal(w.sheet.writes(), writes, 'no write')
+  const next = await w.dryRun()
+  assert.equal(next.status, 'ready', 'the next preview reads the finished run')
+  assert.ok(next.dryRunToken)
+})
+
+test('SL-R5 (follow-up) the straddled run ends FAILED before the re-consult: the preview answers recovery_pending from the FRESH rows (one re-consult) — canApply false, no token, the counts-only stanza', async () => {
+  const w = await world()
+  await w.firstPullApplied()
+  const execution = await w.env.seedExecution(SCOPE, { status: 'running' })
+  const { handle, calls } = recheckHandle(w, {
+    afterFirstConsult: () => w.env.store.finishExecution({ ...SCOPE, executionId: execution.id, status: 'failed', written: 0, attemptedWrites: 1 }),
+  })
+  const tokens = w.tokenStore.map.size
+  const preview = await w.dryRun({ refreshGovernance: handle })
+  assert.equal(preview.status, 'recovery_pending')
+  assert.equal(preview.canApply, false)
+  assert.equal(preview.dryRunToken, null)
+  assert.deepEqual({ ...preview.refreshRecovery }, { pending: true, openExecutions: 1 })
+  assert.equal(calls.consult, 2)
+  assert.equal(w.tokenStore.map.size, tokens)
+})
+
+test('SL-R6 (follow-up) the re-consult happens ONLY when the answer rests on lease-less running rows: a FAILED row, alone or beside a running one => recovery_pending after ONE consult; a dead running row that stays running => recovery_pending after TWO', async () => {
+  for (const [label, statuses, expectedConsults] of [['failed', ['failed'], 1], ['failed_and_running', ['failed', 'running'], 1], ['dead_running', ['running'], 2]]) {
+    const w = await world()
+    await w.firstPullApplied()
+    for (const status of statuses) await w.env.seedExecution(SCOPE, { status, leaseId: `lease_sl_r6_${status}`, leaseRunId: `run_sl_r6_${status}` })
+    const { handle, calls } = recheckHandle(w)
+    const preview = await w.dryRun({ refreshGovernance: handle })
+    assert.equal(preview.status, 'recovery_pending', label)
+    assert.equal(preview.dryRunToken, null, label)
+    assert.deepEqual({ ...preview.refreshRecovery }, { pending: true, openExecutions: statuses.length }, label)
+    assert.equal(calls.consult, expectedConsults, `${label}: consults`)
+  }
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-small-lane.test.cjs', tests)
