@@ -9,7 +9,9 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 
 const {
+  FORMAL_SURFACE_REFUSALS,
   STATUS_TOKENS,
+  formalSurfaceVerdict,
   readProjectRefreshState,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-refresh-state.cjs'))
 
@@ -206,6 +208,43 @@ test('U01: every status other than not_governed / complete refuses the export; c
     changePlans: [{ id: 'cp', status: 'written' }],
   }))
   assert.deepEqual(counted.counts, { pendingConfirm: 2, confirmable: 1, openExecutions: 1, pendingReviews: 1, continuations: 1 })
+})
+
+// Step-4 review follow-ups (item 4, #6566 N10): THE FORMAL-SURFACE VERDICT on its own — the one predicate the export,
+// the handoff terminal hop and the overview's 「可以导出」 key on. A `complete` project passes ONLY when settled (both
+// settledAt AND the machine digest); a mutant that lets `not_settled` pass must go red HERE, not only in a route suite.
+test('U01b formalSurfaceVerdict: not_governed and a settled complete pass; complete without a full settlement is not_settled; every unfinished status is state; anything malformed is unreadable', () => {
+  const DIGEST = 'd'.repeat(64)
+  const verdictOf = (answer) => ({ ...formalSurfaceVerdict(readProjectRefreshState(answer)) })
+  assert.deepEqual(verdictOf(consult()), { allowed: true, reason: null }, 'not governed: today\'s behaviour')
+  assert.deepEqual(verdictOf(consult({ pilot: PILOT, continuations: [CONTINUATION], executions: [SUCCEEDED], state: { ...SETTLED_STATE, settledSheetMachineDigest: DIGEST } })), { allowed: true, reason: null }, 'complete AND settled')
+  for (const [label, state] of [
+    ['no state row', null],
+    ['settledAt only', { settledAt: '2026-10-22T00:00:00.000Z', settledExecutionId: null }],
+    ['digest only', { settledAt: null, settledExecutionId: null, settledSheetMachineDigest: DIGEST }],
+  ]) {
+    const answer = consult({ pilot: PILOT, state })
+    assert.equal(readProjectRefreshState(answer).status, 'complete', label)
+    assert.deepEqual(verdictOf(answer), { allowed: false, reason: 'not_settled' }, label)
+  }
+  const unfinished = {
+    executing: consult({ pilot: PILOT, lock: liveLock() }),
+    failed_pending_recovery: consult({ pilot: PILOT, executions: [{ id: 'e', status: 'partial', leaseId: null, startedAt: '2026-10-22T00:00:00.000Z' }] }),
+    pending_confirmation: consult({ pilot: PILOT, holds: [{ id: 'h', status: 'open', kind: 'continuation_candidate', confirmable: true }] }),
+    change_pending_review: consult({ pilot: PILOT, changePlans: [{ id: 'cp', status: 'written' }] }),
+    confirmed_pending_execution: consult({ pilot: PILOT, continuations: [{ ...CONTINUATION, executedExecutionId: null }] }),
+    executed_pending_settlement: consult({ pilot: PILOT, executions: [SUCCEEDED] }),
+  }
+  for (const [status, answer] of Object.entries(unfinished)) {
+    assert.equal(readProjectRefreshState(answer).status, status)
+    assert.deepEqual(verdictOf(answer), { allowed: false, reason: 'state' }, status)
+  }
+  assert.deepEqual({ ...formalSurfaceVerdict(readProjectRefreshState({ ok: false, failure: { store: 'continuation', operation: 'read_holds' } })) }, { allowed: false, reason: 'unreadable' })
+  for (const malformed of [null, undefined, {}, { status: 'partial' }, { readable: true, status: 'no_such_status' }, { readable: false, status: 'complete', settled: true }, { readable: true, status: 'unreadable' }]) {
+    assert.deepEqual({ ...formalSurfaceVerdict(malformed) }, { allowed: false, reason: 'unreadable' }, JSON.stringify(malformed))
+  }
+  const reasons = new Set(['not_settled', 'state', 'unreadable'])
+  assert.deepEqual(new Set(FORMAL_SURFACE_REFUSALS), reasons, 'the closed refusal list')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-state.test.cjs', tests)
