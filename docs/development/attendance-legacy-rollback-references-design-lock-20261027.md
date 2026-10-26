@@ -1,0 +1,19 @@
+# Active multi-segment legacy rollback — Draft repair lock (2026-10-27)
+
+Refs #4556 parent DB-10/DB-11 and the ratified advanced-capability lock sections0/6/7.1. Fresh-main isolated source is in source-preflight.json. No new capability or owner acceptance.
+
+The original lock requires legacy-mode transitions to reject atomically while active multi-segment references exist and requires every runtime rollback to preserve both envelope and segment rows. The existing canonical core transition boundary and its read-only plan are the only permitted implementation surfaces; no direct rollout DML or alternative operator path.
+
+First reproduce the missing active-reference predicate on real full-schema synthetic PostgreSQL, with independent no-reference/single-segment controls and exact state/version/event/envelope/segment readbacks. No runtime change before a valid actual reproduction. Preserve original legal transition pairs, locking/transaction order, evidence fields, source/pointer guards and all budgets/assertions. Runtime owns no DDL and never deletes historical data. Defensive inconsistent-state import/punch refusals remain unchanged.
+
+If reproduced, add the minimum same-transaction canonical predicate and matching read-only plan result, using current durable source statuses and existing org isolation. Enumerate the live reference producers before claiming the full clause. Exact reference-state semantics must be derived from current writer/read paths and the ratified lock, not from a narrower convenient fixture. Closed historical evidence is distinct from an active reference; no time-now heuristic is invented. Same-org reference races must serialize with the existing canonical rollout/source lock protocol. Source-only queries are not execution proof.
+
+Validate native positives/negatives, remove-predicate and org-scope matching mutations, rollback data preservation and a real lock-wait race at the original budget. Run affected neighbors/guards and actual quality; no unchanged-green replay. New tests stay in existing registered DB files or receive complete required registration. Independent review and main raw-log/source audit, normal own-branch push and Draft PR; current-head CI required before final evidence.
+
+AllPRDraft/HOLD, no merge/deploy/R71/tag/release/business-config/flag changes. Stream/lifecycle OFF, realUAT/50004 excluded, historical08PUT INCONCLUSIVE. Correction/OT target decision, formal owner/parent/W8/manual/live boundaries remain separate.
+
+## Current durable reference interpretation
+
+Active assignment and rotation-rule flags are explicit is_active=true; no server-clock cutoff is added. Pending swap and pending-or-published dispatch snapshots remain live reference producers under their explicit current statuses. FSER desired-only config is NOT an effective schedule fact and is not a legacy rollback blocker; actual fixed-schedule apply/rebuild results are active assignments and remain blockers. Rotation IDs and legacy names both bind within the same org. Inactive assignments/rules, rejected/cancelled request evidence and auto-write candidate history are not live blockers. Ended dates are not silently used to deactivate an is_active row. Native source-state/control fixtures must discriminate each arm and historical status before claiming full DB-10 coverage.
+
+The original FSER contract sections3/6 explicitly separates desired-only metadata from effective assignment facts. The first Draft hypothesis copied that delete-only blocker into rollback and was wrong: actual legacy/OFF config-save HTTP200 with zero assignments and no rollout row is accepted, while the candidate then wrongly refused rollback. This hypothesis is corrected without changing desired-save, delete or conversion behavior, and without inventing a new owner decision. Native before/after evidence and source review are retained.
