@@ -64,6 +64,11 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+// Batch-refresh step 4 PR-5: the TERMINAL hop is a formal handover and consults the REAL refresh governance (over
+// the kit's empty step-4 tables => not governed: the hop completes as before). Required by name (501) on that hop
+// only, so the mount wires it with a lock for the reader's generation read.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const { STOCK_PREP_OPERATE, STOCK_PREP_READ, STOCK_PREP_WORKBENCH_CAPABILITIES } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { STOCK_PREP_AUDIT_ACTIONS, __internals: auditInternals } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const {
@@ -400,12 +405,13 @@ function mount({
   })
   services.stockPreparationHandoffNotifier = notifier
   services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, auditCalls, notifier, db, records, tenantPrincipalDirectory }
+  return { routes, auditAppends, auditCalls, notifier, db, records, tenantPrincipalDirectory, services }
 }
 
 function createResponse() {

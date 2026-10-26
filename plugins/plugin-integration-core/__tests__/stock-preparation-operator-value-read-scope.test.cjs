@@ -71,6 +71,8 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 
 const assert = require('node:assert/strict')
 const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
+// Batch-refresh step 4 PR-5: the export brackets its read with the sheet's lock generation (required by name).
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
 const path = require('node:path')
 const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
@@ -444,6 +446,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory(), exportBoundTo = 'A'
     },
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
   httpRoutes.registerIntegrationRoutes({
     context,

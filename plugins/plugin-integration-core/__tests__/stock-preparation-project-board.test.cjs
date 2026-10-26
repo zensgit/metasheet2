@@ -35,6 +35,11 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+// Batch-refresh step 4 PR-5: the board carries the project's derived refresh state (`refresh`) and unions the open
+// refresh holds into its pending count — both read through the REAL refresh governance / continuation store over the
+// kit's empty step-4 tables (=> not governed, zero holds), wired here with a lock for the reader's generation read.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const {
   STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
@@ -182,6 +187,9 @@ function ownSheetIdFor(stagingProjectId, objectId) {
 
 function mount({
   mainTableProvisioned = true,
+  // PR-5: `false` mounts WITHOUT the refresh governance / continuation store (a deployment that has not wired them):
+  // the board's `refresh` stanza must then say unreadable by name and its pending counts cannot be trusted.
+  wireRefreshGovernance = true,
   // `undefined` = the action is bound to the caller's own canonical fill table (the normal case).
   // `null` = nothing is bound at all. An object = whatever the deployment configured, verbatim.
   boundTarget,
@@ -483,15 +491,17 @@ function mount({
     } : {}),
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: wireRefreshGovernance === false ? services : withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {
     routes,
     auditAppends,
+    services,
     auditListCalls,
     auditProbes,
     hostCallCount: () => hostCalls,
@@ -1630,10 +1640,84 @@ async function oneProjectsNumbersAreReadOutOfASheetThatHoldsMany() {
     'B-14: and the other project number never appears in a board that is not about it')
 }
 
+// ---------------------------------------------------------------------------
+// B-PR5 — THE REFRESH STANZA AND THE HOLD UNION (batch-refresh step 4 PR-5, design §11 / §13, O-18)
+// ---------------------------------------------------------------------------
+
+async function theBoardCarriesTheRefreshStateAndUnionsTheOpenHolds() {
+  const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+  const { hold } = await refreshKit.candidateHoldFixture()
+  // No step-4 row anywhere: the stanza is the derived `not_governed` state — three distinct answers, never zero.
+  {
+    const h = mount()
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.deepEqual(stanza, {
+      readable: true, status: 'not_governed', statusLabel: '未启用', governed: 'none', exportAllowed: true, settled: false,
+      counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 0 },
+    }, 'B-PR5: the stanza is readProjectRefreshState\'s own values-free object')
+    assert.equal(res.body.data.ledgerReady, true)
+  }
+  // An open hold on the project's bound sheet (seeded through the REAL store): the stanza says 待确认, the pending
+  // count is the UNION of the confirmation ledger and the hold, and the audit row counts the union too.
+  {
+    const h = mount()
+    const before = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    const ledgerPending = before.body.data.pendingDecisionCount
+    await h.services.refreshGovernanceEnv.seedHolds({ tenantId: TENANT_A, sheetId: MAIN_SHEET_A, projectNo: PROJECT_A_NO }, [hold])
+    h.auditAppends.length = 0
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = res.body.data.refresh
+    assert.equal(stanza.status, 'pending_confirmation')
+    assert.equal(stanza.statusLabel, '待确认')
+    assert.equal(stanza.governed, 'protected')
+    assert.equal(stanza.exportAllowed, false)
+    assert.equal(stanza.counts.pendingConfirm, 1)
+    assert.equal(res.body.data.pendingDecisionCount, ledgerPending + 1, 'B-PR5: the union of the ledger and the open hold')
+    assert.equal(res.body.data.ledgerReady, true)
+    assert.equal(h.auditAppends.find((entry) => entry.detail && entry.detail.operation === 'operator_project_board').detail.pendingDecisionCount, ledgerPending + 1)
+    assert.equal(JSON.stringify(res.body).includes('D100-01'), false, 'B-PR5: no hold value crosses the board')
+    assert.deepEqual(Object.keys(res.body.data).sort(), [...STOCK_PREPARATION_PROJECT_BOARD_KEYS].sort())
+  }
+  // The hold table cannot be read: the stanza is `unreadable` BY NAME (store + operation tokens), and the pending
+  // counts cannot be trusted — `ledgerReady` false, never "zero holds".
+  {
+    const h = mount()
+    h.services.refreshGovernanceEnv.db.faults.select = (args) => (args && /integration_stock_prep_refresh_hold/.test(args.table) ? refreshKit.sqlError('42P01', 'relation does not exist') : null)
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.deepEqual(stanza, { readable: false, status: 'unreadable', statusLabel: '状态读取失败', governed: 'unknown', exportAllowed: false, settled: false, counts: null, unreadable: { reason: 'store_read_failed', store: 'continuation', operation: 'read_holds' } })
+    assert.equal(res.body.data.ledgerReady, false, 'B-PR5: an unreadable hold table is never "no holds"')
+    h.services.refreshGovernanceEnv.db.faults.select = null
+  }
+  // No bound sheet to consult: unreadable with its own reason — never a fabricated state.
+  {
+    const res = await callBoard(mount({ actionConfigured: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.deepEqual(JSON.parse(JSON.stringify(res.body.data.refresh.unreadable)), { reason: 'store_read_failed', store: 'registry', operation: 'bound_target_absent' })
+  }
+  // No refresh governance wired at all (an older deployment): the stanza is unreadable BY NAME (never not_governed,
+  // never complete) and the pending counts cannot be trusted — the board still opens.
+  {
+    const res = await callBoard(mount({ wireRefreshGovernance: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.equal(stanza.status, 'unreadable', 'B-PR5: an unwired reader is never "not governed"')
+    assert.equal(stanza.readable, false)
+    assert.equal(stanza.exportAllowed, false)
+    assert.deepEqual(stanza.unreadable, { reason: 'store_read_failed', store: 'governance', operation: 'reader_absent' })
+    assert.equal(res.body.data.ledgerReady, false, 'B-PR5: an unwired hold store is never "no holds"')
+  }
+}
+
 async function main() {
   await onlyTheOperatorTierReachesTheBoard()
   await anotherTenantsProjectIsIndistinguishableFromNoProject()
   await theBoardAnswersWithHandlesCountsAndTheProjectsOwnNameOnly()
+  await theBoardCarriesTheRefreshStateAndUnionsTheOpenHolds()
   await theAuditRowIsValuesFreeAndPrecedesTheValues()
   await theDeepLinkHandleAppearsOnlyWhenTheFillTableExists()
   await theBoardReflectsThePullRatherThanTheAdminsArchive()
