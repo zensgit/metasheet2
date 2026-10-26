@@ -174,3 +174,69 @@ for (const token of [freshToken, '']) {
     assertHealth(result, 'none', token)
   })
 }
+
+
+const upgradeSource = readFileSync(process.env.PLM_TEST_UPGRADE_SOURCE || path.join(here, 'attendance-onprem-package-upgrade.sh'))
+
+function runUpgrade({ manager, health = '1', updateExit = '0', healthExit = '0' } = {}) {
+  const root = mkdtempSync(path.join(tmpdir(), 'plm-upgrade-manager-'))
+  try {
+    const ops = path.join(root, 'scripts/ops')
+    const bin = path.join(root, 'bin')
+    mkdirSync(ops, { recursive: true })
+    mkdirSync(bin)
+    const write = (dir, name, text) => writeFileSync(path.join(dir, name), text, { mode: 0o700 })
+    write(ops, 'attendance-onprem-package-upgrade.sh', upgradeSource)
+    for (const [step, exitVariable] of [['update', 'UPDATE_EXIT'], ['healthcheck', 'HEALTH_EXIT']]) {
+      write(ops, `attendance-onprem-${step}.sh`, `#!/bin/sh
+set -eu
+printf '%s\\n' "$SERVICE_MANAGER" > "$FIXTURE_ROOT/${step}-manager"
+exit "$${exitVariable}"
+`)
+    }
+    // Only metadata lookup and explicitly owned child-script dispatch are available in PATH.
+    write(bin, 'dirname', '#!/bin/sh\nprintf %s "${1%/*}"\n')
+    write(bin, 'env', `#!/bin/sh
+set -eu
+last=''
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  "$FIXTURE_ROOT/scripts/ops/attendance-onprem-update.sh"|"$FIXTURE_ROOT/scripts/ops/attendance-onprem-healthcheck.sh") exec /usr/bin/env "$@" ;;
+  *) exit 97 ;;
+esac
+`)
+    writeFileSync(path.join(root, 'env'), 'owned fixture')
+    const env = { PATH: bin, FIXTURE_ROOT: root, TMPDIR: root, ENV_FILE: path.join(root, 'env'),
+      RUN_MIGRATIONS: '0', RESTART_SERVICE: '0', RELOAD_NGINX: '0', INSTALL_DEPS: '0',
+      RUN_HEALTHCHECK: health, UPDATE_EXIT: updateExit, HEALTH_EXIT: healthExit }
+    if (manager !== undefined) env.SERVICE_MANAGER = manager
+    const result = spawnSync('/bin/bash', [path.join(ops, 'attendance-onprem-package-upgrade.sh')], {
+      env, encoding: 'utf8', timeout: 5000,
+    })
+    assert.equal(result.error, undefined)
+    assert.equal(result.signal, null)
+    const read = step => existsSync(path.join(root, `${step}-manager`)) ? readFileSync(path.join(root, `${step}-manager`), 'utf8') : null
+    return { code: result.status, update: read('update'), health: read('healthcheck') }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+for (const manager of [undefined, 'none', 'pm2', 'systemd']) {
+  test(`package upgrade manager handoff preserves caller: ${manager ?? 'default pm2'}`, () => {
+    const result = runUpgrade({ manager })
+    assert.deepEqual(result, { code: 0, update: `${manager ?? 'pm2'}\n`, health: `${manager ?? 'pm2'}\n` })
+  })
+}
+
+test('package upgrade manager handoff skips disabled health', () => {
+  assert.deepEqual(runUpgrade({ manager: 'none', health: '0' }), { code: 0, update: 'none\n', health: null })
+})
+
+test('package upgrade manager handoff stops after exact update failure', () => {
+  assert.deepEqual(runUpgrade({ manager: 'none', updateExit: '31' }), { code: 31, update: 'none\n', health: null })
+})
+
+test('package upgrade manager handoff propagates exact health failure', () => {
+  assert.deepEqual(runUpgrade({ manager: 'none', healthExit: '23' }), { code: 23, update: 'none\n', health: 'none\n' })
+})
