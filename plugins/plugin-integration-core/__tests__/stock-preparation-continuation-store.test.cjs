@@ -1274,4 +1274,131 @@ test('ST-17 the reviewer\'s ANCESTOR counterexample (review round 2): over the F
   }
 })
 
+// ── ST-18..ST-21: hermetic kills for the PR-4 delta mutants (step-4 review follow-ups, item 8; #6565 delta N-2/N-3) ──
+
+// Two confirmed relationships on one scope: A (the canonical candidate) and B (a disjoint one).
+async function twoRelationships(w) {
+  const disjoint = kit.disjointCandidateHold(w.hold, { parentId: 'Z-001', suffix: '_st18' })
+  await seedHolds(w, [w.hold, disjoint])
+  const idA = (await confirmHold(w, w.hold)).continuationId
+  const idB = (await confirmHold(w, disjoint)).continuationId
+  return { idA, idB }
+}
+
+const decisionVersionOf = (w) => (w.db.rows(T.state)[0] ? w.db.rows(T.state)[0].decision_version : 0)
+
+// A relationship_reconfirm hold about `continuationId` recording `count` new positions (verdict new_position_removed).
+function reconfirmWithCountFor(continuationId, count) {
+  const h = reconfirmHoldFor(continuationId, { confirmable: false, verdict: 'new_position_removed' })
+  h.detail = { ...h.detail, componentNewPositionCount: count }
+  h.fingerprint = pairing.holdFingerprint(h)
+  return h
+}
+
+test('ST-18 (M2) a release decides ONLY from the continuation\'s OWN open relationship_reconfirm row: A needs re-confirmation with no open row, B has an admissible one — end(A, release) naming B\'s row is 409 no_open_hold, byte-identical to naming an unknown id; nothing persisted, no bump; B itself releases (control)', async () => {
+  const w = await world()
+  const { store, db, scope, bump } = w
+  const { idA, idB } = await twoRelationships(w)
+  const holdB = reconfirmWithCountFor(idB, 0)
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: decisionVersionOf(w), holds: [holdB], verdicts: { [idA]: 'new_position_removed', [idB]: 'new_position_removed' }, computation: computation() })
+  const rowA = db.rows(T.continuation).find((row) => row.id === idA)
+  assert.equal(rowA.status, 'needs_reconfirmation', 'A needs re-confirmation by its verdict')
+  assert.equal(db.rows(T.hold).filter((row) => row.status === 'open' && row.continuation_id === idA).length, 0, 'A has NO open row of its own')
+  const rowB = db.rows(T.hold).find((row) => row.status === 'open' && row.continuation_id === idB)
+  assert.ok(rowB, 'B has its admissible open row')
+  const hooks = { bumpWithin: bump.bumpWithin }
+  const endA = (facts) => store.endContinuation({ ...scope, continuationId: idA, revision: 1, endedBy: PULLER, outcome: 'release_to_normal_refresh', facts }, hooks)
+  const before = tablesSnapshot(db)
+  const bumpsBefore = bump.calls.length
+  const namingB = await expectError(endA({ holdId: rowB.id, holdFingerprint: rowB.fingerprint }), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'no_open_hold' })
+  const namingUnknown = await expectError(endA({ holdId: 'hold_st18_unknown', holdFingerprint: 'f'.repeat(64) }), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'no_open_hold' })
+  assert.equal(JSON.stringify({ m: namingB.message, d: namingB.details }), JSON.stringify({ m: namingUnknown.message, d: namingUnknown.details }), 'no oracle: naming another relationship\'s row answers exactly as an unknown id')
+  assert.equal(bump.calls.length, bumpsBefore, 'refused before the bump')
+  assert.equal(tablesSnapshot(db), before, 'nothing persisted')
+  assert.equal(db.rows(T.continuation).find((row) => row.id === idA).status, 'needs_reconfirmation', 'A still protected')
+  assert.equal(db.rows(T.continuation).find((row) => row.id === idA).claim_active, true)
+  // Control: B's own row IS admissible — B releases.
+  const released = await store.endContinuation({ ...scope, continuationId: idB, revision: 1, endedBy: PULLER, outcome: 'release_to_normal_refresh', facts: { holdId: rowB.id, holdFingerprint: rowB.fingerprint } }, hooks)
+  assert.equal(released.holdsResolved, 1)
+})
+
+test('ST-19 (M3c) S25 on the RELEASE: while A\'s escalated hold is open runbook-only, B\'s otherwise admissible release is 409 runbook_only_hold_open { holdCount: 1 } — refused before the bump, nothing persisted', async () => {
+  const w = await world()
+  const { store, db, scope, bump } = w
+  const { idA, idB } = await twoRelationships(w)
+  const hooks = { bumpWithin: bump.bumpWithin }
+  // A: a structure_changed reconfirm row, then escalated (its row stays OPEN, runbook-only).
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: decisionVersionOf(w), holds: [reconfirmHoldFor(idA, { confirmable: false, verdict: 'structure_changed' })], verdicts: { [idA]: 'structure_changed' }, computation: computation() })
+  await store.endContinuation({ ...scope, continuationId: idA, revision: 1, endedBy: PULLER, outcome: 'escalate_special_repair' }, hooks)
+  // B: an admissible reconfirm row (count 0). The computation keeps A's runbook-only row open.
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: decisionVersionOf(w), holds: [reconfirmWithCountFor(idB, 0)], verdicts: { [idB]: 'new_position_removed' }, computation: computation() })
+  assert.equal(db.rows(T.hold).filter((row) => row.status === 'open' && row.runbook_only === true).length, 1, 'A\'s escalated row is open runbook-only')
+  const rowB = db.rows(T.hold).find((row) => row.status === 'open' && row.continuation_id === idB)
+  const before = tablesSnapshot(db)
+  const bumpsBefore = bump.calls.length
+  const refused = await expectError(store.endContinuation({ ...scope, continuationId: idB, revision: 1, endedBy: PULLER, outcome: 'release_to_normal_refresh', facts: { holdId: rowB.id, holdFingerprint: rowB.fingerprint } }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'runbook_only_hold_open' })
+  assert.equal(refused.details.holdCount, 1)
+  assert.equal(refused.details.partial, false)
+  assert.equal(bump.calls.length, bumpsBefore, 'refused before the bump')
+  assert.equal(tablesSnapshot(db), before, 'nothing persisted')
+})
+
+test('ST-20 (M4) the confirm re-reads the executions AFTER the bump: (i) a running execution + the lock refusing => the lock\'s 409 WRITE_LOCKED and no execution read; (ii) a failed execution + a free bump => 409 RECOVERY_PENDING after ONE bump, rolled back', async () => {
+  // (i)
+  {
+    const w = await world()
+    const { store, db, scope, bump } = w
+    await seedHolds(w, [w.hold])
+    const guard = { leaseRunId: 'run_st20', leaseId: 'lease_st20', fencingEpoch: 3, generation: 9, generationToken: 'tok_9' }
+    await store.beginExecution({ ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_st20', planDigest: 'plan_st20', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    const before = tablesSnapshot(db)
+    bump.refuseWith(kit.writeLockedError())
+    db.log.length = 0
+    await expectError(confirmHold(w, w.hold), { status: 409, code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' })
+    assert.equal(statementsOf(db).some((statement) => statement.endsWith(':refresh_execution')), false, `(i) no execution read before the bump: ${statementsOf(db).join(' ')}`)
+    assert.equal(db.log[db.log.length - 1][0], 'rollback')
+    assert.equal(tablesSnapshot(db), before, '(i) nothing persisted')
+  }
+  // (ii)
+  {
+    const w = await world()
+    const { store, db, scope, bump } = w
+    await seedHolds(w, [w.hold])
+    const guard = { leaseRunId: 'run_st20b', leaseId: 'lease_st20b', fencingEpoch: 3, generation: 9, generationToken: 'tok_9' }
+    const execution = await store.beginExecution({ ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_st20b', planDigest: 'plan_st20b', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    await store.finishExecution({ ...scope, executionId: execution.id, status: 'failed', written: 0, attemptedWrites: 1 })
+    const before = tablesSnapshot(db)
+    const bumpsBefore = bump.calls.length
+    const refused = await expectError(confirmHold(w, w.hold), { status: 409, code: CODES.RECOVERY_PENDING })
+    assert.equal(refused.details.openExecutions, 1)
+    assert.equal(bump.calls.length, bumpsBefore + 1, '(ii) the bump ran first')
+    assert.equal(db.log[db.log.length - 1][0], 'rollback')
+    assert.equal(tablesSnapshot(db), before, '(ii) nothing persisted')
+  }
+})
+
+test('ST-21 (M7) a COMMIT-time failure is mapped: an untyped SQLSTATE error => 503 STORE_FAILED { operation: commit, sqlState }; a connection error => 503 commit without sqlState; a typed error passes as itself — nothing persisted in each case', async () => {
+  for (const [label, fault, expect] of [
+    ['42501', Object.assign(new Error('deferred'), { code: '42501' }), { status: 503, code: CODES.STORE_FAILED, sqlState: '42501' }],
+    ['ECONNRESET', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }), { status: 503, code: CODES.STORE_FAILED, sqlState: undefined }],
+    ['typed', Object.assign(new Error('typed'), { status: 409, code: 'STOCK_PREP_ST21_TYPED' }), { status: 409, code: 'STOCK_PREP_ST21_TYPED' }],
+  ]) {
+    const w = await world()
+    const { db } = w
+    await seedHolds(w, [w.hold])
+    const before = tablesSnapshot(db)
+    db.faults.commit = fault
+    const error = await expectError(confirmHold(w, w.hold), { status: expect.status, code: expect.code })
+    if (expect.code === CODES.STORE_FAILED) {
+      assert.equal(error.details.operation, 'commit', label)
+      assert.equal(error.details.sqlState, expect.sqlState, label)
+      assert.equal(error.details.partial, false, label)
+      assert.equal(JSON.stringify({ m: error.message, d: error.details }).includes('socket hang up'), false, `${label}: no driver text`)
+    } else {
+      assert.equal(error, fault, `${label}: the typed error itself`)
+    }
+    assert.equal(tablesSnapshot(db), before, `${label}: nothing persisted`)
+  }
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-continuation-store.test.cjs', tests)

@@ -35,6 +35,8 @@
 //           CONFIRM_STALE facts_moved from the open row under the lock (the release binds to the hold shown)
 //   RT-E6   S25 under the lock for a release (another relationship escalated in that window)
 //   RT-E7   the body names the hold the page showed (factsHoldId + factsHoldFingerprint): facts_moved otherwise
+//   RT-E8   a release naming ANOTHER relationship's admissible row is no_open_hold, byte-identical to an unknown id
+//           (step-4 review follow-ups, item 8)
 //   RT-K    「暂不处理」: audit only, nothing persisted, STALE on a moved fingerprint
 //   RT-EV   the evidence: the demand facts of the computation that opened the hold; history_unknown, then the
 //           relationship snapshot once a relationship claims the old root; the continuation detail
@@ -1146,6 +1148,43 @@ test('RT-E7 the body names the hold the page showed (factsHoldId + factsHoldFing
     assert.equal(done.statusCode, 200, JSON.stringify(done.body))
     assert.equal(done.body.data.endedOutcome, 'release_to_normal_refresh')
     assert.equal(st.holds().find((row) => row.id === shown.id).resolution, 'continuation_ended')
+  } finally { st.restore() }
+})
+
+// Step-4 review follow-ups (item 8, #6565 delta N-2): a release decides only from the relationship's OWN open
+// relationship_reconfirm row. A needs re-confirmation by its verdict with NO open row; B (disjoint) has an
+// admissible one (count 0). Ending A as a release while naming B's row is 409 no_open_hold — byte-identical to
+// naming an unknown id (no oracle) — and nothing moves.
+test('RT-E8 a release of A naming ANOTHER relationship\'s admissible reconfirm row is 409 END_OUTCOME_NOT_ADMISSIBLE no_open_hold, byte-identical to an unknown id; A stays needs_reconfirmation with its claims; no audit row, no bump, nothing persisted', async () => {
+  const st = mount()
+  try {
+    const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+    const fixture = await refreshKit.candidateHoldFixture()
+    const a = await st.env.seedConfirmedContinuation(st.scope, fixture.hold, { sourceIdentity: fixture.sourceIdentity })
+    const b = await st.env.seedConfirmedContinuation(st.scope, refreshKit.disjointCandidateHold(fixture.hold), { sourceIdentity: fixture.sourceIdentity })
+    const holdB = refreshKit.reconfirmHoldFor(b.continuationId, { confirmable: false, verdict: 'new_position_removed' })
+    holdB.detail = { ...holdB.detail, componentNewPositionCount: 0 }
+    holdB.fingerprint = pairing.holdFingerprint(holdB)
+    await st.env.seedHolds(st.scope, [holdB], { verdicts: { [a.continuationId]: 'new_position_removed', [b.continuationId]: 'new_position_removed' } })
+    assert.equal(st.continuations().find((row) => row.id === a.continuationId).status, 'needs_reconfirmation')
+    assert.equal(st.holds().filter((row) => row.status === 'open' && row.continuation_id === a.continuationId).length, 0, 'A has no open row of its own')
+    const rowB = st.holds().find((row) => row.status === 'open' && row.continuation_id === b.continuationId)
+    const before = st.env.snapshot()
+    const lock0 = JSON.stringify(st.lockRow())
+    const audits0 = st.audits().length
+    const namingB = await end(st, a.continuationId, { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: rowB.id, factsHoldFingerprint: rowB.fingerprint })
+    const namingUnknown = await end(st, a.continuationId, { revision: 1, outcome: 'release_to_normal_refresh', factsHoldId: 'hold_rd_e8_unknown', factsHoldFingerprint: 'f'.repeat(64) })
+    assert.equal(namingB.statusCode, 409, JSON.stringify(namingB.body))
+    assert.equal(errorOf(namingB).code, CODES.END_OUTCOME_NOT_ADMISSIBLE)
+    assert.equal(errorOf(namingB).details.reason, 'no_open_hold')
+    assert.equal(JSON.stringify(namingB.body), JSON.stringify(namingUnknown.body), 'no oracle: another relationship\'s row answers as an unknown id')
+    const rowA = st.continuations().find((row) => row.id === a.continuationId)
+    assert.equal(rowA.status, 'needs_reconfirmation')
+    assert.equal(rowA.claim_active, true)
+    assert.equal(st.audits().length, audits0, 'no audit row')
+    assert.equal(st.audits().some((item) => item.mode === REFRESH_DECISION_AUDIT.modes.ended), false)
+    assert.equal(JSON.stringify(st.lockRow()), lock0, 'no bump')
+    assert.equal(st.env.snapshot(), before, 'nothing persisted')
   } finally { st.restore() }
 })
 
