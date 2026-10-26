@@ -13,6 +13,15 @@
 //         two rows-based refusals; it never refuses on a suspended pull (`assertPullNotSuspended(` absent).
 //   SC-5  `computeDryRun` probes the target fields, THEN consults, THEN runs the B2a pre-read pin and the source
 //         read — and each of the four planning entries threads `refreshGovernance: input.refreshGovernance`.
+//   SC-6  (PR-3b) each large non-write route — expansion start, run, plan, approve — calls `consultLargeLane(` once,
+//         on one line, naming its own lane, AFTER PR B's pilot gate and BEFORE its first IO (the job write and the
+//         observation; the B2a claim, the adapter load and the source read; the field probe, the existing-row read,
+//         the foreign-row guard and the plan; the probes, the approval and its bump); the plan hands the plan lib
+//         `governanceVerdict: planGovernance`; five `consultLargeLane(` sites in all (four routes + the chunk gate).
+//   SC-7  (PR-3b, O-1) the large plan's planner call is an explicit literal with no `continuation` key and no spread;
+//         the plan validates its verdict before its first storage read and records / deletes it on every plan, outside
+//         the plan revision; the approval runs `assertLargePlanApprovable(` before the manual-confirm count, the binder
+//         and the storage write.
 //
 // The scanner strips comments and string bodies before matching, so a mention in prose never satisfies a scan.
 
@@ -215,6 +224,65 @@ test('SC-5 computeDryRun: assertTargetFieldsExist( < consultForPlanning( < asser
     assert.match(calls[0].text, /refreshGovernance:\s*input\.refreshGovernance\b/, `${name} threads the handle`)
   }
   assert.equal(callsOf(TA, 'computeDryRun').length, 4, 'no fifth planning entry')
+})
+
+test('SC-6 (PR-3b) each large non-write route calls consultLargeLane( once, on one line, for its own lane, AFTER assertLargeLaneAllowedForPilot( and BEFORE its first IO; the plan hands the lib governanceVerdict: planGovernance; five consultLargeLane( sites in all', () => {
+  const ROUTES = {
+    tableActionLargeBomExpansionJobStart: { lane: 'large_expansion_start', io: ['createLargeBomBackgroundExpansionJob(', 'observeGeneration('] },
+    tableActionLargeBomExpansionJobRun: { lane: 'large_expansion_run', io: ['assertB2aReadAuthorization(', 'b2aTableActionSourceObjects(', 'loadTableActionSourceAdapter(', 'runLargeBomBackgroundExpansionJob('] },
+    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', io: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'loadTableScopeConflictPolicies(', 'planLargeBomBackgroundExpansionJob(', 'resolveInstalledFieldProperties('] },
+    tableActionLargeBomApplyJobStart: { lane: 'large_approve', io: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'resolveInstalledFieldProperties(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration('] },
+  }
+  const rawRoutes = raw['http-routes.cjs']
+  for (const [handler, spec] of Object.entries(ROUTES)) {
+    const start = HR.indexOf(`    async ${handler}(req, res) {`)
+    assert.ok(start >= 0, `${handler} exists`)
+    const end = HR.indexOf('\n    },', start)
+    const body = HR.slice(start, end)
+    const rawBody = rawRoutes.slice(start, end)
+    const consults = callsOf(body, 'consultLargeLane')
+    assert.equal(consults.length, 1, `${handler}: exactly one consult`)
+    const consultAt = consults[0].at
+    const pilotAt = body.indexOf('assertLargeLaneAllowedForPilot(')
+    assert.ok(pilotAt >= 0 && pilotAt < consultAt, `${handler}: the consult follows PR B's pilot gate`)
+    for (const io of spec.io) {
+      const at = body.indexOf(io)
+      assert.ok(at >= 0, `${handler}: ${io} present (the scan is not vacuous)`)
+      assert.ok(consultAt < at, `${handler}: the consult precedes ${io}`)
+    }
+    const lineStart = rawBody.lastIndexOf('\n', consultAt) + 1
+    const consultLine = rawBody.slice(lineStart, rawBody.indexOf('\n', consultAt))
+    assert.ok(consultLine.includes(`, '${spec.lane}')`), `${handler}: the consult names lane ${spec.lane}: ${consultLine.trim()}`)
+    assert.ok(/\)\s*$/.test(consultLine), `${handler}: the consult is a single-line call (C-06 slicing rule)`)
+  }
+  const planStart = HR.indexOf('    async tableActionLargeBomExpansionJobPlan(req, res) {')
+  const planBody = HR.slice(planStart, HR.indexOf('\n    },', planStart))
+  assert.match(planBody, /const planGovernance = await consultLargeLane\(/, 'the plan keeps the verdict')
+  const planCalls = callsOf(planBody, 'planLargeBomBackgroundExpansionJob')
+  assert.equal(planCalls.length, 1)
+  assert.match(planCalls[0].text, /\bgovernanceVerdict:\s*planGovernance\b/, 'the verdict rides into the plan')
+  assert.equal(callsOf(HR, 'consultLargeLane').length, 5, 'four non-write routes + the chunk gate')
+})
+
+test('SC-7 (PR-3b, O-1) the large plan hands the planner an explicit literal — no `continuation` key, no spread — validates its verdict before the first storage read and records / deletes it on every plan, outside the plan revision; the approval runs assertLargePlanApprovable( before the manual-confirm count, the binder and the storage write', () => {
+  const planBody = functionBody(LB, 'planLargeBomBackgroundExpansionJob')
+  const plannerCalls = callsOf(planBody, 'planStockPreparationConflicts')
+  assert.equal(plannerCalls.length, 1, 'one planner call')
+  assert.equal(/(^|[\s,{])continuation\b/.test(plannerCalls[0].text), false, 'the planner input names no `continuation`')
+  assert.equal(plannerCalls[0].text.includes('...'), false, 'no spread into the planner input')
+  const verdictAt = planBody.indexOf('normalizeLargePlanGovernanceVerdict(')
+  const firstRead = planBody.indexOf('storage.get(')
+  assert.ok(verdictAt >= 0 && firstRead >= 0 && verdictAt < firstRead, 'the verdict is validated before the first storage read')
+  assert.match(planBody, /if \(governanceVerdict\) job\.governanceVerdict = governanceVerdict/)
+  assert.match(planBody, /else delete job\.governanceVerdict/)
+  assert.equal(functionBody(LB, 'largeBomPlanRevision').includes('governanceVerdict'), false, 'the verdict is outside the plan revision')
+  const approveBody = functionBody(LB, 'createLargeBomCheckpointApplyJob')
+  const refuse = approveBody.indexOf('assertLargePlanApprovable(')
+  assert.ok(refuse >= 0, 'the approval refuses')
+  for (const later of ['countManualConfirmDecisions(', 'writeGenerationBinder(', 'storage.set(']) {
+    const at = approveBody.indexOf(later)
+    assert.ok(at >= 0 && refuse < at, `the approval refusal precedes ${later}`)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-scan.test.cjs', tests)

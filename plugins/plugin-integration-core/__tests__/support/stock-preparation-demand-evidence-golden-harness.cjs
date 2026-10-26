@@ -491,9 +491,17 @@ function laneCalls(harness, { handle = 'wired' } = {}) {
   // Batch-refresh step 4 PR-3a (plan-final §2.10): `handle` WIRED = every small leg plans with the route's governance
   // handle for this NOT-governed project; ABSENT = none does (the dry-run opts out of the kit's injection).
   const governance = handle === 'wired' ? { refreshGovernance: writeLock.refresh().handleFor('tenant_rgw_default') } : { refreshGovernance: undefined }
+  // Batch-refresh step 4 PR-3b: the large PLAN route consults the same governance and hands the plan its not-governed
+  // verdict (`consultLargeLane` => `largeLaneVerdictOf`). WIRED = the plan gets the verdict of a REAL consult of this
+  // not-governed project; ABSENT = none (the approval then refuses GOVERNANCE_UNCONSULTED, asserted below).
+  const lanesLib = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
+  const largePlanVerdict = handle === 'wired'
+    ? async ({ tenantId, projectNo, sheetId }) => lanesLib.largeLaneVerdictOf(await writeLock.refresh().governance.consult({ tenantId, projectNo, sheetId }), 'large_plan')
+    : async () => undefined
   return {
     handle,
     governance,
+    largePlanVerdict,
     dryRun: writeLock.wrapDryRun(tableActions.dryRunStockPreparationAction),
     apply: writeLock.wrapApply(tableActions.applyStockPreparationAction),
     createLargeApplyJob: largeBomJobs.createLargeBomCheckpointApplyJob,
@@ -707,10 +715,18 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       expansionOptions: { ...routeShapedLargeExpansionOptions(tableActions, runAction), requireCompleteBatch: false },
       now,
     })
+    const governanceVerdict = await lanes.largePlanVerdict({ tenantId: TENANT_ID, projectNo: scenario.projectNo, sheetId: runAction.target.sheetId })
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_sde_golden', existingRows: [], plannedAt: PLANNED_AT, now,
+      ...(governanceVerdict ? { governanceVerdict } : {}),
     })
-    const applyJob = await lanes.createLargeApplyJob({
+    // PR-3b: the stored job carries the verdict the plan route records — one NEW key, beside `planWriteObservation`,
+    // values-free and outside the plan revision. It is asserted here and digested apart, so every other byte of the
+    // stored job is still the golden's.
+    const { governanceVerdict: storedVerdict, ...plannedWithoutVerdict } = planned
+    if (governanceVerdict) assert.deepEqual(storedVerdict, { consulted: true, verdict: 'not_governed', generationToken: governanceVerdict.generationToken }, 'the plan recorded the route\'s verdict, closed to three keys')
+    else assert.equal(Object.prototype.hasOwnProperty.call(planned, 'governanceVerdict'), false, 'a plan without a verdict records none')
+    const approveInput = {
       storage,
       ...scope,
       actionId: action.actionId,
@@ -720,16 +736,25 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       acceptManualConfirmHold: true,
       createApplyJobId: () => 'apply_job_sde_golden',
       now,
-    })
+    }
+    let targetRevision
+    if (governanceVerdict) {
+      targetRevision = (await lanes.createLargeApplyJob(approveInput)).targetRevision
+    } else {
+      // PR-3b (O-1, P3-B1): an expansion planned without a governance verdict is never approved.
+      await assert.rejects(lanes.createLargeApplyJob(approveInput), (error) => error.status === 409 && error.code === 'LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED' && error.details.reason === 'verdict_absent')
+      assert.equal(await storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...scope, actionId: action.actionId, applyJobId: 'apply_job_sde_golden' })), null, 'no apply job is stored')
+      targetRevision = 'refused_governance_unconsulted'
+    }
     observed.large = {
       status: ran.status,
       artifactRevision: ran.artifactRevision,
       artifactDigest: digest(ran.artifact),
       planRevision: planned.planRevision,
       planArtifactDigest: digest(planned.planArtifact),
-      targetRevision: applyJob.targetRevision,
+      targetRevision,
       publicJobDigest: digest(largeBomJobs.publicBackgroundExpansionJob(planned)),
-      storedJobDigest: digest(planned),
+      storedJobDigest: digest(plannedWithoutVerdict),
     }
   }
   return observed

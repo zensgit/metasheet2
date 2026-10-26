@@ -476,8 +476,18 @@ async function main() {
     const observed = await observeAll(harness, mode, undefined, { handle })
     const stripped = stripHarnessKeys(observed)
     // PR-3a: a handle-absent apply is refused by the writer (asserted in the harness) — the one section that leg
-    // cannot reproduce; every other section is the golden, byte for byte.
-    const goldenFor = (name) => (handle === 'absent' && GOLDEN[name].apply ? { ...GOLDEN[name], apply: 'refused_governance_absent' } : GOLDEN[name])
+    // cannot reproduce; every other section is the golden, byte for byte. PR-3b: likewise a large expansion planned
+    // without the plan route's governance verdict is refused at approval (asserted in the harness), so that leg's
+    // `large.targetRevision` is the refusal token; its artifact, plan revision, plan artifact and stored job (minus the
+    // one new `governanceVerdict` key, asserted apart) are still the golden's.
+    const goldenFor = (name) => {
+      if (handle !== 'absent') return GOLDEN[name]
+      return {
+        ...GOLDEN[name],
+        ...(GOLDEN[name].apply ? { apply: 'refused_governance_absent' } : {}),
+        ...(GOLDEN[name].large ? { large: { ...GOLDEN[name].large, targetRevision: 'refused_governance_unconsulted' } } : {}),
+      }
+    }
 
     await run(`[${handle}][${mode}] every golden scenario was observed`, () => {
       assert.deepEqual(Object.keys(stripped).sort(), Object.keys(GOLDEN).sort())

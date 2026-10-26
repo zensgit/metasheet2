@@ -56,7 +56,8 @@
 //                                  continuation is confirmed would leave it evidence_incomplete with no confirm)
 //   no_generic_writer_names_sheet  no external-system object config and no pipeline's erp-feedback option
 //                                  names this sheet or objectId (and both registries answered) ← step 4 PR-6
-//   continuation_support_version   the plugin build recognises continuations    ← step 4 PR-3 flips the marker
+//   continuation_support_version   the plugin build recognises continuations    ← flipped by the LAST PR of the
+//                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
 // ---------------------------------------------------------------------------------------------------
 
 const { resolveFieldExistence } = require('./stock-preparation-target-provisioning.cjs')
@@ -70,10 +71,10 @@ const {
   readProjectSheetPlmSystemColumnLock,
 } = require('./stock-preparation-project-targets.cjs')
 
-// THE CONTINUATION MARKER lives in its own module (read at evaluation time, see its header): a later PR
-// (step 4 PR-3: the governance consult on every lane, the planner projection, whole-pull suspension)
-// flips it to REQUIRED when the build really recognises persisted continuations on every lane. Until
-// then readiness refuses by construction (D-22).
+// THE CONTINUATION MARKER lives in its own module (read at evaluation time, see its header): the LAST PR of
+// the D-22 set (step 4 PR-3a / PR-3b — the governance consult on every lane, the planner projection, whole-
+// pull suspension, the large-lane refusal — plus PR-4, PR-5, PR-6, PR-8 and step 6) flips it to REQUIRED,
+// never ahead. PR-3a and PR-3b leave it 0, so readiness still refuses every enable by construction (D-22).
 const continuationSupport = require('./stock-preparation-continuation-support.cjs')
 // O-6: the continuation core's own "active" / "root" predicates (see no_two_copy_component above).
 const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')

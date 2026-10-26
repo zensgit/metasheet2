@@ -101,6 +101,7 @@ node __tests__/stock-preparation-refresh-lanes.test.cjs
 node __tests__/stock-preparation-refresh-small-lane.test.cjs
 node __tests__/stock-preparation-refresh-writer-tripwire.test.cjs
 node __tests__/stock-preparation-refresh-chunk-gate.test.cjs
+node __tests__/stock-preparation-refresh-large-lane.test.cjs
 node __tests__/stock-preparation-refresh-route-wiring.test.cjs
 node __tests__/stock-preparation-refresh-egress.test.cjs
 node __tests__/stock-preparation-refresh-scan.test.cjs

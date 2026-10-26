@@ -18,7 +18,7 @@
 //        no guard ⇒ the pre-PR-B answer (`large_bom_bounded`) byte for byte
 //   R-01 readiness: every check passes on a satisfied fake ⇒ ready, failing [], version 1, the id list pinned
 //   R-02 EVERY CHECK FAILS CLOSED ON ITS OWN: one mutation per check id ⇒ exactly the expected failing set, the
-//        continuation marker included (the build literal is 0 until step 4 PR-3 flips it)
+//        continuation marker included (the build literal is 0 until the LAST PR of the D-22 set flips it; still 0 after PR-3b)
 //   R-03 a probe that throws is `ok: false`, never a thrown readiness; the answer is values-free
 //   R-04 collectGenericWriterTargets: both registries must answer (else incomplete); object configs and pipeline
 //        erp-feedback options are collected; a throwing registry is incomplete
@@ -339,7 +339,7 @@ async function withContinuationSupport(version, fn) {
 test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the version are pinned; the answer is values-free', async () => {
   // Version 2 (pre-enable hardening, step-4 design §23.4 F-3 / F-5): three checks added, none removed or renamed.
   assert.equal(readiness.PILOT_READINESS_VERSION, 2)
-  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (step 4 PR-3 flips it)')
+  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
     'single_project_on_sheet', 'no_two_copy_component', 'write_lock_store_readable', 'write_lock_free', 'no_open_large_job', 'export_closure_port',
