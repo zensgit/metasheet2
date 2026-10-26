@@ -5304,6 +5304,15 @@
                     </div>
                   </section>
 
+                  <AttendanceCalculationMembershipWorkspace
+                    :enabled="attendanceGroupPolicyWorkspaceEnabled"
+                    :active="showAdminSectionWorkspace && shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups) && attendanceGroupActiveStage === 'people'"
+                    :can-read="canReadAttendanceCalculationMembership"
+                    :org-id="normalizedOrgId() ?? ''"
+                    :group-id="attendanceGroupEditingId ?? ''"
+                    :groups="attendanceGroups"
+                  >
+                    <template #legacy>
                   <section v-show="attendanceGroupActiveStage === 'people'" id="attendance-group-stage-people" class="attendance__group-panel" data-attendance-group-people>
                     <div class="attendance__admin-section-header">
                       <h6>{{ tr('People', '考勤人员') }}</h6>
@@ -5451,6 +5460,8 @@
                       </div>
                     </template>
                   </section>
+                    </template>
+                  </AttendanceCalculationMembershipWorkspace>
 
                   <section v-show="attendanceGroupActiveStage === 'people'" class="attendance__group-panel" data-attendance-group-managers>
                     <div class="attendance__admin-section-header">
@@ -10714,6 +10725,7 @@ import {
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
 import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../router/attendanceGroupContextRoute'
 import AttendanceGroupPolicyWorkspace, { useAttendanceGroupPolicyWorkspace } from './attendance/AttendanceGroupPolicyWorkspace'
+import AttendanceCalculationMembershipWorkspace from './attendance/AttendanceCalculationMembershipWorkspace'
 import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupRouteContext'
 import { hydrateAttendanceGroupRoute, type AttendanceGroupRouteWorkflowStage } from './attendance/attendanceGroupRouteHydration'
 import type { AttendanceGroupEffectivePolicyStageActionV1 } from './attendance/attendanceGroupEffectivePolicyLabels'
@@ -12915,6 +12927,9 @@ const attendanceSessionGuard = provideAttendanceSessionGuard(
 const attendanceSessionStale = attendanceSessionGuard.stale
 const apiFetch = attendanceSessionGuard.wrapFetch(sendApiFetch)
 function reloadAttendanceSession() { window.location.reload() }
+function canReadAttendanceCalculationMembership(): boolean {
+  return typeof auth.hasPermission === 'function' && auth.hasPermission('attendance:admin') === true
+}
 const attendanceAdminGlobalUserScope = computed(() => (
   typeof auth.getAccessSnapshot === 'function' && auth.getAccessSnapshot().isAdmin
 ))

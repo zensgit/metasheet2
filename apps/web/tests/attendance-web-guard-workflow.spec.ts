@@ -142,6 +142,18 @@ function requiredLaneExecCommand(script: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it('registers calculation-membership view and transport specs in both live lanes exactly once', () => {
+    const targeted = targetedRunCommand(workflow).trim().split(/\s+/)
+    const required = requiredLaneExecCommand(
+      readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8'),
+    ).split(/\s+/)
+    for (const spec of ['AttendanceCalculationMembershipHistory', 'attendanceCalculationMembershipHost', 'attendanceCalculationMembershipTimeline', 'attendanceCalculationMembershipTransport']) {
+      expect(workflow.split('apps/web/tests/' + spec + '.spec.ts')).toHaveLength(3)
+      expect(targeted.filter(token => token === spec)).toHaveLength(1)
+      expect(required.filter(token => token === spec)).toHaveLength(1)
+    }
+  })
+
   it('registers the W6 summary-fidelity specs in both live lanes exactly once', () => {
     const targeted = targetedRunCommand(workflow).trim().split(/\s+/)
     const required = requiredLaneExecCommand(

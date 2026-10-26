@@ -1625,6 +1625,10 @@ exec npx vitest run \
   attendanceAdminGuide.spec.ts \
   attendanceAudienceChipField.spec.ts \
   attendanceBusinessTripRequestCard \
+  AttendanceCalculationMembershipHistory \
+  attendanceCalculationMembershipHost \
+  attendanceCalculationMembershipTimeline \
+  attendanceCalculationMembershipTransport \
   attendanceCapabilityUnavailable \
   attendanceCurrentTimeContext \
   attendanceDayTimeContext \

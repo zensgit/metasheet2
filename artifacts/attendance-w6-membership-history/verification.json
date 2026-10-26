@@ -1,0 +1,132 @@
+{
+  "status": "Draft/HOLD local qualified; exact published-head CI pending",
+  "main": "4c4cd3abafad0761cb1fedcc8731b4341d02ee19",
+  "dependencyPR": 6556,
+  "dependencyHead": "4137840b7ce81cabf446307560db4cdbbc7ea48d",
+  "localDependencyMerge": "25bbfae147061603950887127bbc8e019a902c5f",
+  "runtimeSourceHashes": {
+    "apps/web/src/views/AttendanceView.vue": "e90308ed7ae46e65222c12603d50dcde2a3ce3a7b3f40e24aca07cbb874e6870",
+    "apps/web/src/views/attendance/AttendanceCalculationMembershipHistory.vue": "502d9863c513f2c351b6f40ede2e85628e83a400c49b9ac902c5816283714fe6",
+    "apps/web/src/views/attendance/AttendanceCalculationMembershipWorkspace.ts": "46713f2ecc26c73f514b391cb65eee76d6fd87c4ac76da924fd998d346e0ef86",
+    "apps/web/src/views/attendance/attendanceCalculationMembershipHistory.ts": "979ee650e1502b8fbb7fa5e2e83fe78a982d4bfdab719cc722a39d1766c79154",
+    "apps/web/src/views/attendance/useAttendanceCalculationCapability.ts": "87fc95c67575b2732a9d56fe3b82431d0eceffdb9619a6e293832f9227b32cbd"
+  },
+  "frontend": {
+    "auditCountingNote": "one search-error title parametrized three distinct source inputs; count actual invocations, not deduplicate titles or label132 fresh unique names",
+    "newCases": {
+      "initialActualPassed": 128,
+      "additionalActualPassed": 4,
+      "additionalFilteredExcluded": 44,
+      "caseInvocationsAcrossPhases": 132,
+      "uniqueFullNamesAcrossPhases": 130,
+      "sameTitleParameterizedSearchRows": 3,
+      "freshFull132Claim": false
+    },
+    "initialFourSpecCounts": [
+      {
+        "file": "AttendanceCalculationMembershipHistory.spec.ts",
+        "actualPassed": 37
+      },
+      {
+        "file": "attendanceCalculationMembershipHost.spec.ts",
+        "actualPassed": 3
+      },
+      {
+        "file": "attendanceCalculationMembershipTimeline.spec.ts",
+        "actualPassed": 81
+      },
+      {
+        "file": "attendanceCalculationMembershipTransport.spec.ts",
+        "actualPassed": 7
+      }
+    ],
+    "nineMutations": {
+      "matchingRed": 12,
+      "controlExecutions": 9,
+      "allRestored": true,
+      "controlsNotAddedToUnique": true
+    },
+    "affectedNeighbors": 45,
+    "frontendRegistration": 40,
+    "backendGuards": 63,
+    "scopedLintExit": 0,
+    "validateAllExit": 0,
+    "webBuildExit": 0,
+    "AVInheritedDiagnostics": 17,
+    "AVIntroducedDiagnostics": 0,
+    "fullAVLintCleanClaim": false,
+    "current14SourcePinsMatch": true,
+    "onlyRuntimeDeltaAfterInitialGreen": "local lifetime boolean active renamed mounted at three references, no guard/budget semantics changed",
+    "harnessFailuresPreserved": true,
+    "review": "Astra high source-only three P2 closed; no confirmed newP1/P2; execution separately audited"
+  },
+  "backend": {
+    "actualHttpUniqueCases": 9,
+    "phase": "actual jwt middleware/RBAC/router + isolated PG; not full MetaSheetServer",
+    "migrationsApplied": 458,
+    "pending": 0,
+    "ledgerCount": 458,
+    "observedRequestSql": 74,
+    "observedRequestDml": 0,
+    "providerTcpAttempts": 0,
+    "nineRelevantTableFingerprintsUnchanged": true,
+    "ownClusterStopped": true,
+    "dataRetained": true,
+    "probeSHA256": "e04e6a2654dee3e04a6b843341489efcce648ff8270b0954acaa11975981ff6b",
+    "resultLogSHA256": "3ce8897e265778883e3f599dc8a33197edf3fdc01efc2a76700f8f2080279612"
+  },
+  "browser": {
+    "phases": [
+      {
+        "viewport": 1440,
+        "locale": "en",
+        "status": "passed-bounded-observations-only",
+        "screenshot": "artifacts/attendance-w6-membership-history/screenshots/1440-en-inclusive-history.png",
+        "sha256": "625d78e4beef492353380c4952fff89d0a92e016e572ed7db823bfb9ca669e7b",
+        "selectionDriver": "Playwright selectOption on existing native select; not native-menu keyboard or humanAT proof",
+        "nativeMenuKeyboardAcceptance": false,
+        "rawProofSHA256": "78d86c959749a0a57cca9b0e812bb6db667c02ba23aa9073d243482c03f8b4e2"
+      },
+      {
+        "viewport": 768,
+        "locale": "zh-CN",
+        "status": "passed-bounded-observations-only",
+        "screenshot": "artifacts/attendance-w6-membership-history/screenshots/768-zh-inclusive-history.png",
+        "sha256": "4f346b125bb9828cac9b2e62b13d6febb8b549f52839bca262c86c92d42c9671",
+        "selectionDriver": "Playwright selectOption on existing native select; not native-menu keyboard or humanAT proof",
+        "nativeMenuKeyboardAcceptance": false,
+        "rawProofSHA256": "f33c3c33dd71ae02dea87a916d5fdc581db743a6c84e1eb03444275aebbba1cd"
+      },
+      {
+        "viewport": 390,
+        "locale": "zh-CN",
+        "status": "passed-original-mobile-block-observation",
+        "screenshot": "artifacts/attendance-w6-membership-history/screenshots/390-zh-original-admin-gate.png",
+        "sha256": "aad08c82d64362ca626030a12f1f12c5981e2748ca19e24934db5764b20627c8",
+        "selectionDriver": null,
+        "nativeMenuKeyboardAcceptance": false,
+        "rawProofSHA256": "4995be8479c50404e4a849e46c3b0ba49e7c5068004ffda99b64052def3380ff"
+      }
+    ],
+    "OFFScopedDOMEqual": true,
+    "OFFfullAPIRequestMultisetEqual": true,
+    "OFFAPIrequestCountEach": 58,
+    "OFFfullDocumentEqual": false,
+    "OFForderedIOClaim": false,
+    "applicationWrites": 0,
+    "providerAttempts": 0,
+    "pageErrors": 0,
+    "nativeMenuKeyboardAcceptance": false,
+    "humanAT": false,
+    "originalMobileGate": true
+  },
+  "defaultGate": "existing attendanceGroupEffectivePolicyPanel OFF",
+  "newFlags": 0,
+  "backendChanges": 0,
+  "businessWriterChanges": 0,
+  "R71Changed": false,
+  "realUAT": false,
+  "business50004": "excluded",
+  "historical08PUT": "INCONCLUSIVE",
+  "privateCompatibilityNewInput": "pending"
+}
