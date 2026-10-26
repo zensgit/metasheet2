@@ -2036,6 +2036,34 @@ function projectWriteAbortError(applyResult) {
   return new StockPreparationProjectWriteLockError(status, code, message, details)
 }
 
+// Batch-refresh step 5 PR-8 (design §10.3 (2) last sentence, D-2; the F15 hazard): the VERSION each UPDATE /
+// INACTIVE decision of THIS in-lease recompute was planned against — `Map<idempotencyKey, { id, version, row }>` from
+// the record reference the project-scoped reader attached to the ONE existing row of that key
+// (`withExistingRowRecordRef`). Built from THIS request's read (O-10), never from the token, a preview or a stored
+// artifact. A key whose existing group is not exactly one row with an integer version gets no entry, and the writer
+// patches it exactly as before. Every small apply passes it, governed or not (register R-63 ①).
+function expectedRecordsOf(dryRun) {
+  const groups = new Map()
+  for (const row of Array.isArray(dryRun.existingRows) ? dryRun.existingRows : []) {
+    const key = isPlainObject(row) && typeof row.idempotencyKey === 'string' ? row.idempotencyKey.trim() : ''
+    if (!key) continue
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(row)
+  }
+  const out = new Map()
+  const decisions = dryRun.plan && Array.isArray(dryRun.plan.decisions) ? dryRun.plan.decisions : []
+  for (const decision of decisions) {
+    if (!decision || (decision.decision !== DECISIONS.UPDATE && decision.decision !== DECISIONS.INACTIVE)) continue
+    const key = typeof decision.idempotencyKey === 'string' ? decision.idempotencyKey.trim() : ''
+    const group = key ? groups.get(key) : null
+    if (!group || group.length !== 1) continue
+    const ref = group[0][EXISTING_ROW_RECORD_REF]
+    if (!ref || typeof ref.id !== 'string' || ref.id.trim() === '' || !Number.isSafeInteger(ref.version) || ref.version < 1) continue
+    out.set(key, Object.freeze({ id: ref.id, version: ref.version, row: group[0] }))
+  }
+  return out
+}
+
 // PR-3a (P3-X3): an execution whose apply THREW is finished `failed` with the thrown error's code (a closed
 // token, or `apply_threw`), best effort. A finish that fails here leaves the row `running` — after the
 // release it derives 失败待恢复 and blocks the next apply (RECOVERY_PENDING) until step 6 — and is logged
@@ -3231,6 +3259,10 @@ async function applyStockPreparationAction(input = {}) {
       writeFenceRequired: true,
       // PR-3a (design §7.2 (b)): the verdict of THIS computation's consult; the writer refuses without it.
       governance: dryRun.governance,
+      // PR-8 (register R-63 ①): every UPDATE / INACTIVE carries the version of the row THIS in-lease recompute
+      // planned against; a conflict re-reads once (human-only move => one retry; a plugin-written column moved =>
+      // the run stops 409 STOCK_PREP_CHANGE_PLAN_STALE). Governed or not.
+      expectedRecords: expectedRecordsOf(dryRun),
     })
   } catch (error) {
     if (execution) {
@@ -3343,6 +3375,7 @@ module.exports = {
     requireConsumableTokenStore,
     WRITE_BINDING_KEYS,
     assertProjectWriteGuardScope,
+    expectedRecordsOf,
     normalizeWriteBinding,
     projectWriteAbortError,
     requireProjectWriteGuard,

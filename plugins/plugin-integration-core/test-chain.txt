@@ -151,6 +151,7 @@ node __tests__/stock-preparation-carry-hardening.test.cjs
 node __tests__/stock-preparation-carry-target-binding.test.cjs
 node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
+node __tests__/stock-preparation-apply-writer-version.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs
 node __tests__/stock-preparation-project-write-lock.test.cjs
 node __tests__/stock-preparation-pilot-gate.test.cjs
