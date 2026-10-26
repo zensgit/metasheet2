@@ -1,3 +1,8 @@
+import {
+  DIRECTORY_ACCOUNT_UPSERT_SQL,
+  upsertDirectoryAccountMetadataRows,
+  upsertDirectoryDepartmentMetadataRows,
+} from './directory-metadata-batch-upsert'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
@@ -1242,47 +1247,6 @@ export function resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(
 // all read ONE rule. Re-exported for existing importers.
 export { resolveDirectoryAccountGrantOpenId }
 export type { DirectoryAccountGrantOpenIdSource }
-
-/**
- * The directory sync's per-member upsert (params $1..$16 in column order). A module constant so
- * directory-dingtalk-openid-grant-path.db.test.ts can run the exact statement against real
- * Postgres and prove the open_id CASE semantics.
- */
-const DIRECTORY_ACCOUNT_UPSERT_SQL = `INSERT INTO directory_accounts (
-     integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key,
-     name, nick, email, mobile, job_number, title, avatar_url, is_active, raw, last_seen_at, created_at, updated_at
-   )
-   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, $15::jsonb, $16, NOW(), NOW())
-   ON CONFLICT (integration_id, external_user_id)
-   DO UPDATE SET
-     corp_id = EXCLUDED.corp_id,
-     union_id = EXCLUDED.union_id,
-     -- 通讯录 user/get never returns openId, so EXCLUDED.open_id is normally NULL: keep
-     -- the openId a DingTalk login backfilled, but ONLY while it still describes the same
-     -- person in the same corp. A changed unionId (or corp) means the stored openId may
-     -- belong to someone else, and a stale openId would let a grant key on the wrong
-     -- person (DT-HARDEN-02) — so it is cleared and must be re-learned from a login.
-     open_id = CASE
-       WHEN COALESCE(EXCLUDED.open_id, '') <> '' THEN EXCLUDED.open_id
-       -- plain = on purpose: a NULL unionId (either side) is NOT the same person, so the openId is cleared
-       WHEN directory_accounts.union_id = EXCLUDED.union_id
-         AND directory_accounts.corp_id IS NOT DISTINCT FROM EXCLUDED.corp_id
-         THEN directory_accounts.open_id
-       ELSE NULL
-     END,
-     external_key = EXCLUDED.external_key,
-     name = EXCLUDED.name,
-     nick = EXCLUDED.nick,
-     email = EXCLUDED.email,
-     mobile = EXCLUDED.mobile,
-     job_number = EXCLUDED.job_number,
-     title = EXCLUDED.title,
-     avatar_url = EXCLUDED.avatar_url,
-     is_active = true,
-     raw = EXCLUDED.raw,
-     last_seen_at = EXCLUDED.last_seen_at,
-     updated_at = NOW()
-   RETURNING (xmax = 0) AS created`
 
 // ONE builder for every reader: the bind/admit loaders (alias `account`) feed the grant
 // assertion, and the account summary / review-item queries (alias `a`) feed the page's
@@ -4180,27 +4144,10 @@ export async function syncDirectoryIntegration(
       // transaction's xid (pg-only repo, standard PostgreSQL trick). Read defensively
       // (`rows[0]?.created === true`) so a fake client answering empty rows in unit suites
       // falls into the "updated" bucket instead of throwing.
-      let departmentsCreatedCount = 0
-      let departmentsUpdatedCount = 0
-      for (const department of departments.values()) {
-        const departmentUpsert = await client.query(
-          `INSERT INTO directory_departments (
-             integration_id, provider, external_department_id, external_parent_department_id, name,
-             full_path, order_index, is_active, raw, last_seen_at, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8::jsonb, $9, NOW(), NOW())
-           ON CONFLICT (integration_id, external_department_id)
-           DO UPDATE SET
-             external_parent_department_id = EXCLUDED.external_parent_department_id,
-             name = EXCLUDED.name,
-             full_path = EXCLUDED.full_path,
-             order_index = EXCLUDED.order_index,
-             is_active = true,
-             raw = EXCLUDED.raw,
-             last_seen_at = EXCLUDED.last_seen_at,
-             updated_at = NOW()
-           RETURNING (xmax = 0) AS created`,
-          [
+      const { createdCount: departmentsCreatedCount, updatedCount: departmentsUpdatedCount } =
+        await upsertDirectoryDepartmentMetadataRows(
+          (sql, params) => client.query(sql, params),
+          Array.from(departments.values()).map((department) => [
             integrationId,
             DEFAULT_PROVIDER,
             department.id,
@@ -4215,42 +4162,35 @@ export async function syncDirectoryIntegration(
               ),
             ),
             syncTimestamp,
-          ],
+          ]),
         )
-        if (departmentUpsert.rows[0]?.created === true) departmentsCreatedCount += 1
-        else departmentsUpdatedCount += 1
-      }
 
-      let accountsCreatedCount = 0
-      let accountsUpdatedCount = 0
       const userList = Array.from(users.values())
-      for (const user of userList) {
-        const externalKey = normalizeText(user.unionId || user.openId || user.userId)
-        const accountUpsert = await client.query(
-          DIRECTORY_ACCOUNT_UPSERT_SQL,
-          [
-            integrationId,
-            DEFAULT_PROVIDER,
-            integration.corp_id,
-            user.userId,
-            normalizeOptionalText(user.unionId),
-            normalizeOptionalText(user.openId),
-            externalKey,
-            user.name,
-            normalizeOptionalText(user.nick),
-            normalizeOptionalText(user.email),
-            normalizeOptionalText(user.mobile),
-            normalizeOptionalText(user.jobNumber),
-            normalizeOptionalText(user.title),
-            normalizeOptionalText(user.avatarUrl),
-            JSON.stringify(user.source),
-            syncTimestamp,
-          ],
+      const { createdCount: accountsCreatedCount, updatedCount: accountsUpdatedCount } =
+        await upsertDirectoryAccountMetadataRows(
+          (sql, params) => client.query(sql, params),
+          userList.map((user) => {
+            const externalKey = normalizeText(user.unionId || user.openId || user.userId)
+            return [
+              integrationId,
+              DEFAULT_PROVIDER,
+              integration.corp_id,
+              user.userId,
+              normalizeOptionalText(user.unionId),
+              normalizeOptionalText(user.openId),
+              externalKey,
+              user.name,
+              normalizeOptionalText(user.nick),
+              normalizeOptionalText(user.email),
+              normalizeOptionalText(user.mobile),
+              normalizeOptionalText(user.jobNumber),
+              normalizeOptionalText(user.title),
+              normalizeOptionalText(user.avatarUrl),
+              JSON.stringify(user.source),
+              syncTimestamp,
+            ]
+          }),
         )
-        if (accountUpsert.rows[0]?.created === true) accountsCreatedCount += 1
-        else accountsUpdatedCount += 1
-      }
-
       // R5, mirroring the DT-OPS-01 account sweep below: `AND is_active = true` makes this a
       // TRANSITION (departments that departed in THIS run), not a re-stamp of every
       // long-gone department on every sync — without it the per-run count would report the
