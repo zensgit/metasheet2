@@ -50,6 +50,12 @@ const SAFE_WRITE_ERROR_CODES = new Set([
   // operator cannot tell a misconfigured target from a flaky one.
   'METASHEET_MULTITABLE_OWNERSHIP_PROTECTED_KEY_FIELD',
   'METASHEET_MULTITABLE_OWNERSHIP_UNVERIFIED',
+  // Batch-refresh step 4 PR-6 (lib/stock-preparation-governed-sheet-probe.cjs): the write-source's `test()` refuses a
+  // governed stock-prep sheet before any row, uncaught; insertRows / updateRows refuse it too (defence in depth),
+  // and a refusal there lands in this row loop. Registered so that layer stays diagnosable — a governed target, or a
+  // write-source built without its probe, is a TARGET fact, not an opaque WRITE_FAILED.
+  'METASHEET_MULTITABLE_STOCK_PREP_GOVERNED_SHEET',
+  'STOCK_PREP_GOVERNED_SHEET_PROBE_UNWIRED',
   'DATA_SOURCE_BRIDGE_CONFIG_ERROR',
   'DATA_SOURCE_GENERIC_QUERY_DISABLED_REQUIRED',
   'DATA_SOURCE_NOT_C6_WRITE_TARGET',

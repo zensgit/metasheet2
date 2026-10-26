@@ -105,6 +105,11 @@ node __tests__/stock-preparation-refresh-large-lane.test.cjs
 node __tests__/stock-preparation-refresh-route-wiring.test.cjs
 node __tests__/stock-preparation-refresh-egress.test.cjs
 node __tests__/stock-preparation-refresh-scan.test.cjs
+node __tests__/stock-preparation-governed-sheet-probe.test.cjs
+node __tests__/metasheet-multitable-governed-sheet.test.cjs
+node __tests__/erp-feedback-governed-sheet.test.cjs
+node __tests__/pipeline-runner-governed-sheet.test.cjs
+node __tests__/stock-preparation-generic-writer-scan.test.cjs
 node __tests__/stock-preparation-existing-row-record-ref.test.cjs
 node __tests__/stock-preparation-foreign-existing-rows-readside.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs
