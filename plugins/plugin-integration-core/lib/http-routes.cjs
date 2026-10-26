@@ -749,6 +749,7 @@ const {
   assertNoRunbookOnlyHold,
   assertNoUnfinishedExecution,
   createRefreshGovernanceHandle,
+  isExecutionFinishedDuringPreview,
   largeLaneVerdictOf,
   planningInputsOrRefuse,
   sourceBindingDisagreementOf,
@@ -4890,6 +4891,10 @@ function requireStockPreparationAudit() {
   // could land after — and overwrite — the holder's `applied`.
   async function stampWriteLockRefusal(action, tenantId, error) {
     if (error && error.code === PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED) return
+    // Design §23.8 F-18 (step-4 review follow-ups): the preview's straddle refusal (`execution_finished_during_preview`)
+    // likewise describes ANOTHER run — the apply that just finished and stamped its own `applied` — so no `refused`
+    // stamp (and no overview update) from this preview may land over it.
+    if (isExecutionFinishedDuringPreview(error)) return
     await stampProjectPullOutcome(action, tenantId, { outcome: 'refused', code: error && error.code })
     if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(tenantId, action.projectTarget.projectNo)
   }
