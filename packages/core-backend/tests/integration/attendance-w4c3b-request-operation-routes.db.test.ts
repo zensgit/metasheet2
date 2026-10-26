@@ -1,6 +1,6 @@
 import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
@@ -336,6 +336,247 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       else process.env[key] = value
     }
   })
+
+  it.each([
+    { splitSlot: 0, narrowSlot: 1, scenario: 'narrow' },
+    { splitSlot: 1, narrowSlot: 0, scenario: 'narrow' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'split' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'overlap' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'enabled-narrow' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'enabled-split' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'second-context' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'off' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'source-failure' },
+    { splitSlot: 0, narrowSlot: 1, scenario: 'policy-cut' },
+  ] as const)(
+    'CALC05_SEGMENT_WINDOW: containing narrow shift wins over split envelope (splitSlot=$splitSlot, narrowSlot=$narrowSlot, scenario=$scenario)',
+    async ({ splitSlot, narrowSlot, scenario }) => {
+      const fixture = await seedOrg('shadow')
+      const workDate = '2026-02-04'
+      const isSplit = scenario === 'split' || scenario === 'enabled-split'
+      const selectedIndex = isSplit ? 0 : 1
+      const expectedStatus = isSplit ? 'partial' : 'normal'
+      const expectedMinutes = isSplit ? 60 : 120
+      const expectedSegments = isSplit ? 2 : 1
+      const inTime = isSplit ? '16:00:00' : '13:00:00'
+      const outTime = isSplit ? '17:00:00' : '15:00:00'
+      await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+      await pool.query(
+        "INSERT INTO user_permissions (user_id, permission_code) SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING",
+        [fixture.userId, ['attendance:read', 'attendance:write']],
+      )
+      const headers = { Authorization: 'Bearer ' + fixture.token }
+      const shiftIds: string[] = []
+      for (const [name, segments] of [
+        ['CALC05 split source', [{ startTime: '08:00', endTime: '09:00' }, { startTime: scenario === 'overlap' ? '13:00' : '16:00', endTime: '17:00' }]],
+        ['CALC05 containing source', [{ startTime: '13:00', endTime: '15:00' }]],
+      ] as const) {
+        const created = await requestJson(baseUrl + '/api/attendance/shifts', {
+          method: 'POST', headers,
+          body: { name, timezone: 'UTC', segments, lateGraceMinutes: 0, earlyGraceMinutes: 0,
+            roundingMinutes: 1, workingDays: [0, 1, 2, 3, 4, 5, 6] },
+        })
+        expect(created.status, 'CALC05_SHIFT_SOURCE_HTTP_201').toBe(201)
+        expect(typeof created.body?.data?.id).toBe('string')
+        shiftIds.push(created.body?.data?.id)
+      }
+      // Source fixture rows only; this does not test assignment-write permission or authoring settings.
+      const assignmentIds = [randomUUID(), randomUUID()]
+      await pool.query(
+        `INSERT INTO attendance_shift_assignments
+           (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+         VALUES ($1, $2, $3, $4, $5::date, $5::date, true, 'published', $6),
+                ($7, $2, $3, $8, $5::date, $5::date, true, 'published', $9)`,
+        [assignmentIds[0], fixture.orgId, fixture.userId, shiftIds[0], workDate, splitSlot,
+          assignmentIds[1], shiftIds[1], narrowSlot],
+      )
+      for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+        await pool.query(
+          'UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1',
+          [fixture.orgId, state, prior, version],
+        )
+      }
+      const persistedSegments = await pool.query(
+        `SELECT shift_id::text, segment_index, substr(start_time::text, 1, 5) AS start_time,
+                substr(end_time::text, 1, 5) AS end_time, start_day_offset, end_day_offset
+           FROM attendance_shift_segments WHERE org_id = $1 AND shift_id = ANY($2::uuid[])
+          ORDER BY shift_id, segment_index`, [fixture.orgId, shiftIds],
+      )
+      expect(persistedSegments.rows).toEqual([
+        { shift_id: shiftIds[0], segment_index: 0, start_time: '08:00', end_time: '09:00', start_day_offset: 0, end_day_offset: 0 },
+        { shift_id: shiftIds[0], segment_index: 1, start_time: scenario === 'overlap' ? '13:00' : '16:00', end_time: '17:00', start_day_offset: 0, end_day_offset: 0 },
+        { shift_id: shiftIds[1], segment_index: 0, start_time: '13:00', end_time: '15:00', start_day_offset: 0, end_day_offset: 0 },
+      ].sort((a, b) => a.shift_id.localeCompare(b.shift_id) || a.segment_index - b.segment_index))
+      const businessCountsSql = `SELECT
+        (SELECT count(*)::int FROM attendance_events WHERE org_id = $1) AS events,
+        (SELECT count(*)::int FROM attendance_records WHERE org_id = $1) AS records,
+        (SELECT count(*)::int FROM attendance_record_calculations WHERE org_id = $1) AS calculations,
+        (SELECT count(*)::int FROM attendance_record_segments WHERE org_id = $1) AS segments`
+      const beforeBusiness = (await pool.query(businessCountsSql, [fixture.orgId])).rows[0]
+      expect(beforeBusiness).toEqual({ events: 0, records: 0, calculations: 0, segments: 0 })
+      const posture = await pool.query(
+        'SELECT state, version, scope FROM attendance_calculation_rollout_state WHERE org_id = $1', [fixture.orgId],
+      )
+      expect(posture.rows).toEqual([{ state: 'authoritative', version: 4, scope: 'synthetic_staging' }])
+      expect(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED).toBe(fixture.orgId)
+      // Isolated source-policy fixtures, not a public configuration-write proof.
+      if (scenario.startsWith('enabled-') || scenario === 'policy-cut') {
+        await pool.query(
+          'INSERT INTO attendance_timezone_policies (org_id, enabled, version, updated_by) VALUES ($1, true, 1, $2)',
+          [fixture.orgId, fixture.userId],
+        )
+      }
+      if (scenario === 'policy-cut') {
+        // The changed zone moves the reconstructed window away from the required
+        // second half of the original full window; that partition must not vanish.
+        await pool.query(
+          `INSERT INTO attendance_employee_timezone_overrides
+             (org_id, user_id, timezone, effective_from, effective_to, version, created_by, updated_by)
+           VALUES ($1, $2, 'Asia/Tokyo', $3::timestamptz, NULL, 1, $2, $2)`,
+          [fixture.orgId, fixture.userId, workDate + 'T14:00:00.000Z'],
+        )
+      }
+      if (scenario === 'off') delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      const events = [['check_in', inTime], ['check_out', outTime]] as const
+      for (const [eventType, time] of events) {
+        if (scenario === 'source-failure') {
+          await pool.query('ALTER TABLE attendance_shift_segments RENAME TO attendance_shift_segments_calc05_unavailable')
+        }
+        let response: JsonResponse
+        try {
+          response = await requestJson(baseUrl + '/api/attendance/punch', {
+            method: 'POST', headers,
+            body: { orgId: fixture.orgId, eventType, operationId: randomUUID(),
+              occurredAt: workDate + 'T' + time + '.000Z' },
+          })
+        } finally {
+          if (scenario === 'source-failure') {
+            await pool.query('ALTER TABLE attendance_shift_segments_calc05_unavailable RENAME TO attendance_shift_segments')
+          }
+        }
+        console.log('PARENT_CALC05_ADMISSION_RECEIPT ' + JSON.stringify({
+          splitSlot, narrowSlot, scenario, eventType, status: response.status,
+          code: response.body?.error?.code ?? null,
+        }))
+        if (response.status !== 200) {
+          const afterBusiness = (await pool.query(businessCountsSql, [fixture.orgId])).rows[0]
+          console.log('PARENT_CALC05_REFUSAL_DELTA ' + JSON.stringify({
+            splitSlot, narrowSlot, scenario, before: beforeBusiness, after: afterBusiness,
+          }))
+          expect(afterBusiness).toEqual(beforeBusiness)
+        }
+        if (scenario === 'off' || scenario === 'source-failure' || scenario === 'policy-cut') {
+          const expected = scenario === 'source-failure'
+            ? { status: 503, code: 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE' }
+            : { status: 409, code: scenario === 'off'
+              ? 'ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS' : 'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT' }
+          expect({ status: response.status, code: response.body?.error?.code }).toEqual(expected)
+          console.log('PARENT_CALC05_PROTECTION_RECEIPT ' + JSON.stringify({
+            scenario, status: response.status, code: response.body?.error?.code, businessDeltaZero: true,
+            ...(scenario === 'off' ? { bodySHA256: createHash('sha256').update(response.raw).digest('hex') } : {}),
+          }))
+          return
+        }
+        if (scenario === 'overlap') {
+          expect(response.status, 'CALC05_TRUE_SEGMENT_OVERLAP_HTTP_409_REQUIRED').toBe(409)
+          expect(response.body?.error?.code).toBe('ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS')
+          console.log('PARENT_CALC05_TRUE_OVERLAP_RECEIPT ' + JSON.stringify({
+            scenario, status: response.status, code: response.body?.error?.code, businessDeltaZero: true,
+          }))
+          return
+        }
+        expect(response.status, 'CALC05_CONTAINING_SEGMENT_HTTP_200_REQUIRED').toBe(200)
+      }
+      const rows = await pool.query(
+        `SELECT r.id, r.work_date::text, r.current_calculation_id, r.projection_owner,
+                r.visibility_state, r.status, r.work_minutes, c.id AS calculation_id,
+                c.mode, c.outcome, c.outcome_reason_code, c.entrypoint, c.expected_segment_count,
+                c.projected_status, c.projected_work_minutes, c.attribution_snapshot, c.context_snapshot
+           FROM attendance_records r JOIN attendance_record_calculations c
+             ON c.id = r.current_calculation_id AND c.org_id = r.org_id AND c.attendance_record_id = r.id
+          WHERE r.org_id = $1 AND r.user_id = $2`,
+        [fixture.orgId, fixture.userId],
+      )
+      expect(rows.rows).toHaveLength(1)
+      const row = rows.rows[0]
+      expect(row).toMatchObject({
+        work_date: workDate, current_calculation_id: row.calculation_id, projection_owner: 'w4',
+        visibility_state: 'active', status: expectedStatus, work_minutes: expectedMinutes, mode: 'authoritative',
+        outcome: 'completed', outcome_reason_code: 'calculated', entrypoint: 'live',
+        expected_segment_count: expectedSegments, projected_status: expectedStatus, projected_work_minutes: expectedMinutes,
+      })
+      expect(row.attribution_snapshot).toMatchObject({
+        posture: 'resolved_v2', value: { orgId: fixture.orgId, userId: fixture.userId, workDate, shiftId: shiftIds[selectedIndex],
+          absoluteWindow: { startAt: workDate + (isSplit ? 'T08:00:00.000Z' : 'T13:00:00.000Z'),
+            endAt: workDate + (isSplit ? 'T17:00:00.000Z' : 'T15:00:00.000Z') } },
+      })
+      expect(row.context_snapshot).toMatchObject({ workDate, timezone: 'UTC', shiftId: shiftIds[selectedIndex] })
+      expect(row.context_snapshot.segments).toHaveLength(expectedSegments)
+      expect(row.context_snapshot.segments).toMatchObject(isSplit ? [
+        { index: 0, startTime: '08:00', endTime: '09:00', startDayOffset: 0, endDayOffset: 0 },
+        { index: 1, startTime: '16:00', endTime: '17:00', startDayOffset: 0, endDayOffset: 0 },
+      ] : [{ index: 0, startTime: '13:00', endTime: '15:00', startDayOffset: 0, endDayOffset: 0 }])
+      const children = await pool.query(
+        `SELECT segment_index, expected_start_at, expected_end_at, actual_in_at, actual_out_at,
+                status, status_reasons, work_minutes
+           FROM attendance_record_segments
+          WHERE org_id = $1 AND record_id = $2 AND calculation_id = $3 ORDER BY segment_index`,
+        [fixture.orgId, row.id, row.calculation_id],
+      )
+      expect(children.rows.map(segment => ({
+        ...segment, expected_start_at: segment.expected_start_at.toISOString(),
+        expected_end_at: segment.expected_end_at.toISOString(),
+        actual_in_at: segment.actual_in_at?.toISOString() ?? null, actual_out_at: segment.actual_out_at?.toISOString() ?? null,
+      }))).toEqual(isSplit ? [{
+        segment_index: 0, expected_start_at: workDate + 'T08:00:00.000Z', expected_end_at: workDate + 'T09:00:00.000Z',
+        actual_in_at: null, actual_out_at: null, status: 'missing_both', status_reasons: ['missing_both'], work_minutes: 0,
+      }, {
+        segment_index: 1, expected_start_at: workDate + 'T16:00:00.000Z', expected_end_at: workDate + 'T17:00:00.000Z',
+        actual_in_at: workDate + 'T16:00:00.000Z', actual_out_at: workDate + 'T17:00:00.000Z',
+        status: 'normal', status_reasons: ['within_window'], work_minutes: 60,
+      }] : [{
+        segment_index: 0, expected_start_at: workDate + 'T13:00:00.000Z',
+        expected_end_at: workDate + 'T15:00:00.000Z', actual_in_at: workDate + 'T13:00:00.000Z',
+        actual_out_at: workDate + 'T15:00:00.000Z', status: 'normal',
+        status_reasons: ['within_window'], work_minutes: 120,
+      }])
+      const sourceEvents = await pool.query(
+        `SELECT work_date::text, event_type, occurred_at FROM attendance_events
+          WHERE org_id = $1 AND user_id = $2 ORDER BY occurred_at, id`, [fixture.orgId, fixture.userId],
+      )
+      expect(sourceEvents.rows.map(event => [event.work_date, event.event_type, event.occurred_at.toISOString()]))
+        .toEqual(events.map(([direction, time]) => [workDate, direction, workDate + 'T' + time + '.000Z']))
+      if (scenario === 'second-context') {
+        const beforeCounts = (await pool.query(businessCountsSql, [fixture.orgId])).rows[0]
+        const beforeRecord = await pool.query(
+          'SELECT to_jsonb(r) AS record FROM attendance_records r WHERE org_id = $1 AND user_id = $2',
+          [fixture.orgId, fixture.userId],
+        )
+        const second = await requestJson(baseUrl + '/api/attendance/punch', {
+          method: 'POST', headers,
+          body: { orgId: fixture.orgId, eventType: 'check_in', operationId: randomUUID(),
+            occurredAt: workDate + 'T16:30:00.000Z' },
+        })
+        expect({ status: second.status, code: second.body?.error?.code }).toEqual({
+          status: 409, code: 'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',
+        })
+        expect((await pool.query(businessCountsSql, [fixture.orgId])).rows[0]).toEqual(beforeCounts)
+        const afterRecord = await pool.query(
+          'SELECT to_jsonb(r) AS record FROM attendance_records r WHERE org_id = $1 AND user_id = $2',
+          [fixture.orgId, fixture.userId],
+        )
+        expect(afterRecord.rows).toEqual(beforeRecord.rows)
+        console.log('PARENT_CALC05_SECOND_CONTEXT_RECEIPT ' + JSON.stringify({
+          status: second.status, code: second.body?.error?.code,
+          businessDeltaZero: true, entireCurrentRecordUnchanged: true,
+        }))
+      }
+      console.log('PARENT_CALC05_CURRENT_RESULT_RECEIPT ' + JSON.stringify({
+        splitSlot, narrowSlot, scenario, selectedContainingShift: true, expectedSegments,
+        actualSegments: children.rows.length, currentAuthoritative: true, workedMinutes: expectedMinutes, realAuth: false,
+      }))
+    }, 30000,
+  )
 
   it('replays shadow create and edit without duplicate source, snapshot, operation, or outbox rows', async () => {
     const fixture = await seedOrg('shadow')

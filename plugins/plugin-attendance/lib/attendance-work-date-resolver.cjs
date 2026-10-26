@@ -376,6 +376,7 @@ function selectAmongMatchingCandidates({
   attributionTailMinutes,
   orgId,
   userId,
+  containsActualSegment,
 }) {
   if (!Array.isArray(matching) || matching.length === 0) {
     return unresolvedResult({ reasonCode: REASON.NO_MATCHING_SHIFT })
@@ -428,7 +429,12 @@ function selectAmongMatchingCandidates({
   }
 
   // Current-day containing shift: punch inside the ABSOLUTE shift window for calendar day.
-  const currentDayContaining = matching.filter((candidate) => {
+  // Private canonical evidence only. Zero actual hits retains the original
+  // envelope/tail fallback; open previous-night precedence above is unchanged.
+  const actualContaining = typeof containsActualSegment === 'function' ? matching.filter(candidate =>
+    String(candidate.workDate) === String(calendarWorkDate) && containsActualSegment(candidate,occurredAt) === true
+  ) : []
+  const currentDayContaining = actualContaining.length > 0 ? actualContaining : matching.filter((candidate) => {
     if (!calendarWorkDate || String(candidate.workDate) !== String(calendarWorkDate)) return false
     return isInstantInWindow(occurredAt, candidate.absoluteWindow)
   })
@@ -579,6 +585,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
   }
   const {
     loadPublishedCandidates,
+    containsActualSegment,
     loadOpenRecords,
     loadApprovedOvertimeWindows,
     getAttributionTailMinutes,
@@ -890,7 +897,12 @@ function createAttendanceWorkDateResolver(deps = {}) {
       if (!includeFullWinner || !result || result.kind !== 'resolved') return result
       const fullWinner = candidates.find(
         (candidate) => String(candidate.workDate) === String(result.workDate)
-          && String(candidate.shiftId) === String(result.shiftId),
+          && String(candidate.shiftId) === String(result.shiftId)
+          && (typeof containsActualSegment !== 'function'
+            || (candidate.assignmentId === result.evidenceSnapshot?.winner?.assignmentId
+              && candidate.source === result.evidenceSnapshot?.winner?.source
+              && candidate.absoluteWindow.startAt.toISOString() === result.evidenceSnapshot?.winner?.absoluteWindow?.startAt
+              && candidate.absoluteWindow.endAt.toISOString() === result.evidenceSnapshot?.winner?.absoluteWindow?.endAt)),
       ) || null
       return {
         ...result,
@@ -1028,6 +1040,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       attributionTailMinutes,
       orgId,
       userId,
+      containsActualSegment,
     }))
   }
 
