@@ -577,6 +577,12 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   if (data.status === 'manual_confirm_required') {
     return { ...record, action: 'skipped_manual_confirm_required', durationMs: Date.now() - startedAt }
   }
+  // Batch-refresh step 4 PR-3a follow-up: a GOVERNED project with an earlier execution that did not finish cleanly
+  // previews `recovery_pending` (no token). A FAILURE by name (exit non-zero), never a quiet skip — nothing applies to
+  // this project until that execution is recovered — with the code a reader can look up instead of "unexpected".
+  if (data.status === 'recovery_pending') {
+    return { ...record, action: 'error', error: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', note: 'an earlier execution of this project did not finish cleanly; it must be recovered (step 6, or the owner runbook until step 6 exists) before any pull applies — nothing was applied', failed: true, durationMs: Date.now() - startedAt }
+  }
   if (data.status !== 'ready') {
     return { ...record, action: 'error', error: `unexpected dry-run status: ${data.status}`, failed: true, durationMs: Date.now() - startedAt }
   }

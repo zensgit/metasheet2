@@ -93,7 +93,7 @@ const {
   isCompleteComputation,
   mapContinuationStraddle,
   planDigestOf,
-  previewRecoveryOf,
+  previewRecoveryRechecked,
   reconcileComputation,
   selfSettlementFor,
 } = require('./stock-preparation-refresh-lanes.cjs')
@@ -2645,7 +2645,12 @@ async function dryRunStockPreparationAction(input = {}) {
   // refusal of the apply. The apply's order is kept — the hold reconciliation below still runs — but it NEVER
   // settles: `settlementForComputation` reads only the NEWEST execution, so an older failure beside a newer
   // success would otherwise settle a project the apply refuses.
-  const recovery = dryRun.refresh && dryRun.refresh.governed ? previewRecoveryOf(dryRun.refresh.consult) : null
+  // PR-3a follow-up (delta verification, 2026-10-26): the consult reads the executions inside its snapshot and the
+  // lock after it, so a run that finished between the two looks like a dead `running` row. When the answer rests
+  // only on such rows, the preview consults ONCE more (RL `previewRecoveryRechecked`): still open => recovery_pending;
+  // none left => 409 STATE_MOVED `execution_finished_during_preview` (preview again), before the reconciliation. The
+  // preview's answer is advisory; the apply's in-lease row check is the guarantee.
+  const recovery = dryRun.refresh && dryRun.refresh.governed ? await previewRecoveryRechecked(dryRun.refresh) : null
   // PR-3a (design §8.4, D-13 / TD-24): THE ONE hold reconciliation of a governed, COMPLETE preview — after the
   // pilot guard and BEFORE the token block, so a store failure (503) or a decision that landed since the consult
   // (409 STATE_MOVED) leaves no token and no `small_preview` bump. A settling preview settles here.

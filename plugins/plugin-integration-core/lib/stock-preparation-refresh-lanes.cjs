@@ -431,6 +431,43 @@ function previewRecoveryOf(consult) {
 }
 
 /**
+ * PR-3a follow-up (delta verification, 2026-10-26): true when EVERY row `previewRecoveryOf` answers on is a `running`
+ * row with no live lease (none partial / failed / aborted). That is the picture of a dead run — and ALSO of a run that
+ * was `running` at the consult's snapshot and finished before the consult's lock read, which the reader takes after
+ * the snapshot (refresh-governance.cjs header).
+ */
+function recoveryRestsOnLeaselessRunning(consult) {
+  const open = unfinishedExecutionsOf(consult, liveLeaseIdOf(consult))
+  return open.length > 0 && open.every((entry) => entry.status === 'running')
+}
+
+function executionFinishedDuringPreview() {
+  return new StockPreparationRefreshLaneError(409, REFRESH_LANE_ERROR_CODES.STATE_MOVED, 'an execution of this project finished while this pull was being planned; preview again', {
+    reason: 'execution_finished_during_preview',
+    partial: false,
+  })
+}
+
+/**
+ * THE PREVIEW's recovery answer: `previewRecoveryOf`, with ONE re-consult when it rests only on lease-less `running`
+ * rows. Rows still open => the fresh count (a dead run, or the run ended partial / failed / aborted). None left =>
+ * that run finished while this preview read; the plan was computed against the earlier picture, so 409 STATE_MOVED
+ * `execution_finished_during_preview` (preview again) — before the reconciliation, so nothing is reconciled, no token
+ * is minted and nothing is bumped. A failing re-consult propagates (fail closed). Advisory either way: the apply's
+ * in-lease check of the rows (`assertNoUnfinishedExecution`) is the guarantee.
+ */
+async function previewRecoveryRechecked(refresh) {
+  const recovery = previewRecoveryOf(refresh.consult)
+  if (!recovery || !recoveryRestsOnLeaselessRunning(refresh.consult)) return recovery
+  const scope = refresh.consult.scope
+  const fresh = await refresh.handle.consult({ projectNo: scope.projectNo, sheetId: scope.sheetId })
+  if (!isPlainObject(fresh) || fresh.ok !== true) throw storeFailed('governance', 'consult')
+  const recheck = previewRecoveryOf(fresh)
+  if (!recheck) throw executionFinishedDuringPreview()
+  return recheck
+}
+
+/**
  * O-22: any partial / failed / aborted execution, or a `running` one of ANOTHER lease, refuses — 409
  * RECOVERY_PENDING, before anything is begun or written (`unfinishedExecutionsOf`, the caller's own lease exempt).
  */
@@ -661,6 +698,7 @@ module.exports = {
   pickPersistedHold,
   planDigestOf,
   previewRecoveryOf,
+  previewRecoveryRechecked,
   reconcileComputation,
   refreshBindingOf,
   refreshHoldStanza,
@@ -673,8 +711,10 @@ module.exports = {
   stockPreparationReadPlanDigest,
   stockPreparationSourceScopeDigest,
   __internals: {
+    executionFinishedDuringPreview,
     isRefreshHandle,
     liveLeaseIdOf,
+    recoveryRestsOnLeaselessRunning,
     unfinishedExecutionsOf,
     planningInputsOrRefuse,
     storeFailed,

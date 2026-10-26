@@ -2911,6 +2911,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       //   S3A-28 (review round 1 item 3, lens B V50B-16) a carry whose key is DUPLICATE-RESOLVED
       //          (`<json>::duplicate:<kind>:<hash>`): a NOT-governed project (switch off) carries as before this PR; a
       //          GOVERNED project's consult resolves THAT project (an earlier failed execution => RECOVERY_PENDING).
+      //   S3A-29 (PR-3a follow-up) the executor half of S3A-28: a governed project's pair whose duplicate-resolved
+      //          TARGET key embeds another, not-governed project — the route consults that project and cannot refuse;
+      //          the executor's base-key check refuses 409 CONFIRM_CARRY_PROJECT_MISMATCH, nothing written.
+      //   S3A-30 (PR-3a follow-up) a run `running` at the preview's snapshot that finishes before the preview's lock
+      //          read: the preview re-consults once and answers 409 STATE_MOVED execution_finished_during_preview,
+      //          never a false recovery_pending; no token, no bump.
       describe('S3A step-4 lanes (real Postgres, real lock, real host)', () => {
         const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
         const projectTargetsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
@@ -3908,6 +3914,132 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           expect(observed).toEqual({
             notGoverned: { status: 200, mode: 'carried', code: null, notes: 'synthetic note', stepFourRows: 0 },
             governed: { status: 409, code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', notes: null },
+          })
+        }, 180000)
+
+        test('S3A-29 (PR-3a follow-up; the executor half of V50B-16) switch off, the shared env sheet: a project GOVERNED by an earlier failed execution whose pair carries a duplicate-resolved TARGET key EMBEDDING another, not-governed project — the route consults that other project (no refusal) and the executor\'s key-vs-rows check on the BASE key refuses 409 CONFIRM_CARRY_PROJECT_MISMATCH, nothing written; the honest key is refused 409 RECOVERY_PENDING', async () => {
+          const st = await s3aStack('s29', { pilot: false, register: false, switchOn: false })
+          const env = st.envTarget
+          const other = 'PRJ-S3A-29-OTHER'
+          const envScope = { tenantId: st.tenantId, sheetId: env.sheetId, projectNo: st.projectNo }
+          const gen = await st.generation(sheetWriteScopeKey(env.sheetId))
+          const begun = await st.refresh.store.beginExecution({
+            ...envScope, lane: 'small_apply',
+            guard: { leaseRunId: 'run_s3a_29_dead', leaseId: 'lease_s3a_29_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_29' },
+            tokenRevision: 'rev_s3a_29', planDigest: 'd'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_29',
+          })
+          await st.refresh.store.finishExecution({ ...envScope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_29'] })
+          const physical = (logical: string) => (env.fieldIdMap && env.fieldIdMap[logical]) || logical
+          const toPhysical = (data: Record<string, unknown>) => Object.fromEntries(Object.entries(data).map(([key, value]) => [physical(key), value]))
+          const keyOf = (projectNo: string, tag: string) => JSON.stringify({ projectNo, componentSourceId: CARRY_COMPONENT, parentSourceId: null, path: [tag, CARRY_COMPONENT] })
+          const suffixed = (key: string) => `${key}::duplicate:sortLine:${'7'.repeat(16)}`
+          const records = st.multitable.records as any
+          // A pair on the env sheet whose rows both belong to THIS project (machine projectNo), the source row's key
+          // honest; only the target key varies.
+          const seedPair = async (tag: string, newKey: string) => {
+            const oldKey = keyOf(st.projectNo, `OLD${tag}`)
+            await records.createRecord({ sheetId: env.sheetId, data: toPhysical({ projectNo: st.projectNo, idempotencyKey: oldKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify([`OLD${tag}`, CARRY_COMPONENT]), active: false, notes: 'synthetic note' }) })
+            const target = await records.createRecord({ sheetId: env.sheetId, data: toPhysical({ projectNo: st.projectNo, idempotencyKey: newKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify([`NEW${tag}`, CARRY_COMPONENT]), active: true }) })
+            const notes = async () => (await q('SELECT data->>$2 AS notes FROM meta_records WHERE id = $1', [target.id, physical('notes')])).rows[0].notes
+            return { decision: { ...carryDecision(st.projectNo), idempotencyKey: newKey, sourceIdempotencyKey: oldKey }, notes }
+          }
+          const forged = await seedPair('F', suffixed(keyOf(other, 'NEWF')))
+          const honest = await seedPair('H', suffixed(keyOf(st.projectNo, 'NEWH')))
+          const main0 = await st.main(env.sheetId)
+          const forgedRes = await st.carry(forged.decision)
+          const honestRes = await st.carry(honest.decision)
+          const observed = {
+            governed: {
+              project: (await st.refresh.governance.consult(envScope)).governed,
+              other: (await st.refresh.governance.consult({ ...envScope, projectNo: other })).governed,
+            },
+            forged: `${forgedRes.statusCode}:${errorOf(forgedRes).code}:${errorOf(forgedRes).details && errorOf(forgedRes).details.field}`,
+            honest: `${honestRes.statusCode}:${errorOf(honestRes).code}`,
+            notes: [await forged.notes(), await honest.notes()],
+            envSheetUnchanged: sameJson(await st.main(env.sheetId), main0),
+          }
+          console.log(`[S3A-29] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({
+            governed: { project: true, other: false },
+            forged: '409:CONFIRM_CARRY_PROJECT_MISMATCH:idempotencyKey',
+            honest: '409:STOCK_PREP_REFRESH_RECOVERY_PENDING',
+            notes: [null, null],
+            envSheetUnchanged: true,
+          })
+        }, 180000)
+
+        test('S3A-30 (PR-3a follow-up) the consult reads the executions in its snapshot and the lock AFTER it: an execution RUNNING under a live lease at the preview\'s snapshot that FINISHES cleanly and releases before the preview\'s lock read — the preview re-consults once and answers 409 STATE_MOVED execution_finished_during_preview, never recovery_pending: no token, no bump, no recovery stamp; the next preview is ready', async () => {
+          // The real reader over the real store and lock, with two holds: before the snapshot, and at the lock read.
+          const store = continuationStoreLib.createStockPreparationContinuationStore({ db: hostLikeDb() })
+          const realLock = createStockPreparationProjectWriteLock({ db: hostLikeDb() })
+          const rowsGate = { armed: false, reached: gate(), release: gate() }
+          const lockGate = { armed: false, reached: gate(), release: gate() }
+          const gatedStore = {
+            ...store,
+            readGovernanceRows: async (input: any, options: any) => {
+              if (rowsGate.armed) { rowsGate.armed = false; rowsGate.reached.open(); await rowsGate.release.promise }
+              return store.readGovernanceRows(input, options)
+            },
+          }
+          const heldLock = {
+            ...realLock,
+            readState: async (scopeKey: string) => {
+              if (lockGate.armed) { lockGate.armed = false; lockGate.reached.open(); await lockGate.release.promise }
+              return realLock.readState(scopeKey)
+            },
+          }
+          const governance = refreshGovernanceLib.createStockPreparationRefreshGovernance({
+            continuationStore: gatedStore,
+            projectTargetStore: projectTargetStoreLib.createStockPreparationProjectTargetStore({ db: hostLikeDb() }),
+            projectWriteLock: heldLock,
+          })
+          const st = await s3aStack('s30', { pilot: true, refresh: { governance, store } })
+          await firstPullApplied(st)
+          const gen0 = await st.generation()
+          const tokens0 = await kvTokens()
+          // 1. The preview passes its precheck (no lease yet) and stops before its consult's snapshot.
+          rowsGate.armed = true
+          const previewing = st.dryRun()
+          await rowsGate.reached.promise
+          // 2. A run takes the lease and begins its execution: `running` under the live lease.
+          const runId = `s3a-30-${TOKEN}`
+          const grant = await st.lock.acquire(st.key, { purpose: 'small_apply', runId, tenantId: st.tenantId })
+          const gen = await st.generation()
+          const begun = await store.beginExecution({
+            ...st.scope, lane: 'small_apply',
+            guard: { leaseRunId: runId, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
+            tokenRevision: 'rev_s3a_30', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_30',
+          })
+          // 3. The snapshot is taken now (it holds the running row); the preview stops at its lock read.
+          lockGate.armed = true
+          rowsGate.release.open()
+          await lockGate.reached.promise
+          // 4. The run finishes cleanly and releases the lease.
+          await store.finishExecution({ ...st.scope, executionId: begun.id, status: 'succeeded', written: 0, attemptedWrites: 0 })
+          await st.lock.createGuard(grant).release()
+          // 5. The lock read sees no live lease; the snapshot still holds the running row.
+          lockGate.release.open()
+          const straddled = await previewing
+          const genAfter = await st.generation()
+          const tokensAfter = await kvTokens()
+          const stamp = (await q('SELECT last_pull_outcome, last_pull_code FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo])).rows[0]
+          const next = await st.dryRun()
+          const observed = {
+            straddled: `${straddled.statusCode}:${errorOf(straddled).code}:${errorOf(straddled).details && errorOf(straddled).details.reason}`,
+            noBump: sameJson(genAfter, gen0),
+            tokensLeft: tokensAfter - tokens0,
+            recoveryStamp: Boolean(stamp && stamp.last_pull_code === 'STOCK_PREP_REFRESH_RECOVERY_PENDING'),
+            executions: (await st.executions()).map((row: any) => row.status),
+            next: `${next.statusCode}:${next.body && next.body.data && next.body.data.status}`,
+          }
+          console.log(`[S3A-30] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({
+            straddled: '409:STOCK_PREP_PULL_STATE_MOVED:execution_finished_during_preview',
+            noBump: true,
+            tokensLeft: 0,
+            recoveryStamp: false,
+            executions: ['succeeded', 'succeeded'],
+            next: '200:ready',
           })
         }, 180000)
         // ── S3B: batch-refresh step 4 PR-3b — the LARGE lane on the real stack ────────────────────────────────────

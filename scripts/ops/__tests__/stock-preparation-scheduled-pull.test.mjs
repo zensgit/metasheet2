@@ -381,6 +381,13 @@ test('manual_confirm_required is recorded and NEVER applied, even with --apply',
     assert.equal(heldLines[0].action, 'error', heldStatus)
     assert.equal(heldLines[0].failed, true, heldStatus)
     assert.equal(heldLines[1].summary.failed, 1, heldStatus)
+    // PR-3a follow-up: `recovery_pending` fails by its own code with a recovery note, not as an unexpected status.
+    if (heldStatus === 'recovery_pending') {
+      assert.equal(heldLines[0].error, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
+      assert.match(heldLines[0].note, /recovered/)
+    } else {
+      assert.equal(heldLines[0].error, `unexpected dry-run status: ${heldStatus}`)
+    }
   }
 })
 
