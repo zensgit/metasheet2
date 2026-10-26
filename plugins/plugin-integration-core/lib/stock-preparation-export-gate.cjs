@@ -125,8 +125,14 @@ function unreadableRefusal(state) {
   })
 }
 
+// The BLOCKED message by reason (fixed literals, values-free). A lease at G0 is a WRITER, not a refresh state —
+// a not-governed project has none — so it names the cause and the remedy: wait, or a preview with the pull tier
+// (which clears an abandoned lease; a floor-tier preview cannot). Step-4 review follow-ups (#6566 pg N1).
+const BLOCKED_MESSAGE_LEASE_IN_FLIGHT = 'a pull is writing this sheet or a crashed pull left its lease; retry after it finishes or run a preview with the pull tier'
+const BLOCKED_MESSAGE_STATE = 'this project has an unfinished refresh state; the formal export is refused until it is complete and checked'
+
 function blockedRefusal(state, reason) {
-  return new StockPreparationExportGateError(409, EXPORT_GATE_ERROR_CODES.BLOCKED, 'this project has an unfinished refresh state; the formal export is refused until it is complete and checked', {
+  return new StockPreparationExportGateError(409, EXPORT_GATE_ERROR_CODES.BLOCKED, reason === 'lease_in_flight' ? BLOCKED_MESSAGE_LEASE_IN_FLIGHT : BLOCKED_MESSAGE_STATE, {
     reason,
     status: state.status,
     governed: state.governed,
