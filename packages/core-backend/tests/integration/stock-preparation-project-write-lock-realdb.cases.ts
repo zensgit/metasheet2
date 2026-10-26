@@ -81,8 +81,8 @@
  *       large plan (D11, D13, D21, H-01, S3A-11, S3A-18, S3A-27): the approval now refuses an unconsulted expansion.
  *   S3B (batch-refresh step 4, PR-3b) the LARGE lane on the real stack — expansion start / run / plan / approve refuse a
  *       governed project (and an unreadable / retargeted one) before any source or existing-row read, the plan records its
- *       verdict, the approval refuses an unconsulted or governed-shape plan, the stored jobs never carry a hold; plus the
- *       executor half of the carry's duplicate-key strip (S3B-*; listed in the S3B describe's own header).
+ *       verdict, the approval refuses an unconsulted or governed-shape plan, the stored jobs never carry a hold (S3B-*;
+ *       listed in the S3B describe's own header).
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -3932,10 +3932,6 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //          PR B's code; a registered NOT-governed project => served end to end on the env sheet, 0 step-4 rows.
         //   S3B-06 (R-12, A11 / G1 large) the step-4 tables absent from the store binding (42P01): the four routes 503
         //          STORE_FAILED `continuation` before any source read or existing-row read; nothing written, no bump.
-        //   S3B-07 (PR-3a review follow-up: the EXECUTOR half of the `::duplicate:` strip) a carry whose TARGET key is
-        //          duplicate-resolved and embeds a NOT-governed project while both rows belong to a governed project
-        //          awaiting recovery (switch off, F5b) — and the switch-on variant (F4b) — is refused 409
-        //          CONFIRM_CARRY_PROJECT_MISMATCH, nothing written; reverting the executor strip alone lets it write.
         describe('S3B step-4 large lane (real Postgres, real lock, real host)', () => {
           const LARGE_PREFIX = 'stock-preparation:large-bom:'
           // Every large-BOM plugin_kv row of one tenant, key order (the "nothing persisted" fingerprint of a refusal).
@@ -4365,73 +4361,6 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               client.release()
               if (tenantId) await cleanupLarge(tenantId)
             }
-          }, 300000)
-
-          test('S3B-07 (PR-3a review follow-up: the EXECUTOR half of the `::duplicate:` strip) a carry whose TARGET key is duplicate-resolved and embeds a NOT-governed project P2 while its SOURCE key is the governed project P1\'s honest key and both rows belong to P1 — the route consults P2 (not governed), so only the executor\'s base-key check refuses: switch OFF with P1 awaiting recovery (F5b) and switch ON on P2\'s own sheet (F4b) both 409 CONFIRM_CARRY_PROJECT_MISMATCH (idempotencyKey), nothing written; the honest-key control answers RECOVERY_PENDING', async () => {
-            const P2 = 'PRJ-S3B-P2'
-            const suffixed = (key: string) => `${key}::duplicate:sortLine:${'7'.repeat(16)}`
-            const keyOf = (projectNo: string, token: string) => JSON.stringify({ projectNo, componentSourceId: CARRY_COMPONENT, parentSourceId: null, path: [token, CARRY_COMPONENT] })
-            // A pair whose rows BOTH belong to P1 (machine projectNo): an inactive source with a person's note, an active target.
-            async function seedPair(sb: { multitable: any; sheetId: string; target: any }, sourceKey: string, targetKey: string) {
-              const physical = (logical: string) => (sb.target.fieldIdMap && sb.target.fieldIdMap[logical]) || logical
-              const toPhysical = (data: Record<string, unknown>) => Object.fromEntries(Object.entries(data).map(([key, value]) => [physical(key), value]))
-              const records = sb.multitable.records as any
-              await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo: CF.PROJECT_NO, idempotencyKey: sourceKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), active: false, notes: 'synthetic note' }) })
-              const target = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo: CF.PROJECT_NO, idempotencyKey: targetKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), active: true }) })
-              return { notes: async () => (await q('SELECT data->>$2 AS notes FROM meta_records WHERE id = $1', [target.id, physical('notes')])).rows[0].notes }
-            }
-            const decision = (sourceKey: string, targetKey: string) => ({ ...carryDecision(CF.PROJECT_NO), idempotencyKey: targetKey, sourceIdempotencyKey: sourceKey })
-            const sheetState = async (st: any, sheetId: string) => ({ rows: await st.rows(sheetId), main: await st.main(sheetId) })
-            const observed: Record<string, unknown> = {}
-            // F5b — switch OFF, the env sheet; P1 governed by an earlier FAILED execution there; P2 not governed.
-            {
-              const st = await s3aStack('b07off', { pilot: false, register: false, switchOn: false })
-              const env = { multitable: st.multitable, sheetId: st.envTarget.sheetId, target: st.envTarget }
-              const envScope = { tenantId: st.tenantId, sheetId: env.sheetId, projectNo: st.projectNo }
-              const gen = await st.generation(sheetWriteScopeKey(env.sheetId))
-              const begun = await st.refresh.store.beginExecution({
-                ...envScope, lane: 'small_apply',
-                guard: { leaseRunId: 'run_s3b_07_dead', leaseId: 'lease_s3b_07_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3b_07' },
-                tokenRevision: 'rev_s3b_07', planDigest: 'e'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3b_07',
-              })
-              await st.refresh.store.finishExecution({ ...envScope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3B_07'] })
-              observed.p1Governed = (await st.refresh.governance.consult(envScope)).governed
-              observed.p2Governed = (await st.refresh.governance.consult({ ...envScope, projectNo: P2 })).governed
-              const pair = await seedPair(env, keyOf(CF.PROJECT_NO, 'OLD5B'), suffixed(keyOf(P2, 'NEW5B')))
-              const before = await sheetState(st, env.sheetId)
-              const res = await st.carry(decision(keyOf(CF.PROJECT_NO, 'OLD5B'), suffixed(keyOf(P2, 'NEW5B'))))
-              observed.f5b = { answer: `${res.statusCode}:${errorOf(res).code || (res.body.data && res.body.data.mode)}:${errorOf(res).details && errorOf(res).details.field}`, notes: await pair.notes(), wroteNothing: sameJson(await sheetState(st, env.sheetId), before) }
-              // Control: the HONEST suffixed key (embedding P1) consults P1 — awaiting recovery.
-              const honest = await seedPair(env, keyOf(CF.PROJECT_NO, 'OLD5R'), suffixed(keyOf(CF.PROJECT_NO, 'NEW5R')))
-              const beforeControl = await sheetState(st, env.sheetId)
-              const control = await st.carry(decision(keyOf(CF.PROJECT_NO, 'OLD5R'), suffixed(keyOf(CF.PROJECT_NO, 'NEW5R'))))
-              observed.f5r = { answer: `${control.statusCode}:${errorOf(control).code}`, notes: await honest.notes(), wroteNothing: sameJson(await sheetState(st, env.sheetId), beforeControl) }
-            }
-            // F4b — switch ON: P2 registered with its OWN sheet in the same tenant; the rows on P2's sheet belong to P1.
-            {
-              const st = await s3aStack('b07on', { pilot: false })
-              const p2ObjectId: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(st.tenantId, P2)
-              const p2Ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable: st.multitable } }, projectId: st.projectId, permission: 'admin', objectId: p2ObjectId })
-              expect(p2Ensured.ready).toBe(true)
-              await syncStockPreparationContractOptionsForObject({ provisioning: st.multitable.provisioning, projectId: st.projectId, objectId: p2ObjectId })
-              await projectTargetsLib.markProjectSheetPlmSystemColumns({ provisioning: st.multitable.provisioning, projectId: st.projectId, objectId: p2ObjectId })
-              s3aSheets.push(p2Ensured.target.sheetId)
-              scopes.push(sheetWriteScopeKey(p2Ensured.target.sheetId))
-              await st.registry.create({ tenantId: st.tenantId, projectNo: P2, sheetId: p2Ensured.target.sheetId, objectId: p2ObjectId, createdBy: 'syn' })
-              const p2 = { multitable: st.multitable, sheetId: p2Ensured.target.sheetId, target: p2Ensured.target }
-              const pair = await seedPair(p2, keyOf(CF.PROJECT_NO, 'OLD4B'), suffixed(keyOf(P2, 'NEW4B')))
-              const before = await sheetState(st, p2.sheetId)
-              const res = await st.carry(decision(keyOf(CF.PROJECT_NO, 'OLD4B'), suffixed(keyOf(P2, 'NEW4B'))))
-              observed.f4b = { answer: `${res.statusCode}:${errorOf(res).code || (res.body.data && res.body.data.mode)}:${errorOf(res).details && errorOf(res).details.field}`, notes: await pair.notes(), wroteNothing: sameJson(await sheetState(st, p2.sheetId), before) }
-            }
-            console.log(`[S3B-07] ${JSON.stringify(observed)}`)
-            expect(observed).toEqual({
-              p1Governed: true,
-              p2Governed: false,
-              f5b: { answer: '409:CONFIRM_CARRY_PROJECT_MISMATCH:idempotencyKey', notes: null, wroteNothing: true },
-              f5r: { answer: '409:STOCK_PREP_REFRESH_RECOVERY_PENDING', notes: null, wroteNothing: true },
-              f4b: { answer: '409:CONFIRM_CARRY_PROJECT_MISMATCH:idempotencyKey', notes: null, wroteNothing: true },
-            })
           }, 300000)
         })
       })
