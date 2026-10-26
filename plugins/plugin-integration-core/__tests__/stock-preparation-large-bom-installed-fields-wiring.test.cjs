@@ -60,6 +60,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // ownership tokens and synthetic cell text.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -366,7 +367,7 @@ function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProd
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(sourceAdapter || createSourceAdapter(), ledger),
+    services: withRefreshGovernance(baseServices(sourceAdapter || createSourceAdapter(), ledger)),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context, records: recordsApi }

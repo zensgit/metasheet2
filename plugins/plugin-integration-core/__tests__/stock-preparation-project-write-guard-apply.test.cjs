@@ -195,6 +195,44 @@ test('G the revision, source-content, archive digests, evidence and response key
   assert.equal(snapshot.archiveRevision, GOLDEN.archiveRevision)
 })
 
+// Batch-refresh step 4 PR-3a (plan-final §2.10 "Goldens ... green twice"): the SAME literals with the governance
+// handle ABSENT — a direct lib caller plans exactly as before (dry-run, second dry-run, mvp-persist) — and the
+// mvp-persist literal with the handle WIRED for this not-governed project too (G above drives dry-run and apply
+// wired). A handle-absent APPLY can no longer write: the writer's tripwire (E-1 layer (b)) refuses it 501
+// governance_absent with nothing written — no lane without the consult can write any project.
+test('G2 (PR-3a) the clean-tree literals hold with the governance handle ABSENT (dry-run, second dry-run, mvp-persist) and WIRED for a not-governed project (mvp-persist); a handle-absent apply is refused 501 governance_absent before any write', async () => {
+  const harness = kit.createLibWriteLockHarness()
+  const s = scenario({ harness })
+  const absent = { refreshGovernance: undefined }
+  const dry = await s.dryRun(absent)
+  assert.equal(dry.revision, GOLDEN.dryRunRevision)
+  assert.equal(kit.hashJsonForGolden(dry.evidence), GOLDEN.dryRunEvidenceHash)
+  assert.deepEqual(Object.keys(dry).sort(), GOLDEN.dryRunResponseKeys, 'no new response key')
+  const record = tokenRecordOf(s.storage)
+  assert.deepEqual(Object.keys(record).sort(), [...GOLDEN.tokenRecordKeys, 'writeGeneration', 'writeGenerationToken', 'writeScope'].sort())
+  assert.equal(kit.hashJsonForGolden({ actionId: record.actionId, parametersHash: record.parametersHash, revision: record.revision, conflictPolicyReview: record.conflictPolicyReview }), GOLDEN.tokenComparedHash)
+  await assert.rejects(() => s.apply(dry.dryRunToken, absent), (error) => {
+    assert.equal(error.status, 501)
+    assert.equal(error.code, 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED')
+    assert.equal(error.details.reason, 'governance_absent')
+    return true
+  })
+  assert.equal(s.records.calls.filter(([op]) => op === 'createRecord' || op === 'patchRecord').length, 0, 'nothing written')
+  // The literals of the second preview need the golden apply's rows: write them through the wired apply.
+  const wiredHarness = kit.createLibWriteLockHarness()
+  const wired = scenario({ harness: wiredHarness })
+  const first = await wired.dryRun()
+  assert.equal((await wired.apply(first.dryRunToken)).status, 'succeeded')
+  const second = await wired.dryRun(absent)
+  assert.equal(second.revision, GOLDEN.secondDryRunRevision)
+  assert.equal(kit.hashJsonForGolden(second.evidence), GOLDEN.secondDryRunEvidenceHash)
+  const snapshotWired = await prepareStockPreparationMvpSnapshot({
+    action: wired.action, parameters: wired.parameters, sourceAdapter: wired.source.adapter, recordsApi: wired.records.recordsApi,
+    plannedAt: kit.GOLDEN_PLANNED_AT, runId: kit.GOLDEN_RUN_ID, refreshGovernance: wiredHarness.refresh().handleFor('tenant_rgw_default'),
+  })
+  assert.equal(snapshotWired.archiveRevision, GOLDEN.archiveRevision)
+})
+
 // ── T2 ────────────────────────────────────────────────────────────────────────────────────────────
 test('T2 the binding is stored alongside the token only: generation 3 and generation 99 plan byte-identically', async () => {
   const harness = kit.createLibWriteLockHarness()
@@ -501,8 +539,13 @@ test('T7c (review round 2) refusals before any host write report partial: false 
   const stale = (await s.dryRun()).dryRunToken
   await s.dryRun()
   await assert.rejects(() => s.apply(stale), (error) => error.code === PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED && error.details.partial === false)
+  // Batch-refresh step 4 PR-3a: the governance consult now reads the lock row FIRST (before any source read),
+  // so a lock store that is down refuses there — 503 STOCK_PREP_REFRESH_STORE_FAILED naming the lock, partial
+  // false; a caller without the governance handle reaches the binder's own refusal as before.
   harness.db.faults.selectOne = new Error('down')
-  await assert.rejects(() => s.dryRun(), (error) => error.code === PROJECT_WRITE_ERROR_CODES.STORE_FAILED && error.details.partial === false)
+  await assert.rejects(() => s.dryRun(), (error) => error.code === 'STOCK_PREP_REFRESH_STORE_FAILED' && error.details.store === 'lock' && error.details.partial === false)
+  harness.db.faults.selectOne = new Error('down')
+  await assert.rejects(() => s.dryRun({ refreshGovernance: undefined }), (error) => error.code === PROJECT_WRITE_ERROR_CODES.STORE_FAILED && error.details.partial === false)
 })
 
 // ── T9 ────────────────────────────────────────────────────────────────────────────────────────────

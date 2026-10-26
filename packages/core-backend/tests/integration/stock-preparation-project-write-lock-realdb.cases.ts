@@ -72,6 +72,11 @@
  *       own sheet only, the readiness check fails; run to its end the job is terminal and the check passes.
  *   H-02 (pre-enable hardening F-4c) the pilot mark and its audit row in ONE real transaction: a crash before or after
  *       the audit insert leaves neither; the completing call writes exactly one row; a repeat (already pilot) none.
+ *   S2 / S3A (batch-refresh step 4, PR-2 / PR-3a) the continuation / refresh-state stores and the governance reader on
+ *       PostgreSQL (S2-*), and the step-4 LANES on the real stack — the route module over the production host, lock,
+ *       registry and refresh services (S3A-*; listed in the S3A describe's own header). PR-3a also threads the REAL
+ *       refresh wiring (module-scope `realRefreshHandle` / `realChunkGate` / `inLeaseVerdict`) through D3, D7, D8, D11,
+ *       D18, D21, H-01, S2-12 and S2-13: the writer now refuses a fenced write without a consulted verdict.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -156,6 +161,87 @@ function dbOn(client: PoolClient) {
   })
 }
 
+// The scoped db over the HOST's plugin database binding shape (src/index.ts `database`: `query` runs on a POOLED
+// connection in autocommit, `transaction` checks out its OWN client — BEGIN, the callback, COMMIT / ROLLBACK),
+// with an optional `hook` awaited before every statement (and before the COMMIT): used to FREEZE a session at a
+// chosen statement inside its transaction (the consult's snapshot), or to SIGNAL that a session is about to run
+// one (the natural race loop). Faithful on purpose: a read that is NOT handed the transaction lands on another
+// connection, exactly as in production — so a registry read outside the snapshot is visible here as one.
+type StatementEvent = { sql: string; inTransaction: boolean }
+function hostLikeDb(hook: (event: StatementEvent) => Promise<void> | void = () => {}) {
+  return createDb({
+    database: {
+      query: async (sql: string, params?: unknown[]) => {
+        await hook({ sql, inTransaction: false })
+        return (await q(sql, params)).rows
+      },
+      transaction: async <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await poolManager.get().getInternalPool().connect()
+        try {
+          await client.query('BEGIN')
+          const result = await callback({
+            query: async (sql: string, params?: unknown[]) => {
+              await hook({ sql, inTransaction: true })
+              return (await client.query(sql, params)).rows
+            },
+            commit: async () => {},
+            rollback: async () => {},
+          })
+          await hook({ sql: 'COMMIT', inTransaction: true })
+          await client.query('COMMIT')
+          return result
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw error
+        } finally {
+          client.release()
+        }
+      },
+    },
+  })
+}
+
+// Batch-refresh step 4 PR-3a: the PRODUCTION refresh services over host-shaped bindings — index.cjs builds ONE
+// continuation store for the reader and the lanes, PR B's registry store and the lock — and the lane handle / chunk
+// gate / in-lease writer verdict built from them with the SAME factories lib/http-routes.cjs uses
+// (`createRefreshGovernanceHandle`, `largeLaneVerdictOf`, `governanceVerdictOf`). The D-series lane calls thread them
+// because the writer now refuses a fenced write without a consulted verdict (E-1 layer (b)).
+const refreshLanes = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-lanes.cjs')) as any
+const continuationStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-store.cjs')) as any
+const refreshGovernanceLib = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-governance.cjs')) as any
+const projectTargetStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-target-store.cjs')) as any
+const packInstallStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+function realRefreshServices(consultDb: any = hostLikeDb()) {
+  const store = continuationStoreLib.createStockPreparationContinuationStore({ db: consultDb })
+  const governance = refreshGovernanceLib.createStockPreparationRefreshGovernance({
+    continuationStore: store,
+    projectTargetStore: projectTargetStoreLib.createStockPreparationProjectTargetStore({ db: hostLikeDb() }),
+    projectWriteLock: createStockPreparationProjectWriteLock({ db: hostLikeDb() }),
+  })
+  return { governance, store }
+}
+function realRefreshHandle(tenantId: string, options: { services?: any; provisioning?: any; sourceBindingStore?: any; extFieldMapping?: any } = {}) {
+  const services = options.services || realRefreshServices()
+  return refreshLanes.createRefreshGovernanceHandle({
+    tenantId,
+    resolveServices: () => services,
+    sourceBindingStore: options.sourceBindingStore || null,
+    packInstallStore: packInstallStoreLib.createStockPreparationPackInstallStore({ db: hostLikeDb() }),
+    resolveProvisioning: () => options.provisioning || null,
+    projectId: `${tenantId}:integration-core`,
+    defaultObjectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    extFieldMapping: options.extFieldMapping || null,
+  })
+}
+function realChunkGate(tenantId: string, projectNo: string, services: any = realRefreshServices()) {
+  return async ({ target }: any) => refreshLanes.largeLaneVerdictOf(await services.governance.consult({ tenantId, projectNo, sheetId: target && target.sheetId }), 'large_apply_chunk')
+}
+// A DIRECT writer call (S2-12 / S2-13) takes its verdict from a consult made INSIDE the lease, as every lane does.
+async function inLeaseVerdict(scope: { tenantId: string; sheetId: string; projectNo: string }, services: any = realRefreshServices()) {
+  const consult = await services.governance.consult(scope)
+  return refreshLanes.governanceVerdictOf({ consult, governed: consult.governed === true })
+}
 async function settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: any }> {
   try {
     return { ok: true, value: await promise }
@@ -405,6 +491,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           tokenStore: pluginContext.storage,
           plannedAt: '2026-10-22T08:00:00.000Z',
           runId: `swl_rdb_${TOKEN}`,
+          // PR-3a: the lane's governance handle (not governed here: one consult, nothing else).
+          refreshGovernance: realRefreshHandle(`tenant_swl_${TOKEN}`),
         }
         const dry = await tableActions.dryRunStockPreparationAction({
           ...common,
@@ -632,6 +720,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const plan = async (lock: any, projectNo: string) => tableActions.dryRunStockPreparationAction({
           action, parameters: { projectNo }, sourceAdapter: sourceFor(projectNo), recordsApi: multitable.records,
           tokenStore: pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d7_${projectNo}`,
+          refreshGovernance: realRefreshHandle(`tenant_swl_d7_${TOKEN}`),
           projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lock.bumpGeneration(key, { reason: 'small_preview' })),
         })
         const applyWith = (lock: any, projectNo: string, token: string) => lock.withProjectWriteLease(key, { purpose: 'small_apply', runId: `swl-d7-${projectNo}` }, (guard: any) =>
@@ -639,6 +728,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             action, parameters: { projectNo }, sourceAdapter: sourceFor(projectNo), recordsApi: recordsWithBarrier,
             tokenStore: pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d7_${projectNo}`,
             dryRunToken: token, permission: 'write', sandboxPolicy: { enabled: true, allowedTargetObjectIds: [objectId] }, projectWriteGuard: guard,
+            refreshGovernance: realRefreshHandle(`tenant_swl_d7_${TOKEN}`),
           }))
         const P1 = 'SYN-SWL-D7A'
         const P2 = 'SYN-SWL-D7B'
@@ -767,6 +857,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const common = (records: any) => ({
           action: sb.action, parameters: { projectNo }, sourceAdapter: sourceOf(projectNo), recordsApi: records,
           tokenStore: sb.pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d8_${TOKEN}`,
+          refreshGovernance: realRefreshHandle(`tenant_swl_d8_${TOKEN}`),
         })
         const policy = { enabled: true, allowedTargetObjectIds: [sb.objectId] }
         const dryA = await tableActions.dryRunStockPreparationAction({ ...common(recordsA), projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })) })
@@ -1233,6 +1324,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const small = {
           action: sb.action, parameters: { projectNo }, sourceAdapter: sourceOf(projectNo, '5'), recordsApi: records,
           tokenStore: storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d11_small_${TOKEN}`,
+          refreshGovernance: realRefreshHandle(jobScope.tenantId),
         }
         const dry = await tableActions.dryRunStockPreparationAction({ ...small, projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'small_preview' })) })
         const applied = await lock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId: 'swl-d11-small' }, (guard: any) =>
@@ -1253,7 +1345,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         expect((await lock.readGeneration(sb.key)).generation, 'nothing bumped').toBe(generation)
         // the old approval's own job cannot write either
         const oldChunk = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d11-chunk' }, async (guard: any) =>
-          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId: `swl_d11_apply_old_${TOKEN}`, recordsApi: await scopedForChunk(), projectWriteGuard: guard })))
+          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId: `swl_d11_apply_old_${TOKEN}`, recordsApi: await scopedForChunk(), projectWriteGuard: guard, refreshGovernanceGate: realChunkGate(jobScope.tenantId, projectNo) })))
         expect(oldChunk.ok).toBe(false)
         expect((oldChunk as any).error.details.reason).toBe('newer_plan')
         expect(await quantities(), 'the quantities stay 5 / 15').toEqual([[3, 15], [5, 5]])
@@ -1369,6 +1461,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const common = (api: any) => ({
           action: sb.action, parameters: { projectNo }, sourceAdapter: sourceOf(projectNo), recordsApi: api,
           tokenStore: sb.pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d18_${TOKEN}`,
+          refreshGovernance: realRefreshHandle(`tenant_swl_d18_${TOKEN}`),
         })
         const preview = (lock: any) => tableActions.dryRunStockPreparationAction({ ...common(records), projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'small_preview' })) })
         const applyWith = (lock: any, api: any, token: string, runId: string) => lock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId }, (guard: any) =>
@@ -1719,6 +1812,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           largeBomJobs.runLargeBomCheckpointApplyJobChunk({
             storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard,
             largeLanePilotCheck: ({ target }: any) => gate.assertLargeLaneAllowed({ tenantId, projectNo, sheetId: target && target.sheetId }, 'large_apply_chunk'),
+            refreshGovernanceGate: realChunkGate(tenantId, projectNo),
           })))
         expect(chunk.ok).toBe(false)
         expect((chunk as any).error.code).toBe('STOCK_PREP_PILOT_LARGE_LANE_REFUSED')
@@ -1732,7 +1826,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         // CONTROL: without the pilot check the same chunk is refused by the generation binding (the enable's bump) —
         // so the pilot check is what ran FIRST above, and the registry's marker is what refused.
         const control = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d21-control' }, async (guard: any) =>
-          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard })))
+          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard, refreshGovernanceGate: realChunkGate(tenantId, projectNo) })))
         expect(control.ok).toBe(false)
         expect((control as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
         expect((control as any).error.details.reason).toBe('newer_plan')
@@ -1744,6 +1838,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await dropSheet(sb.sheetId)
       }
     }, 90000)
+
     // ── Pre-enable hardening (step-4 design §23.4 F-3 / F-4) — the H series ────────────────────────────────────
     // H-01 (F-3) no_open_large_job against a REAL job in the REAL durable job store (plugin_kv, jsonb round trip):
     //      approved through the real lock, one chunk of one decision lands on the real host and the job is
@@ -1783,7 +1878,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         })
         expect(approved.totalDecisions, 'calibration: at least two decisions, so one chunk of one leaves the job paused').toBeGreaterThanOrEqual(2)
         const runChunk = () => lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: `swl-h01-chunk-${Date.now()}` }, async (guard: any) =>
-          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard, maxDecisionsPerChunk: 1 }))
+          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard, maxDecisionsPerChunk: 1, refreshGovernanceGate: realChunkGate(tenantId, projectNo) }))
         const first = await runChunk()
         expect(first.status).toBe('paused')
         expect(await countRows(sb.sheetId), 'the chunk really landed on the host').toBeGreaterThan(0)
@@ -1864,5 +1959,1925 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await q('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
       }
     }, 60000)
+
+    // ── Batch-refresh step 4 PR-2: the continuation / refresh-state stores (migrations 102 / 103) and the
+    //    governance reader on real PostgreSQL. The hermetic suites drive them against a fake that models the
+    //    unique indexes and rolls transactions back; a fake is not PostgreSQL, so the claims below are proven
+    //    here: the partial unique claims arbitrate two SESSIONS (A08), the state-row FOR UPDATE serialises the
+    //    decision / reconciliation races, a missing table is 503 (never zero rows), a header-steered tenant is
+    //    refused (never "not governed"), and a project resolved to another sheet is refused (never matched).
+    //    Review round 1 of #6514 adds: S2-07 / S2-08 / S2-09 (X-1) the consult is ONE REPEATABLE READ snapshot —
+    //    frozen at every step-4 read boundary (and after the registry reads) while another session decides, it
+    //    answers one instant, and a bounded natural race loop never persists a stale hold nor derives a torn
+    //    complete; S2-10 (X-2) the end admissibility; S2-11 (X-3) the supersede relatedness. Review round 2 adds
+    //    S2-12: a PARTIAL takeover cannot supersede — the reviewer's real-planner shape, refused with every row
+    //    unchanged, and after a pilot exit the real planner and the REAL host writer still leave all four old rows
+    //    alone; a full takeover supersedes and keeps them protected. S2-13: the reviewer's ANCESTOR counterexample —
+    //    an independent subtree inserted beside the relationship (a synthetic starting state), the real planner's
+    //    candidate over the full sheet and current projection (0 old rows, 4 new positions) refused; the next pull,
+    //    pilot on and off, the real host writer and the third pull never write the four old rows.
+    //    Cases are prefixed S2- (PR-0 / PR B own D17-D21, the pre-enable hardening H-01 / H-02). Every value is
+    //    synthetic and per-run.
+    describe('S2 continuation / refresh-state stores + governance reader (real Postgres, migrations 102 / 103)', () => {
+      const nodeCrypto = require('node:crypto') as typeof import('node:crypto')
+      const continuationStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-store.cjs')) as any
+      const governanceModule = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-governance.cjs')) as any
+      const refreshStateModule = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-state.cjs')) as any
+      const refreshKit = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-refresh-store-kit.cjs')) as any
+      const { REFRESH_STORE_TABLES: RT, REFRESH_STORE_ERROR_CODES: RC } = continuationStoreModule
+      const { REFRESH_GOVERNANCE_ERROR_CODES: GC } = governanceModule
+      const S2_TENANT_PREFIX = `tenant_scs_${TOKEN}`
+      const s2Sheets: string[] = []
+      const tenantFor = (label: string) => `${S2_TENANT_PREFIX}_${label}`
+      const sheetFor = (label: string) => {
+        const id = `sheet_scs_${TOKEN}_${label}`
+        s2Sheets.push(id)
+        scopes.push(sheetWriteScopeKey(id))
+        return id
+      }
+      const storeOn = (client: PoolClient) => continuationStoreModule.createStockPreparationContinuationStore({ db: dbOn(client) })
+      const computation = (overrides: Record<string, unknown> = {}) => ({ lane: 'small_preview', suspended: true, generationToken: 'g_s2', sourceContentDigest: 'src_s2', ...overrides })
+      // S2-01..S2-06 and S2-10 have no registry row: the registry's pilot reads (PR B, #6510) are a test double
+      // answering "absent". S2-07..S2-09 use PR B's PRODUCTION registry store over real migration-101 rows
+      // (`pilotReaderOn`), whose pilot reads run on the consult's snapshot handle.
+      const absentRegistry = { getPilotState: async () => null, getPilotStateBySheetId: async () => null }
+      const readerOn = (client: PoolClient) => governanceModule.createStockPreparationRefreshGovernance({
+        continuationStore: storeOn(client),
+        projectTargetStore: absentRegistry,
+        projectWriteLock: createStockPreparationProjectWriteLock({ db: dbOn(client) }),
+      })
+      // `hostLikeDb` (the HOST's plugin database binding shape, with the statement hook) lives at MODULE scope since
+      // PR-3a: the S3A cases and the rewired D-series lane calls use it too.
+      // The PRODUCTION reader wiring over host-shaped bindings: the continuation store on `consultDb` (its snapshot
+      // transaction may be hooked), PR B's registry store and the lock on their own bindings (autocommit reads go to
+      // the pool; the registry reads reach the snapshot only through `{ executor }`).
+      const pilotReaderOn = (consultDb: any = hostLikeDb()) => governanceModule.createStockPreparationRefreshGovernance({
+        continuationStore: continuationStoreModule.createStockPreparationContinuationStore({ db: consultDb }),
+        projectTargetStore: projectTargetStoreModule.createStockPreparationProjectTargetStore({ db: hostLikeDb() }),
+        projectWriteLock: createStockPreparationProjectWriteLock({ db: hostLikeDb() }),
+      })
+      const derive = (consult: any) => refreshStateModule.readProjectRefreshState(consult)
+      function gate() {
+        let open: () => void = () => {}
+        const promise = new Promise<void>((resolve) => { open = resolve })
+        return { promise, open: () => open() }
+      }
+
+      // A registry row on real migration-087 / 101 columns (the pilot stamp all three columns, or none).
+      async function registerProject(scope: Record<string, string>, { pilot = true } = {}) {
+        await q(
+          pilot
+            ? `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status, pilot_enabled_at, pilot_enabled_by, pilot_readiness_version)
+               VALUES ($1, $2, $3, $4, $5, 'active', now(), 'u_scs_admin', 1)`
+            : `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status)
+               VALUES ($1, $2, $3, $4, $5, 'active')`,
+          [`pt_${scope.sheetId}`, scope.tenantId, scope.projectNo, scope.sheetId, `obj_${scope.sheetId}`],
+        )
+      }
+
+      // ONE governed computation as PR-3 will run it: the REAL planner over the consult's projection (pilot from the
+      // consult, the canonical second-pull expansion against the first-pull sheet), then the hold reconciliation
+      // keyed on the decision_version the consult observed. Values-free outcome tokens only.
+      async function computeAndReconcile(store: any, scope: Record<string, string>, consult: any, fixture: any) {
+        const F = fixture.fixtures
+        const slice = governanceModule.plannerSlice(consult)
+        let planned: any
+        try {
+          planned = F.plan(fixture.expansion, fixture.sheet, {
+            continuation: F.continuationInput({ pilot: consult.pilot ? consult.pilot.enabled === true : false, demandEvidence: fixture.expansion.demandEvidence, continuations: slice.continuations, members: slice.members, projectNo: scope.projectNo }),
+          })
+        } catch (error: any) {
+          return { planner: `threw ${error && error.code}`, reconcile: null as string | null }
+        }
+        const reconciled = await settle(store.reconcileHolds({ ...scope, decisionVersionObserved: consult.decisionVersionObserved, holds: planned.holds || [], computation: computation({ suspended: planned.suspended === true }) }))
+        return { planner: null as string | null, reconcile: reconciled.ok ? `ok opened=${(reconciled as any).value.holds.opened}` : String((reconciled as any).error.code) }
+      }
+
+      // Every row of the step-4 tables on one sheet plus its lock row: the "nothing persisted" fingerprint.
+      async function sheetFingerprint(sheetId: string) {
+        const out: unknown[] = []
+        for (const table of [RT.continuation, RT.member, RT.hold, RT.state, RT.execution]) {
+          out.push((await q(`SELECT * FROM ${table} WHERE sheet_id = $1 ORDER BY id`, [sheetId])).rows)
+        }
+        out.push((await q(`SELECT generation, generation_token, fencing_epoch, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sheetWriteScopeKey(sheetId)])).rows)
+        return JSON.stringify(out)
+      }
+
+      // The test's stand-in for PR-4's `bumpGenerationWithin` (design §8.1): the FREE-ROW branch on the caller's
+      // TRANSACTION handle — insert generation 1 when the lock row is absent, else generation + 1 under
+      // `lease_id IS NULL`; a live lease refuses 409 WRITE_LOCKED. Real statements on the real lock row inside the
+      // store's transaction, so the composition "decision rows + bump, one COMMIT" is what is proven here.
+      async function testBumpWithin(trx: any, scopeKey: string, { reason, tenantId }: { reason: string; tenantId: string }) {
+        const token = `tok_${reason}_${nodeCrypto.randomUUID()}`
+        const row = await trx.selectOneForUpdate(PROJECT_WRITE_LOCK_TABLE, { scope_key: scopeKey })
+        if (!row) {
+          await trx.insertOne(PROJECT_WRITE_LOCK_TABLE, { scope_key: scopeKey, tenant_id: tenantId, generation: 1, generation_token: token, generation_reason: 'small_preview', generation_bumped_at: new Date(), fencing_epoch: 0 })
+          return { generation: 1, generationToken: token, fencingEpoch: 0 }
+        }
+        if (row.lease_id) throw Object.assign(new Error('live lease'), { status: 409, code: PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, details: { reason: 'test_bump' } })
+        const updated = await trx.updateRow(PROJECT_WRITE_LOCK_TABLE, { generation: Number(row.generation) + 1, generation_token: token, generation_bumped_at: new Date() }, { scope_key: scopeKey, lease_id: null, generation_token: row.generation_token })
+        if (!updated || updated.length !== 1) throw Object.assign(new Error('bump lost'), { status: 409, code: PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, details: { reason: 'contention' } })
+        return { generation: Number(row.generation) + 1, generationToken: token, fencingEpoch: Number(row.fencing_epoch) }
+      }
+
+      async function seedOpenHolds(store: any, scope: Record<string, string>, holds: any[], observed = 0, verdicts: Record<string, string> = {}) {
+        await store.reconcileHolds({ ...scope, decisionVersionObserved: observed, holds, verdicts, computation: computation() })
+        const rows = (await q(`SELECT id, fingerprint FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 AND status = 'open'`, [scope.sheetId, scope.projectNo])).rows
+        return (hold: any) => {
+          const row = rows.find((entry: any) => entry.fingerprint === hold.fingerprint)
+          if (!row) throw new Error('S2: hold not open')
+          return row.id as string
+        }
+      }
+
+      function confirmInput(scope: Record<string, string>, holdId: string, hold: any, fixture: any, extra: Record<string, unknown> = {}) {
+        return { ...scope, holdId, echo: refreshKit.echoOf(hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: 'u_scs_puller', sourceIdentity: fixture.sourceIdentity, ...extra }
+      }
+
+      async function countWhere(table: string, where: string, params: unknown[]) {
+        return Number((await q(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, params)).rows[0].n)
+      }
+
+      afterAll(async () => {
+        const like = `${S2_TENANT_PREFIX}%`
+        for (const table of [RT.member, RT.continuation, RT.hold, RT.execution, RT.state, 'integration_stock_prep_project_target']) {
+          await q(`DELETE FROM ${table} WHERE tenant_id LIKE $1`, [like]).catch(() => {})
+        }
+      })
+
+      test('S2-01 migrations 102 / 103 applied: the five tables, every unique index (partial where modelled), INTEGER counters, a direct double claim is 23505, the claim mirror and the open-hold unique are DB facts', async () => {
+        for (const table of Object.values(RT) as string[]) {
+          expect((await q('SELECT to_regclass($1) AS oid', [table])).rows[0].oid, table).not.toBeNull()
+        }
+        const indexes = await q(
+          `SELECT c.relname AS name, i.indisunique AS uniq, (i.indpred IS NOT NULL) AS partial,
+                  pg_get_expr(i.indpred, i.indrelid) AS predicate
+             FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+            WHERE i.indrelid = ANY($1::regclass[])`,
+          [[RT.continuation, RT.member, RT.hold, RT.state]],
+        )
+        for (const index of refreshKit.UNIQUE_INDEXES) {
+          const row = indexes.rows.find((entry: any) => entry.name === index.name)
+          expect(row, index.name).toBeTruthy()
+          expect(row.uniq, index.name).toBe(true)
+          expect(row.partial, index.name).toBe(Boolean(index.where))
+        }
+        const cols = await q(
+          `SELECT table_name, column_name, data_type FROM information_schema.columns
+            WHERE table_name = ANY($1::text[]) AND column_name IN ('revision', 'decision_version', 'version', 'generation', 'fencing_epoch', 'position', 'confirmed_generation')`,
+          [Object.values(RT)],
+        )
+        expect(cols.rows.length).toBeGreaterThanOrEqual(7)
+        for (const row of cols.rows) expect(row.data_type, `${row.table_name}.${row.column_name}`).toBe('integer')
+        const tenant = tenantFor('s2_01')
+        const sheet = sheetFor('s2_01')
+        const scopeKey = sheetWriteScopeKey(sheet)
+        const continuationRow = (id: string, overrides: Record<string, unknown> = {}) => q(
+          `INSERT INTO ${RT.continuation} (id, tenant_id, sheet_id, project_no, write_scope_key, status, revision, old_root_record_id, old_root_key,
+             old_root_component_source_id, new_parent_component_source_id, new_root_path_tokens, new_root_key, new_root_key_digest, external_system_id,
+             source_scope_digest, read_plan_digest, pairing_fingerprint, comparison_fingerprint, evidence_fingerprint, evidence_snapshot, demand_basis,
+             confirmed_by, confirmed_at, confirmed_generation, confirmed_generation_token, confirmed_fencing_epoch, claim_active, ended_by, ended_at, ended_outcome)
+           VALUES ($1, $2, $3, 'SYN-S2-01', $4, $5, 1, $6, 'ok', 'c', 'p', '["p","c"]'::jsonb, $7, $8, 'x', 's', 'r', 'pf', 'cf', 'ef', '{}'::jsonb,
+             'puller_confirmed_same_demand', 'u', now(), 1, 't', 0, $9, $10, $11, $12)`,
+          [id, tenant, sheet, scopeKey, overrides.status ?? 'active', overrides.oldRootRecordId ?? 'rec_a', overrides.newRootKey ?? 'nk_a', overrides.newRootKeyDigest ?? 'd_a',
+            overrides.claimActive ?? true, overrides.endedBy ?? null, overrides.endedAt ?? null, overrides.endedOutcome ?? null],
+        )
+        await continuationRow('cont_s2_01_a')
+        // The same old root claimed by a second live relationship: refused by the header's old-root index.
+        const oldRoot = await settle(continuationRow('cont_s2_01_b', { newRootKey: 'nk_b', newRootKeyDigest: 'd_b' }))
+        expect(oldRoot.ok).toBe(false)
+        expect((oldRoot as any).error.code).toBe('23505')
+        expect((oldRoot as any).error.constraint).toBe('uniq_integration_stock_prep_continuation_old_root')
+        // The same new position claimed by a second live relationship: the new-root index.
+        const newRoot = await settle(continuationRow('cont_s2_01_c', { oldRootRecordId: 'rec_c' }))
+        expect((newRoot as any).error.constraint).toBe('uniq_integration_stock_prep_continuation_new_root')
+        // Ending without releasing the claim, or claiming while ended: the mirror CHECK refuses both.
+        const halfEnded = await settle(q(`UPDATE ${RT.continuation} SET status = 'ended', ended_by = 'u', ended_at = now(), ended_outcome = 'escalate_special_repair' WHERE id = $1`, ['cont_s2_01_a']))
+        expect((halfEnded as any).error.code).toBe('23514')
+        expect((halfEnded as any).error.constraint).toBe('integration_stock_prep_continuation_claim_active_check')
+        await q(`UPDATE ${RT.continuation} SET status = 'ended', claim_active = false, ended_by = 'u', ended_at = now(), ended_outcome = 'escalate_special_repair' WHERE id = $1`, ['cont_s2_01_a'])
+        // Once ended, the SAME old root and new position can be claimed again (the partial predicate).
+        await continuationRow('cont_s2_01_d')
+        // The open-hold unique: one open row per (sheet, project, fingerprint); a resolved one does not count.
+        const holdRow = (id: string, status: string) => q(
+          `INSERT INTO ${RT.hold} (id, tenant_id, sheet_id, project_no, write_scope_key, kind, fingerprint, status, confirmable, not_confirmable_reason, subject, detail, resolved_at, resolution)
+           VALUES ($1, $2, $3, 'SYN-S2-01', $4, 'candidate_ambiguous', 'fp_s2_01', $5, false, 'ambiguous_pairing', '{}'::jsonb, '{}'::jsonb, $6, $7)`,
+          [id, tenant, sheet, scopeKey, status, status === 'open' ? null : new Date(), status === 'open' ? null : 'superseded_by_computation'],
+        )
+        await holdRow('hold_s2_01_a', 'open')
+        const dupOpen = await settle(holdRow('hold_s2_01_b', 'open'))
+        expect((dupOpen as any).error.code).toBe('23505')
+        expect((dupOpen as any).error.constraint).toBe('uniq_integration_stock_prep_refresh_hold_open')
+        await holdRow('hold_s2_01_c', 'superseded')
+        // The hold's confirmable shape and the shape-token vocabulary (dropped_other_rule admitted) are CHECKs.
+        const badShape = await settle(q(`UPDATE ${RT.hold} SET confirmable = true WHERE id = $1`, ['hold_s2_01_a']))
+        expect((badShape as any).error.code).toBe('23514')
+        await q(`UPDATE ${RT.hold} SET shape_token = 'dropped_other_rule' WHERE id = $1`, ['hold_s2_01_a'])
+        const badToken = await settle(q(`UPDATE ${RT.hold} SET shape_token = 'made_up' WHERE id = $1`, ['hold_s2_01_a']))
+        expect((badToken as any).error.code).toBe('23514')
+      }, 30000)
+
+      test('S2-02 A08 across two sessions: two holds claiming one old record (and two old sets claiming one new position) -> exactly one confirm commits, the loser is 409 CONFIRM_CONFLICT from the partial unique index and persists nothing', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const storeB = storeOn(clientB)
+        for (const [label, rival] of [['old_record', refreshKit.competingCandidateHold(fixture.hold)], ['new_position', refreshKit.sameNewPositionHold(fixture.hold)]] as const) {
+          const scope = { tenantId: tenantFor(`s2_02_${label}`), sheetId: sheetFor(`s2_02_${label}`), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold, rival])
+          const [a, b] = await Promise.all([
+            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })),
+            settle(storeB.confirmContinuation(confirmInput(scope, idOf(rival), rival, fixture), { bumpWithin: testBumpWithin })),
+          ])
+          const winners = [a, b].filter((outcome) => outcome.ok)
+          const losers = [a, b].filter((outcome) => !outcome.ok) as Array<{ ok: false; error: any }>
+          expect(winners.length, label).toBe(1)
+          expect(losers.length, label).toBe(1)
+          expect(losers[0].error.code, label).toBe(RC.CONFIRM_CONFLICT)
+          expect(losers[0].error.status).toBe(409)
+          expect(losers[0].error.details.sqlState).toBe('23505')
+          expect(String(losers[0].error.details.constraint)).toMatch(/^uniq_integration_stock_prep_continuation/)
+          expect(JSON.stringify(losers[0].error.details)).not.toContain('S-001')
+          expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId]), label).toBe(1)
+          expect(await countWhere(RT.member, 'sheet_id = $1 AND claim_active', [scope.sheetId]), label).toBe(4)
+          expect(await countWhere(RT.hold, 'sheet_id = $1 AND status = $2', [scope.sheetId, 'open']), 'the losing hold stays open').toBe(1)
+          expect(await countWhere(RT.hold, 'sheet_id = $1 AND status = $2', [scope.sheetId, 'resolved'])).toBe(1)
+          const state = (await q(`SELECT decision_version, version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0]
+          expect(state.decision_version, 'exactly one decision').toBe(1)
+          // The winner's bump landed in the SAME commit: generation 1 on the sheet's lock row.
+          const lock = (await q(`SELECT generation, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sheetWriteScopeKey(scope.sheetId)])).rows[0]
+          expect(lock.generation).toBe(1)
+          expect(lock.lease_id).toBeNull()
+        }
+      }, 60000)
+
+      test('S2-03 CAS races across two sessions: two confirms of ONE hold, confirm-with-supersedes vs end, reconcile vs confirm, two reconciliations — serialised by the state row, never two decisions, never a stale hold set', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const storeB = storeOn(clientB)
+        // (a) the same hold confirmed twice at once: one commits, the other is STALE (hold_not_open), one decision.
+        {
+          const scope = { tenantId: tenantFor('s2_03a'), sheetId: sheetFor('s2_03a'), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const input = confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture)
+          const [a, b] = await Promise.all([
+            settle(storeA.confirmContinuation(input, { bumpWithin: testBumpWithin })),
+            settle(storeB.confirmContinuation(input, { bumpWithin: testBumpWithin })),
+          ])
+          expect([a, b].filter((outcome) => outcome.ok).length).toBe(1)
+          const loser = [a, b].find((outcome) => !outcome.ok) as { ok: false; error: any }
+          expect(loser.error.code).toBe(RC.CONFIRM_STALE)
+          expect(loser.error.details.reason).toBe('hold_not_open')
+          expect(await countWhere(RT.continuation, 'sheet_id = $1', [scope.sheetId])).toBe(1)
+          expect((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0].decision_version).toBe(1)
+        }
+        // (b) confirm (superseding A) vs end (A): exactly one decision lands; A is ended exactly once; at most one live.
+        //     Review X-2 / X-3: A must NEED RECONFIRMATION with its hold open (only then may it be ended) and the rival
+        //     must claim A's old rows (only then may it supersede) — ONE computation raises both holds and the verdict.
+        {
+          const scope = { tenantId: tenantFor('s2_03b'), sheetId: sheetFor('s2_03b'), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+          const rival = refreshKit.competingCandidateHold(fixture.hold)
+          const reconfirm = refreshKit.reconfirmHoldFor(first.continuationId, { confirmable: false, verdict: 'structure_changed' })
+          const idOf2 = await seedOpenHolds(storeA, scope, [rival, reconfirm], 1, { [first.continuationId]: 'structure_changed' })
+          expect((await q(`SELECT status FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0].status).toBe('needs_reconfirmation')
+          const [confirm, end] = await Promise.all([
+            settle(storeB.confirmContinuation(confirmInput(scope, idOf2(rival), rival, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin })),
+            settle(storeA.endContinuation({ ...scope, continuationId: first.continuationId, revision: 1, endedBy: 'u_scs_puller', outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin })),
+          ])
+          expect([confirm, end].filter((outcome) => outcome.ok).length, 'exactly one decision').toBe(1)
+          const loser = [confirm, end].find((outcome) => !outcome.ok) as { ok: false; error: any }
+          expect(loser.error.code).toBe(RC.CONFIRM_STALE)
+          const ended = (await q(`SELECT status, ended_outcome, claim_active FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0]
+          expect(ended.status).toBe('ended')
+          expect(ended.claim_active).toBe(false)
+          expect(ended.ended_outcome).toBe(confirm.ok ? 'superseded_by_new_confirmation' : 'escalate_special_repair')
+          expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(confirm.ok ? 1 : 0)
+          expect((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0].decision_version).toBe(2)
+          // A's hold stays open either way: escalated -> runbook-only (the project stays suspended); superseded -> as
+          // it was, until the next computation (it no longer names a live relationship).
+          const reconfirmRow = (await q(`SELECT status, runbook_only FROM ${RT.hold} WHERE sheet_id = $1 AND fingerprint = $2`, [scope.sheetId, reconfirm.fingerprint])).rows[0]
+          expect(reconfirmRow.status).toBe('open')
+          expect(reconfirmRow.runbook_only).toBe(!confirm.ok)
+        }
+        // (c) reconcile vs confirm: a reconciliation that straddles a decision is STATE_MOVED and persists nothing.
+        {
+          const scope = { tenantId: tenantFor('s2_03c'), sheetId: sheetFor('s2_03c'), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const rival = refreshKit.competingCandidateHold(fixture.hold)
+          const [confirm, reconcile] = await Promise.all([
+            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })),
+            settle(storeB.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [fixture.hold, rival], computation: computation() })),
+          ])
+          expect(confirm.ok, JSON.stringify((confirm as any).error && (confirm as any).error.details)).toBe(true)
+          const rows = (await q(`SELECT fingerprint, status FROM ${RT.hold} WHERE sheet_id = $1`, [scope.sheetId])).rows
+          expect(rows.filter((row: any) => row.fingerprint === fixture.hold.fingerprint).length, 'the confirmed hold has ONE row').toBe(1)
+          expect(rows.find((row: any) => row.fingerprint === fixture.hold.fingerprint).status).toBe('resolved')
+          if (reconcile.ok) {
+            // The reconciliation ran first (observed 0 still true): the rival hold is open, the confirm followed.
+            expect(rows.some((row: any) => row.fingerprint === rival.fingerprint && row.status === 'open')).toBe(true)
+          } else {
+            expect((reconcile as any).error.code).toBe(RC.STATE_MOVED)
+            expect((reconcile as any).error.details.reason).toBe('decision_version')
+            expect(rows.some((row: any) => row.fingerprint === rival.fingerprint), 'nothing of the moved reconciliation persisted').toBe(false)
+          }
+        }
+        // (d) two reconciliations at once (different sets, same observation): both land in some order; exactly
+        //     one open hold remains, no duplicate rows per fingerprint, version advanced twice, no decision.
+        {
+          const scope = { tenantId: tenantFor('s2_03d'), sheetId: sheetFor('s2_03d'), projectNo: fixture.projectNo }
+          const rival = refreshKit.competingCandidateHold(fixture.hold)
+          const [x, y] = await Promise.all([
+            settle(storeA.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [fixture.hold], computation: computation() })),
+            settle(storeB.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [rival], computation: computation() })),
+          ])
+          expect(x.ok && y.ok, JSON.stringify([(x as any).error && (x as any).error.details, (y as any).error && (y as any).error.details])).toBe(true)
+          expect(await countWhere(RT.state, 'sheet_id = $1', [scope.sheetId]), 'one state row (UPSERT then lock)').toBe(1)
+          const state = (await q(`SELECT version, decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0]
+          expect(state.version).toBe(2)
+          expect(state.decision_version).toBe(0)
+          expect(await countWhere(RT.hold, 'sheet_id = $1 AND status = $2', [scope.sheetId, 'open'])).toBe(1)
+          expect(await countWhere(RT.hold, 'sheet_id = $1', [scope.sheetId])).toBe(2)
+        }
+      }, 60000)
+
+      test('S2-04 table unreadable (migrations absent on the search path): the store answers 503 STORE_FAILED (42P01) — never zero rows; the reader 503 naming the store; the derived state is unreadable', async () => {
+        const client = await poolManager.get().getInternalPool().connect()
+        const schema = `scs_empty_${TOKEN}`
+        try {
+          await client.query(`CREATE SCHEMA ${schema}`)
+          await client.query(`SET search_path TO ${schema}`)
+          const store = storeOn(client)
+          const scope = { tenantId: tenantFor('s2_04'), sheetId: sheetFor('s2_04'), projectNo: 'SYN-S2-04' }
+          const read = await settle(store.readGovernanceRows(scope))
+          expect(read.ok).toBe(false)
+          expect((read as any).error.code).toBe(RC.STORE_FAILED)
+          expect((read as any).error.status).toBe(503)
+          expect((read as any).error.details.sqlState).toBe('42P01')
+          expect((read as any).error.details.operation).toBe('read_continuations')
+          expect((read as any).error.details.partial).toBe(false)
+          const reader = readerOn(client)
+          const consult = await settle(reader.consult(scope))
+          expect(consult.ok).toBe(false)
+          expect((consult as any).error.code).toBe(GC.STORE_FAILED)
+          expect((consult as any).error.details.store).toBe('continuation')
+          const derived = await reader.readRefreshState(scope)
+          expect(derived.state.status).toBe('unreadable')
+          expect(derived.state.unreadable.store).toBe('continuation')
+          expect(derived.state.exportAllowed).toBe(false)
+          // A write is refused the same way: a hold reconciliation never records "clean" on a missing table.
+          const write = await settle(store.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [], computation: computation({ suspended: false }) }))
+          expect((write as any).error.code).toBe(RC.STORE_FAILED)
+          expect((write as any).error.details.sqlState).toBe('42P01')
+        } finally {
+          await client.query('RESET search_path').catch(() => {})
+          await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
+          client.release()
+        }
+      }, 30000)
+
+      test('S2-05 tenant assertion: a header-steered tenant that owns nothing is REFUSED by the sheet-keyed read (409 TENANT_MISMATCH), never answered "not governed"', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const owner = { tenantId: tenantFor('s2_05'), sheetId: sheetFor('s2_05'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, owner, [fixture.hold])
+        await storeA.confirmContinuation(confirmInput(owner, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const steered = { ...owner, tenantId: tenantFor('s2_05_steered') }
+        // The store's reads under the steered tenant still surface the owner's rows (the sheet-keyed read) ...
+        const rows = await storeA.readGovernanceRows(steered)
+        expect(rows.continuations.length).toBe(1)
+        expect(rows.continuations[0].tenantId).toBe(owner.tenantId)
+        // ... and the reader refuses on them instead of answering an empty, ungoverned project.
+        const reader = readerOn(clientA)
+        const refused = await settle(reader.consult(steered))
+        expect(refused.ok).toBe(false)
+        expect((refused as any).error.code).toBe(GC.TENANT_MISMATCH)
+        expect((refused as any).error.status).toBe(409)
+        expect(JSON.stringify((refused as any).error.details)).not.toContain(owner.tenantId)
+        await expect(reader.readRefreshState(steered)).rejects.toMatchObject({ code: GC.TENANT_MISMATCH })
+        // The owner's own consult is governed and derives the confirmed-pending state.
+        const own = await reader.consult(owner)
+        expect(own.governed).toBe(true)
+        expect(own.continuations[0].memberCount).toBe(4)
+        expect((await reader.readRefreshState(owner)).state.status).toBe('confirmed_pending_execution')
+      }, 30000)
+
+      test('S2-06 sheet-keyed read: a project whose protection lives on another sheet is refused 409 RETARGETED when resolved elsewhere — its old rows are never matched to the new target', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const home = { tenantId: tenantFor('s2_06'), sheetId: sheetFor('s2_06_home'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, home, [fixture.hold])
+        await storeA.confirmContinuation(confirmInput(home, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const elsewhere = { ...home, sheetId: sheetFor('s2_06_env') }
+        const reader = readerOn(clientA)
+        const refused = await settle(reader.consult(elsewhere))
+        expect(refused.ok).toBe(false)
+        expect((refused as any).error.code).toBe(GC.TARGET_RETARGETED)
+        expect((refused as any).error.status).toBe(409)
+        expect((refused as any).error.details.reason).toBe('sheet')
+        expect(JSON.stringify((refused as any).error.details)).not.toContain(home.sheetId)
+        await expect(reader.readRefreshState(elsewhere)).rejects.toMatchObject({ code: GC.TARGET_RETARGETED })
+        const own = await reader.consult(home)
+        expect(own.governed).toBe(true)
+        expect(governanceModule.plannerSlice(own).continuations.length).toBe(1)
+      }, 30000)
+
+      // Review X-1: the freeze points of the consult's snapshot reads (statement text from lib/db.cjs `select`).
+      const STEP4_FREEZE_POINTS: Array<[string, RegExp]> = [
+        ['T0 after the registry reads, before the first step-4 read', /FROM "integration_stock_prep_continuation" WHERE "tenant_id"/],
+        ['T1 between the continuation reads and the member reads', /FROM "integration_stock_prep_continuation_member" WHERE/],
+        ['T2 between the member reads and the hold reads', /FROM "integration_stock_prep_refresh_hold" WHERE/],
+        ['T3 between the hold reads and the state read', /FROM "integration_stock_prep_refresh_state" WHERE/],
+        ['T4 between the state read and the execution reads', /FROM "integration_stock_prep_refresh_execution" WHERE/],
+      ]
+
+      test('S2-07 (review X-1) the consult is ONE snapshot: frozen at each read boundary (T3 = between the hold reads and the state read) while another session CONFIRMS, it answers the pre-confirm instant whole; the computation keyed on it is 409 STATE_MOVED; no stale hold persisted, no torn complete, no projection 500', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeB = storeOn(clientB)
+        // Every freeze point is run and recorded; ONE assertion at the end compares the whole table, so a regression
+        // reports which boundaries tore and how (stale hold, torn complete, projection 500) — not only the first.
+        const observed: Array<Record<string, unknown>> = []
+        for (const [index, [label, pattern]] of STEP4_FREEZE_POINTS.entries()) {
+          const scope = { tenantId: tenantFor(`s2_07_${index}`), sheetId: sheetFor(`s2_07_${index}`), projectNo: fixture.projectNo }
+          await registerProject(scope, { pilot: true })
+          const idOf = await seedOpenHolds(storeB, scope, [fixture.hold])
+          const reached = gate()
+          const frozen = gate()
+          let hit = false
+          // The freeze matches the step-4 read whether it runs in the snapshot transaction (the design) or not (a
+          // regression): either way the case answers with an assertion, never a hang.
+          const consultDb = hostLikeDb(async ({ sql }) => {
+            if (!hit && pattern.test(sql)) {
+              hit = true
+              reached.open()
+              await frozen.promise
+            }
+          })
+          const consultP = settle(pilotReaderOn(consultDb).consult(scope))
+          await reached.promise
+          // Another session decides while the consult is frozen inside its snapshot.
+          const confirmed = await storeB.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+          frozen.open()
+          const consult = await consultP
+          const row: Record<string, unknown> = { point: label.slice(0, 2), confirmDecisionVersion: confirmed.decisionVersion }
+          if (!consult.ok) {
+            row.consult = String((consult as any).error && (consult as any).error.code)
+          } else {
+            const answer = (consult as any).value
+            row.consult = `c${answer.continuations.length}m${answer.members.length}h${answer.holds.length}dv${answer.decisionVersionObserved}`
+            row.pilot = Boolean(answer.pilot && answer.pilot.enabled)
+            const derived = derive(answer)
+            row.derived = derived.status
+            row.exportAllowed = derived.exportAllowed
+            // The computation built on it (the real planner, pilot from the consult) and its CAS-keyed reconciliation.
+            const outcome = await computeAndReconcile(storeB, scope, answer, fixture)
+            row.planner = outcome.planner
+            row.reconcile = outcome.reconcile
+          }
+          row.staleOpenHolds = await countWhere(RT.hold, 'sheet_id = $1 AND fingerprint = $2 AND status = $3', [scope.sheetId, fixture.hold.fingerprint, 'open'])
+          const after = await pilotReaderOn().consult(scope)
+          row.after = `c${after.continuations.length}m${after.members.length}h${after.holds.length}dv${after.decisionVersionObserved}:${derive(after).status}`
+          observed.push(row)
+        }
+        // At EVERY boundary: the pre-confirm instant, whole (the snapshot was taken at the registry read, before the
+        // freeze) — pending confirmation, export refused, the computation refused 409 STATE_MOVED at the CAS, no stale
+        // open hold; the next consult sees the decision whole.
+        expect(observed).toEqual(STEP4_FREEZE_POINTS.map(([label]) => ({
+          point: label.slice(0, 2),
+          confirmDecisionVersion: 1,
+          consult: 'c0m0h1dv0',
+          pilot: true,
+          derived: 'pending_confirmation',
+          exportAllowed: false,
+          planner: null,
+          reconcile: RC.STATE_MOVED,
+          staleOpenHolds: 0,
+          after: 'c1m4h0dv1:confirmed_pending_execution',
+        })))
+      }, 60000)
+
+      test('S2-08 (review X-1) the registry reads are IN the snapshot: frozen right after them while another session enables the pilot and a pilot computation raises a hold, the consult answers the registry and the step-4 rows of ONE instant (not pilot, no rows) — never "not pilot" beside the rows the pilot raised', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeB = storeOn(clientB)
+        {
+          const scope = { tenantId: tenantFor('s2_08'), sheetId: sheetFor('s2_08'), projectNo: fixture.projectNo }
+          await registerProject(scope, { pilot: false })
+          const reached = gate()
+          const frozen = gate()
+          let hit = false
+          const consultDb = hostLikeDb(async ({ sql }) => {
+            if (!hit && STEP4_FREEZE_POINTS[0][1].test(sql)) {
+              hit = true
+              reached.open()
+              await frozen.promise
+            }
+          })
+          const consultP = settle(pilotReaderOn(consultDb).consult(scope))
+          await reached.promise
+          // Another session: the pilot marker is set and the first pilot computation raises the candidate hold.
+          await q(`UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = 'u_scs_admin', pilot_readiness_version = 1 WHERE id = $1`, [`pt_${scope.sheetId}`])
+          await storeB.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [fixture.hold], computation: computation() })
+          frozen.open()
+          const consult = await consultP
+          expect(consult.ok).toBe(true)
+          const answer = (consult as any).value
+          expect(answer.pilot.enabled, 'the registry as of the snapshot').toBe(false)
+          expect({ governed: answer.governed, state: answer.state, holds: answer.holds.length }, 'the step-4 rows as of the SAME snapshot').toEqual({ governed: false, state: null, holds: 0 })
+          expect(derive(answer).status).toBe('not_governed')
+          // A consult after both commits sees both: pilot, the hold, pending confirmation.
+          const after = await pilotReaderOn().consult(scope)
+          expect(after.pilot.enabled).toBe(true)
+          expect(after.holds.length).toBe(1)
+          expect(derive(after).status).toBe('pending_confirmation')
+        }
+      }, 30000)
+
+      test('S2-09 (review X-1) natural races, no freezing: a consult starts as another session is about to run one of its confirm statements (lock read, bump, header, members, hold, state, COMMIT); bounded rounds — every consult is one of the two consistent instants, no stale hold, no torn complete, no projection 500', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const triggers = [
+          /^SELECT \* FROM "integration_stock_prep_project_write_lock"/,
+          /^(UPDATE "integration_stock_prep_project_write_lock"|INSERT INTO "integration_stock_prep_project_write_lock")/,
+          /^INSERT INTO "integration_stock_prep_continuation" /,
+          /^INSERT INTO "integration_stock_prep_continuation_member"/,
+          /^UPDATE "integration_stock_prep_refresh_hold"/,
+          /^UPDATE "integration_stock_prep_refresh_state"/,
+          /^COMMIT$/,
+        ]
+        // 15 rounds per trigger point, capped by time so a slow runner stays within the step's budget.
+        const MAX_ROUNDS = 105
+        const BUDGET_MS = 8000
+        const CONSISTENT = ['c0m0h1dv0', 'c1m4h0dv1']
+        const tally: Record<string, number> = {}
+        // Counted over every round and asserted once at the end, so a regression reports the whole tally.
+        const counts = { torn: 0, tornComplete: 0, projection500: 0, staleOpenHolds: 0, confirmFailed: 0, consultFailed: 0 }
+        let rounds = 0
+        const started = Date.now()
+        while (rounds < MAX_ROUNDS && Date.now() - started < BUDGET_MS) {
+          const scope = { tenantId: tenantFor(`s2_09_${rounds}`), sheetId: sheetFor(`s2_09_${rounds}`), projectNo: fixture.projectNo }
+          await registerProject(scope, { pilot: true })
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const trigger = triggers[rounds % triggers.length]
+          const aboutTo = gate()
+          const confirmDb = hostLikeDb(({ sql, inTransaction }) => { if (inTransaction && trigger.test(sql)) aboutTo.open() })
+          const confirmStore = continuationStoreModule.createStockPreparationContinuationStore({ db: confirmDb })
+          const confirmP = settle(confirmStore.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin }))
+          await Promise.race([aboutTo.promise, confirmP])
+          const offset = Math.floor(rounds / triggers.length) % 3
+          if (offset > 0) await new Promise((resolve) => setTimeout(resolve, offset - 1))
+          const [consult, confirm] = await Promise.all([settle(pilotReaderOn().consult(scope)), confirmP])
+          rounds += 1
+          if (!confirm.ok) { counts.confirmFailed += 1; continue }
+          if (!consult.ok) { counts.consultFailed += 1; continue }
+          const answer = (consult as any).value
+          const shape = `c${answer.continuations.length}m${answer.members.length}h${answer.holds.length}dv${answer.decisionVersionObserved}`
+          if (!CONSISTENT.includes(shape)) counts.torn += 1
+          if (derive(answer).status === 'complete') counts.tornComplete += 1
+          const outcome = await computeAndReconcile(storeA, scope, answer, fixture)
+          if (outcome.planner) counts.projection500 += 1
+          counts.staleOpenHolds += await countWhere(RT.hold, 'sheet_id = $1 AND fingerprint = $2 AND status = $3', [scope.sheetId, fixture.hold.fingerprint, 'open'])
+          const key = `${shape}:${outcome.planner || outcome.reconcile}`
+          tally[key] = (tally[key] || 0) + 1
+        }
+        // Values-free evidence in the CI log: how many rounds ran and which instants the consults answered.
+        console.log(`[S2-09] rounds=${rounds} in ${Date.now() - started} ms counts=${JSON.stringify(counts)} tally=${JSON.stringify(tally)}`)
+        expect(rounds, `rounds run within ${BUDGET_MS} ms`).toBeGreaterThanOrEqual(14)
+        // Every consult one consistent instant: no torn view, no torn complete, no projection 500, no stale hold.
+        expect({ counts, tally: Object.keys(tally).filter((key) => !['c0m0h1dv0:STOCK_PREP_PULL_STATE_MOVED', 'c1m4h0dv1:ok opened=0'].includes(key)) })
+          .toEqual({ counts: { torn: 0, tornComplete: 0, projection500: 0, staleOpenHolds: 0, confirmFailed: 0, consultFailed: 0 }, tally: [] })
+      }, 60000)
+
+      test('S2-10 (review X-2) end admissibility on PostgreSQL: an ACTIVE continuation cannot be ended (409 status), an escalation with no open hold naming it cannot (409 no_open_hold) — both leave every table and the lock row untouched; an admitted escalation keeps the hold open runbook-only and the project pending, never complete, even after a clean settling computation', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const scope = { tenantId: tenantFor('s2_10'), sheetId: sheetFor('s2_10'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+        const confirmed = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const id = confirmed.continuationId
+        const endBase = { ...scope, continuationId: id, revision: 1, endedBy: 'u_scs_puller' }
+        // ACTIVE with an OPEN hold naming it (a content_changed verdict keeps it active): only the status check refuses.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [refreshKit.contentChangeHoldFor(id)], verdicts: { [id]: 'content_changed' }, computation: computation() })
+        {
+          const before = await sheetFingerprint(scope.sheetId)
+          const refused = await settle(storeA.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin }))
+          expect(refused.ok, 'an ACTIVE relationship with an open hold is still not ended').toBe(false)
+          expect((refused as any).error.details).toEqual({ reason: 'status', outcome: 'escalate_special_repair', status: 'active' })
+          expect(await sheetFingerprint(scope.sheetId), 'nothing persisted, no bump').toBe(before)
+        }
+        // ACTIVE with no hold (the next computation verifies it valid and supersedes the content hold): both outcomes refused.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'valid' }, computation: computation({ suspended: false }) })
+        for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }]) {
+          const before = await sheetFingerprint(scope.sheetId)
+          const refused = await settle(storeA.endContinuation({ ...endBase, ...extra }, { bumpWithin: testBumpWithin }))
+          expect(refused.ok, extra.outcome).toBe(false)
+          expect((refused as any).error.code, extra.outcome).toBe(RC.END_OUTCOME_NOT_ADMISSIBLE)
+          expect((refused as any).error.details, extra.outcome).toEqual({ reason: 'status', outcome: extra.outcome, status: 'active' })
+          expect(await sheetFingerprint(scope.sheetId), `${extra.outcome}: nothing persisted, no bump`).toBe(before)
+        }
+        // needs_reconfirmation, but no open hold names it: an escalation would release the claims with nothing left
+        // to suspend the project.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'structure_changed' }, computation: computation({ suspended: false }) })
+        {
+          const before = await sheetFingerprint(scope.sheetId)
+          const refused = await settle(storeA.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin }))
+          expect(refused.ok, 'an escalation with no open hold is not admitted').toBe(false)
+          expect((refused as any).error.code).toBe(RC.END_OUTCOME_NOT_ADMISSIBLE)
+          expect((refused as any).error.details).toEqual({ reason: 'no_open_hold', outcome: 'escalate_special_repair' })
+          expect(await sheetFingerprint(scope.sheetId), 'nothing persisted, no bump').toBe(before)
+        }
+        // The computation raises the hold: the escalation is admitted and the hold stays open, runbook-only.
+        await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [refreshKit.reconfirmHoldFor(id, { confirmable: false, verdict: 'structure_changed' })], verdicts: { [id]: 'structure_changed' }, computation: computation() })
+        const escalated = await storeA.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin })
+        expect(escalated.holdsEscalated).toBe(1)
+        const kept = (await q(`SELECT kind, status, runbook_only, confirmable FROM ${RT.hold} WHERE sheet_id = $1 AND continuation_id = $2 AND status = 'open'`, [scope.sheetId, id])).rows
+        expect(kept).toEqual([{ kind: 'relationship_reconfirm', status: 'open', runbook_only: true, confirmable: false }])
+        const reader = readerOn(clientA)
+        expect((await reader.readRefreshState(scope)).state.status).toBe('pending_confirmation')
+        const clean = await storeA.reconcileHolds({ ...scope, decisionVersionObserved: 2, holds: [], computation: computation({ suspended: false, lane: 'small_apply' }), settlement: { executionId: null, generationToken: 'g_s2_10', sourceContentDigest: 'src_s2', sheetMachineDigest: 'm_s2_10' } })
+        expect(clean.settled).toBe(false)
+        expect(clean.holds.open).toBe(1)
+        const state = (await reader.readRefreshState(scope)).state
+        expect(state.status).toBe('pending_confirmation')
+        expect(state.exportAllowed).toBe(false)
+      }, 30000)
+
+      test('S2-11 (review X-3) supersede relatedness on PostgreSQL: a candidate sharing no claim cannot supersede (409 supersedes_unrelated, every table and the lock row untouched) and commits on its own; a candidate claiming the same old rows supersedes in one transaction', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const scope = { tenantId: tenantFor('s2_11'), sheetId: sheetFor('s2_11'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const disjoint = refreshKit.disjointCandidateHold(fixture.hold)
+        const related = refreshKit.competingCandidateHold(fixture.hold)
+        const idOf2 = await seedOpenHolds(storeA, scope, [disjoint, related], 1)
+        const supersedes = { supersedes: { continuationId: first.continuationId, revision: 1 } }
+        const before = await sheetFingerprint(scope.sheetId)
+        const refused = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture, supersedes), { bumpWithin: testBumpWithin }))
+        expect(refused.ok).toBe(false)
+        expect((refused as any).error.code).toBe(RC.END_OUTCOME_NOT_ADMISSIBLE)
+        expect((refused as any).error.status).toBe(409)
+        expect((refused as any).error.details).toEqual({ reason: 'supersedes_unrelated', outcome: 'superseded_by_new_confirmation' })
+        expect(await sheetFingerprint(scope.sheetId), 'nothing persisted: the relationship keeps its claims, no bump').toBe(before)
+        // Control: the same candidate commits on its own — the refusal was the relatedness rule alone.
+        const alone = await storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture), { bumpWithin: testBumpWithin })
+        expect(alone.supersededContinuationId).toBeNull()
+        expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(2)
+        // Related: the claims collide without `supersedes`; with it the old relationship ends and the new one claims.
+        const conflict = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture), { bumpWithin: testBumpWithin }))
+        expect((conflict as any).error.code).toBe(RC.CONFIRM_CONFLICT)
+        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture, supersedes), { bumpWithin: testBumpWithin })
+        expect(replaced.supersededContinuationId).toBe(first.continuationId)
+        expect((await q(`SELECT status, ended_outcome, claim_active FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0])
+          .toEqual({ status: 'ended', ended_outcome: 'superseded_by_new_confirmation', claim_active: false })
+        expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(2)
+      }, 30000)
+
+      test('S2-12 (review round 2, P1 on X-3) a PARTIAL takeover cannot supersede — the reviewer\'s shape end to end on the real host: (a) refused 409 supersedes_incomplete, every step-4 row and the lock row byte-identical; (b) after pilot exit the persisted relationship still protects all four old rows through the REAL planner and the REAL host writer (zero INACTIVE / UPDATE / copy-ADD for them); (c) a FULL takeover supersedes, and after pilot exit the old rows stay protected under the replacing relationship', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const F = fixture.fixtures
+        const storeA = storeOn(clientA)
+        const demandEvidence = fixture.expansion.demandEvidence
+        const RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+        const writesTouching = (planned: any, keys: Set<string>) => planned.decisions
+          .filter((decision: any) => keys.has(decision.idempotencyKey) && ['add', 'update', 'inactive'].includes(decision.decision))
+          .map((decision: any) => decision.decision)
+        // The runbook's pilot exit (migration 101): ONE statement clearing all three columns.
+        const pilotExit = (scope: Record<string, string>) => q(
+          'UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE id = $1',
+          [`pt_${scope.sheetId}`],
+        )
+        // (a) + (b) on a REAL sandbox sheet: the four old rows and the independent PART-A rows written through the host.
+        // One observed table, asserted once: a regression shows the reviewer's whole outcome, not only its first step.
+        const observed: Record<string, unknown> = {}
+        const sb = await sandboxSheet('s2_12')
+        try {
+          const scope = { tenantId: tenantFor('s2_12'), sheetId: sb.sheetId, projectNo: fixture.projectNo }
+          const fields = sb.target.fieldIdMap
+          const seedRows = async (rows: any[]) => {
+            const out: any[] = []
+            for (const row of rows) {
+              const data = Object.fromEntries(Object.entries(row).map(([name, value]) => [fields[name] || name, value]))
+              const record = await sb.multitable.records.createRecord({ sheetId: sb.sheetId, data })
+              out.push(F.withRecordRef(row, record.id, record.version))
+            }
+            return out
+          }
+          await registerProject(scope, { pilot: true })
+          const oldRows = await seedRows(fixture.sheet)
+          const original = F.plan(fixture.expansion, oldRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const idOf = await seedOpenHolds(storeA, scope, [original])
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin })
+          // The reviewer's candidate, emitted by the REAL planner against an independent PART-A subtree on the same sheet:
+          // two of the relationship's four new positions, none of its four old rows.
+          const independent = await F.expand(F.project({ orders: [{ part: 'PART-A', qty: 20 }], parts: F.PARTS.slice(), boms: { 'PART-A': [{ part: 'PART-C', usage: 4 }] } }))
+          const aRows = await seedRows(F.applyToSheet(F.plan(independent, []), [], { idPrefix: 's2_12_independent_a' }))
+          const partial = F.plan(fixture.expansion, aRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const oldNewKeys = new Set<string>(original.detail.pairs.map((pair: any) => pair.newKey))
+          const oldRecordIds = new Set<string>(original.detail.pairs.map((pair: any) => pair.oldRecordId))
+          expect(partial.detail.pairs.length).toBe(2)
+          expect(partial.detail.pairs.every((pair: any) => oldNewKeys.has(pair.newKey) && !oldRecordIds.has(pair.oldRecordId))).toBe(true)
+          const idOf2 = await seedOpenHolds(storeA, scope, [partial], 1)
+          // (a) the partial supersede.
+          const before = await sheetFingerprint(scope.sheetId)
+          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(partial), partial, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin }))
+          observed.supersede = supersede.ok ? 'admitted' : `${(supersede as any).error.code}:${(supersede as any).error.details.reason}`
+          observed.supersedeDetails = supersede.ok ? null : (supersede as any).error.details
+          observed.stepFourRowsAndLockRowUnchanged = (await sheetFingerprint(scope.sheetId)) === before
+          // (b) pilot exit; the next plan over the PERSISTED state; the REAL host writer under a real lease.
+          await pilotExit(scope)
+          const consult = await pilotReaderOn().consult(scope)
+          observed.pilotAfterExit = consult.pilot ? consult.pilot.enabled : null
+          observed.governedAfterExit = consult.governed
+          const next = F.plan(fixture.expansion, oldRows.concat(aRows), { continuation: F.continuationInput({ pilot: false, demandEvidence, ...governanceModule.plannerSlice(consult) }) })
+          observed.nextSuspended = next.suspended === true
+          observed.oldRowWrites = writesTouching(next, new Set<string>(oldRows.map((row: any) => row.idempotencyKey)))
+          observed.copyAddsAtOldPositions = writesTouching(next, oldNewKeys)
+          const oldIds = oldRows.map((row: any) => row[RECORD_REF].id)
+          const rowsOf = async () => (await q('SELECT id, version, data FROM meta_records WHERE id = ANY($1::text[]) ORDER BY id', [oldIds])).rows
+          const beforeRows = await rowsOf()
+          const writer = require(path.join(PLUGIN_LIB, 'stock-preparation-apply-writer.cjs'))
+          const writeLock = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+          const applied = await writeLock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId: 's2_12_run' }, async (guard: any) => writer.applyStockPreparationPlan({ permission: 'write', plan: next, target: sb.target, recordsApi: sb.multitable.records, writeFence: guard, writeFenceRequired: true, governance: await inLeaseVerdict(scope) }))
+          observed.writerStatus = applied.status
+          const afterRows = await rowsOf()
+          observed.oldRowsChangedByWriter = afterRows.filter((row: any, index: number) => JSON.stringify(row) !== JSON.stringify(beforeRows[index])).length
+        } finally {
+          await dropSheet(sb.sheetId)
+        }
+        console.log(`[S2-12] partial ${JSON.stringify(observed)}`)
+        expect(observed).toEqual({
+          supersede: `${RC.END_OUTCOME_NOT_ADMISSIBLE}:supersedes_incomplete`,
+          supersedeDetails: { reason: 'supersedes_incomplete', outcome: 'superseded_by_new_confirmation', uncoveredOldRecords: 4, uncoveredOldKeys: 4 },
+          stepFourRowsAndLockRowUnchanged: true,
+          pilotAfterExit: false,
+          governedAfterExit: true,
+          nextSuspended: false,
+          oldRowWrites: [],
+          copyAddsAtOldPositions: [],
+          writerStatus: 'succeeded',
+          oldRowsChangedByWriter: 0,
+        })
+        // (c) a FULL takeover: every old row (and old key) re-rooted under another parent supersedes; after pilot exit the
+        //     replacing relationship is the only one in the projection and still protects every old row.
+        const scope = { tenantId: tenantFor('s2_12_full'), sheetId: sheetFor('s2_12_full'), projectNo: fixture.projectNo }
+        await registerProject(scope, { pilot: true })
+        const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const full = refreshKit.competingCandidateHold(fixture.hold)
+        const idOf2 = await seedOpenHolds(storeA, scope, [full], 1)
+        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(full), full, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin })
+        await pilotExit(scope)
+        const consult = await pilotReaderOn().consult(scope)
+        const slice = governanceModule.plannerSlice(consult)
+        const next = F.plan(fixture.expansion, fixture.sheet, { continuation: F.continuationInput({ pilot: false, demandEvidence, ...slice }) })
+        const fullObserved = {
+          superseded: replaced.supersededContinuationId === first.continuationId,
+          pilotAfterExit: consult.pilot ? consult.pilot.enabled : null,
+          projection: slice.continuations.map((entry: any) => entry.id === replaced.continuationId ? 'replacing' : 'other'),
+          claimedOldRecords: slice.members.map((member: any) => member.oldRecordId).sort(),
+          oldRowWrites: writesTouching(next, new Set<string>(fixture.sheet.map((row: any) => row.idempotencyKey))),
+        }
+        console.log(`[S2-12] full ${JSON.stringify({ ...fullObserved, claimedOldRecords: fullObserved.claimedOldRecords.length })}`)
+        expect(fullObserved).toEqual({
+          superseded: true,
+          pilotAfterExit: false,
+          projection: ['replacing'],
+          claimedOldRecords: fixture.hold.detail.pairs.map((pair: any) => pair.oldRecordId).sort(),
+          oldRowWrites: [],
+        })
+      }, 90000)
+
+      test('S2-13 (review round 2, the reviewer\'s ANCESTOR counterexample) on a real sheet: an independent P-001 subtree inserted beside the confirmed relationship; over the FULL sheet and the current projection the REAL planner emits a five-member ancestor candidate (0 old rows, 4 new positions); the supersede is refused 409 supersedes_incomplete (uncoveredOldRecords 4) with every step-4 row and the lock row byte-identical; the next pull with the pilot ON (the real writer refuses the suspended plan) and OFF (the real writer applies it), and the third pull over the rows the host now holds, never write the four old rows', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const scenario = await refreshKit.ancestorScenario({ idPrefix: 's2_13_independent_p' })
+        const F = scenario.fixtures
+        const demandEvidence = scenario.expansion.demandEvidence
+        const RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+        const writesTouching = (planned: any, keys: Set<string>) => planned.decisions
+          .filter((decision: any) => keys.has(decision.idempotencyKey) && ['add', 'update', 'inactive'].includes(decision.decision))
+          .map((decision: any) => decision.decision)
+        const planWith = (rows: any[], consult: any, pilot: boolean) => F.plan(scenario.expansion, rows, { continuation: F.continuationInput({ pilot, demandEvidence, ...governanceModule.plannerSlice(consult) }) })
+        const writer = require(path.join(PLUGIN_LIB, 'stock-preparation-apply-writer.cjs'))
+        const writeLock = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+        // One observed table, asserted once (a regression shows the reviewer's whole outcome).
+        const observed: Record<string, unknown> = {}
+        const sb = await sandboxSheet('s2_13')
+        try {
+          const scope = { tenantId: tenantFor('s2_13'), sheetId: sb.sheetId, projectNo: fixture.projectNo }
+          const fields = sb.target.fieldIdMap
+          const seedRows = async (rows: any[]) => {
+            const out: any[] = []
+            for (const row of rows) {
+              const data = Object.fromEntries(Object.entries(row).map(([name, value]) => [fields[name] || name, value]))
+              const record = await sb.multitable.records.createRecord({ sheetId: sb.sheetId, data })
+              out.push(F.withRecordRef(row, record.id, record.version))
+            }
+            return out
+          }
+          const applyThroughHost = async (planned: any, runId: string) => {
+            const outcome = await settle(writeLock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId }, async (guard: any) => writer.applyStockPreparationPlan({ permission: 'write', plan: planned, target: sb.target, recordsApi: sb.multitable.records, writeFence: guard, writeFenceRequired: true, governance: await inLeaseVerdict(scope) })))
+            if (outcome.ok) return String((outcome as any).value.status)
+            const error = (outcome as any).error
+            return String(error && (error.code === 'plan_suspended' || (error.details && error.details.code === 'plan_suspended')) ? 'plan_suspended' : `threw ${error && error.code}`)
+          }
+          await registerProject(scope, { pilot: true })
+          const oldRows = await seedRows(fixture.sheet)
+          const oldKeys = new Set<string>(oldRows.map((row: any) => row.idempotencyKey))
+          const oldIds = oldRows.map((row: any) => row[RECORD_REF].id)
+          const oldRowsNow = async () => (await q('SELECT id, version, data FROM meta_records WHERE id = ANY($1::text[]) ORDER BY id', [oldIds])).rows
+          const changedSince = (before: any[], after: any[]) => after.filter((row: any, index: number) => JSON.stringify(row) !== JSON.stringify(before[index])).length
+          // The relationship: the real planner pairs the four old rows with S-001 nested under Q-001 > P-001.
+          const original = F.plan(scenario.expansion, oldRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const idOf = await seedOpenHolds(storeA, scope, [original])
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin })
+          // The reviewer's SYNTHETIC step: five independent P-001 rows written to the same sheet after the confirm.
+          const independentRows = await seedRows(scenario.independentRows)
+          const complete = oldRows.concat(independentRows)
+          // The real planner over the FULL sheet and the CURRENT projection (the real consult) emits the ancestor candidate.
+          const consult0 = await pilotReaderOn().consult(scope)
+          const candidate = planWith(complete, consult0, true).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const oldRecordIds = new Set<string>(original.detail.pairs.map((pair: any) => pair.oldRecordId))
+          const oldNewKeys = new Set<string>(original.detail.pairs.map((pair: any) => pair.newKey))
+          observed.sheetRows = complete.length
+          observed.candidate = candidate ? {
+            members: candidate.detail.pairs.length,
+            oldRecordOverlap: candidate.detail.pairs.filter((pair: any) => oldRecordIds.has(pair.oldRecordId)).length,
+            newPositionOverlap: candidate.detail.pairs.filter((pair: any) => oldNewKeys.has(pair.newKey)).length,
+          } : null
+          const idOf2 = await seedOpenHolds(storeA, scope, [candidate], consult0.decisionVersionObserved)
+          // (a) the supersede.
+          const before = await sheetFingerprint(scope.sheetId)
+          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(candidate), candidate, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin }))
+          observed.supersede = supersede.ok ? 'admitted' : `${(supersede as any).error.code}:${(supersede as any).error.details.reason}`
+          observed.supersedeDetails = supersede.ok ? null : (supersede as any).error.details
+          observed.stepFourRowsAndLockRowUnchanged = (await sheetFingerprint(scope.sheetId)) === before
+          // (b) the next pull with the pilot ON, then (pilot exit) OFF — the real planner over the persisted state, the real host writer.
+          const nextOn = planWith(complete, await pilotReaderOn().consult(scope), true)
+          let rowsBefore = await oldRowsNow()
+          observed.nextPilotOn = { suspended: nextOn.suspended === true, oldRowWrites: writesTouching(nextOn, oldKeys), writer: await applyThroughHost(nextOn, 's2_13_on'), oldRowsChangedByWriter: changedSince(rowsBefore, await oldRowsNow()) }
+          await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE id = $1', [`pt_${scope.sheetId}`])
+          const consultOff = await pilotReaderOn().consult(scope)
+          const nextOff = planWith(complete, consultOff, false)
+          rowsBefore = await oldRowsNow()
+          observed.nextPilotOff = { pilot: consultOff.pilot ? consultOff.pilot.enabled : null, suspended: nextOff.suspended === true, oldRowWrites: writesTouching(nextOff, oldKeys), writer: await applyThroughHost(nextOff, 's2_13_off'), oldRowsChangedByWriter: changedSince(rowsBefore, await oldRowsNow()) }
+          // (c) the third pull over the sheet AS THE HOST NOW HOLDS IT (read back through the real reader), pilot on and off.
+          const landed = await tableActions.__internals.readExistingStockPreparationRows(sb.multitable.records, sb.target, scope.projectNo)
+          const consult3 = await pilotReaderOn().consult(scope)
+          observed.thirdPull = {
+            pilotOn: writesTouching(planWith(landed, consult3, true), oldKeys),
+            pilotOff: writesTouching(planWith(landed, consult3, false), oldKeys),
+            oldRowsStillActive: (await oldRowsNow()).filter((row: any) => row.data[fields.active || 'active'] !== false).length,
+          }
+        } finally {
+          await dropSheet(sb.sheetId)
+        }
+        console.log(`[S2-13] ancestor ${JSON.stringify(observed)}`)
+        expect(observed).toEqual({
+          sheetRows: 9,
+          candidate: { members: 5, oldRecordOverlap: 0, newPositionOverlap: 4 },
+          supersede: `${RC.END_OUTCOME_NOT_ADMISSIBLE}:supersedes_incomplete`,
+          supersedeDetails: { reason: 'supersedes_incomplete', outcome: 'superseded_by_new_confirmation', uncoveredOldRecords: 4, uncoveredOldKeys: 4 },
+          stepFourRowsAndLockRowUnchanged: true,
+          nextPilotOn: { suspended: true, oldRowWrites: [], writer: 'plan_suspended', oldRowsChangedByWriter: 0 },
+          nextPilotOff: { pilot: false, suspended: false, oldRowWrites: [], writer: 'succeeded', oldRowsChangedByWriter: 0 },
+          thirdPull: { pilotOn: [], pilotOff: [], oldRowsStillActive: 4 },
+        })
+      }, 120000)
+      // ── S3A: batch-refresh step 4 PR-3a — the lanes on the REAL stack ─────────────────────────────────────────
+      // Every route case mounts the REAL route module (lib/http-routes.cjs registerIntegrationRoutes) over the
+      // production host context (real multitable records / provisioning, plugin_kv storage), the real lock, PR B's
+      // real registry store, the real audit store and the REAL refresh services (`realRefreshServices`: one
+      // continuation store for the reader and the lanes, as index.cjs wires them). A project sheet is a really
+      // provisioned sandbox sheet (template fields, contract options, PLM column lock); the deployment's env target is
+      // a second one. The source is the canonical S/P story of support/stock-preparation-continuation-fixtures.cjs
+      // (first pull: S-001 alone; second pull: S-001 nested in P-001 plus N-001). Nested in S2 for its store helpers
+      // (the seeded confirm's bump stand-in, `seedOpenHolds`, `sheetFingerprint`) and its tenant-prefix cleanup.
+      //   S3A-01 (A01, E-1 full entry) a pilot project's second pull: a READ-tier and a puller preview are suspended
+      //          (no token, no bump, one open confirmable candidate hold); HTTP apply with a forged token, a stale
+      //          one and acceptManualConfirmHold is 409 SUSPENDED; mvp-persist 409 NOT_READY refresh_suspended; the
+      //          reconcile route keeps the SAME hold; the main sheet's meta_records (ids, versions) and
+      //          meta_record_revisions unchanged after EVERY entry; no execution begun by a refusal.
+      //   S3A-06 (A12 / E-4) after a confirmed relationship, a PERSON's fill of a human column on an old row never
+      //          revokes it: the re-preview verifies, the continuation stays active, the apply writes no human
+      //          column and the new value survives; a HOST-side machine edit of an old row suspends the pull.
+      //   S3A-07 (C10 (c), E-2(a)) a pilot-era open candidate hold survives pilot exit: two previews keep the SAME
+      //          open row (no new row), the pull stays suspended, the apply is 409 and nothing is written.
+      //   S3A-08 (U07, both ways) switch off: a PILOT project registered on its own sheet is refused 409 RETARGETED on
+      //          dry-run, reconcile, mvp-persist, carry and apply (0 source reads, env sheet untouched, no store row, no
+      //          token left, no bump); a registered NOT-governed project pulls on the env sheet as before, 0 step-4 rows.
+      //   S3A-11 (G1 / A11; review round 1 item 2) the step-4 tables ABSENT from the store's binding (42P01 — what a
+      //          pre-102/103 database answers; the registry stays readable): the chunk route on a PAUSED job, the
+      //          dry-run and the apply answer 503 STORE_FAILED `continuation`; 0 source reads, nothing written, no token,
+      //          no bump, the job STAYS paused (explicitly) and the lease is released.
+      //   S3A-12 (H6 / E09; review round 1 item 1, lens B V50B-08) a REAL fault inside the reconcile transaction (a
+      //          BEFORE INSERT trigger on the hold table raising 42501 for this tenant only): the preview and the apply
+      //          answer 503 `hold_open`; every step-4 row byte-identical, no bump, no token, no execution, main untouched.
+      //   S3A-13 (O-22) a seeded FAILED execution, or a RUNNING one of a dead lease: the PREVIEW answers
+      //          `recovery_pending` (no token, no bump; review round 1 item 4) and the apply under its own live lease is
+      //          409 RECOVERY_PENDING from the rows (the derived state under a live lease reads `executing`), nothing
+      //          written, no new execution.
+      //   S3A-17 (ST-1 / TD-23) the settling finish vs a concurrent preview reconcile, on PostgreSQL, both orders
+      //          (pg_blocking_pids) plus the non-settling leg: no 40P01, no stuck `running` row, and while the finish
+      //          waits it holds neither its execution row nor the bound continuation.
+      //   S3A-18 (L5) a paused large job (one row written) on a project made governed by a store-seeded hold (no bump):
+      //          the chunk ROUTE refuses 409 LARGE_LANE_REFUSED `hold` inside its lease, the job byte-identical, 0 writes.
+      //   S3A-19 (G4) a registered NOT-governed project through dry-run / apply / re-preview / reconcile: 0 step-4 rows,
+      //          the next consult `governed: false`.
+      //   S3A-22 (R-7) the carry on a governed project: an ordinary open hold => carried (only the human cell moves);
+      //          a runbook-only hold => 409; a failed execution => 409 RECOVERY_PENDING; the store unreadable => 503.
+      //   S3A-23 (V1) a sentinel planted in a persisted hold's detail: the suspended responses, every plugin_kv value
+      //          (token + background job record), the registry row and every meta_records value never carry it; the
+      //          hold table does.
+      //   S3A-27 (R-13) step-4 rows on sheet A, the registry re-pointed to sheet B, switch on: dry-run, reconcile,
+      //          mvp-persist, carry, apply and the chunk route all 409 RETARGETED `sheet`; 0 source reads, no store write.
+      //   S3A-28 (review round 1 item 3, lens B V50B-16) a carry whose key is DUPLICATE-RESOLVED
+      //          (`<json>::duplicate:<kind>:<hash>`): a NOT-governed project (switch off) carries as before this PR; a
+      //          GOVERNED project's consult resolves THAT project (an earlier failed execution => RECOVERY_PENDING).
+      describe('S3A step-4 lanes (real Postgres, real lock, real host)', () => {
+        const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
+        const projectTargetsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
+        const auditStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-audit-store.cjs')) as any
+        const confirmationDecisionsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-confirmation-decisions.cjs')) as any
+        const pairingLib = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-pairing.cjs')) as any
+        const httpRoutesLib = require(path.join(PLUGIN_LIB, 'http-routes.cjs')) as any
+        const access = require(path.join(PLUGIN_LIB, 'stock-preparation-workbench-access.cjs')) as any
+        const harnessLib = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-project-sheet-harness.cjs')) as any
+        const CF = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-continuation-fixtures.cjs')) as any
+        const SWITCH = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+        const MVP_SWITCH = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
+        const ACTION_ID = tableActions.PLM_STOCK_PREPARATION_ACTION_ID
+        const PATHS = {
+          dryRun: '/api/integration/table-actions/:actionId/dry-run',
+          dryRunJob: '/api/integration/table-actions/:actionId/dry-run-jobs',
+          apply: '/api/integration/table-actions/:actionId/apply',
+          mvp: '/api/integration/table-actions/:actionId/mvp-persist',
+          reconcile: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
+          carry: '/api/integration/stock-preparation/carry/confirm',
+          chunk: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run',
+        }
+        const RETARGETED = 'STOCK_PREP_REFRESH_TARGET_RETARGETED'
+        const s3aSheets: string[] = []
+
+        afterAll(async () => {
+          for (const sheetId of s3aSheets) await dropSheet(sheetId)
+        })
+
+        // The main sheet as the host holds it: record ids + versions and the revision count.
+        async function mainSheetState(sheetId: string) {
+          const rows = (await q('SELECT id, version FROM meta_records WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows
+          const revisions = Number((await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1', [sheetId])).rows[0].n)
+          return { count: rows.length, rows: rows.map((row: any) => `${row.id}@${row.version}`), revisions }
+        }
+        const sameJson = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+        // Every step-4 row of one tenant (the five tables): the "nothing persisted" fingerprint of a lane refusal.
+        async function stepFour(tenantId: string) {
+          const out: unknown[] = []
+          for (const table of [RT.continuation, RT.member, RT.hold, RT.state, RT.execution]) out.push((await q(`SELECT * FROM ${table} WHERE tenant_id = $1 ORDER BY id`, [tenantId])).rows)
+          return JSON.stringify(out)
+        }
+        const kvTokens = async () => Number((await q(`SELECT count(*)::int AS n FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE 'integration:table-action:dry-run-token:%'`)).rows[0].n)
+        const errorOf = (res: any) => (res && res.body && res.body.error ? res.body.error : {})
+        const decisionVersionOf = async (scope: Record<string, string>) => Number(((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1 AND project_no = $2`, [scope.sheetId, scope.projectNo])).rows[0] || { decision_version: 0 }).decision_version)
+
+        // A pilot content-change hold (a pilot-detection kind: re-emitted from its stored row after pilot exit).
+        function contentHold(key = 'k_s3a', extraDetail: Record<string, unknown> = {}) {
+          const hold: any = {
+            kind: 'content_change',
+            confirmable: false,
+            notConfirmableReason: 'needs_step5',
+            subject: { keyDigest: nodeCrypto.createHash('sha256').update(key).digest('hex') },
+            detail: { recordId: null, recordVersion: null, key, reason: 'plm_system_refresh', fields: {}, inContinuation: null, humanColumnsPresent: {}, ...extraDetail },
+          }
+          hold.fingerprint = pairingLib.holdFingerprint(hold)
+          return hold
+        }
+
+        async function s3aStack(label: string, options: { pilot?: boolean; register?: boolean; switchOn?: boolean; data?: any; refresh?: any } = {}) {
+          const { pilot = true, register = true, switchOn = true } = options
+          const tenantId = tenantFor(`s3a_${label}`)
+          const projectNo: string = CF.PROJECT_NO
+          const projectId = `${tenantId}:integration-core`
+          const objectId: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(tenantId, projectNo)
+          const pluginContext = createProductionPluginContext()
+          const multitable: any = pluginContext.api.multitable
+          if (!multitable) throw new Error('production plugin context is missing multitable APIs')
+          const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId })
+          expect(ensured.ready).toBe(true)
+          await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
+          await projectTargetsLib.markProjectSheetPlmSystemColumns({ provisioning: multitable.provisioning, projectId, objectId })
+          const sheetId: string = ensured.target.sheetId
+          s3aSheets.push(sheetId)
+          scopes.push(sheetWriteScopeKey(sheetId))
+          // The deployment's env target: its OWN real sandbox sheet in the same tenant project (switch-off legs).
+          const envObjectId = `plm_stock_preparation_sandbox_s3a_env_${label}_${TOKEN}`
+          const envEnsured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId: envObjectId })
+          expect(envEnsured.ready).toBe(true)
+          await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId: envObjectId })
+          s3aSheets.push(envEnsured.target.sheetId)
+          scopes.push(sheetWriteScopeKey(envEnsured.target.sheetId))
+          const db = createDb({ database: pluginContext.api.database })
+          const registry = projectTargetStoreLib.createStockPreparationProjectTargetStore({ db })
+          if (register) await registry.create({ tenantId, projectNo, sheetId, objectId, createdBy: 'syn' })
+          if (register && pilot) {
+            await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo, 'u_s3a_admin'])
+          }
+          const lock = createStockPreparationProjectWriteLock({ db })
+          const refresh = options.refresh || realRefreshServices()
+          const state: any = { data: options.data || CF.firstPullSource(), reads: 0 }
+          const sourceAdapter = {
+            async read(input: any = {}) {
+              state.reads += 1
+              const rows = Array.isArray(state.data[input.object]) ? state.data[input.object] : []
+              const found = rows.filter((row: any) => Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
+              return { records: found.map((row: any) => ({ ...row })), done: true, nextCursor: null }
+            },
+          }
+          const actionConfig = {
+            actionId: ACTION_ID,
+            source: { externalSystemId: `plm_s3a_${label}_${TOKEN}`, kind: 'data-source:sql-readonly' },
+            target: envEnsured.target,
+          }
+          const routes = new Map<string, any>()
+          const routeContext = {
+            api: {
+              http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
+              multitable,
+              database: pluginContext.api.database,
+            },
+            storage: pluginContext.storage,
+            config: {
+              stockPreparationTableActions: [actionConfig],
+              stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envObjectId] },
+            },
+          }
+          const base = harnessLib.baseServices(sourceAdapter)
+          const services: any = {
+            ...base,
+            externalSystemRegistry: { ...base.externalSystemRegistry, async listExternalSystems() { return [] } },
+            pipelineRegistry: { ...base.pipelineRegistry, async listPipelines() { return [] } },
+            stockPreparationProjectWriteLock: lock,
+            stockPreparationProjectTargetStore: registry,
+            stockPreparationAuditStore: auditStoreLib.createStockPreparationAuditStore({ db }),
+            stockPreparationPackInstallStore: packInstallStoreLib.createStockPreparationPackInstallStore({ db }),
+            stockPreparationConfirmationDecisionLease: confirmationDecisionsLib.createConfirmationDecisionReconcileLease({ db }),
+            tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+            stockPreparationRefreshGovernance: refresh.governance,
+            stockPreparationContinuationStore: refresh.store,
+          }
+          httpRoutesLib.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
+          const users = {
+            reader: { id: `u_s3a_read_${label}`, tenantId, permissions: ['integration:read'] },
+            puller: { id: `u_s3a_pull_${label}`, tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE, access.STOCK_PREP_PULL] },
+            admin: { id: `u_s3a_admin_${label}`, tenantId, roles: ['admin'], permissions: ['integration:admin'] },
+          }
+          const key = sheetWriteScopeKey(sheetId)
+          const withEnv = async <T>(extra: Record<string, string>, fn: () => Promise<T>): Promise<T> => {
+            const names = [SWITCH, ...Object.keys(extra)]
+            const before: Record<string, string | undefined> = Object.fromEntries(names.map((name) => [name, process.env[name]]))
+            if (switchOn) process.env[SWITCH] = 'true'
+            else delete process.env[SWITCH]
+            for (const [name, value] of Object.entries(extra)) process.env[name] = value
+            try {
+              return await fn()
+            } finally {
+              for (const name of names) {
+                if (before[name] === undefined) delete process.env[name]
+                else process.env[name] = before[name]
+              }
+            }
+          }
+          const call = (method: string, routePath: string, user: any, body: any = {}, params: Record<string, string> = {}, extraEnv: Record<string, string> = {}) =>
+            withEnv(extraEnv, () => callRoute(routes, method, routePath, { user, body, query: {}, params: { actionId: ACTION_ID, ...params } }))
+          const sourceIdentity = refreshLanes.refreshSourceIdentity({ action: tableActions.normalizeStockPreparationActionConfig(actionConfig), tenantId })
+          return {
+            tenantId, projectNo, projectId, objectId, sheetId, key, target: ensured.target, envTarget: envEnsured.target, multitable, pluginContext,
+            registry, lock, refresh, state, users, routes, sourceAdapter, sourceIdentity, action: { ...actionConfig, target: ensured.target },
+            scope: { tenantId, sheetId, projectNo },
+            dryRun: (user: any = users.puller) => call('POST', PATHS.dryRun, user, { parameters: { projectNo } }),
+            dryRunJob: (user: any = users.puller) => call('POST', PATHS.dryRunJob, user, { parameters: { projectNo } }),
+            apply: (user: any, token: string, confirmExtra: Record<string, unknown> = {}) => call('POST', PATHS.apply, user, { parameters: { projectNo }, confirm: { dryRunToken: token, ...confirmExtra } }),
+            mvpPersist: (user: any = users.admin) => call('POST', PATHS.mvp, user, { parameters: { projectNo } }, {}, { [MVP_SWITCH]: 'true' }),
+            reconcile: (user: any = users.admin) => call('POST', PATHS.reconcile, user, { parameters: { projectNo } }),
+            carry: (decision: any, user: any = users.admin) => call('POST', PATHS.carry, user, { decision }),
+            chunk: (jobId: string, applyJobId: string, user: any = users.admin) => call('POST', PATHS.chunk, user, {}, { jobId, applyJobId }),
+            // A token the apply route will consume and bind: the CURRENT generation of the sheet, no bump.
+            async mintToken(revision: string, sheetKey: string = key) {
+              const generation = await lock.readGeneration(sheetKey)
+              return tableActions.__internals.createDryRunToken(pluginContext.storage, {
+                actionId: ACTION_ID,
+                parametersHash: tableActions.__internals.hashJson(tableActions.normalizeActionParameters({ projectNo })),
+                revision,
+                conflictPolicyReview: null,
+                ...writeBindingFromGeneration(generation),
+              })
+            },
+            generation: async (sheetKey: string = key) => {
+              const generation = await lock.readGeneration(sheetKey)
+              return { generation: generation.generation, generationToken: generation.generationToken }
+            },
+            main: (target: string = sheetId) => mainSheetState(target),
+            rows: async (target: string = sheetId) => (await q('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY id', [target])).rows,
+            holds: async () => (await q(`SELECT id, kind, status, confirmable, runbook_only, fingerprint, comparison_fingerprint, evidence_fingerprint FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 ORDER BY opened_at, id`, [sheetId, projectNo])).rows,
+            executions: async () => (await q(`SELECT id, status, lease_id, started_by FROM ${RT.execution} WHERE sheet_id = $1 ORDER BY started_at, id`, [sheetId])).rows,
+            stepFourRows: async () => {
+              let n = 0
+              for (const table of [RT.continuation, RT.member, RT.hold, RT.state, RT.execution]) n += await countWhere(table, 'tenant_id = $1', [tenantId])
+              return n
+            },
+            pilotExit: () => q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo]),
+          }
+        }
+
+        // The first pull applied through the routes (a governed project's clean pull records ONE execution).
+        async function firstPullApplied(st: any) {
+          const first = await st.dryRun()
+          expect(first.statusCode, JSON.stringify(first.body)).toBe(200)
+          expect(first.body.data.status).toBe('ready')
+          const applied = await st.apply(st.users.puller, first.body.data.dryRunToken)
+          expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+          expect(applied.body.data.status).toBe('succeeded')
+          return first
+        }
+
+        // Confirm the project's open candidate hold through the REAL store (the decision PR-4's route will make).
+        async function confirmOpenCandidate(st: any) {
+          const row = (await st.holds()).find((entry: any) => entry.status === 'open' && entry.kind === 'continuation_candidate')
+          expect(row, 'an open candidate hold to confirm').toBeTruthy()
+          return st.refresh.store.confirmContinuation({
+            ...st.scope,
+            holdId: row.id,
+            echo: { holdFingerprint: row.fingerprint, comparisonFingerprint: row.comparison_fingerprint, evidenceFingerprint: row.evidence_fingerprint },
+            basis: { kind: 'puller_confirmed_same_demand' },
+            confirmedBy: st.users.puller.id,
+            sourceIdentity: st.sourceIdentity,
+          }, { bumpWithin: testBumpWithin })
+        }
+
+        test('S3A-01 (A01, E-1 full entry) a pilot project\'s second pull through the REAL routes: read-tier and puller previews suspended (no token, no bump, one open confirmable candidate hold); apply with a forged token, a stale one and acceptManualConfirmHold 409 SUSPENDED; mvp-persist 409 NOT_READY refresh_suspended; reconcile keeps the same hold; the main sheet\'s meta_records and meta_record_revisions unchanged after every entry; no execution begun by a refusal', async () => {
+          const st = await s3aStack('s01', { pilot: true })
+          const first = await firstPullApplied(st)
+          expect((await st.executions()).map((row: any) => row.status)).toEqual(['succeeded'])
+          st.state.data = CF.secondPullSource()
+          const main0 = await st.main()
+          expect(main0.count).toBe(4)
+          const gen0 = await st.generation()
+          const observed: Record<string, unknown> = {}
+          const read = await st.dryRun(st.users.reader)
+          observed.readTier = { status: read.statusCode, previewStatus: read.body.data && read.body.data.status, token: read.body.data ? read.body.data.dryRunToken : 'absent', canApply: read.body.data && read.body.data.canApply }
+          observed.genAfterRead = sameJson(await st.generation(), gen0)
+          observed.mainAfterRead = sameJson(await st.main(), main0)
+          const pulled = await st.dryRun(st.users.puller)
+          observed.puller = { status: pulled.statusCode, previewStatus: pulled.body.data && pulled.body.data.status, token: pulled.body.data ? pulled.body.data.dryRunToken : 'absent', held: pulled.body.data && pulled.body.data.refreshHold && pulled.body.data.refreshHold.held }
+          observed.genAfterPuller = sameJson(await st.generation(), gen0)
+          observed.mainAfterPuller = sameJson(await st.main(), main0)
+          const openIds = (await st.holds()).filter((row: any) => row.status === 'open').map((row: any) => row.id)
+          observed.openHolds = (await st.holds()).filter((row: any) => row.status === 'open').map((row: any) => `${row.kind}:${row.confirmable}`)
+          // E-1 layer (a) at the full entry: every token shape is refused by the in-lease recompute.
+          const tokens: Array<[string, string, Record<string, unknown>]> = [
+            ['forged', 'rev_s3a_forged', {}],
+            ['stale', String(first.body.data.revision), {}],
+            ['acceptManualConfirmHold', 'rev_s3a_forged_manual', { acceptManualConfirmHold: true }],
+          ]
+          const refusals: Record<string, unknown> = {}
+          for (const [label, revision, extra] of tokens) {
+            const res = await st.apply(st.users.puller, await st.mintToken(revision), extra)
+            refusals[label] = { status: res.statusCode, code: errorOf(res).code, mainUnchanged: sameJson(await st.main(), main0) }
+          }
+          observed.applies = refusals
+          const mvp = await st.mvpPersist()
+          observed.mvp = { status: mvp.statusCode, code: errorOf(mvp).code, reason: errorOf(mvp).details && errorOf(mvp).details.reason, mainUnchanged: sameJson(await st.main(), main0) }
+          const reconciled = await st.reconcile()
+          observed.reconcile = {
+            mainUnchanged: sameJson(await st.main(), main0),
+            sameOpenHolds: sameJson((await st.holds()).filter((row: any) => row.status === 'open').map((row: any) => row.id), openIds),
+          }
+          console.log(`[S3A-01] reconcile route answered ${reconciled.statusCode} ${errorOf(reconciled).code || ''}`)
+          observed.executions = (await st.executions()).map((row: any) => row.status)
+          console.log(`[S3A-01] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({
+            readTier: { status: 200, previewStatus: 'suspended', token: null, canApply: false },
+            genAfterRead: true,
+            mainAfterRead: true,
+            puller: { status: 200, previewStatus: 'suspended', token: null, held: true },
+            genAfterPuller: true,
+            mainAfterPuller: true,
+            openHolds: ['continuation_candidate:true'],
+            applies: {
+              forged: { status: 409, code: 'STOCK_PREP_PULL_SUSPENDED', mainUnchanged: true },
+              stale: { status: 409, code: 'STOCK_PREP_PULL_SUSPENDED', mainUnchanged: true },
+              acceptManualConfirmHold: { status: 409, code: 'STOCK_PREP_PULL_SUSPENDED', mainUnchanged: true },
+            },
+            mvp: { status: 409, code: 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', reason: 'refresh_suspended', mainUnchanged: true },
+            reconcile: { mainUnchanged: true, sameOpenHolds: true },
+            executions: ['succeeded'],
+          })
+          expect(await st.main()).toEqual(main0)
+        }, 180000)
+
+        test('S3A-06 (A12 / E-4) a person\'s fill of a human column on an old row never revokes the confirmed relationship: the re-preview verifies, the continuation stays active, the apply writes no human column and the new value survives; a HOST-side machine edit of an old row suspends the pull', async () => {
+          const st = await s3aStack('s06', { pilot: true })
+          await firstPullApplied(st)
+          st.state.data = CF.secondPullSource()
+          expect((await st.dryRun()).body.data.status).toBe('suspended')
+          const confirmed = await confirmOpenCandidate(st)
+          const continuationRow = async () => (await q(`SELECT status, last_verdict FROM ${RT.continuation} WHERE id = $1`, [confirmed.continuationId])).rows[0]
+          const observed: Record<string, unknown> = {}
+          const before = await st.dryRun()
+          observed.afterConfirm = { status: before.body.data && before.body.data.status, add: before.body.data && before.body.data.counts && before.body.data.counts.add }
+          // A PERSON fills a human column on the old S-001 root through the host (a version bump of that record).
+          const fields = st.target.fieldIdMap
+          const notesField = fields.notes || 'notes'
+          const rows = await st.rows()
+          const root = rows.find((row: any) => row.data[fields.componentSourceId || 'componentSourceId'] === 'S-001' && JSON.parse(String(row.data[fields.path || 'path'])).length === 1)
+          expect(root, 'the old S-001 root row').toBeTruthy()
+          await st.multitable.records.patchRecord({ sheetId: st.sheetId, recordId: root.id, changes: { [notesField]: 'synthetic human fill' } })
+          // The old token: either still applicable or refused TOKEN_MISMATCH (acceptable) — never a human-column write.
+          const old = await st.apply(st.users.puller, before.body.data.dryRunToken)
+          observed.oldToken = old.statusCode === 200 ? 'applied' : errorOf(old).code
+          const again = await st.dryRun()
+          observed.rePreview = again.body.data && again.body.data.status
+          if (again.body.data && again.body.data.dryRunToken) {
+            const applied = await st.apply(st.users.puller, again.body.data.dryRunToken)
+            observed.reApply = applied.statusCode === 200 ? applied.body.data.status : errorOf(applied).code
+          }
+          observed.continuation = await continuationRow()
+          const rootAfter = (await st.rows()).find((row: any) => row.id === root.id)
+          observed.humanValueIntact = rootAfter.data[notesField] === 'synthetic human fill'
+          // A HOST-side MACHINE edit of an old row (a PLM column changed behind the plugin's back).
+          const materialField = fields.material || 'material'
+          await st.multitable.records.patchRecord({ sheetId: st.sheetId, recordId: root.id, changes: { [materialField]: 'M-HOST-EDITED' } })
+          const afterMachine = await st.dryRun()
+          observed.afterMachineEdit = { status: afterMachine.body.data && afterMachine.body.data.status, token: afterMachine.body.data ? afterMachine.body.data.dryRunToken : 'absent' }
+          observed.openHoldKinds = (await st.holds()).filter((row: any) => row.status === 'open').map((row: any) => row.kind).sort()
+          console.log(`[S3A-06] ${JSON.stringify(observed)}`)
+          expect(observed.afterConfirm).toEqual({ status: 'ready', add: 2 })
+          expect(['applied', 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH']).toContain(observed.oldToken)
+          expect(observed.rePreview).toBe('ready')
+          expect(observed.continuation).toMatchObject({ status: 'active' })
+          expect(observed.humanValueIntact).toBe(true)
+          expect(observed.afterMachineEdit).toEqual({ status: 'suspended', token: null })
+          expect((observed.openHoldKinds as string[]).length).toBeGreaterThan(0)
+        }, 240000)
+
+        test('S3A-07 (C10 (c), E-2(a)) a pilot-era open candidate hold survives pilot exit: two previews keep the SAME open row and add none, the pull stays suspended, the apply is 409 and nothing is written', async () => {
+          const st = await s3aStack('s07', { pilot: true })
+          await firstPullApplied(st)
+          st.state.data = CF.secondPullSource()
+          expect((await st.dryRun()).body.data.status).toBe('suspended')
+          const pilotHolds = await st.holds()
+          expect(pilotHolds.filter((row: any) => row.status === 'open').map((row: any) => row.kind)).toEqual(['continuation_candidate'])
+          await st.pilotExit()
+          const main0 = await st.main()
+          const previews: unknown[] = []
+          for (let i = 0; i < 2; i += 1) {
+            const res = await st.dryRun()
+            const holds = await st.holds()
+            previews.push({
+              status: res.body.data && res.body.data.status,
+              token: res.body.data ? res.body.data.dryRunToken : 'absent',
+              holdRows: holds.length,
+              sameOpenRow: sameJson(holds.filter((row: any) => row.status === 'open').map((row: any) => row.id), pilotHolds.map((row: any) => row.id)),
+            })
+          }
+          const applied = await st.apply(st.users.puller, await st.mintToken('rev_s3a_07_forged'))
+          console.log(`[S3A-07] ${JSON.stringify({ previews, apply: errorOf(applied).code })}`)
+          expect(previews).toEqual([
+            { status: 'suspended', token: null, holdRows: 1, sameOpenRow: true },
+            { status: 'suspended', token: null, holdRows: 1, sameOpenRow: true },
+          ])
+          expect(applied.statusCode).toBe(409)
+          expect(errorOf(applied).code).toBe('STOCK_PREP_PULL_SUSPENDED')
+          expect(await st.main()).toEqual(main0)
+        }, 180000)
+
+        test('S3A-08 (U07, both ways) switch off: a PILOT project registered on its own sheet is refused 409 RETARGETED on every lane with nothing read, written, minted or bumped; a registered NOT-governed project pulls on the env sheet as before with 0 step-4 rows', async () => {
+          const st = await s3aStack('s08g', { pilot: true, switchOn: false })
+          const envKey = sheetWriteScopeKey(st.envTarget.sheetId)
+          const envMain0 = await st.main(st.envTarget.sheetId)
+          // The env sheet's lock row exists before the lanes run (a first lease acquire CREATES it — a new row, not a
+          // bump), so "no bump" compares the generation AND its token across every lane below.
+          await st.lock.withProjectWriteLease(envKey, { purpose: 'small_apply', runId: 's3a-08-prime' }, async () => null)
+          const envGen0 = await st.generation(envKey)
+          expect(envGen0.generationToken).toBeTruthy()
+          const tokens0 = await kvTokens()
+          const carryPair = await seedCarryPair({ multitable: st.multitable, sheetId: st.envTarget.sheetId, target: st.envTarget }, st.projectNo)
+          const envMainWithPair = await st.main(st.envTarget.sheetId)
+          const lanes: Record<string, any> = {
+            dryRun: await st.dryRun(),
+            reconcile: await st.reconcile(),
+            mvpPersist: await st.mvpPersist(),
+            carry: await st.carry(carryDecision(st.projectNo)),
+            apply: await st.apply(st.users.puller, await st.mintToken('rev_s3a_08_forged', envKey)),
+          }
+          const answers = Object.fromEntries(Object.entries(lanes).map(([lane, res]) => [lane, `${res.statusCode}:${errorOf(res).code}:${errorOf(res).details && errorOf(res).details.reason}`]))
+          const governedLeg = {
+            answers,
+            sourceReads: st.state.reads,
+            envUnchanged: sameJson(await st.main(st.envTarget.sheetId), envMainWithPair),
+            carryTargetUntouched: (await carryPair.readTarget()).notes === null,
+            stepFourRows: await st.stepFourRows(),
+            tokensLeft: (await kvTokens()) - tokens0,
+            envGenUnchanged: sameJson(await st.generation(envKey), envGen0),
+          }
+          console.log(`[S3A-08] governed ${JSON.stringify(governedLeg)}`)
+          const refused = `409:${RETARGETED}:project_registered_on_another_sheet`
+          expect(envMain0.count).toBe(0)
+          expect(governedLeg).toEqual({
+            answers: { dryRun: refused, reconcile: refused, mvpPersist: refused, carry: refused, apply: refused },
+            sourceReads: 0,
+            envUnchanged: true,
+            carryTargetUntouched: true,
+            stepFourRows: 0,
+            tokensLeft: 0,
+            envGenUnchanged: true,
+          })
+          // NOT governed (registered, no pilot, no step-4 row), switch off: today's behaviour on the env sheet.
+          const nt = await s3aStack('s08n', { pilot: false, switchOn: false })
+          const dry = await nt.dryRun()
+          expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+          expect(dry.body.data.status).toBe('ready')
+          expect(dry.body.data.counts.add).toBe(4)
+          const applied = await nt.apply(nt.users.puller, dry.body.data.dryRunToken)
+          expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+          expect(applied.body.data.status).toBe('succeeded')
+          expect((await nt.main(nt.envTarget.sheetId)).count).toBe(4)
+          expect((await nt.main()).count).toBe(0)
+          expect(await nt.stepFourRows()).toBe(0)
+          expect((await nt.refresh.governance.consult({ ...nt.scope, sheetId: nt.envTarget.sheetId })).governed).toBe(false)
+        }, 240000)
+
+        test('S3A-13 (O-22) a seeded FAILED execution, or a RUNNING one of a dead lease: the PREVIEW answers `recovery_pending` (canApply false, no token, no bump, stamped with the recovery code) and the apply under its own live lease is 409 RECOVERY_PENDING from the same rows, nothing written, no new execution; the derived state under a live lease reads `executing`', async () => {
+          for (const variant of ['failed', 'running']) {
+            const st = await s3aStack(`s13${variant[0]}`, { pilot: true })
+            const first = await st.dryRun()
+            expect(first.body.data.status).toBe('ready')
+            const gen = await st.generation()
+            const begun = await st.refresh.store.beginExecution({
+              ...st.scope,
+              lane: 'small_apply',
+              guard: { leaseRunId: `run_s3a_dead_${variant}`, leaseId: `lease_s3a_dead_${variant}`, fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken },
+              tokenRevision: 'rev_s3a_dead',
+              planDigest: 'a'.repeat(64),
+              plannedCounts: { add: 1, update: 0, inactive: 0 },
+              refreshBinding: { continuations: [], holdSetFingerprint: null },
+              startedBy: 'u_s3a_dead',
+            })
+            if (variant === 'failed') await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 1, attemptedWrites: 1, errorCodes: ['E_S3A'] })
+            // Review round 1 item 4: the preview says so — the same rows the apply refuses on.
+            const genBeforePreview = await st.generation()
+            const tokensBeforePreview = await kvTokens()
+            const preview = await st.dryRun()
+            expect(preview.statusCode, JSON.stringify(preview.body)).toBe(200)
+            expect({ status: preview.body.data.status, canApply: preview.body.data.canApply, token: preview.body.data.dryRunToken, recovery: preview.body.data.refreshRecovery })
+              .toEqual({ status: 'recovery_pending', canApply: false, token: null, recovery: { pending: true, openExecutions: 1 } })
+            expect(await st.generation()).toEqual(genBeforePreview)
+            expect(await kvTokens()).toBe(tokensBeforePreview)
+            const stamp = (await q('SELECT last_pull_outcome, last_pull_code FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo])).rows[0]
+            expect(stamp).toEqual({ last_pull_outcome: 'previewed', last_pull_code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' })
+            const main0 = await st.main()
+            const executions0 = await st.executions()
+            const applied = await st.apply(st.users.puller, first.body.data.dryRunToken)
+            expect(applied.statusCode, `${variant}: ${JSON.stringify(applied.body)}`).toBe(409)
+            expect(errorOf(applied).code).toBe('STOCK_PREP_REFRESH_RECOVERY_PENDING')
+            expect(await st.main()).toEqual(main0)
+            expect(await st.executions()).toEqual(executions0)
+            // Why the lane reads ROWS: under a live lease the derived state is `executing`, masking the earlier run.
+            const lease = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: `run_s3a_13_probe_${variant}` })
+            try {
+              const consult = await st.refresh.governance.consult(st.scope)
+              console.log(`[S3A-13] ${variant} derived under a live lease: ${derive(consult).status}`)
+              expect(derive(consult).status).toBe('executing')
+            } finally {
+              await st.lock.createGuard(lease).release()
+            }
+          }
+        }, 240000)
+
+        test('S3A-11 (G1 / A11; review round 1 item 2) the step-4 tables ABSENT from the store binding (42P01 — the shape of a pre-102/103 database; the registry readable): the chunk route on a PAUSED job, the dry-run and the apply answer 503 STORE_FAILED continuation before any source read — nothing written, no token, no bump, the job STAYS paused, the lease released', async () => {
+          const client = await poolManager.get().getInternalPool().connect()
+          const schema = `s3a_nostep4_${TOKEN}`
+          try {
+            await client.query(`CREATE SCHEMA ${schema}`)
+            // The registry stays readable on this binding (the consult's registry reads share the store's snapshot):
+            // only the five step-4 tables are missing, as on a database without migrations 102 / 103.
+            await client.query(`CREATE VIEW ${schema}.integration_stock_prep_project_target AS SELECT * FROM public.integration_stock_prep_project_target`)
+            await client.query(`SET search_path TO ${schema}`)
+            const st = await s3aStack('s11', { pilot: false, refresh: realRefreshServices(dbOn(client)) })
+            const storage: any = st.pluginContext.storage
+            const jobScope = { tenantId: st.tenantId, workspaceId: 'workspace-default' }
+            const jobId = `s3a_11_${TOKEN}`
+            const applyJobId = `s3a_11_apply_${TOKEN}`
+            const records = st.multitable.records as any
+            await largeBomJobs.createLargeBomBackgroundExpansionJob({
+              storage, ...jobScope, action: st.action, parameters: { projectNo: st.projectNo }, principal: 's3a-11', createJobId: () => jobId,
+              writeGenerationObserver: async () => writeObservationFromGeneration(await st.lock.observeGeneration(st.key)),
+            })
+            await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId: ACTION_ID, jobId, sourceAdapter: st.sourceAdapter })
+            await largeBomJobs.planLargeBomBackgroundExpansionJob({
+              storage, ...jobScope, actionId: ACTION_ID, jobId,
+              existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, st.target, st.projectNo),
+              writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
+            })
+            await largeBomJobs.createLargeBomCheckpointApplyJob({
+              storage, ...jobScope, actionId: ACTION_ID, jobId, principal: 's3a-11', permission: 'write', createApplyJobId: () => applyJobId,
+              writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await st.lock.bumpGeneration(st.key, { reason: 'large_approval', expect })),
+            })
+            // One chunk lands through the lib with a HEALTHY gate (its own production services): the job is paused.
+            const scoped = await tableActions.createTargetScopedRecordsApi(records, st.target, { fieldIdTranslation: 'pre_mapped' })
+            const first = await st.lock.withProjectWriteLease(st.key, { purpose: 'large_apply_chunk', runId: 's3a-11-first' }, (guard: any) =>
+              largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId: ACTION_ID, applyJobId, recordsApi: scoped, projectWriteGuard: guard, maxDecisionsPerChunk: 1, refreshGovernanceGate: realChunkGate(st.tenantId, st.projectNo) }))
+            expect(first.status).toBe('paused')
+            const job0 = await largeBomJobs.loadLargeBomCheckpointApplyJob({ storage, ...jobScope, actionId: ACTION_ID, applyJobId })
+            const main0 = await st.main()
+            const gen0 = await st.generation()
+            const tokens0 = await kvTokens()
+            const reads0 = st.state.reads
+            const lanes: Record<string, any> = {
+              chunk: await st.chunk(jobId, applyJobId),
+              dryRun: await st.dryRun(),
+            }
+            const genAfterPreview = await st.generation()
+            lanes.apply = await st.apply(st.users.puller, await st.mintToken('rev_s3a_11'))
+            const answers = Object.fromEntries(Object.entries(lanes).map(([lane, res]) => [lane, `${res.statusCode}:${errorOf(res).code}:${errorOf(res).details && errorOf(res).details.store}:${errorOf(res).details && errorOf(res).details.sqlState}`]))
+            const job1 = await largeBomJobs.loadLargeBomCheckpointApplyJob({ storage, ...jobScope, actionId: ACTION_ID, applyJobId })
+            const observed = {
+              answers,
+              jobStatus: job1.status,
+              jobByteIdentical: sameJson(job1, job0),
+              leaseReleased: (await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [st.key])).rows[0].lease_id === null,
+              sourceReads: st.state.reads - reads0,
+              mainUnchanged: sameJson(await st.main(), main0),
+              noBumpByThePreview: sameJson(genAfterPreview, gen0),
+              tokensLeft: (await kvTokens()) - tokens0,
+            }
+            console.log(`[S3A-11] ${JSON.stringify(observed)}`)
+            const refused = '503:STOCK_PREP_REFRESH_STORE_FAILED:continuation:42P01'
+            expect(observed).toEqual({
+              answers: { chunk: refused, dryRun: refused, apply: refused },
+              jobStatus: 'paused',
+              jobByteIdentical: true,
+              leaseReleased: true,
+              sourceReads: 0,
+              mainUnchanged: true,
+              noBumpByThePreview: true,
+              tokensLeft: 0,
+            })
+            await q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`stock-preparation:large-bom:%:${st.tenantId}:%`]).catch(() => {})
+          } finally {
+            await client.query('RESET search_path').catch(() => {})
+            await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
+            client.release()
+          }
+        }, 240000)
+
+        test('S3A-12 (H6 / E09; review round 1 item 1, lens B V50B-08) a REAL fault inside the reconcile transaction — a BEFORE INSERT trigger on the hold table raising 42501 for this tenant only: the preview and the apply answer 503 STORE_FAILED hold_open; every step-4 row byte-identical, no bump, no token, no execution, the main sheet untouched', async () => {
+          const st = await s3aStack('s12', { pilot: true })
+          await firstPullApplied(st)
+          st.state.data = CF.secondPullSource()
+          const fn = `s3a_hold_fault_${TOKEN}`
+          await q(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN IF NEW.tenant_id = '${st.tenantId}' THEN RAISE EXCEPTION 's3a hold fault' USING ERRCODE = '42501'; END IF; RETURN NEW; END $fn$`)
+          await q(`CREATE TRIGGER ${fn} BEFORE INSERT ON ${RT.hold} FOR EACH ROW EXECUTE FUNCTION ${fn}()`)
+          try {
+            const four0 = await stepFour(st.tenantId)
+            const gen0 = await st.generation()
+            const tokens0 = await kvTokens()
+            const main0 = await st.main()
+            const execs0 = (await st.executions()).length
+            const preview = await st.dryRun()
+            const genAfterPreview = await st.generation()
+            const apply = await st.apply(st.users.puller, await st.mintToken('rev_s3a_12'))
+            const answer = (res: any) => `${res.statusCode}:${errorOf(res).code}:${errorOf(res).details && errorOf(res).details.operation}:${errorOf(res).details && errorOf(res).details.sqlState}`
+            const observed = {
+              preview: answer(preview),
+              apply: answer(apply),
+              stepFourUnchanged: (await stepFour(st.tenantId)) === four0,
+              noBumpByThePreview: sameJson(genAfterPreview, gen0),
+              tokensLeft: (await kvTokens()) - tokens0,
+              mainUnchanged: sameJson(await st.main(), main0),
+              newExecutions: (await st.executions()).length - execs0,
+            }
+            console.log(`[S3A-12] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              preview: '503:STOCK_PREP_REFRESH_STORE_FAILED:hold_open:42501',
+              apply: '503:STOCK_PREP_REFRESH_STORE_FAILED:hold_open:42501',
+              stepFourUnchanged: true,
+              noBumpByThePreview: true,
+              tokensLeft: 0,
+              mainUnchanged: true,
+              newExecutions: 0,
+            })
+          } finally {
+            await q(`DROP TRIGGER IF EXISTS ${fn} ON ${RT.hold}`).catch(() => {})
+            await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+          }
+        }, 180000)
+
+        test('S3A-17 (ST-1 / TD-23) a settling finish vs a concurrent preview reconcile on PostgreSQL, both orders, plus the non-settling leg: no 40P01, no stuck running row; while the finish waits it holds neither its execution row nor the bound continuation', async () => {
+          const fixture = await refreshKit.candidateHoldFixture()
+          const pid = async (client: PoolClient) => Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+          const pidA = await pid(clientA)
+          const pidB = await pid(clientB)
+          const pidX = await pid(clientX)
+          // A store on ONE known client whose statements can be frozen (the dbOn shape plus a hook before every
+          // statement and before the COMMIT).
+          function hookedDbOn(client: PoolClient, hook: (event: { sql: string; inTransaction: boolean }) => Promise<void> | void) {
+            return createDb({
+              database: {
+                query: async (sql: string, params?: unknown[]) => { await hook({ sql, inTransaction: false }); return client.query(sql, params) },
+                transaction: async <T>(callback: (trx: any) => Promise<T>): Promise<T> => {
+                  await client.query('BEGIN')
+                  try {
+                    const result = await callback({
+                      query: async (sql: string, params?: unknown[]) => { await hook({ sql, inTransaction: true }); return (await client.query(sql, params)).rows },
+                      commit: async () => {},
+                      rollback: async () => {},
+                    })
+                    await hook({ sql: 'COMMIT', inTransaction: true })
+                    await client.query('COMMIT')
+                    return result
+                  } catch (error) {
+                    await client.query('ROLLBACK').catch(() => {})
+                    throw error
+                  }
+                },
+              },
+            })
+          }
+          const seedStore = continuationStoreLib.createStockPreparationContinuationStore({ db: hostLikeDb() })
+          // One governed project: an ACTIVE continuation C (seeded confirm), an open hold H the reconcile keeps, and a
+          // zero-write execution bound to [C] ready to settle.
+          async function setup(label: string) {
+            const scope = { tenantId: tenantFor(`s3a_17_${label}`), sheetId: sheetFor(`s3a_17_${label}`), projectNo: fixture.projectNo }
+            const idOf = await seedOpenHolds(seedStore, scope, [fixture.hold])
+            const confirmed = await seedStore.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+            const C = confirmed.continuationId
+            const H = contentHold(`k_s3a_17_${label}`)
+            const dv = await decisionVersionOf(scope)
+            const idOfH = await seedOpenHolds(seedStore, scope, [H], dv)
+            const lockRow = (await q(`SELECT generation, generation_token FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sheetWriteScopeKey(scope.sheetId)])).rows[0]
+            const execution = await seedStore.beginExecution({
+              ...scope,
+              lane: 'small_apply',
+              guard: { leaseRunId: `run_s3a_17_${label}`, leaseId: `lease_s3a_17_${label}`, fencingEpoch: 1, generation: Number(lockRow.generation), generationToken: lockRow.generation_token },
+              tokenRevision: 'rev_s3a_17',
+              planDigest: 'b'.repeat(64),
+              plannedCounts: { add: 0, update: 0, inactive: 0 },
+              refreshBinding: { continuations: [{ id: C, revision: confirmed.revision || 1 }], holdSetFingerprint: null },
+              startedBy: 'u_s3a_17',
+            })
+            const settlement = { executionId: execution.id, generationToken: lockRow.generation_token, sourceContentDigest: 'src_s3a_17', sheetMachineDigest: 'machine_s3a_17' }
+            return {
+              scope, C, hId: idOfH(H), executionId: execution.id,
+              reconcileInput: { ...scope, decisionVersionObserved: await decisionVersionOf(scope), holds: [H], verdicts: { [C]: 'valid' }, computation: computation({ suspended: true }) },
+              finishInput: (settle: boolean) => ({ ...scope, executionId: execution.id, status: 'succeeded', written: 0, attemptedWrites: 0, counts: { add: 0, update: 0, inactive: 0, failed: 0 }, ...(settle ? { settlement } : {}) }),
+            }
+          }
+          const lockable = async (table: string, id: string) => {
+            const probe = await poolManager.get().getInternalPool().connect()
+            try {
+              await probe.query('BEGIN')
+              await probe.query(`SELECT id FROM ${table} WHERE id = $1 FOR UPDATE NOWAIT`, [id])
+              return true
+            } catch (error: any) {
+              return `refused ${error && error.code}`
+            } finally {
+              await probe.query('ROLLBACK').catch(() => {})
+              probe.release()
+            }
+          }
+          const outcomeOf = (result: any) => (result.ok ? 'ok' : `${result.error && result.error.code}:${result.error && result.error.details && result.error.details.sqlState}`)
+          const after = async (s: any) => {
+            const execution = (await q(`SELECT status FROM ${RT.execution} WHERE id = $1`, [s.executionId])).rows[0]
+            const continuation = (await q(`SELECT executed_execution_id, last_verdict FROM ${RT.continuation} WHERE id = $1`, [s.C])).rows[0]
+            return { execution: execution.status, executed: continuation.executed_execution_id === s.executionId, lastVerdict: continuation.last_verdict }
+          }
+          const observed: Record<string, unknown> = {}
+          // Leg 1 (R holds the state row first): X blocks R at the hold R keeps; the finish F queues behind R AT THE
+          // STATE ROW, holding neither its execution row nor C.
+          {
+            const s = await setup('leg1')
+            await clientX.query('BEGIN')
+            await clientX.query(`SELECT id FROM ${RT.hold} WHERE id = $1 FOR UPDATE`, [s.hId])
+            const R = settle(storeOn(clientA).reconcileHolds(s.reconcileInput))
+            await waitUntil('S3A-17 leg 1: R blocked by X', () => isBlockedBy(pidA, pidX))
+            const F = settle(storeOn(clientB).finishExecution(s.finishInput(true)))
+            const fQueued = await settle(waitUntil('S3A-17 leg 1: F blocked by R', () => isBlockedBy(pidB, pidA), 5000))
+            const heldByF = { execution: await lockable(RT.execution, s.executionId), continuation: await lockable(RT.continuation, s.C) }
+            await clientX.query('COMMIT')
+            const [r, f] = [await R, await F]
+            observed.leg1 = { fQueuedBehindR: fQueued.ok, r: outcomeOf(r), f: outcomeOf(f), settled: f.ok ? (f as any).value.settled : null, freeWhileWaiting: heldByF, ...(await after(s)) }
+          }
+          // Leg 2 (F first): F frozen right after its state lock, at its execution FOR UPDATE; R queues behind F.
+          {
+            const s = await setup('leg2')
+            const frozen = gate()
+            const reached = gate()
+            const storeF = continuationStoreLib.createStockPreparationContinuationStore({
+              db: hookedDbOn(clientB, async ({ sql, inTransaction }) => {
+                if (inTransaction && /refresh_execution/.test(sql) && /FOR UPDATE/i.test(sql)) { reached.open(); await frozen.promise }
+              }),
+            })
+            const F = settle(storeF.finishExecution(s.finishInput(true)))
+            await reached.promise
+            const R = settle(storeOn(clientA).reconcileHolds(s.reconcileInput))
+            const queued = await settle(waitUntil('S3A-17 leg 2: R blocked by F', () => isBlockedBy(pidA, pidB), 5000))
+            frozen.open()
+            const [f, r] = [await F, await R]
+            observed.leg2 = { rQueuedBehindF: queued.ok, r: outcomeOf(r), f: outcomeOf(f), settled: f.ok ? (f as any).value.settled : null, ...(await after(s)) }
+          }
+          // Leg 3 (a non-settling finish: no state lock): F takes its execution row and C and is frozen at COMMIT; R
+          // waits on C until F commits.
+          {
+            const s = await setup('leg3')
+            const frozen = gate()
+            const reached = gate()
+            const storeF = continuationStoreLib.createStockPreparationContinuationStore({
+              db: hookedDbOn(clientB, async ({ sql, inTransaction }) => {
+                if (inTransaction && sql === 'COMMIT') { reached.open(); await frozen.promise }
+              }),
+            })
+            const F = settle(storeF.finishExecution(s.finishInput(false)))
+            await reached.promise
+            const R = settle(storeOn(clientA).reconcileHolds(s.reconcileInput))
+            const waited = await settle(waitUntil('S3A-17 leg 3: R blocked by F', () => isBlockedBy(pidA, pidB), 5000))
+            frozen.open()
+            const [f, r] = [await F, await R]
+            observed.leg3 = { rWaitedOnC: waited.ok, r: outcomeOf(r), f: outcomeOf(f), settled: f.ok ? (f as any).value.settled : null, ...(await after(s)) }
+          }
+          console.log(`[S3A-17] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({
+            leg1: { fQueuedBehindR: true, r: 'ok', f: 'ok', settled: true, freeWhileWaiting: { execution: true, continuation: true }, execution: 'succeeded', executed: true, lastVerdict: 'valid' },
+            leg2: { rQueuedBehindF: true, r: 'ok', f: 'ok', settled: true, execution: 'succeeded', executed: true, lastVerdict: 'valid' },
+            leg3: { rWaitedOnC: true, r: 'ok', f: 'ok', settled: false, execution: 'succeeded', executed: true, lastVerdict: 'valid' },
+          })
+        }, 120000)
+
+        test('S3A-18 (L5) a paused large job (one row written) on a project made governed by a store-seeded hold (no bump): the chunk ROUTE refuses 409 LARGE_LANE_REFUSED `hold` inside its lease; the job byte-identical; 0 writes', async () => {
+          const st = await s3aStack('s18', { pilot: false })
+          const storage: any = st.pluginContext.storage
+          const jobScope = { tenantId: st.tenantId, workspaceId: 'workspace-default' }
+          const jobId = `s3a_18_${TOKEN}`
+          const applyJobId = `s3a_18_apply_${TOKEN}`
+          const records = st.multitable.records as any
+          await largeBomJobs.createLargeBomBackgroundExpansionJob({
+            storage, ...jobScope, action: st.action, parameters: { projectNo: st.projectNo }, principal: 's3a-18', createJobId: () => jobId,
+            writeGenerationObserver: async () => writeObservationFromGeneration(await st.lock.observeGeneration(st.key)),
+          })
+          await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId: ACTION_ID, jobId, sourceAdapter: st.sourceAdapter })
+          await largeBomJobs.planLargeBomBackgroundExpansionJob({
+            storage, ...jobScope, actionId: ACTION_ID, jobId,
+            existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, st.target, st.projectNo),
+            writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
+          })
+          const approved = await largeBomJobs.createLargeBomCheckpointApplyJob({
+            storage, ...jobScope, actionId: ACTION_ID, jobId, principal: 's3a-18', permission: 'write', createApplyJobId: () => applyJobId,
+            writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await st.lock.bumpGeneration(st.key, { reason: 'large_approval', expect })),
+          })
+          expect(approved.totalDecisions).toBeGreaterThanOrEqual(2)
+          const scoped = await tableActions.createTargetScopedRecordsApi(records, st.target, { fieldIdTranslation: 'pre_mapped' })
+          const first = await st.lock.withProjectWriteLease(st.key, { purpose: 'large_apply_chunk', runId: 's3a-18-first' }, (guard: any) =>
+            largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId: ACTION_ID, applyJobId, recordsApi: scoped, projectWriteGuard: guard, maxDecisionsPerChunk: 1, refreshGovernanceGate: realChunkGate(st.tenantId, st.projectNo, st.refresh) }))
+          expect(first.status).toBe('paused')
+          expect((await st.main()).count).toBe(1)
+          // The project becomes governed by a store-seeded hold — no generation bump.
+          const gen0 = await st.generation()
+          await seedOpenHolds(st.refresh.store, st.scope, [contentHold('k_s3a_18')])
+          expect(await st.generation()).toEqual(gen0)
+          const job0 = await largeBomJobs.loadLargeBomCheckpointApplyJob({ storage, ...jobScope, actionId: ACTION_ID, applyJobId })
+          const main0 = await st.main()
+          const res = await st.chunk(jobId, applyJobId)
+          console.log(`[S3A-18] chunk route ${res.statusCode} ${errorOf(res).code} ${JSON.stringify(errorOf(res).details)}`)
+          expect(res.statusCode, JSON.stringify(res.body)).toBe(409)
+          expect(errorOf(res).code).toBe('STOCK_PREP_REFRESH_LARGE_LANE_REFUSED')
+          expect(errorOf(res).details).toMatchObject({ reason: 'hold', lane: 'large_apply_chunk', partial: false })
+          expect(await largeBomJobs.loadLargeBomCheckpointApplyJob({ storage, ...jobScope, actionId: ACTION_ID, applyJobId })).toEqual(job0)
+          expect(await st.main()).toEqual(main0)
+          expect((await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [st.key])).rows[0].lease_id).toBeNull()
+          await q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`stock-preparation:large-bom:%:${st.tenantId}:%`]).catch(() => {})
+        }, 180000)
+
+        test('S3A-19 (G4) a registered NOT-governed project through dry-run, apply, re-preview and reconcile on the real stack: 0 step-4 rows; the next consult answers governed: false', async () => {
+          const st = await s3aStack('s19', { pilot: false })
+          const dry = await st.dryRun()
+          expect(dry.body.data.status).toBe('ready')
+          const applied = await st.apply(st.users.puller, dry.body.data.dryRunToken)
+          expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+          expect(applied.body.data.status).toBe('succeeded')
+          const again = await st.dryRun()
+          expect(again.statusCode).toBe(200)
+          const reconciled = await st.reconcile()
+          console.log(`[S3A-19] re-preview ${again.body.data && again.body.data.status}; reconcile ${reconciled.statusCode} ${errorOf(reconciled).code || ''}`)
+          expect(await st.stepFourRows()).toBe(0)
+          expect((await st.refresh.governance.consult(st.scope)).governed).toBe(false)
+        }, 180000)
+
+        test('S3A-22 (R-7) the carry on a governed project: an ordinary open hold => carried (only the human cell of the target moves); a runbook-only hold => 409 runbook_only_hold; a failed execution => 409 RECOVERY_PENDING; the step-4 store unreadable => 503 — none of the refusals patch', async () => {
+          const observed: Record<string, unknown> = {}
+          // Ordinary open hold (a pilot second pull suspended by its candidate): the carry goes through.
+          {
+            const st = await s3aStack('s22o', { pilot: true })
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource()
+            expect((await st.dryRun()).body.data.status).toBe('suspended')
+            const pair = await seedCarryPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
+            const rows0 = await st.rows()
+            const res = await st.carry(carryDecision(st.projectNo))
+            const rows1 = await st.rows()
+            const changed = rows1.filter((row: any) => !sameJson(row, rows0.find((entry: any) => entry.id === row.id))).map((row: any) => row.id)
+            const target0 = rows0.find((row: any) => row.id === pair.targetId)
+            const target1 = rows1.find((row: any) => row.id === pair.targetId)
+            const notesField = pair.physical('notes')
+            const { [notesField]: _n0, ...machine0 } = target0.data
+            const { [notesField]: _n1, ...machine1 } = target1.data
+            observed.ordinary = { status: res.statusCode, mode: res.body.data && res.body.data.mode, changed: changed.length === 1 && changed[0] === pair.targetId, notes: (await pair.readTarget()).notes, machineUnchanged: sameJson(machine0, machine1) }
+          }
+          // A runbook-only hold: confirm -> reconcile a reconfirm hold WITH its verdict -> escalate (R-6's recipe).
+          {
+            const st = await s3aStack('s22r', { pilot: true })
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource()
+            expect((await st.dryRun()).body.data.status).toBe('suspended')
+            const confirmed = await confirmOpenCandidate(st)
+            const reconfirm = refreshKit.reconfirmHoldFor(confirmed.continuationId)
+            await seedOpenHolds(st.refresh.store, st.scope, [reconfirm], await decisionVersionOf(st.scope), { [confirmed.continuationId]: 'source_scope_changed' })
+            await st.refresh.store.endContinuation({ ...st.scope, continuationId: confirmed.continuationId, revision: 1, outcome: 'escalate_special_repair', endedBy: st.users.admin.id }, { bumpWithin: testBumpWithin })
+            const pair = await seedCarryPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
+            const res = await st.carry(carryDecision(st.projectNo))
+            observed.runbook = { status: res.statusCode, code: errorOf(res).code, reason: errorOf(res).details && errorOf(res).details.reason, notes: (await pair.readTarget()).notes, runbookRows: (await st.holds()).filter((row: any) => row.status === 'open' && row.runbook_only).length }
+          }
+          // A failed execution (O-22 for the carry lane).
+          {
+            const st = await s3aStack('s22f', { pilot: true })
+            const gen = await st.generation()
+            const begun = await st.refresh.store.beginExecution({
+              ...st.scope, lane: 'small_apply',
+              guard: { leaseRunId: 'run_s3a_22_dead', leaseId: 'lease_s3a_22_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_22' },
+              tokenRevision: 'rev_s3a_22', planDigest: 'c'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_22',
+            })
+            await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_22'] })
+            const pair = await seedCarryPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
+            const res = await st.carry(carryDecision(st.projectNo))
+            observed.recovery = { status: res.statusCode, code: errorOf(res).code, notes: (await pair.readTarget()).notes }
+          }
+          // The step-4 store unreadable (its tables absent on the search path of its binding): 503, nothing patched.
+          {
+            const client = await poolManager.get().getInternalPool().connect()
+            const schema = `s3a_empty_${TOKEN}`
+            try {
+              await client.query(`CREATE SCHEMA ${schema}`)
+              // Only the step-4 store's binding loses its tables; the registry and the lock (host-shaped bindings) stay readable.
+              await client.query(`SET search_path TO ${schema}`)
+              const broken = realRefreshServices(dbOn(client))
+              const st = await s3aStack('s22u', { pilot: true, refresh: broken })
+              const pair = await seedCarryPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
+              const res = await st.carry(carryDecision(st.projectNo))
+              observed.unreadable = { status: res.statusCode, code: errorOf(res).code, notes: (await pair.readTarget()).notes }
+            } finally {
+              await client.query('RESET search_path').catch(() => {})
+              await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
+              client.release()
+            }
+          }
+          console.log(`[S3A-22] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({
+            ordinary: { status: 200, mode: 'carried', changed: true, notes: 'synthetic note', machineUnchanged: true },
+            runbook: { status: 409, code: 'STOCK_PREP_PULL_SUSPENDED', reason: 'runbook_only_hold', notes: null, runbookRows: 1 },
+            recovery: { status: 409, code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', notes: null },
+            unreadable: { status: 503, code: 'STOCK_PREP_REFRESH_STORE_FAILED', notes: null },
+          })
+        }, 300000)
+
+        test('S3A-23 (V1) a sentinel planted in a persisted hold\'s detail never leaves the hold table: the suspended responses (sync and background), every plugin_kv value written meanwhile (tokens, the job record), the registry row and every meta_records value are free of it and of the private keys', async () => {
+          const st = await s3aStack('s23', { pilot: true })
+          const SENTINEL = `S3A-SENTINEL-${TOKEN}`
+          const startedAt = (await q('SELECT now() AS at')).rows[0].at
+          await seedOpenHolds(st.refresh.store, st.scope, [contentHold('k_s3a_23', { key: SENTINEL, fields: { material: { before: SENTINEL, after: `${SENTINEL}-2` } } })])
+          await st.pilotExit()
+          const sync = await st.dryRun()
+          expect(sync.body.data.status).toBe('suspended')
+          const job = await st.dryRunJob()
+          expect(job.statusCode, JSON.stringify(job.body)).toBe(202)
+          await waitUntil('S3A-23: the background dry-run finished', async () => Number((await q(`SELECT count(*)::int AS n FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE 'stock-preparation:dry-run-job:%' AND updated_at >= $1 AND value->>'status' <> 'running'`, [startedAt])).rows[0].n) > 0, 30000)
+          const PRIVATE = ['"holds":[', '"refresh":', '"handle":', '"planningInputs":', '"persistedHolds":', '"consult":', '"members":']
+          const leaks = (text: string) => [SENTINEL, ...PRIVATE].filter((needle) => text.includes(needle))
+          const kv = (await q(`SELECT key, value::text AS text FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND updated_at >= $1`, [startedAt])).rows
+          const observed = {
+            syncResponse: leaks(JSON.stringify(sync.body)),
+            jobResponse: leaks(JSON.stringify(job.body)),
+            kvRowsWritten: kv.length > 0,
+            kv: kv.flatMap((row: any) => leaks(row.text)),
+            registry: leaks(JSON.stringify((await q('SELECT * FROM integration_stock_prep_project_target WHERE tenant_id = $1', [st.tenantId])).rows)),
+            metaRecords: Number((await q('SELECT count(*)::int AS n FROM meta_records WHERE data::text LIKE $1', [`%${SENTINEL}%`])).rows[0].n),
+            holdTableCarriesIt: Number((await q(`SELECT count(*)::int AS n FROM ${RT.hold} WHERE detail::text LIKE $1`, [`%${SENTINEL}%`])).rows[0].n) > 0,
+          }
+          console.log(`[S3A-23] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({ syncResponse: [], jobResponse: [], kvRowsWritten: true, kv: [], registry: [], metaRecords: 0, holdTableCarriesIt: true })
+        }, 180000)
+
+        test('S3A-27 (R-13) step-4 rows on sheet A, the registry re-pointed to sheet B, switch ON: dry-run, reconcile, mvp-persist, carry, apply and the chunk route all 409 RETARGETED `sheet`; 0 source reads; no store write; no bump of B', async () => {
+          const st = await s3aStack('s27', { pilot: false })
+          const sheetA = sheetFor('s3a_27_previous')
+          await seedOpenHolds(st.refresh.store, { ...st.scope, sheetId: sheetA }, [contentHold('k_s3a_27')])
+          const fingerprintA = await sheetFingerprint(sheetA)
+          const rows0 = await st.stepFourRows()
+          const gen0 = await st.generation()
+          // A large job approved on B before anything consults (the chunk is the lane under test).
+          const storage: any = st.pluginContext.storage
+          const jobScope = { tenantId: st.tenantId, workspaceId: 'workspace-default' }
+          const jobId = `s3a_27_${TOKEN}`
+          const applyJobId = `s3a_27_apply_${TOKEN}`
+          await largeBomJobs.createLargeBomBackgroundExpansionJob({
+            storage, ...jobScope, action: st.action, parameters: { projectNo: st.projectNo }, principal: 's3a-27', createJobId: () => jobId,
+            writeGenerationObserver: async () => writeObservationFromGeneration(await st.lock.observeGeneration(st.key)),
+          })
+          await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId: ACTION_ID, jobId, sourceAdapter: st.sourceAdapter })
+          await largeBomJobs.planLargeBomBackgroundExpansionJob({
+            storage, ...jobScope, actionId: ACTION_ID, jobId,
+            existingRows: await tableActions.__internals.readExistingStockPreparationRows(st.multitable.records, st.target, st.projectNo),
+            writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
+          })
+          await largeBomJobs.createLargeBomCheckpointApplyJob({
+            storage, ...jobScope, actionId: ACTION_ID, jobId, principal: 's3a-27', permission: 'write', createApplyJobId: () => applyJobId,
+            writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await st.lock.bumpGeneration(st.key, { reason: 'large_approval', expect })),
+          })
+          const genApproved = await st.generation()
+          const reads0 = st.state.reads
+          const pair = await seedCarryPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
+          const main0 = await st.main()
+          const lanes: Record<string, any> = {
+            dryRun: await st.dryRun(),
+            reconcile: await st.reconcile(),
+            mvpPersist: await st.mvpPersist(),
+            carry: await st.carry(carryDecision(st.projectNo)),
+            apply: await st.apply(st.users.puller, await st.mintToken('rev_s3a_27_forged')),
+            chunk: await st.chunk(jobId, applyJobId),
+          }
+          const answers = Object.fromEntries(Object.entries(lanes).map(([lane, res]) => [lane, `${res.statusCode}:${errorOf(res).code}:${errorOf(res).details && errorOf(res).details.reason}`]))
+          const observed = {
+            answers,
+            sourceReads: st.state.reads - reads0,
+            mainUnchanged: sameJson(await st.main(), main0),
+            carryTargetUntouched: (await pair.readTarget()).notes === null,
+            sheetAUnchanged: (await sheetFingerprint(sheetA)) === fingerprintA,
+            stepFourRows: (await st.stepFourRows()) - rows0,
+            noBumpOfB: sameJson(await st.generation(), genApproved),
+          }
+          console.log(`[S3A-27] ${JSON.stringify(observed)}`)
+          const refused = `409:${RETARGETED}:sheet`
+          expect(gen0.generation).toBeLessThan(genApproved.generation)
+          expect(observed).toEqual({
+            answers: { dryRun: refused, reconcile: refused, mvpPersist: refused, carry: refused, apply: refused, chunk: refused },
+            sourceReads: 0,
+            mainUnchanged: true,
+            carryTargetUntouched: true,
+            sheetAUnchanged: true,
+            stepFourRows: 0,
+            noBumpOfB: true,
+          })
+          await q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`stock-preparation:large-bom:%:${st.tenantId}:%`]).catch(() => {})
+        }, 240000)
+
+        test('S3A-28 (review round 1 item 3, lens B V50B-16) a carry whose key is DUPLICATE-RESOLVED: a NOT-governed project (switch off, unregistered, env sheet) carries as before this PR; a GOVERNED project consults THAT project — an earlier failed execution of it refuses 409 RECOVERY_PENDING, nothing patched', async () => {
+          const suffixed = (key: string) => `${key}::duplicate:sortLine:${"7".repeat(16)}`
+          const seedSuffixedPair = async (sb: any, projectNo: string) => {
+            const physical = (logical: string) => (sb.target.fieldIdMap && sb.target.fieldIdMap[logical]) || logical
+            const toPhysical = (data: Record<string, unknown>) => Object.fromEntries(Object.entries(data).map(([key, value]) => [physical(key), value]))
+            const { oldKey, newKey: plainNewKey } = carryKeys(projectNo)
+            const newKey = suffixed(plainNewKey)
+            const records = sb.multitable.records as any
+            await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: oldKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), active: false, notes: 'synthetic note' }) })
+            const target = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: newKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), active: true }) })
+            const notes = async () => (await q('SELECT data->>$2 AS notes FROM meta_records WHERE id = $1', [target.id, physical('notes')])).rows[0].notes
+            return { decision: { ...carryDecision(projectNo), idempotencyKey: newKey }, notes }
+          }
+          const observed: Record<string, unknown> = {}
+          {
+            const st = await s3aStack('s28n', { pilot: false, register: false, switchOn: false })
+            const pair = await seedSuffixedPair({ multitable: st.multitable, sheetId: st.envTarget.sheetId, target: st.envTarget }, st.projectNo)
+            const res = await st.carry(pair.decision)
+            observed.notGoverned = { status: res.statusCode, mode: res.body.data && res.body.data.mode, code: errorOf(res).code || null, notes: await pair.notes(), stepFourRows: await st.stepFourRows() }
+          }
+          {
+            const st = await s3aStack('s28g', { pilot: true })
+            const gen = await st.generation()
+            const begun = await st.refresh.store.beginExecution({
+              ...st.scope, lane: 'small_apply',
+              guard: { leaseRunId: 'run_s3a_28_dead', leaseId: 'lease_s3a_28_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_28' },
+              tokenRevision: 'rev_s3a_28', planDigest: 'd'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_28',
+            })
+            await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_28'] })
+            const pair = await seedSuffixedPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
+            const res = await st.carry(pair.decision)
+            observed.governed = { status: res.statusCode, code: errorOf(res).code, notes: await pair.notes() }
+          }
+          console.log(`[S3A-28] ${JSON.stringify(observed)}`)
+          expect(observed).toEqual({
+            notGoverned: { status: 200, mode: 'carried', code: null, notes: 'synthetic note', stepFourRows: 0 },
+            governed: { status: 409, code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', notes: null },
+          })
+        }, 180000)
+      })
+    })
   })
 }

@@ -239,5 +239,8 @@ function readProjectRefreshState(consult) {
 module.exports = {
   STATUS_TOKENS,
   STATUS_LABELS_ZH,
+  // PR-3a (O-14): the ONE newest-execution ordering (startedAt desc, then id desc) a settling computation
+  // names its execution by — exported so the lanes never reproduce it.
+  newestExecution,
   readProjectRefreshState,
 }

@@ -3,6 +3,7 @@
 const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 // MODEL THE PRODUCT, NOT A CONVENIENCE. The real `getExternalSystem` is the PUBLIC accessor and
@@ -593,6 +594,9 @@ function createMockServices(overrides = {}) {
 }
 
 function mountRoutes(services, contextOptions = {}) {
+  // Batch-refresh step 4 PR-3a: the REAL refresh governance every planning / writing route now consults (a test
+  // that sets `stockPreparationRefreshGovernance` itself — even to null — keeps its own).
+  if (services && Object.isExtensible(services) && !Object.prototype.hasOwnProperty.call(services, 'stockPreparationRefreshGovernance')) withRefreshGovernance(services)
   const { context, routes } = createMockContext(contextOptions)
   const registerRoutes = httpRoutes.registerIntegrationRoutes || httpRoutes.createIntegrationHttpRouter
   assert.equal(typeof registerRoutes, 'function', 'HTTP routes module exports a registration function')

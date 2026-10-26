@@ -780,6 +780,47 @@ function assertPlanNotSuspended(plan) {
   return plan
 }
 
+// Batch-refresh step 4 PR-3a (design §7.2 (b); refuter R-5, TD-20): THE WRITER'S GOVERNANCE TRIPWIRE. Every
+// production caller (writeFenceRequired) must hand the verdict of the governance consult its lane made under
+// THIS lease, and the verdict must match the plan:
+//   (i)   `{ consulted: true, verdict: 'not_governed' | 'projected', generationToken }` — else 501
+//         `governance_absent` / `governance_malformed`;
+//   (ii)  `projected` => the plan carries the planner's `continuation` stanza (the projection was applied);
+//         `not_governed` => the plan carries neither `continuation` nor `suspended` — else
+//         `governance_plan_mismatch` (a lane that consulted but planned without the projection writes nothing);
+//   (iii) the verdict's generation token is the write fence's — else `governance_stale` (a forged or stale
+//         verdict; `acquire` never moves the token and a bump refuses while the lease is live, so a verdict
+//         read inside the lease always carries the grant's token).
+// ZERO IO. It re-runs the suspension refusal first, so a caller that pre-checks with it (the large chunk, BEFORE
+// it stores the job as `running`) covers both writer refusals. The code literal is kept here (no import of the
+// lane module: table-actions requires both, and this module must not depend on the lane helpers).
+const REFRESH_GOVERNANCE_UNCONSULTED_CODE = 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED'
+const WRITER_GOVERNANCE_VERDICTS = Object.freeze(['not_governed', 'projected'])
+
+function governanceUnconsulted(reason) {
+  return new StockPreparationProjectWriteLockError(501, REFRESH_GOVERNANCE_UNCONSULTED_CODE, 'stock-prep writes need a plan whose lane consulted the refresh governance under this lease; nothing was written', { reason, partial: false })
+}
+
+function assertWriterAdmitsPlan({ plan, governance, writeFence } = {}) {
+  const admitted = assertPlanNotSuspended(normalizePlan(plan))
+  if (governance === undefined || governance === null) throw governanceUnconsulted('governance_absent')
+  if (!isPlainObject(governance) || governance.consulted !== true || !WRITER_GOVERNANCE_VERDICTS.includes(governance.verdict)
+    || typeof governance.generationToken !== 'string' || governance.generationToken.trim() === '') {
+    throw governanceUnconsulted('governance_malformed')
+  }
+  const consistent = governance.verdict === 'projected'
+    ? isPlainObject(admitted.continuation)
+    : admitted.continuation === undefined && admitted.suspended === undefined
+  if (!consistent) throw governanceUnconsulted('governance_plan_mismatch')
+  // ORDERING: the writer calls this only after its `write_fence_required` refusal, which guarantees a fence;
+  // refusing a missing one HERE as well keeps a later reorder from turning check (iii) into a TypeError.
+  if (!writeFence || typeof writeFence.generationToken !== 'string' || writeFence.generationToken.trim() === '') {
+    throw governanceUnconsulted('governance_malformed')
+  }
+  if (governance.generationToken !== writeFence.generationToken) throw governanceUnconsulted('governance_stale')
+  return admitted
+}
+
 async function applyStockPreparationPlan(input = {}) {
   const permission = requireApplyPermission(input.permission)
   const plan = assertPlanNotSuspended(normalizePlan(input.plan))
@@ -816,6 +857,9 @@ async function applyStockPreparationPlan(input = {}) {
   if (input.writeFenceRequired === true && !writeFence) {
     throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep writes require the sheet write fence; nothing is written without it', { reason: 'write_fence_required' })
   }
+  // PR-3a: the governance tripwire (see assertWriterAdmitsPlan). Runs AFTER the refusal above on purpose —
+  // check (iii) reads `writeFence.generationToken`, and only that refusal guarantees a fence here.
+  if (input.writeFenceRequired === true) assertWriterAdmitsPlan({ plan, governance: input.governance, writeFence })
   // A fenced run is ALSO host-fenced on every record write; fail closed before any IO otherwise.
   assertHostFencedWriteSupported(recordsApi, writeFence)
 
@@ -1007,6 +1051,9 @@ module.exports = {
   StockPreparationApplyWriterError,
   applyStockPreparationPlan,
   assertHostFencedWriteSupported,
+  // PR-3a (AW-2): the large chunk pre-runs it BEFORE the job turns `running`, so no writer refusal can fire
+  // after the job is stored as running (a throw there would strand it — F-7 class).
+  assertWriterAdmitsPlan,
   summarizeApplyResultForEvidence,
   countAttemptedHostWrites,
   __internals: {

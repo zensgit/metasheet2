@@ -564,9 +564,17 @@ function mountProjectSheetRoutes({
   }
   if (switchOn) process.env[PROJECT_SHEETS_ENABLED_ENV] = 'true'
   if (grantRoleIds) process.env[PROJECT_SHEET_GRANT_ROLE_IDS_ENV] = grantRoleIds.join(',')
+  // Batch-refresh step 4 PR-3a: the REAL refresh governance (reader + continuation store) every planning and
+  // writing route now consults — over the routes' own lock and registry store. A suite that sets
+  // `stockPreparationRefreshGovernance` in `serviceExtras` (even to null: an unwired deployment) opts out.
+  const refresh = Object.prototype.hasOwnProperty.call(serviceExtras, 'stockPreparationRefreshGovernance')
+    ? null
+    : require('./stock-preparation-refresh-governance-wiring.cjs').wireRefreshGovernance(services)
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
+    // PR-3a: the governance environment the routes consult (null when the suite opted out).
+    refresh,
     // PR B: the service objects the routes captured at mount, so a suite can patch one in place (a registry
     // that answers its list read, an audit store whose vocabulary probe refuses).
     services,

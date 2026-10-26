@@ -124,6 +124,85 @@ async function loadPackInstalledFieldProperties({
   return installed
 }
 
+function sqlStateOf(error) {
+  const code = error && typeof error.code === 'string' ? error.code : ''
+  return /^[0-9A-Z]{5}$/.test(code) ? code : undefined
+}
+
+function readFailed(operation, error) {
+  const sqlState = sqlStateOf(error)
+  return Object.freeze({ state: 'read_failed', operation, ...(sqlState ? { sqlState } : {}) })
+}
+
+/**
+ * THE STRICT READ (batch-refresh step 4 PR-3a, TD-22 / refuter R-2) — the same projection as
+ * `loadPackInstalledFieldProperties`, for a GOVERNED computation only. There the band is not a write-width
+ * preference: it decides the content-trigger list and `nameAndSpecDeclared` (pairing.cjs
+ * prepareGovernedPlanning), the seven items a continuation is verified on, and the machine band the
+ * settlement digest covers. A band GUESSED from a failed read would verify a valid continuation as
+ * `evidence_changed` (sticky) and settle over the wrong columns, so this reader NEVER degrades: it answers a
+ * state, and the lane turns `read_failed` into 503 and `unavailable` into 501 before any source read.
+ *
+ *   { state: 'installed', installedFieldProperties }    the live projection (exactly the loader's)
+ *   { state: 'no_pack' }                                 the accurate legacy answer: nothing installed, or
+ *                                                        every installed column is gone from the sheet
+ *   { state: 'unavailable', reason }                     'pack_install_ledger' (no ledger to ask) or
+ *                                                        'pack_field_read' (candidates, but no host read)
+ *   { state: 'read_failed', operation, sqlState? }       'ledger_read' / 'field_read' threw or answered
+ *                                                        something that is not an answer
+ *
+ * Never throws for IO. Values-free: a SQLSTATE class code at most — no message, no id, no field name.
+ * The fail-open loader above is UNCHANGED and stays the not-governed path (its warnings byte for byte).
+ */
+async function readPackInstalledFieldPropertiesStrict({
+  packInstallStore,
+  provisioning,
+  tenantId,
+  projectId,
+  objectId,
+} = {}) {
+  if (!packInstallStore || typeof packInstallStore.listInstalledFieldIds !== 'function') {
+    return Object.freeze({ state: 'unavailable', reason: 'pack_install_ledger' })
+  }
+  const tenant = optionalString(tenantId)
+  const project = optionalString(projectId)
+  const object = optionalString(objectId)
+  if (!tenant || !project || !object) return Object.freeze({ state: 'unavailable', reason: 'pack_install_ledger' })
+
+  let candidates
+  try {
+    candidates = await packInstallStore.listInstalledFieldIds({ tenantId: tenant, projectId: project, objectId: object })
+  } catch (error) {
+    return readFailed('ledger_read', error)
+  }
+  if (!isPlainObject(candidates) || !Array.isArray(candidates.fieldIds) || !candidates.fieldIds.every((fieldId) => typeof fieldId === 'string' && fieldId.trim() !== '')) {
+    return readFailed('ledger_read', null)
+  }
+  const fieldIds = candidates.fieldIds
+  if (fieldIds.length === 0) return Object.freeze({ state: 'no_pack' })
+
+  if (!provisioning || typeof provisioning.readObjectFieldsContent !== 'function') {
+    return Object.freeze({ state: 'unavailable', reason: 'pack_field_read' })
+  }
+  let content
+  try {
+    content = await provisioning.readObjectFieldsContent({ projectId: project, objectId: object, fieldIds })
+  } catch (error) {
+    return readFailed('field_read', error)
+  }
+  if (!isPlainObject(content)) return readFailed('field_read', null)
+
+  const installed = []
+  for (const fieldId of fieldIds) {
+    const live = content[fieldId]
+    if (!isPlainObject(live)) continue
+    installed.push({ fieldId, property: isPlainObject(live.property) ? live.property : {} })
+  }
+  if (installed.length === 0) return Object.freeze({ state: 'no_pack' })
+  return Object.freeze({ state: 'installed', installedFieldProperties: installed })
+}
+
 module.exports = {
   loadPackInstalledFieldProperties,
+  readPackInstalledFieldPropertiesStrict,
 }

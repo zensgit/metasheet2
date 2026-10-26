@@ -57,6 +57,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // S4 stays green under every one of them: none of them may cost an agreeing deployment its archive.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -314,7 +315,7 @@ function mount({ bindings = [], disabled = [], store = 'real' } = {}) {
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: services({ bindingStore, disabled: new Set(disabled), reads, created }),
+    services: withRefreshGovernance(services({ bindingStore, disabled: new Set(disabled), reads, created })),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, records, reads, created }

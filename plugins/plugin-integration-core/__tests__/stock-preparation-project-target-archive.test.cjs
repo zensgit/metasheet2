@@ -45,6 +45,7 @@
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -630,7 +631,7 @@ function mountLedger({ switchOn = true, registryGetFails = false } = {}) {
   else delete process.env[PROJECT_SHEETS_ENABLED_ENV]
   httpRoutes.registerIntegrationRoutes({
     context: { api: { http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { provisioning, records } }, storage: new Map(), config: {} },
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {

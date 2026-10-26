@@ -230,7 +230,7 @@ function recordRefsOf(rows) {
   return rows.map((row) => (row && row[RECORD_REF] ? { id: row[RECORD_REF].id, version: row[RECORD_REF].version } : null))
 }
 
-async function observeScenario(harness, scenario) {
+async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
   const { tableActions, largeBomJobs } = harness
   // The lanes the way the routes drive them since #6501 (the same wrapping the #6502 golden harness's
   // `laneCalls` applies): the dry-run through the generation binder, the apply inside the project write
@@ -240,6 +240,10 @@ async function observeScenario(harness, scenario) {
   const writeLock = writeLockKit.createLibWriteLockHarness()
   const dryRunStockPreparationAction = writeLock.wrapDryRun(tableActions.dryRunStockPreparationAction)
   const applyStockPreparationAction = writeLock.wrapApply(tableActions.applyStockPreparationAction)
+  // Batch-refresh step 4 PR-3a (plan-final §2.10 / C09): `handle` WIRED = every small leg plans with the route's
+  // governance handle for this NOT-governed project (one consult, nothing else); ABSENT = no leg is given one (the
+  // dry-run opts out of the kit's injection). Either way every literal below must hold.
+  const governance = handle === 'wired' ? { refreshGovernance: writeLock.refresh().handleFor('tenant_rgw_default') } : { refreshGovernance: undefined }
   const createTokenStore = () => writeLockKit.createConsumableStorage()
   const {
     prepareStockPreparationConfirmationDecisions,
@@ -263,6 +267,7 @@ async function observeScenario(harness, scenario) {
   const tokenStore = createTokenStore()
   const dryRun = await dryRunStockPreparationAction({
     action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), tokenStore, plannedAt: PLANNED_AT, runId: RUN_ID,
+    ...governance,
   })
   const dryRunExpansion = harness.calls[harness.calls.length - 1].result
   observed.dryRun = {
@@ -293,6 +298,7 @@ async function observeScenario(harness, scenario) {
   // 3. Ledger: reconcile's input revision, the three families, and the PLAN the reconcile derives from.
   const prepared = await prepareStockPreparationConfirmationDecisions({
     action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
+    ...governance,
   })
   const derived = deriveDecisionCandidates({ projectNo: scenario.projectNo, plan: prepared.plan, sourceRevision: prepared.revision })
   const identities = (list) => list.map((entry) => ({ decisionId: entry.decisionId, stableDecisionKey: entry.stableDecisionKey, inputFingerprint: entry.inputFingerprint }))
@@ -327,6 +333,7 @@ async function observeScenario(harness, scenario) {
     //    from the dry-run revision here — unlike the #6502 golden's empty-sheet archive).
     const archived = await prepareStockPreparationMvpSnapshot({
       action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
+      ...governance,
     })
     const stableScope = `${TENANT_ID}\n${action.actionId}\n${archived.parameters.projectNo}`
     const batchDigest = crypto.createHash('sha256').update(`${stableScope}\n${archived.archiveRevision}`).digest('hex').slice(0, 32)
@@ -353,8 +360,18 @@ async function observeScenario(harness, scenario) {
     const applyRecords = seededRecordsApi(scenario)
     const applyDryRun = await dryRunStockPreparationAction({
       action, parameters, sourceAdapter, recordsApi: applyRecords, tokenStore: applyStore, plannedAt: PLANNED_AT, runId: RUN_ID,
+      ...governance,
     })
-    const applied = await applyStockPreparationAction({
+    if (handle === 'absent') {
+      const writesBefore = applyRecords.rows.map((row) => `${row.id}@${row.version}`).join(',')
+      await assert.rejects(applyStockPreparationAction({
+        sandboxPolicy: SANDBOX_POLICY, action, parameters, dryRunToken: applyDryRun.dryRunToken, sourceAdapter, recordsApi: applyRecords,
+        tokenStore: applyStore, permission: 'write', plannedAt: PLANNED_AT, runId: RUN_ID, refreshGovernance: undefined,
+      }), (error) => error.status === 501 && error.code === 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED' && error.details.reason === 'governance_absent')
+      assert.equal(applyRecords.rows.map((row) => `${row.id}@${row.version}`).join(','), writesBefore, 'a handle-absent apply writes nothing')
+      observed.apply = 'refused_governance_absent'
+    }
+    const applied = handle === 'absent' ? null : await applyStockPreparationAction({
       sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters,
@@ -366,7 +383,7 @@ async function observeScenario(harness, scenario) {
       plannedAt: PLANNED_AT,
       runId: RUN_ID,
     })
-    observed.apply = {
+    if (applied) observed.apply = {
       status: applied.status,
       dryRunRevision: applied.dryRunRevision,
       sourceContentRevision: applied.sourceContentRevision,
@@ -537,11 +554,12 @@ async function main() {
   const harness = installExpansionCaptureSwitch()
   const captured = {}
 
-  for (const mode of ['off', 'on']) {
+  for (const handle of ['wired', 'absent']) for (const mode of ['off', 'on']) {
     for (const build of SCENARIOS) {
       const scenario = build()
       harness.setMode(mode)
-      const { observed, refs } = await observeScenario(harness, scenario)
+      const { observed, refs } = await observeScenario(harness, scenario, { handle })
+      if (CAPTURE && handle === 'absent') continue
       if (mode === 'off') delete observed.demandEvidenceFingerprint
       if (CAPTURE) {
         captured[`${mode}:${scenario.name}`] = observed
@@ -549,10 +567,13 @@ async function main() {
       }
       const expected = { ...GOLDEN[scenario.name] }
       if (mode === 'off') delete expected.demandEvidenceFingerprint
-      await run(`[${mode}] ${scenario.name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
+      // A handle-absent apply is refused by the writer (asserted inside observeScenario): the one section that leg
+      // cannot reproduce. Every other section is the golden, byte for byte.
+      if (handle === 'absent' && expected.apply) expected.apply = 'refused_governance_absent'
+      await run(`[${handle}][${mode}] ${scenario.name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
         assert.deepEqual(observed, expected)
       })
-      await run(`[${mode}] ${scenario.name}: the reader attached a record reference to every existing row (the identity is not vacuous)`, () => {
+      await run(`[${handle}][${mode}] ${scenario.name}: the reader attached a record reference to every existing row (the identity is not vacuous)`, () => {
         const expectedRefs = scenario.existingRows.map((entry) => ({ id: entry.id, version: entry.version }))
         assert.deepEqual(refs.reader, expectedRefs)
         if (scenario.large) assert.deepEqual(refs.large, expectedRefs)

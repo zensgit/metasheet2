@@ -28,6 +28,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // literals are schema ids, frozen reason tokens, synthetic scope refs and synthetic cell text.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
@@ -472,7 +473,7 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: {
+    services: withRefreshGovernance({
       ...baseServices({
         sourceAdapter: (source || createRecordingSourceAdapter()).adapter,
         spies,
@@ -489,7 +490,7 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
       // unreachable. Applied AFTER the baseServices spread so the mount-level parameter stays the
       // authority on the claim, exactly as the W-3 suite's M78 cases require.
       b2aOperationClaim: operationClaim === null ? null : (operationClaim || claimForStorage(context.storage)),
-    },
+    }),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context, spies }
