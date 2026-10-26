@@ -18,6 +18,9 @@ export type OperatorNextStepAction =
   | 'resync'
   | 'open-fill'
   | 'notify-next'
+  // 备料分批拉取第一期 step 4 PR-7: open 「拉取待确认」 (PULL tier only), and 「核对」 (one more preview).
+  | 'go-refresh-queue'
+  | 'check'
   | null
 
 export interface OperatorNextStepInput {
@@ -57,6 +60,20 @@ export interface OperatorNextStepInput {
    * specs written before the ruling) keep today's words.
    */
   canPull?: boolean
+  /**
+   * 备料分批拉取第一期 step 4 PR-7 — the board's refresh stanza, as values-free inputs (refreshState.ts). Absent /
+   * `not_governed` / complete ∧ settled: rule 3b never fires, so every not-governed project reads exactly as before.
+   * `refreshSettled` is the stanza's `settled` — NEVER `exportAllowed` (#6566 review N5).
+   */
+  refreshStatus?: string | null
+  refreshSettled?: boolean
+  /** The stanza's open-hold count (`counts.pendingConfirm`). */
+  refreshPendingConfirmCount?: number | null
+  /**
+   * Whether the viewer may open 「拉取待确认」 — the caller passes `canOpenStockPrepRefreshQueue` (PULL tier exactly,
+   * the six routes' gate). `false`/absent: rule 3b names the 拉取人员 and carries no action (R-11).
+   */
+  canOpenRefreshQueue?: boolean
 }
 
 /** The last step's press, in the words the button and the bar share (the queue's own label, H-09). */
@@ -66,7 +83,7 @@ export const STOCK_PREP_NOTIFY_LAST_STEP_LABEL = Object.freeze({
 })
 
 export interface OperatorNextStepResult {
-  key: 'pull' | 'missing' | 'pending' | 'resync' | 'fill' | 'notify' | 'clear'
+  key: 'pull' | 'missing' | 'pending' | 'refresh' | 'check' | 'resync' | 'fill' | 'notify' | 'clear'
   zh: string
   en: string
   /** Empty string on the one rule (`clear`) that has no primary button (G1: absent, not disabled). */
@@ -76,8 +93,85 @@ export interface OperatorNextStepResult {
 }
 
 /**
+ * Rule 3b (PR-7). Fires only for a governed project whose refresh is unfinished: not for an absent stanza, not for
+ * `not_governed`, not for complete ∧ settled. A FLOOR operator (no PULL) gets the sentence that names the 拉取人员
+ * and NO action — 「拉取待确认」 is a pull-tier page (R-11: visible must be actionable).
+ */
+function refreshNextStep(input: OperatorNextStepInput, canPull: boolean): OperatorNextStepResult | null {
+  const status = typeof input.refreshStatus === 'string' ? input.refreshStatus : null
+  if (status === null || status === 'not_governed') return null
+  if (status === 'complete' && input.refreshSettled === true) return null
+  const puller = input.canOpenRefreshQueue === true
+  const raw = input.refreshPendingConfirmCount
+  const n = typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : 0
+  const sentenceOnly = (zh: string, en: string): OperatorNextStepResult => ({ key: 'refresh', zh, en, actionZh: '', actionEn: '', action: null })
+  if (status === 'pending_confirmation') {
+    if (puller) {
+      return {
+        key: 'refresh',
+        zh: `本项目的分批拉取已整体挂起:有 ${n} 项等您确认沿用关系或变更,确认后再重新试算。`,
+        en: `This project’s batch refresh is suspended: ${n} item(s) await your confirmation of a relationship or change; preview again afterwards.`,
+        actionZh: `去确认(${n} 项)`,
+        actionEn: `Decide them (${n})`,
+        action: 'go-refresh-queue',
+      }
+    }
+    return sentenceOnly(
+      `本项目有 ${n} 项待拉取人员确认,正式导出已暂停。请联系拉取人员。`,
+      `${n} item(s) of this project await the puller’s confirmation; the formal export is paused. Please contact a pull operator (拉取人员).`,
+    )
+  }
+  if (status === 'executed_pending_settlement' || status === 'complete') {
+    if (canPull && puller) {
+      return {
+        key: 'check',
+        zh: '已写入,还没核对:核对(再试算一次)通过后才能正式导出。',
+        en: 'Written but not checked yet: the formal export opens once the check (one more preview) passes.',
+        actionZh: '核对',
+        actionEn: 'Check',
+        action: 'check',
+      }
+    }
+    return sentenceOnly(
+      '已写入,还没核对;正式导出已暂停。请联系拉取人员核对。',
+      'Written but not checked yet; the formal export is paused. Please ask a pull operator (拉取人员) to check it.',
+    )
+  }
+  if (status === 'confirmed_pending_execution') {
+    if (canPull && puller) {
+      return {
+        key: 'resync',
+        zh: '沿用关系已确认、还没写入:重新试算并写入。',
+        en: 'The relationship is confirmed but not written yet: preview again and write.',
+        actionZh: '再同步一次',
+        actionEn: 'Sync again',
+        action: 'resync',
+      }
+    }
+    return sentenceOnly(
+      '沿用关系已确认、还没写入;正式导出已暂停。请联系拉取人员重新同步。',
+      'The relationship is confirmed but not written yet; the formal export is paused. Please ask a pull operator (拉取人员) to sync again.',
+    )
+  }
+  if (status === 'executing') {
+    return sentenceOnly('本项目正在写入,正式导出暂停到写入结束;稍后刷新本页。', 'This project is being written; the formal export is paused until it ends. Refresh shortly.')
+  }
+  if (status === 'failed_pending_recovery') {
+    return sentenceOnly(
+      '本项目上次写入没有正常结束,在等恢复;正式导出已暂停。请联系平台管理员按手册恢复。',
+      'This project’s last write did not finish cleanly and awaits recovery; the formal export is paused. Ask the platform admin to recover it per the runbook.',
+    )
+  }
+  if (status === 'change_pending_review') {
+    return sentenceOnly('本项目有变更待复核,正式导出已暂停。请联系拉取人员。', 'This project has a change awaiting review; the formal export is paused. Please contact a pull operator (拉取人员).')
+  }
+  // `unreadable` and any token this build does not know: fail closed, never 「没有等您的事」.
+  return sentenceOnly('读不出本项目的分批拉取状态,正式导出已暂停;稍后刷新本页,一直这样请联系平台管理员。', 'This project’s batch-refresh state could not be read; the formal export is paused. Refresh shortly; if it persists, ask the platform admin.')
+}
+
+/**
  * THE seven rules, read top to bottom exactly as 设计稿 §4.2 lists them — the first one whose
- * condition is true wins, and it is the ONLY one that renders.
+ * condition is true wins, and it is the ONLY one that renders. PR-7 inserts rule 3b (an unfinished batch refresh).
  */
 export function operatorNextStep(input: OperatorNextStepInput): OperatorNextStepResult {
   const canPull = input.canPull !== false
@@ -133,6 +227,9 @@ export function operatorNextStep(input: OperatorNextStepInput): OperatorNextStep
       action: 'go-confirm',
     }
   }
+  // 3b. 备料分批拉取第一期 step 4 PR-7 — an unfinished batch refresh (the posture's rank: after the two count badges).
+  const refresh = refreshNextStep(input, canPull)
+  if (refresh) return refresh
   // 4. 刚确认完(本次会话内 pending 归零且上次 verdict=held)
   if (input.justConfirmed) {
     if (!canPull) {

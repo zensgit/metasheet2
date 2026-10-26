@@ -90,6 +90,12 @@ export interface StockPreparationProjectBoard {
   fillTarget: StockPreparationFillTarget | null
   directoryReady: boolean
   ledgerReady: boolean
+  /**
+   * 备料分批拉取第一期 step 4 PR-5's stanza — the project's derived refresh state (values-free). UNTYPED at the
+   * boundary on purpose: read ONLY through `parseStockPrepRefreshStanza` (refreshState.ts), which answers `null`
+   * when the key is absent (an older backend) and the `unreadable` stanza for anything malformed.
+   */
+  refresh?: unknown
 }
 
 /**

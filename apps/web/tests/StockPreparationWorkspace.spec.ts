@@ -709,8 +709,9 @@ describe('StockPreparationWorkspace shell', () => {
     // `workbenchAccess.ts` now uses the server's own literal ladder over the auth SNAPSHOT, so this
     // principal is a platform admin here too and sees the whole rail. 14 -> 15 IS a new tab: P2-1's
     // 项目查询, in 【工作】 after 项目备料 — 4 【工作】 + 3 【部署与接入】 + 7 深度工具 (folded, still
-    // rendered) + 1 【帮助】.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
+    // rendered) + 1 【帮助】. 15 -> 16 is 备料分批拉取第一期 step 4 PR-7's 拉取待确认 (R-62 ①), the last item of
+    // 【工作】: PULL tier, which a platform admin satisfies through the ladder.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(16)
   })
 
   // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
@@ -765,8 +766,9 @@ describe('StockPreparationWorkspace shell', () => {
     // `stock-prep:admin` actor (already on the real ladder) always expected.
     // The seven legacy MVP tabs stay platform-admin and did NOT come along with this code.
     // 7 -> 8 is P2-1's 项目查询: same operate tier as 今天要处理 / 项目备料, which this code satisfies.
-    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
-    for (const key of ['home', 'project-board', 'project-query', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
+    // 8 -> 9 is PR-7's 拉取待确认 (R-62 ①): PULL tier, which `stock-prep:admin` satisfies on the server's ladder.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(9)
+    for (const key of ['home', 'project-board', 'project-query', 'refresh-queue', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
       expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be visible`).not.toBeNull()
     }
     for (const key of LEGACY_MVP_VIEW_KEYS) {
@@ -799,7 +801,8 @@ describe('StockPreparationWorkspace shell', () => {
     // 12 -> 14 (PR #5555): this actor holds `stock-prep:admin` AND a bare `integration:admin`, and
     // both satisfy operate on the server's ladder — the ladder the workbench now uses — so 今天要处理
     // and 项目备料 join the twelve. 14 -> 15 (P2-1): 项目查询 rides that same operate tier.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
+    // 15 -> 16 (PR-7, R-62 ①): 拉取待确认 rides the PULL tier, which both codes satisfy on the server's ladder.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(16)
     ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
     await flushUi()
 

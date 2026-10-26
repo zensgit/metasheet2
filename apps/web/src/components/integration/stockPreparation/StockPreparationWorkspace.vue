@@ -36,6 +36,7 @@
       <StockPreparationRail
         :groups="railGroups"
         :active-key="effectiveKey"
+        :counts="railCounts"
         @select="handleRailSelect"
       />
 
@@ -111,6 +112,7 @@
         @navigate-stage="handleNavigateStage"
         @open-multitable="handleOpenFillTarget"
         @select-project-no="handleProjectNoSelect"
+        @refresh-changed="onRefreshChanged"
       />
       <!-- 项目查询 (P2-1) — 「怎么查询」。A SIBLING BRANCH of 今天要处理 / 项目备料, not a passenger
            on them: it owns four URL state bits of its own (`q` / `status` / `source` / `sel`) and one
@@ -134,6 +136,15 @@
         :project-no="selectedProjectNo"
         @admin-action="handleAdminAction"
         @navigate-stage="handleNavigateStage"
+      />
+      <!-- 拉取待确认 (备料分批拉取第一期 step 4 PR-7, R-62 ①) — the puller's holds of the OPEN project. INSIDE the v-if
+           chain (see the chain-split warning at its end). PULL tier only (`visibleViews`). -->
+      <StockPreparationRefreshQueueView
+        v-else-if="effectiveKey === 'refresh-queue'"
+        :scope="scope"
+        :project-no="selectedProjectNo"
+        @navigate-stage="handleNavigateStage"
+        @refresh-changed="onRefreshChanged"
       />
       <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
            out for a customer admin to confirm, the deployment preflight, and a SKIP-aware install run
@@ -281,6 +292,7 @@ import StockPreparationExceptionQueueView from './StockPreparationExceptionQueue
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import StockPreparationProjectBoardView from './StockPreparationProjectBoardView.vue'
 import StockPreparationProjectQueryView from './StockPreparationProjectQueryView.vue'
+import StockPreparationRefreshQueueView from './StockPreparationRefreshQueueView.vue'
 import StockPreparationInstallView from './StockPreparationInstallView.vue'
 import StockPreparationOpsPanel from './StockPreparationOpsPanel.vue'
 import StockPreparationMembersView from './StockPreparationMembersView.vue'
@@ -296,10 +308,12 @@ import {
   canOpenStockPrepMembersPage,
   canOpenStockPrepProjectBoard,
   canOpenStockPrepProjectQuery,
+  canOpenStockPrepRefreshQueue,
   canUseLegacyMvpTabs,
   landsOnStockPrepProjectBoard,
   stockPrepLandingKey,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
+import { stockPrepRefreshRailCount, type StockPrepRefreshStanza } from '../../../services/integration/stockPreparation/refreshState'
 import { readStockPreparationPreflight } from '../../../services/integration/stockPreparation/installPlan'
 import { readStockPrepMembers, type StockPrepMembersReadOutcome } from '../../../services/integration/stockPreparation/members'
 import { createStockPreparationInstallApi } from '../../../services/integration/stockPreparation/installRun'
@@ -335,6 +349,8 @@ type StockPreparationViewKey =
   | 'project-board'
   | 'project-query'
   | 'confirmation-queue'
+  // 备料分批拉取第一期 step 4 PR-7 (R-62 ①): 拉取待确认.
+  | 'refresh-queue'
   | 'install'
   | 'dashboard'
   | 'project-workspace'
@@ -404,6 +420,11 @@ interface StockPreparationViewTab {
    * admin or the stock-prep delegated admin). Switch off ⇒ 404 ⇒ the tab does not exist.
    */
   membersPage?: boolean
+  /**
+   * 拉取待确认 (备料分批拉取第一期 step 4 PR-7, R-62 ①). Gated on the PULL tier exactly
+   * (`canOpenStockPrepRefreshQueue` — the six routes' own gate; never `integration:write`).
+   */
+  pullQueue?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -465,6 +486,20 @@ const views: StockPreparationViewTab[] = [
     zhDesc: '系统拿不准的地方会停下来问您:同一样东西出现了好几条,或者前后两份数据对不上。您在这里逐条拿主意,系统按您的决定继续往下走。',
     enDesc: 'Wherever the system is not sure — the same thing appearing several times, or two records that disagree — it stops and asks you here. You decide each one, and it carries on from your decision.',
     endpoint: '/api/integration/stock-preparation/confirmation-decisions',
+    confirmWrites: true,
+  },
+  // 拉取待确认 — 备料分批拉取第一期 step 4 PR-7 (design §13; R-62 ①). The puller's page for a GOVERNED project's
+  // holds: a whole pull is suspended until a 拉取人员 has looked at each held item (old vs new, the demand evidence)
+  // and confirmed the relationship, kept it for now, or ended it. PULL tier only; a distinct label so a platform
+  // admin never sees two 「异常队列」 (the legacy one stays in 深度工具). Never `legacyMvp` (F-06 counts 7).
+  {
+    key: 'refresh-queue',
+    pullQueue: true,
+    zh: '拉取待确认',
+    en: 'Pull Holds',
+    zhDesc: '异常队列(分批拉取):整次挂起的拉取在这里逐项看清新旧对照和需求依据,由拉取人员确认沿用、暂不处理或结束沿用关系;处理完要重新试算。',
+    enDesc: 'Batch-refresh holds: a suspended pull lists each held item here with its old-versus-new comparison and demand evidence; the puller confirms the relationship, keeps it for now, or ends it — then previews again.',
+    endpoint: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds',
     confirmWrites: true,
   },
   // §14 (docs/development/platform-overall-design/multitable-application-model-20260830.md):
@@ -653,6 +688,8 @@ const visibleViews = computed(() => {
     if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(principal)
     // S5b: the permission half AND the server's answer — see `membersOutcome`.
     if (view.membersPage) return canOpenStockPrepMembersPage(principal) && membersPageAvailable.value
+    // PR-7: 拉取待确认 rides its OWN named predicate — the rail manifest's `pull` gate (F-09 pins the two equal).
+    if (view.pullQueue) return canOpenStockPrepRefreshQueue(principal)
     // 项目查询 rides its OWN named predicate rather than the board's, even though the two are one
     // expression today: the rail manifest gates it on its own token, and a shell that consulted a
     // different predicate than the manifest names is precisely the drift F-09 exists to catch.
@@ -661,6 +698,25 @@ const visibleViews = computed(() => {
     if (view.helpOnly) return canOpenStockPrepHelp(principal)
     return true
   })
+})
+
+/**
+ * 拉取待确认's rail count (备料分批拉取第一期 step 4 PR-7, R-62 ④): the OPEN project's open holds, as the board (or the
+ * holds page) last reported them — values-free. Shown ONLY to a PULL-tier viewer (「只显示本人能处理的计数」, design
+ * §13); a floor operator sees the board's banner instead. Reset when the opened project changes.
+ */
+const currentRefresh = ref<StockPrepRefreshStanza | null>(null)
+
+function onRefreshChanged(stanza: StockPrepRefreshStanza | null): void {
+  currentRefresh.value = stanza
+}
+
+const railCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {}
+  if (!canOpenStockPrepRefreshQueue(auth.getAccessSnapshot())) return counts
+  const count = stockPrepRefreshRailCount(currentRefresh.value)
+  if (count !== null) counts['refresh-queue'] = count
+  return counts
 })
 
 /** The visible keys as plain strings — what the help card checks its links against. */
@@ -1013,6 +1069,12 @@ function projectNoFromQuery(): string {
 }
 
 const selectedProjectNo = ref<string>(projectNoFromQuery())
+
+// PR-7 (R-62 ④): the rail count is the OPEN project's — a different project starts from nothing until its board or
+// holds page reports.
+watch(selectedProjectNo, () => {
+  currentRefresh.value = null
+})
 
 // The `?tab=` seed, applied now that `route` exists. Synchronous — before the first render — so a
 // deep link never paints the landing first.
