@@ -16,6 +16,8 @@
 //   RW-G7  GV-1: a registered project that is NOT pilot and has no step-4 row, switch off => today's behaviour —
 //          the same answer as an unregistered project (status, counts, evidence), zero step-4 rows.
 //   RW-V4  a suspended preview is stamped `previewed` + STOCK_PREP_PULL_SUSPENDED; its apply `refused` + the code.
+//   RW-V6  the preview's straddle 409 (execution_finished_during_preview) keeps the just-finished apply's `applied`
+//          stamp (design §23.8 F-18); RW-V6b the exemption names that one reason only.
 //   RW-CR  the carry on a governed project: an ordinary open hold => allowed; unreadable => 503; a runbook-only
 //          hold => 409 runbook_only_hold; an unfinished execution => 409 RECOVERY_PENDING — none of them patch.
 //   RW-SB1 split source bindings on a governed project => 409 SOURCE_BINDING_SPLIT before any source read.
@@ -65,12 +67,13 @@ function errorOf(res) {
 // carry's tenant wall admits with the switch off. Without it the env sheet is a bare id no tenant owns.
 const ENV_OBJECT = 'plm_stock_preparation_sandbox_synthetic_env'
 const TENANT_ENV_SHEET = `sheet_${TENANT}:integration-core_${ENV_OBJECT}`.replace(/[^A-Za-z0-9_]/g, '_')
-function mount({ switchOn = true, unwired = false, sourceBindingStore = null, tenantEnv = false } = {}) {
+function mount({ switchOn = true, unwired = false, sourceBindingStore = null, tenantEnv = false, refreshOptions = null } = {}) {
   const lockEnv = kit.createInMemoryProjectWriteLock({ timers: 'real' })
   const h = harness.mountProjectSheetRoutes({
     tenantId: TENANT,
     projectNo: PROJECT,
     switchOn,
+    ...(refreshOptions ? { refreshOptions } : {}),
     ...(sourceBindingStore ? { sourceBindingStore } : {}),
     ...(tenantEnv ? {
       envObjectId: ENV_OBJECT,
@@ -377,6 +380,42 @@ test('RW-V5 (review round 1) a governed project whose earlier execution FAILED p
     assert.equal(row.last_pull_outcome, 'previewed')
     assert.equal(row.last_pull_code, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
   } finally { h.restore() }
+})
+
+// Step-4 review follow-ups (item 10, design §23.8 F-18): the straddle 409 (`execution_finished_during_preview`) is
+// not stamped `refused` — like WRITE_LOCKED, it describes ANOTHER run (the apply that just finished and stamped its
+// own `applied`), so a `refused` stamp from this preview would overwrite the holder's outcome.
+test('RW-V6 a preview refused 409 STATE_MOVED execution_finished_during_preview leaves the just-finished apply\'s `applied` stamp untouched', async () => {
+  let finish = null
+  const h = mount({ switchOn: true, refreshOptions: { consultHook: async (n) => { if (n === 1 && finish) await finish() } } })
+  try {
+    const { sheetId } = h.seedRegistryRow(PROJECT)
+    const scope = { tenantId: TENANT, sheetId, projectNo: PROJECT }
+    const execution = await h.refresh.seedExecution(scope, { status: 'running' })
+    // The apply that holds that execution stamps its outcome as it finishes.
+    await h.projectTargetStore.recordPullOutcome({ tenantId: TENANT, projectNo: PROJECT, outcome: 'applied', code: null })
+    const stamped = { ...h.registryRows().find((entry) => entry.project_no === PROJECT) }
+    assert.equal(stamped.last_pull_outcome, 'applied')
+    finish = () => h.refresh.store.finishExecution({ ...scope, executionId: execution.id, status: 'succeeded', written: 0, attemptedWrites: 0 })
+    const dry = await dryRun(h)
+    assert.equal(dry.statusCode, 409, JSON.stringify(dry.body))
+    assert.equal(errorOf(dry).code, 'STOCK_PREP_PULL_STATE_MOVED')
+    assert.equal(errorOf(dry).details.reason, 'execution_finished_during_preview')
+    const row = h.registryRows().find((entry) => entry.project_no === PROJECT)
+    assert.equal(row.last_pull_outcome, 'applied', 'the straddle refusal never overwrites the apply\'s stamp')
+    assert.equal(row.last_pull_code, stamped.last_pull_code)
+  } finally { h.restore() }
+})
+
+// ...while another STATE_MOVED refusal is still stamped `refused` (the exemption is that one reason only).
+test('RW-V6b the exemption is narrow: the predicate names only execution_finished_during_preview', () => {
+  const lanes = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
+  const { REFRESH_LANE_ERROR_CODES, StockPreparationRefreshLaneError, isExecutionFinishedDuringPreview } = lanes
+  assert.equal(typeof isExecutionFinishedDuringPreview, 'function')
+  assert.equal(isExecutionFinishedDuringPreview(new StockPreparationRefreshLaneError(409, REFRESH_LANE_ERROR_CODES.STATE_MOVED, 'x', { reason: 'execution_finished_during_preview', partial: false })), true)
+  assert.equal(isExecutionFinishedDuringPreview(new StockPreparationRefreshLaneError(409, REFRESH_LANE_ERROR_CODES.STATE_MOVED, 'x', { reason: 'decision_version_moved', partial: false })), false)
+  assert.equal(isExecutionFinishedDuringPreview(Object.assign(new Error('x'), { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', details: { reason: 'execution_finished_during_preview' } })), false)
+  assert.equal(isExecutionFinishedDuringPreview(null), false)
 })
 
 // ── RW-CR (TD-25 / TD-26) ────────────────────────────────────────────────────────────────────────

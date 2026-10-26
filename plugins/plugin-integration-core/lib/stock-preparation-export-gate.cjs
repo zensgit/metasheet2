@@ -125,8 +125,14 @@ function unreadableRefusal(state) {
   })
 }
 
+// The BLOCKED message by reason (fixed literals, values-free). A lease at G0 is a WRITER, not a refresh state —
+// a not-governed project has none — so it names the cause and the remedy: wait, or a preview with the pull tier
+// (which clears an abandoned lease; a floor-tier preview cannot). Step-4 review follow-ups (#6566 pg N1).
+const BLOCKED_MESSAGE_LEASE_IN_FLIGHT = 'a pull is writing this sheet or a crashed pull left its lease; retry after it finishes or run a preview with the pull tier'
+const BLOCKED_MESSAGE_STATE = 'this project has an unfinished refresh state; the formal export is refused until it is complete and checked'
+
 function blockedRefusal(state, reason) {
-  return new StockPreparationExportGateError(409, EXPORT_GATE_ERROR_CODES.BLOCKED, 'this project has an unfinished refresh state; the formal export is refused until it is complete and checked', {
+  return new StockPreparationExportGateError(409, EXPORT_GATE_ERROR_CODES.BLOCKED, reason === 'lease_in_flight' ? BLOCKED_MESSAGE_LEASE_IN_FLIGHT : BLOCKED_MESSAGE_STATE, {
     reason,
     status: state.status,
     governed: state.governed,
@@ -257,13 +263,20 @@ function continuationExportInputOf(consult) {
   })
 }
 
-/** The values-free slice of a gate refusal's details an audit row may carry (tokens and booleans only). */
+/**
+ * The values-free slice of a gate refusal's details an audit row may carry (tokens and booleans only).
+ * It NEVER emits `operation`: the audit row's own `operation` is the route's (`prep_line_export`) and a caller
+ * spreads this slice after it, so a store's operation token (`read_holds`, `ledger_read`, …) rides along as
+ * `storeOperation` instead (step-4 review follow-ups, #6566 N1). A five-character SQLSTATE is carried too.
+ */
 function auditableRefusalDetail(details) {
   const out = {}
   if (!isPlainObject(details)) return out
-  for (const key of ['reason', 'status', 'governed', 'store', 'operation', 'previousStatus']) {
+  for (const key of ['reason', 'status', 'governed', 'store', 'previousStatus']) {
     if (nonBlankString(details[key])) out[key] = details[key]
   }
+  if (nonBlankString(details.operation)) out.storeOperation = details.operation
+  if (typeof details.sqlState === 'string' && /^[0-9A-Z]{5}$/.test(details.sqlState)) out.sqlState = details.sqlState
   for (const key of ['generationMoved', 'epochMoved']) {
     if (typeof details[key] === 'boolean') out[key] = details[key]
   }

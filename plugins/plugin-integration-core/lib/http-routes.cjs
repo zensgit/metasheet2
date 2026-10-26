@@ -745,9 +745,11 @@ const { loadPackInstalledFieldProperties } = require('./stock-preparation-pack-i
 // builder every planning lane is handed, the source-binding check, the large-lane verdict and the carry's
 // rows-based refusals.
 const {
+  StockPreparationRefreshLaneError,
   assertNoRunbookOnlyHold,
   assertNoUnfinishedExecution,
   createRefreshGovernanceHandle,
+  isExecutionFinishedDuringPreview,
   largeLaneVerdictOf,
   planningInputsOrRefuse,
   sourceBindingDisagreementOf,
@@ -2398,6 +2400,31 @@ function stockPreparationRouteErrorIsTyped(error) {
 function toValuesFreeStockPreparationRouteError(error) {
   if (stockPreparationRouteErrorIsTyped(error)) return error
   return new HttpRouteError(500, STOCK_PREPARATION_ROUTE_FAILED_CODE, STOCK_PREPARATION_ROUTE_FAILED_MESSAGE, {})
+}
+
+/**
+ * Step-4 review follow-ups (item 2, #6566 N2): the `export_refused` audit detail for ANY failure that escapes the
+ * formal-export gate call (R-60 ②: a refusal streams nothing and audits the code and closed tokens only).
+ * The plugin's own refusal classes carry values-free details by construction, so their closed-token slice rides
+ * along; anything else — a host read failure, a driver error, a defect — records only the code the caller is
+ * answered (a typed error's code-shaped code, else the fixed route-failure code): never a message, never its
+ * details, never a SQL driver code as the refusal.
+ */
+function stockPreparationExportRefusalAuditDetail(error) {
+  if (error instanceof StockPreparationExportGateError
+    || error instanceof StockPreparationRefreshGovernanceError
+    || error instanceof StockPreparationRefreshLaneError) {
+    return { operation: 'prep_line_export', refusal: error.code, ...auditableRefusalDetail(error.details) }
+  }
+  let refusal = STOCK_PREPARATION_ROUTE_FAILED_CODE
+  try {
+    if (stockPreparationRouteErrorIsTyped(error) && typeof error.code === 'string' && STOCK_PREPARATION_S3_TYPED_CODE_PATTERN.test(error.code)) {
+      refusal = error.code
+    }
+  } catch {
+    refusal = STOCK_PREPARATION_ROUTE_FAILED_CODE
+  }
+  return { operation: 'prep_line_export', refusal }
 }
 
 /**
@@ -4864,6 +4891,10 @@ function requireStockPreparationAudit() {
   // could land after — and overwrite — the holder's `applied`.
   async function stampWriteLockRefusal(action, tenantId, error) {
     if (error && error.code === PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED) return
+    // Design §23.8 F-18 (step-4 review follow-ups): the preview's straddle refusal (`execution_finished_during_preview`)
+    // likewise describes ANOTHER run — the apply that just finished and stamped its own `applied` — so no `refused`
+    // stamp (and no overview update) from this preview may land over it.
+    if (isExecutionFinishedDuringPreview(error)) return
     await stampProjectPullOutcome(action, tenantId, { outcome: 'refused', code: error && error.code })
     if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(tenantId, action.projectTarget.projectNo)
   }
@@ -12271,6 +12302,10 @@ function requireStockPreparationAudit() {
       if (!stockPreparationXlsxExport || typeof stockPreparationXlsxExport.buildWorkbookBuffer !== 'function') {
         throw new HttpRouteError(501, 'PREP_LINE_EXPORT_XLSX_UNAVAILABLE', 'xlsx export capability is not available')
       }
+      // The records surface is looked up HERE, with the other unwired-capability 501s and before the gate's try: an
+      // unwired host answers its 501 with no audit row, like an unwired governance / lock / xlsx (XR-07). An object
+      // lookup, not a read — G0 still precedes every read.
+      const exportRecordsApi = getMultitableRecordsApi()
       let gate
       try {
         gate = await runFormalExportGate({
@@ -12279,7 +12314,7 @@ function requireStockPreparationAudit() {
           readData: async (read, { governed }) => {
             // The export rows FIRST (today's read, byte for byte for a not-governed project)...
             const exportResult = await exportStockPreparationPrepLines({
-              recordsApi: getMultitableRecordsApi(),
+              recordsApi: exportRecordsApi,
               target: action.target,
               projectNo,
               permission: 'admin',
@@ -12289,7 +12324,7 @@ function requireStockPreparationAudit() {
             // ...THEN the settlement's own projection: the planner's reader, the strict pack band (TD-22) and the
             // ONE shared digest — never the export's own column projection (design §9.2). A host-side machine
             // write landing between the two reads moves this digest away from the settlement (409).
-            const existingRows = await tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo)
+            const existingRows = await tableActionInternals.readExistingStockPreparationRows(exportRecordsApi, action.target, projectNo)
             const planningInputs = planningInputsOrRefuse(await refreshHandle.planningInputs(action))
             const machineFieldIds = machineBandFieldIds({ template: action.template, installedFieldProperties: planningInputs.installedFieldProperties })
             return { exportResult, sheetMachineDigest: sheetMachineDigest(existingRows, { machineFieldIds }) }
@@ -12301,18 +12336,18 @@ function requireStockPreparationAudit() {
           }),
         })
       } catch (error) {
-        // A refusal of the gate or of the reader (409 RETARGETED / TENANT_MISMATCH, 503 unreadable) leaves a
-        // values-free `export_refused` row: the code and the closed reason / status tokens, never a value.
-        if (error instanceof StockPreparationExportGateError || error instanceof StockPreparationRefreshGovernanceError) {
-          await audit.append({
-            tenantId,
-            projectId: projectNo,
-            action: 'prep_line_export',
-            actor: user.id || user.email,
-            mode: 'export_refused',
-            detail: { operation: 'prep_line_export', refusal: error.code, ...auditableRefusalDetail(error.details) },
-          })
-        }
+        // EVERY failure of the gate call leaves ONE values-free `export_refused` row (step-4 review follow-ups,
+        // item 2, #6566 N2): a refusal of the gate or of the reader (409 RETARGETED / TENANT_MISMATCH, 503
+        // unreadable), a lane-class refusal inside R (the pack-install ledger read), a host read failure, a
+        // failing build — the code and the closed reason / status / store tokens, never a message or a value.
+        await audit.append({
+          tenantId,
+          projectId: projectNo,
+          action: 'prep_line_export',
+          actor: user.id || user.email,
+          mode: 'export_refused',
+          detail: stockPreparationExportRefusalAuditDetail(error),
+        })
         throw error
       }
       const exportResult = gate.data.exportResult

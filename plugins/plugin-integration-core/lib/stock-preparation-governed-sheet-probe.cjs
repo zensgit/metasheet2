@@ -89,13 +89,24 @@ function sqlStateOf(error) {
   return /^[0-9A-Z]{5}$/.test(nested) ? nested : undefined
 }
 
+// A closed snake_case token may name itself in a message; anything else is left out of it.
+function tokenForMessage(value) {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : null
+}
+
+// Step-4 review follow-ups (#6567 N1): the 501 and 503 messages START with the code and the closed tokens, as the
+// 409 does — the pipeline runner keeps only `error.message` as a run's cause, so `/pipelines/:id/run` must be able
+// to tell a missing table (42P01) from a dropped connection (08006). Tokens come from code constants and
+// `sqlStateOf` only, never from the driver's message.
 function unavailable(reason) {
-  return new StockPreparationGovernedSheetWriteError(501, GOVERNED_SHEET_WRITE_CODES.STORE_UNAVAILABLE, 'the governed-sheet probe is not wired on this deployment; refusing to answer whether the sheet is governed', { reason, partial: false })
+  const named = tokenForMessage(reason)
+  return new StockPreparationGovernedSheetWriteError(501, GOVERNED_SHEET_WRITE_CODES.STORE_UNAVAILABLE, `${GOVERNED_SHEET_WRITE_CODES.STORE_UNAVAILABLE}${named ? ` (reason ${named})` : ''}: the governed-sheet probe is not wired on this deployment; refusing to answer whether the sheet is governed`, { reason, partial: false })
 }
 
 function storeFailed(store, operation, error) {
   const sqlState = sqlStateOf(error)
-  return new StockPreparationGovernedSheetWriteError(503, GOVERNED_SHEET_WRITE_CODES.STORE_FAILED, 'whether this sheet is governed by the stock-preparation batch refresh could not be read; nothing was written', {
+  const tokens = [`store ${tokenForMessage(store) || 'unknown'}`, `operation ${tokenForMessage(operation) || 'unknown'}`, ...(sqlState ? [`SQLSTATE ${sqlState}`] : [])]
+  return new StockPreparationGovernedSheetWriteError(503, GOVERNED_SHEET_WRITE_CODES.STORE_FAILED, `${GOVERNED_SHEET_WRITE_CODES.STORE_FAILED} (${tokens.join(', ')}): whether this sheet is governed by the stock-preparation batch refresh could not be read; nothing was written`, {
     store,
     operation,
     ...(sqlState ? { sqlState } : {}),

@@ -11,6 +11,8 @@
 //          missing — and ok only with every pair page served and the current fingerprints
 //   RD-R3  the receipt key prefix never collides with the large-BOM prefix the readiness scan reads; the record is
 //          values-free (ids, digests, counts, timestamps)
+//   RD-R4  a receipt write that throws leaves the stored receipt unchanged over a live-reference storage (load
+//          clones; step-4 review follow-ups, item 7)
 //   RD-P1  the hold payload: a candidate's pairs and comparison items paged together; a relationship hold's
 //          verification incl. componentNewPositionCount; a content change; other kinds pass their detail; a page
 //          past the end is 400
@@ -108,6 +110,28 @@ test('RD-R3 the receipt key prefix is outside the large-BOM apply prefix the pil
   assert.equal(READ_RECEIPT_KEY_PREFIX.startsWith(LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX), false)
   assert.equal(LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX.startsWith(READ_RECEIPT_KEY_PREFIX), false)
   assert.equal(READ_RECEIPT_KEY_PREFIX, 'integration:stock-prep:refresh-read-receipt:')
+})
+
+// Step-4 review follow-ups (item 7, #6565 delta N-1): over a LIVE-REFERENCE storage (a memory-backed deployment, the
+// kit's consumableMap) a `record` whose `set` throws must not leave the page on the stored receipt — `load` hands
+// out a copy, so only a successful `set` changes what `verify` sees.
+test('RD-R4 a receipt write that throws leaves the stored receipt unchanged (live-reference storage): verify still says pages_missing', async () => {
+  const clock = refreshKit.createClock()
+  const storage = consumableMap()
+  const realSet = storage.set.bind(storage)
+  let failNextSet = false
+  storage.set = (key, value) => {
+    if (failNextSet) { failNextSet = false; throw new Error('storage write failed') }
+    return realSet(key, value)
+  }
+  const receipts = createReadReceiptStore({ storage, now: clock.now, idGenerator: () => 'a'.repeat(32) })
+  const a = hold('hold_a')
+  const current = { id: 'hold_a', fingerprint: a.fingerprint, comparisonFingerprint: a.comparisonFingerprint, evidenceFingerprint: a.evidenceFingerprint }
+  const first = await receipts.record({ scope: SCOPE, actorId: 'u_a', pages: [page(a, 0, 2)] })
+  failNextSet = true
+  await assert.rejects(() => receipts.record({ receiptId: first.id, scope: SCOPE, actorId: 'u_a', pages: [page(a, 1, 2)] }), /storage write failed/)
+  assert.deepEqual(await receipts.verify({ receiptId: first.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: false, reason: 'pages_missing', pagesServed: 1, pageCount: 2 }, 'the unserved page is not vouched for')
+  assert.deepEqual(storage.get(`${READ_RECEIPT_KEY_PREFIX}${first.id}`).holds.hold_a.pairPagesServed, [0], 'the stored record still lists page 0 only')
 })
 
 test('RD-P1 the hold payload: a candidate\'s pairs and comparison items are paged together (candidateId = the pairing fingerprint); a relationship hold carries its verification and componentNewPositionCount; a content change its fields; other kinds their detail; a page past the end is 400', async () => {

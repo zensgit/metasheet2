@@ -1039,12 +1039,18 @@ test('SL-R3 a preview awaiting recovery NEVER settles: an OLDER failed execution
 
 // A handle whose consults and reconciliations are counted; `afterFirstConsult` runs once the FIRST consult has
 // answered — what a run that finishes between the consult's snapshot and its lock read leaves behind.
-function recheckHandle(w, { afterFirstConsult } = {}) {
+// Step-4 review follow-ups (item 9): `secondConsult` scripts the RE-consult — `{ throws: error }` or `{ answer: value }`.
+function recheckHandle(w, { afterFirstConsult, secondConsult } = {}) {
   const calls = { consult: 0, reconcileHolds: 0 }
   const handle = w.handle({
     resolveServices: () => ({
       governance: {
         consult: async (input) => {
+          if (secondConsult && calls.consult === 1) {
+            calls.consult += 1
+            if (secondConsult.throws) throw secondConsult.throws
+            return secondConsult.answer
+          }
           const answer = await w.env.governance.consult(input)
           calls.consult += 1
           if (calls.consult === 1 && afterFirstConsult) await afterFirstConsult()
@@ -1113,6 +1119,49 @@ test('SL-R6 (follow-up) the re-consult happens ONLY when the answer rests on lea
     assert.deepEqual({ ...preview.refreshRecovery }, { pending: true, openExecutions: statuses.length }, label)
     assert.equal(calls.consult, expectedConsults, `${label}: consults`)
   }
+})
+
+// Step-4 review follow-ups (item 9, design §23.8 F-17): THE RE-CONSULT FAILS CLOSED. A re-consult that throws, answers
+// not-ok or answers nothing never reads as "no recovery": the preview refuses 503 before the reconciliation — no
+// token, no bump, no write. And the recovery answer counts the FRESH rows, never the stale ones.
+test('SL-R7 (follow-up) the preview\'s re-consult fails closed: (a) it throws 503 => that 503; (b) it answers not-ok / (c) nothing => 503 STORE_FAILED governance.consult — ONE re-consult, nothing reconciled, no token, no bump, no write; (d) the recovery counts the FRESH rows', async () => {
+  const legs = [
+    ['throws', { throws: new lanes.StockPreparationRefreshLaneError(503, 'STOCK_PREP_REFRESH_STORE_FAILED', 'store failed', { store: 'continuation', operation: 'read_holds', partial: false }) }, { store: 'continuation', operation: 'read_holds' }],
+    ['not_ok', { answer: { ok: false, failure: { store: 'continuation', operation: 'read_holds' } } }, { store: 'governance', operation: 'consult' }],
+    ['null', { answer: null }, { store: 'governance', operation: 'consult' }],
+  ]
+  for (const [label, secondConsult, where] of legs) {
+    const w = await world()
+    await w.firstPullApplied()
+    await w.env.seedExecution(SCOPE, { status: 'running' })
+    const { handle, calls } = recheckHandle(w, { secondConsult })
+    const generation = await w.generation()
+    const tokens = w.tokenStore.map.size
+    const writes = w.sheet.writes()
+    const refused = await expectCode(w.dryRun({ refreshGovernance: handle }), { status: 503, code: 'STOCK_PREP_REFRESH_STORE_FAILED' })
+    assert.equal(refused.details.store, where.store, label)
+    assert.equal(refused.details.operation, where.operation, label)
+    assert.equal(calls.consult, 2, `${label}: the planning consult and ONE re-consult`)
+    assert.equal(calls.reconcileHolds, 0, `${label}: refused before the reconciliation`)
+    assert.equal(w.tokenStore.map.size, tokens, `${label}: no token`)
+    const after = await w.generation()
+    assert.deepEqual([after.generation, after.generationToken], [generation.generation, generation.generationToken], `${label}: no bump`)
+    assert.equal(w.sheet.writes(), writes, `${label}: no write`)
+  }
+  // (d) the straddled run ends FAILED and a second failed row appears before the re-consult: the count is the fresh one.
+  const w = await world()
+  await w.firstPullApplied()
+  const execution = await w.env.seedExecution(SCOPE, { status: 'running' })
+  const { handle, calls } = recheckHandle(w, {
+    afterFirstConsult: async () => {
+      await w.env.store.finishExecution({ ...SCOPE, executionId: execution.id, status: 'failed', written: 0, attemptedWrites: 1 })
+      await w.env.seedExecution(SCOPE, { status: 'failed', leaseId: 'lease_sl_r7_second', leaseRunId: 'run_sl_r7_second' })
+    },
+  })
+  const preview = await w.dryRun({ refreshGovernance: handle })
+  assert.equal(preview.status, 'recovery_pending')
+  assert.deepEqual({ ...preview.refreshRecovery }, { pending: true, openExecutions: 2 }, '(d) the fresh rows, never the stale count')
+  assert.equal(calls.consult, 2)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-small-lane.test.cjs', tests)

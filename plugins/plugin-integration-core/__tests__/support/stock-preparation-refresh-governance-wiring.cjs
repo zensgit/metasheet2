@@ -157,7 +157,21 @@ function createRefreshGovernanceEnv(options = {}) {
     getPilotState: (input, readOptions) => readerRegistry().getPilotState(input, readOptions),
     getPilotStateBySheetId: (input, readOptions) => readerRegistry().getPilotStateBySheetId(input, readOptions),
   })
-  const governance = createStockPreparationRefreshGovernance({ continuationStore: store, projectTargetStore: registryProxy, projectWriteLock: lockProxy })
+  const realGovernance = createStockPreparationRefreshGovernance({ continuationStore: store, projectTargetStore: registryProxy, projectWriteLock: lockProxy })
+  // Step-4 review follow-ups (item 10): an optional `consultHook(n, scope)` runs after the n-th `consult` answered
+  // (a run that finishes between a consult's snapshot and the next one). Absent => the real service, untouched.
+  let consults = 0
+  const governance = typeof options.consultHook === 'function'
+    ? Object.freeze({
+      ...realGovernance,
+      consult: async (scope) => {
+        const answer = await realGovernance.consult(scope)
+        consults += 1
+        await options.consultHook(consults, scope)
+        return answer
+      },
+    })
+    : realGovernance
   const packInstallStore = options.packInstallStore === undefined ? createPackInstallStoreFake() : options.packInstallStore
   const sourceBindingStore = options.sourceBindingStore === undefined ? null : options.sourceBindingStore
   const bump = refreshKit.createFakeBumpWithin()

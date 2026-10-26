@@ -264,6 +264,10 @@ test('P-04 a step-4 count fails (42P01 on each table in turn) => 503 STORE_FAILE
     const error = await expectError(w.probe.probe({ sheetId: SHEET, tenantId: TENANT }), { status: 503, code: CODES.STORE_FAILED })
     assert.ok(error instanceof StockPreparationGovernedSheetWriteError)
     assert.deepEqual(error.details, { store: 'continuation', operation: 'read_sheet_governance_marks', sqlState: '42P01', partial: false }, table)
+    // Step-4 review follow-ups (item 6, #6567 N1): the message itself names the code, the store, the operation and
+    // the SQLSTATE (the pipeline runner keeps only the message), never the driver's own text.
+    assert.ok(error.message.startsWith(`${CODES.STORE_FAILED} (store continuation, operation read_sheet_governance_marks, SQLSTATE 42P01): `), error.message)
+    assert.equal(error.message.includes(table), false, `${table}: the driver message never reaches the refusal`)
     await expectError(w.probe.assertSheetWritable({ sheetId: SHEET, tenantId: TENANT, surface: 'pipeline_upsert', objectId: 'main' }), { status: 503, code: CODES.STORE_FAILED })
   }
   // The store's own answer for a binding that returns garbage: 503, not zero.
@@ -275,6 +279,7 @@ test('P-04 a step-4 count fails (42P01 on each table in turn) => 503 STORE_FAILE
   const lying = createStockPreparationGovernedSheetProbe({ continuationStore: { readSheetGovernanceMarks: async () => ({ ok: true, continuation: 0, openHold: 0, state: 0 }) }, projectTargetStore: w.projectTargetStore })
   const lie = await expectError(lying.probe({ sheetId: SHEET }), { status: 503, code: CODES.STORE_FAILED })
   assert.deepEqual(lie.details, { store: 'continuation', operation: 'read_sheet_governance_marks', partial: false })
+  assert.ok(lie.message.startsWith(`${CODES.STORE_FAILED} (store continuation, operation read_sheet_governance_marks): `), `no SQLSTATE => none named: ${lie.message}`)
   const notOk = createStockPreparationGovernedSheetProbe({ continuationStore: { readSheetGovernanceMarks: async () => ({ ok: false }) }, projectTargetStore: w.projectTargetStore })
   await expectError(notOk.probe({ sheetId: SHEET }), { status: 503, code: CODES.STORE_FAILED })
 })
@@ -286,6 +291,8 @@ test('P-05 the registry read fails => 503 { store: registry, operation: pilot_st
   w.db.faults.selectOne = refreshKit.sqlError('42703', 'column "pilot_enabled_at" does not exist')
   const error = await expectError(w.probe.probe({ sheetId: SHEET, tenantId: TENANT }), { status: 503, code: CODES.STORE_FAILED })
   assert.deepEqual(error.details, { store: 'registry', operation: 'pilot_state_by_sheet', sqlState: '42703', partial: false })
+  assert.ok(error.message.startsWith(`${CODES.STORE_FAILED} (store registry, operation pilot_state_by_sheet, SQLSTATE 42703): `), error.message)
+  assert.equal(error.message.includes('pilot_enabled_at'), false, 'the driver message never reaches the refusal')
   assert.equal(stepFourCounts(w.db).length, 0, 'refused before any step-4 count')
   // A registry answer that is not a row is unreadable too.
   const odd = createStockPreparationGovernedSheetProbe({ continuationStore: w.continuationStore, projectTargetStore: { getPilotStateBySheetId: async () => 'pilot' } })
@@ -296,7 +303,9 @@ test('P-05 the registry read fails => 503 { store: registry, operation: pilot_st
 test('P-06 not wired => 501 STORE_UNAVAILABLE by name (never "not governed"); the store answers 501 when its binding cannot count', async () => {
   const w = await world()
   const none = createStockPreparationGovernedSheetProbe({})
-  await expectError(none.probe({ sheetId: SHEET }), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'continuation_store' })
+  const unwired = await expectError(none.probe({ sheetId: SHEET }), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'continuation_store' })
+  // Step-4 review follow-ups (item 6): the 501 message names its code and reason too.
+  assert.ok(unwired.message.startsWith(`${CODES.STORE_UNAVAILABLE} (reason continuation_store): `), unwired.message)
   const oldStore = createStockPreparationGovernedSheetProbe({ continuationStore: { readGovernanceRows: async () => ({}) }, projectTargetStore: w.projectTargetStore })
   await expectError(oldStore.probe({ sheetId: SHEET }), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'continuation_store' })
   const legacyRegistry = createStockPreparationGovernedSheetProbe({ continuationStore: w.continuationStore, projectTargetStore: { get: async () => null, getPilotState: async () => null } })

@@ -205,9 +205,12 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
 ])
 
 /**
- * PR-5: the board's `refresh` stanza. The reader's refusals (409 RETARGETED / TENANT_MISMATCH, 422) are
- * RETHROWN — a refusal is not a state to display; a reader that is not wired, or a project with no bound
- * sheet to consult, answers the `unreadable` state with a closed-shape reason.
+ * PR-5: the board's `refresh` stanza. A reader that is not wired, or a project with no bound sheet to consult,
+ * answers the `unreadable` state with a closed-shape reason. A reader REFUSAL (409 RETARGETED / TENANT_MISMATCH,
+ * 422) is the `unreadable` state too, with the overview's token `consult_refused` (step-4 review follow-ups,
+ * #6566 N4; R-60 ⑤: a read surface that cannot read says 状态读取失败) — nothing of the refusal is carried, and
+ * the write lanes and the formal export still refuse on the same reader (D-3). Any OTHER throw is rethrown: the
+ * board is one project, so a defect stays a loud (values-free) 500 rather than a quiet stanza.
  */
 async function readRefreshStanza({ readRefreshState, projectNo, boundTarget }) {
   const sheetId = boundTarget && optionalString(boundTarget.sheetId)
@@ -217,7 +220,16 @@ async function readRefreshStanza({ readRefreshState, projectNo, boundTarget }) {
   if (!sheetId) {
     return readProjectRefreshState({ ok: false, failure: { store: 'registry', operation: 'bound_target_absent' } })
   }
-  const read = await readRefreshState({ projectNo, sheetId })
+  let read
+  try {
+    read = await readRefreshState({ projectNo, sheetId })
+  } catch (error) {
+    const status = error && Number.isInteger(error.status) ? error.status : null
+    if (status === 409 || status === 422) {
+      return readProjectRefreshState({ ok: false, failure: { store: 'governance', operation: 'consult_refused' } })
+    }
+    throw error
+  }
   const state = read && typeof read === 'object' && read.state && typeof read.state === 'object' ? read.state : null
   return state || readProjectRefreshState({ ok: false, failure: { store: 'governance', operation: 'reader_shape' } })
 }
