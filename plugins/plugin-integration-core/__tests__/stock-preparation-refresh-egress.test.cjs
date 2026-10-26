@@ -12,9 +12,16 @@
 //   EG-6  the mvp-persist archive input and evidence     EG-8  route logs / warns
 //   EG-11 the registry row (last_pull_*)                 EG-12 every new refusal's `details`
 //   EG-13 the execution row (plan_digest, planned_counts, refresh_binding, counts, started_by)
-// EG-4 (the large planArtifact) belongs to PR-3b; EG-7 audit rows are asserted values-free by the harness on
-// every append; EG-9 (scheduled pull) reads the dry-run / apply responses (EG-1 / EG-5); EG-10 (a support packet)
-// does not exist for stock-prep — the scan suite pins its absence. Synthetic values only.
+// EG-7 audit rows are asserted values-free by the harness on every append; EG-9 (scheduled pull) reads the dry-run /
+// apply responses (EG-1 / EG-5); EG-10 (a support packet) does not exist for stock-prep — the scan suite pins its
+// absence. PR-3b adds:
+//   EG-4  the large lane (E6 / E7 of the egress map): a GOVERNED project whose persisted hold carries the sentinel is
+//         refused at start / plan / approve with nothing stored; a NOT-governed project's stored expansion job (its
+//         `planArtifact.plan`) and apply job carry no holds / suspension / projection and no private key, and the
+//         plan's verdict is three values-free keys.
+//   EG-12c the census of PR-3b's refusals (the approval's two, the plan's verdict defect, every large-lane reason)
+//         driven with sentinel-bearing inputs: values-free messages, token / count details.
+// Synthetic values only.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -292,6 +299,109 @@ test('EG-3/EG-8/EG-11 the routes: a governed project\'s background dry-run job r
     assertClean('EG-11 registry row', h.registryRows())
     for (const entry of h.auditAppends) assertClean('EG-7 audit rows', entry)
   } finally { h.restore() }
+})
+
+// ── PR-3b: the large lane ────────────────────────────────────────────────────────────────────────────────────
+
+const LARGE_ADMIN = Object.freeze({ id: 'u_eg_admin', tenantId: TENANT, roles: ['admin'], permissions: ['integration:admin'] })
+const LARGE_JOBS_PATH = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
+
+function largeMount() {
+  const lockEnv = lockKit.createInMemoryProjectWriteLock({ timers: 'real' })
+  const h = harness.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn: true, serviceExtras: { stockPreparationProjectWriteLock: lockEnv.lock } })
+  const call = (method, routePath, params, body) => harness.call(h.routes, method, routePath, { user: LARGE_ADMIN, params: { actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, ...params }, body, query: { tenantId: TENANT } })
+  return {
+    h,
+    start: () => call('POST', LARGE_JOBS_PATH, {}, { parameters: { projectNo: PROJECT } }),
+    run: (jobId) => call('POST', `${LARGE_JOBS_PATH}/:jobId/run`, { jobId }, {}),
+    plan: (jobId) => call('POST', `${LARGE_JOBS_PATH}/:jobId/plan`, { jobId }, {}),
+    approve: (jobId) => call('POST', `${LARGE_JOBS_PATH}/:jobId/apply-jobs`, { jobId }, { confirm: { acceptManualConfirmHold: true } }),
+    chunk: (jobId, applyJobId) => call('POST', `${LARGE_JOBS_PATH}/:jobId/apply-jobs/:applyJobId/run`, { jobId, applyJobId }, {}),
+    largeRecords: () => Array.from(h.context.storage.entries()).filter(([key]) => String(key).startsWith('stock-preparation:large-bom:')),
+  }
+}
+
+test('EG-4 (PR-3b, O-1, E6 / E7) the large lane: a GOVERNED project whose persisted hold carries the sentinel is refused at start, plan and approve — no answer and no stored large-BOM record carries it or a private key; a NOT-governed project\'s stored expansion job (planArtifact.plan) and apply job carry no holds / suspension / projection and no private key; the plan\'s verdict is three values-free keys', async () => {
+  // NOT governed: the whole lane, then every stored large-BOM record scanned whole.
+  const free = largeMount()
+  try {
+    free.h.seedRegistryRow(PROJECT)
+    const started = await free.start()
+    assert.equal(started.statusCode, 202, JSON.stringify(started.body))
+    const jobId = started.body.data.jobId
+    const answers = [started, await free.run(jobId), await free.plan(jobId)]
+    const approved = await free.approve(jobId)
+    assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+    answers.push(approved, await free.chunk(jobId, approved.body.data.jobId))
+    for (const res of answers) assertClean('EG-4 not-governed large answer', res.body)
+    const records = free.largeRecords()
+    assert.equal(records.length, 2, 'calibration: one expansion job and one apply job are stored')
+    for (const [key, value] of records) {
+      assertClean(`EG-4 stored ${String(key).split(':')[2]}`, value)
+      const plan = String(key).includes(':apply:') ? value.plan : value.planArtifact.plan
+      for (const name of ['holds', 'suspended', 'continuation']) assert.equal(Object.prototype.hasOwnProperty.call(plan, name), false, `${key}: no ${name}`)
+      if (!String(key).includes(':apply:')) assert.deepEqual(Object.keys(value.governanceVerdict).sort(), ['consulted', 'generationToken', 'verdict'], 'the verdict is three values-free keys')
+    }
+  } finally { free.h.restore() }
+  // GOVERNED by a persisted hold whose detail carries the sentinel (jobs created before it landed).
+  const governed = largeMount()
+  try {
+    const { sheetId } = governed.h.seedRegistryRow(PROJECT)
+    const ranJob = (await governed.start()).body.data.jobId
+    assert.equal((await governed.run(ranJob)).statusCode, 200)
+    const plannedJob = (await governed.start()).body.data.jobId
+    assert.equal((await governed.run(plannedJob)).statusCode, 200)
+    assert.equal((await governed.plan(plannedJob)).statusCode, 200)
+    await governed.h.refresh.seedHolds({ tenantId: TENANT, sheetId, projectNo: PROJECT }, [sentinelHold()])
+    const before = JSON.stringify(governed.largeRecords())
+    for (const res of [await governed.start(), await governed.plan(ranJob), await governed.approve(plannedJob)]) {
+      assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, 'STOCK_PREP_REFRESH_LARGE_LANE_REFUSED')
+      assertClean('EG-4 governed refusal', res.body)
+    }
+    assert.equal(JSON.stringify(governed.largeRecords()), before, 'nothing stored by a refused large route')
+    for (const [key, value] of governed.largeRecords()) assertClean(`EG-4 stored ${key}`, value)
+    assert.ok(JSON.stringify(governed.h.refresh.rows('hold')).includes(SENTINEL), 'calibration: the sentinel is in the PRIVATE hold row')
+  } finally { governed.h.restore() }
+})
+
+test('EG-12c (PR-3b) the census: the approval\'s two refusals, the plan\'s verdict defect and every large-lane refusal reason, driven with sentinel-bearing plans / verdicts / consult rows, emit a values-free message and token details', async () => {
+  const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
+  const lanes = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
+  const { assertLargePlanApprovable, normalizeLargePlanGovernanceVerdict } = largeBomJobs.__internals
+  const held = { ...sentinelHold(), continuationId: SENTINEL }
+  const notGoverned = { consulted: true, verdict: 'not_governed', generationToken: null }
+  const decisions = [{ decision: 'add', idempotencyKey: SENTINEL, record: { componentCode: SENTINEL } }]
+  const consultOf = (extra) => ({ governed: true, pilot: { enabled: false }, continuations: [], holds: [], executions: [], changePlans: [], ...extra })
+  const caught = []
+  const capture = (label, fn) => {
+    try {
+      fn()
+    } catch (error) {
+      caught.push([label, error])
+      return
+    }
+    assert.fail(`${label}: did not refuse`)
+  }
+  capture('plan_suspended', () => assertLargePlanApprovable({ governanceVerdict: notGoverned }, { decisions, suspended: true, holds: [held], continuation: { verdicts: { [SENTINEL]: 'valid' } } }))
+  capture('plan_holds', () => assertLargePlanApprovable({ governanceVerdict: notGoverned }, { decisions, holds: [held] }))
+  capture('plan_projected', () => assertLargePlanApprovable({ governanceVerdict: notGoverned }, { decisions, continuation: { verdicts: { [SENTINEL]: 'valid' } } }))
+  capture('verdict_absent', () => assertLargePlanApprovable({}, { decisions }))
+  capture('verdict_invalid', () => assertLargePlanApprovable({ governanceVerdict: { consulted: true, verdict: SENTINEL, generationToken: SENTINEL, holds: [held] } }, { decisions }))
+  capture('plan_verdict_defect', () => normalizeLargePlanGovernanceVerdict({ consulted: true, verdict: SENTINEL, generationToken: SENTINEL }))
+  capture('large_continuation', () => lanes.largeLaneVerdictOf(consultOf({ continuations: [{ id: SENTINEL, oldRootKey: SENTINEL, newRootKey: SENTINEL, status: 'active' }] }), 'large_plan'))
+  capture('large_execution', () => lanes.largeLaneVerdictOf(consultOf({ executions: [{ id: SENTINEL, status: 'failed', leaseId: SENTINEL, errorCodes: [SENTINEL] }] }), 'large_approve'))
+  capture('large_refresh_state', () => lanes.largeLaneVerdictOf(consultOf({ state: { id: SENTINEL, decisionVersion: 3 } }), 'large_expansion_start'))
+  capture('large_pilot', () => lanes.largeLaneVerdictOf(consultOf({ pilot: { enabled: true, by: SENTINEL } }), 'large_expansion_run'))
+  assert.equal(caught.length, 10)
+  for (const [label, error] of caught) {
+    assert.equal(typeof error.code, 'string', `${label}: a typed refusal`)
+    assert.ok(Number.isInteger(error.status), `${label}: an HTTP status`)
+    assertClean(`EG-12c ${label}`, { message: error.message, code: error.code, details: error.details })
+    for (const [key, value] of Object.entries(error.details || {})) {
+      assert.ok(['string', 'number', 'boolean'].includes(typeof value), `${label}.${key} is a token / count`)
+    }
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-egress.test.cjs', tests)

@@ -77,6 +77,12 @@
  *       registry and refresh services (S3A-*; listed in the S3A describe's own header). PR-3a also threads the REAL
  *       refresh wiring (module-scope `realRefreshHandle` / `realChunkGate` / `inLeaseVerdict`) through D3, D7, D8, D11,
  *       D18, D21, H-01, S2-12 and S2-13: the writer now refuses a fenced write without a consulted verdict.
+ *       PR-3b threads `realPlanVerdict` (the plan route's not-governed verdict from a real consult) through every direct
+ *       large plan (D11, D13, D21, H-01, S3A-11, S3A-18, S3A-27): the approval now refuses an unconsulted expansion.
+ *   S3B (batch-refresh step 4, PR-3b) the LARGE lane on the real stack — expansion start / run / plan / approve refuse a
+ *       governed project (and an unreadable / retargeted one) before any source or existing-row read, the plan records its
+ *       verdict, the approval refuses an unconsulted or governed-shape plan, the stored jobs never carry a hold; plus the
+ *       executor half of the carry's duplicate-key strip (S3B-*; listed in the S3B describe's own header).
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -236,6 +242,13 @@ function realRefreshHandle(tenantId: string, options: { services?: any; provisio
 }
 function realChunkGate(tenantId: string, projectNo: string, services: any = realRefreshServices()) {
   return async ({ target }: any) => refreshLanes.largeLaneVerdictOf(await services.governance.consult({ tenantId, projectNo, sheetId: target && target.sheetId }), 'large_apply_chunk')
+}
+// Batch-refresh step 4 PR-3b: the not-governed verdict the PLAN route hands the plan (`consultLargeLane` =>
+// `largeLaneVerdictOf`), from a REAL consult made right before the plan — the approval refuses an expansion planned
+// without one (LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED). A direct lib plan of the D / H / S3A cases threads it the way
+// the route does.
+async function realPlanVerdict(tenantId: string, projectNo: string, sheetId: string, services: any = realRefreshServices()) {
+  return refreshLanes.largeLaneVerdictOf(await services.governance.consult({ tenantId, projectNo, sheetId }), 'large_plan')
 }
 // A DIRECT writer call (S2-12 / S2-13) takes its verdict from a consult made INSIDE the lease, as every lane does.
 async function inLeaseVerdict(scope: { tenantId: string; sheetId: string; projectNo: string }, services: any = realRefreshServices()) {
@@ -1035,6 +1048,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           await largeBomJobs.planLargeBomBackgroundExpansionJob({
             storage, ...jobScope, actionId, jobId,
             existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+            governanceVerdict: await realPlanVerdict(jobScope.tenantId, projectNo, sb.target.sheetId),
             writeGenerationReader: (observed: string) => lockB.readGeneration(observed),
           })
           let late: any = null
@@ -1311,6 +1325,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await largeBomJobs.planLargeBomBackgroundExpansionJob({
           storage, ...jobScope, actionId, jobId,
           existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+          governanceVerdict: await realPlanVerdict(jobScope.tenantId, projectNo, sb.target.sheetId),
           writeGenerationReader: (observed: string) => lock.readGeneration(observed),
         })
         const approve = (applyJobId: string) => largeBomJobs.createLargeBomCheckpointApplyJob({
@@ -1794,6 +1809,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await largeBomJobs.planLargeBomBackgroundExpansionJob({
           storage, ...jobScope, actionId, jobId,
           existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+          governanceVerdict: await realPlanVerdict(jobScope.tenantId, projectNo, sb.target.sheetId),
           writeGenerationReader: (observed: string) => lock.readGeneration(observed),
         })
         const approved = await largeBomJobs.createLargeBomCheckpointApplyJob({
@@ -1870,6 +1886,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await largeBomJobs.planLargeBomBackgroundExpansionJob({
           storage, ...jobScope, actionId, jobId,
           existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+          governanceVerdict: await realPlanVerdict(jobScope.tenantId, projectNo, sb.target.sheetId),
           writeGenerationReader: (observed: string) => lock.readGeneration(observed),
         })
         const approved = await largeBomJobs.createLargeBomCheckpointApplyJob({
@@ -2915,6 +2932,11 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           reconcile: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
           carry: '/api/integration/stock-preparation/carry/confirm',
           chunk: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run',
+          // PR-3b: the large lane's four non-write routes.
+          largeStart: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
+          largeRun: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run',
+          largePlan: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan',
+          largeApprove: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs',
         }
         const RETARGETED = 'STOCK_PREP_REFRESH_TARGET_RETARGETED'
         const s3aSheets: string[] = []
@@ -3061,6 +3083,11 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             reconcile: (user: any = users.admin) => call('POST', PATHS.reconcile, user, { parameters: { projectNo } }),
             carry: (decision: any, user: any = users.admin) => call('POST', PATHS.carry, user, { decision }),
             chunk: (jobId: string, applyJobId: string, user: any = users.admin) => call('POST', PATHS.chunk, user, {}, { jobId, applyJobId }),
+            // PR-3b: the large lane's four non-write routes, through the same switch handling as every lane.
+            largeStart: (user: any = users.admin) => call('POST', PATHS.largeStart, user, { parameters: { projectNo } }),
+            largeRun: (jobId: string, user: any = users.admin) => call('POST', PATHS.largeRun, user, {}, { jobId }),
+            largePlan: (jobId: string, user: any = users.admin) => call('POST', PATHS.largePlan, user, {}, { jobId }),
+            largeApprove: (jobId: string, user: any = users.admin) => call('POST', PATHS.largeApprove, user, { confirm: { acceptManualConfirmHold: true } }, { jobId }),
             // A token the apply route will consume and bind: the CURRENT generation of the sheet, no bump.
             async mintToken(revision: string, sheetKey: string = key) {
               const generation = await lock.readGeneration(sheetKey)
@@ -3377,6 +3404,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             await largeBomJobs.planLargeBomBackgroundExpansionJob({
               storage, ...jobScope, actionId: ACTION_ID, jobId,
               existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, st.target, st.projectNo),
+              governanceVerdict: await realPlanVerdict(jobScope.tenantId, st.projectNo, st.target.sheetId),
               writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
             })
             await largeBomJobs.createLargeBomCheckpointApplyJob({
@@ -3628,6 +3656,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           await largeBomJobs.planLargeBomBackgroundExpansionJob({
             storage, ...jobScope, actionId: ACTION_ID, jobId,
             existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, st.target, st.projectNo),
+            governanceVerdict: await realPlanVerdict(jobScope.tenantId, st.projectNo, st.target.sheetId),
             writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
           })
           const approved = await largeBomJobs.createLargeBomCheckpointApplyJob({
@@ -3795,6 +3824,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           await largeBomJobs.planLargeBomBackgroundExpansionJob({
             storage, ...jobScope, actionId: ACTION_ID, jobId,
             existingRows: await tableActions.__internals.readExistingStockPreparationRows(st.multitable.records, st.target, st.projectNo),
+            // PR-3b: the plan ROUTE would refuse this project (RETARGETED — its rows live on A), so a REAL consult cannot
+            // hand this plan a verdict: the job stands for one that reached approval past every route (a direct lib
+            // caller), with an ASSERTED not-governed verdict — the chunk's in-lease gate is the lane under test.
+            governanceVerdict: { consulted: true, verdict: 'not_governed', generationToken: (await st.generation()).generationToken },
             writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
           })
           await largeBomJobs.createLargeBomCheckpointApplyJob({
@@ -3877,6 +3910,530 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             governed: { status: 409, code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', notes: null },
           })
         }, 180000)
+        // ── S3B: batch-refresh step 4 PR-3b — the LARGE lane on the real stack ────────────────────────────────────
+        // Nested in S3A for its stack (`s3aStack`, now with the four large non-write routes), its fixtures and its
+        // tenant-prefix cleanup. Each case drives the REAL route module over the production host, lock, registry, plugin
+        // storage (plugin_kv) and the REAL refresh services.
+        //   S3B-01 (P3-L1..L4, S6(4), D-7) a project governed by a store-seeded CONFIRMED relationship (not pilot): start,
+        //          run, plan and approve 409 LARGE_LANE_REFUSED `continuation` — zero source reads, zero records reads,
+        //          no large-BOM plugin_kv row written or changed, the generation unchanged, the sheet unchanged.
+        //   S3B-02 (P3-L7 / L05 / C09 large, P3-B1) not governed: the plan records the verdict (read back from
+        //          plugin_kv), approval and chunk run as before; an expansion planned WITHOUT a verdict is refused at
+        //          approval 409 GOVERNANCE_UNCONSULTED (no apply job, no bump) and served once re-planned by the route.
+        //   S3B-03 (P3-L6, O-1, E-3 large) a sentinel in a persisted hold's detail: the governed project's large routes
+        //          write nothing; a DIRECT lib plan handed the governed projection as `continuation` stores no hold and no
+        //          sentinel; a crafted stored plan carrying holds is refused at approval (PLAN_SUSPENDED), no apply job —
+        //          every plugin_kv row written meanwhile is free of the sentinel and of a hold array.
+        //   S3B-04 (C10 large, E-2(a)) pilot column cleared after a confirmed relationship: the four routes 409
+        //          `continuation`; a job approved before the confirm is refused at its chunk (PLAN_SUPERSEDED — the binding
+        //          answers first); a job slipped past the routes afterwards is refused by the chunk's in-lease gate.
+        //   S3B-05 (U07 large, E-2(b), GV-1) switch off: rows on the project's own sheet while the action resolves the
+        //          env sheet => 409 RETARGETED `sheet` on the four routes, nothing read or written; a pilot project =>
+        //          PR B's code; a registered NOT-governed project => served end to end on the env sheet, 0 step-4 rows.
+        //   S3B-06 (R-12, A11 / G1 large) the step-4 tables absent from the store binding (42P01): the four routes 503
+        //          STORE_FAILED `continuation` before any source read or existing-row read; nothing written, no bump.
+        //   S3B-07 (PR-3a review follow-up: the EXECUTOR half of the `::duplicate:` strip) a carry whose TARGET key is
+        //          duplicate-resolved and embeds a NOT-governed project while both rows belong to a governed project
+        //          awaiting recovery (switch off, F5b) — and the switch-on variant (F4b) — is refused 409
+        //          CONFIRM_CARRY_PROJECT_MISMATCH, nothing written; reverting the executor strip alone lets it write.
+        describe('S3B step-4 large lane (real Postgres, real lock, real host)', () => {
+          const LARGE_PREFIX = 'stock-preparation:large-bom:'
+          // Every large-BOM plugin_kv row of one tenant, key order (the "nothing persisted" fingerprint of a refusal).
+          const largeRows = async (tenantId: string) => (await q(
+            `SELECT key, value::text AS text FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1 ORDER BY key`,
+            [`${LARGE_PREFIX}%:${tenantId}:%`],
+          )).rows
+          const cleanupLarge = (tenantId: string) => q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`${LARGE_PREFIX}%:${tenantId}:%`]).catch(() => {})
+          const answerOf = (res: any) => `${res.statusCode}:${errorOf(res).code || 'ok'}${errorOf(res).details && errorOf(res).details.reason ? `:${errorOf(res).details.reason}` : ''}${errorOf(res).details && errorOf(res).details.lane ? `:${errorOf(res).details.lane}` : ''}`
+          const notGovernedVerdict = (generationToken: string | null) => ({ consulted: true, verdict: 'not_governed', generationToken })
+          // Count the host records reads the ROUTES make (the plan's existing-row read and the foreign-row guard).
+          function countRecordReads(records: any) {
+            const original = records.queryRecords
+            let n = 0
+            records.queryRecords = async (...args: any[]) => { n += 1; return original.apply(records, args) }
+            if (records.queryRecords === original) throw new Error('S3B: the host records API cannot be counted')
+            return { count: () => n, restore: () => { records.queryRecords = original } }
+          }
+          async function startedJob(st: any) {
+            const res = await st.largeStart()
+            expect(res.statusCode, JSON.stringify(res.body)).toBe(202)
+            return res.body.data.jobId as string
+          }
+          // Expansions at every stage, through the REAL routes while the project is NOT governed.
+          async function largeStages(st: any) {
+            const queued = await startedJob(st)
+            const ran = await startedJob(st)
+            expect((await st.largeRun(ran)).statusCode).toBe(200)
+            const planned = await startedJob(st)
+            expect((await st.largeRun(planned)).statusCode).toBe(200)
+            const res = await st.largePlan(planned)
+            expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+            return { queued, ran, planned }
+          }
+          const fourRoutes = (st: any, jobs: { queued: string; ran: string; planned: string }) => [
+            ['start', () => st.largeStart()],
+            ['run', () => st.largeRun(jobs.queued)],
+            ['plan', () => st.largePlan(jobs.ran)],
+            ['approve', () => st.largeApprove(jobs.planned)],
+          ] as Array<[string, () => Promise<any>]>
+          // A full expansion through the LIB (for a deployment whose routes refuse every large call), the way the routes
+          // store it: observed, run, planned with the not-governed verdict, optionally approved through the binder.
+          async function libExpansion(st: any, jobId: string, stage: 'queued' | 'ran' | 'planned' | 'approved') {
+            const storage: any = st.pluginContext.storage
+            const jobScope = { tenantId: st.tenantId, workspaceId: 'workspace-default' }
+            await largeBomJobs.createLargeBomBackgroundExpansionJob({
+              storage, ...jobScope, action: st.action, parameters: { projectNo: st.projectNo }, principal: st.users.admin.id, actor: st.users.admin.id, createJobId: () => jobId,
+              writeGenerationObserver: async () => writeObservationFromGeneration(await st.lock.observeGeneration(st.key)),
+            })
+            if (stage === 'queued') return null
+            await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId: ACTION_ID, jobId, sourceAdapter: st.sourceAdapter })
+            if (stage === 'ran') return null
+            await largeBomJobs.planLargeBomBackgroundExpansionJob({
+              storage, ...jobScope, actionId: ACTION_ID, jobId,
+              existingRows: await tableActions.__internals.readExistingStockPreparationRows(st.multitable.records, st.target, st.projectNo),
+              // The route-shaped verdict, ASSERTED rather than consulted: this helper stands for a caller that never asked.
+              governanceVerdict: notGovernedVerdict((await st.generation()).generationToken),
+              writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
+            })
+            if (stage === 'planned') return null
+            return largeBomJobs.createLargeBomCheckpointApplyJob({
+              storage, ...jobScope, actionId: ACTION_ID, jobId, principal: st.users.admin.id, permission: 'write', acceptManualConfirmHold: true, createApplyJobId: () => `${jobId}_apply`,
+              writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await st.lock.bumpGeneration(st.key, { reason: 'large_approval', expect })),
+            })
+          }
+          // Governed by a store-seeded CONFIRMED relationship: the canonical candidate (same project number as the stack),
+          // opened by a computation and confirmed by the store's own transaction with the bump stand-in.
+          async function confirmSeededContinuation(st: any) {
+            const fixture = await refreshKit.candidateHoldFixture()
+            const holdIdOf = await seedOpenHolds(st.refresh.store, st.scope, [fixture.hold])
+            return st.refresh.store.confirmContinuation(confirmInput(st.scope, holdIdOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+          }
+
+          test('S3B-01 (P3-L1..L4, S6(4), D-7) a project governed by a store-seeded CONFIRMED relationship (not pilot): start, run, plan and approve answer 409 LARGE_LANE_REFUSED `continuation` through the REAL routes — zero source reads, zero records reads, no large-BOM plugin_kv row written or changed, no apply job, the generation unchanged, the sheet\'s meta_records and meta_record_revisions unchanged, no step-4 write', async () => {
+            const st = await s3aStack('b01', { pilot: false })
+            const jobs = await largeStages(st)
+            await confirmSeededContinuation(st)
+            const consult = await st.refresh.governance.consult(st.scope)
+            expect(consult.governed).toBe(true)
+            expect(consult.pilot.enabled).toBe(false)
+            const counter = countRecordReads(st.multitable.records)
+            try {
+              const kv0 = await largeRows(st.tenantId)
+              const gen0 = await st.generation()
+              const main0 = await st.main()
+              const four0 = await stepFour(st.tenantId)
+              const reads0 = st.state.reads
+              const answers: Record<string, string> = {}
+              for (const [route, run] of fourRoutes(st, jobs)) answers[route] = answerOf(await run())
+              const kv1 = await largeRows(st.tenantId)
+              const observed = {
+                answers,
+                sourceReads: st.state.reads - reads0,
+                recordReads: counter.count(),
+                kvUnchanged: sameJson(kv1, kv0),
+                applyJobs: kv1.filter((row: any) => row.key.startsWith(`${LARGE_PREFIX}apply:`)).length,
+                generationUnchanged: sameJson(await st.generation(), gen0),
+                mainUnchanged: sameJson(await st.main(), main0),
+                stepFourUnchanged: (await stepFour(st.tenantId)) === four0,
+              }
+              console.log(`[S3B-01] ${JSON.stringify(observed)}`)
+              const refused = (lane: string) => `409:STOCK_PREP_REFRESH_LARGE_LANE_REFUSED:continuation:${lane}`
+              expect(observed).toEqual({
+                answers: { start: refused('large_expansion_start'), run: refused('large_expansion_run'), plan: refused('large_plan'), approve: refused('large_approve') },
+                sourceReads: 0,
+                recordReads: 0,
+                kvUnchanged: true,
+                applyJobs: 0,
+                generationUnchanged: true,
+                mainUnchanged: true,
+                stepFourUnchanged: true,
+              })
+            } finally {
+              counter.restore()
+              await cleanupLarge(st.tenantId)
+            }
+          }, 240000)
+
+          test('S3B-02 (P3-L7 / L05 / C09 large, P3-B1) a NOT-governed registered project through the REAL routes: the plan records the not-governed verdict (read back from plugin_kv: three keys, the consult\'s token); approval and chunk run as before; an expansion planned WITHOUT a verdict (a pre-PR-3b plan, through the lib) is refused at approval 409 GOVERNANCE_UNCONSULTED — no apply job, no bump — and is served once re-planned by the route; 0 step-4 rows', async () => {
+            const st = await s3aStack('b02', { pilot: false })
+            const kvKeyOf = (jobId: string) => `${LARGE_PREFIX}background:${st.tenantId}:workspace-default:${ACTION_ID}:${jobId}`
+            const verdictOf = async (jobId: string) => ((await q(`SELECT value->'governanceVerdict' AS verdict FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key = $1`, [kvKeyOf(jobId)])).rows[0] || {}).verdict
+            try {
+              const first = await startedJob(st)
+              expect((await st.largeRun(first)).statusCode).toBe(200)
+              expect((await st.largePlan(first)).statusCode).toBe(200)
+              const firstVerdict = await verdictOf(first)
+              const approved = await st.largeApprove(first)
+              expect(approved.statusCode, JSON.stringify(approved.body)).toBe(202)
+              const chunk = await st.chunk(first, approved.body.data.jobId)
+              expect(chunk.statusCode, JSON.stringify(chunk.body)).toBe(200)
+              const written = (await st.main()).count
+              // A pre-PR-3b plan: another expansion, planned through the lib WITHOUT a verdict.
+              const legacy = await startedJob(st)
+              expect((await st.largeRun(legacy)).statusCode).toBe(200)
+              await largeBomJobs.planLargeBomBackgroundExpansionJob({
+                storage: st.pluginContext.storage, tenantId: st.tenantId, workspaceId: 'workspace-default', actionId: ACTION_ID, jobId: legacy,
+                existingRows: await tableActions.__internals.readExistingStockPreparationRows(st.multitable.records, st.target, st.projectNo),
+                writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
+              })
+              const legacyVerdict = await verdictOf(legacy)
+              const gen0 = await st.generation()
+              const applyJobs0 = (await largeRows(st.tenantId)).filter((row: any) => row.key.startsWith(`${LARGE_PREFIX}apply:`)).length
+              const refused = await st.largeApprove(legacy)
+              const genAfterRefusal = await st.generation()
+              const applyJobs1 = (await largeRows(st.tenantId)).filter((row: any) => row.key.startsWith(`${LARGE_PREFIX}apply:`)).length
+              const replanned = await st.largePlan(legacy)
+              const replannedVerdict = await verdictOf(legacy)
+              const tokenAtReplan = (await st.generation()).generationToken
+              const servedAgain = await st.largeApprove(legacy)
+              const observed = {
+                firstVerdictKeys: Object.keys(firstVerdict || {}).sort(),
+                firstVerdict: { consulted: firstVerdict.consulted, verdict: firstVerdict.verdict, tokenIsNullOrString: firstVerdict.generationToken === null || typeof firstVerdict.generationToken === 'string' },
+                approved: answerOf(approved),
+                chunk: answerOf(chunk),
+                rowsWritten: written > 0,
+                legacyVerdict: legacyVerdict === undefined || legacyVerdict === null ? 'absent' : 'present',
+                refused: answerOf(refused),
+                noBumpByTheRefusal: sameJson(genAfterRefusal, gen0),
+                noApplyJobByTheRefusal: applyJobs1 === applyJobs0,
+                replanned: answerOf(replanned),
+                replannedVerdict: Boolean(replannedVerdict) && Object.keys(replannedVerdict).length === 3 && replannedVerdict.consulted === true && replannedVerdict.verdict === 'not_governed' && replannedVerdict.generationToken === tokenAtReplan && typeof tokenAtReplan === 'string',
+                servedAgain: answerOf(servedAgain),
+                stepFourRows: await st.stepFourRows(),
+              }
+              console.log(`[S3B-02] ${JSON.stringify(observed)}`)
+              expect(observed).toEqual({
+                firstVerdictKeys: ['consulted', 'generationToken', 'verdict'],
+                firstVerdict: { consulted: true, verdict: 'not_governed', tokenIsNullOrString: true },
+                approved: '202:ok',
+                chunk: '200:ok',
+                rowsWritten: true,
+                legacyVerdict: 'absent',
+                refused: '409:LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED:verdict_absent',
+                noBumpByTheRefusal: true,
+                noApplyJobByTheRefusal: true,
+                replanned: '200:ok',
+                replannedVerdict: true,
+                servedAgain: '202:ok',
+                stepFourRows: 0,
+              })
+            } finally {
+              await cleanupLarge(st.tenantId)
+            }
+          }, 300000)
+
+          test('S3B-03 (P3-L6, O-1, E-3 large) a sentinel planted in a persisted hold\'s detail never reaches a stored large-BOM job: the governed project\'s start / run / plan / approve are refused and write no plugin_kv row; a DIRECT lib plan handed the governed projection as `continuation` stores a plan with no hold and no sentinel; a crafted stored plan carrying a sentinel hold is refused at approval (409 LARGE_BOM_APPLY_PLAN_SUSPENDED) and no apply job row is written — every other plugin_kv row written meanwhile is free of the sentinel and of a hold array', async () => {
+            const SENTINEL = `S3B-SENTINEL-${TOKEN}`
+            const startedAt = (await q('SELECT now() AS at')).rows[0].at
+            const sentinelHold = contentHold('k_s3b_03', { key: SENTINEL, fields: { material: { before: SENTINEL, after: `${SENTINEL}-2` } } })
+            const st = await s3aStack('b03', { pilot: false })
+            const free = await s3aStack('b03c', { pilot: false })
+            try {
+              const jobs = await largeStages(st)
+              await seedOpenHolds(st.refresh.store, st.scope, [sentinelHold])
+              const kv0 = await largeRows(st.tenantId)
+              const answers: Record<string, string> = {}
+              for (const [route, run] of fourRoutes(st, jobs)) answers[route] = answerOf(await run())
+              const routesWroteNothing = sameJson(await largeRows(st.tenantId), kv0)
+              // O-1 on the real store: a direct lib plan handed the governed projection (whose persistedHolds carry the
+              // sentinel) as `continuation` — the large planner never receives it.
+              const consult = await st.refresh.governance.consult(st.scope)
+              const continuation = refreshLanes.continuationInputFor({ consult, governed: true }, { action: st.action, expansion: null })
+              const sentinelInProjection = JSON.stringify(continuation.persistedHolds).includes(SENTINEL)
+              await largeBomJobs.planLargeBomBackgroundExpansionJob({
+                storage: st.pluginContext.storage, tenantId: st.tenantId, workspaceId: 'workspace-default', actionId: ACTION_ID, jobId: jobs.ran,
+                existingRows: [], continuation, governanceVerdict: notGovernedVerdict((await st.generation()).generationToken),
+                writeGenerationReader: (observed: string) => st.lock.readGeneration(observed),
+              })
+              const directPlanRow = (await largeRows(st.tenantId)).find((row: any) => row.key.endsWith(`:${jobs.ran}`))
+              // E-3 / O-1 at approval: a NOT-governed project's stored plan crafted to carry the sentinel hold (an
+              // artifact from before this change, or a forged one) — the route consult passes, the lib refuses.
+              const freeJobs = await largeStages(free)
+              const freeKey = `${LARGE_PREFIX}background:${free.tenantId}:workspace-default:${ACTION_ID}:${freeJobs.planned}`
+              const storage: any = free.pluginContext.storage
+              const crafted = await storage.get(freeKey)
+              crafted.planArtifact.plan = { ...crafted.planArtifact.plan, suspended: true, holds: [sentinelHold] }
+              await storage.set(freeKey, crafted)
+              const craftedApproval = await free.largeApprove(freeJobs.planned)
+              const freeApplyJobs = (await largeRows(free.tenantId)).filter((row: any) => row.key.startsWith(`${LARGE_PREFIX}apply:`)).length
+              const kv = (await q(`SELECT key, value::text AS text FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND updated_at >= $1 AND key <> $2`, [startedAt, freeKey])).rows
+              const leaks = (text: string) => [SENTINEL, '"holds":[', '"persistedHolds"', '"continuationRoots"'].filter((needle) => text.includes(needle))
+              const observed = {
+                answers,
+                routesWroteNothing,
+                sentinelInProjection,
+                directPlanStored: Boolean(directPlanRow),
+                directPlanLeaks: directPlanRow ? leaks(directPlanRow.text) : ['<missing>'],
+                craftedApproval: answerOf(craftedApproval),
+                freeApplyJobs,
+                kvRowsWritten: kv.length > 0,
+                kvLeaks: kv.flatMap((row: any) => leaks(row.text)),
+                holdTableCarriesIt: Number((await q(`SELECT count(*)::int AS n FROM ${RT.hold} WHERE detail::text LIKE $1`, [`%${SENTINEL}%`])).rows[0].n) > 0,
+              }
+              console.log(`[S3B-03] ${JSON.stringify(observed)}`)
+              const refused = (lane: string) => `409:STOCK_PREP_REFRESH_LARGE_LANE_REFUSED:hold:${lane}`
+              expect(observed).toEqual({
+                answers: { start: refused('large_expansion_start'), run: refused('large_expansion_run'), plan: refused('large_plan'), approve: refused('large_approve') },
+                routesWroteNothing: true,
+                sentinelInProjection: true,
+                directPlanStored: true,
+                directPlanLeaks: [],
+                craftedApproval: '409:LARGE_BOM_APPLY_PLAN_SUSPENDED:suspended',
+                freeApplyJobs: 0,
+                kvRowsWritten: true,
+                kvLeaks: [],
+                holdTableCarriesIt: true,
+              })
+            } finally {
+              await cleanupLarge(st.tenantId)
+              await cleanupLarge(free.tenantId)
+            }
+          }, 300000)
+
+          test('S3B-04 (C10 large, E-2(a)) the pilot column cleared after a confirmed relationship exists (same sheet): start, run, plan and approve answer 409 LARGE_LANE_REFUSED `continuation`; a job approved BEFORE the project became governed is refused at its chunk (PLAN_SUPERSEDED — the confirm bumped, the binding answers first; fail closed); a job slipped past the routes afterwards (a lib approval with a forged not-governed verdict) is refused by the chunk\'s in-lease gate `continuation` — nothing written by any of them', async () => {
+            const st = await s3aStack('b04', { pilot: false })
+            try {
+              // Large jobs while the project is neither pilot nor governed: one approved, then every stage.
+              const early = await startedJob(st)
+              expect((await st.largeRun(early)).statusCode).toBe(200)
+              expect((await st.largePlan(early)).statusCode).toBe(200)
+              const approved = await st.largeApprove(early)
+              expect(approved.statusCode, JSON.stringify(approved.body)).toBe(202)
+              const jobs = await largeStages(st)
+              // The pilot is enabled (the registry mark), the first pull applied, the second pull's candidate confirmed,
+              // and the pilot cleared — the project is governed by its relationship alone.
+              await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_s3b_admin'])
+              await firstPullApplied(st)
+              st.state.data = CF.secondPullSource()
+              expect((await st.dryRun()).body.data.status).toBe('suspended')
+              await confirmOpenCandidate(st)
+              await st.pilotExit()
+              const consult = await st.refresh.governance.consult(st.scope)
+              expect(consult.pilot.enabled).toBe(false)
+              expect(consult.continuations.length).toBeGreaterThan(0)
+              const main0 = await st.main()
+              const reads0 = st.state.reads
+              const answers: Record<string, string> = {}
+              for (const [route, run] of fourRoutes(st, jobs)) answers[route] = answerOf(await run())
+              const routeSourceReads = st.state.reads - reads0
+              const earlyJob0 = await st.pluginContext.storage.get(`${LARGE_PREFIX}apply:${st.tenantId}:workspace-default:${ACTION_ID}:${approved.body.data.jobId}`)
+              answers.chunkBefore = answerOf(await st.chunk(early, approved.body.data.jobId))
+              const earlyJob1 = await st.pluginContext.storage.get(`${LARGE_PREFIX}apply:${st.tenantId}:workspace-default:${ACTION_ID}:${approved.body.data.jobId}`)
+              // Slipped past the routes: a fresh expansion planned and approved through the LIB with a forged verdict (its
+              // own source read is this test's, not a route's).
+              const slipped = await libExpansion(st, `s3b_04_slipped_${TOKEN}`, 'approved')
+              const slippedJob0 = await st.pluginContext.storage.get(`${LARGE_PREFIX}apply:${st.tenantId}:workspace-default:${ACTION_ID}:${slipped.jobId}`)
+              answers.chunkSlipped = answerOf(await st.chunk(`s3b_04_slipped_${TOKEN}`, slipped.jobId))
+              const slippedJob1 = await st.pluginContext.storage.get(`${LARGE_PREFIX}apply:${st.tenantId}:workspace-default:${ACTION_ID}:${slipped.jobId}`)
+              const observed = {
+                answers,
+                sourceReads: routeSourceReads,
+                earlyJobUnchanged: sameJson(earlyJob1, earlyJob0),
+                slippedJobUnchanged: sameJson(slippedJob1, slippedJob0),
+                mainUnchanged: sameJson(await st.main(), main0),
+              }
+              console.log(`[S3B-04] ${JSON.stringify(observed)}`)
+              const refused = (lane: string) => `409:STOCK_PREP_REFRESH_LARGE_LANE_REFUSED:continuation:${lane}`
+              expect(observed).toEqual({
+                answers: {
+                  start: refused('large_expansion_start'),
+                  run: refused('large_expansion_run'),
+                  plan: refused('large_plan'),
+                  approve: refused('large_approve'),
+                  chunkBefore: '409:STOCK_PREP_PROJECT_PLAN_SUPERSEDED:newer_plan',
+                  chunkSlipped: refused('large_apply_chunk'),
+                },
+                sourceReads: 0,
+                earlyJobUnchanged: true,
+                slippedJobUnchanged: true,
+                mainUnchanged: true,
+              })
+            } finally {
+              await cleanupLarge(st.tenantId)
+            }
+          }, 300000)
+
+          test('S3B-05 (U07 large, E-2(b), GV-1) switch OFF: a project governed by step-4 ROWS on its own registered sheet while the action resolves the env sheet => start, run, plan and approve 409 RETARGETED `sheet` before any source read or existing-row read (no plugin_kv row written, no bump); a PILOT project => PR B\'s code; a registered NOT-governed project => today\'s large lane, served end to end on the env sheet with 0 step-4 rows', async () => {
+            const free = await s3aStack('b05n', { pilot: false, switchOn: false })
+            const gov = await s3aStack('b05g', { pilot: false, switchOn: false })
+            const pilot = await s3aStack('b05p', { pilot: true, switchOn: false })
+            const counter = countRecordReads(gov.multitable.records)
+            try {
+              // Registered, NOT governed: the whole lane on the env sheet, as before PR-3b.
+              const freeJob = await startedJob(free)
+              const served: Record<string, string> = { run: answerOf(await free.largeRun(freeJob)), plan: answerOf(await free.largePlan(freeJob)) }
+              const freeApproved = await free.largeApprove(freeJob)
+              served.approve = answerOf(freeApproved)
+              served.chunk = freeApproved.statusCode === 202 ? answerOf(await free.chunk(freeJob, freeApproved.body.data.jobId)) : 'not approved'
+              const freeRowsOnEnv = (await free.main(free.envTarget.sheetId)).count
+              // Governed by ROWS on its registered sheet: jobs made while not governed, then the rows land.
+              const jobs = await largeStages(gov)
+              await seedOpenHolds(gov.refresh.store, gov.scope, [contentHold('k_s3b_05')])
+              const envKey = sheetWriteScopeKey(gov.envTarget.sheetId)
+              const kv0 = await largeRows(gov.tenantId)
+              const gen0 = await gov.generation(envKey)
+              const reads0 = gov.state.reads
+              const recordReads0 = counter.count()
+              const retargeted: Record<string, string> = {}
+              for (const [route, run] of fourRoutes(gov, jobs)) retargeted[route] = answerOf(await run())
+              const observed = {
+                served,
+                freeRowsOnEnv: freeRowsOnEnv > 0,
+                freeStepFourRows: await free.stepFourRows(),
+                retargeted,
+                sourceReads: gov.state.reads - reads0,
+                recordReads: counter.count() - recordReads0,
+                kvUnchanged: sameJson(await largeRows(gov.tenantId), kv0),
+                generationUnchanged: sameJson(await gov.generation(envKey), gen0),
+                pilot: answerOf(await pilot.largeStart()),
+              }
+              console.log(`[S3B-05] ${JSON.stringify(observed)}`)
+              const refused = '409:STOCK_PREP_REFRESH_TARGET_RETARGETED:sheet'
+              expect(observed).toEqual({
+                served: { run: '200:ok', plan: '200:ok', approve: '202:ok', chunk: '200:ok' },
+                freeRowsOnEnv: true,
+                freeStepFourRows: 0,
+                retargeted: { start: refused, run: refused, plan: refused, approve: refused },
+                sourceReads: 0,
+                recordReads: 0,
+                kvUnchanged: true,
+                generationUnchanged: true,
+                pilot: '409:STOCK_PREP_PILOT_LARGE_LANE_REFUSED:pilot_project:large_expansion_start',
+              })
+            } finally {
+              counter.restore()
+              await cleanupLarge(free.tenantId)
+              await cleanupLarge(gov.tenantId)
+              await cleanupLarge(pilot.tenantId)
+            }
+          }, 300000)
+
+          test('S3B-06 (R-12, A11 / G1 large) the step-4 tables ABSENT from the store binding (42P01 — a pre-102/103 database; the registry readable): start, run, plan and approve answer 503 STORE_FAILED `continuation` 42P01 before any source read or existing-row read — no plugin_kv row written or changed, no apply job, the generation unchanged', async () => {
+            const client = await poolManager.get().getInternalPool().connect()
+            const schema = `s3b_nostep4_${TOKEN}`
+            let tenantId: string | null = null
+            try {
+              await client.query(`CREATE SCHEMA ${schema}`)
+              // The registry stays readable on this binding (the consult's registry reads share the store's snapshot):
+              // only the five step-4 tables are missing, as on a database without migrations 102 / 103.
+              await client.query(`CREATE VIEW ${schema}.integration_stock_prep_project_target AS SELECT * FROM public.integration_stock_prep_project_target`)
+              await client.query(`SET search_path TO ${schema}`)
+              const st = await s3aStack('b06', { pilot: false, refresh: realRefreshServices(dbOn(client)) })
+              tenantId = st.tenantId
+              // Jobs at every stage through the LIB (this deployment's routes refuse every large call).
+              const queued = `s3b_06_queued_${TOKEN}`
+              const ran = `s3b_06_ran_${TOKEN}`
+              const planned = `s3b_06_planned_${TOKEN}`
+              await libExpansion(st, queued, 'queued')
+              await libExpansion(st, ran, 'ran')
+              await libExpansion(st, planned, 'planned')
+              const counter = countRecordReads(st.multitable.records)
+              try {
+                const kv0 = await largeRows(st.tenantId)
+                const gen0 = await st.generation()
+                const reads0 = st.state.reads
+                const answers: Record<string, string> = {}
+                for (const [route, run] of fourRoutes(st, { queued, ran, planned })) {
+                  const res = await run()
+                  answers[route] = `${res.statusCode}:${errorOf(res).code}:${errorOf(res).details && errorOf(res).details.store}:${errorOf(res).details && errorOf(res).details.sqlState}`
+                }
+                const kv1 = await largeRows(st.tenantId)
+                const observed = {
+                  answers,
+                  sourceReads: st.state.reads - reads0,
+                  recordReads: counter.count(),
+                  kvUnchanged: sameJson(kv1, kv0),
+                  applyJobs: kv1.filter((row: any) => row.key.startsWith(`${LARGE_PREFIX}apply:`)).length,
+                  generationUnchanged: sameJson(await st.generation(), gen0),
+                }
+                console.log(`[S3B-06] ${JSON.stringify(observed)}`)
+                const unreadable = '503:STOCK_PREP_REFRESH_STORE_FAILED:continuation:42P01'
+                expect(observed).toEqual({
+                  answers: { start: unreadable, run: unreadable, plan: unreadable, approve: unreadable },
+                  sourceReads: 0,
+                  recordReads: 0,
+                  kvUnchanged: true,
+                  applyJobs: 0,
+                  generationUnchanged: true,
+                })
+              } finally {
+                counter.restore()
+              }
+            } finally {
+              await client.query('RESET search_path').catch(() => {})
+              await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
+              client.release()
+              if (tenantId) await cleanupLarge(tenantId)
+            }
+          }, 300000)
+
+          test('S3B-07 (PR-3a review follow-up: the EXECUTOR half of the `::duplicate:` strip) a carry whose TARGET key is duplicate-resolved and embeds a NOT-governed project P2 while its SOURCE key is the governed project P1\'s honest key and both rows belong to P1 — the route consults P2 (not governed), so only the executor\'s base-key check refuses: switch OFF with P1 awaiting recovery (F5b) and switch ON on P2\'s own sheet (F4b) both 409 CONFIRM_CARRY_PROJECT_MISMATCH (idempotencyKey), nothing written; the honest-key control answers RECOVERY_PENDING', async () => {
+            const P2 = 'PRJ-S3B-P2'
+            const suffixed = (key: string) => `${key}::duplicate:sortLine:${'7'.repeat(16)}`
+            const keyOf = (projectNo: string, token: string) => JSON.stringify({ projectNo, componentSourceId: CARRY_COMPONENT, parentSourceId: null, path: [token, CARRY_COMPONENT] })
+            // A pair whose rows BOTH belong to P1 (machine projectNo): an inactive source with a person's note, an active target.
+            async function seedPair(sb: { multitable: any; sheetId: string; target: any }, sourceKey: string, targetKey: string) {
+              const physical = (logical: string) => (sb.target.fieldIdMap && sb.target.fieldIdMap[logical]) || logical
+              const toPhysical = (data: Record<string, unknown>) => Object.fromEntries(Object.entries(data).map(([key, value]) => [physical(key), value]))
+              const records = sb.multitable.records as any
+              await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo: CF.PROJECT_NO, idempotencyKey: sourceKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), active: false, notes: 'synthetic note' }) })
+              const target = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo: CF.PROJECT_NO, idempotencyKey: targetKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), active: true }) })
+              return { notes: async () => (await q('SELECT data->>$2 AS notes FROM meta_records WHERE id = $1', [target.id, physical('notes')])).rows[0].notes }
+            }
+            const decision = (sourceKey: string, targetKey: string) => ({ ...carryDecision(CF.PROJECT_NO), idempotencyKey: targetKey, sourceIdempotencyKey: sourceKey })
+            const sheetState = async (st: any, sheetId: string) => ({ rows: await st.rows(sheetId), main: await st.main(sheetId) })
+            const observed: Record<string, unknown> = {}
+            // F5b — switch OFF, the env sheet; P1 governed by an earlier FAILED execution there; P2 not governed.
+            {
+              const st = await s3aStack('b07off', { pilot: false, register: false, switchOn: false })
+              const env = { multitable: st.multitable, sheetId: st.envTarget.sheetId, target: st.envTarget }
+              const envScope = { tenantId: st.tenantId, sheetId: env.sheetId, projectNo: st.projectNo }
+              const gen = await st.generation(sheetWriteScopeKey(env.sheetId))
+              const begun = await st.refresh.store.beginExecution({
+                ...envScope, lane: 'small_apply',
+                guard: { leaseRunId: 'run_s3b_07_dead', leaseId: 'lease_s3b_07_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3b_07' },
+                tokenRevision: 'rev_s3b_07', planDigest: 'e'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3b_07',
+              })
+              await st.refresh.store.finishExecution({ ...envScope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3B_07'] })
+              observed.p1Governed = (await st.refresh.governance.consult(envScope)).governed
+              observed.p2Governed = (await st.refresh.governance.consult({ ...envScope, projectNo: P2 })).governed
+              const pair = await seedPair(env, keyOf(CF.PROJECT_NO, 'OLD5B'), suffixed(keyOf(P2, 'NEW5B')))
+              const before = await sheetState(st, env.sheetId)
+              const res = await st.carry(decision(keyOf(CF.PROJECT_NO, 'OLD5B'), suffixed(keyOf(P2, 'NEW5B'))))
+              observed.f5b = { answer: `${res.statusCode}:${errorOf(res).code || (res.body.data && res.body.data.mode)}:${errorOf(res).details && errorOf(res).details.field}`, notes: await pair.notes(), wroteNothing: sameJson(await sheetState(st, env.sheetId), before) }
+              // Control: the HONEST suffixed key (embedding P1) consults P1 — awaiting recovery.
+              const honest = await seedPair(env, keyOf(CF.PROJECT_NO, 'OLD5R'), suffixed(keyOf(CF.PROJECT_NO, 'NEW5R')))
+              const beforeControl = await sheetState(st, env.sheetId)
+              const control = await st.carry(decision(keyOf(CF.PROJECT_NO, 'OLD5R'), suffixed(keyOf(CF.PROJECT_NO, 'NEW5R'))))
+              observed.f5r = { answer: `${control.statusCode}:${errorOf(control).code}`, notes: await honest.notes(), wroteNothing: sameJson(await sheetState(st, env.sheetId), beforeControl) }
+            }
+            // F4b — switch ON: P2 registered with its OWN sheet in the same tenant; the rows on P2's sheet belong to P1.
+            {
+              const st = await s3aStack('b07on', { pilot: false })
+              const p2ObjectId: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(st.tenantId, P2)
+              const p2Ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable: st.multitable } }, projectId: st.projectId, permission: 'admin', objectId: p2ObjectId })
+              expect(p2Ensured.ready).toBe(true)
+              await syncStockPreparationContractOptionsForObject({ provisioning: st.multitable.provisioning, projectId: st.projectId, objectId: p2ObjectId })
+              await projectTargetsLib.markProjectSheetPlmSystemColumns({ provisioning: st.multitable.provisioning, projectId: st.projectId, objectId: p2ObjectId })
+              s3aSheets.push(p2Ensured.target.sheetId)
+              scopes.push(sheetWriteScopeKey(p2Ensured.target.sheetId))
+              await st.registry.create({ tenantId: st.tenantId, projectNo: P2, sheetId: p2Ensured.target.sheetId, objectId: p2ObjectId, createdBy: 'syn' })
+              const p2 = { multitable: st.multitable, sheetId: p2Ensured.target.sheetId, target: p2Ensured.target }
+              const pair = await seedPair(p2, keyOf(CF.PROJECT_NO, 'OLD4B'), suffixed(keyOf(P2, 'NEW4B')))
+              const before = await sheetState(st, p2.sheetId)
+              const res = await st.carry(decision(keyOf(CF.PROJECT_NO, 'OLD4B'), suffixed(keyOf(P2, 'NEW4B'))))
+              observed.f4b = { answer: `${res.statusCode}:${errorOf(res).code || (res.body.data && res.body.data.mode)}:${errorOf(res).details && errorOf(res).details.field}`, notes: await pair.notes(), wroteNothing: sameJson(await sheetState(st, p2.sheetId), before) }
+            }
+            console.log(`[S3B-07] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              p1Governed: true,
+              p2Governed: false,
+              f5b: { answer: '409:CONFIRM_CARRY_PROJECT_MISMATCH:idempotencyKey', notes: null, wroteNothing: true },
+              f5r: { answer: '409:STOCK_PREP_REFRESH_RECOVERY_PENDING', notes: null, wroteNothing: true },
+              f4b: { answer: '409:CONFIRM_CARRY_PROJECT_MISMATCH:idempotencyKey', notes: null, wroteNothing: true },
+            })
+          }, 300000)
+        })
       })
     })
   })

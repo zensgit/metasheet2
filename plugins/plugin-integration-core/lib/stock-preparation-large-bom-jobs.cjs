@@ -742,6 +742,63 @@ function storedWriteObservation(value) {
   }
 }
 
+// ── the refresh governance of the large lane (batch-refresh step 4 PR-3b; design §7.1 rows 9-10, D-7, O-1) ──
+// The plan route consults the governance reader and plans ONLY a project it answered not governed (a governed one is
+// refused 409 STOCK_PREP_REFRESH_LARGE_LANE_REFUSED before the existing-row read); the verdict it hands the plan is
+// recorded on the expansion job beside `planWriteObservation`, values-free and closed to three keys. It is NOT part of
+// `largeBomPlanRevision` (the plan revision and the artifact stay byte-identical) and the planner is never handed a
+// `continuation` (O-1: the call below is an explicit literal), so a large `planArtifact.plan` never carries holds.
+const LARGE_PLAN_GOVERNANCE_VERDICT_KEYS = Object.freeze(['consulted', 'generationToken', 'verdict'])
+
+// The one verdict a large plan may carry: consulted, `not_governed`, and the generation token the consult observed —
+// a non-blank string, or null for a sheet whose lock row does not exist yet (a never-leased, never-bumped sheet; the
+// writer's non-blank rule is a chunk-time rule, checked again by every chunk's own in-lease consult).
+function isLargePlanGovernanceVerdict(value) {
+  if (!isPlainObject(value)) return false
+  if (Object.keys(value).sort().join(',') !== LARGE_PLAN_GOVERNANCE_VERDICT_KEYS.join(',')) return false
+  if (value.consulted !== true || value.verdict !== 'not_governed') return false
+  return value.generationToken === null || (typeof value.generationToken === 'string' && value.generationToken.trim() !== '')
+}
+
+// The plan's input: absent (a direct caller) => the job records none; anything else must be the route's verdict, or the
+// route is defective (500, before any IO).
+function normalizeLargePlanGovernanceVerdict(value) {
+  if (value === undefined) return null
+  if (!isLargePlanGovernanceVerdict(value)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_PLAN_GOVERNANCE_VERDICT_INVALID',
+      'the large-BOM plan was handed a governance verdict that is not a consulted not-governed verdict; nothing was planned',
+      { partial: false },
+      500,
+    )
+  }
+  return { consulted: true, verdict: 'not_governed', generationToken: value.generationToken }
+}
+
+// APPROVAL REFUSALS (O-1, E-3; §7.1 row 10), before the binder bumps and before any apply job is stored: a stored plan
+// in a GOVERNED shape (suspended, carrying holds or a continuation stanza — the private, values-bearing channel) is never
+// copied into an apply job; and an expansion planned without the not-governed verdict (planned before this change, or
+// by a caller that never consulted) is never approved — it is re-planned (the plan route consults).
+function assertLargePlanApprovable(sourceJob, plan) {
+  if (plan.suspended !== undefined || plan.holds !== undefined || plan.continuation !== undefined) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_PLAN_SUSPENDED',
+      'this large-BOM plan carries refresh holds or a suspension; it is never approved — plan the expansion again',
+      { reason: plan.suspended === true ? 'suspended' : (plan.holds !== undefined ? 'holds' : 'projected'), partial: false },
+      409,
+    )
+  }
+  const verdict = sourceJob.governanceVerdict
+  if (verdict === undefined || verdict === null || !isLargePlanGovernanceVerdict(verdict)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED',
+      'this large-BOM expansion was planned without a refresh governance verdict; plan it again before approving',
+      { reason: verdict === undefined || verdict === null ? 'verdict_absent' : 'verdict_invalid', partial: false },
+      409,
+    )
+  }
+}
+
 async function loadLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
   const key = backgroundJobKey(input)
@@ -1267,6 +1324,9 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
   assertAuthoritativeLargeBomPlan(sourceJob)
   const planArtifact = sourceJob.planArtifact
   const plan = cloneJson(planArtifact.plan)
+  // Batch-refresh step 4 PR-3b: a governed-shape plan or an unconsulted expansion is refused HERE — before the
+  // manual-confirm acknowledgement, before the binder's bump (a refusal supersedes nothing) and before the job is stored.
+  assertLargePlanApprovable(sourceJob, plan)
   const manualConfirmCount = countManualConfirmDecisions(plan)
   if (manualConfirmCount > 0 && input.acceptManualConfirmHold !== true) {
     throw new StockPreparationLargeBomJobError(
@@ -1607,6 +1667,8 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
 async function planLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
   const key = backgroundJobKey(input)
+  // PR-3b: the route's not-governed verdict, checked before any IO (a malformed one is a route defect, 500).
+  const governanceVerdict = normalizeLargePlanGovernanceVerdict(input.governanceVerdict)
   const job = await storage.get(key)
   if (!job) {
     throw new StockPreparationLargeBomJobError(
@@ -1637,6 +1699,9 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
   const expandedRows = Array.isArray(artifact.rows) ? artifact.rows.map(cloneJson) : []
   const existingRows = normalizeExistingRows(input.existingRows)
   const conflictPolicyReview = isPlainObject(input.conflictPolicyReview) ? cloneJson(input.conflictPolicyReview) : undefined
+  // O-1 (batch-refresh step 4 PR-3b): an EXPLICIT literal — no `continuation` key and no spread of `input`, so the large
+  // planner never plans a governed project's projection and its plan never carries `holds` (a governed project is
+  // refused by the route before this point). Pinned by the step-4 scan suite (SC-7) and the O-1 planner spy.
   const plan = planStockPreparationConflicts({
     template: job.actionSnapshot && job.actionSnapshot.template,
     conflictStrategy: job.actionSnapshot && job.actionSnapshot.conflictStrategy,
@@ -1681,6 +1746,9 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
   // refuses it), never the observation an earlier plan recorded.
   if (planWriteObservation) job.planWriteObservation = planWriteObservation
   else delete job.planWriteObservation
+  // PR-3b: the same rule for the governance verdict — a plan made without one carries none (and approval refuses it).
+  if (governanceVerdict) job.governanceVerdict = governanceVerdict
+  else delete job.governanceVerdict
   job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   await storage.set(key, job)
   return cloneJson(job)
@@ -1811,5 +1879,10 @@ module.exports = {
     nonNegativeInteger,
     normalizeChunkSize,
     requireCheckpointRecordsApi,
+    // PR-3b: the large lane's governance verdict and approval refusals (direct lib tests).
+    LARGE_PLAN_GOVERNANCE_VERDICT_KEYS,
+    assertLargePlanApprovable,
+    isLargePlanGovernanceVerdict,
+    normalizeLargePlanGovernanceVerdict,
   },
 }

@@ -465,10 +465,32 @@ function createLibWriteLockHarness(options = {}) {
       })
     }
   }
+  // Batch-refresh step 4 PR-3b: the plan route consults the governance reader (`consultLargeLane`) and hands the plan
+  // its not-governed verdict, which approval requires — the wrapper does the same with the REAL consult over this
+  // harness's lock (a governed project is refused here exactly as the route refuses it). A caller that passes
+  // `governanceVerdict` itself (even as undefined) opts out; a job the wrapper cannot load (or that names no project
+  // / sheet) gets none, and the lib answers its own error.
+  async function largePlanVerdictFor(input) {
+    let source = null
+    try {
+      const largeBomJobs = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+      source = await largeBomJobs.loadLargeBomBackgroundExpansionJob({
+        storage: input.storage, tenantId: input.tenantId, workspaceId: input.workspaceId, actionId: input.actionId, jobId: input.jobId,
+      })
+    } catch {
+      return undefined
+    }
+    const projectNo = source && source.parameters ? source.parameters.projectNo : null
+    const sheetId = source && source.actionSnapshot && source.actionSnapshot.target ? source.actionSnapshot.target.sheetId : null
+    if (typeof projectNo !== 'string' || !projectNo || typeof sheetId !== 'string' || !sheetId) return undefined
+    const lanes = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-refresh-lanes.cjs'))
+    return lanes.largeLaneVerdictOf(await refresh().governance.consult({ tenantId: tenantOf(input), projectNo, sheetId }), 'large_plan')
+  }
   function wrapLargePlan(planJob) {
     return async (input = {}) => {
-      if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationReader')) return planJob(input)
-      return planJob({ ...input, writeGenerationReader: (scope) => env.lock.readGeneration(scope) })
+      const withVerdict = Object.prototype.hasOwnProperty.call(input, 'governanceVerdict') ? input : { ...input, governanceVerdict: await largePlanVerdictFor(input) }
+      if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationReader')) return planJob(withVerdict)
+      return planJob({ ...withVerdict, writeGenerationReader: (scope) => env.lock.readGeneration(scope) })
     }
   }
   function wrapLargeApprove(createJob) {

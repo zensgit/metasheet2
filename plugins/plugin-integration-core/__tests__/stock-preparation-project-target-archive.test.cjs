@@ -342,6 +342,11 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
   const writeObservation = seedLock && target && typeof target.sheetId === 'string'
     ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
     : null
+  // Batch-refresh step 4 PR-3b: ...and the not-governed verdict the plan route records (its REAL consult over the
+  // mounted governance), which the approval requires.
+  const governanceVerdict = h.refresh && target && typeof target.sheetId === 'string'
+    ? require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs')).largeLaneVerdictOf(await h.refresh.governance.consult({ tenantId: TENANT, projectNo, sheetId: target.sheetId }), 'large_plan')
+    : null
   const job = {
     jobId, ...JOB_SCOPE, actionId: ACTION_ID,
     status: 'completed', authoritative: true, projectNoPresent: true,
@@ -358,6 +363,7 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
     evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
     createdAt: at, updatedAt: at,
     ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
+    ...(governanceVerdict ? { governanceVerdict: { ...governanceVerdict } } : {}),
   }
   await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, jobId }), job)
 }
