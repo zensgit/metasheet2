@@ -18,6 +18,9 @@
 //        the run details' erpFeedback entry carries `reason: ERP_FEEDBACK_GOVERNED_SHEET_REFUSED` (the projection's
 //        fixed field set — `code` is dropped); zero feedback writes; under failOnError the runner's own catch records
 //        ERP_FEEDBACK_THROWN with the code inside `error`; the run status is unchanged on both legs.
+//   R-05 a REAL probe that cannot read (42P01, then 08006): the run's cause names STORE_FAILED, the store and the
+//        SQLSTATE, so the two failures read differently; no dead letter, no watermark, zero host writes (step-4
+//        review follow-ups, item 6).
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -116,10 +119,10 @@ const SOURCE_RECORDS = [
   { code: 'rgs-02', revision: 'r1', qty: '4', name: 'CELLVALUE_NUT', updatedAt: '2026-10-26T02:00:00.000Z' },
 ]
 
-function harness({ targetAnswer = () => NOT_GOVERNED, feedbackAnswer = () => NOT_GOVERNED, erpFeedback = null } = {}) {
+function harness({ targetAnswer = () => NOT_GOVERNED, feedbackAnswer = () => NOT_GOVERNED, erpFeedback = null, targetProbeOverride = null } = {}) {
   const db = createMockDb()
   const host = recordingContext()
-  const targetProbe = scriptedProbe(targetAnswer)
+  const targetProbe = targetProbeOverride || scriptedProbe(targetAnswer)
   const feedbackProbe = scriptedProbe(feedbackAnswer)
   const pipeline = {
     id: 'pipe_rgs', tenantId: TENANT, workspaceId: null, projectId: `${TENANT}:integration-core`,
@@ -195,6 +198,36 @@ test('R-01 a live run into a governed target: PipelineRunnerError whose cause na
   assert.equal(h.host.calls.filter(([name]) => name === 'queryRecords').length, 0, 'not even a key lookup')
   assert.deepEqual(h.targetProbe.calls, [{ via: 'probe', sheetId: TARGET_SHEET, tenantId: TENANT }])
   assert.equal(h.feedbackProbe.calls.length, 0, 'the feedback writer never ran (the target refused first)')
+})
+
+// Step-4 review follow-ups (item 6, #6567 N1): the runner keeps only `error.message` as the run's cause, so the
+// probe's 503 must say WHICH failure it was. A REAL probe over a continuation store whose sheet read throws a
+// 42P01 (migrations 102/103 missing) and then an 08006 (the connection dropped): the two causes differ and each
+// names the code, the store and the SQLSTATE — never the driver's text; the run fails exactly as R-01's does.
+test('R-05 a live run whose governed-sheet probe cannot read: the cause names STORE_FAILED, the store and the SQLSTATE (42P01 vs 08006 tell apart); no dead letter, watermark not advanced, zero host writes', async () => {
+  const causes = []
+  for (const sqlState of ['42P01', '08006']) {
+    const driverError = Object.assign(new Error(`driver text ZZPROBESENTINELZZ ${sqlState}`), { code: sqlState })
+    const realProbe = probeLib.createStockPreparationGovernedSheetProbe({
+      continuationStore: { async readSheetGovernanceMarks() { throw driverError } },
+      projectTargetStore: { async getPilotStateBySheetId() { return null } },
+    })
+    const h = harness({ targetProbeOverride: realProbe })
+    const outcome = await settle(h.runner.runPipeline({ tenantId: TENANT, workspaceId: null, pipelineId: 'pipe_rgs', mode: 'incremental', triggeredBy: 'manual' }))
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.error.name, 'PipelineRunnerError')
+    const cause = outcome.error.details.cause
+    assert.ok(cause.startsWith(`${CODES.STORE_FAILED} (store continuation, operation read_sheet_governance_marks, SQLSTATE ${sqlState}): `), cause)
+    for (const forbidden of ['ZZPROBESENTINELZZ', 'CELLVALUE', TARGET_SHEET, TENANT]) assert.equal(cause.includes(forbidden), false, `${forbidden} in ${cause}`)
+    const run = h.db.tables.get('integration_runs')[0]
+    assert.equal(run.status, 'failed')
+    assert.equal(run.error_summary, cause)
+    assert.equal(h.db.tables.get('integration_dead_letters').length, 0, 'no dead letter')
+    assert.equal(h.db.tables.get('integration_watermarks').length, 0, 'the watermark did not advance')
+    assert.deepEqual(writesOf(h.host.calls), [])
+    causes.push(cause)
+  }
+  assert.notEqual(causes[0], causes[1], 'a missing table and a dropped connection read differently on the run surface')
 })
 
 test('R-02 a dead-letter replay into a governed target: the error propagates, the letter stays open, zero host writes', async () => {
