@@ -4797,6 +4797,14 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             observed.afterReviewerGap = { answer: answerOf(after), streamed: streamed(after) }
             const auditEnd = await exportAudit(st.tenantId)
             observed.audit = { delivered: auditEnd.delivered.length, refused: auditEnd.refused.length, refusals: auditEnd.refused.map((row: any) => `${row.refusal}:${row.reason || ''}`) }
+            // (e2) the report's last named boundary, on a fresh settled sheet: the same whole failed run BETWEEN C2's two
+            //      lock reads (after the reader's readState, before its readGeneration): C2 derives complete; G1 refuses.
+            const e2 = await s5Stack('s5_02e2')
+            await settledContinuation(e2)
+            e2.resetHooks()
+            e2.reader.hooks.beforeReadGeneration = async (n: number) => { if (n === 2) await zeroWriteRun(e2, 'failed') }
+            const e2Res = await e2.exportLines()
+            observed.betweenC2LockReads = { answer: answerOf(e2Res), streamed: streamed(e2Res), epochMoved: errorOf(e2Res).details && errorOf(e2Res).details.epochMoved, consults: e2.seen.slice(), failedRows: (await e2.executions()).filter((row: any) => row.status === 'failed').length }
             console.log(`[S5-02] ${JSON.stringify(observed)}`)
             const handle = String(confirmed.continuationId).slice(-8)
             expect(observed).toEqual({
@@ -4814,6 +4822,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               reviewerGap: { answer: `409:${STATE_CHANGED}:generation_moved:`, streamed: false, epochMoved: true, generationMoved: false, consults: ['complete', 'complete'], executionsAdded: 1, failedRows: 1 },
               afterReviewerGap: { answer: `409:${BLOCKED}:state:failed_pending_recovery`, streamed: false },
               audit: { delivered: 2, refused: 7, refusals: [`${BLOCKED}:state`, `${BLOCKED}:state`, `${STATE_CHANGED}:generation_moved`, `${STATE_CHANGED}:generation_moved`, `${STATE_CHANGED}:lease_in_flight`, `${STATE_CHANGED}:generation_moved`, `${BLOCKED}:state`] },
+              betweenC2LockReads: { answer: `409:${STATE_CHANGED}:generation_moved:`, streamed: false, epochMoved: true, consults: ['complete', 'complete'], failedRows: 1 },
             })
             // (f) the same failure completed BEFORE G0, on a fresh settled sheet: C1's own snapshot refuses it.
             const f = await s5Stack('s5_02f')

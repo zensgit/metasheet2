@@ -938,6 +938,19 @@ async function main() {
       const next = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
       assertRefused(h, next, 409, EXPORT_GATE_ERROR_CODES.BLOCKED, { state: 'failed_pending_recovery' })
     }
+    // (e2) the report's last named boundary: the same whole failed run BETWEEN C2's two lock reads (after the
+    //      reader's readState, before its readGeneration): C2 still derives complete; G1's epoch refuses.
+    {
+      const seen = []
+      const h = await settledStack({
+        readerBeforeReadGeneration: async (n) => { if (n === 2) await zeroWriteRun(h, { status: 'failed' }) },
+        afterReadRefreshState: async (n, read) => { seen.push(read.state.status) },
+      })
+      const res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
+      assertRefused(h, res, 409, EXPORT_GATE_ERROR_CODES.STATE_CHANGED, { reason: 'generation_moved' })
+      assert.deepEqual(seen, ['complete', 'complete'])
+      assert.equal(errorOf(res).details.epochMoved, true)
+    }
     // (f) the same failure completed BEFORE G0: C1's fresh snapshot sees it.
     {
       const h = await settledStack()
