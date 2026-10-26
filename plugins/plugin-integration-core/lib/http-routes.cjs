@@ -2268,6 +2268,14 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   // check ids) and the enable (the same, plus the outcome booleans) — handles, enums and check ids only.
   'stockPreparationProjectPilotGet',
   'stockPreparationProjectPilotEnable',
+  // Batch-refresh step 4 PR-4 (R-59): the six refresh decision routes — their typed refusals (the store's, the
+  // lock's, the lanes' and the decision library's) answer as themselves; an untyped escape answers the fixed 500.
+  'stockPreparationRefreshHolds',
+  'stockPreparationRefreshHoldEvidence',
+  'stockPreparationRefreshHoldKeep',
+  'stockPreparationRefreshContinuationConfirm',
+  'stockPreparationRefreshContinuationGet',
+  'stockPreparationRefreshContinuationEnd',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
