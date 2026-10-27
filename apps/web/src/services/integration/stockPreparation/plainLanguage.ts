@@ -713,13 +713,18 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
   }),
   /**
    * 备料分批拉取第一期 step 5 PR-8 (register R-63) — the change plan (变更计划确认 / 受控更新) and the review (变更复核).
-   * Minimal copy; the pages are PR-9's. Every refusal means nothing was confirmed, written or reviewed.
+   * Minimal copy; the pages are PR-9's. A confirm / review refusal changes nothing.
+   *
+   * PR-8 review fix B1: STOCK_PREP_CHANGE_PLAN_STALE is ALSO the generic version fence's stop (register R-63 ①), live for
+   * EVERY project's apply — including a stop AFTER rows were written (`details.partial: true`). So the code-level
+   * sentence claims neither "nothing was written" nor anything about a 变更计划 (an ordinary project has none); the
+   * `<code>/<reason>` readings below carry the specifics, and only the reasons a plan-bound run produces name the plan.
    */
   STOCK_PREP_CHANGE_PLAN_STALE: Object.freeze({
-    zh: '这次的内容变更已经不是系统现在算出的结果(来源、待确认项或表里的内容又变了),这次没有确认、也没有写入。',
-    en: 'This content change is no longer what the server computes now (the source, the holds or the sheet moved), so nothing was confirmed or written.',
-    zhNext: '请重新试算,再打开变更计划重新确认。',
-    enNext: 'Preview again, then reopen the change plan and confirm it again.',
+    zh: '试算之后,来源、待确认项或表里的内容又变了,这一步停了下来。',
+    en: 'The source, the holds or the sheet moved after the preview, so this step stopped.',
+    zhNext: '请重新试算后再试。',
+    enNext: 'Preview again, then try again.',
   }),
   STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED: Object.freeze({
     zh: '这次的内容变更现在不能作为变更计划确认;什么都没有改动。',
@@ -1425,7 +1430,40 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
     zhNext: '请重新试算,看过新的变化后重新确认。',
     enNext: 'Preview again, read the new change and confirm it again.',
   }),
-  'STOCK_PREP_CHANGE_PLAN_STALE/plan_replaced': RELOAD_THIS_ITEM,
+  // PR-8 review fix B1: plan_replaced / plan_written reach the APPLY of a run bound to a confirmed plan (never a confirm),
+  // so they say what stopped — not RELOAD_THIS_ITEM's 「这次没有确认」.
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_replaced': Object.freeze({
+    zh: '这次试算绑定的变更计划已经被替换(又有新的确认或新的计算),这一步停了下来。',
+    en: 'The change plan this preview was bound to has been replaced (a newer confirm or computation), so this step stopped.',
+    zhNext: '请重新试算;如果内容又变了,请拉取人员重新确认变更计划。',
+    enNext: 'Preview again; if the change moved, the puller confirms the change plan again.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_written': Object.freeze({
+    zh: '这次试算绑定的变更计划已经写入过了,这一步停了下来。',
+    en: 'The change plan this preview was bound to has already been written, so this step stopped.',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  // PR-8 review fix B1: the version fence's remaining stops (register R-63 ①, ANY project's apply). Neutral about what
+  // landed — rows written before the stop stay written (the result's counts say how many); no 变更计划 advice.
+  'STOCK_PREP_CHANGE_PLAN_STALE/record_missing': Object.freeze({
+    zh: '写入时发现试算时依据的一行已经不在表里了,写入已停止。',
+    en: 'While writing, a row the preview was computed against was no longer in the sheet; writing stopped.',
+    zhNext: '请重新试算后再应用;已写入的行数见结果。',
+    enNext: 'Preview again, then apply; the rows already written are in the result.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/record_replaced': Object.freeze({
+    zh: '写入时发现试算时依据的一行被删掉后又新建了一行,写入已停止。',
+    en: 'While writing, a row the preview was computed against had been deleted and re-created; writing stopped.',
+    zhNext: '请重新试算后再应用;已写入的行数见结果。',
+    enNext: 'Preview again, then apply; the rows already written are in the result.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/duplicate_target_key': Object.freeze({
+    zh: '写入时发现表里同一个键出现了两行,写入已停止。',
+    en: 'While writing, the sheet held two rows under one key; writing stopped.',
+    zhNext: '请重新试算;如果仍提示重复,请负责人处理表里的重复行。',
+    enNext: 'Preview again; if the duplicate is still reported, ask the owner to resolve the duplicate rows.',
+  }),
   'STOCK_PREP_CHANGE_PLAN_STALE/machine_columns_moved': Object.freeze({
     zh: '写入时发现系统维护的列在试算之后被改动了,写入已停止(不会盲目重试,也不会覆盖人工填写)。',
     en: 'While writing, a column the system maintains was found changed since the preview; the write stopped (no blind retry, no human entry overwritten).',
@@ -3069,6 +3107,28 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '请联系负责人核对项目表登记。',
     enNext: 'Ask the owner to check the project-sheet registration.',
   }),
+  // PR-8 review fix B1 — 409 STOCK_PREP_CHANGE_PLAN_STALE at the apply, by the tri-state `details.partial` (WL-6's rule).
+  /** `partial: true`: the version fence stopped the run AFTER a host write was attempted — rows may have landed. */
+  WRITE_ROW_CHANGED_MIDWAY: Object.freeze({
+    zh: '写入中途发现有行在试算之后被改动,写入已停止,可能已写进一部分',
+    en: 'A row changed after the preview; writing stopped part-way and some rows may already have landed',
+    zhNext: '请重新同步(重新试算);已写入的行不会重复写。',
+    enNext: 'Sync again (preview again); rows that landed will not be written twice.',
+  }),
+  /** `partial: false` or unreported: neutral — neither "nothing was written" nor "rows landed". */
+  WRITE_ROW_CHANGED: Object.freeze({
+    zh: '写入时发现有行在试算之后被改动,写入已停止',
+    en: 'A row changed after the preview, so writing stopped',
+    zhNext: '请重新同步(重新试算)。',
+    enNext: 'Sync again (preview again).',
+  }),
+  /** A reason only a run bound to a confirmed change plan produces (plan replaced / invalidated / already written). */
+  WRITE_CHANGE_PLAN_STALE: Object.freeze({
+    zh: '这次试算绑定的已确认变更计划已经不是当前的计划,写入已停止',
+    en: 'The confirmed change plan this preview was bound to is no longer the current one, so writing stopped',
+    zhNext: '请重新同步(重新试算);如果内容又变了,请拉取人员重新确认变更计划。',
+    enNext: 'Sync again (preview again); if the change moved, the puller confirms the change plan again.',
+  }),
 
   // 4. 批次存档
   BATCH_ARCHIVED: Object.freeze({
@@ -3315,6 +3375,17 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
     en: 'The last write did not finish cleanly and this project awaits recovery; nothing was written this time.',
     zhNext: '请联系平台管理员按手册恢复,不是数据源的问题。',
     enNext: 'Ask the platform admin to recover it per the runbook; it is not a data-source problem.',
+  }),
+  /**
+   * PR-8 review fix B1: the write STOPPED after a host write was attempted (or it is not known whether one was). Rows
+   * may already be in the sheet, so this is never the `blocked` sentence (G-4: 「数据没有变化」 only when nothing was
+   * written) — and never the `partial` one either, which states rows DID land.
+   */
+  interrupted: Object.freeze({
+    zh: '写入没有完成 —— 中途停了下来,可能已经写进了一部分行,表里的数据可能已经变了。',
+    en: 'The write did not finish — it stopped part-way, some rows may already have landed, and the table may have changed.',
+    zhNext: '已写进去的行不会重复写。请重新同步(重新试算);下面每一步都写了停在哪里。',
+    enNext: 'Rows that landed will not be written twice. Sync again (preview again); each step below says where it stopped.',
   }),
   blocked: Object.freeze({
     zh: '这次没有导入成功,数据没有变化。',
