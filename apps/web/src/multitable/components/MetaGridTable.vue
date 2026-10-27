@@ -931,6 +931,64 @@ function scrollFocusedRowIntoWindow() {
   }
 }
 
+// 客户问题 2026-10-27（4b）：点通知、评论深链、URL #recordId 定位一条记录后，父组件调用
+// scrollToRecord 把目标行滚进可视区。以前只给行加高亮，从不滚动，目标行常在几屏之下。
+// 偏移按行序号 × 行高算（分组视图用 groupedItemOffsets），开不开虚拟滚动都适用；
+// 有展开行时行高不一致，此时全部行都已渲染，改量 DOM。偏移是相对 tbody 顶部的。
+type RecordRowSpan = { top: number; height: number; pinned: number; frozen: boolean }
+function recordRowSpan(recordId: string): RecordRowSpan | null {
+  if (groupedRows.value) {
+    // 折叠分组里的行不在 renderableGroupItems 里，返回 null（不展开别人折叠的分组）。
+    const itemIndex = renderableGroupItems.value.findIndex((item) => item.kind === 'data' && item.row.id === recordId)
+    if (itemIndex < 0) return null
+    const offsets = groupedItemOffsets.value
+    return { top: offsets[itemIndex], height: offsets[itemIndex + 1] - offsets[itemIndex], pinned: 0, frozen: false }
+  }
+  const index = filteredRows.value.findIndex((row) => row.id === recordId)
+  if (index < 0) return null
+  const rowH = rowHeightPx.value
+  const frozenN = frozenTopRowsCountEffective.value
+  if (index < frozenN) return { top: index * rowH, height: rowH, pinned: 0, frozen: true }
+  // 冻结的前 N 行贴在表头下面，会挡住可视区顶部这一段。
+  const pinned = frozenN * rowH
+  if (expandedRowIds.value.size > 0 && tableWrap.value) {
+    const body = tableWrap.value.querySelector<HTMLElement>('tbody')
+    const rowEl = tableWrap.value.querySelectorAll<HTMLElement>('tbody tr.meta-grid__row')[index]
+    if (body && rowEl) {
+      const top = rowEl.getBoundingClientRect().top - body.getBoundingClientRect().top
+      return { top, height: rowEl.offsetHeight > 0 ? rowEl.offsetHeight : rowH, pinned, frozen: false }
+    }
+  }
+  return { top: index * rowH, height: rowH, pinned, frozen: false }
+}
+
+// 返回 true：目标行在已加载的行里（已滚到可视区，或本来就整行可见、冻结行）。
+// 返回 false：目标行不在已加载的行里，或在折叠的分组里；不滚动。
+// 本来就整行可见时不动，免得画面跳；否则把目标行滚到可视区中间。
+function scrollToRecord(recordId: string): boolean {
+  const span = recordRowSpan(recordId)
+  if (!span) return false
+  const el = tableWrap.value
+  if (span.frozen || !el) return true
+  const header = headerHeightPx.value
+  const viewport = effectiveViewportHeight.value
+  const rowTop = header + span.top
+  const rowBottom = rowTop + span.height
+  const visibleTop = el.scrollTop + header + span.pinned
+  const visibleBottom = el.scrollTop + viewport
+  if (rowTop >= visibleTop && rowBottom <= visibleBottom) return true
+  const visibleBodyHeight = Math.max(span.height, viewport - header - span.pinned)
+  let next = rowTop - header - span.pinned - (visibleBodyHeight - span.height) / 2
+  // 浏览器里 scrollHeight 含上下占位行，等于整表高度；jsdom 下为 0，不做上限。
+  const maxScroll = el.scrollHeight - el.clientHeight
+  if (maxScroll > 0) next = Math.min(next, maxScroll)
+  next = Math.max(0, Math.round(next))
+  el.scrollTop = next
+  // 立刻同步虚拟窗口，不等 scroll 事件，保证目标行这一帧就被渲染出来。
+  scrollTop.value = el.scrollTop
+  return true
+}
+
 function onBeforePrint() { printing.value = true }
 function onAfterPrint() { printing.value = false }
 
@@ -2029,6 +2087,8 @@ function onKeydown(e: KeyboardEvent) {
     scrollFocusedRowIntoWindow()
   }
 }
+
+defineExpose({ scrollToRecord })
 </script>
 
 <style scoped>

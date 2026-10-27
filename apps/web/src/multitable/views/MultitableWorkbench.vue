@@ -416,6 +416,7 @@
         -->
         <MetaGridTable
           v-else
+          ref="gridTableRef"
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
@@ -819,6 +820,8 @@ import {
   duplicateRowsSkipped as fmtDuplicateRowsSkipped,
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
+  deepLinkLocateHint as fmtDeepLinkLocateHint,
+  type DeepLinkLocateMiss,
   sheetDeleteConfirm as fmtSheetDeleteConfirm,
   sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
   fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
@@ -1596,7 +1599,7 @@ async function onHistoryOpenRecord(payload: { sheetId: string; recordId: string 
     exitDashboard()
   }
   closeHistory()
-  await resolveDeepLink(payload.recordId)
+  await resolveDeepLink(payload.recordId, { locate: true })
 }
 
 function closeHistory() {
@@ -1706,6 +1709,9 @@ const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 // entry and keeps today's toast when the alert could not render (other tab active, field row not
 // rendered, inspector closed or showing another record). Same idiom as `toastRef.showError` above.
 const recordInspectorRef = ref<InstanceType<typeof MetaRecordInspector> | null>(null)
+// 客户问题 2026-10-27（4b）：定位记录后调用表格暴露的 scrollToRecord（见 resolveDeepLink）。
+// 只在表格视图下挂载；其他视图类型时为 null。
+const gridTableRef = ref<InstanceType<typeof MetaGridTable> | null>(null)
 const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
 // #5795: NOT a roster any more. The mention-candidate endpoint is search-required and capped, so this
@@ -4396,7 +4402,7 @@ async function onNotificationNavigate(payload: { sheetId: string; recordId: stri
     // switching), so exiting unconditionally here is safe.
     exitDashboard()
   }
-  await resolveDeepLink(payload.recordId)
+  await resolveDeepLink(payload.recordId, { locate: true })
 }
 
 function onSelectView(viewId: string) {
@@ -5496,6 +5502,7 @@ async function applyCommentDeepLink(recordId: string, options?: {
     highlightCommentId: options?.commentId ?? null,
     markReadCommentId: options?.commentId ?? null,
     targetFieldId: options?.fieldId ?? null,
+    locate: true,
   })
 }
 
@@ -5736,15 +5743,47 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
 // the timeline/hierarchy edit surfaces are themselves only reachable with the record already
 // selected in an open inspector), so this is a no-op re-assertion there, not a surprise reopen of a
 // panel the user had deliberately closed for some OTHER record.
-async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+//
+// 客户问题 2026-10-27（4b）：`locate: true` 的调用方（通知铃铛、历史中心、评论深链 / URL #recordId，
+// 都是「点了要定位到这一行」）额外做两件事：
+//   1. 目标行不在已加载的行里、且表格能追加加载时，按现有分页（grid.loadMore）最多再追加
+//      DEEP_LINK_LOCATE_MAX_EXTRA_PAGES 页，找到就走「已加载」分支；
+//   2. 选中后让表格把这一行滚进可视区（MetaGridTable.scrollToRecord）。
+// 仍没定位到时，详情照常用 getRecord 打开，并给一条轻提示说明原因。只「刷新已选记录」的调用方
+// （冲突重载、时间线 / 层级改动后）不传 locate，行为不变，也不会把表格滚走。
+// 追加期间组件被卸载、或已切到别的表时，这次定位作废：不打开详情、不提示（免得按新表去取旧表的
+// 记录，报「未找到记录」）。等待阶段切表不作废：等待本来就是为了等切表 / 外部路由带来的加载结束，
+// 之后在当时的表里找。
+async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null; locate?: boolean }) {
+  const { locate = false, ...selectOptions } = options ?? {}
   // `open: true` is merged into whatever `selectRecord` opts this call already builds — NOT set on
   // `inspectorOpen` directly here — so a declined discard-changes prompt inside `selectRecord`'s own
   // guard cancels the open too (see that function's own comment; same fix as `openRecord`).
-  const selectOpts = { ...options, open: true }
+  const selectOpts = { ...selectOptions, open: true }
+  let locateMiss: DeepLinkLocateMiss | null = null
+  if (locate) {
+    // 切表 / 刚进页面时行数据可能还在路上，先等这次加载结束（有上限），免得在旧的或空的行里找。
+    await waitForGridSettled()
+    if (!workbenchAlive) return
+    const locateSheetId = workbench.activeSheetId.value
+    if (gridTableRef.value) {
+      const outcome = await appendGridUntilRecordLoaded(recordId)
+      if (!workbenchAlive || workbench.activeSheetId.value !== locateSheetId) return
+      // 'aborted'（追加期间视图变了，或表格加载失败）：不提示，按原来的方式找这条记录（下面的已加载 / getRecord）。
+      if (outcome !== 'found' && outcome !== 'aborted') locateMiss = outcome
+    }
+  }
   // First check if it's in the current rows
   const inPage = grid.rows.value.find((r) => r.id === recordId)
   if (inPage) {
-    await selectRecord(recordId, selectOpts)
+    const selecting = selectRecord(recordId, selectOpts)
+    if (locate) {
+      // selectRecord 在第一个 await 之前就同步设好了 selectedRecordId（放弃改动的确认也在那之前），
+      // 所以不必等它加载完评论再滚动：两件事同时进行。确认被拒时 selectedRecordId 没变，不滚动。
+      await Promise.all([selecting, scrollGridToRecord(recordId)])
+    } else {
+      await selecting
+    }
     return
   }
   // Fetch from server
@@ -5764,7 +5803,105 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     await selectRecord(recordId, selectOpts)
   } catch (e: any) {
     showError(fmtRecordNotFound(recordId, isZh.value))
+    return
   }
+  // 详情已打开，但表格里没能定位到这一行：轻提示（info），不当成错误。
+  if (locateMiss && selectedRecordId.value === recordId) {
+    toastRef.value?.show?.(fmtDeepLinkLocateHint(locateMiss, grid.rows.value.length, isZh.value), 'info', 5000)
+  }
+}
+
+// 客户问题 2026-10-27（4b）：定位记录时最多再追加加载的页数。每页行数随用户的选择（50 / 200 / 500），
+// 所以最多再拉 500 / 2000 / 5000 行；再往后还有就停下，给轻提示（见 deepLinkLocateHint 'capped'）。
+// 另受 useMultitableGrid 的累计 5000 行上限约束。只用现有分页加载，不新增后端接口。
+const DEEP_LINK_LOCATE_MAX_EXTRA_PAGES = 10
+// 定位前等表格当前这次加载结束的上限。
+const DEEP_LINK_GRID_SETTLE_TIMEOUT_MS = 10000
+
+// 定位前判断「表格还在加载」。切表时 selectSheet 只改 activeSheetId、清空 activeViewId，接着：
+//   - 表格先不带视图取一次行（这批行没有视图的筛选和排序，不能拿来定位）；
+//   - 同时取表元数据（/context）。它回来以后才设好 activeViewId，表格再按这个视图重新取行。
+// loadSheetMeta 不会把 workbench.loading 设为 true，所以 /context 在路上这段由 capabilitiesStale 覆盖
+// （从 selectSheet 到 /context 返回一直为真）。/context 失败时 capabilitiesStale 会一直为真，
+// 这时 workbench.error 有值，放行，免得每次白等到超时。workbench.loading 只在载入表列表、整个 base
+// 的上下文（loadSheets / loadBaseContext / switchBase / syncExternalContext）时为真。
+function isGridBusy(): boolean {
+  const sheetMetaPending = capabilitiesStale.value && !workbench.error?.value
+  return Boolean(sheetMetaPending || workbench.loading?.value || grid.loading.value || grid.loadingMore?.value)
+}
+
+async function waitForGridSettled(): Promise<void> {
+  // 让切表 / 切视图触发的 loadViewData 先开始（useMultitableGrid 的监听是 pre-flush）。
+  await nextTick()
+  if (!isGridBusy()) return
+  await new Promise<void>((resolve) => {
+    let stop: (() => void) | null = null
+    const timer = setTimeout(() => {
+      stop?.()
+      resolve()
+    }, DEEP_LINK_GRID_SETTLE_TIMEOUT_MS)
+    // flush: 'post'：这个监听建在组件实例之外，若是 pre 任务会排在同一轮所有组件内的 pre 任务之前。
+    // /context 返回的那一轮里，capabilitiesStale 变为 false，而表格按新视图重新取行的监听（pre，
+    // 会同步把 grid.loading 设为 true）还没执行，pre 任务在这时判断会误以为「已经加载完」。
+    // post 任务在这一轮的 pre 任务之后才判断，看到的是表格已经开始重新取行。
+    stop = watch(isGridBusy, (busy) => {
+      if (busy) return
+      clearTimeout(timer)
+      stop?.()
+      resolve()
+    }, { flush: 'post' })
+  })
+}
+
+// 定位时，loadMore 没追加到行、而表格正忙（loadMore 因正在加载直接返回，或被一次重载取代）时，
+// 等表格加载结束再试的次数上限。不计入追加页数。
+const DEEP_LINK_LOCATE_MAX_BUSY_RETRIES = 2
+
+// 'found'：目标行已在 grid.rows 里。'aborted'：停止定位、不提示（追加期间组件卸载或表 / 视图变了，
+// 或表格加载失败）。其余为没定位到的原因。
+async function appendGridUntilRecordLoaded(recordId: string): Promise<'found' | 'aborted' | DeepLinkLocateMiss> {
+  const sheetId = workbench.activeSheetId.value
+  const viewId = workbench.activeViewId.value
+  const isLoaded = () => grid.rows.value.some((row) => row.id === recordId)
+  const changed = () => !workbenchAlive || workbench.activeSheetId.value !== sheetId || workbench.activeViewId.value !== viewId
+  let pages = 0
+  let busyRetries = 0
+  while (!isLoaded()) {
+    if (changed()) return 'aborted'
+    // 只有平铺视图、且从第 1 行开始累计时才能追加（与表格滚到底自动追加是同一条路径）。
+    if (!gridCanLoadMore.value) break
+    if (pages >= DEEP_LINK_LOCATE_MAX_EXTRA_PAGES) return 'capped'
+    const before = grid.rows.value.length
+    await grid.loadMore()
+    if (changed()) return 'aborted'
+    if (grid.rows.value.length > before) {
+      pages += 1
+      continue
+    }
+    // 行数没有增加：表格正忙时等它结束再试（有上限）；不忙就是追加失败，不再重试。
+    if (busyRetries < DEEP_LINK_LOCATE_MAX_BUSY_RETRIES && isGridBusy()) {
+      busyRetries += 1
+      await waitForGridSettled()
+      continue
+    }
+    break
+  }
+  if (isLoaded()) return 'found'
+  // 表格加载失败：行是空的或不全，「可能被筛选隐藏」「还没加载到」之类的说法都不成立，不提示。
+  if (grid.error?.value) return 'aborted'
+  if (grid.accumulationCapped?.value || grid.page.value.hasMore) {
+    // 平铺视图还有后续行没加载（累计上限、或追加失败）。
+    if (gridIsFlatPath.value && grid.page.value.offset === 0) return 'capped'
+    return 'unavailable'
+  }
+  return grid.page.value.offset === 0 ? 'absent' : 'unavailable'
+}
+
+async function scrollGridToRecord(recordId: string): Promise<void> {
+  // 等新追加的行、选中状态渲染进表格后再算位置。
+  await nextTick()
+  if (selectedRecordId.value !== recordId) return
+  gridTableRef.value?.scrollToRecord?.(recordId)
 }
 
 function clearDeepLinkedRecordState() {
