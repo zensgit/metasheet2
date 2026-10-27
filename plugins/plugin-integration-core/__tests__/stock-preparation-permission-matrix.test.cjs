@@ -1988,19 +1988,18 @@ function theRailVocabularyAndTheLandingRuleHold() {
   )
   assert.equal(STOCK_PREP_RAIL_GATE_PULL, 'pull', 'rail: the PULL gate token')
 
-  // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
-  // the platform-admin gate they were always on.
+  // The remaining legacy MVP keys are FOLDED into 深度工具 and still on the platform-admin gate they
+  // were always on. 旧「备料行」(prep-line) and 旧「异常队列」(exception-queue) were retired on 2026-10-27
+  // (owner: 「不用就去掉」); their backend routes and tables stay.
   const deploy = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'deploy')
   assert.equal(deploy.advancedGate, 'platform-admin', 'rail: 深度工具 stays platform-admin')
   assert.deepEqual([...deploy.advanced].sort(), [
     'bom-snapshot-diff',
     'dashboard',
-    'exception-queue',
     'material-mapping',
-    'prep-line',
     'project-workspace',
     'unit-conversion',
-  ], 'rail: all seven legacy MVP tabs are folded, none dropped')
+  ], 'rail: the five remaining legacy MVP tabs are folded; prep-line and exception-queue are retired')
 
   // THE GATE RESOLVER. Per actor, per token, plus the refusal an unknown token must produce for
   // EVERYONE — a mistyped gate must hide a group, never open one.

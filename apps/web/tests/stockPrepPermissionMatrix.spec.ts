@@ -647,8 +647,9 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(workspace).toContain('canUseLegacyMvpTabs')
     expect(workspace).toContain("effectiveKey === 'confirmation-queue'")
     expect(workspace).not.toContain("v-if=\"activeKey === 'dashboard'\"")
-    // Exactly the seven legacy MVP tabs are marked; the confirmation queue is not.
-    expect(workspace.split('legacyMvp: true').length - 1).toBe(7)
+    // Exactly the five remaining legacy MVP tabs are marked; the confirmation queue is not. 7 -> 5:
+    // 旧「备料行」 and 旧「异常队列」 were retired on 2026-10-27 (owner: 「不用就去掉」).
+    expect(workspace.split('legacyMvp: true').length - 1).toBe(5)
   })
   // ---------------------------------------------------------------------------
   // F-09 the RAIL manifest and the D2 landing — the second thing the mirror pins
@@ -689,14 +690,20 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     // 14 -> 15 是 P2-1 的 项目查询(设计稿 §6.3 第一行),【工作】里排在 项目备料 之后。
     // 15 -> 16 是 S5b(R-39)的 成员与权限,【部署与接入】的最后一项;它另外受服务端开关约束(见 SMW-SHELL)。
     // 16 -> 17 是 备料分批拉取第一期 step 4 PR-7(R-62 ①)的 拉取待确认,【工作】的最后一项,PULL 档(`pull` 闸)。
-    expect(keys.length).toBe(17)
+    // 17 -> 15:旧 异常队列 / 备料行 下线(owner 2026-10-27 不用就去掉),深度工具 7 -> 5。
+    expect(keys.length).toBe(15)
     expect(new Set(keys).size).toBe(keys.length)
     for (const key of keys) {
       expect(workspace, `${key} must be a view key in the shell`).toContain(`key: '${key}',`)
     }
-    // 不下线: every legacy MVP key is still in the manifest, folded rather than removed.
-    for (const key of ['dashboard', 'project-workspace', 'bom-snapshot-diff', 'material-mapping', 'unit-conversion', 'prep-line', 'exception-queue']) {
+    // Every remaining legacy MVP key is still in the manifest, folded rather than removed.
+    for (const key of ['dashboard', 'project-workspace', 'bom-snapshot-diff', 'material-mapping', 'unit-conversion']) {
       expect(keys, `${key} must still be reachable`).toContain(key)
+    }
+    // ...and the two the owner retired on 2026-10-27 (「不用就去掉」) are gone from both the rail and the shell.
+    for (const key of ['prep-line', 'exception-queue']) {
+      expect(keys, `${key} was retired`).not.toContain(key)
+      expect(workspace, `${key} must not be a view key in the shell`).not.toContain(`key: '${key}',`)
     }
   })
 

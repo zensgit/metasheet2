@@ -228,16 +228,10 @@
         :project-id="selectedProjectId"
         :scope="scope"
       />
-      <StockPreparationPrepLineView
-        v-else-if="effectiveKey === 'prep-line'"
-        :project-id="selectedProjectId"
-        :scope="scope"
-      />
-      <StockPreparationExceptionQueueView
-        v-else-if="effectiveKey === 'exception-queue'"
-        :project-id="selectedProjectId"
-        :scope="scope"
-      />
+      <!-- 旧「备料行」(prep-line) 与 旧「异常队列」(exception-queue) 已下线 (owner 2026-10-27:「不用就去掉」).
+           UI entry only: the two view components, their services and specs stay on disk unwired, and the
+           backend routes (/prep-lines, /generation/run, /exceptions*) and their tables are untouched, so
+           reverting this change restores both tabs. A stale `?tab=` for either key folds to the landing. -->
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
       </p>
@@ -287,8 +281,6 @@ import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorks
 import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
 import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
 import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
-import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
-import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import StockPreparationProjectBoardView from './StockPreparationProjectBoardView.vue'
 import StockPreparationProjectQueryView from './StockPreparationProjectQueryView.vue'
@@ -337,9 +329,9 @@ function bi(zh: string, en: string): string {
 }
 
 type StockPreparationViewKey =
-  // P1-1's four new keys. NO OLD KEY WAS REMOVED — `project-board`, `install` and the seven legacy
-  // keys all still resolve, so every existing deep link, every `navigate-stage` caller and every
-  // spec that names one keeps working.
+  // P1-1's four new keys. P1-1 REMOVED NO OLD KEY — `project-board`, `install` and the legacy keys
+  // all kept resolving. The owner's 2026-10-27 ruling (「不用就去掉」) later retired two legacy keys,
+  // `prep-line` and `exception-queue`; a stale `?tab=` naming either now folds to the landing.
   | 'home'
   | 'getting-started'
   | 'ops'
@@ -357,8 +349,6 @@ type StockPreparationViewKey =
   | 'bom-snapshot-diff'
   | 'material-mapping'
   | 'unit-conversion'
-  | 'prep-line'
-  | 'exception-queue'
 
 interface StockPreparationViewTab {
   key: StockPreparationViewKey
@@ -613,27 +603,10 @@ const views: StockPreparationViewTab[] = [
     endpoint: '/api/integration/stock-preparation/unit-conversions/summary',
     confirmWrites: true,
   },
-  {
-    key: 'prep-line',
-    legacyMvp: true,
-    zh: '备料行',
-    en: 'Prep Lines',
-    zhDesc: '只有确认过的数据才会生成备料明细。物料对应关系或单位还没定下来的,不会产出可以用的行。',
-    enDesc: 'Prep lines are built only from data you have confirmed. While a material match or a unit is still unresolved, no usable line is produced.',
-    endpoint: '/api/integration/stock-preparation/prep-lines',
-    // View 5's generation run is a MULTITABLE-INTERNAL table op (W4a) — badge drops the GET-only claim.
-    confirmWrites: true,
-  },
-  {
-    key: 'exception-queue',
-    legacyMvp: true,
-    zh: '异常队列',
-    en: 'Exception Queue',
-    zhDesc: '所有拿不准的行都在这里,可以逐条处理。拦路的问题会一直显示着,不处理就出不了最终结果。',
-    enDesc: 'Everything the system is unsure about is here and can be worked through. Blocking problems stay visible and hold up the final result until they are handled.',
-    endpoint: '/api/integration/stock-preparation/exceptions',
-    confirmWrites: true,
-  },
+  // 旧「备料行」(prep-line) and 旧「异常队列」(exception-queue) were retired here (owner 2026-10-27:
+  // 「不用就去掉」). Nothing live fed them: the exception sheet's only writer is the generation run, which
+  // only the 备料行 tab triggered, and its rows were cleared only from the 异常队列 tab. Backend routes and
+  // tables stay; revert this change to bring both tabs back.
   // 【帮助】— 怎么用这个页面 + 错误码对照. LAST in this array on purpose: `landingKey` falls back to
   // `visible[0]` only when no landing candidate is visible at all, and a help page is the one view
   // nobody should ever be dropped onto by default.
@@ -1024,7 +997,7 @@ function dropStaleProjectQueryState(): void {
  * SEEDED SYNCHRONOUSLY, during setup, so a shared link paints its destination on the FIRST frame
  * rather than painting the landing and then swapping. It is read through `views` (not through a
  * literal list), so EVERY key is accepted — the four new ones and every old one, `project-board` and
- * the seven legacy keys included. An unknown value is ignored rather than treated as an error: a
+ * the remaining legacy keys included. An unknown value (a retired key among them) is ignored rather than treated as an error: a
  * stale link should land somewhere sensible, and `activeView` folds any key this principal cannot
  * see back to their landing anyway.
  *

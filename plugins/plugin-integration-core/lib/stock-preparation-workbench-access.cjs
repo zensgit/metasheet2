@@ -819,8 +819,6 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
       'bom-snapshot-diff',
       'material-mapping',
       'unit-conversion',
-      'prep-line',
-      'exception-queue',
     ]),
   }),
   Object.freeze({

@@ -36,14 +36,13 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, '..', '..', '..')
 
+// 旧「备料行」(prep-line) 与 旧「异常队列」(exception-queue) 已于 2026-10-27 下线(owner:「不用就去掉」).
 const LEGACY_TAB_KEYS = [
   'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
   'material-mapping',
   'unit-conversion',
-  'prep-line',
-  'exception-queue',
 ] as const
 
 function expectNoUnmockedRoutes(log: StockPrepRouteLog): void {
@@ -118,7 +117,7 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
       el.focus()
       return document.activeElement === el ? 'focusable' : 'not-focusable'
     }), [...LEGACY_TAB_KEYS])
-    expect(focusable, '折叠里的七个 legacy tab 都不在 Tab 序里').toEqual(
+    expect(focusable, '折叠里的 legacy tab 都不在 Tab 序里').toEqual(
       LEGACY_TAB_KEYS.map(() => 'not-focusable'),
     )
 
@@ -217,7 +216,7 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
     //      the disclosure is open — proving the earlier wrap was about visibility, not a dead key. ----
     await page.locator('[data-testid="stock-prep-tab-help"]').focus()
     await page.keyboard.press('End')
-    await expect(page.locator('[data-testid="stock-prep-tab-exception-queue"]')).toBeFocused()
+    await expect(page.locator('[data-testid="stock-prep-tab-unit-conversion"]')).toBeFocused()
 
     // ---- tablist 直接子节点只有 tab (as the accessible-content invariant, see the note above) ----
     const disclosureOutside = await tablist.evaluate((el, toggleId) => {
