@@ -87,6 +87,10 @@
  *       host / lock / registry / audit store and the lock's in-transaction bump inside the store's real transaction:
  *       interleavings (abandoned lease, frozen confirm vs acquire via pg_blocking_pids, live lease, frozen holder), E03,
  *       E04, E09 (a real audit trigger), A08 across two sessions, U03, U04 (S4-*; listed in the S4 describe's own header).
+ *   S8 (batch-refresh step 5, PR-8) the CHANGE PLAN on the real stack — migration 104, the three routes, the controlled update
+ *       through the host's own read-modify-write (a person's cell vs a plugin-owned cell committed inside the host's patch,
+ *       pg_blocking_pids), the review, the absorption of an unreviewed write (B1), E09, C07, the combined confirm, register ①
+ *       on a not-governed project, and the confirm / review interleavings (S8-*; listed in the S8 describe's own header).
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -2121,7 +2125,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
 
       afterAll(async () => {
         const like = `${S2_TENANT_PREFIX}%`
-        for (const table of [RT.member, RT.continuation, RT.hold, RT.execution, RT.state, 'integration_stock_prep_project_target']) {
+        for (const table of [RT.changePlan, RT.member, RT.continuation, RT.hold, RT.execution, RT.state, 'integration_stock_prep_project_target']) {
           await q(`DELETE FROM ${table} WHERE tenant_id LIKE $1`, [like]).catch(() => {})
         }
       })
@@ -2135,7 +2139,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                   pg_get_expr(i.indpred, i.indrelid) AS predicate
              FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
             WHERE i.indrelid = ANY($1::regclass[])`,
-          [[RT.continuation, RT.member, RT.hold, RT.state]],
+          // Step 5 PR-8: + the change-plan table (migration 104; its two partial uniques are in the kit's list).
+          [[RT.continuation, RT.member, RT.hold, RT.state, RT.changePlan]],
         )
         for (const index of refreshKit.UNIQUE_INDEXES) {
           const row = indexes.rows.find((entry: any) => entry.name === index.name)
@@ -5844,6 +5849,934 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               exported: { status: 200, lastHeader: EXPORT_HEADERS[EXPORT_HEADERS.length - 1], headerCount: EXPORT_HEADERS.length },
               audit: { refused: [`${BLOCKED}:not_settled`], delivered: ['complete:0'] },
             })
+          }, 300000)
+        })
+
+        // ── S8 (batch-refresh step 5, PR-8): the CHANGE PLAN on the real stack ─────────────────────────────────────────
+        // The routes over the production host / lock / registry / audit store (`s3aStack`), the in-transaction bump inside
+        // the store's real transaction, and the host's own read-modify-write patch. Values-free outcome tokens only; the
+        // plan's private record set and the floor's notes never reach an `observed` line.
+        //   S8-01 migration 104 on PostgreSQL: INTEGER counters, the CHECKs and the two partial uniques as DB facts; a
+        //         confirmed and a written plan of one project coexist.
+        //   S8-02 (C01 / C02 / C11) a pilot second pull (a unicode material: the JSONB round trip of the plan fingerprint)
+        //         suspends on content holds; the page (presence only, ONE audit row, no receipt), the hold page's receipt,
+        //         the confirm (201: the plan, the bump `change_plan_confirm` IN the transaction, the holds resolved, the
+        //         audit row); the re-preview's token binds the plan.
+        //   S8-03 (C02, m2) the source moves after the confirm: the re-preview invalidates the plan (source_changed) with ONE
+        //         system audit row (actor NULL) on its own reconcile; the earlier bound token's apply is refused; the main
+        //         sheet and its revisions unchanged.
+        //   S8-04a (C03 / A12, M2) the controlled update: a person's note between the confirm and the write re-keys nothing;
+        //         only the plan's fields + RUN change, the note and the keys untouched, the revisions name exactly those
+        //         fields; the plan written by a bound execution.
+        //   S8-04b (A12 / F15, human) a person's cell committed by another session INSIDE the host's patch (SHARE lock on
+        //         meta_records, pg_blocking_pids): one conflict, one retry, the person's value kept.
+        //   S8-04c (machine) a plugin-owned cell the same way: 409 CHANGE_PLAN_STALE machine_columns_moved, the execution
+        //         aborted, the plan invalidated(execution_failed), failed_pending_recovery: the page blocked, a confirm 409
+        //         RECOVERY_PENDING, the export 409.
+        //   S8-05 (C04 / C11 / C12 / C08) written => change_pending_review: export 409, an unbound token's apply 409
+        //         REVIEW_PENDING, the preview review_pending (no token, no bump) yet settled; the written page + receipt;
+        //         the review (200, decision_version + 1, no bump, two audit rows, sameActorAsConfirm); export 200; a new
+        //         change => export 409 again.
+        //   S8-07 (C06, B1) W written, a change elsewhere: W's review refused hold_open, then change_plan_pending once B is
+        //         confirmed; B's preview mints (no deadlock), B's write absorbs W (superseded, review-only fields); W's review
+        //         STALE plan_replaced; the export waits for B's review.
+        //   S8-08 (C05 / U03) the gate on the real stack: read tier 403, tenantless 403 (no audit row), another tenant's plan
+        //         id and an unknown id answer the same bytes.
+        //   S8-09 (E09) the confirm's audit insert fails (BEFORE INSERT trigger 42501): 503 audit, nothing persisted,
+        //         generation unchanged; with the trigger gone the same body commits with exactly one audit row.
+        //   S8-10 (C07) a structure hold beside the content holds: the page says so and the confirm is 409
+        //         STRUCTURE_CHANGE_PRESENT with nothing persisted.
+        //   S8-11 (§10.3 (5)) the combined confirm (candidate_content_differs): relationship + members + plan in ONE bump;
+        //         the write updates the old rows (no copy of the continued subtree), S root raw = total; the review completes.
+        //   S8-13 (F15, register ①, NOT governed) the same human / machine interleavings on a not-governed project: the
+        //         person's value kept, a machine move stops 409 with partial counts; no step-4 / step-5 row.
+        //   S8-I1 confirm vs apply (pg_blocking_pids): the confirm frozen before COMMIT; an apply's lease acquire queues on
+        //         the lock row and is granted the confirm's token; the pre-confirm binding is refused.
+        //   S8-I2 confirm vs reconcile: a computation's reconcile queues on the state row behind the frozen confirm, then
+        //         misses its CAS (STATE_MOVED): the plan stays confirmed, the holds stay resolved.
+        //   S8-I3 review vs live writer: a live lease => the review 409 WRITE_LOCKED; the review frozen before COMMIT holds
+        //         the state row and a computation's reconcile queues behind it, then STATE_MOVED; the plan reviewed.
+        describe('S8 step-5 PR-8 change plans (real Postgres, real lock, real host, real reader)', () => {
+          const decisionsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-decisions.cjs')) as any
+          const { REFRESH_DECISION_ERROR_CODES: DC } = decisionsLib
+          const { RUN_FIELD_IDS } = require(path.join(PLUGIN_LIB, 'stock-preparation-conflict-planner.cjs')) as any
+          const CP_BASE = '/api/integration/stock-preparation/projects/:projectNo/refresh'
+          const CPR = {
+            holds: `${CP_BASE}/holds`,
+            current: `${CP_BASE}/change-plans/current`,
+            confirm: `${CP_BASE}/change-plans/confirm`,
+            review: `${CP_BASE}/change-reviews/complete`,
+          }
+          const S8_MATERIAL = '铝合金-合成'
+          const EXPORT_BLOCKED = 'STOCK_PREP_EXPORT_BLOCKED'
+          const TOKEN_KEY_PREFIX = 'integration:table-action:dry-run-token:'
+
+          async function withSwitch<T>(fn: () => Promise<T>): Promise<T> {
+            const before = process.env[SWITCH]
+            process.env[SWITCH] = 'true'
+            try {
+              return await fn()
+            } finally {
+              if (before === undefined) delete process.env[SWITCH]
+              else process.env[SWITCH] = before
+            }
+          }
+          const cpCall = (st: any, method: string, routePath: string, { user, body = {}, query = {} }: { user?: any; body?: any; query?: any } = {}) =>
+            withSwitch(() => callRoute(st.routes, method, routePath, { user: user || st.users.puller, body, query, params: { projectNo: st.projectNo } }))
+          const okData = (res: any) => {
+            expect(res.statusCode < 300, JSON.stringify(res.body)).toBe(true)
+            return res.body.data
+          }
+          const answer = (res: any) => {
+            if (res.statusCode < 300) return `${res.statusCode}`
+            const error = errorOf(res)
+            const details = error.details || {}
+            return `${res.statusCode}:${error.code || ''}:${details.reason || ''}${details.status ? `:${details.status}` : ''}`
+          }
+          // The second read: PART-A's material (one record) and, when asked, PART-C's usage (a second record).
+          function sourceWith({ material = S8_MATERIAL, partCUsage = 4 }: { material?: string; partCUsage?: number } = {}) {
+            const parts = CF.PARTS.map((part: any) => (part.OBJ_ID === 'PART-A' ? { ...part, Material: material } : part))
+            return CF.project({ orders: [{ part: 'S-001', qty: 10 }], parts, boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage: partCUsage }] } })
+          }
+          const plansOf = async (st: any) => (await q(`SELECT * FROM ${RT.changePlan} WHERE sheet_id = $1 AND project_no = $2 ORDER BY created_at, id`, [st.sheetId, st.projectNo])).rows
+          const planById = async (id: string) => (await q(`SELECT * FROM ${RT.changePlan} WHERE id = $1`, [id])).rows[0] || null
+          const lockRowFor = async (key: string) => (await q(`SELECT generation, generation_token, generation_reason, fencing_epoch, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [key])).rows[0] || null
+          const auditsOf = async (tenantId: string) => (await q('SELECT action, mode, subject_id, actor, detail FROM integration_stock_prep_audit WHERE tenant_id = $1 ORDER BY created_at, id', [tenantId])).rows
+          const fullHolds = async (st: any) => (await q(`SELECT * FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 ORDER BY opened_at, id`, [st.sheetId, st.projectNo])).rows
+          const openHoldRows = async (st: any) => (await fullHolds(st)).filter((row: any) => row.status === 'open')
+          const stateOf = async (st: any) => (await q(`SELECT * FROM ${RT.state} WHERE sheet_id = $1 AND project_no = $2`, [st.sheetId, st.projectNo])).rows[0] || null
+          const physical = (st: any, logical: string): string => (st.target.fieldIdMap && st.target.fieldIdMap[logical]) || logical
+          const logicalOf = (st: any) => {
+            const inverse: Record<string, string> = {}
+            for (const [logical, phys] of Object.entries(st.target.fieldIdMap || {})) inverse[phys as string] = logical
+            return (fieldId: string) => inverse[fieldId] || fieldId
+          }
+          const rowOf = async (st: any, component: string) => (await q(`SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND data->>$2 = $3`, [st.sheetId, physical(st, 'componentSourceId'), component])).rows[0] || null
+          const rowsByComponent = async (st: any) => {
+            const rows = (await q('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY id', [st.sheetId])).rows
+            const key = physical(st, 'componentSourceId')
+            return new Map(rows.map((row: any) => [String(row.data[key]), row]))
+          }
+          const derivedOf = async (st: any) => derive(await st.refresh.governance.consult(st.scope))
+          const tokenRecordOf = async (st: any, token: string) => st.pluginContext.storage.get(`${TOKEN_KEY_PREFIX}${token}`)
+          const noAudit = async () => {}
+
+          // A pilot project after its first pull, previewed on the changed read: suspended on content holds.
+          async function s8Suspended(label: string, { partCUsage = 4, pilot = true }: { partCUsage?: number; pilot?: boolean } = {}) {
+            const st = await s3aStack(label, { pilot })
+            await firstPullApplied(st)
+            st.state.data = sourceWith({ partCUsage })
+            const preview = await st.dryRun()
+            expect(preview.body.data && preview.body.data.status, JSON.stringify(preview.body)).toBe('suspended')
+            return st
+          }
+          // The confirm body exactly as the page offers it, with a receipt over every page of every content hold.
+          async function boundBody(st: any) {
+            const page = okData(await cpCall(st, 'GET', CPR.current))
+            const holdsPage = okData(await cpCall(st, 'GET', CPR.holds))
+            return {
+              page,
+              body: {
+                confirmProjectNo: st.projectNo,
+                holdIds: page.proposal.holdIds,
+                holdSetFingerprint: page.proposal.holdSetFingerprint,
+                planFingerprint: page.proposal.planFingerprint,
+                sourceContentDigest: page.proposal.sourceContentDigest,
+                readReceipt: holdsPage.readReceipt.id,
+              },
+            }
+          }
+          async function s8Confirmed(label: string, options: { partCUsage?: number } = {}) {
+            const st = await s8Suspended(label, options)
+            const { body } = await boundBody(st)
+            const res = await cpCall(st, 'POST', CPR.confirm, { body })
+            expect(res.statusCode, JSON.stringify(res.body)).toBe(201)
+            return { st, confirmed: res.body.data }
+          }
+          async function s8Written(label: string, options: { partCUsage?: number } = {}) {
+            const { st, confirmed } = await s8Confirmed(label, options)
+            const replan = await st.dryRun()
+            expect(replan.body.data.status, JSON.stringify(replan.body)).toBe('ready')
+            const applied = await st.apply(st.users.puller, replan.body.data.dryRunToken)
+            expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+            expect((await planById(confirmed.changePlanId)).status).toBe('written')
+            return { st, confirmed }
+          }
+          // The review body exactly as the page offers it (the written plan's digest and the receipt over its current diff).
+          async function reviewBody(st: any, changePlanId?: string) {
+            const page = okData(await cpCall(st, 'GET', CPR.current))
+            const written = page.current.written
+            return {
+              page,
+              body: {
+                confirmProjectNo: st.projectNo,
+                changePlanId: changePlanId || (written && written.id),
+                contentDigest: written ? written.writtenContentDigest : 'none',
+                conclusion: 'handled',
+                readReceipt: page.readReceipt ? page.readReceipt.id : 'f'.repeat(32),
+              },
+            }
+          }
+          // A single raw client with a statement hook — the frozen side of an interleaving (the S4 technique).
+          function dbOnFrozen(client: PoolClient, hook: (event: StatementEvent) => Promise<void> | void) {
+            return createDb({
+              database: {
+                query: async (sql: string, params?: unknown[]) => { await hook({ sql, inTransaction: false }); return (await client.query(sql, params)).rows },
+                transaction: async <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+                  await client.query('BEGIN')
+                  try {
+                    const result = await callback({
+                      query: async (sql: string, params?: unknown[]) => { await hook({ sql, inTransaction: true }); return (await client.query(sql, params)).rows },
+                      commit: async () => {},
+                      rollback: async () => {},
+                    })
+                    await hook({ sql: 'COMMIT', inTransaction: true })
+                    await client.query('COMMIT')
+                    return result
+                  } catch (error) {
+                    await client.query('ROLLBACK').catch(() => {})
+                    throw error
+                  }
+                },
+              },
+            })
+          }
+          // Freeze every meta_records INSERT / UPDATE behind a SHARE lock held by clientX (reads still pass), run `write`,
+          // wait until the host backend waits on clientX (pg_locks + pg_blocking_pids), run `inside` on clientX, COMMIT.
+          async function insideHostWrite(write: () => Promise<any>, inside: (client: PoolClient) => Promise<void>) {
+            const pidX = Number((await clientX.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+            await clientX.query('BEGIN')
+            try {
+              await clientX.query('LOCK TABLE meta_records IN SHARE MODE')
+              let finished = false
+              const running = settle(write()).then((outcome) => { finished = true; return outcome })
+              let hostPid = 0
+              // A write that ends WITHOUT ever reaching the host (refused before its first patch) ends the wait too, and
+              // the case's own assertion names it (blocked: false).
+              await waitUntil('the host write to wait at its meta_records write', async () => {
+                if (finished) return true
+                const waiting = await q(`SELECT pid FROM pg_locks WHERE relation = 'meta_records'::regclass AND NOT granted AND pid <> $1`, [pidX])
+                if (waiting.rows.length !== 1) return false
+                hostPid = Number(waiting.rows[0].pid)
+                return true
+              }, 30000)
+              if (finished) {
+                await clientX.query('COMMIT')
+                return { blocked: false, result: await running }
+              }
+              const blocked = await isBlockedBy(hostPid, pidX)
+              await inside(clientX)
+              await clientX.query('COMMIT')
+              return { blocked, result: await running }
+            } finally {
+              try { await clientX.query('ROLLBACK') } catch { /* already committed */ }
+            }
+          }
+          // A person's cell through SQL (the grid's effect: the cell and the version move).
+          const personSql = (client: PoolClient, recordId: string, fieldId: string, value: string) =>
+            client.query('UPDATE meta_records SET data = jsonb_set(data, ARRAY[$2::text], to_jsonb($3::text)), version = version + 1 WHERE id = $1', [recordId, fieldId, value])
+
+          test('S8-01 migration 104 on PostgreSQL: INTEGER counters, the status / reason / shape CHECKs and the two partial uniques are DB facts; a confirmed and a written plan of one project coexist', async () => {
+            const cols = (await q('SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1', [RT.changePlan])).rows
+            const typeOf = (name: string) => (cols.find((col: any) => col.column_name === name) || {}).data_type
+            const indexes = (await q(
+              `SELECT c.relname AS name, i.indisunique AS uniq, pg_get_expr(i.indpred, i.indrelid) AS predicate
+                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = $1::regclass AND i.indisunique AND i.indpred IS NOT NULL ORDER BY 1`,
+              [RT.changePlan],
+            )).rows
+            const tenant = tenantFor('s8_01')
+            const sheet = sheetFor('s8_01')
+            const insertPlan = (id: string, status: string, { projectNo = 'SYN-S8-01', recordCount = 1, executionId = null, written = false, reason = null }: { projectNo?: string; recordCount?: number; executionId?: string | null; written?: boolean; reason?: string | null } = {}) => q(
+              `INSERT INTO ${RT.changePlan} (id, tenant_id, sheet_id, project_no, write_scope_key, status, plan_fingerprint, source_content_digest, planned_content_digest,
+                 record_count, write_record_count, record_set, absorbed_change_plan_ids, hold_ids, hold_set_fingerprint, continuation_ids, review_baseline_digest,
+                 confirmed_by, confirmed_at, confirmed_generation, confirmed_generation_token, confirmed_fencing_epoch, execution_id, written_at, written_content_digest,
+                 invalidated_at, invalidated_reason)
+               VALUES ($1, $2, $3, $4, $5, $6, 'pf', 'src', 'pd', $7, 1, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'hsf', '[]'::jsonb, 'rb',
+                 'u_s8_01', now(), 1, 'tok', 0, $8, $9, $10, $11, $12)`,
+              [id, tenant, sheet, projectNo, sheetWriteScopeKey(sheet), status, recordCount, executionId, written ? new Date() : null, written ? 'wd' : null, reason ? new Date() : null, reason],
+            )
+            const codeOf = async (promise: Promise<unknown>) => {
+              const outcome = await settle(promise)
+              return outcome.ok ? 'inserted' : `${(outcome as any).error.code}:${(outcome as any).error.constraint || ''}`
+            }
+            const observed = {
+              integers: ['record_count', 'write_record_count', 'confirmed_generation', 'confirmed_fencing_epoch'].map(typeOf),
+              jsonb: ['record_set', 'absorbed_change_plan_ids', 'hold_ids', 'continuation_ids'].map(typeOf),
+              partialUniques: indexes.map((row: any) => `${row.name}:${String(row.predicate).replace(/::text/g, '')}`),
+              confirmed: await codeOf(insertPlan('chp_s8_01_a', 'confirmed')),
+              secondConfirmed: await codeOf(insertPlan('chp_s8_01_b', 'confirmed')),
+              written: await codeOf(insertPlan('chp_s8_01_w', 'written', { executionId: 'exec_s8_01', written: true })),
+              secondWritten: await codeOf(insertPlan('chp_s8_01_w2', 'written', { executionId: 'exec_s8_01b', written: true })),
+              writtenWithoutExecution: await codeOf(insertPlan('chp_s8_01_x', 'written', { projectNo: 'SYN-S8-01-X', written: true })),
+              unknownStatus: await codeOf(insertPlan('chp_s8_01_s', 'approved', { projectNo: 'SYN-S8-01-S' })),
+              countsBelowWrites: await codeOf(insertPlan('chp_s8_01_c', 'confirmed', { projectNo: 'SYN-S8-01-C', recordCount: 0 })),
+              failedWithoutExecution: await codeOf(insertPlan('chp_s8_01_f', 'invalidated', { projectNo: 'SYN-S8-01-F', reason: 'execution_failed' })),
+              invalidatedBySource: await codeOf(insertPlan('chp_s8_01_i', 'invalidated', { projectNo: 'SYN-S8-01-I', reason: 'source_changed' })),
+            }
+            console.log(`[S8-01] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              integers: ['integer', 'integer', 'integer', 'integer'],
+              jsonb: ['jsonb', 'jsonb', 'jsonb', 'jsonb'],
+              partialUniques: [
+                "uniq_integration_stock_prep_change_plan_confirmed:(status = 'confirmed')",
+                "uniq_integration_stock_prep_change_plan_written:(status = 'written')",
+              ],
+              confirmed: 'inserted',
+              secondConfirmed: '23505:uniq_integration_stock_prep_change_plan_confirmed',
+              written: 'inserted',
+              secondWritten: '23505:uniq_integration_stock_prep_change_plan_written',
+              writtenWithoutExecution: '23514:integration_stock_prep_change_plan_written_shape_check',
+              unknownStatus: '23514:integration_stock_prep_change_plan_status_check',
+              countsBelowWrites: '23514:integration_stock_prep_change_plan_counts_check',
+              failedWithoutExecution: '23514:integration_stock_prep_change_plan_invalidated_shape_check',
+              invalidatedBySource: 'inserted',
+            })
+          }, 60000)
+
+          test('S8-02 (C01 / C02 / C11) through the ROUTES on PostgreSQL: the suspended pull, the page (presence only, one audit row, no receipt), the receipt, the confirm (201, the plan, the bump change_plan_confirm in the transaction, the holds resolved, the audit row), the re-preview\'s token bound to the plan', async () => {
+            const st = await s8Suspended('s8_02', { partCUsage: 5 })
+            const suspendedHolds = await openHoldRows(st)
+            const audits0 = (await auditsOf(st.tenantId)).length
+            const page = okData(await cpCall(st, 'GET', CPR.current))
+            const pageAudits = (await auditsOf(st.tenantId)).slice(audits0)
+            const partA = await rowOf(st, 'PART-A')
+            const recordA = page.proposal.records.find((record: any) => record.recordId === partA.id)
+            const holdsPage = okData(await cpCall(st, 'GET', CPR.holds))
+            const lock0 = await lockRowFor(st.key)
+            const dv0 = await decisionVersionOf(st.scope)
+            const res = await cpCall(st, 'POST', CPR.confirm, {
+              body: {
+                confirmProjectNo: st.projectNo,
+                holdIds: page.proposal.holdIds,
+                holdSetFingerprint: page.proposal.holdSetFingerprint,
+                planFingerprint: page.proposal.planFingerprint,
+                sourceContentDigest: page.proposal.sourceContentDigest,
+                readReceipt: holdsPage.readReceipt.id,
+              },
+            })
+            const lock1 = await lockRowFor(st.key)
+            const plans = await plansOf(st)
+            const holdsAfter = await fullHolds(st)
+            const confirmAudits = (await auditsOf(st.tenantId)).filter((row: any) => row.mode === 'change_plan_confirmed')
+            const replan = await st.dryRun()
+            const record = await tokenRecordOf(st, replan.body.data.dryRunToken)
+            const observed = {
+              suspended: suspendedHolds.map((row: any) => row.kind).sort(),
+              page: {
+                blocked: page.proposal.blocked,
+                holdIdsMatch: sameJson(page.proposal.holdIds, suspendedHolds.map((row: any) => row.id).sort()),
+                records: page.proposal.recordCount,
+                receipt: page.readReceipt,
+                partANotesPresent: recordA ? recordA.humanColumnsPresent.notes : 'missing',
+                status: page.refresh.status,
+              },
+              pageAudit: pageAudits.map((row: any) => `${row.action}:${row.mode}`),
+              confirm: { status: res.statusCode, state: res.body.data && res.body.data.state, records: res.body.data && res.body.data.recordCount },
+              plan: { count: plans.length, status: plans[0] && plans[0].status, confirmedBy: plans[0] && plans[0].confirmed_by === st.users.puller.id, bumpTokenIsThePlans: plans[0] && plans[0].confirmed_generation_token === lock1.generation_token },
+              bump: { step: Number(lock1.generation) - Number(lock0.generation), reason: lock1.generation_reason, decisionVersionStep: (await decisionVersionOf(st.scope)) - dv0 },
+              holdsResolved: suspendedHolds.every((row: any) => (holdsAfter.find((entry: any) => entry.id === row.id) || {}).status === 'resolved'),
+              confirmAudit: confirmAudits.map((row: any) => `${row.action}:${row.subject_id === (plans[0] && plans[0].id)}:${row.actor === st.users.puller.id}`),
+              replan: { status: replan.body.data.status, boundToThePlan: Boolean(record && record.refreshBinding && plans[0] && record.refreshBinding.changePlanId === plans[0].id) },
+            }
+            console.log(`[S8-02] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: ['content_change', 'content_change'],
+              page: { blocked: null, holdIdsMatch: true, records: 2, receipt: null, partANotesPresent: false, status: 'pending_confirmation' },
+              pageAudit: ['project_board_read:change_plan_read'],
+              confirm: { status: 201, state: 'confirmed_pending_execution', records: 2 },
+              plan: { count: 1, status: 'confirmed', confirmedBy: true, bumpTokenIsThePlans: true },
+              bump: { step: 1, reason: 'change_plan_confirm', decisionVersionStep: 1 },
+              holdsResolved: true,
+              confirmAudit: ['exception_resolve:true:true'],
+              replan: { status: 'ready', boundToThePlan: true },
+            })
+          }, 300000)
+
+          test('S8-03 (C02, m2) the source moves after the confirm: the re-preview invalidates the plan (source_changed) with ONE system audit row (actor NULL) on its reconcile; the earlier bound token\'s apply is refused; the main sheet and its revisions unchanged', async () => {
+            const { st, confirmed } = await s8Confirmed('s8_03', { partCUsage: 5 })
+            const bound = await st.dryRun()
+            expect(bound.body.data.status).toBe('ready')
+            const main0 = await st.main()
+            st.state.data = sourceWith({ partCUsage: 6 })
+            const moved = await st.dryRun()
+            const plan = await planById(confirmed.changePlanId)
+            const invalidations = (await auditsOf(st.tenantId)).filter((row: any) => row.mode === 'change_plan_invalidated')
+            const applied = await st.apply(st.users.puller, bound.body.data.dryRunToken)
+            const observed = {
+              moved: { status: moved.body.data.status, token: moved.body.data.dryRunToken },
+              plan: `${plan.status}:${plan.invalidated_reason}`,
+              reopened: (await openHoldRows(st)).map((row: any) => row.kind).sort(),
+              invalidationAudit: invalidations.map((row: any) => ({ action: row.action, actor: row.actor, subject: row.subject_id === plan.id, reason: row.detail.reason, lane: row.detail.lane, records: row.detail.recordCount })),
+              staleApply: answer(applied),
+              mainUnchanged: sameJson(await st.main(), main0),
+            }
+            console.log(`[S8-03] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              moved: { status: 'suspended', token: null },
+              plan: 'invalidated:source_changed',
+              reopened: ['content_change', 'content_change'],
+              invalidationAudit: [{ action: 'exception_resolve', actor: null, subject: true, reason: 'source_changed', lane: 'small_preview', records: 2 }],
+              // The bound plan is no longer the project's confirmed plan (an earlier computation invalidated it).
+              staleApply: `409:${DC.CHANGE_PLAN_STALE}:plan_replaced`,
+              mainUnchanged: true,
+            })
+          }, 300000)
+
+          test('S8-04a (C03 / A12, M2) the controlled update: a person\'s note between the confirm and the write re-keys nothing; only the plan\'s fields + RUN change, the note and the keys untouched; the revisions name exactly those fields; the plan written by a bound execution', async () => {
+            const { st, confirmed } = await s8Confirmed('s8_04a', { partCUsage: 5 })
+            const partA0 = await rowOf(st, 'PART-A')
+            await personSql(clientX, partA0.id, physical(st, 'notes'), 'synthetic floor note s8-04a')
+            const before = await rowsByComponent(st)
+            const replan = await st.dryRun()
+            const applied = await st.apply(st.users.puller, replan.body.data.dryRunToken)
+            const after = await rowsByComponent(st)
+            const plan = await planById(confirmed.changePlanId)
+            const logical = logicalOf(st)
+            const planFields = new Map<string, string[]>((plan.record_set as any[]).map((record: any) => [record.recordId, Object.keys(record.fields)]))
+            const changed: Record<string, string[]> = {}
+            const outsidePlan: string[] = []
+            for (const [component, row] of before.entries()) {
+              const next: any = after.get(component)
+              const keys = Array.from(new Set([...Object.keys((row as any).data), ...Object.keys(next.data)]))
+              const moved = keys.filter((key) => JSON.stringify((row as any).data[key]) !== JSON.stringify(next.data[key])).map(logical).sort()
+              changed[component] = moved
+              const allowed = new Set([...(planFields.get((row as any).id) || []), ...RUN_FIELD_IDS])
+              for (const field of moved) if (!allowed.has(field)) outsidePlan.push(`${component}.${field}`)
+            }
+            const revisions = (await q(`SELECT record_id, changed_field_ids FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'plugin' AND action = 'update' ORDER BY created_at DESC LIMIT 2`, [st.sheetId])).rows
+            const revisionOutside = revisions.flatMap((row: any) => (row.changed_field_ids as string[]).map(logical).filter((field: string) => !new Set([...(planFields.get(row.record_id) || []), ...RUN_FIELD_IDS]).has(field)))
+            const execution = (await q(`SELECT status, refresh_binding FROM ${RT.execution} WHERE id = $1`, [plan.execution_id])).rows[0]
+            const observed = {
+              replan: replan.body.data.status,
+              applied: `${applied.statusCode}:${applied.body.data && applied.body.data.status}`,
+              changedComponents: Object.entries(changed).filter(([, fields]) => fields.length > 0).map(([component]) => component).sort(),
+              partAPlanFieldsWritten: (planFields.get(partA0.id) || []).every((field) => changed['PART-A'].includes(field)),
+              outsidePlan,
+              noteKept: (after.get('PART-A') as any).data[physical(st, 'notes')] === 'synthetic floor note s8-04a',
+              keysKept: ['idempotencyKey', 'path', 'parentSourceId'].every((field) => JSON.stringify((before.get('PART-A') as any).data[physical(st, field)]) === JSON.stringify((after.get('PART-A') as any).data[physical(st, field)])),
+              revisionsOutsidePlan: revisionOutside,
+              plan: plan.status,
+              execution: `${execution.status}:${execution.refresh_binding && execution.refresh_binding.changePlanId === plan.id}`,
+            }
+            console.log(`[S8-04a] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              replan: 'ready',
+              applied: '200:succeeded',
+              changedComponents: ['PART-A', 'PART-C'],
+              partAPlanFieldsWritten: true,
+              outsidePlan: [],
+              noteKept: true,
+              keysKept: true,
+              revisionsOutsidePlan: [],
+              plan: 'written',
+              execution: 'succeeded:true',
+            })
+          }, 300000)
+
+          test('S8-04b (A12 / F15, human) a person\'s cell committed by another session INSIDE the host\'s patch (SHARE lock on meta_records, pg_blocking_pids): one conflict, one retry with the fresh version, the person\'s value kept, the plan written', async () => {
+            const { st, confirmed } = await s8Confirmed('s8_04b')
+            const replan = await st.dryRun()
+            const partA0 = await rowOf(st, 'PART-A')
+            const { blocked, result } = await insideHostWrite(
+              () => st.apply(st.users.puller, replan.body.data.dryRunToken),
+              async (client) => { await personSql(client, partA0.id, physical(st, 'notes'), 'synthetic floor note s8-04b') },
+            )
+            const applied = (result as any).ok ? (result as any).value : null
+            const partA1 = await rowOf(st, 'PART-A')
+            const observed = {
+              hostWaitedOnTheLock: blocked,
+              applied: applied ? `${applied.statusCode}:${applied.body.data && applied.body.data.status}` : 'threw',
+              personKept: partA1.data[physical(st, 'notes')] === 'synthetic floor note s8-04b',
+              materialWritten: partA1.data[physical(st, 'material')] === S8_MATERIAL,
+              versionStep: Number(partA1.version) - Number(partA0.version),
+              plan: (await planById(confirmed.changePlanId)).status,
+            }
+            console.log(`[S8-04b] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({ hostWaitedOnTheLock: true, applied: '200:succeeded', personKept: true, materialWritten: true, versionStep: 2, plan: 'written' })
+          }, 300000)
+
+          test('S8-04c (A12, machine) a plugin-owned cell committed INSIDE the host\'s patch: 409 CHANGE_PLAN_STALE machine_columns_moved, the execution aborted, the plan invalidated(execution_failed), failed_pending_recovery — the page blocked, a confirm 409 RECOVERY_PENDING, the export 409', async () => {
+            const { st, confirmed } = await s8Confirmed('s8_04c')
+            const replan = await st.dryRun()
+            const partA0 = await rowOf(st, 'PART-A')
+            const { blocked, result } = await insideHostWrite(
+              () => st.apply(st.users.puller, replan.body.data.dryRunToken),
+              async (client) => { await personSql(client, partA0.id, physical(st, 'componentName'), 'synthetic host-side name s8-04c') },
+            )
+            const applied = (result as any).ok ? (result as any).value : null
+            const plan = await planById(confirmed.changePlanId)
+            const execution = (await q(`SELECT status FROM ${RT.execution} WHERE id = $1`, [plan.execution_id])).rows[0]
+            const page = okData(await cpCall(st, 'GET', CPR.current))
+            const confirm = await cpCall(st, 'POST', CPR.confirm, { body: { confirmProjectNo: st.projectNo, holdIds: ['hold_s8_04c'], holdSetFingerprint: 'a', planFingerprint: 'b', sourceContentDigest: 'c', readReceipt: 'e'.repeat(32) } })
+            const exported = await st.exportLines()
+            const observed = {
+              hostWaitedOnTheLock: blocked,
+              applied: applied ? answer(applied) : 'threw',
+              partial: applied && errorOf(applied).details ? typeof errorOf(applied).details.written : 'none',
+              execution: execution && execution.status,
+              plan: `${plan.status}:${plan.invalidated_reason}`,
+              derived: (await derivedOf(st)).status,
+              pageBlocked: page.proposal.blocked,
+              confirm: answer(confirm),
+              exported: answer(exported),
+            }
+            console.log(`[S8-04c] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              hostWaitedOnTheLock: true,
+              applied: `409:${DC.CHANGE_PLAN_STALE}:machine_columns_moved`,
+              partial: 'number',
+              execution: 'aborted',
+              plan: 'invalidated:execution_failed',
+              derived: 'failed_pending_recovery',
+              pageBlocked: 'recovery_pending',
+              confirm: `409:${DC.RECOVERY_PENDING}:`,
+              exported: `409:${EXPORT_BLOCKED}:state:failed_pending_recovery`,
+            })
+          }, 300000)
+
+          test('S8-05 (C04 / C11 / C12 / C08) written => change_pending_review: export 409, an unbound token 409 REVIEW_PENDING, the preview review_pending (no token, no bump) yet settled; the written page + receipt; the review (200, decision_version + 1, no bump, two audit rows, sameActorAsConfirm); export 200; a new change => export 409 again', async () => {
+            const { st, confirmed } = await s8Written('s8_05', { partCUsage: 5 })
+            const derivedWritten = (await derivedOf(st)).status
+            const export0 = await st.exportLines()
+            const unbound = await st.apply(st.users.puller, await st.mintToken('rev_s8_05_unbound'))
+            const lockBefore = await lockRowFor(st.key)
+            const pending = await st.dryRun()
+            const lockAfter = await lockRowFor(st.key)
+            const settledAfterPreview = Boolean((await stateOf(st)).settled_at)
+            const { page, body } = await reviewBody(st)
+            const dv0 = await decisionVersionOf(st.scope)
+            const generation0 = Number((await lockRowFor(st.key)).generation)
+            const reviewed = await cpCall(st, 'POST', CPR.review, { body })
+            const plan = await planById(confirmed.changePlanId)
+            const decisions = (await auditsOf(st.tenantId)).filter((row: any) => row.action === 'exception_resolve')
+            const export1 = await st.exportLines()
+            st.state.data = sourceWith({ partCUsage: 7 })
+            const again = await st.dryRun()
+            const export2 = await st.exportLines()
+            const observed = {
+              derivedWritten,
+              export0: answer(export0),
+              unbound: answer(unbound),
+              preview: { status: pending.body.data.status, token: pending.body.data.dryRunToken, bumped: Number(lockAfter.generation) !== Number(lockBefore.generation), settled: settledAfterPreview },
+              page: { matches: page.current.written.contentMatchesWrite, receiptComplete: page.readReceipt.holds[plan.id].complete },
+              review: { status: reviewed.statusCode, plan: plan.status, conclusion: plan.review_conclusion, decisionVersionStep: (await decisionVersionOf(st.scope)) - dv0, generationStep: Number((await lockRowFor(st.key)).generation) - generation0 },
+              audits: decisions.map((row: any) => `${row.mode}${row.mode === 'change_review_completed' ? `:${row.detail.sameActorAsConfirm}` : ''}`),
+              export1: answer(export1),
+              again: again.body.data.status,
+              export2: answer(export2),
+            }
+            console.log(`[S8-05] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              derivedWritten: 'change_pending_review',
+              export0: `409:${EXPORT_BLOCKED}:state:change_pending_review`,
+              unbound: '409:STOCK_PREP_REFRESH_REVIEW_PENDING:',
+              preview: { status: 'review_pending', token: null, bumped: false, settled: true },
+              page: { matches: true, receiptComplete: true },
+              review: { status: 200, plan: 'reviewed', conclusion: 'handled', decisionVersionStep: 1, generationStep: 0 },
+              audits: ['change_plan_confirmed', 'change_review_completed:true'],
+              export1: '200',
+              again: 'suspended',
+              export2: `409:${EXPORT_BLOCKED}:state:pending_confirmation`,
+            })
+          }, 300000)
+
+          test('S8-07 (C06, B1) W written, a change elsewhere: W\'s review refused hold_open, then change_plan_pending once B is confirmed; B\'s preview mints, B\'s write absorbs W (superseded, review-only fields); W\'s review STALE plan_replaced; the export waits for B\'s review', async () => {
+            const { st, confirmed: w } = await s8Written('s8_07')
+            const wPage = await reviewBody(st)
+            st.state.data = sourceWith({ partCUsage: 5 })
+            const suspended = await st.dryRun()
+            const reviewHold = await cpCall(st, 'POST', CPR.review, { body: wPage.body })
+            const { body: bBody } = await boundBody(st)
+            const b = await cpCall(st, 'POST', CPR.confirm, { body: bBody })
+            const reviewPending = await cpCall(st, 'POST', CPR.review, { body: wPage.body })
+            const replanB = await st.dryRun()
+            const appliedB = await st.apply(st.users.puller, replanB.body.data.dryRunToken)
+            const wRow = await planById(w.changePlanId)
+            const bRow = await planById(b.body.data.changePlanId)
+            const reviewReplaced = await cpCall(st, 'POST', CPR.review, { body: wPage.body })
+            const settleB = await st.dryRun()
+            const exportB = await st.exportLines()
+            const bPage = await reviewBody(st)
+            const partA = await rowOf(st, 'PART-A')
+            const bView = bPage.page.current.written
+            const absorbedA = bView.records.find((record: any) => record.recordId === partA.id)
+            const doneB = await cpCall(st, 'POST', CPR.review, { body: bPage.body })
+            const exportFinal = await st.exportLines()
+            const observed = {
+              suspended: suspended.body.data.status,
+              reviewWhileHoldOpen: answer(reviewHold),
+              confirmB: b.statusCode,
+              reviewWhileBConfirmed: answer(reviewPending),
+              replanB: replanB.body.data.status,
+              appliedB: `${appliedB.statusCode}:${appliedB.body.data && appliedB.body.data.status}`,
+              w: `${wRow.status}:${wRow.superseded_by === bRow.id}`,
+              b: `${bRow.status}:${sameJson(bRow.absorbed_change_plan_ids, [wRow.id])}`,
+              reviewW: answer(reviewReplaced),
+              settleB: settleB.body.data.status,
+              exportBeforeBReview: answer(exportB),
+              bShowsPartAReviewOnly: Boolean(absorbedA) && Object.values(absorbedA.fields).every((cell: any) => cell.reviewOnly === true),
+              bMatches: bView.contentMatchesWrite,
+              reviewB: doneB.statusCode,
+              exportFinal: answer(exportFinal),
+            }
+            console.log(`[S8-07] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: 'suspended',
+              reviewWhileHoldOpen: `409:${DC.CHANGE_REVIEW_BLOCKED}:hold_open`,
+              confirmB: 201,
+              reviewWhileBConfirmed: `409:${DC.CHANGE_REVIEW_BLOCKED}:change_plan_pending`,
+              replanB: 'ready',
+              appliedB: '200:succeeded',
+              w: 'superseded:true',
+              b: 'written:true',
+              reviewW: `409:${DC.CHANGE_REVIEW_STALE}:plan_replaced:superseded`,
+              settleB: 'review_pending',
+              exportBeforeBReview: `409:${EXPORT_BLOCKED}:state:change_pending_review`,
+              bShowsPartAReviewOnly: true,
+              bMatches: true,
+              reviewB: 200,
+              exportFinal: '200',
+            })
+          }, 300000)
+
+          test('S8-08 (C05 / U03) the gate on the real stack: the read tier 403 and a tenantless platform admin 403 on all three routes (no audit row); another tenant\'s plan id and an unknown id answer the SAME bytes', async () => {
+            const { st, confirmed } = await s8Written('s8_08')
+            const tenantless = { id: `u_s8_08_platform_${TOKEN}`, roles: ['admin'], permissions: ['integration:admin'] }
+            const audits0 = (await auditsOf(st.tenantId)).length
+            const routes = async (user: any) => [
+              answer(await cpCall(st, 'GET', CPR.current, { user })),
+              answer(await cpCall(st, 'POST', CPR.confirm, { user, body: { confirmProjectNo: st.projectNo, holdIds: ['h'], holdSetFingerprint: 'a', planFingerprint: 'b', sourceContentDigest: 'c', readReceipt: 'e'.repeat(32) } })),
+              answer(await cpCall(st, 'POST', CPR.review, { user, body: { confirmProjectNo: st.projectNo, changePlanId: confirmed.changePlanId, contentDigest: 'd', conclusion: 'handled', readReceipt: 'e'.repeat(32) } })),
+            ]
+            const reader = await routes(st.users.reader)
+            const platform = await routes(tenantless)
+            const auditsAfterRefusals = (await auditsOf(st.tenantId)).length - audits0
+            const own = await planById(confirmed.changePlanId)
+            const foreignId = `chp_s8_08_foreign_${TOKEN}`
+            await q(`INSERT INTO ${RT.changePlan} SELECT $1, $2, sheet_id || '_other', 'SYN-S8-08-OTHER', write_scope_key, status, plan_fingerprint, source_content_digest, planned_content_digest, record_count,
+                       write_record_count, record_set, absorbed_change_plan_ids, hold_ids, hold_set_fingerprint, continuation_ids, review_baseline_digest, confirmed_by, confirmed_at,
+                       confirmed_generation, confirmed_generation_token, confirmed_fencing_epoch, execution_id, written_at, written_content_digest, reviewed_by, reviewed_at,
+                       review_conclusion, review_notes, reviewed_content_digest, invalidated_at, invalidated_reason, superseded_at, superseded_by, now(), now()
+                     FROM ${RT.changePlan} WHERE id = $3`, [foreignId, `${st.tenantId}_other`, own.id])
+            const { body } = await reviewBody(st)
+            const foreign = await cpCall(st, 'POST', CPR.review, { body: { ...body, changePlanId: foreignId } })
+            const unknown = await cpCall(st, 'POST', CPR.review, { body: { ...body, changePlanId: `chp_s8_08_unknown_${TOKEN}` } })
+            await q(`DELETE FROM ${RT.changePlan} WHERE id = $1`, [foreignId])
+            const observed = {
+              reader,
+              platform,
+              auditsAfterRefusals,
+              foreign: answer(foreign),
+              sameBytes: JSON.stringify(foreign.body) === JSON.stringify(unknown.body),
+              ownStillWritten: (await planById(own.id)).status,
+            }
+            console.log(`[S8-08] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              reader: ['403:FORBIDDEN:', '403:FORBIDDEN:', '403:FORBIDDEN:'],
+              platform: ['403:OPERATOR_SCOPE_TENANT_REQUIRED:', '403:OPERATOR_SCOPE_TENANT_REQUIRED:', '403:OPERATOR_SCOPE_TENANT_REQUIRED:'],
+              auditsAfterRefusals: 0,
+              foreign: `404:${DC.CHANGE_PLAN_NOT_FOUND}:`,
+              sameBytes: true,
+              ownStillWritten: 'written',
+            })
+          }, 300000)
+
+          test('S8-09 (E09) the confirm\'s audit insert fails (a BEFORE INSERT trigger raising 42501 for this tenant\'s change_plan_confirmed row): 503 STORE_FAILED audit, nothing persisted, the generation unchanged; with the trigger gone the same body commits with exactly one audit row', async () => {
+            const st = await s8Suspended('s8_09', { partCUsage: 5 })
+            const fn = `s8_audit_fault_${TOKEN}`
+            await q(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN IF NEW.tenant_id = '${st.tenantId}' AND NEW.mode = 'change_plan_confirmed' THEN RAISE EXCEPTION 's8 audit fault' USING ERRCODE = '42501'; END IF; RETURN NEW; END $fn$`)
+            await q(`CREATE TRIGGER ${fn} BEFORE INSERT ON integration_stock_prep_audit FOR EACH ROW EXECUTE FUNCTION ${fn}()`)
+            try {
+              const { body } = await boundBody(st)
+              const before = await sheetFingerprint(st.sheetId)
+              const refused = await cpCall(st, 'POST', CPR.confirm, { body })
+              const observed: Record<string, unknown> = {
+                status: refused.statusCode,
+                code: errorOf(refused).code,
+                details: errorOf(refused).details,
+                unchanged: (await sheetFingerprint(st.sheetId)) === before,
+                plans: (await plansOf(st)).length,
+                openHolds: (await openHoldRows(st)).length,
+              }
+              await q(`DROP TRIGGER IF EXISTS ${fn} ON integration_stock_prep_audit`)
+              await q(`DROP FUNCTION IF EXISTS ${fn}()`)
+              const committed = await cpCall(st, 'POST', CPR.confirm, { body })
+              observed.afterRepair = { status: committed.statusCode, plans: (await plansOf(st)).length, audits: (await auditsOf(st.tenantId)).filter((row: any) => row.mode === 'change_plan_confirmed').length }
+              console.log(`[S8-09] ${JSON.stringify(observed)}`)
+              expect(observed).toEqual({
+                status: 503,
+                code: RC.STORE_FAILED,
+                details: { operation: 'audit', sqlState: '42501', partial: false },
+                unchanged: true,
+                plans: 0,
+                openHolds: 2,
+                afterRepair: { status: 201, plans: 1, audits: 1 },
+              })
+            } finally {
+              await q(`DROP TRIGGER IF EXISTS ${fn} ON integration_stock_prep_audit`).catch(() => {})
+              await q(`DROP FUNCTION IF EXISTS ${fn}()`).catch(() => {})
+            }
+          }, 300000)
+
+          test('S8-10 (C07) a structure hold beside the content holds (a legacy lineage mismatch): the page names it and the confirm is 409 STRUCTURE_CHANGE_PRESENT with nothing persisted', async () => {
+            const st = await s8Suspended('s8_10', { partCUsage: 5 })
+            const state = await stateOf(st)
+            const content = (await openHoldRows(st)).map(continuationStoreLib.__internals.rowToHold)
+            const structure: any = { kind: 'structure_change', confirmable: false, notConfirmableReason: 'phase_2', subject: { keyDigest: 's'.repeat(64) }, detail: { recordId: (await rowOf(st, 'PART-B')).id, key: 'k_s8_10', changedFields: ['componentSourceId'] } }
+            structure.fingerprint = pairingLib.holdFingerprint(structure)
+            await st.refresh.store.reconcileHolds({ ...st.scope, decisionVersionObserved: Number(state.decision_version), holds: [...content, structure], computation: { lane: 'small_preview', suspended: true, generationToken: null, sourceContentDigest: state.last_computation_source_content_digest } }, { auditWithin: noAudit })
+            const { page, body } = await boundBody(st)
+            const before = await sheetFingerprint(st.sheetId)
+            const refused = await cpCall(st, 'POST', CPR.confirm, { body })
+            const observed = {
+              blocked: page.proposal.blocked,
+              structureHoldOpen: page.proposal.structureHoldOpen,
+              confirm: answer(refused),
+              holdCount: errorOf(refused).details && errorOf(refused).details.holdCount,
+              unchanged: (await sheetFingerprint(st.sheetId)) === before,
+              plans: (await plansOf(st)).length,
+            }
+            console.log(`[S8-10] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({ blocked: 'structure_change_present', structureHoldOpen: true, confirm: `409:${DC.CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT}:`, holdCount: 1, unchanged: true, plans: 0 })
+          }, 300000)
+
+          test('S8-11 (§10.3 (5)) the combined confirm (candidate_content_differs) through the ROUTE: the relationship, its members and the plan in ONE bump; the write updates the old rows (no copy of the continued subtree), the S root\'s raw = total; the review completes', async () => {
+            const st = await s3aStack('s8_11', { pilot: true })
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource({ edge: 3 })
+            const suspended = await st.dryRun()
+            const { page, body } = await boundBody(st)
+            const candidate = page.proposal.candidates[0]
+            const lock0 = await lockRowFor(st.key)
+            const res = await cpCall(st, 'POST', CPR.confirm, { body: { ...body, candidates: [{ holdId: candidate.holdId, candidateId: candidate.candidateId, basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } }] } })
+            const lock1 = await lockRowFor(st.key)
+            const continuationId = res.body.data && res.body.data.continuationIds[0]
+            const relationship = (await q(`SELECT status, confirmed_generation_token FROM ${RT.continuation} WHERE id = $1`, [continuationId])).rows[0]
+            const members = await countWhere(RT.member, 'continuation_id = $1', [continuationId])
+            const plan = await planById(res.body.data.changePlanId)
+            const replan = await st.dryRun()
+            const applied = await st.apply(st.users.puller, replan.body.data.dryRunToken)
+            const rows = (await q('SELECT data FROM meta_records WHERE sheet_id = $1', [st.sheetId])).rows
+            const component = physical(st, 'componentSourceId')
+            const perComponent = (id: string) => rows.filter((row: any) => row.data[component] === id).length
+            const sRoot = rows.find((row: any) => row.data[component] === 'S-001' && row.data[physical(st, 'active')] !== false)
+            const review = await reviewBody(st)
+            const reviewed = await cpCall(st, 'POST', CPR.review, { body: review.body })
+            const observed = {
+              suspended: suspended.body.data.status,
+              candidateHistory: candidate.history,
+              confirm: res.statusCode,
+              oneBump: `${Number(lock1.generation) - Number(lock0.generation)}:${lock1.generation_reason}`,
+              relationship: `${relationship.status}:${relationship.confirmed_generation_token === plan.confirmed_generation_token}`,
+              members,
+              planNamesTheRelationship: sameJson(plan.continuation_ids, [continuationId]),
+              replan: replan.body.data.status,
+              applied: `${applied.statusCode}:${applied.body.data && applied.body.data.status}`,
+              continuedSubtreeOnce: ['S-001', 'PART-A', 'PART-B', 'PART-C'].map(perComponent),
+              sRootRawEqualsTotal: Number(sRoot.data[physical(st, 'rawQuantity')]) === Number(sRoot.data[physical(st, 'totalQuantity')]),
+              sRootTotal: Number(sRoot.data[physical(st, 'totalQuantity')]),
+              review: reviewed.statusCode,
+            }
+            console.log(`[S8-11] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: 'suspended',
+              candidateHistory: 'history_unknown',
+              confirm: 201,
+              oneBump: '1:change_plan_confirm',
+              relationship: 'active:true',
+              members: 4,
+              planNamesTheRelationship: true,
+              replan: 'ready',
+              applied: '200:succeeded',
+              continuedSubtreeOnce: [1, 1, 1, 1],
+              sRootRawEqualsTotal: true,
+              sRootTotal: 15,
+              review: 200,
+            })
+          }, 300000)
+
+          test('S8-13 (F15, register ①, NOT governed) the same interleavings on a not-governed project: a person\'s cell inside the host\'s patch is kept (one retry); a plugin-owned cell stops the run 409 with partial counts; no step-4 / step-5 row', async () => {
+            const st = await s3aStack('s8_13', { pilot: false })
+            await firstPullApplied(st)
+            // A quantity change (PART-C's usage): the not-governed lane applies it without a manual confirm (a material change
+            // on an existing row would answer manual_confirm_required there).
+            st.state.data = sourceWith({ material: 'M-STEEL', partCUsage: 5 })
+            const preview = await st.dryRun()
+            const partC0 = await rowOf(st, 'PART-C')
+            const human = await insideHostWrite(
+              () => st.apply(st.users.puller, preview.body.data.dryRunToken),
+              async (client) => { await personSql(client, partC0.id, physical(st, 'notes'), 'synthetic floor note s8-13') },
+            )
+            const humanApplied = (human.result as any).ok ? (human.result as any).value : null
+            const partC1 = await rowOf(st, 'PART-C')
+            st.state.data = sourceWith({ material: 'M-STEEL', partCUsage: 6 })
+            const preview2 = await st.dryRun()
+            const machine = await insideHostWrite(
+              () => st.apply(st.users.puller, preview2.body.data.dryRunToken),
+              async (client) => { await personSql(client, partC0.id, physical(st, 'componentName'), 'synthetic host-side name s8-13') },
+            )
+            const machineApplied = (machine.result as any).ok ? (machine.result as any).value : null
+            const observed = {
+              previews: `${preview.body.data.status}:${preview2.body.data.status}`,
+              human: {
+                waited: human.blocked,
+                applied: humanApplied ? `${humanApplied.statusCode}:${humanApplied.body.data && humanApplied.body.data.status}` : 'threw',
+                personKept: partC1.data[physical(st, 'notes')] === 'synthetic floor note s8-13',
+                usageWritten: Number(partC1.data[physical(st, 'rawQuantity')]) === 5,
+                versionStep: Number(partC1.version) - Number(partC0.version),
+              },
+              machine: {
+                waited: machine.blocked,
+                applied: machineApplied ? answer(machineApplied) : 'threw',
+                partialCounts: machineApplied && errorOf(machineApplied).details ? typeof errorOf(machineApplied).details.written : 'none',
+              },
+              stepFiveRows: await countWhere(RT.changePlan, 'tenant_id = $1', [st.tenantId]),
+              stepFourRows: await st.stepFourRows(),
+            }
+            console.log(`[S8-13] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              previews: 'ready:ready',
+              human: { waited: true, applied: '200:succeeded', personKept: true, usageWritten: true, versionStep: 2 },
+              machine: { waited: true, applied: `409:${DC.CHANGE_PLAN_STALE}:machine_columns_moved`, partialCounts: 'number' },
+              stepFiveRows: 0,
+              stepFourRows: 0,
+            })
+          }, 300000)
+
+          // The store-level interleavings: the canonical changed read planned against the first-pull sheet (the REAL planner),
+          // its content holds persisted on a synthetic sheet, the confirm's inputs derived from the persisted rows.
+          async function storeScenario(label: string) {
+            const scope = { tenantId: tenantFor(label), sheetId: sheetFor(label), projectNo: CF.PROJECT_NO }
+            const key = sheetWriteScopeKey(scope.sheetId)
+            const sheet = await CF.firstPullSheet()
+            const expansion = await CF.expand(sourceWith({ partCUsage: 5 }))
+            const planned = CF.plan(expansion, sheet, { continuation: CF.continuationInput({ pilot: true, demandEvidence: expansion.demandEvidence }) })
+            const seedStore = continuationStoreLib.createStockPreparationContinuationStore({ db: hostLikeDb() })
+            await seedStore.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: planned.holds, computation: computation({ sourceContentDigest: `src_${label}` }) }, { auditWithin: noAudit })
+            const state = (await q(`SELECT * FROM ${RT.state} WHERE sheet_id = $1 AND project_no = $2`, [scope.sheetId, scope.projectNo])).rows[0]
+            const holdRows = (await q(`SELECT * FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 AND status = 'open'`, [scope.sheetId, scope.projectNo])).rows
+            const content = holdRows.map(continuationStoreLib.__internals.rowToHold).filter(pairingLib.isContentClassHold)
+            const records = pairingLib.changePlanRecordsFromHolds(content)
+            const input = {
+              ...scope,
+              confirmedBy: `u_${label}_puller`,
+              holds: content.map((hold: any) => ({ id: hold.id, fingerprint: hold.fingerprint })),
+              echo: { holdSetFingerprint: state.hold_set_fingerprint, planFingerprint: pairingLib.changePlanFingerprintOf({ projectNo: scope.projectNo, records, sourceContentDigest: `src_${label}` }), sourceContentDigest: `src_${label}` },
+              candidates: [],
+              sourceIdentity: CF.SOURCE_IDENTITY,
+              template: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+            }
+            return { scope, key, planned, input, state, content }
+          }
+
+          test('S8-I1 confirm vs apply (pg_blocking_pids): the confirm frozen before COMMIT holds the lock row it bumped; an apply\'s lease acquire queues behind it and is granted the CONFIRM\'s token; the pre-confirm binding is refused', async () => {
+            const scenario = await storeScenario('s8_i1')
+            const pidA = Number((await clientA.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+            const pidB = Number((await clientB.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+            const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB) })
+            const before = await lockB.bumpGeneration(scenario.key, { reason: 'small_preview', tenantId: scenario.scope.tenantId })
+            const commitGate = gate()
+            let frozen: (() => void) | null = null
+            const frozenAt = new Promise<void>((resolve) => { frozen = resolve })
+            const confirmDb = dbOnFrozen(clientA, async (event) => {
+              if (event.inTransaction && event.sql === 'COMMIT') {
+                if (frozen) frozen()
+                await commitGate.promise
+              }
+            })
+            const lockA = createStockPreparationProjectWriteLock({ db: confirmDb })
+            const storeA = continuationStoreLib.createStockPreparationContinuationStore({ db: confirmDb })
+            const confirming = settle(storeA.confirmChangePlan(scenario.input, { bumpWithin: lockA.bumpGenerationWithin, auditWithin: noAudit }))
+            await frozenAt
+            const acquiring = settle(lockB.acquire(scenario.key, { purpose: 'small_apply', runId: 's8-i1-acquire', tenantId: scenario.scope.tenantId }))
+            await waitUntil('the acquire to queue behind the frozen confirm', () => isBlockedBy(pidB, pidA))
+            commitGate.open()
+            const confirmed: any = await confirming
+            const granted: any = await acquiring
+            const guardB = granted.ok ? lockB.createGuard(granted.value) : null
+            const oldBinding = writeBindingFromGeneration({ scopeKey: scenario.key, generation: before.generation, generationToken: before.generationToken })
+            const stale = guardB ? await settle((async () => lockModule.assertWriteBindingMatchesGuard(oldBinding, guardB))()) : null
+            const plan = confirmed.ok ? await planById(confirmed.value.changePlanId) : null
+            const observed = {
+              confirmed: confirmed.ok ? plan.status : String(confirmed.error && confirmed.error.code),
+              acquired: granted.ok,
+              grantCarriesTheConfirmToken: granted.ok && plan ? granted.value.generationToken === plan.confirmed_generation_token : false,
+              oldBinding: stale ? (stale.ok ? 'admitted' : `${(stale as any).error.code}`) : 'none',
+            }
+            if (guardB) await guardB.release()
+            console.log(`[S8-I1] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({ confirmed: 'confirmed', acquired: true, grantCarriesTheConfirmToken: true, oldBinding: PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED })
+          }, 120000)
+
+          test('S8-I2 confirm vs reconcile (pg_blocking_pids): a computation\'s reconcile queues on the state row behind the frozen confirm, then misses its CAS (STATE_MOVED): the plan stays confirmed, the holds stay resolved, nothing invalidated', async () => {
+            const scenario = await storeScenario('s8_i2')
+            const pidA = Number((await clientA.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+            const pidB = Number((await clientB.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+            const commitGate = gate()
+            let frozen: (() => void) | null = null
+            const frozenAt = new Promise<void>((resolve) => { frozen = resolve })
+            const confirmDb = dbOnFrozen(clientA, async (event) => {
+              if (event.inTransaction && event.sql === 'COMMIT') {
+                if (frozen) frozen()
+                await commitGate.promise
+              }
+            })
+            const storeA = continuationStoreLib.createStockPreparationContinuationStore({ db: confirmDb })
+            const storeB = continuationStoreLib.createStockPreparationContinuationStore({ db: dbOn(clientB) })
+            const lockA = createStockPreparationProjectWriteLock({ db: confirmDb })
+            const confirming = settle(storeA.confirmChangePlan(scenario.input, { bumpWithin: lockA.bumpGenerationWithin, auditWithin: noAudit }))
+            await frozenAt
+            const reconciling = settle(storeB.reconcileHolds({ ...scenario.scope, decisionVersionObserved: Number(scenario.state.decision_version), holds: scenario.planned.holds, computation: computation({ sourceContentDigest: 'src_s8_i2_next' }) }, { auditWithin: noAudit }))
+            await waitUntil('the reconcile to queue behind the frozen confirm', () => isBlockedBy(pidB, pidA))
+            commitGate.open()
+            const confirmed: any = await confirming
+            const reconciled: any = await reconciling
+            const plan = confirmed.ok ? await planById(confirmed.value.changePlanId) : null
+            const openAfter = await countWhere(RT.hold, `sheet_id = $1 AND status = 'open'`, [scenario.scope.sheetId])
+            const observed = {
+              confirmed: plan ? plan.status : String(confirmed.error && confirmed.error.code),
+              reconcile: reconciled.ok ? 'committed' : `${reconciled.error.code}:${reconciled.error.details && reconciled.error.details.reason}`,
+              openHolds: openAfter,
+            }
+            console.log(`[S8-I2] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({ confirmed: 'confirmed', reconcile: `${RC.STATE_MOVED}:decision_version`, openHolds: 0 })
+          }, 120000)
+
+          test('S8-I3 review vs live writer: a live lease => the review 409 WRITE_LOCKED; the review frozen before COMMIT holds the state row, a computation\'s reconcile queues behind it (pg_blocking_pids) and then misses its CAS; the plan reviewed', async () => {
+            const { st, confirmed } = await s8Written('s8_i3')
+            const { page, body } = await reviewBody(st)
+            const grant = await st.lock.acquire(st.key, { purpose: 'small_apply', runId: 's8-i3-live', tenantId: st.tenantId })
+            const locked = await cpCall(st, 'POST', CPR.review, { body })
+            await st.lock.createGuard(grant).release()
+            const pidA = Number((await clientA.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+            const pidB = Number((await clientB.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+            const commitGate = gate()
+            let frozen: (() => void) | null = null
+            const frozenAt = new Promise<void>((resolve) => { frozen = resolve })
+            const reviewDb = dbOnFrozen(clientA, async (event) => {
+              if (event.inTransaction && event.sql === 'COMMIT') {
+                if (frozen) frozen()
+                await commitGate.promise
+              }
+            })
+            const storeA = continuationStoreLib.createStockPreparationContinuationStore({ db: reviewDb })
+            const storeB = continuationStoreLib.createStockPreparationContinuationStore({ db: dbOn(clientB) })
+            const dv0 = await decisionVersionOf(st.scope)
+            const written = page.current.written
+            const reviewing = settle(storeA.completeChangeReview({ ...st.scope, changePlanId: written.id, reviewedBy: st.users.puller.id, echoDigest: written.writtenContentDigest, currentContentDigest: written.currentContentDigest, conclusion: 'handled', notes: null }, { auditWithin: noAudit }))
+            await frozenAt
+            const reconciling = settle(storeB.reconcileHolds({ ...st.scope, decisionVersionObserved: dv0, holds: [], computation: computation({ suspended: false, sourceContentDigest: 'src_s8_i3_next' }) }, { auditWithin: noAudit }))
+            await waitUntil('the reconcile to queue behind the frozen review', () => isBlockedBy(pidB, pidA))
+            commitGate.open()
+            const reviewed: any = await reviewing
+            const reconciled: any = await reconciling
+            const observed = {
+              liveLease: answer(locked),
+              reviewed: reviewed.ok ? (await planById(confirmed.changePlanId)).status : String(reviewed.error && reviewed.error.code),
+              reconcile: reconciled.ok ? 'committed' : `${reconciled.error.code}`,
+            }
+            console.log(`[S8-I3] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({ liveLease: `409:${PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED}:`, reviewed: 'reviewed', reconcile: RC.STATE_MOVED })
           }, 300000)
         })
       })

@@ -616,8 +616,10 @@ function changePlanStale(reason, extra = {}) {
 /**
  * The apply's change-plan check (before SUSPENDED / BINDING_STALE / TOKEN_MISMATCH, so it answers with its own code): a
  * token minted for a confirmed plan (`refreshBinding.changePlanId`) is applied only when THIS in-lease recompute still
- * authorizes that very plan (`matches`); a plan the recompute calls stale (its reconciliation has just invalidated it),
- * or a confirmed plan that is another one, is 409 STOCK_PREP_CHANGE_PLAN_STALE (`plan_invalidated` / `plan_replaced`).
+ * authorizes that very plan (`matches`); a plan the recompute calls stale (its reconciliation has just invalidated it)
+ * is `plan_invalidated`; a bound plan that is no longer the project's confirmed plan at all (another confirm superseded
+ * it, an earlier computation invalidated it, or it was already written) is `plan_replaced` — both 409
+ * STOCK_PREP_CHANGE_PLAN_STALE.
  */
 function assertChangePlanCurrent(tokenRecord, changePlanVerdict) {
   const bound = tokenRecord && isPlainObject(tokenRecord.refreshBinding) && nonBlankString(tokenRecord.refreshBinding.changePlanId)

@@ -1012,17 +1012,21 @@ function proposalOf(ctx) {
   const state = consult.state || {}
   const sourceContentDigest = state.lastComputationSourceContentDigest || null
   let records = []
-  let blocked = null
+  let recordsBlocked = null
   try {
     records = pairing.changePlanRecordsFromHolds(classes.content)
   } catch (error) {
-    blocked = error && error.details && error.details.reason === 'record_unbound' ? 'record_unbound' : 'records_malformed'
+    recordsBlocked = error && error.details && error.details.reason === 'record_unbound' ? 'record_unbound' : 'records_malformed'
   }
-  if (!blocked && classes.content.length === 0) blocked = 'no_content_hold'
-  if (!blocked && classes.runbook.length > 0) blocked = 'runbook_only_hold_open'
-  if (!blocked && classes.structure.length > 0) blocked = 'structure_change_present'
-  if (!blocked && previewRecoveryOf(consult)) blocked = 'recovery_pending'
-  if (!blocked && !sourceContentDigest) blocked = 'source_unknown'
+  // The token names what the confirm would refuse FIRST (confirmChangePlan's own order: recovery, S25, C07, the empty
+  // set, the record binding, then the echoes), so the page never offers a control the server refuses for another reason.
+  let blocked = null
+  if (previewRecoveryOf(consult)) blocked = 'recovery_pending'
+  else if (classes.runbook.length > 0) blocked = 'runbook_only_hold_open'
+  else if (classes.structure.length > 0) blocked = 'structure_change_present'
+  else if (classes.content.length === 0) blocked = 'no_content_hold'
+  else if (recordsBlocked) blocked = recordsBlocked
+  else if (!sourceContentDigest) blocked = 'source_unknown'
   return {
     classes,
     records,
