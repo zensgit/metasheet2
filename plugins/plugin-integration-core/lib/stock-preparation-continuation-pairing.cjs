@@ -187,7 +187,8 @@ const CONTINUATION_INPUT_KEYS = Object.freeze([
   'specSlotDeclared',
   'persistedHolds',
   'changePlan',
-  // Step 5 PR-8 review fix N3 (C06): the content the latest reviewed plan and the pending written plan left on the sheet.
+  // Step 5 PR-8 review fix N3 (C06): the content the reviews (round 2: the reviewed-cell register) and the pending written
+  // plan left on the sheet.
   'expectedContent',
 ])
 
@@ -211,9 +212,10 @@ const PERSISTED_HOLD_KEYS = Object.freeze([
   'continuationRoots',
 ])
 
-// Step 5 PR-8 review fix N3 (C06): the `detail.reason` of a content_change hold opened because a cell the latest review
-// (or the pending written plan) left on a row is no longer on the sheet while the source agrees with the sheet — the
-// source and a host-side write moved together. Detected for those records pilot or not, so it is never re-emitted.
+// Step 5 PR-8 review fix N3 (C06): the `detail.reason` of a content_change hold opened because a cell a review (or the
+// pending written plan) left under a record key is no longer on the sheet while the source agrees with the sheet — the
+// source and a host-side write moved together — or (round 2, N3-a) because the row under that key is gone while the
+// source moved off the reviewed value. Detected for those keys pilot or not, so it is never re-emitted.
 const REVIEWED_CONTENT_MOVED_REASON = 'reviewed_content_moved'
 
 // Re-emission (AMB-1 / TD-10): the kinds only pilot DETECTION produces. After the pilot marker is cleared
@@ -1036,10 +1038,13 @@ function normalizeContinuationInput(input) {
   })
 }
 
-// Step 5 PR-8 review fix N3 (C06) — the content the project's latest REVIEWED change plan and its pending WRITTEN plan
-// left on the sheet (the consult's private `expectedContent`, built by the continuation store): `[]` when absent (no
-// such plan — the lane always passes it, RL-02 / SL-G8), else exactly `[{ recordId, key, fields: { [fieldId]: { after,
-// afterCanonical } } }]` with distinct record ids. A closed shape, refused 500 otherwise (a lane defect).
+// Step 5 PR-8 review fix N3 (C06) — the content the project's REVIEWS (round 2, N3-b: the reviewed-cell register, every
+// cell any review bound) and its pending WRITTEN plan left on the sheet (the consult's private `expectedContent`, built
+// by the continuation store): `[]` when absent (nothing reviewed or written — the lane always passes it, RL-02 / SL-G8),
+// else exactly `[{ recordId, key, fields: { [fieldId]: { after, afterCanonical } } }]` with DISTINCT KEYS (round 2,
+// N3-a: the record key is the identity; `recordId` names the record the latest review / the written plan bound under
+// that key, and one record reviewed under two keys over time may appear twice). A closed shape, refused 500 otherwise
+// (a lane defect).
 const EXPECTED_CONTENT_KEYS = Object.freeze(['recordId', 'key', 'fields'])
 
 function normalizeExpectedContent(input) {
@@ -1053,8 +1058,8 @@ function normalizeExpectedContent(input) {
       if (!EXPECTED_CONTENT_KEYS.includes(entryKey)) throw inputInvalid(`${field}.${entryKey} is not a recognized key`, `${field}.${entryKey}`)
     }
     if (!nonBlankString(entry.recordId) || !nonBlankString(entry.key) || !isPlainObject(entry.fields)) throw inputInvalid('an expected-content entry needs recordId, key and fields', field)
-    if (seen.has(entry.recordId)) throw inputInvalid('an expected-content record id repeats', field)
-    seen.add(entry.recordId)
+    if (seen.has(entry.key)) throw inputInvalid('an expected-content key repeats', field)
+    seen.add(entry.key)
     const fields = {}
     for (const [fieldId, cell] of Object.entries(entry.fields)) {
       if (!isPlainObject(cell) || !Object.prototype.hasOwnProperty.call(cell, 'after') || !Object.prototype.hasOwnProperty.call(cell, 'afterCanonical')) {
@@ -1878,16 +1883,28 @@ function prepareGovernedPlanning(args) {
   // Step 5 PR-8 (refutation M4): the records a confirmed plan writes stay under content detection on EVERY pass,
   // pilot or not — after a pilot exit the confirmed change is still found (so it matches, is executed and reviewed).
   const forcedRecordIds = input.changePlan ? new Set(input.changePlan.recordIds) : null
-  // Review fix N3 (C06 「复核前后再发生相关变化，旧复核不再有效，重新挂起」): the content the latest review and the pending
-  // written plan left on the sheet, by record id. Those records stay under content detection on every pass (pilot or
-  // not), and a cell of them the sheet no longer carries is held even when the source moved to exactly that value.
-  const expectedByRecordId = new Map((Array.isArray(input.expectedContent) ? input.expectedContent : []).map((entry) => [entry.recordId, entry]))
-  // The trigger cells of `existingRow` that differ from what the review / the written plan left there (canonical, the
-  // writer's normalisation), only when the row is the one the plan bound (same record id AND key). Sorted.
-  function reviewedContentMovesOf(existingRow, key) {
+  // Review fix N3 (C06 「复核前后再发生相关变化，旧复核不再有效，重新挂起」): the content the reviews and the pending written
+  // plan left on the sheet. Those rows stay under content detection on every pass (pilot or not), and a cell of them the
+  // sheet no longer carries is held even when the source moved to exactly that value. Round 2 (N3-a): indexed by record
+  // KEY as well as by record id — a row under a reviewed / written key is compared whatever its record id (the reviewed
+  // row deleted and re-created under its key carries a new id, V8D-03), and a key whose row is gone is held when the
+  // source no longer carries the reviewed value (V8D-04, `noteMissingReviewedRow`).
+  const expectedEntries = Array.isArray(input.expectedContent) ? input.expectedContent : []
+  const expectedByRecordId = new Map(expectedEntries.map((entry) => [entry.recordId, entry]))
+  const expectedByKey = new Map(expectedEntries.map((entry) => [entry.key, entry]))
+  // The expected content of the row under `key`: the entry its record id names when that entry is under the same key,
+  // else (N3-a) the entry of the KEY itself.
+  function expectedEntryFor(existingRow, key) {
     const ref = recordRefOf(existingRow)
-    const entry = ref ? expectedByRecordId.get(ref.id) : null
-    if (!entry || entry.key !== key) return []
+    const byId = ref ? expectedByRecordId.get(ref.id) : null
+    if (byId && byId.key === key) return byId
+    return expectedByKey.get(key) || null
+  }
+  // The trigger cells of `existingRow` that differ from what the reviews / the written plan left under its key
+  // (canonical, the writer's normalisation). Sorted.
+  function reviewedContentMovesOf(existingRow, key) {
+    const entry = expectedEntryFor(existingRow, key)
+    if (!entry) return []
     const moved = []
     for (const [fieldId, cell] of Object.entries(entry.fields)) {
       if (!triggerFieldIds.includes(fieldId)) continue
@@ -1913,9 +1930,11 @@ function prepareGovernedPlanning(args) {
     triggerFieldIds,
     authorization,
     // Content detection for this existing row on a governed plan: the pilot marker, a record the confirmed plan writes
-    // (M4), or a record whose content the latest review / the pending written plan left (review fix N3).
+    // (M4), or a row whose content the reviews / the pending written plan left (review fix N3) — by its KEY (round 2,
+    // N3-a: whatever its record id, and before the record-ref check: a re-created row is still the reviewed position).
     detectsContentOf(existingRow) {
       if (input.pilot === true) return true
+      if (expectedByKey.has(keyOf(existingRow))) return true
       const ref = recordRefOf(existingRow)
       if (!ref) return false
       return Boolean((forcedRecordIds && forcedRecordIds.has(ref.id)) || expectedByRecordId.has(ref.id))
@@ -1960,7 +1979,7 @@ function prepareGovernedPlanning(args) {
       if (authorizedEntryFor(existingRow)) return
       const fields = contentTriggerChanges(row, existingRow, { triggerFieldIds, templateFields })
       // Review fix N3 (C06; design §10.3 (4) "any later relevant change invalidates"): the source did not change against
-      // the sheet, but a cell the latest review (or the pending written plan) left on this row is no longer there — the
+      // the sheet, but a cell a review (or the pending written plan) left under this row's key is no longer there — the
       // source and a host-side write moved it TOGETHER (pg lens V8PG-15), so no ordinary detection fires and the old review
       // would stay "valid" over content nobody reviewed. It is held like any content change: from the reviewed / written
       // value (`before`, the C06 baseline the review chain continues from) to the source value (`after`, which the sheet
@@ -1968,7 +1987,7 @@ function prepareGovernedPlanning(args) {
       const moved = fields.length === 0 ? reviewedContentMovesOf(existingRow, key) : []
       if (fields.length === 0 && moved.length === 0) return
       const ref = recordRefOf(existingRow)
-      const expected = moved.length > 0 ? expectedByRecordId.get(ref.id) : null
+      const expected = moved.length > 0 ? expectedEntryFor(existingRow, key) : null
       rowHolds.set(key, makeHold({
         kind: 'content_change',
         confirmable: false,
@@ -1992,6 +2011,47 @@ function prepareGovernedPlanning(args) {
           humanColumnsPresent: Object.fromEntries(humanFieldIds.map((fieldId) => [fieldId, !isBlank(existingRow[fieldId])])),
         },
       }))
+    },
+    // Review fix N3-a (round 2; delta probe V8D-04): the expansion carries `key`, the sheet has NO row under it, and the
+    // reviews / the pending written plan left content there (the reviewed row was deleted — a person's action the PLM
+    // column lock does not cover). When a trigger cell of the source differs (canonically) from what was reviewed /
+    // written, the ADD would bring back content nobody reviewed: the key is HELD, a content_change with reason
+    // `reviewed_content_moved`, before = the reviewed / written value, after = the source. There is no record to bind, so
+    // a change-plan confirm answers `record_unbound` until a row is back under the key (its content is then compared by
+    // key, `expectedEntryFor`). The planner's ADD decision stays as computed; the suspension dominates (no token is
+    // minted), as for every content hold. A source that still carries the reviewed value is re-ADDed (nothing
+    // unreviewed). Returns whether the key was held.
+    noteMissingReviewedRow(row, key) {
+      if (!key || rowHolds.has(key)) return false
+      const entry = expectedByKey.get(key)
+      if (!entry) return false
+      const moved = []
+      for (const [fieldId, cell] of Object.entries(entry.fields)) {
+        if (!triggerFieldIds.includes(fieldId)) continue
+        const source = canonicalChangeValue(row[fieldId], templateFields.get(fieldId))
+        if (canonicalJson(source === undefined ? null : source) !== canonicalJson(cell.afterCanonical === undefined ? null : cell.afterCanonical)) moved.push(fieldId)
+      }
+      if (moved.length === 0) return false
+      moved.sort(compareStrings)
+      rowHolds.set(key, makeHold({
+        kind: 'content_change',
+        confirmable: false,
+        notConfirmableReason: 'needs_step5',
+        subject: subjectFor(null, key),
+        detail: {
+          recordId: null,
+          recordVersion: null,
+          key,
+          reason: REVIEWED_CONTENT_MOVED_REASON,
+          fields: Object.fromEntries(moved.map((fieldId) => [fieldId, {
+            before: entry.fields[fieldId].after === undefined ? null : entry.fields[fieldId].after,
+            after: row[fieldId] === undefined ? null : row[fieldId],
+          }])),
+          inContinuation: null,
+          humanColumnsPresent: Object.fromEntries(humanFieldIds.map((fieldId) => [fieldId, false])),
+        },
+      }))
+      return true
     },
     // D-4: a legacy lineage_mismatch on a governed project is a STRUCTURE hold (never acknowledgeable,
     // and never the content path — C07).

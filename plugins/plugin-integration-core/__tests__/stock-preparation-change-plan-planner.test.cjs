@@ -426,4 +426,86 @@ test('CP-P09 (N3, C06) a reviewed cell the sheet no longer carries is HELD even 
   }
 })
 
+// ── CP-P10 (review fix N3-a, round 2) ────────────────────────────────────────────────────────────
+
+test('CP-P10 (N3-a, C06) the expected content is matched by record KEY: a reviewed row DELETED and RE-CREATED under its key (new record id) carrying the moved source value is HELD (V8D-03); a reviewed row DELETED while the source moved is HELD instead of re-added (V8D-04), unbound; a deleted row whose source still carries the reviewed value is re-ADDed; pilot or not', async () => {
+  const sheet = await F.firstPullSheet()
+  const partA = sheet.find((row) => row.componentSourceId === 'PART-A')
+  const oldId = pairing.recordRefOf(partA).id
+  const expected = expectedMaterial(partA, 'M-N3-REVIEWED')
+  const read = await contentRead({ material: 'M-N3A-NEW', partCUsage: 4 })
+  const reasonOf = (hold) => hold.detail && hold.detail.reason
+  const movedHolds = (planned) => contentHolds(planned).filter((hold) => reasonOf(hold) === pairing.REVIEWED_CONTENT_MOVED_REASON)
+  // (a) V8D-03: deleted and re-created under the SAME key with a NEW record id, carrying exactly the moved source value.
+  const recreatedId = 'rec_n3a_recreated'
+  const recreated = sheet.map((row) => (row === partA ? F.withRecordRef({ ...row, material: 'M-N3A-NEW' }, recreatedId, 1) : row))
+  for (const pilot of [true, false]) {
+    const held = plan(read, recreated, { pilot, expectedContent: expected })
+    const holds = movedHolds(held)
+    assert.equal(holds.length, 1, `pilot=${pilot}: ${JSON.stringify((held.holds || []).map((hold) => `${hold.kind}:${reasonOf(hold)}`))}`)
+    assert.equal(holds[0].kind, 'content_change')
+    assert.equal(holds[0].detail.recordId, recreatedId, 'the hold binds the record now under the key')
+    assert.equal(holds[0].detail.key, partA.idempotencyKey)
+    assert.deepEqual(holds[0].detail.fields, { material: { before: 'M-N3-REVIEWED', after: 'M-N3A-NEW' } })
+    assert.equal(held.suspended, true)
+    assert.equal(held.valid, false)
+  }
+  // The plan cycle closes on the re-created record: confirmed from that hold, the next pass MATCHES and authorizes ONE
+  // UPDATE of the new record id; after it is reviewed (the register now carries the new value) nothing is held.
+  const heldA = plan(read, recreated, { expectedContent: expected })
+  const changePlan = planInputFor(heldA.holds)
+  assert.deepEqual(changePlan.recordIds, [recreatedId])
+  const bound = plan(read, recreated, { expectedContent: expected, changePlan })
+  assert.equal(bound.continuation.changePlan.verdict, 'matches')
+  assert.equal(contentHolds(bound).length, 0)
+  const updates = changePlanUpdates(bound)
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].idempotencyKey, partA.idempotencyKey)
+  assert.equal(updates[0].patch.material, 'M-N3A-NEW')
+  const reviewedAgain = [{ recordId: recreatedId, key: partA.idempotencyKey, fields: { material: { after: 'M-N3A-NEW', afterCanonical: pairing.canonicalChangeValue('M-N3A-NEW', TEMPLATE_FIELDS.get('material')) } } }]
+  assert.equal(contentHolds(plan(read, recreated, { expectedContent: reviewedAgain })).length, 0)
+  // Re-created carrying the REVIEWED value while the source moved: the ordinary hold (sheet -> source), alone.
+  const recreatedReviewed = sheet.map((row) => (row === partA ? F.withRecordRef({ ...row, material: 'M-N3-REVIEWED' }, recreatedId, 1) : row))
+  const ordinary = contentHolds(plan(read, recreatedReviewed, { pilot: false, expectedContent: expected }))
+  assert.equal(ordinary.length, 1)
+  assert.notEqual(reasonOf(ordinary[0]), pairing.REVIEWED_CONTENT_MOVED_REASON)
+  assert.deepEqual(ordinary[0].detail.fields.material, { before: 'M-N3-REVIEWED', after: 'M-N3A-NEW' })
+  // (b) V8D-04: the reviewed row DELETED while the source moved — held, not re-added with content nobody reviewed.
+  const deleted = sheet.filter((row) => row !== partA)
+  for (const pilot of [true, false]) {
+    const held = plan(read, deleted, { pilot, expectedContent: expected })
+    const holds = movedHolds(held)
+    assert.equal(holds.length, 1, `pilot=${pilot}: ${JSON.stringify((held.holds || []).map((hold) => `${hold.kind}:${reasonOf(hold)}`))}`)
+    assert.equal(holds[0].kind, 'content_change')
+    assert.equal(holds[0].detail.recordId, null, 'no record to bind')
+    assert.equal(holds[0].detail.key, partA.idempotencyKey)
+    assert.deepEqual(holds[0].detail.fields, { material: { before: 'M-N3-REVIEWED', after: 'M-N3A-NEW' } })
+    assert.deepEqual(holds[0].subject, { keyDigest: pairing.__internals.subjectDigest(partA.idempotencyKey) })
+    assert.equal(held.suspended, true, 'the suspension dominates the ADD')
+    assert.equal(held.valid, false)
+    // Stable: the same computation yields the same fingerprint (kept, never churned).
+    assert.equal(movedHolds(plan(read, deleted, { pilot, expectedContent: expected }))[0].fingerprint, holds[0].fingerprint)
+    // A change plan cannot bind it: the derivation refuses record_unbound (the confirm answers it by name).
+    assert.throws(() => pairing.changePlanRecordsFromHolds(holds), (error) => error.details && error.details.reason === 'record_unbound')
+  }
+  // Without the expected content the same read simply re-adds the row (the V8D-04 hole).
+  const blind = plan(read, deleted, { pilot: false })
+  assert.equal(contentHolds(blind).length, 0)
+  assert.equal(blind.suspended, false)
+  assert.equal(F.byDecision(blind, DECISIONS.ADD).some((decision) => decision.idempotencyKey === partA.idempotencyKey), true)
+  // (c) a deleted reviewed row whose source still carries the REVIEWED value is re-ADDed (nothing unreviewed).
+  const unchanged = await contentRead({ material: 'M-N3-REVIEWED', partCUsage: 4 })
+  const readd = plan(unchanged, deleted, { pilot: false, expectedContent: expected })
+  assert.equal(contentHolds(readd).length, 0)
+  assert.equal(readd.suspended, false)
+  const added = F.byDecision(readd, DECISIONS.ADD).find((decision) => decision.idempotencyKey === partA.idempotencyKey)
+  assert.ok(added, 'the row is re-added')
+  assert.equal(added.record.material, 'M-N3-REVIEWED')
+  // (d) the closed shape is keyed by KEY: a repeated key refuses; one record id under two keys (reviewed before and after
+  // a key move) is accepted.
+  assert.throws(() => pairing.normalizeContinuationInput(F.continuationInput({ expectedContent: [expected[0], { ...expected[0], recordId: 'rec_other' }] })), (error) => error.code === pairing.CONTINUATION_ERROR_CODES.INPUT_INVALID)
+  assert.equal(pairing.normalizeContinuationInput(F.continuationInput({ expectedContent: [expected[0], { ...expected[0], key: '{"other":true}' }] })).expectedContent.length, 2)
+  void oldId
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-planner.test.cjs', tests)

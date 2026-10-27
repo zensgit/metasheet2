@@ -1732,6 +1732,10 @@ function planOnce(input, continuationInput, changePlanAuthorization) {
       }
     }
     if (!existingRow) {
+      // Step 5 PR-8 review fix N3-a (round 2): on a governed project, a key whose reviewed / written content is gone from
+      // the sheet (the row deleted) is HELD when the source no longer carries the reviewed value — the decision below
+      // stays as computed and the suspension dominates (no token), as for every content hold.
+      if (governed) governed.noteMissingReviewedRow(row, key)
       if (strategy.addMissing) {
         addDecision(decisions, counts, makeAddDecision(row, runId, plannedAt, plmFields, humanFields))
         if (carryPolicy) {
