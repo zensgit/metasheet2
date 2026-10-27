@@ -6686,26 +6686,30 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             })
             const lockA = createStockPreparationProjectWriteLock({ db: confirmDb })
             const storeA = continuationStoreLib.createStockPreparationContinuationStore({ db: confirmDb })
-            const confirming = settle(storeA.confirmChangePlan(scenario.input, { bumpWithin: lockA.bumpGenerationWithin, auditWithin: noAudit }))
-            await frozenAt
-            const acquiring = settle(lockB.acquire(scenario.key, { purpose: 'small_apply', runId: 's8-i1-acquire', tenantId: scenario.scope.tenantId }))
-            await waitUntil('the acquire to queue behind the frozen confirm', () => isBlockedBy(pidB, pidA))
-            commitGate.open()
-            const confirmed: any = await confirming
-            const granted: any = await acquiring
-            const guardB = granted.ok ? lockB.createGuard(granted.value) : null
-            const oldBinding = writeBindingFromGeneration({ scopeKey: scenario.key, generation: before.generation, generationToken: before.generationToken })
-            const stale = guardB ? await settle((async () => lockModule.assertWriteBindingMatchesGuard(oldBinding, guardB))()) : null
-            const plan = confirmed.ok ? await planById(confirmed.value.changePlanId) : null
-            const observed = {
-              confirmed: confirmed.ok ? plan.status : String(confirmed.error && confirmed.error.code),
-              acquired: granted.ok,
-              grantCarriesTheConfirmToken: granted.ok && plan ? granted.value.generationToken === plan.confirmed_generation_token : false,
-              oldBinding: stale ? (stale.ok ? 'admitted' : `${(stale as any).error.code}`) : 'none',
+            try {
+              const confirming = settle(storeA.confirmChangePlan(scenario.input, { bumpWithin: lockA.bumpGenerationWithin, auditWithin: noAudit }))
+              await frozenAt
+              const acquiring = settle(lockB.acquire(scenario.key, { purpose: 'small_apply', runId: 's8-i1-acquire', tenantId: scenario.scope.tenantId }))
+              await waitUntil('the acquire to queue behind the frozen confirm', () => isBlockedBy(pidB, pidA))
+              commitGate.open()
+              const confirmed: any = await confirming
+              const granted: any = await acquiring
+              const guardB = granted.ok ? lockB.createGuard(granted.value) : null
+              const oldBinding = writeBindingFromGeneration({ scopeKey: scenario.key, generation: before.generation, generationToken: before.generationToken })
+              const stale = guardB ? await settle((async () => lockModule.assertWriteBindingMatchesGuard(oldBinding, guardB))()) : null
+              const plan = confirmed.ok ? await planById(confirmed.value.changePlanId) : null
+              const observed = {
+                confirmed: confirmed.ok ? plan.status : String(confirmed.error && confirmed.error.code),
+                acquired: granted.ok,
+                grantCarriesTheConfirmToken: granted.ok && plan ? granted.value.generationToken === plan.confirmed_generation_token : false,
+                oldBinding: stale ? (stale.ok ? 'admitted' : `${(stale as any).error.code}`) : 'none',
+              }
+              if (guardB) await guardB.release()
+              console.log(`[S8-I1] ${JSON.stringify(observed)}`)
+              expect(observed).toEqual({ confirmed: 'confirmed', acquired: true, grantCarriesTheConfirmToken: true, oldBinding: PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED })
+            } finally {
+              commitGate.open()
             }
-            if (guardB) await guardB.release()
-            console.log(`[S8-I1] ${JSON.stringify(observed)}`)
-            expect(observed).toEqual({ confirmed: 'confirmed', acquired: true, grantCarriesTheConfirmToken: true, oldBinding: PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED })
           }, 120000)
 
           test('S8-I2 confirm vs reconcile (pg_blocking_pids): a computation\'s reconcile queues on the state row behind the frozen confirm, then misses its CAS (STATE_MOVED): the plan stays confirmed, the holds stay resolved, nothing invalidated', async () => {
@@ -6723,23 +6727,27 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             })
             const storeA = continuationStoreLib.createStockPreparationContinuationStore({ db: confirmDb })
             const storeB = continuationStoreLib.createStockPreparationContinuationStore({ db: dbOn(clientB) })
-            const lockA = createStockPreparationProjectWriteLock({ db: confirmDb })
-            const confirming = settle(storeA.confirmChangePlan(scenario.input, { bumpWithin: lockA.bumpGenerationWithin, auditWithin: noAudit }))
-            await frozenAt
-            const reconciling = settle(storeB.reconcileHolds({ ...scenario.scope, decisionVersionObserved: Number(scenario.state.decision_version), holds: scenario.planned.holds, computation: computation({ sourceContentDigest: 'src_s8_i2_next' }) }, { auditWithin: noAudit }))
-            await waitUntil('the reconcile to queue behind the frozen confirm', () => isBlockedBy(pidB, pidA))
-            commitGate.open()
-            const confirmed: any = await confirming
-            const reconciled: any = await reconciling
-            const plan = confirmed.ok ? await planById(confirmed.value.changePlanId) : null
-            const openAfter = await countWhere(RT.hold, `sheet_id = $1 AND status = 'open'`, [scenario.scope.sheetId])
-            const observed = {
-              confirmed: plan ? plan.status : String(confirmed.error && confirmed.error.code),
-              reconcile: reconciled.ok ? 'committed' : `${reconciled.error.code}:${reconciled.error.details && reconciled.error.details.reason}`,
-              openHolds: openAfter,
+            try {
+              const lockA = createStockPreparationProjectWriteLock({ db: confirmDb })
+              const confirming = settle(storeA.confirmChangePlan(scenario.input, { bumpWithin: lockA.bumpGenerationWithin, auditWithin: noAudit }))
+              await frozenAt
+              const reconciling = settle(storeB.reconcileHolds({ ...scenario.scope, decisionVersionObserved: Number(scenario.state.decision_version), holds: scenario.planned.holds, computation: computation({ sourceContentDigest: 'src_s8_i2_next' }) }, { auditWithin: noAudit }))
+              await waitUntil('the reconcile to queue behind the frozen confirm', () => isBlockedBy(pidB, pidA))
+              commitGate.open()
+              const confirmed: any = await confirming
+              const reconciled: any = await reconciling
+              const plan = confirmed.ok ? await planById(confirmed.value.changePlanId) : null
+              const openAfter = await countWhere(RT.hold, `sheet_id = $1 AND status = 'open'`, [scenario.scope.sheetId])
+              const observed = {
+                confirmed: plan ? plan.status : String(confirmed.error && confirmed.error.code),
+                reconcile: reconciled.ok ? 'committed' : `${reconciled.error.code}:${reconciled.error.details && reconciled.error.details.reason}`,
+                openHolds: openAfter,
+              }
+              console.log(`[S8-I2] ${JSON.stringify(observed)}`)
+              expect(observed).toEqual({ confirmed: 'confirmed', reconcile: `${RC.STATE_MOVED}:decision_version`, openHolds: 0 })
+            } finally {
+              commitGate.open()
             }
-            console.log(`[S8-I2] ${JSON.stringify(observed)}`)
-            expect(observed).toEqual({ confirmed: 'confirmed', reconcile: `${RC.STATE_MOVED}:decision_version`, openHolds: 0 })
           }, 120000)
 
           test('S8-I3 review vs live writer: a live lease => the review 409 WRITE_LOCKED; the review frozen before COMMIT holds the state row, a computation\'s reconcile queues behind it (pg_blocking_pids) and then misses its CAS; the plan reviewed', async () => {
@@ -6763,20 +6771,24 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             const storeB = continuationStoreLib.createStockPreparationContinuationStore({ db: dbOn(clientB) })
             const dv0 = await decisionVersionOf(st.scope)
             const written = page.current.written
-            const reviewing = settle(storeA.completeChangeReview({ ...st.scope, changePlanId: written.id, reviewedBy: st.users.puller.id, echoDigest: written.writtenContentDigest, currentContentDigest: written.currentContentDigest, conclusion: 'handled', notes: null }, { auditWithin: noAudit }))
-            await frozenAt
-            const reconciling = settle(storeB.reconcileHolds({ ...st.scope, decisionVersionObserved: dv0, holds: [], computation: computation({ suspended: false, sourceContentDigest: 'src_s8_i3_next' }) }, { auditWithin: noAudit }))
-            await waitUntil('the reconcile to queue behind the frozen review', () => isBlockedBy(pidB, pidA))
-            commitGate.open()
-            const reviewed: any = await reviewing
-            const reconciled: any = await reconciling
-            const observed = {
-              liveLease: answer(locked),
-              reviewed: reviewed.ok ? (await planById(confirmed.changePlanId)).status : String(reviewed.error && reviewed.error.code),
-              reconcile: reconciled.ok ? 'committed' : `${reconciled.error.code}`,
+            try {
+              const reviewing = settle(storeA.completeChangeReview({ ...st.scope, changePlanId: written.id, reviewedBy: st.users.puller.id, echoDigest: written.writtenContentDigest, currentContentDigest: written.currentContentDigest, conclusion: 'handled', notes: null }, { auditWithin: noAudit }))
+              await frozenAt
+              const reconciling = settle(storeB.reconcileHolds({ ...st.scope, decisionVersionObserved: dv0, holds: [], computation: computation({ suspended: false, sourceContentDigest: 'src_s8_i3_next' }) }, { auditWithin: noAudit }))
+              await waitUntil('the reconcile to queue behind the frozen review', () => isBlockedBy(pidB, pidA))
+              commitGate.open()
+              const reviewed: any = await reviewing
+              const reconciled: any = await reconciling
+              const observed = {
+                liveLease: answer(locked),
+                reviewed: reviewed.ok ? (await planById(confirmed.changePlanId)).status : String(reviewed.error && reviewed.error.code),
+                reconcile: reconciled.ok ? 'committed' : `${reconciled.error.code}`,
+              }
+              console.log(`[S8-I3] ${JSON.stringify(observed)}`)
+              expect(observed).toEqual({ liveLease: `409:${PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED}:`, reviewed: 'reviewed', reconcile: RC.STATE_MOVED })
+            } finally {
+              commitGate.open()
             }
-            console.log(`[S8-I3] ${JSON.stringify(observed)}`)
-            expect(observed).toEqual({ liveLease: `409:${PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED}:`, reviewed: 'reviewed', reconcile: RC.STATE_MOVED })
           }, 300000)
         })
       })

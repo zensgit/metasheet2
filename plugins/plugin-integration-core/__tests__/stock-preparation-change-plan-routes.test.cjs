@@ -807,6 +807,8 @@ test('CR-RV the review: a confirmed plan is not reviewable (not_written); a live
     const pageB = dataOf(await current(st))
     assert.equal(pageB.current.written.id, b.id)
     assert.deepEqual(pageB.current.written.absorbedChangePlanIds, [w.id])
+    const viewC = pageB.current.written.records.find((record) => record.recordId === st.sheet.byComponent('PART-C').id)
+    assert.ok(viewC && Object.keys(viewC.fields).length > 0 && Object.values(viewC.fields).every((cell) => cell.reviewOnly === true), 'the written plan\'s unreviewed PART-C change rides B as review-only (B1: nothing written escapes review)')
     assert.equal(pageB.current.written.contentMatchesWrite, true)
     const doneB = await review(st, { changePlanId: b.id, contentDigest: pageB.current.written.writtenContentDigest, conclusion: 'handled_with_notes', notes: 'synthetic review note', readReceipt: pageB.readReceipt.id })
     assert.equal(doneB.statusCode, 200, JSON.stringify(doneB.body))

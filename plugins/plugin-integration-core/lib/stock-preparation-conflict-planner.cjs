@@ -1716,12 +1716,9 @@ function planOnce(input, continuationInput, changePlanAuthorization) {
       // otherwise UPDATE / revive a copy; a protected old row would otherwise be patched).
       const continued = governed.continuedRefFor(key)
       if (continued) {
-        // Step 5 PR-8: the one exception — a confirmed change plan's UPDATE of a continued relationship's OLD row.
-        const authorizedOld = existingRow ? governed.authorizedContinuedUpdateFor(key, existingRow) : null
-        if (authorizedOld) {
-          addDecision(decisions, counts, makeChangePlanUpdateDecision(existingRow.idempotencyKey, authorizedOld, runId, plannedAt, humanFields, governed.authorization.changePlanId))
-          continue
-        }
+        // Step 5 PR-8: NO change-plan exception on this branch. A continued OLD key that is still in the expansion (its own
+        // order line came back) makes the relationship verify `demand_changed` (a reconfirm, not content), so no confirmed
+        // plan matches and nothing could be authorized here; a plan's old-row UPDATEs come from the sweep below only.
         addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
         continue
       }
