@@ -2,17 +2,15 @@
  * Approval ↔ Directory org-relation plumbing (READ-ONLY).
  *
  * Lane G (P1-A) prerequisite slice. The directory-sync subsystem already stores
- * the full provider payload for every synced account/department in the `raw`
- * JSONB column (`directory_accounts.raw`, `directory_departments.raw`), but the
- * org-hierarchy signals inside it — the requester's direct manager and their
- * department head — are NOT extracted into queryable columns. This module is the
- * single read-only seam that lifts those two relations out of `raw` and maps
- * them back to LOCAL user ids, so the approval bake step
+ * the provider payload for synced accounts/departments in their `raw` JSONB columns.
+ * Native local organizations use independent membership flags for direct managers
+ * and department heads; external-provider rows retain their legacy raw relations.
+ * This read-only seam resolves those relations to LOCAL user ids, so the approval bake step
  * (`ApprovalProductService.createApproval`) can freeze `managerId` / `deptHeadId`
  * into the requester snapshot.
  *
  * BOUNDARY / DOCTRINE (#2738/#2740, CI-enforced by #2742):
- *   - This module ONLY issues SELECTs against `directory_*` + `directory_account_links`.
+ *   - This module ONLY issues SELECTs against directory relations and local user/org eligibility.
  *     It writes nothing, and it touches no `approval_*` / `automation_*` table —
  *     so it is outside the convergence guard's write-boundary entirely and never
  *     crosses an automation boundary.
@@ -40,6 +38,8 @@
  * the field is simply omitted — never throws — so the empty-assignee policy
  * downstream stays in control.
  */
+
+import { resolveLocalDepartmentHead } from '../directory/local-directory-department-head'
 
 type QueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 
@@ -554,16 +554,22 @@ export async function resolveApprovalRequesterOrgRelations(
     ? await resolveDirectManager(integrationId, requesterDeptId, requester.external_user_id, query)
     : undefined
 
-  // 3) Department head: first manager external id on the primary department's raw
-  //    that resolves to a linked local user (and is not the requester).
+  // 3) Local department heads use the native membership flag; provider rows keep their raw list.
   let deptHeadId: string | undefined
-  const deptManagerExternalIds = parseDeptManagerExternalIds(asRecord(requester.primary_department_raw))
-    .filter((external) => external !== requester.external_user_id)
-  for (const external of deptManagerExternalIds) {
-    const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
-    if (localId) {
-      deptHeadId = localId
-      break
+  const localHead = requesterDeptId
+    ? await resolveLocalDepartmentHead(integrationId, requesterDeptId, userId, query)
+    : { localDepartment: false }
+  if (localHead.localDepartment) {
+    deptHeadId = localHead.headId
+  } else {
+    const deptManagerExternalIds = parseDeptManagerExternalIds(asRecord(requester.primary_department_raw))
+      .filter((external) => external !== requester.external_user_id)
+    for (const external of deptManagerExternalIds) {
+      const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
+      if (localId) {
+        deptHeadId = localId
+        break
+      }
     }
   }
 
@@ -765,8 +771,8 @@ async function fetchDeptHop(
  * department); this walk follows `directory_departments.external_parent_department_id` — a
  * property of the DEPARTMENT itself, independent of whether any head resolves at this level.
  *
- * "Primary" head selection is byte-identical to the shipped single-level `dept_head` (step 3
- * above): the FIRST external id in `dept_manager_userid_list` order — excluding the requester's
+ * Local levels use the same native membership lookup as single-level `dept_head` (step 3).
+ * Provider head selection retains the legacy list order: the FIRST external id in `dept_manager_userid_list` order — excluding the requester's
  * own EXTERNAL id — that resolves to a LINKED local user. The inner loop breaks on that first
  * resolution exactly like the single-level computation; a SEPARATE local-id self-exclusion then
  * decides whether the resolved head enters the CHAIN (mirroring how `managerChainIds` differs
@@ -808,13 +814,18 @@ async function resolveDeptHeadChain(
 
     // Continue-past-empty-level: resolve THIS level's head without letting the outcome gate the
     // next hop (set below, from `hop.parentExternalId`).
-    const managerExternalIds = parseDeptManagerExternalIds(asRecord(hop.raw))
-      .filter((external) => external !== requesterExternalId)
-    for (const external of managerExternalIds) {
-      const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
-      if (localId) {
-        if (localId !== requesterLocalId && !chain.includes(localId)) chain.push(localId)
-        break
+    const localHead = await resolveLocalDepartmentHead(integrationId, currentDeptExternalId, requesterLocalId, query)
+    if (localHead.localDepartment) {
+      if (localHead.headId && !chain.includes(localHead.headId)) chain.push(localHead.headId)
+    } else {
+      const managerExternalIds = parseDeptManagerExternalIds(asRecord(hop.raw))
+        .filter((external) => external !== requesterExternalId)
+      for (const external of managerExternalIds) {
+        const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
+        if (localId) {
+          if (localId !== requesterLocalId && !chain.includes(localId)) chain.push(localId)
+          break
+        }
       }
     }
 

@@ -401,6 +401,7 @@ import { adminUsersRouter } from './routes/admin-users'
 import { adminRoleMembersRouter } from './routes/admin-role-members'
 import { adminDirectoryRouter } from './routes/admin-directory'
 import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
+import { localOrganizationWorkspaceRouter } from './routes/admin-local-organization-workspace'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
 import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
 import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
@@ -2137,6 +2138,7 @@ export class MetaSheetServer {
     // Canonical Org MVP B2 (local departments/accounts/memberships CRUD) — mounted alongside
     // adminDirectoryRouter under the same base path, sharing its `ensurePlatformAdmin` RBAC gate.
     this.app.use('/api/admin/directory/local', adminDirectoryLocalRouter())
+    this.app.use('/api/admin/directory/local', localOrganizationWorkspaceRouter())
     this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())
     this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
 
