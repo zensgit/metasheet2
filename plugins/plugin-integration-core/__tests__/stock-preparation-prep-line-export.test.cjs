@@ -54,6 +54,11 @@ const LIB = path.join(__dirname, '..', 'lib')
 
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+// Batch-refresh step 4 PR-5: the export is a FORMAL surface — it consults the REAL refresh governance (over the
+// kit's empty step-4 tables => not governed: today's rows, audit row and workbook, byte for byte) and brackets its
+// read with the sheet's lock generation. Both are required (501 by name without them), so the mount wires them.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const { STOCK_PREP_OPERATE, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 // The ONE stock-prep table action every route in this family defaults to — the same constant the
@@ -581,9 +586,10 @@ function mount({ boundSheet = SANDBOX_SHEET, realAuditStore = false } = {}) {
       return { member: true }
     },
   }
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, auditAppends, auditRows, xlsxExport, hostReads }

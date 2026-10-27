@@ -164,6 +164,18 @@ const EXPORT_COLUMNS = Object.freeze([
   Object.freeze({ id: 'ext_blankMass', label: '毛胚质量' }),
 ])
 const EXPORT_COLUMN_IDS = Object.freeze(EXPORT_COLUMNS.map((column) => column.id))
+
+// 沿用说明 (batch-refresh step 4 PR-5; design §11 G8 / D-18; plan §2 导出 row 「正式导出有沿用说明，不伪造
+// 父件/路径」). ONE trailing column, present ONLY when the route hands this module the project's live
+// 沿用关系 (`continuation`: the headers and the claim_active members of a governed project's consult, in
+// process, never a request input) and at least one of them exists. It is filled on the CONTINUED rows
+// only — the old rows a relationship keeps (the S root and its subtree keep their own parent / path; the
+// export invents nothing) — and names the new parent's 图号, the parent-edge usage and a short relationship
+// handle. For every project without a continuation the header list and every row are byte-identical to
+// the pre-PR-5 workbook (C09). WORDING IS A T-LAYER PLACEHOLDER until plan §10 Q4 (what purchasing /
+// the warehouse need to read on the line) is answered by the customer; the column's existence is not.
+const CONTINUATION_NOTE_COLUMN = Object.freeze({ id: '__continuationNote', label: '沿用说明' })
+const CONTINUATION_HANDLE_LENGTH = 8
 // Every logical id the projection reads, including the fallback sources (which are never headers).
 const EXPORT_SOURCE_FIELD_IDS = Object.freeze([
   ...EXPORT_COLUMN_IDS,
@@ -843,7 +855,48 @@ async function queryAllMainRows(recordsApi, sheetId, fieldIdMap, projectNo) {
  * The real gate is requireAccess(req, STOCK_PREP_OPERATE), the first statement of the route handler,
  * before any host IO. See REQUIRED_PERMISSION above.
  */
-async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, permission } = {}) {
+/**
+ * The 沿用说明 cell of every continued row, keyed by record id (see CONTINUATION_NOTE_COLUMN). `null` when
+ * the column is absent: no `continuation` input, or one without a live relationship. The new parent's
+ * 图号 is resolved from the export's OWN rows (the row at the new root's parent path, else the first
+ * active row of that part id); when none is found the note names the relationship only — it never
+ * fabricates a parent.
+ */
+function continuationNotesFor(rows, continuation) {
+  if (continuation === undefined || continuation === null) return null
+  if (!isPlainObject(continuation) || !Array.isArray(continuation.continuations) || !Array.isArray(continuation.members)) {
+    throw new StockPreparationPrepLineExportError(500, 'PREP_LINE_EXPORT_CONTINUATION_INVALID', 'the continuation input must carry continuations and members')
+  }
+  const live = continuation.continuations.filter((entry) => isPlainObject(entry) && typeof entry.id === 'string' && entry.id !== '' && entry.status !== 'ended')
+  if (live.length === 0) return null
+  const headers = new Map(live.map((entry) => [entry.id, entry]))
+  const parentCodeOf = new Map()
+  for (const header of live) {
+    const parentSourceId = optionalString(header.newParentComponentSourceId)
+    const tokens = Array.isArray(header.newRootPathTokens) ? header.newRootPathTokens.slice(0, -1) : null
+    const wantedPath = tokens && tokens.length > 0 ? JSON.stringify(tokens) : null
+    let parent = null
+    if (wantedPath) parent = rows.find((row) => row.active !== false && typeof row.path === 'string' && row.path === wantedPath) || null
+    if (!parent && parentSourceId) parent = rows.find((row) => row.active !== false && optionalString(row.componentSourceId) === parentSourceId) || null
+    parentCodeOf.set(header.id, parent ? optionalString(parent.componentCode) : null)
+  }
+  const notes = new Map()
+  for (const member of continuation.members) {
+    if (!isPlainObject(member) || member.claimActive === false) continue
+    const header = headers.get(member.continuationId)
+    const recordId = optionalString(member.oldRecordId)
+    if (!header || !recordId) continue
+    const handle = header.id.slice(-CONTINUATION_HANDLE_LENGTH)
+    const parentCode = parentCodeOf.get(header.id)
+    const edge = typeof header.parentEdgeUsage === 'number' && Number.isFinite(header.parentEdgeUsage) ? String(header.parentEdgeUsage) : null
+    notes.set(recordId, parentCode
+      ? `由 ${parentCode} 沿用（父边用量 ${edge === null ? '未记录' : edge}，关系 ${handle}）`
+      : `沿用既有备料行（关系 ${handle}）`)
+  }
+  return notes
+}
+
+async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, permission, continuation } = {}) {
   assertAdminPermission(permission)
   const api = ensureReadOnlyRecordsApi(recordsApi)
   const boundTarget = normalizeExportTarget(target)
@@ -868,13 +921,27 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
   // (orderRowsAsBomTree), 老系统 iterHandle 的形状,而不再只是「按父组件图号分带」。身份列认不出
   // 来的老部署自动退回 F1b 的平比较器,所以没有任何一种部署会比改之前更乱。
   const ordering = orderRowsAsBomTree(activeRows)
-  const rows = ordering.rows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
+  // PR-5: the 沿用说明 column exists only for a project with a live 沿用关系 (see CONTINUATION_NOTE_COLUMN);
+  // without one, `headers` and every row below are the pre-PR-5 projection byte for byte.
+  const notes = continuationNotesFor(activeRows, continuation)
+  let continuedRowCount = 0
+  const rows = ordering.rows.map((data) => {
+    const cells = EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column)))
+    if (notes === null) return cells
+    const note = typeof data[ROW_IDENTITY_KEY] === 'string' ? notes.get(data[ROW_IDENTITY_KEY]) : undefined
+    if (note !== undefined) continuedRowCount += 1
+    cells.push(note === undefined ? '' : note)
+    return cells
+  })
+  if (notes !== null) headers.push(CONTINUATION_NOTE_COLUMN.label)
   return {
     projectNo: scopedProjectNo,
     totalRowCount: allRows.length,
     activeRowCount: activeRows.length,
     headers,
     rows,
+    // PR-5, present only when the 沿用说明 column is: values-free counts of the continued rows.
+    ...(notes === null ? {} : { continuationColumn: true, continuedRowCount }),
     // Values-free ordering facts. `collapsedRowCount` is the ONE number that explains a workbook
     // with fewer lines than the sheet has rows (同父同键的重复行按老系统合并),so it travels with
     // the result instead of being a silent drop; `treeOrdered: false` says this deployment's rows

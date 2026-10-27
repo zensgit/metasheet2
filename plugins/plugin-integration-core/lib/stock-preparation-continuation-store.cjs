@@ -910,6 +910,47 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     })
   }
 
+  /**
+   * Batch-refresh step 4 PR-6: does ANY step-4 row name this SHEET — the generic configured writers' half of the
+   * governed predicate (lib/stock-preparation-governed-sheet-probe.cjs). A generic writer (the pipelines target
+   * adapter, the C6 write-source, the ERP feedback writer) holds a sheet id and nothing else: no project number, no
+   * proven project scope, no lease. So this reads BY SHEET only, four counts on the store's own db (autocommit; a
+   * point-in-time existence check needs no snapshot), with the same row predicate the consult's `governed` uses
+   * (design §5.1, governance `anyRows`):
+   *   continuation  every status — an ENDED relationship still governs (D3);
+   *   openHold      status 'open' only — a resolved / superseded hold does not;
+   *   state         any refresh-state row;
+   *   execution     any execution row (the consult always reads the newest five, so one row is enough to govern).
+   * Members are not read: a member is inserted with its header in the confirm transaction and `claim_active` mirrors
+   * the header's status (migration 102 CHECK), so a governing member implies a governing header on the same sheet.
+   * Values-free answer: integers only. Throws 503 STORE_FAILED on any failure (never zero), 422 on a blank sheet
+   * id, 501 when the binding cannot count.
+   */
+  async function readSheetGovernanceMarks(input = {}) {
+    const sheetId = isPlainObject(input) ? trimmed(input.sheetId) : null
+    if (!sheetId) throw scopeInvalid('sheetId')
+    if (typeof db.countRows !== 'function') {
+      throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the refresh store binding cannot count rows; refusing to answer whether a sheet is governed', { reason: 'count_rows' })
+    }
+    const T = REFRESH_STORE_TABLES
+    async function count(table, token, where) {
+      let value
+      try {
+        value = await db.countRows(table, where)
+      } catch (error) {
+        throw storeFailed('read_sheet_governance_marks', error, { table: token })
+      }
+      const n = typeof value === 'number' ? value : Number(value)
+      if (!Number.isInteger(n) || n < 0) throw storeFailed('read_sheet_governance_marks', null, { table: token, reason: 'count_malformed' })
+      return n
+    }
+    const continuation = await count(T.continuation, 'continuation', { sheet_id: sheetId })
+    const openHold = await count(T.hold, 'refresh_hold', { sheet_id: sheetId, status: 'open' })
+    const state = await count(T.state, 'refresh_state', { sheet_id: sheetId })
+    const execution = await count(T.execution, 'refresh_execution', { sheet_id: sheetId })
+    return Object.freeze({ ok: true, sheetId, continuation, openHold, state, execution })
+  }
+
   /** One continuation with its members (every status; members claim_active or not), scoped. */
   async function readContinuation(input = {}) {
     const scope = normalizeScope(input)
@@ -925,6 +966,24 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     assertScopedRow(row, scope, 'continuation')
     const members = await selectAll(db, REFRESH_STORE_TABLES.member, { continuation_id: continuationId }, { orderBy: ['position', 'ASC'], ceiling: READ_CEILINGS.member, operation: 'read_members' })
     return Object.freeze({ continuation: rowToContinuation(row), members: members.map(rowToMember) })
+  }
+
+  /**
+   * PR-5 (design §11, the directory's union count): the OPEN holds of one tenant, counted by project number.
+   * One paged read of the open rows (ceiling READ_CEILINGS.hold), grouped in process; throws 503 on any
+   * failure — never an empty map (the directory then answers `ledgerReady: false`, never zero).
+   */
+  async function countOpenHoldsByProjectNo(input = {}) {
+    const tenantId = trimmed(input.tenantId)
+    if (!tenantId) throw scopeInvalid('tenantId')
+    const rows = await selectAll(db, REFRESH_STORE_TABLES.hold, { tenant_id: tenantId, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'count_open_holds' })
+    const byProjectNo = new Map()
+    for (const row of rows) {
+      const projectNo = trimmed(row.project_no)
+      if (!projectNo) continue
+      byProjectNo.set(projectNo, (byProjectNo.get(projectNo) || 0) + 1)
+    }
+    return Object.freeze({ ok: true, byProjectNo })
   }
 
   /** One hold by id, scoped (any status). */
@@ -1797,8 +1856,10 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
 
   return Object.freeze({
     readGovernanceRows,
+    readSheetGovernanceMarks,
     readContinuation,
     readHold,
+    countOpenHoldsByProjectNo,
     confirmContinuation,
     reconfirmContinuation,
     endContinuation,

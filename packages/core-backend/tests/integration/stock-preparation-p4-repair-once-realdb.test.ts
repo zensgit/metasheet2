@@ -18,6 +18,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
 import { defineStockPreparationProjectWriteLockRealDbCases } from './stock-preparation-project-write-lock-realdb.cases'
+import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stock-preparation-generic-writer-governance-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -499,3 +500,5 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
 // Batch-refresh phase 0 step 1: the stock-prep project write lock (migration 100) real-DB cases ride this
 // already-wired stock-prep real-DB host (see the cases module header for why there is no lane file of their own).
 defineStockPreparationProjectWriteLockRealDbCases()
+// Batch-refresh step 4 PR-6: the generic configured writers refuse governed stock-prep sheets (real PG, S6-*).
+defineStockPreparationGenericWriterGovernanceRealDbCases()

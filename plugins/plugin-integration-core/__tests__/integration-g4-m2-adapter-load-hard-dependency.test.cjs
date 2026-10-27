@@ -272,9 +272,9 @@ const ROUTE_PUBLIC_PROJECTION_FORMS = Object.freeze([
     why: 'the same matched-scope object-fence loader, continued. When B2a is armed for data-source:sql-readonly, an unavailable config accessor/loader is refused; the config result is used only for the object fence, never as adapter input.',
   },
   {
-    exact: 'function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf }) {',
+    exact: 'function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf, governedSheetProbe }) {',
     count: 1,
-    why: 'the PARAMETER that receives the `getExternalSystem: (input) => …` seam rostered above (K3 B4 same-INSTANCE comparison: kind + baseUrl, no adapter). On the roster because the match is on the IDENTIFIER, not on `.name` / `\'name\'` — a binding created by destructuring is exactly the form that used to be invisible.',
+    why: 'the PARAMETER that receives the `getExternalSystem: (input) => …` seam rostered above (K3 B4 same-INSTANCE comparison: kind + baseUrl, no adapter). On the roster because the match is on the IDENTIFIER, not on `.name` / `\'name\'` — a binding created by destructuring is exactly the form that used to be invisible. (Batch-refresh step 4 PR-6 appended `governedSheetProbe`: the server-held governed-sheet probe the multitable write-source is built with — plugin-SQL reads of the stock-prep registry / refresh tables, never an external-system read and never an adapter load.)',
   },
   {
     exact: "if (typeof externalSystems.getExternalSystemAdapterConfig !== 'function') return null",
