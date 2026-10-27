@@ -87,16 +87,20 @@
  *       host / lock / registry / audit store and the lock's in-transaction bump inside the store's real transaction:
  *       interleavings (abandoned lease, frozen confirm vs acquire via pg_blocking_pids, live lease, frozen holder), E03,
  *       E04, E09 (a real audit trigger), A08 across two sessions, U03, U04 (S4-*; listed in the S4 describe's own header).
+ *   F2-01 (F2) the PROJECT REGISTRY lock, not the write lock: a small dedicated pool exhausted by blocking registrations
+ *       while one holds the tenant registry lock — the holder's comparison reads ride its own transaction, it answers
+ *       201 well inside the connect timeout and every queued registration lands (listed in the F2 describe's header).
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import type { PoolClient } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import express from 'express'
@@ -5848,5 +5852,234 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         })
       })
     })
+  })
+
+  // F2 — the project REGISTRY lock (not the write lock above): the registration comparison's reads under it ride the
+  // locked transaction. The REAL create route (lib/http-routes.cjs stockPreparationProjectTargetCreate) over the REAL
+  // registry, read-plan and source-binding stores on a DEDICATED small pool against this database; only the host
+  // provisioning / records are the plugin suites' in-memory fakes, so no host call competes for this pool.
+  describeIfDatabase('stock-prep project registration comparison under the registry lock (real Postgres, F2)', () => {
+    // The host pool's own connect timeout (src/integration/db/connection-pool.ts, DB_CONNECT_TIMEOUT default).
+    const CONNECT_TIMEOUT_MS = 10000
+    const CREATE_PATH = '/api/integration/stock-preparation/projects/:projectNo/target'
+    const routesModule = require(path.join(PLUGIN_LIB, 'http-routes.cjs')) as any
+    const registryModule = require(path.join(PLUGIN_LIB, 'stock-preparation-project-target-store.cjs')) as any
+    const readPlanStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-read-plan-store.cjs')) as any
+    const bindingStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-source-binding-store.cjs')) as any
+    const { validateStockPreparationReadPlanConfig } = require(path.join(PLUGIN_LIB, 'stock-preparation-read-plan-config.cjs')) as any
+    const access = require(path.join(PLUGIN_LIB, 'stock-preparation-workbench-access.cjs')) as any
+    const projectTargets = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
+    const { ONLINE_READ_PLANS_ENABLED_ENV } = require(path.join(PLUGIN_LIB, 'stock-preparation-read-plan-switch.cjs')) as any
+    const SUPPORT = path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support')
+    const sheetHarness = require(path.join(SUPPORT, 'stock-preparation-project-sheet-harness.cjs')) as any
+    const writeLockKit = require(path.join(SUPPORT, 'stock-preparation-project-write-lock-kit.cjs')) as any
+    const { consumableMap } = require(path.join(SUPPORT, 'consumable-storage.cjs')) as any
+
+    // The HOST's plugin database binding shape (src/index.ts `database`, as hostLikeDb above) over a dedicated pool:
+    // `query` runs on a pooled connection in autocommit, `transaction` checks out its own client. `afterStatement`
+    // runs after each statement INSIDE a transaction has returned — the hook that holds the first lock holder there.
+    function poolDb(pool: Pool, afterStatement: (sql: string) => Promise<void> | void) {
+      return createDb({
+        database: {
+          query: async (sql: string, params?: unknown[]) => (await pool.query(sql, params)).rows,
+          transaction: async <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+            const client = await pool.connect()
+            try {
+              await client.query('BEGIN')
+              const result = await callback({
+                query: async (sql: string, params?: unknown[]) => {
+                  const rows = (await client.query(sql, params)).rows
+                  await afterStatement(sql)
+                  return rows
+                },
+                commit: async () => {},
+                rollback: async () => {},
+              })
+              await client.query('COMMIT')
+              return result
+            } catch (error) {
+              await client.query('ROLLBACK').catch(() => {})
+              throw error
+            } finally {
+              client.release()
+            }
+          },
+        },
+      })
+    }
+    const stable = (value: any): string => {
+      if (value === null || typeof value !== 'object') return JSON.stringify(value)
+      if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`
+    }
+
+    // F2-01 max 4 connections and the host's connect timeout. One default / case-sensitive registration takes the
+    //   tenant registry lock (the BLOCKING 'pinned' leg) and is held right after its lock statement; five more
+    //   registrations of other project numbers queue behind it — three block on the lock inside their transactions,
+    //   each holding a pooled connection (pg_stat_activity wait_event 'advisory'), two wait in the pool for a
+    //   connection — the precondition is asserted, not assumed. Released, the holder re-resolves the comparison under
+    //   the lock (online switch on; an approved case-sensitive plan active at the tenant-null scope and one workspace
+    //   binding: seven reads) on its OWN transaction and answers 201 well inside the connect timeout; all six land.
+    //   Before F2 those reads went to the pool, the holder waited behind the queue for the whole connect timeout and
+    //   answered 503 STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE (witnessed by mutation, not kept as code).
+    test('F2-01 a small pool exhausted by blocking registrations: the lock holder\'s comparison rides its own transaction, it answers 201 promptly and every queued registration lands', async () => {
+      const tenantId = `tenant_swl_f2_${TOKEN}`
+      const appName = `swl_f2_registry_${process.pid}`
+      const systemId = `swl_f2_source_${TOKEN}`
+      const actionId = tableActions.PLM_STOCK_PREPARATION_ACTION_ID
+      const versionId = `rpv_swl_f2_${TOKEN}`
+      const projects = ['SYN-F2-HOLDER', 'SYN-F2-W1', 'SYN-F2-W2', 'SYN-F2-W3', 'SYN-F2-W4', 'SYN-F2-W5']
+      const BLOCKED_ON_LOCK = 3
+      const QUEUED_FOR_POOL = 2
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 4,
+        connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+        statement_timeout: 30000,
+        application_name: appName,
+      })
+      let releaseHolder: () => void = () => {}
+      const holderHeld = new Promise<void>((resolve) => { releaseHolder = resolve })
+      let signalLocked: () => void = () => {}
+      const holderLocked = new Promise<void>((resolve) => { signalLocked = resolve })
+      let held = false
+      const db = poolDb(pool, async (sql) => {
+        if (held || !sql.includes('pg_advisory_xact_lock(')) return
+        held = true
+        signalLocked()
+        await holderHeld
+      })
+      const blockedOnRegistryLock = async () => Number((await q(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND application_name = $1 AND wait_event_type = 'Lock' AND wait_event = 'advisory'`,
+        [appName],
+      )).rows[0].n)
+      const envKeys = [projectTargets.PROJECT_SHEETS_ENABLED_ENV, projectTargets.PROJECT_SHEET_GRANT_ROLE_IDS_ENV, ONLINE_READ_PLANS_ENABLED_ENV,
+        'MULTITABLE_STOCK_PREP_OWN_BASE', 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED']
+      const envBefore = new Map(envKeys.map((key) => [key, process.env[key]]))
+      const pending: Array<Promise<unknown>> = []
+      try {
+        for (const key of envKeys) delete process.env[key]
+        process.env[projectTargets.PROJECT_SHEETS_ENABLED_ENV] = 'true'
+        process.env[ONLINE_READ_PLANS_ENABLED_ENV] = 'true'
+        // An APPROVED case-sensitive online plan, active at the tenant-null scope, and one workspace binding: the
+        // comparison stays case-sensitive (every registration is the BLOCKING default / case-sensitive leg) and reads
+        // the null pointer, both binding listings, the bound workspace's pointer in both rounds and the version.
+        const config = validateStockPreparationReadPlanConfig({
+          schemaVersion: 1, actionId, systemId,
+          readPlan: {
+            id: 'plm.stock-preparation.bom-read.user-draft.v1', sourceKind: 'data-source:sql-readonly', matchField: 'project', maxReadCount: 100,
+            pathExAttr: { object: 'SYN_PathLink', matchField: 'project', pathIdField: 'path' },
+            pathInfo: { object: 'SYN_Path', idField: 'id' },
+            orderHead: { object: 'SYN_Order', idField: 'id', pathIdField: 'path' },
+            orderDetail: { object: 'SYN_OrderLine', orderIdField: 'order', componentIdField: 'part', quantityField: 'qty' },
+            part: { object: 'SYN_Part', idField: 'id', codeField: 'code', nameField: 'name' },
+            bomHead: { object: 'SYN_Bom', parentPartField: 'part', bomIdField: 'id' },
+            bomDetail: { object: 'SYN_BomLine', bomParentField: 'bom', componentIdField: 'part', quantityField: 'qty' },
+            sourceProjectComparison: 'case-sensitive',
+          },
+        })
+        const contentKey = createHash('sha256').update(stable(config)).digest('hex')
+        await q(
+          `INSERT INTO integration_stock_prep_read_plan_versions (id, tenant_id, workspace_id, action_id, system_id, schema_version, config, content_key, version, status, created_by, updated_by)
+           VALUES ($1, $2, NULL, $3, $4, 1, $5::jsonb, $6, 1, 'approved', 'syn', 'syn')`,
+          [versionId, tenantId, actionId, systemId, JSON.stringify(config), contentKey],
+        )
+        await q(
+          `INSERT INTO integration_stock_prep_read_plan_activation (id, tenant_id, workspace_id, action_id, version_id, system_id, content_key, generation, status, created_by, updated_by)
+           VALUES ($1, $2, NULL, $3, $4, $5, $6, 1, 'active', 'syn', 'syn')`,
+          [`rpa_swl_f2_${TOKEN}`, tenantId, actionId, versionId, systemId, contentKey],
+        )
+        await q(
+          `INSERT INTO integration_stock_prep_source_binding (id, tenant_id, workspace_id, action_id, external_system_id) VALUES ($1, $2, $3, $4, $5)`,
+          [`bind_swl_f2_${TOKEN}`, tenantId, 'ws-swl-f2', actionId, systemId],
+        )
+
+        const provisioning = sheetHarness.makeProvisioning()
+        const routes = new Map<string, any>()
+        const envTarget = { sheetId: `sheet_env_swl_f2_${TOKEN}`, objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} }
+        const routeContext = {
+          api: {
+            http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
+            multitable: { provisioning, records: writeLockKit.withFakeHostWriteFence(sheetHarness.makeRecordsApi({ provisioning })) },
+          },
+          storage: consumableMap(),
+          config: {
+            stockPreparationTableActions: [{ actionId, source: { externalSystemId: systemId, kind: 'data-source:sql-readonly' }, target: envTarget }],
+            stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envTarget.objectId] },
+          },
+        }
+        const services = {
+          ...sheetHarness.baseServices(null),
+          stockPreparationProjectTargetStore: registryModule.createStockPreparationProjectTargetStore({ db }),
+          stockPreparationReadPlanStore: readPlanStoreModule.createStockPreparationReadPlanStore({ db }),
+          stockPreparationSourceBindingStore: bindingStoreModule.createStockPreparationSourceBindingStore({ db }),
+          stockPreparationAuditStore: {
+            async append() { return { ok: true } },
+            async supportsAction() { return { supported: true, reason: 'check_constraint_accepts' } },
+            async list() { return { rowCount: 0, entries: [] } },
+          },
+          tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+        }
+        routesModule.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
+        const puller = { id: `u_swl_f2_${TOKEN}`, tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE, access.STOCK_PREP_PULL] }
+        const register = async (projectNo: string) => {
+          const handler = routes.get(`POST ${CREATE_PATH}`)
+          if (!handler) throw new Error('the project-sheet create route is not registered')
+          const res: any = { statusCode: 200, body: null, headers: {} }
+          res.status = (code: number) => { res.statusCode = code; return res }
+          res.json = (payload: unknown) => { res.body = payload; return res }
+          res.setHeader = (name: string, value: unknown) => { res.headers[name] = value; return res }
+          res.send = (payload: unknown) => { res.body = payload; return res }
+          await handler({ user: puller, body: {}, query: {}, params: { projectNo }, authenticatedTenantId: tenantId }, res)
+          return { status: res.statusCode as number, code: (res.body && res.body.error && res.body.error.code) || null, at: Date.now() }
+        }
+
+        const holder = register(projects[0])
+        pending.push(holder)
+        const answeredUnlocked = holder.then(() => { throw new Error('the holder answered before it took the registry lock') })
+        answeredUnlocked.catch(() => {})
+        await Promise.race([holderLocked, answeredUnlocked])
+        const waiters = projects.slice(1).map((projectNo) => register(projectNo))
+        pending.push(...waiters)
+        await waitUntil('three registrations blocked on the registry lock and two queued for a pool connection', async () => (
+          (await blockedOnRegistryLock()) === BLOCKED_ON_LOCK && pool.waitingCount === QUEUED_FOR_POOL
+        ), 20000)
+        const precondition = { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount, blockedOnLock: await blockedOnRegistryLock() }
+        expect(precondition, 'the pool is exhausted while the holder holds the registry lock').toEqual({ total: 4, idle: 0, waiting: QUEUED_FOR_POOL, blockedOnLock: BLOCKED_ON_LOCK })
+
+        const releasedAt = Date.now()
+        releaseHolder()
+        const answered = await holder
+        const holderMs = answered.at - releasedAt
+        const others = await Promise.all(waiters)
+        const totalMs = Date.now() - releasedAt
+        const registered = (await q('SELECT project_no FROM integration_stock_prep_project_target WHERE tenant_id = $1 ORDER BY project_no', [tenantId])).rows.map((row: any) => row.project_no)
+        const observed = {
+          holder: `${answered.status}:${answered.code}`,
+          holderMs,
+          waiters: others.map((entry) => `${entry.status}:${entry.code}`),
+          totalMs,
+          registered: registered.length,
+        }
+        console.log(`[F2-01] ${JSON.stringify({ precondition, ...observed })}`)
+        expect(answered.status, `the holder answered ${answered.status} ${answered.code} after ${holderMs} ms`).toBe(201)
+        expect(holderMs, 'no wait for a pool connection: well inside the connect timeout').toBeLessThan(CONNECT_TIMEOUT_MS / 2)
+        expect(others.map((entry) => entry.status), JSON.stringify(observed.waiters)).toEqual([201, 201, 201, 201, 201])
+        expect(registered).toEqual([...projects].sort())
+      } finally {
+        releaseHolder()
+        await Promise.allSettled(pending)
+        for (const [key, value] of envBefore) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+        await q('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await q('DELETE FROM integration_stock_prep_read_plan_activation WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await q('DELETE FROM integration_stock_prep_read_plan_versions WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await q('DELETE FROM integration_stock_prep_source_binding WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await pool.end()
+      }
+    }, 120000)
   })
 }

@@ -138,16 +138,23 @@ async function registrationRead(read) {
   try { return await read() } catch (_error) { throw registrationUnavailable() }
 }
 
+// F2: the registration's read-handle argument list. `executor`, when given, is the project registry's TRANSACTION
+// handle (stock-preparation-project-target-store.cjs `assertSourceProjectIdentity` hands it while the tenant registry
+// lock is held), and `[{ executor }]` is passed to every store read so each one is issued on it. Absent (the route's
+// unlocked pre-read): an empty list, so every store read is called exactly as before and uses the store's own db.
+const registrationReadVia = (executor) => (executor === undefined || executor === null ? [] : [{ executor }])
+
 function registrationMode(value) {
   if (value !== undefined && !SOURCE_PROJECT_COMPARISON_MODES.includes(value)) throw registrationUnavailable()
   return value
 }
 
 // The complete binding list for this tenant/action. No binding store means no binding capability.
-async function readRegistrationBindings(bindingStore, tenantId, actionId) {
+// `via` is the registration's read-handle argument list (`registrationReadVia`): empty, or `[{ executor }]`.
+async function readRegistrationBindings(bindingStore, tenantId, actionId, via) {
   if (!bindingStore) return []
   if (typeof bindingStore.listForAction !== 'function') throw registrationUnavailable()
-  const listed = await registrationRead(() => bindingStore.listForAction({ tenantId, actionId }))
+  const listed = await registrationRead(() => bindingStore.listForAction({ tenantId, actionId }, ...via))
   if (!isPlainRecord(listed) || listed.complete !== true || !Array.isArray(listed.bindings)
     || listed.bindings.length > REGISTRATION_MAX_BINDINGS) throw registrationUnavailable()
   const seen = new Set()
@@ -184,12 +191,12 @@ function checkedRegistrationPointer(pointer, tenantId, workspaceId, actionId) {
   }
 }
 
-async function readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces, cachedNull }) {
+async function readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces, cachedNull, via }) {
   const pointers = []
   for (const workspaceId of workspaces) {
     const raw = workspaceId === null && cachedNull
       ? cachedNull.value
-      : await registrationRead(() => readPlanStore.getActivation({ tenantId, workspaceId, actionId }))
+      : await registrationRead(() => readPlanStore.getActivation({ tenantId, workspaceId, actionId }, ...via))
     pointers.push(checkedRegistrationPointer(raw, tenantId, workspaceId, actionId))
   }
   return pointers
@@ -214,7 +221,14 @@ function registrationVersionMode(version, pointer, tenantId, workspaceId, action
 // Residual: the reads are re-checked for stability but are not atomic with a future activation (a case-insensitive
 // activation serializes with registration on the registry lock instead). With the online read-plan switch off
 // (`onlineReadPlansEnabled` not literal true) no online scope can execute, so the deployment's answer is the answer.
-async function resolveStockPreparationProjectRegistrationComparison({ tenantId, actionId, deploymentAction, bindingStore, readPlanStore, onlineReadPlansEnabled = false } = {}) {
+// F2: under the registry lock the caller passes its transaction handle as `executor` and EVERY read below rides it —
+// the first activation, both binding listings, both pointer rounds (the second is the stability re-check) and the
+// versions. Blocking takers of the same lock each hold a pooled connection while they wait, so a read that needed
+// another one could wait behind them until the pool's connect timeout and refuse a registration nothing was wrong
+// with. db.cjs offers no savepoint: an undefined-table error on that handle aborts the transaction (every later
+// statement fails 25P02), so the pre-ledger escape below is taken only WITHOUT an executor; with one, a missing
+// activation table is the typed 503 by name. The two early returns below read nothing and ignore the executor.
+async function resolveStockPreparationProjectRegistrationComparison({ tenantId, actionId, deploymentAction, bindingStore, readPlanStore, onlineReadPlansEnabled = false, executor } = {}) {
   if (!isCanonicalText(tenantId) || !isCanonicalText(actionId) || !isPlainRecord(deploymentAction)
     || !isPlainRecord(deploymentAction.source)) throw registrationUnavailable()
   const deploymentReadPlan = deploymentAction.source.readPlan
@@ -228,17 +242,20 @@ async function resolveStockPreparationProjectRegistrationComparison({ tenantId, 
   if (deploymentMode === 'case-insensitive') return deploymentMode
   if (onlineReadPlansEnabled !== true) return deploymentMode
   if (!readPlanStore || typeof readPlanStore.getActivation !== 'function') throw registrationUnavailable()
+  const via = registrationReadVia(executor)
+  const onExecutor = via.length > 0
   let first
   try {
-    first = { value: await readPlanStore.getActivation({ tenantId, workspaceId: null, actionId }) }
+    first = { value: await readPlanStore.getActivation({ tenantId, workspaceId: null, actionId }, ...via) }
   } catch (error) {
-    // Only this first direct single-table read may say the activation table does not exist.
-    if (error && error.code === UNDEFINED_TABLE_SQLSTATE) return deploymentMode
+    // Only this first direct single-table read may say the activation table does not exist — and only on the
+    // store's own db. On a handed transaction (F2) that 42P01 has already aborted it: refused by name, never legacy.
+    if (!onExecutor && error && error.code === UNDEFINED_TABLE_SQLSTATE) return deploymentMode
     throw registrationUnavailable()
   }
-  const bindings = await readRegistrationBindings(bindingStore, tenantId, actionId)
+  const bindings = await readRegistrationBindings(bindingStore, tenantId, actionId, via)
   const workspaces = registrationWorkspaces(deploymentWorkspaceId, bindings)
-  const pointers = await readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces, cachedNull: first })
+  const pointers = await readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces, cachedNull: first, via })
   const modes = [deploymentMode]
   for (let index = 0; index < pointers.length; index += 1) {
     const pointer = pointers[index]
@@ -246,12 +263,12 @@ async function resolveStockPreparationProjectRegistrationComparison({ tenantId, 
     const workspaceId = workspaces[index]
     const version = await registrationRead(() => readPlanStore.getForRuntime({
       tenantId, workspaceId, id: pointer.versionId, actionId, systemId: pointer.systemId,
-    }))
+    }, ...via))
     modes.push(registrationVersionMode(version, pointer, tenantId, workspaceId, actionId))
   }
-  const bindingsAfter = await readRegistrationBindings(bindingStore, tenantId, actionId)
+  const bindingsAfter = await readRegistrationBindings(bindingStore, tenantId, actionId, via)
   const workspacesAfter = registrationWorkspaces(deploymentWorkspaceId, bindingsAfter)
-  const pointersAfter = await readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces: workspacesAfter })
+  const pointersAfter = await readRegistrationPointers({ readPlanStore, tenantId, actionId, workspaces: workspacesAfter, via })
   if (JSON.stringify([bindings, workspaces, pointers]) !== JSON.stringify([bindingsAfter, workspacesAfter, pointersAfter])) {
     throw registrationUnavailable()
   }

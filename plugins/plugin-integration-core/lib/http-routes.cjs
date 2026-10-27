@@ -10916,7 +10916,11 @@ function requireStockPreparationAudit() {
       // online read-plan scope of the verified tenant; never chosen by the request and not an execution or
       // source authorization. Only an unconfigured / absent action means legacy (no mode); every other
       // failure propagates and refuses the request. The strict store path calls it again under its lock.
-      const resolveSourceProjectComparison = async () => {
+      // F2: under the lock (strict create and replay, and the pinned default / case-sensitive create) the store calls
+      // it with `{ executor: trx }`, its own transaction handle, and every comparison read rides that connection (the
+      // deployment lookup below is in memory). The unlocked pre-read further down passes none and reads through the
+      // stores' own db, as before.
+      const resolveSourceProjectComparison = async ({ executor } = {}) => {
         let deploymentAction
         try {
           deploymentAction = await deploymentTableActions.getTableAction({
@@ -10936,6 +10940,7 @@ function requireStockPreparationAudit() {
           bindingStore: stockPreparationSourceBinding,
           readPlanStore: services.stockPreparationReadPlanStore,
           onlineReadPlansEnabled: onlineReadPlansEnabled(),
+          executor,
         })
       }
       // G1 — the host grant is ON CONFLICT DO NOTHING, so running it again heals a grant that failed

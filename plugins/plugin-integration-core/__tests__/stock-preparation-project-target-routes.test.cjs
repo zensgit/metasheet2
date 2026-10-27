@@ -509,7 +509,17 @@ function registrationBindings(scopes = [null, 'workspace-synthetic']) {
     async transaction(fn) { return fn(db) },
     async selectOneForKeyShare() { throw new Error('unexpected synthetic binding write') },
   }
-  return { store: createStockPreparationSourceBindingStore({ db }), calls }
+  // F2: under the registry lock the comparison lists the bindings on the REGISTRY's transaction handle. One database:
+  // `servedBy(trx)` is that handle reading this table too (recorded 'trx-list'); every other table stays the registry's.
+  const servedBy = (trx) => ({
+    ...trx,
+    async select(table, options = {}) {
+      if (table !== BINDING_TABLE) return trx.select(table, options)
+      calls.push(['trx-list', options.where])
+      return rows.filter((row) => matches(row, options.where)).slice(0, options.limit)
+    },
+  })
+  return { store: createStockPreparationSourceBindingStore({ db }), calls, servedBy }
 }
 
 const registerProject = (h, projectNo, { user = PULLER, body = {}, query = {}, claim = true } = {}) => call(h.routes, 'POST', CREATE_PATH, {
@@ -697,7 +707,11 @@ test('P2-R09 real binding enumeration finds CI in tenant-null and sibling worksp
     active.activation.workspaceId = workspaceId
     active.version.workspaceId = workspaceId
     delete active.sourceValidation
-    const h = registrationMount({ comparison: 'case-sensitive', active,
+    // One database (F2): the registry transaction the comparison reads on under the lock serves the binding table too.
+    const db = makeMemoryDb()
+    const original = db.transaction
+    db.transaction = (fn) => original((trx) => fn(binding.servedBy(trx)))
+    const h = registrationMount({ comparison: 'case-sensitive', active, db,
       serviceExtras: { stockPreparationSourceBindingStore: binding.store } })
     try {
       registerActive(h, 'Abc')
@@ -707,6 +721,7 @@ test('P2-R09 real binding enumeration finds CI in tenant-null and sibling worksp
       assert.ok(probed.includes(null), 'tenant-null pointer is never hidden by a workspace binding')
       assert.ok(probed.includes('workspace-synthetic'), 'all real binding scopes are checked')
       assert.ok(binding.calls.some(([method]) => method === 'list'), 'actual listForAction participates')
+      assert.ok(binding.calls.some(([method]) => method === 'trx-list'), 'under the registry lock the bindings are listed on its transaction (F2)')
       assert.equal(h.executionCalls.length, 0, 'registration metadata does not consult execution validation')
     } finally { h.restore() }
   }
@@ -832,6 +847,57 @@ test('P2-R14 online read plans switched OFF: registration uses the deployment co
         assertRegistrationRefusedWithoutWrites(h, result, before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
       }
       assert.deepEqual(h.planCalls, [], `${deployment}: no activation pointer or version is read while the switch is off`)
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R15 (F2) the pool is exhausted while the registry lock is held: strict create, pinned default / case-sensitive create and strict replay still register — every comparison read under the lock rides the registry transaction', async () => {
+  // A connection-starved pool, modelled: while a registry transaction holds the tenant lock, a comparison read that is
+  // NOT handed that transaction finds no free connection and fails (the host pool's connect timeout, without its 10 s
+  // wait: blocking takers of the same lock each hold a pooled connection while they wait). A read handed the
+  // transaction runs on its connection. Without F2 each leg below answered 503 STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE.
+  const online = activeRegistrationPlan('case-insensitive')
+  for (const [leg, status, lockedKinds] of [
+    ['strict-create', 201, ['activation', 'bindings', 'version', 'bindings', 'activation']],
+    ['pinned-create', 201, ['activation', 'bindings', 'bindings', 'activation']],
+    ['strict-replay', 200, ['activation', 'bindings', 'version', 'bindings', 'activation']],
+  ]) {
+    const db = makeMemoryDb({ serializeTenantTransactions: true })
+    const transactions = new Set()
+    const original = db.transaction
+    db.transaction = (fn) => original((trx) => { transactions.add(trx); return fn(trx) })
+    const strict = leg !== 'pinned-create'
+    const reads = []
+    const read = (kind, options) => {
+      const executor = options && options.executor
+      const locked = db.heldLocks.size > 0
+      reads.push({ kind, on: executor ? (transactions.has(executor) ? 'registry-transaction' : 'foreign-handle') : 'pool', locked })
+      if (!executor && locked) throw new Error('synthetic-private-pool-exhausted')
+    }
+    const h = registrationMount({ comparison: 'case-sensitive', db, serviceExtras: {
+      stockPreparationReadPlanStore: {
+        async getActiveForRuntime() { return null },
+        // strict legs: an online case-insensitive plan is active at the tenant-null scope; pinned: no pointer anywhere.
+        async getActivation(input, options) { read('activation', options); return strict && input.workspaceId === null ? structuredClone(online.activation) : null },
+        async getForRuntime(_input, options) { read('version', options); return structuredClone(online.version) },
+      },
+      stockPreparationSourceBindingStore: {
+        async get() { return null },
+        async set() { throw new Error('unexpected synthetic binding write') },
+        async listForAction(_input, options) { read('bindings', options); return { bindings: [], complete: true } },
+      },
+    } })
+    try {
+      if (leg === 'strict-replay') registerActive(h, 'Abc')
+      const result = await registerProject(h, 'Abc')
+      assert.equal(result.statusCode, status, `${leg}: ${JSON.stringify(result.body)}`)
+      const underLock = reads.filter((entry) => entry.locked)
+      assert.deepEqual(underLock.map((entry) => entry.kind), lockedKinds, `${leg}: the whole comparison, stability round included, re-read under the lock`)
+      assert.ok(underLock.every((entry) => entry.on === 'registry-transaction'), `${leg}: every read under the lock rode the registry's own transaction: ${JSON.stringify(underLock)}`)
+      const unlocked = reads.filter((entry) => !entry.locked)
+      assert.ok(unlocked.length > 0 && unlocked.every((entry) => entry.on === 'pool'), `${leg}: the unlocked pre-read stays on the pool`)
+      assert.equal(h.db.rows.length, 1, `${leg}: one registry row`)
+      assert.equal(db.heldLocks.size, 0, `${leg}: the lock is released`)
     } finally { h.restore() }
   }
 })

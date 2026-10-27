@@ -548,10 +548,16 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
    * scans EVERY row of the tenant, archived included, and refuses (409, no values) a row whose project number
    * differs exactly but matches case-insensitively. An unknown mode, a count above the bound, an unstable
    * count or an incomplete row is a typed 503. Without a resolver the guard does nothing (the old contract).
+   *
+   * F2: the resolver is handed THIS transaction (`{ executor: trx }`) and reads on it. The lock is held here, and
+   * every BLOCKING taker of the same lock (a 'pinned' registration, archive / restore, a case-insensitive
+   * activation) holds a pooled connection while it waits — so a comparison read that needed another pool
+   * connection could wait behind them until the pool's connect timeout and refuse a registration nothing was
+   * wrong with. Not closed by this: `prepareTarget` and a replay / repair callback still use the pool under the lock.
    */
   async function assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison }) {
     if (typeof resolveSourceProjectComparison !== 'function') return
-    const mode = await resolveSourceProjectComparison()
+    const mode = await resolveSourceProjectComparison({ executor: trx })
     if (mode !== undefined && !SOURCE_PROJECT_COMPARISON_MODES.includes(mode)) throw registryIdentityUnavailableError()
     if (mode !== 'case-insensitive') return
     const rows = await readRegistryRowsForIdentity(trx, tenantId)

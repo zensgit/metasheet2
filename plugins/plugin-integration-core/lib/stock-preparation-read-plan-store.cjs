@@ -251,17 +251,30 @@ function createStockPreparationReadPlanStore({ db, idGenerator = crypto.randomUU
       return checked
     }))
   }
-  async function getForRuntime({ tenantId, workspaceId, id, actionId, systemId } = {}) {
+  // F2: the project registration comparison (stock-preparation-read-plan-runtime.cjs) reads through the two getters
+  // below on the caller's TRANSACTION handle, `options.executor`: the project registry hands the one that holds its
+  // tenant lock, so the reads ride that connection instead of waiting for another pooled one. Absent => this store's
+  // own db, exactly as before. A handle that cannot `selectOne` is refused (a throw), never silently swapped for the
+  // pool — the same rule as the project registry's `pilotReadHandle`.
+  function runtimeReadHandle(options) {
+    const executor = options && typeof options === 'object' ? options.executor : undefined
+    if (executor === undefined || executor === null) return db
+    if (typeof executor.selectOne !== 'function') {
+      throw new Error('createStockPreparationReadPlanStore: a read executor must expose selectOne')
+    }
+    return executor
+  }
+  async function getForRuntime({ tenantId, workspaceId, id, actionId, systemId } = {}, options = {}) {
     const scope = scopeOf({ tenantId, workspaceId })
-    const row = await db.selectOne(VERSION_TABLE, { ...whereScope(scope), id: text(id), action_id: text(actionId), system_id: text(systemId) })
+    const row = await runtimeReadHandle(options).selectOne(VERSION_TABLE, { ...whereScope(scope), id: text(id), action_id: text(actionId), system_id: text(systemId) })
     if (!row) fail(404, 'READ_PLAN_NOT_FOUND')
     const checked = checkedRow(row)
     if (checked.status !== 'approved') fail(409, 'READ_PLAN_NOT_APPROVED')
     return checked
   }
-  async function getActivation({ tenantId, workspaceId, actionId } = {}) {
+  async function getActivation({ tenantId, workspaceId, actionId } = {}, options = {}) {
     const scope = scopeOf({ tenantId, workspaceId })
-    const row = await db.selectOne(ACTIVATION_TABLE, { ...whereScope(scope), action_id: text(actionId) })
+    const row = await runtimeReadHandle(options).selectOne(ACTIVATION_TABLE, { ...whereScope(scope), action_id: text(actionId) })
     return row ? checkedActivation(row) : null
   }
   async function activate({ tenantId, workspaceId, id, actor, expectedGeneration: expected } = {}) {

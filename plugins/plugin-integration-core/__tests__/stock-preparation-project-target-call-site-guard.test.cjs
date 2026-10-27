@@ -47,6 +47,10 @@
 //   C-12 (S4 fix round 1) the create REPLAY heals only inside `store.withActiveRowLocked`: the grant
 //        heal, the pack plan and the pack install all sit inside that callback (on the row the lock
 //        re-read), and no replay heal call remains outside it.
+//   C-14 (F2) the executor hand-off: the store's one identity guard calls the resolver with
+//        `{ executor: trx }` (its only resolver call), the route's resolver closure accepts `{ executor }`
+//        and forwards it as the registration comparison's last argument, and the unlocked pre-read is the
+//        handler's only argument-free resolver call (it stays on the pool). Self-mutation pairs below.
 //
 // Mutation: delete `projectNo` from any one lookup, or change a `'source'` to `'write'`, or drop a
 // wall call, and the corresponding check reds naming the handler.
@@ -108,6 +112,27 @@ function assertDeferredRegistration(body) {
   const insert = fn.indexOf('await trx.insertOne(')
   assert.ok(lock !== -1 && guard > lock && callback > guard && insert > callback,
     'same transaction: lock, identity guard, full preparation, then registry insert')
+}
+
+// F2 (C-14): the transaction that holds the tenant lock is what the comparison reads on.
+function assertExecutorHandOff(code = CODE, storeCode = STORE_CODE) {
+  const guardStart = storeCode.indexOf('async function assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison }) {')
+  assert.notEqual(guardStart, -1, 'the shared identity guard exists')
+  const guard = storeCode.slice(guardStart, storeCode.indexOf('\n  }\n', guardStart))
+  assert.ok(guard.includes('const mode = await resolveSourceProjectComparison({ executor: trx })'), 'the guard hands the resolver the transaction that holds the tenant lock')
+  assert.equal((storeCode.match(/\bresolveSourceProjectComparison\(/g) || []).length, 1, 'the guard is the store\'s only resolver call')
+  const createStart = code.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
+  assert.notEqual(createStart, -1, 'the create handler exists')
+  const body = code.slice(createStart, code.indexOf('\n    },', createStart))
+  const closureAt = body.indexOf('const resolveSourceProjectComparison = async ({ executor } = {}) => {')
+  assert.notEqual(closureAt, -1, 'the route resolver accepts the handed executor')
+  const closureEnd = body.indexOf('\n      }\n', closureAt)
+  assert.ok(closureEnd > closureAt, 'the route resolver closes')
+  const closure = body.slice(closureAt, closureEnd)
+  const comparisonAt = closure.indexOf('return resolveStockPreparationProjectRegistrationComparison({')
+  assert.notEqual(comparisonAt, -1, 'the closure returns the registration comparison')
+  assert.match(closure.slice(comparisonAt), /\n {10}executor,\n {8}\}\)$/, 'the closure forwards the executor as the comparison\'s last argument')
+  assert.equal((body.match(/\bresolveSourceProjectComparison\(\)/g) || []).length, 1, 'one argument-free resolver call: the unlocked pre-read, on the pool')
 }
 
 function assertReplayLockInput(body) {
@@ -520,6 +545,29 @@ check('C-12 (S4 fix round 1) the create replay heals only inside the locked re-c
   ]) {
     assert.equal(body.split(before).length - 1, 1, `one actual replay lock needle: ${before}`)
     assert.throws(() => assertReplayLockInput(body.replace(before, after)), assert.AssertionError)
+  }
+})
+
+check('C-14 (F2) the identity guard hands the resolver its locked transaction and the route forwards it; the unlocked pre-read stays on the pool', () => {
+  assertExecutorHandOff()
+  for (const [before, after] of [
+    ['resolveSourceProjectComparison({ executor: trx })', 'resolveSourceProjectComparison()'],
+    ['resolveSourceProjectComparison({ executor: trx })', 'resolveSourceProjectComparison({ executor: undefined })'],
+  ]) {
+    assert.equal(STORE_CODE.split(before).length - 1, 1, `one actual store hand-off needle: ${before}`)
+    assert.throws(() => assertExecutorHandOff(CODE, STORE_CODE.replace(before, after)), assert.AssertionError)
+  }
+  const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
+  const createEnd = CODE.indexOf('\n    },', createStart)
+  const body = CODE.slice(createStart, createEnd)
+  const withBody = (next) => CODE.slice(0, createStart) + next + CODE.slice(createEnd)
+  for (const [before, after] of [
+    ['onlineReadPlansEnabled: onlineReadPlansEnabled(),\n          executor,\n', 'onlineReadPlansEnabled: onlineReadPlansEnabled(),\n'],
+    ['async ({ executor } = {}) => {', 'async () => {'],
+    ['const comparison = await resolveSourceProjectComparison()', 'const comparison = await resolveSourceProjectComparison({ executor: store })'],
+  ]) {
+    assert.equal(body.split(before).length - 1, 1, `one actual route hand-off needle: ${before}`)
+    assert.throws(() => assertExecutorHandOff(withBody(body.replace(before, after)), STORE_CODE), assert.AssertionError)
   }
 })
 

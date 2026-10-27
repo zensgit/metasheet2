@@ -907,13 +907,14 @@ async function registrationMetadataFixture(options = {}) {
   }
   const bindings = createStockPreparationSourceBindingStore({ db })
   const calls = { activation: [], version: [], bindings: [], execution: 0 }
+  // `...via` forwards the F2 read-handle argument (`{ executor }`) to the real stores untouched; without one it is empty.
   const bindingStore = {
     ...bindings,
-    async listForAction(input) { calls.bindings.push(clone(input)); return bindings.listForAction(input) },
+    async listForAction(input, ...via) { calls.bindings.push(clone(input)); return bindings.listForAction(input, ...via) },
   }
   const readPlanStore = {
-    async getActivation(input) { calls.activation.push(clone(input)); return ledger.getActivation(input) },
-    async getForRuntime(input) { calls.version.push(clone(input)); return ledger.getForRuntime(input) },
+    async getActivation(input, ...via) { calls.activation.push(clone(input)); return ledger.getActivation(input, ...via) },
+    async getForRuntime(input, ...via) { calls.version.push(clone(input)); return ledger.getForRuntime(input, ...via) },
     async getActiveForRuntime() { calls.execution += 1; throw new Error('metadata cannot borrow execution validation') },
   }
   const deploymentPlan = config(deploymentComparison === undefined ? {} : { sourceProjectComparison: deploymentComparison }).readPlan
@@ -1078,6 +1079,99 @@ test('registration metadata: only the first null activation exact 42P01 proves a
   const versions = await registrationMetadataFixture({ activeScope: null })
   await assert.rejects(registrationMetadata(versions, { readPlanStore: { ...versions.readPlanStore, async getForRuntime() { throw missing() } } }), registrationMetadataUnavailable, 'missing versions never imply absent activation table')
   await assert.rejects(registrationMetadata(await registrationMetadataFixture(), { bindingStore: { async listForAction() { throw missing() } } }), registrationMetadataUnavailable)
+})
+
+// F2: under the registry lock the project-target store hands the comparison its transaction (`executor`); every read
+// must ride it. The executor here is the same synthetic database read through its own handle, and the stores' own db
+// is starved (every read there fails), as a pool is while blocking takers of the registry lock hold its connections.
+test('registration metadata (F2): with an executor EVERY read rides it — first activation, both listings, both pointer rounds, the version — none reaches the stores\' own db; without one nothing changes', async () => {
+  const f = await registrationMetadataFixture({ activeScope: 'workspace-synthetic' })
+  const own = { selectOne: f.db.selectOne, select: f.db.select }
+  const onExecutor = []
+  const executor = {
+    async selectOne(table, where) { onExecutor.push(table); return own.selectOne(table, where) },
+    async select(table, options) { onExecutor.push(table); return own.select(table, options) },
+  }
+  const onPool = []
+  f.db.selectOne = async (table) => { onPool.push(table); throw new Error('synthetic-private-pool-exhausted') }
+  f.db.select = async (table) => { onPool.push(table); throw new Error('synthetic-private-pool-exhausted') }
+  assert.equal(await registrationMetadata(f, { executor }), 'case-insensitive')
+  assert.deepEqual(onPool, [], 'no read on the stores\' own db')
+  const tally = (table) => onExecutor.filter((name) => name === table).length
+  // null + bound workspace: first null read, the bound pointer, both again in the stability round; two listings; one version.
+  assert.deepEqual([tally(ACTIVATION_TABLE), tally(BINDING_TABLE), tally(VERSION_TABLE)], [4, 2, 1])
+  assert.equal(onExecutor.length, 7, 'nothing else was read')
+  assert.deepEqual([f.calls.activation.length, f.calls.bindings.length, f.calls.version.length, f.calls.execution], [4, 2, 1, 0])
+  // Control: the starvation is live — the same comparison without the executor is the typed 503.
+  await assert.rejects(registrationMetadata(f), registrationMetadataUnavailable)
+  // Without an executor every store read is called exactly as before: one argument, on the stores' own db.
+  const plain = await registrationMetadataFixture({ activeScope: 'workspace-synthetic' })
+  const arity = []
+  for (const [store, method] of [[plain.readPlanStore, 'getActivation'], [plain.readPlanStore, 'getForRuntime'], [plain.bindingStore, 'listForAction']]) {
+    const read = store[method]
+    store[method] = async (...args) => { arity.push(args.length); return read(...args) }
+  }
+  assert.equal(await registrationMetadata(plain), 'case-insensitive')
+  assert.deepEqual(arity, [1, 1, 1, 1, 1, 1, 1], 'seven reads, none handed a second argument')
+  for (const executorless of [undefined, null]) {
+    assert.equal(await registrationMetadata(plain, { executor: executorless }), 'case-insensitive', `${String(executorless)} is no executor`)
+  }
+  assert.ok(arity.slice(7).every((count) => count === 1), 'undefined / null hand nothing on')
+})
+
+test('registration metadata (F2): a handed handle that cannot read is refused by the stores — never swapped for their own db — and the comparison answers the typed 503', async () => {
+  const f = await registrationMetadataFixture({ activeScope: null })
+  const scope = { tenantId: TENANT, workspaceId: null, actionId: ACTION }
+  const versionScope = { tenantId: TENANT, workspaceId: null, id: f.state[VERSION_TABLE][0].id, actionId: ACTION, systemId: SYSTEM }
+  for (const executor of [{}, { select() {} }, 'synthetic-handle']) {
+    await assert.rejects(f.ledger.getActivation(scope, { executor }), /a read executor must expose selectOne/)
+    await assert.rejects(f.ledger.getForRuntime(versionScope, { executor }), /a read executor must expose selectOne/)
+  }
+  for (const executor of [{}, { selectOne() {} }, 'synthetic-handle']) {
+    await assert.rejects(f.bindingStore.listForAction({ tenantId: TENANT, actionId: ACTION }, { executor }), /a list executor must expose select/)
+  }
+  // Absent / null: the store's own db, exactly as before.
+  for (const options of [undefined, {}, { executor: null }, { executor: undefined }]) {
+    assert.equal((await f.ledger.getActivation(scope, options)).status, 'active')
+    assert.equal((await f.ledger.getForRuntime(versionScope, options)).status, 'approved')
+    assert.equal((await f.bindingStore.listForAction({ tenantId: TENANT, actionId: ACTION }, options)).complete, true)
+  }
+  const poolReads = []
+  for (const name of ['selectOne', 'select']) {
+    const read = f.db[name]
+    f.db[name] = async (...args) => { poolReads.push(name); return read(...args) }
+  }
+  for (const executor of [{}, { select() {} }]) {
+    await assert.rejects(registrationMetadata(f, { executor }), registrationMetadataUnavailable)
+  }
+  assert.deepEqual(poolReads, [], 'an unusable handle never falls back to the stores\' own db')
+})
+
+test('registration metadata (F2): on a handed transaction an exact 42P01 is the typed 503 by name — never the pre-ledger answer — and nothing more is read on the aborted transaction', async () => {
+  const missing = () => Object.assign(new Error('synthetic-private-missing-table'), { code: '42P01' })
+  // The real stores over an executor whose first statement fails 42P01: PostgreSQL has aborted that transaction.
+  const f = await registrationMetadataFixture()
+  let statements = 0
+  const aborted = {
+    async selectOne() { statements += 1; throw missing() },
+    async select() { statements += 1; throw new Error('must not read on an aborted transaction') },
+  }
+  await assert.rejects(registrationMetadata(f, { executor: aborted }), registrationMetadataUnavailable)
+  assert.equal(statements, 1, 'one statement, then nothing on the aborted transaction')
+  assert.deepEqual([f.calls.activation.length, f.calls.bindings.length, f.calls.version.length], [1, 0, 0])
+  // The same first-null 42P01 store as the pre-ledger case above: refused with an executor, still legacy without one.
+  const first = await registrationMetadataFixture()
+  let initialReads = 0
+  const readPlanStore = {
+    async getActivation(input) { initialReads += 1; assert.equal(input.workspaceId, null); throw missing() },
+    async getForRuntime() { throw new Error('must not read versions after a 42P01') },
+  }
+  const bindingStore = { async listForAction() { throw new Error('must not list after a 42P01') } }
+  await assert.rejects(registrationMetadata(first, { readPlanStore, bindingStore, executor: { async selectOne() {}, async select() {} } }), registrationMetadataUnavailable)
+  assert.equal(initialReads, 1)
+  const legacy = await registrationMetadata(first, { readPlanStore, bindingStore })
+  assert.ok(legacy === undefined || legacy === 'case-sensitive', 'without an executor the pre-ledger answer is unchanged')
+  assert.equal(initialReads, 2)
 })
 
 function loadRuntimeCopy(transform) {

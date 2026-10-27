@@ -778,6 +778,97 @@ test('P2-S10 the activation helper locks the tenant registry, then counts case-f
   }
 })
 
+// F2: the three registry paths that run the identity guard with a resolver. 'create-try' is the deferred (strict)
+// create, 'create-pinned' the direct-handle create of the default / case-sensitive leg, 'replay-try' the replay's
+// locked re-check. `f2Attempt` drives one of them for 'Abc'.
+const F2_LEGS = ['create-try', 'create-pinned', 'replay-try']
+async function f2Attempt(store, leg, resolveSourceProjectComparison) {
+  const input = { tenantId: TENANT, projectNo: 'Abc', resolveSourceProjectComparison }
+  if (leg === 'create-try') return store.create(input, async () => ({ sheetId: 'synthetic-prepared', objectId: 'synthetic-prepared-object' }))
+  if (leg === 'create-pinned') return store.create({ ...input, sheetId: 'synthetic-direct', objectId: 'synthetic-direct-object' })
+  return store.withActiveRowLocked(input, async (row) => ({ healed: row.projectNo }))
+}
+
+test('P2-S11 (F2) the comparison resolver is handed exactly { executor: trx } — the transaction that holds the tenant lock — on all three paths, and its reads on it are transaction reads', async () => {
+  for (const leg of F2_LEGS) {
+    const db = makeMemoryDb()
+    const store = makeStore(db)
+    if (leg === 'replay-try') await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-first-object' })
+    db.calls.length = 0
+    const handed = []
+    await f2Attempt(store, leg, async (...args) => {
+      handed.push(args)
+      const [{ executor } = {}] = args
+      await executor.select(PROJECT_TARGET_TABLE, { where: { tenant_id: TENANT } })
+      await executor.selectOne(PROJECT_TARGET_TABLE, { tenant_id: TENANT, project_no: 'Abc' })
+      return 'case-sensitive'
+    })
+    assert.equal(handed.length, 1, `${leg}: resolved once, under the lock`)
+    assert.equal(handed[0].length, 1, `${leg}: one argument`)
+    assert.deepEqual(Object.keys(handed[0][0]), ['executor'], `${leg}: the argument is exactly { executor }`)
+    assert.equal(typeof handed[0][0].executor.advisoryXactLock, 'function', `${leg}: the executor is the transaction handle`)
+    const lock = leg === 'create-pinned' ? 'trx.advisoryXactLock' : 'trx.tryAdvisoryXactLock'
+    assert.deepEqual(db.calls.slice(0, 5).map((call) => call[0]), ['transaction', 'trx.setTransactionIsolationLevel', lock, 'trx.select', 'trx.selectOne'],
+      `${leg}: the resolver's reads run on the transaction, right after the lock`)
+    assert.ok(!db.calls.some((call) => call[0] === 'select' || call[0] === 'selectOne' || call[0] === 'countRows'), `${leg}: no autocommit read`)
+  }
+})
+
+/**
+ * F2: a connection-starved pool, modelled. While a registry transaction holds the tenant lock, an AUTOCOMMIT read
+ * finds no free connection and fails — the host pool's connect timeout, without its 10 s wait (blocking takers of the
+ * same lock each hold a pooled connection while they wait). The transaction handle has its own connection and keeps
+ * reading.
+ */
+function starvedPoolDb() {
+  const db = makeMemoryDb()
+  let held = false
+  const transaction = db.transaction
+  db.transaction = (fn) => transaction(async (trx) => {
+    try {
+      return await fn({
+        ...trx,
+        async tryAdvisoryXactLock(key) { const acquired = await trx.tryAdvisoryXactLock(key); held = acquired === true; return acquired },
+        async advisoryXactLock(key) { await trx.advisoryXactLock(key); held = true },
+      })
+    } finally { held = false }
+  })
+  for (const name of ['select', 'selectOne', 'countRows']) {
+    const read = db[name]
+    db[name] = async (...args) => {
+      if (held) throw new Error('synthetic-private-pool-exhausted')
+      return read(...args)
+    }
+  }
+  return db
+}
+
+test('P2-S12 (F2) the pool is exhausted while the tenant lock is held: a resolver that reads through its handed executor still registers (deferred, direct-handle, replay); one that reads the pool is refused', async () => {
+  for (const leg of F2_LEGS) {
+    for (const reader of ['executor', 'pool']) {
+      const db = starvedPoolDb()
+      const store = makeStore(db)
+      if (leg === 'replay-try') await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-first-object' })
+      const rowsBefore = db.rows.length
+      // Reads on whatever handle it is handed, and on the pool only when handed none (the route resolver's shape).
+      const attempt = f2Attempt(store, leg, async ({ executor } = {}) => {
+        await (reader === 'executor' ? (executor || db) : db).select(PROJECT_TARGET_TABLE, { where: { tenant_id: TENANT } })
+        return 'case-sensitive'
+      })
+      if (reader === 'executor') {
+        const out = await attempt
+        if (leg === 'replay-try') assert.deepEqual(out, { healed: 'Abc' }, `${leg}: the heal ran`)
+        else assert.equal(out.projectNo, 'Abc', `${leg}: registered`)
+        assert.equal(db.rows.length, leg === 'replay-try' ? rowsBefore : rowsBefore + 1, `${leg}: the registration completed`)
+      } else {
+        // Control: the starvation is live — a read on the pool while the lock is held fails and nothing lands.
+        await assert.rejects(attempt, /synthetic-private-pool-exhausted/, `${leg}: a pool read under the lock is starved`)
+        assert.equal(db.rows.length, rowsBefore, `${leg}: nothing registered`)
+      }
+    }
+  }
+})
+
 test('S-06 migration 087: two unique indexes, the CHECKs, the integration_ prefix, no value column, no DROP', () => {
   const migrationPath = path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'migrations', '087_create_integration_stock_prep_project_target.sql')
   const raw = fs.readFileSync(migrationPath, 'utf8')
