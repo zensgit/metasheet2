@@ -13,6 +13,8 @@
 //          values-free (ids, digests, counts, timestamps)
 //   RD-R4  a receipt write that throws leaves the stored receipt unchanged over a live-reference storage (load
 //          clones; step-4 review follow-ups, item 7)
+//   RD-R5  (step 5 PR-8) a page index outside the hold's page count is never recorded, so the public flag and verify
+//          agree (the change-plan page pages on past a written plan's last page)
 //   RD-P1  the hold payload: a candidate's pairs and comparison items paged together; a relationship hold's
 //          verification incl. componentNewPositionCount; a content change; other kinds pass their detail; a page
 //          past the end is 400
@@ -137,6 +139,19 @@ test('RD-R4 a receipt write that throws leaves the stored receipt unchanged (liv
   await assert.rejects(() => receipts.record({ receiptId: first.id, scope: SCOPE, actorId: 'u_a', pages: [page(a, 1, 2)] }), /storage write failed/)
   assert.deepEqual(await receipts.verify({ receiptId: first.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: false, reason: 'pages_missing', pagesServed: 1, pageCount: 2 }, 'the unserved page is not vouched for')
   assert.deepEqual(storage.get(`${READ_RECEIPT_KEY_PREFIX}${first.id}`).holds.hold_a.pairPagesServed, [0], 'the stored record still lists page 0 only')
+})
+
+test('RD-R5 (step 5 PR-8) a page index outside the page count of the hold is never recorded: the receipt neither shows nor verifies it as served; an in-range page then completes it', async () => {
+  const { receipts } = receiptEnv()
+  const a = hold('hold_a')
+  const current = { id: 'hold_a', fingerprint: a.fingerprint, comparisonFingerprint: a.comparisonFingerprint, evidenceFingerprint: a.evidenceFingerprint }
+  const past = await receipts.record({ scope: SCOPE, actorId: 'u_a', pages: [page(a, 1, 1), page(a, -1, 1)] })
+  assert.deepEqual(past.holds, {}, 'a page past the last one (or before the first) is not a served page')
+  assert.deepEqual(await receipts.verify({ receiptId: past.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: false, reason: 'hold_not_in_receipt', pagesServed: 0, pageCount: null })
+  const served = await receipts.record({ receiptId: past.id, scope: SCOPE, actorId: 'u_a', pages: [page(a, 0, 1)] })
+  assert.equal(served.id, past.id)
+  assert.deepEqual(served.holds.hold_a, { pageCount: 1, pagesServed: [0], complete: true })
+  assert.deepEqual(await receipts.verify({ receiptId: past.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: true, pagesServed: 1, pageCount: 1 })
 })
 
 test('RD-P1 the hold payload: a candidate\'s pairs and comparison items are paged together (candidateId = the pairing fingerprint); a relationship hold carries its verification and componentNewPositionCount; a content change its fields; other kinds their detail; a page past the end is 400', async () => {

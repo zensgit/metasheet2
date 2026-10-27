@@ -321,6 +321,9 @@ function createReadReceiptStore({ storage, now, idGenerator } = {}) {
       }
     }
     for (const page of pages) {
+      // A page index outside the hold's page count is never recorded (step 5 PR-8: the change-plan page pages on past a
+      // written plan's last page while the proposal is longer): only an in-range page can count toward completeness.
+      if (!Number.isInteger(page.pairPageIndex) || page.pairPageIndex < 0 || page.pairPageIndex >= page.pairPageCount) continue
       const existing = current.holds[page.holdId]
       const sameHold = existing && existing.fingerprint === page.fingerprint && existing.comparisonFingerprint === page.comparisonFingerprint && existing.evidenceFingerprint === page.evidenceFingerprint && existing.pairPageCount === page.pairPageCount
       const served = sameHold ? new Set(existing.pairPagesServed) : new Set()
