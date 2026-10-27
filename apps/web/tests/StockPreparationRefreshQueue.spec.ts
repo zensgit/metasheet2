@@ -30,6 +30,8 @@ import { createRequire } from 'node:module'
 //   RQ-TYPED-SENT the TYPED number is sent; a mismatch past a broken client mirror is refused by the server (N3).
 //   RQ-ACK / RQ-TYPED / RQ-DETAIL-ID / RQ-SWITCH  the history acknowledgement, the typed check, the detail-id
 //                 match and clearing values on a project switch, each pinned (N4).
+// #6324 review N1 (main-side fix):
+//   SP-CHK-2      a late 「核对」 answer is dropped (no line, no synced) after a project / scope / session change.
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -104,6 +106,7 @@ import {
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 import type { StockPreparationProjectSyncApi } from '../src/services/integration/stockPreparation/projectSync'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..')
 const nodeRequire = createRequire(import.meta.url)
@@ -1177,5 +1180,58 @@ describe('SP — the sync panel learns the batch refresh', () => {
     panelProps.refreshSettled = true
     await flush(2)
     expect(line().textContent).toContain('核对通过')
+  })
+
+  // SP-CHK-2 (#6324 review N1, lens 1): a 「核对」 answer belongs to the project, scope and session it was asked for.
+  // One that lands after the board opened another project, the scope moved, or another principal took the session
+  // is DROPPED — no result line (「核对发现还有 N 处要写入…」 on the wrong project) and no synced(null).
+  function deferredCheckApi(): { api: StockPreparationProjectSyncApi; answer: () => void } {
+    let resolveDryRun!: (value: Record<string, unknown>) => void
+    const pending = new Promise<Record<string, unknown>>((done) => { resolveDryRun = done })
+    const api = panelApi({ dryRun: vi.fn().mockReturnValue(pending) })
+    const answer = () => resolveDryRun({ status: 'ready', canApply: true, dryRunToken: 'tok_syn', counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+    return { api, answer }
+  }
+  const checkResultLine = (root: HTMLElement) => root.querySelector('[data-testid="stock-prep-project-sync-check-result"]') as HTMLElement | null
+  const syncedEmits = () => emitted.filter((entry) => entry.event === 'synced')
+
+  async function pressCheckAndHold(): Promise<{ root: HTMLElement; api: StockPreparationProjectSyncApi; answer: () => void }> {
+    const { api, answer } = deferredCheckApi()
+    const root = mountPanel({ api, scope: { ...SCOPE }, refreshStatus: 'executed_pending_settlement', refreshSettled: false })
+    await flush(2)
+    await click(root.querySelector('[data-testid="stock-prep-project-sync-check"]') as HTMLElement)
+    expect(api.dryRun).toHaveBeenCalledTimes(1)
+    expect((api.dryRun as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(PROJECT)
+    expect(checkResultLine(root), 'still reading').toBeNull()
+    return { root, api, answer }
+  }
+
+  it('SP-CHK-2 control: an undisturbed 「核对」 shows its own answer and asks the board to re-read once', async () => {
+    const { root, answer } = await pressCheckAndHold()
+    answer()
+    await flush(2)
+    expect(checkResultLine(root)?.getAttribute('data-check')).toBe('changes_pending')
+    expect(checkResultLine(root)?.textContent).toContain('核对发现还有 3 处要写入')
+    expect(syncedEmits().map((entry) => entry.args)).toEqual([[null]])
+  })
+
+  it.each([
+    ['the board opened another project', () => { panelProps.projectNo = 'SYN-PROJ-0002'; panelProps.refreshStatus = null }],
+    ['the scope moved', () => { panelProps.scope = { ...SCOPE, workspaceId: 'workspace-syn-other' } }],
+    ['another principal took the session', () => {
+      h.permissions = ['stock-prep:read']
+      window.localStorage.setItem('auth_token', 'synthetic-other-session')
+      notifyAuthPrincipalChange()
+    }],
+    ['another tab replaced the session (no notification)', () => { window.localStorage.setItem('auth_token', 'synthetic-other-tab-session') }],
+  ])('SP-CHK-2: a late 「核对」 answer is dropped after %s', async (_label, change) => {
+    const { root, answer } = await pressCheckAndHold()
+    change()
+    await flush(2)
+    answer()
+    await flush(2)
+    expect(checkResultLine(root), 'no result line for a check the board moved away from').toBeNull()
+    expect(root.textContent).not.toContain('核对发现还有')
+    expect(syncedEmits(), 'no synced(null) for a dropped answer').toEqual([])
   })
 })
