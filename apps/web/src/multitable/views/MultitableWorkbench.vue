@@ -429,6 +429,7 @@
           :search-text="searchText" :row-density="rowDensity"
           :can-load-more="gridCanLoadMore" :infinite-scroll="gridIsFlatPath"
           :page-size="grid.pageSize?.value" :page-size-options="GRID_PAGE_SIZE_OPTIONS" @set-page-size="onSetGridPageSize"
+          :total-rows="grid.page.value.total"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
@@ -3153,9 +3154,16 @@ async function onHierarchyReparentRecord(payload: {
     showError(error?.message ?? wb('toast.hierarchyParentUpdateFailed', isZh.value))
   }
 }
+// Toolbar 「+ 新建记录」 and the grid's inline row / footer entry. 客户反馈 2026-10-27 (R74): the new record used to
+// land as an empty last row with the grid back on its first page, so a person scrolled to the bottom to fill it
+// in. It now opens in the inspector; resolveDeepLink fetches it when it is not among the loaded rows.
 async function onAddRecord() {
   if (!ensureCanCreateRecord()) return
-  await grid.createRecord()
+  const newRecordId = await grid.createRecord()
+  if (newRecordId) {
+    await resolveDeepLink(newRecordId)
+    return
+  }
   if (grid.error.value) showError(grid.error.value)
 }
 async function onKanbanCreateRecord(data: Record<string, unknown>) {

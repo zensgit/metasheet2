@@ -260,3 +260,117 @@ describe('MultitableWorkbench hand-create gate on a sheet with locked + required
     expect(captured.MetaFormView!['read-only']).toBe(false)
   })
 })
+
+// 客户反馈 2026-10-27 (R74): 「页面拉到底才有新增记录」. A hand-created record used to land as an empty last row with the
+// grid reloaded to its first page, so the person still scrolled to the bottom to fill it in. Now the toolbar
+// 「+ 新建记录」 and the grid's own entries (inline row, footer) open the new record in the inspector, fetching it
+// when it is not among the loaded rows. The R68 gate above still applies to the new footer entry: it rides the same
+// `can-create` prop, checked here against the REAL grid fed the workbench's own props.
+describe('MultitableWorkbench hand-create opens the new record (客户反馈 2026-10-27)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  let gridApp: VueApp<Element> | null = null
+  let gridContainer: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    for (const key of Object.keys(captured)) captured[key] = null
+    gridMock = createGridMock()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (gridApp) gridApp.unmount()
+    if (gridContainer) gridContainer.remove()
+    gridApp = null; gridContainer = null
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null; container = null
+    // Opening a record writes it into the URL (deep link); the next mount would otherwise reopen it.
+    window.history.replaceState(null, '', '/')
+    useLocale().setLocale('en')
+    showErrorSpy.mockReset(); showSuccessSpy.mockReset()
+    vi.unstubAllGlobals(); vi.clearAllMocks()
+  })
+
+  async function mount(capabilities: Record<string, unknown>): Promise<void> {
+    workbenchMock = createWorkbenchMock('grid', capabilities)
+    const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  const NEW_RECORD = { id: 'rec_new', version: 1, data: { fld_title: '' } }
+
+  it('toolbar 「+ 新建记录」: the new record (not among the loaded rows) is fetched and opened in the inspector', async () => {
+    await mount({ ...WRITER_CAPS })
+    gridMock.createRecord.mockResolvedValue('rec_new')
+    workbenchMock.client.getRecord.mockResolvedValue({ record: NEW_RECORD })
+    expect(captured.MetaRecordInspector!.visible).toBe(false)
+
+    await (captured.MetaToolbar!.onAddRecord as () => Promise<void>)()
+    await flushUi()
+
+    expect(gridMock.createRecord).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_new', expect.objectContaining({ sheetId: 'sheet_lock', viewId: 'view_main' }))
+    expect(captured.MetaRecordInspector!.visible).toBe(true)
+    expect((captured.MetaRecordInspector!.record as { id: string } | null)?.id).toBe('rec_new')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('grid entries (inline row / footer): a new record already among the loaded rows opens without a fetch', async () => {
+    await mount({ ...WRITER_CAPS })
+    gridMock.rows.value = [NEW_RECORD]
+    gridMock.createRecord.mockResolvedValue('rec_new')
+    await flushUi()
+
+    await (captured.MetaGridTable!.onCreateRecord as () => Promise<void>)()
+    await flushUi()
+
+    expect(workbenchMock.client.getRecord).not.toHaveBeenCalled()
+    expect(captured.MetaRecordInspector!.visible).toBe(true)
+    expect((captured.MetaRecordInspector!.record as { id: string } | null)?.id).toBe('rec_new')
+  })
+
+  it('a rejected create shows the error and leaves the inspector closed', async () => {
+    await mount({ ...WRITER_CAPS })
+    gridMock.createRecord.mockImplementation(async () => { gridMock.error.value = 'Title is required'; return null })
+
+    await (captured.MetaToolbar!.onAddRecord as () => Promise<void>)()
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledWith('Title is required')
+    expect(workbenchMock.client.getRecord).not.toHaveBeenCalled()
+    expect(captured.MetaRecordInspector!.visible).toBe(false)
+  })
+
+  it('passes the server total to the grid as total-rows (the footer 「跳转到第 [ ] 行」 clamps to it)', async () => {
+    gridMock.page.value = { offset: 0, limit: 50, total: 1000, hasMore: true }
+    await mount({ ...WRITER_CAPS })
+    expect(captured.MetaGridTable!['total-rows']).toBe(1000)
+  })
+
+  it('the real grid, fed the workbench\'s own props, shows the footer 「+ 新建记录」 only when the sheet is not PLM-locked', async () => {
+    const { default: RealGrid } = await vi.importActual<{ default: Component }>('../src/multitable/components/MetaGridTable.vue')
+    const footerAddWith = async (capabilities: Record<string, unknown>): Promise<boolean> => {
+      for (const key of Object.keys(captured)) captured[key] = null
+      gridMock = createGridMock()
+      gridMock.rows.value = [{ id: 'rec_1', version: 1, data: { fld_title: 'A' } }]
+      await mount(capabilities)
+      const props = { ...captured.MetaGridTable! }
+      gridContainer = document.createElement('div')
+      document.body.appendChild(gridContainer)
+      gridApp = createApp({ render: () => h(RealGrid, props) })
+      gridApp.mount(gridContainer)
+      await flushUi()
+      const present = gridContainer.querySelector('[data-testid="grid-footer-add-record"]') !== null
+      gridApp.unmount(); gridContainer.remove(); gridApp = null; gridContainer = null
+      app!.unmount(); app = null
+      return present
+    }
+    expect(await footerAddWith({ ...WRITER_CAPS })).toBe(true)
+    expect(await footerAddWith({ ...WRITER_CAPS, recordCreateBlockedByLock: true })).toBe(false)
+    expect(await footerAddWith({ ...WRITER_CAPS, canCreateRecord: false })).toBe(false)
+  })
+})

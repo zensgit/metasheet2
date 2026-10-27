@@ -721,3 +721,247 @@ describe('MetaGridTable footer (客户反馈 2026-10-21)', () => {
     expect(root.querySelector('[data-testid="grid-page-size-select"]')?.getAttribute('aria-label')).toBe('每页显示的行数')
   })
 })
+
+// ── 客户反馈 2026-10-27 (R74): 「每页行数 能否新增 跳转到 行」 ─────────────────────────────────────────────────────
+// The footer gets 「跳转到第 [ ] 行」. Row N is the number in the row-number column (server order on the flat path,
+// visible order on the grouped path). A loaded row is focused and selected without a request; a row that is not
+// loaded asks for its page (go-to-page, ceil(N / pageSize)) and is focused once that page lands.
+function makeRows(from: number, to: number, prefix = 'r'): MetaRecord[] {
+  const out: MetaRecord[] = []
+  for (let i = from; i < to; i++) out.push({ id: `${prefix}${i}`, version: 1, data: { title: `Row ${i}` } })
+  return out
+}
+
+function jumpTo(root: HTMLElement, value: string, via: 'enter' | 'button' = 'enter'): void {
+  const input = root.querySelector('[data-testid="grid-row-jump-input"]') as HTMLInputElement
+  input.value = value
+  input.dispatchEvent(new Event('input'))
+  if (via === 'enter') input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  else (root.querySelector('[data-testid="grid-row-jump-go"]') as HTMLButtonElement).click()
+}
+
+function focusedRowNumber(root: HTMLElement): string | null {
+  return root.querySelector('tr.meta-grid__row--focused .meta-grid__row-num span')?.textContent?.trim() ?? null
+}
+
+describe('MetaGridTable footer row jump (客户反馈 2026-10-27)', () => {
+  it('shows on the flat page 1 without the pager when there is more than one row; hidden at one row or without a total', async () => {
+    let root = mountGrid({ infiniteScroll: true, currentPage: 1, totalPages: 4, totalRows: 200, pageSize: 50, pageSizeOptions: GRID_PAGE_SIZE_OPTIONS })
+    await nextTick()
+    expect(root.querySelector('.meta-grid__page-info')).toBeNull()
+    expect(root.querySelector('[data-testid="grid-row-jump-input"]')).not.toBeNull()
+    expect(root.querySelector('.meta-grid__row-jump-label')?.textContent?.trim()).toBe('Go to row')
+    expect(root.querySelector('[data-testid="grid-row-jump-go"]')?.textContent?.trim()).toBe('Go')
+    expect(root.querySelector('[data-testid="grid-row-jump-input"]')?.getAttribute('aria-label')).toBe('Row number to go to')
+    app!.unmount(); container!.remove()
+
+    // One row in total and the default size: nothing to jump to, no footer at all.
+    root = mountGrid({ infiniteScroll: true, totalPages: 1, totalRows: 1, pageSize: 50, pageSizeOptions: GRID_PAGE_SIZE_OPTIONS })
+    await nextTick()
+    expect(root.querySelector('[data-testid="grid-row-jump-input"]')).toBeNull()
+    expect(root.querySelector('.meta-grid__pagination')).toBeNull()
+    app!.unmount(); container!.remove()
+
+    // Mounts that do not pass a total (other hosts of the grid) keep exactly the old footer.
+    root = mountGrid({ infiniteScroll: true, totalPages: 4, pageSize: 50, pageSizeOptions: GRID_PAGE_SIZE_OPTIONS })
+    await nextTick()
+    expect(root.querySelector('[data-testid="grid-row-jump-input"]')).toBeNull()
+  })
+
+  it('a loaded row is focused and selected with no page request (Enter and the Go button)', async () => {
+    const onGoToPage = vi.fn()
+    const onSelectRecord = vi.fn()
+    const root = mountGrid({ rows: makeRows(0, 10), infiniteScroll: true, totalPages: 4, totalRows: 200, pageSize: 50, onGoToPage, onSelectRecord })
+    await nextTick()
+    jumpTo(root, '5')
+    await nextTick()
+    expect(onGoToPage).not.toHaveBeenCalled()
+    expect(onSelectRecord).toHaveBeenLastCalledWith('r4')
+    expect(focusedRowNumber(root)).toBe('5')
+
+    jumpTo(root, '9', 'button')
+    await nextTick()
+    expect(onSelectRecord).toHaveBeenLastCalledWith('r8')
+    expect(focusedRowNumber(root)).toBe('9')
+    expect(root.querySelector('[data-testid="grid-row-jump-hint"]')).toBeNull()
+  })
+
+  it('clamps: 0 and negatives go to row 1, past the total goes to the last row with a 共 M 行 hint, decimals truncate, non-numbers do nothing', async () => {
+    const onGoToPage = vi.fn()
+    const onSelectRecord = vi.fn()
+    const root = mountGrid({ rows: makeRows(0, 10), infiniteScroll: true, totalPages: 4, totalRows: 200, pageSize: 50, onGoToPage, onSelectRecord })
+    await nextTick()
+
+    jumpTo(root, '0')
+    await nextTick()
+    expect(onSelectRecord).toHaveBeenLastCalledWith('r0')
+    expect(root.querySelector('[data-testid="grid-row-jump-hint"]')?.textContent?.trim()).toBe('200 rows in total')
+
+    jumpTo(root, '-7')
+    await nextTick()
+    expect(onSelectRecord).toHaveBeenLastCalledWith('r0')
+
+    jumpTo(root, '3.9')
+    await nextTick()
+    expect(onSelectRecord).toHaveBeenLastCalledWith('r2')
+    expect(root.querySelector('[data-testid="grid-row-jump-hint"]')).toBeNull()
+
+    onSelectRecord.mockClear()
+    jumpTo(root, 'abc')
+    jumpTo(root, '')
+    await nextTick()
+    expect(onSelectRecord).not.toHaveBeenCalled()
+    expect(onGoToPage).not.toHaveBeenCalled()
+
+    // 5000 > 200 rows: row 200 is on page 4, which is not loaded.
+    jumpTo(root, '5000')
+    await nextTick()
+    expect(onGoToPage).toHaveBeenCalledWith(4)
+    expect(root.querySelector('[data-testid="grid-row-jump-hint"]')?.textContent?.trim()).toBe('200 rows in total')
+  })
+
+  it('a row that is not loaded asks for its page and is focused when that page lands; a sheet/view change in between cancels', async () => {
+    const rows = ref<MetaRecord[]>(makeRows(0, 50))
+    const startIndex = ref(0)
+    const currentPage = ref(1)
+    const loading = ref(false)
+    const contextKey = ref('["s1","v1"]')
+    const onGoToPage = vi.fn()
+    const onSelectRecord = vi.fn()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      render() {
+        return h(MetaGridTable, {
+          rows: rows.value, visibleFields: FIELDS, sortRules: [], loading: loading.value,
+          currentPage: currentPage.value, totalPages: 20, startIndex: startIndex.value, canEdit: false,
+          infiniteScroll: true, totalRows: 1000, pageSize: 50, rangeContextKey: contextKey.value,
+          onGoToPage, onSelectRecord,
+        })
+      },
+    })
+    app.mount(container)
+    await nextTick()
+
+    jumpTo(container, '120')
+    await nextTick()
+    expect(onGoToPage).toHaveBeenCalledWith(3)
+    expect(onSelectRecord).not.toHaveBeenCalled()
+    // The page load: loading first, then the page-3 rows (row numbers 101..150).
+    loading.value = true
+    await nextTick()
+    rows.value = makeRows(100, 150)
+    startIndex.value = 100
+    currentPage.value = 3
+    loading.value = false
+    await nextTick()
+    await nextTick()
+    expect(onSelectRecord).toHaveBeenLastCalledWith('r119')
+    expect(focusedRowNumber(container)).toBe('120')
+
+    // A second jump to page 1; the sheet/view changes before the rows land → nothing is focused afterwards.
+    onSelectRecord.mockClear()
+    jumpTo(container, '7')
+    await nextTick()
+    expect(onGoToPage).toHaveBeenLastCalledWith(1)
+    contextKey.value = '["s2","v9"]'
+    await nextTick()
+    rows.value = makeRows(0, 50, 'other')
+    startIndex.value = 0
+    currentPage.value = 1
+    await nextTick()
+    await nextTick()
+    expect(onSelectRecord).not.toHaveBeenCalled()
+  })
+
+  it('a load that ends without the target clears the pending jump (a later reload does not jump)', async () => {
+    const rows = ref<MetaRecord[]>(makeRows(0, 50))
+    const startIndex = ref(0)
+    const loading = ref(false)
+    const onGoToPage = vi.fn()
+    const onSelectRecord = vi.fn()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      render() {
+        return h(MetaGridTable, {
+          rows: rows.value, visibleFields: FIELDS, sortRules: [], loading: loading.value,
+          currentPage: 1, totalPages: 20, startIndex: startIndex.value, canEdit: false,
+          infiniteScroll: true, totalRows: 1000, pageSize: 50, onGoToPage, onSelectRecord,
+        })
+      },
+    })
+    app.mount(container)
+    await nextTick()
+    jumpTo(container, '120')
+    await nextTick()
+    expect(onGoToPage).toHaveBeenCalledWith(3)
+    // The load failed: loading flips back with the same rows.
+    loading.value = true
+    await nextTick()
+    loading.value = false
+    await nextTick()
+    // A later reload that happens to bring page 3 must not focus anything.
+    rows.value = makeRows(100, 150)
+    startIndex.value = 100
+    await nextTick()
+    await nextTick()
+    expect(onSelectRecord).not.toHaveBeenCalled()
+  })
+
+  it('end to end with the real composable: jumping to row 120 on a flat 154-row sheet loads page 3 and focuses row 120', async () => {
+    const backend = makeBackend()
+    const grid = await loadedGrid(backend)
+    const onSelectRecord = vi.fn()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      render() {
+        return h(MetaGridTable, {
+          rows: grid.rows.value, visibleFields: FIELDS, sortRules: [], loading: grid.loading.value,
+          currentPage: grid.currentPage.value, totalPages: grid.totalPages.value, startIndex: grid.page.value.offset,
+          canEdit: false, infiniteScroll: true, totalRows: grid.page.value.total, pageSize: grid.pageSize.value,
+          onGoToPage: grid.goToPage, onSelectRecord,
+        })
+      },
+    })
+    app.mount(container)
+    await nextTick()
+    expect(ids(grid.rows.value)).toEqual(range(0, 50))
+
+    jumpTo(container, '120')
+    await vi.waitFor(() => expect(onSelectRecord).toHaveBeenCalledWith('r119'))
+    expect(backend.gets().at(-1)).toMatchObject({ offset: 100, limit: 50 })
+    await nextTick()
+    expect(focusedRowNumber(container)).toBe('120')
+    // The flat grid now holds page 3, so it shows the pager (the 2026-10-21 rule) until page 1.
+    expect(container.querySelector('.meta-grid__page-info')?.textContent?.trim()).toBe('3 / 4')
+  })
+
+  it('grouped: row N is the visible row number; a loaded one is focused', async () => {
+    const onSelectRecord = vi.fn()
+    const rows: MetaRecord[] = makeRows(0, 6).map((r, i) => ({ ...r, data: { ...r.data, grp: i % 2 === 0 ? 'A' : 'B' } }))
+    const root = mountGrid({
+      rows, groupFields: [{ id: 'grp', name: 'Group', type: 'string' }], totalPages: 1, totalRows: 6, pageSize: 50, onSelectRecord,
+    })
+    await nextTick()
+    // Visible order: A → r0, r2, r4; B → r1, r3, r5. Row 4 is r1.
+    jumpTo(root, '4')
+    await nextTick()
+    expect(onSelectRecord).toHaveBeenLastCalledWith('r1')
+    expect(focusedRowNumber(root)).toBe('4')
+  })
+
+  it('zh labels: 跳转到第 [ ] 行, 前往, 共 M 行', async () => {
+    useLocale().setLocale('zh-CN')
+    const root = mountGrid({ rows: makeRows(0, 10), infiniteScroll: true, totalPages: 4, totalRows: 200, pageSize: 50, onGoToPage: vi.fn() })
+    await nextTick()
+    expect(root.querySelector('.meta-grid__row-jump-label')?.textContent?.trim()).toBe('跳转到第')
+    expect(root.querySelector('.meta-grid__row-jump-suffix')?.textContent?.trim()).toBe('行')
+    expect(root.querySelector('[data-testid="grid-row-jump-go"]')?.textContent?.trim()).toBe('前往')
+    expect(root.querySelector('[data-testid="grid-row-jump-input"]')?.getAttribute('aria-label')).toBe('要跳转到的行号')
+    jumpTo(root, '999')
+    await nextTick()
+    expect(root.querySelector('[data-testid="grid-row-jump-hint"]')?.textContent?.trim()).toBe('共 200 行')
+  })
+})

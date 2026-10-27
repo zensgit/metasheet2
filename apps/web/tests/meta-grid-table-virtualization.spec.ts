@@ -479,3 +479,71 @@ describe('MetaGridTable infinite-scroll load-more trigger (A1)', () => {
     expect(loadMore).toHaveBeenCalled()
   })
 })
+
+/**
+ * 客户反馈 2026-10-27 (R74): the footer 「跳转到第 [ ] 行」 on a loaded row scrolls it into view. Windowed (more than
+ * 60 rows) it goes through the same arithmetic as keyboard navigation (jsdom has no layout, so the assertion is the
+ * scrollTop that arithmetic produces); with windowing off, the mounted row is scrolled into view.
+ */
+describe('MetaGridTable footer row jump scrolls the row into view', () => {
+  function jumpTo(root: HTMLDivElement, value: string): void {
+    const input = root.querySelector('[data-testid="grid-row-jump-input"]') as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  }
+
+  it('windowed flat grid: row 1500 of 2000 loaded rows → scrollTop by row-height arithmetic, row mounted and focused', async () => {
+    const onGoToPage = vi.fn()
+    const root = mountGrid(makeRows(2000), { totalRows: 2000, pageSize: 50, onGoToPage })
+    const wrap = setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    jumpTo(root, '1500')
+    await nextTick()
+    // Row 1500 is index 1499: its bottom is 1500 × 36px; it lands at the viewport's bottom edge.
+    expect(wrap.scrollTop).toBe(1500 * 36 - 600)
+    expect(onGoToPage).not.toHaveBeenCalled()
+    const focused = root.querySelector('tbody tr.meta-grid__row--focused') as HTMLElement | null
+    expect(focused?.querySelector('.meta-grid__row-num span')?.textContent?.trim()).toBe('1500')
+    expect(renderedRowCount(root)).toBeLessThan(200)
+  })
+
+  it('windowed grouped grid: the visible row number lands mounted and focused', async () => {
+    const root = mountGrid(makeRows(3000), { groupField: GROUP_FIELD, totalRows: 3000, pageSize: 50 })
+    const wrap = setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    jumpTo(root, '1000')
+    await nextTick()
+    expect(wrap.scrollTop).toBeGreaterThan(0)
+    const focused = root.querySelector('tbody tr.meta-grid__row--focused') as HTMLElement | null
+    expect(focused?.querySelector('.meta-grid__row-num span')?.textContent?.trim()).toBe('1000')
+  })
+
+  it('60 rows or fewer (windowing off): the mounted row is scrolled into view', async () => {
+    // jsdom has no scrollIntoView; record which element it is called on.
+    const scrolledInto: Element[] = []
+    const original = (Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView
+    ;(Element.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = function (this: Element) { scrolledInto.push(this) }
+    try {
+      const root = mountGrid(makeRows(30), { totalRows: 30, pageSize: 50 })
+      const wrap = setViewport(root, 600)
+      window.dispatchEvent(new Event('resize'))
+      await nextTick()
+
+      jumpTo(root, '25')
+      await nextTick()
+      await nextTick()
+      expect(wrap.scrollTop).toBe(0)
+      expect(scrolledInto).toHaveLength(1)
+      const target = scrolledInto[0] as HTMLElement
+      expect(target.classList.contains('meta-grid__row--focused')).toBe(true)
+      expect(target.querySelector('.meta-grid__row-num span')?.textContent?.trim()).toBe('25')
+    } finally {
+      ;(Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView = original
+    }
+  })
+})
