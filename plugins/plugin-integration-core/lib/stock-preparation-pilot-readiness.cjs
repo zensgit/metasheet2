@@ -43,8 +43,10 @@
 //                                  and can READ this sheet's closure (so a stamp can land where the resolvers look)
 //   continuation_store_readable    the step-4 continuation table is readable      ← step 4 PR-2
 //   refresh_state_store_readable   the step-4 refresh-state table is readable     ← step 4 PR-2
-//   spec_read_plan_slot            the read plan declares the 规格 column, or server config declares it
-//                                  not applicable (never guessed)                   ← step-4 refuter B-M8
+//   spec_read_plan_slot            server config declares the 规格 column not applicable, or EVERY read plan the
+//                                  project can execute declares it: the deployment plan and, with online read
+//                                  plans ON, the effective one (`specSlotReadPlans`; S1 N4 — only refuses more)
+//                                  (never guessed)                                  ← step-4 refuter B-M8
 // ★ pack_columns_installed         EITHER the action declares at least one `ext_` column (`extensionFieldIds`)
 //                                  and EVERY declared column is installed on THIS sheet — listed live by the
 //                                  pack-install ledger for (tenant, staging project, objectId) AND present on the
@@ -308,11 +310,15 @@ const CHECKS = Object.freeze({
     const probe = await deps.probeTableReadable(STEP4_STORE_TABLES.refreshState)
     return Boolean(probe && probe.readable === true)
   },
-  spec_read_plan_slot(deps) {
-    const readPlan = deps.action && isPlainObject(deps.action.source) ? deps.action.source.readPlan : null
-    const declared = isPlainObject(readPlan) && isPlainObject(readPlan.part) && nonEmptyString(readPlan.part.specField) !== null
-    if (declared) return true
-    return deps.specReadPlanSlotDeclaration === SPEC_READ_PLAN_SLOT_NOT_APPLICABLE
+  async spec_read_plan_slot(deps) {
+    // The explicit not-applicable declaration answers first, without asking for any plan.
+    if (deps.specReadPlanSlotDeclaration === SPEC_READ_PLAN_SLOT_NOT_APPLICABLE) return true
+    // Without the optional `specSlotReadPlans` the deployment action's own plan decides, as it always did.
+    const plans = typeof deps.specSlotReadPlans === 'function'
+      ? await deps.specSlotReadPlans()
+      : [deps.action && isPlainObject(deps.action.source) ? deps.action.source.readPlan : null]
+    return Array.isArray(plans) && plans.length > 0
+      && plans.every((readPlan) => isPlainObject(readPlan) && isPlainObject(readPlan.part) && nonEmptyString(readPlan.part.specField) !== null)
   },
   async pack_columns_installed(deps) {
     const facts = await readPackColumnFacts({
@@ -349,6 +355,8 @@ const CHECKS = Object.freeze({
  *   assertTargetSheetHoldsNoForeignActiveRows, readExistingStockPreparationRows, lock, writeScope,
  *   countOpenLargeJobs, probeTableReadable, specReadPlanSlotDeclaration, packInstallStore,
  *   customerPackDeclaration, collectGenericWriterTargets
+ * and, optionally, specSlotReadPlans: `async () => [readPlan, ...]` — every read plan spec_read_plan_slot must find
+ * the 规格 column in (absent: the action's own plan; a throw or an empty list is not ok).
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []

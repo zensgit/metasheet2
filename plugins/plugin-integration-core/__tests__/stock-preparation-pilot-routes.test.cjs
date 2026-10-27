@@ -51,10 +51,16 @@
 //   L-05 SOURCE ORDER: in each of the five handlers the gate call follows the staleness check and precedes every IO
 //        and the lease; the chunk hands the lib `largeLanePilotCheck`; the dry run hands the lib `pilotLaneGuard`
 //   L-06 AN UNREADABLE MARKER: every large route and the over-cap dry run answer 503 STATE_UNREADABLE, never proceed
+//   PR-N4 (S1 N4, review candidate) spec_read_plan_slot with the online read-plan switch ON: the deployment plan AND
+//        the effective plan must both declare the 规格 column, or the server declares it not applicable (a) deployment
+//        only ⇒ failing, ENABLE refused with nothing done; (b) online only ⇒ failing (today's answer); (c) both ⇒ ok;
+//        (d) a disabled pointer ⇒ failing; (e) switch unset ⇒ P-04 / P-05 as today, no pointer read; (f) declared not
+//        applicable ⇒ ok without asking for any plan
 //
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 
@@ -76,6 +82,9 @@ const { CUSTOMER_PACK_NOT_APPLICABLE, PILOT_READINESS_CHECK_IDS, PILOT_READINESS
 const continuationSupport = require(path.join(LIB, 'stock-preparation-continuation-support.cjs'))
 const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
 const swlLockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+const { ONLINE_READ_PLANS_ENABLED_ENV } = require(path.join(LIB, 'stock-preparation-read-plan-switch.cjs'))
+const { StockPreparationReadPlanStoreError } = require(path.join(LIB, 'stock-preparation-read-plan-store.cjs'))
+const { validateStockPreparationReadPlanConfig } = require(path.join(LIB, 'stock-preparation-read-plan-config.cjs'))
 assert.equal(typeof resolveProjectTargetForAction, 'function', 'the real project-target resolver is the one the registry producer path uses')
 
 const HTTP_ROUTES_SOURCE = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
@@ -1114,6 +1123,202 @@ test('L-06 an unreadable marker: every large route and the over-cap dry run answ
       assert.ok(!JSON.stringify(res.body).includes('does not exist'), 'the store message never travels')
     }
     assert.equal(h.records.calls.filter(([verb]) => verb === 'createRecord' || verb === 'patchRecord').length, 0)
+  } finally { h.restore() }
+})
+
+// ── PR-N4: spec_read_plan_slot under the online read-plan switch (S1 N4) ───────────────────────────────
+// The readiness dep `specSlotReadPlans` names the deployment plan and, with MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED
+// 'true', the effective plan of the hint-less lanes; every other check keeps the deployment action. The deployment
+// plan is set through configExtras.stockPreparationTableActions; a spy ledger is patched onto the captured services
+// (read at call time) with its pointer at the tenant scope only. Switch-ON calls carry the verified claim.
+
+const N4_SYSTEM = 'plm_sql_source_synthetic' // the harness deployment's own source
+
+function n4ReadPlan({ spec }) {
+  return {
+    id: 'plm.stock-preparation.bom-read.user-draft.v1', sourceKind: 'data-source:sql-readonly', matchField: 'project', maxReadCount: 100,
+    pathExAttr: { object: 'SYN_PB_PathLink', matchField: 'project', pathIdField: 'path' },
+    pathInfo: { object: 'SYN_PB_Path', idField: 'id' },
+    orderHead: { object: 'SYN_PB_Order', idField: 'id', pathIdField: 'path' },
+    orderDetail: { object: 'SYN_PB_OrderLine', orderIdField: 'order', componentIdField: 'part', quantityField: 'qty' },
+    part: { object: 'SYN_PB_Part', idField: 'id', codeField: 'code', nameField: 'name', ...(spec ? { specField: 'spec' } : {}) },
+    bomHead: { object: 'SYN_PB_Bom', parentPartField: 'part', bomIdField: 'id' },
+    bomDetail: { object: 'SYN_PB_BomLine', bomParentField: 'bom', componentIdField: 'part', quantityField: 'qty' },
+  }
+}
+
+// The ledger's canonical JSON + sha256 content key (stock-preparation-read-plan-store.cjs).
+function n4CanonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(n4CanonicalJson).join(',')}]`
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${n4CanonicalJson(value[key])}`).join(',')}}`
+}
+
+// The runtime read's answer for one approved, activated online plan at (TENANT, workspace null).
+function n4OnlinePlan({ spec }) {
+  const config = validateStockPreparationReadPlanConfig({ schemaVersion: 1, actionId: ACTION_ID, systemId: N4_SYSTEM, readPlan: n4ReadPlan({ spec }) })
+  const contentKey = crypto.createHash('sha256').update(n4CanonicalJson(config)).digest('hex')
+  const version = { id: 'rpv_pb_1', tenantId: TENANT, workspaceId: null, actionId: ACTION_ID, systemId: N4_SYSTEM, schemaVersion: 1, version: 1, status: 'approved', config, contentKey }
+  const activation = { id: 'rpa_pb_1', tenantId: TENANT, workspaceId: null, actionId: ACTION_ID, systemId: N4_SYSTEM, versionId: version.id, contentKey, generation: 1, status: 'active', validationId: 'rpval_pb_1' }
+  const sourceValidation = { connectionId: 'conn_pb_synthetic', connectionRevision: '22222222-2222-4222-8222-222222222222', bindingRevision: '11111111-1111-4111-8111-111111111111' }
+  return { activation, version, sourceValidation }
+}
+
+// The spy ledger: every runtime read counted; 'active' answers the plan at workspace null, 'disabled' refuses as the
+// real store does (409 READ_PLAN_ACTIVATION_DISABLED).
+function n4SpyReadPlanStore(plan, mode) {
+  const spy = {
+    calls: [],
+    async getActivation() { return null },
+    async getActiveForRuntime(input) {
+      spy.calls.push({ ...input })
+      if (input.workspaceId !== null) return null
+      if (mode === 'disabled') throw new StockPreparationReadPlanStoreError(409, 'READ_PLAN_ACTIVATION_DISABLED')
+      return { activation: { ...plan.activation }, version: { ...plan.version, config: JSON.parse(JSON.stringify(plan.version.config)) }, sourceValidation: { ...plan.sourceValidation } }
+    },
+  }
+  return spy
+}
+
+function withOnlineSwitch(online) {
+  const previous = process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+  if (online) process.env[ONLINE_READ_PLANS_ENABLED_ENV] = 'true'
+  else delete process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+  return () => {
+    if (previous === undefined) delete process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+    else process.env[ONLINE_READ_PLANS_ENABLED_ENV] = previous
+  }
+}
+
+/**
+ * A prepared mount (every other check passes) whose deployment plan declares the 规格 column or not, the customer
+ * pack declared not applicable, the 规格 slot declared not applicable only when asked, the switch set or unset, and
+ * the spy ledger answering an online plan that declares the column or not.
+ */
+function mountN4({ online = true, mode = 'active', deploymentSpec, onlineSpec, specNotApplicable = false }) {
+  const restoreSwitch = withOnlineSwitch(online)
+  let ready
+  try {
+    ready = mountReady({
+      configExtras: {
+        stockPreparationPilot: { customerPack: CUSTOMER_PACK_NOT_APPLICABLE, ...(specNotApplicable ? { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } : {}) },
+        stockPreparationTableActions: [{
+          actionId: ACTION_ID,
+          source: { externalSystemId: N4_SYSTEM, kind: 'data-source:sql-readonly', readPlan: n4ReadPlan({ spec: deploymentSpec }) },
+          target: { sheetId: 'sheet_env_synthetic', objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} },
+        }],
+      },
+    })
+  } catch (error) {
+    restoreSwitch()
+    throw error
+  }
+  const spy = n4SpyReadPlanStore(n4OnlinePlan({ spec: onlineSpec }), mode)
+  ready.services.stockPreparationReadPlanStore = spy
+  const restoreReady = ready.restore
+  return { ...ready, spy, restore: () => { try { restoreReady() } finally { restoreSwitch() } } }
+}
+
+const getPilotClaimed = (h) => projectSheet.call(h.routes, 'GET', PILOT_PATH, { user: WORKBENCH_ADMIN, params: { projectNo: PROJECT }, query: {}, authenticatedTenantId: TENANT })
+const enablePilotClaimed = (h) => projectSheet.call(h.routes, 'POST', PILOT_PATH, { user: WORKBENCH_ADMIN, params: { projectNo: PROJECT }, body: confirm(PROJECT), authenticatedTenantId: TENANT })
+
+/** ENABLE refused 409 NOT_READY naming exactly `failing`: nothing bumped, no lease, no stamp, no mark, no audit row. */
+async function assertEnableRefusedNothingDone(h, failing, label) {
+  const scope = swlLockLib.sheetWriteScopeKey(h.sheetId)
+  const before = await h.projectWriteLock.readState(scope)
+  const res = await enablePilotClaimed(h)
+  assert.equal(res.statusCode, 409, `${label}: ${JSON.stringify(res.body)}`)
+  assert.equal(res.body.error.code, PILOT_ERROR_CODES.NOT_READY, label)
+  assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing, partial: false }, label)
+  assert.deepEqual(await h.projectWriteLock.readState(scope), before, `${label}: the generation did not move and no lease was taken`)
+  assert.equal(h.provisioning.gridExportClosureCalls.length, 0, `${label}: no stamp`)
+  assert.ok(!h.db.calls.some((call) => /^(updateRow|transaction)/.test(call)), `${label}: no registry write`)
+  assert.equal(h.registryRows()[0].pilot_enabled_at, undefined, `${label}: no mark`)
+  assert.deepEqual(h.auditAppends, [], `${label}: no audit row`)
+}
+
+test('PR-N4a switch ON, an active pointer, nothing declared not applicable: the DEPLOYMENT plan declares the 规格 column and the ONLINE plan does not ⇒ spec_read_plan_slot fails on GET; ENABLE is 409 NOT_READY with it — nothing bumped, stamped, marked or audited', async () => {
+  const h = mountN4({ deploymentSpec: true, onlineSpec: false })
+  try {
+    const read = await getPilotClaimed(h)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, ['spec_read_plan_slot'])
+    assert.deepEqual(read.body.data.may, { enable: false })
+    await assertEnableRefusedNothingDone(h, ['spec_read_plan_slot'], 'deployment only')
+    assert.deepEqual(h.spy.calls.map((call) => call.workspaceId), [null, null], 'GET and ENABLE each read the tenant-scope pointer once')
+  } finally { h.restore() }
+})
+
+test('PR-N4b switch ON: the deployment plan LACKS the 规格 column and the online plan declares it ⇒ still failing (today\'s answer: both plans must declare it)', async () => {
+  const h = mountN4({ deploymentSpec: false, onlineSpec: true })
+  try {
+    const read = await getPilotClaimed(h)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, ['spec_read_plan_slot'])
+    await assertEnableRefusedNothingDone(h, ['spec_read_plan_slot'], 'online only')
+  } finally { h.restore() }
+})
+
+test('PR-N4c switch ON: BOTH plans declare the 规格 column ⇒ spec_read_plan_slot ok, the project may be enabled', async () => {
+  const h = mountN4({ deploymentSpec: true, onlineSpec: true })
+  try {
+    const read = await getPilotClaimed(h)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, [])
+    assert.equal(read.body.data.readiness.checks.find((check) => check.id === 'spec_read_plan_slot').ok, true)
+    assert.deepEqual(read.body.data.may, { enable: true })
+    const enabled = await enablePilotClaimed(h)
+    assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+    assert.equal(enabled.body.data.enabled, true)
+    assert.equal(h.spy.calls.length, 2)
+  } finally { h.restore() }
+})
+
+test('PR-N4d switch ON, a DISABLED pointer: the effective plan cannot be resolved, so spec_read_plan_slot is not ok (a resolver refusal never passes); ENABLE is refused NOT_READY with nothing done', async () => {
+  const h = mountN4({ mode: 'disabled', deploymentSpec: true, onlineSpec: true })
+  try {
+    const read = await getPilotClaimed(h)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, ['spec_read_plan_slot'])
+    assert.ok(!JSON.stringify(read.body).includes('READ_PLAN_'), 'the readiness answer stays values-free: an id and a boolean')
+    await assertEnableRefusedNothingDone(h, ['spec_read_plan_slot'], 'disabled pointer')
+    assert.equal(h.spy.calls.length, 2)
+  } finally { h.restore() }
+})
+
+test('PR-N4e switch UNSET: the P-04 / P-05 answers as today — the readiness lists the same failing ids and ENABLE refuses with them — and neither GET nor ENABLE reads an activation pointer', async () => {
+  const restoreSwitch = withOnlineSwitch(false)
+  const h = mount()
+  try {
+    const spy = n4SpyReadPlanStore(n4OnlinePlan({ spec: false }), 'active')
+    h.services.stockPreparationReadPlanStore = spy
+    const { sheetId } = h.seedRegistryRow(PROJECT)
+    const expected = ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version']
+    const read = await getPilot(h, WORKBENCH_ADMIN)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, expected)
+    const scope = swlLockLib.sheetWriteScopeKey(sheetId)
+    const before = await h.projectWriteLock.readState(scope)
+    const res = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: expected, partial: false })
+    assert.deepEqual(await h.projectWriteLock.readState(scope), before)
+    assert.deepEqual(h.auditAppends, [])
+    assert.deepEqual(spy.calls, [], 'switch unset: no pointer read on GET or ENABLE')
+  } finally {
+    try { h.restore() } finally { restoreSwitch() }
+  }
+})
+
+test('PR-N4f switch ON, the server declares the 规格 slot NOT APPLICABLE: ok without asking for any plan — the dep is never called, no pointer read (and the project enables)', async () => {
+  const h = mountN4({ specNotApplicable: true, deploymentSpec: false, onlineSpec: false })
+  try {
+    const read = await getPilotClaimed(h)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, [])
+    const enabled = await enablePilotClaimed(h)
+    assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+    assert.deepEqual(h.spy.calls, [], 'not applicable answers first: no plan, no pointer read')
   } finally { h.restore() }
 })
 

@@ -41,10 +41,16 @@
 //   RT-EV   the evidence: the demand facts of the computation that opened the hold; history_unknown, then the
 //           relationship snapshot once a relationship claims the old root; the continuation detail
 //   RT-NG   a registered, NOT-governed project: not_governed, no holds, no receipt, no step-4 row written by a read
+//   RT-RP   S1 (review candidate): with the online read-plan switch ON the confirm — and only the confirm — stamps
+//           the EFFECTIVE read plan of the hint-less lanes: a candidate (RT-RP1), a re-confirm (RT-RP2), no pointer
+//           (RT-RP6), a request workspace hint over R4 bindings (RT-RP8); switch unset no route reads a pointer
+//           (RT-RP3); a disabled pointer, an unavailable runtime or a claimless principal refuse the confirm with
+//           nothing persisted while the other routes answer as before (RT-RP4, RT-RP5, RT-RP7)
 // Synthetic values only; the pilot column is seeded directly (pilot enable is impossible on this build: the
 // readiness marker CONTINUATION_SUPPORT_VERSION is 0).
 
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -56,6 +62,12 @@ const { PROJECT_WRITE_LOCK_TABLE, PROJECT_WRITE_ERROR_CODES, sheetWriteScopeKey 
 const { REFRESH_DECISION_ERROR_CODES, REFRESH_DECISION_AUDIT, READ_RECEIPT_KEY_PREFIX } = require(path.join(LIB, 'stock-preparation-refresh-decisions.cjs'))
 const { CONTINUATION_SUPPORT_VERSION } = require(path.join(LIB, 'stock-preparation-continuation-support.cjs'))
 const CF = require('./support/stock-preparation-continuation-fixtures.cjs')
+const wiring = require('./support/stock-preparation-refresh-governance-wiring.cjs')
+const { ONLINE_READ_PLANS_ENABLED_ENV } = require(path.join(LIB, 'stock-preparation-read-plan-switch.cjs'))
+const { StockPreparationReadPlanStoreError } = require(path.join(LIB, 'stock-preparation-read-plan-store.cjs'))
+const { validateStockPreparationReadPlanConfig } = require(path.join(LIB, 'stock-preparation-read-plan-config.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID, composeStockPreparationReadPlanAction, createStockPreparationTableActionRegistry } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const { refreshSourceIdentity } = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -1270,6 +1282,348 @@ test('RT-NG a registered project that is NOT governed: the hold page answers not
     assert.equal(st.env.stepFourRowCount(), 0, 'reads never write')
     assert.equal(st.audits().length, 1, 'the empty page is still an audited read')
     assert.equal(st.audits()[0].mode, REFRESH_DECISION_AUDIT.modes.holdRead)
+  } finally { st.restore() }
+})
+
+// ── RT-RP: S1 — the confirm under the online read-plan switch ──────────────────────────────────────────
+// The confirm route alone resolves the EFFECTIVE action of the hint-less lanes (reconcile, mvp-persist, the scheduled
+// pull) while MULTITABLE_STOCK_PREP_ONLINE_READ_PLANS_ENABLED is 'true'. A spy ledger stands in for the read-plan
+// store (the routes read `services.stockPreparationReadPlanStore` at call time); its pointer exists only at the
+// tenant scope (workspace null), the only scope the management routes activate. The switch is set per mount and
+// restored by `restore()` (the harness restores only its own keys). Every switch-ON call carries the verified claim:
+// this suite's principals are claimless by default.
+
+const RP_SYSTEM = 'plm_sql_source_synthetic' // the harness deployment's own source (project-sheet harness config)
+const RP_WORKSPACE = 'ws_rd_hint'
+const CLAIMED = Object.freeze({ authenticatedTenantId: TENANT })
+
+// The ledger's canonical JSON + sha256 content key (stock-preparation-read-plan-store.cjs): a version whose key does
+// not match its content is refused by the composition, so a wrong recipe here fails every switch-ON case loudly.
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+}
+
+// One approved, activated online plan for (TENANT, workspace null) naming the deployment's source, as the runtime read
+// answers it: { activation, version, sourceValidation } (UUID revisions, read-plan-runtime.cjs).
+function onlinePlanFixture() {
+  const config = validateStockPreparationReadPlanConfig({
+    schemaVersion: 1,
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    systemId: RP_SYSTEM,
+    readPlan: {
+      id: 'plm.stock-preparation.bom-read.user-draft.v1', sourceKind: 'data-source:sql-readonly', matchField: 'project', maxReadCount: 100,
+      pathExAttr: { object: 'SYN_RD_PathLink', matchField: 'project', pathIdField: 'path' },
+      pathInfo: { object: 'SYN_RD_Path', idField: 'id' },
+      orderHead: { object: 'SYN_RD_Order', idField: 'id', pathIdField: 'path' },
+      orderDetail: { object: 'SYN_RD_OrderLine', orderIdField: 'order', componentIdField: 'part', quantityField: 'qty' },
+      part: { object: 'SYN_RD_Part', idField: 'id', codeField: 'code', nameField: 'name' },
+      bomHead: { object: 'SYN_RD_Bom', parentPartField: 'part', bomIdField: 'id' },
+      bomDetail: { object: 'SYN_RD_BomLine', bomParentField: 'bom', componentIdField: 'part', quantityField: 'qty' },
+    },
+  })
+  const contentKey = crypto.createHash('sha256').update(canonicalJson(config)).digest('hex')
+  const version = { id: 'rpv_rd_1', tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: RP_SYSTEM, schemaVersion: 1, version: 1, status: 'approved', config, contentKey }
+  const activation = { id: 'rpa_rd_1', tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: RP_SYSTEM, versionId: version.id, contentKey, generation: 1, status: 'active', validationId: 'rpval_rd_1' }
+  const sourceValidation = { connectionId: 'conn_rd_synthetic', connectionRevision: '22222222-2222-4222-8222-222222222222', bindingRevision: '11111111-1111-4111-8111-111111111111' }
+  return Object.freeze({ activation, version, sourceValidation })
+}
+
+// The spy ledger. Every runtime read is counted; a pointer exists only at workspace null. `mode`: 'active' answers
+// the plan, 'none' has no pointer (null), 'disabled' refuses 409 READ_PLAN_ACTIVATION_DISABLED as the real store
+// does, 'throw' fails with a plain error (an outage).
+function spyReadPlanStore(plan, mode) {
+  const spy = {
+    mode,
+    calls: [],
+    async getActivation() { return null },
+    async getActiveForRuntime(input) {
+      spy.calls.push({ ...input })
+      if (input.workspaceId !== null || spy.mode === 'none') return null
+      if (spy.mode === 'disabled') throw new StockPreparationReadPlanStoreError(409, 'READ_PLAN_ACTIVATION_DISABLED')
+      if (spy.mode === 'throw') throw new Error('synthetic read-plan store outage rd-7c1e')
+      return { activation: { ...plan.activation }, version: { ...plan.version, config: JSON.parse(JSON.stringify(plan.version.config)) }, sourceValidation: { ...plan.sourceValidation } }
+    },
+  }
+  return spy
+}
+
+// mount()'s stack (the real store, reader and lock over one db, the registered pilot project) with the switch set
+// (`online`) or unset, the spy ledger patched on, and optionally a source-binding store.
+function mountOnline({ online = true, mode = 'active', sourceBindingStore = null } = {}) {
+  const previous = process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+  const restoreSwitch = () => {
+    if (previous === undefined) delete process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+    else process.env[ONLINE_READ_PLANS_ENABLED_ENV] = previous
+  }
+  if (online) process.env[ONLINE_READ_PLANS_ENABLED_ENV] = 'true'
+  else delete process.env[ONLINE_READ_PLANS_ENABLED_ENV]
+  let h
+  try {
+    h = harness.mountProjectSheetRoutes({
+      tenantId: TENANT,
+      projectNo: PROJECT,
+      switchOn: true,
+      refreshOptions: { lockOnRefreshDb: true },
+      ...(sourceBindingStore ? { sourceBindingStore } : {}),
+      serviceExtras: {
+        stockPreparationConfirmationDecisionLease: { async acquire() { return { leaseId: 'lease_rd' } }, async release() { return true }, async renew() { return true } },
+      },
+    })
+  } catch (error) {
+    restoreSwitch()
+    throw error
+  }
+  const registered = h.seedRegistryRow(PROJECT)
+  markPilot(h)
+  const plan = onlinePlanFixture()
+  const spy = spyReadPlanStore(plan, mode)
+  h.services.stockPreparationReadPlanStore = spy
+  const env = h.refresh
+  const sheetId = registered.sheetId
+  return {
+    h,
+    env,
+    sheetId,
+    plan,
+    spy,
+    scope: { tenantId: TENANT, sheetId, projectNo: PROJECT },
+    lockRow: () => env.rows(PROJECT_WRITE_LOCK_TABLE).find((row) => row.scope_key === sheetWriteScopeKey(sheetId)) || null,
+    holds: () => env.rows('hold'),
+    continuations: () => env.rows('continuation'),
+    members: () => env.rows('member'),
+    state: () => env.rows('state')[0] || null,
+    audits: () => h.auditAppends,
+    restore: () => {
+      try { h.restore() } finally { restoreSwitch() }
+    },
+  }
+}
+
+// The two source identities a confirm can stamp: the deployment action's, and the online plan composed onto it at
+// the tenant scope (what the hint-less lanes execute). Calibrated: only the read-plan digest differs.
+async function identitiesOf(st) {
+  const deploymentAction = await createStockPreparationTableActionRegistry({ actions: st.h.context.config.stockPreparationTableActions }).getTableAction({ tenantId: TENANT })
+  const onlineAction = composeStockPreparationReadPlanAction({ action: deploymentAction, scope: { tenantId: TENANT, workspaceId: null }, activation: st.plan.activation, version: st.plan.version })
+  const deployment = refreshSourceIdentity({ action: deploymentAction, tenantId: TENANT })
+  const online = refreshSourceIdentity({ action: onlineAction, tenantId: TENANT })
+  assert.notEqual(online.readPlanDigest, deployment.readPlanDigest, 'calibration: the online plan is not the deployment plan')
+  assert.equal(online.externalSystemId, deployment.externalSystemId, 'calibration: the composition keeps the source')
+  assert.equal(online.sourceScopeDigest, deployment.sourceScopeDigest, 'calibration: the composition keeps the scope digest')
+  return { deployment, online }
+}
+
+// readAndBind with the verified claim on every page read.
+async function readAndBindClaimed(st, row, hold) {
+  const first = dataOf(await listHolds(st, {}, CLAIMED))
+  let receipt = first.readReceipt
+  const entry = first.page.holds.find((item) => item.id === row.id)
+  const pages = entry && entry.pairPage ? entry.pairPage.count : 1
+  for (let index = 1; index < pages; index += 1) {
+    receipt = dataOf(await listHolds(st, { holdId: row.id, pairCursor: index, receipt: receipt.id }, CLAIMED)).readReceipt
+  }
+  return {
+    receipt,
+    body: {
+      holdId: row.id,
+      holdFingerprint: hold.fingerprint,
+      comparisonFingerprint: hold.comparisonFingerprint,
+      evidenceFingerprint: hold.evidenceFingerprint,
+      candidateId: hold.pairingFingerprint,
+      readReceipt: receipt.id,
+      basis: { kind: 'puller_confirmed_same_demand', note: 'synthetic basis' },
+      acknowledge: { historyUnknown: true },
+    },
+  }
+}
+
+// A confirm refused by the context leaves every step-4 row, the lock row, decision_version and the trail as they were.
+function persistedState(st) {
+  return {
+    rows: st.env.snapshot(),
+    lock: JSON.stringify(st.lockRow()),
+    decisionVersion: st.state() ? st.state().decision_version : null,
+    decisionAudits: st.audits().filter((entry) => entry.action === REFRESH_DECISION_AUDIT.decisionAction).length,
+  }
+}
+
+test('RT-RP1 (S1) switch ON, an active pointer, no binding store: the confirm stamps the EFFECTIVE read-plan digest the hint-less lanes execute (not the deployment one), the external system and scope digest unchanged; the hold page reads no pointer, the confirm exactly one, at the tenant scope', async () => {
+  const st = mountOnline()
+  try {
+    const ids = await identitiesOf(st)
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    assert.equal(st.spy.calls.length, 0, 'the hold page reads no activation pointer')
+    const done = await confirm(st, body, CLAIMED)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    const cont = st.continuations()[0]
+    assert.equal(cont.read_plan_digest, ids.online.readPlanDigest, 'the effective plan of the hint-less lanes')
+    assert.notEqual(cont.read_plan_digest, ids.deployment.readPlanDigest, 'not the deployment plan')
+    assert.equal(cont.external_system_id, ids.deployment.externalSystemId)
+    assert.equal(cont.source_scope_digest, ids.deployment.sourceScopeDigest)
+    assert.equal(st.spy.calls.length, 1, 'the confirm read the pointer exactly once')
+    assert.deepEqual(st.spy.calls[0], { tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: RP_SYSTEM })
+  } finally { st.restore() }
+})
+
+test('RT-RP2 (S1) switch ON, the re-confirm path: a relationship stamped with the DEPLOYMENT identity (the S1 victim) is re-confirmed through the same route — revision 2, and the UPDATE stamps the effective digest', async () => {
+  const st = mountOnline()
+  try {
+    const ids = await identitiesOf(st)
+    const fixture = await refreshKit.candidateHoldFixture()
+    const confirmed = await st.env.seedConfirmedContinuation(st.scope, fixture.hold, { sourceIdentity: ids.deployment })
+    assert.equal(st.continuations()[0].read_plan_digest, ids.deployment.readPlanDigest, 'seeded with the deployment identity')
+    const reconfirm = refreshKit.reconfirmHoldFor(confirmed.continuationId, { verdict: 'source_scope_changed' })
+    await st.env.seedHolds(st.scope, [reconfirm], { verdicts: { [confirmed.continuationId]: 'source_scope_changed' } })
+    const row = st.holds().find((entry) => entry.fingerprint === reconfirm.fingerprint && entry.status === 'open')
+    const page = dataOf(await listHolds(st, {}, CLAIMED))
+    const done = await confirm(st, { holdId: row.id, holdFingerprint: reconfirm.fingerprint, comparisonFingerprint: reconfirm.comparisonFingerprint, evidenceFingerprint: reconfirm.evidenceFingerprint, continuation: { id: confirmed.continuationId, revision: 1 }, readReceipt: page.readReceipt.id, acknowledge: { historyUnknown: true } }, CLAIMED)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(done.body.data.revision, 2)
+    const cont = st.continuations()[0]
+    assert.equal(cont.status, 'active')
+    assert.equal(cont.revision, 2)
+    assert.equal(cont.read_plan_digest, ids.online.readPlanDigest, 'the re-confirm stamps the effective plan')
+    assert.equal(cont.external_system_id, ids.online.externalSystemId)
+    assert.equal(cont.source_scope_digest, ids.online.sourceScopeDigest)
+    assert.equal(st.spy.calls.length, 1)
+  } finally { st.restore() }
+})
+
+test('RT-RP3 (S1) switch UNSET (the spy would answer an active pointer): holds, evidence, keep, confirm, detail and end read NO pointer; the confirm answers 201 and stamps the DEPLOYMENT digest, exactly as today', async () => {
+  const st = mountOnline({ online: false })
+  try {
+    const ids = await identitiesOf(st)
+    const { hold, row } = await seedCandidate(st)
+    assert.equal((await evidence(st, row.id, CLAIMED)).statusCode, 200)
+    assert.equal((await keep(st, row.id, { holdFingerprint: hold.fingerprint }, CLAIMED)).statusCode, 200)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    const done = await confirm(st, body, CLAIMED)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    const cont = st.continuations()[0]
+    assert.equal(cont.read_plan_digest, ids.deployment.readPlanDigest, 'switch unset: the deployment plan, as today')
+    assert.equal(cont.external_system_id, ids.deployment.externalSystemId)
+    assert.equal(cont.source_scope_digest, ids.deployment.sourceScopeDigest)
+    assert.equal((await detail(st, done.body.data.continuationId, CLAIMED)).statusCode, 200)
+    const ended = await end(st, done.body.data.continuationId, { revision: 1, outcome: 'escalate_special_repair' }, CLAIMED)
+    assert.equal(ended.statusCode, 409, JSON.stringify(ended.body))
+    assert.equal(errorOf(ended).code, CODES.END_OUTCOME_NOT_ADMISSIBLE, 'an active relationship is not ended here (RT-E1)')
+    assert.equal(errorOf(ended).details.reason, 'status')
+    assert.deepEqual(st.spy.calls, [], 'switch unset: no route read the activation pointer')
+  } finally { st.restore() }
+})
+
+test('RT-RP4 (S1) switch ON, a DISABLED pointer: the confirm is 409 READ_PLAN_ACTIVATION_DISABLED with nothing persisted (no continuation or member, the hold open, generation, decision_version and trail unchanged); holds, evidence, keep, detail and end answer as before and read no pointer', async () => {
+  const st = mountOnline({ mode: 'disabled' })
+  try {
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    await st.env.lock().bumpGeneration(sheetWriteScopeKey(st.sheetId), { reason: 'small_preview', tenantId: TENANT })
+    const before = persistedState(st)
+    const refused = await confirm(st, body, CLAIMED)
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.equal(errorOf(refused).code, 'READ_PLAN_ACTIVATION_DISABLED')
+    assert.deepEqual(persistedState(st), before, 'nothing persisted')
+    assert.equal(st.continuations().length, 0)
+    assert.equal(st.members().length, 0)
+    assert.equal(st.holds().find((entry) => entry.id === row.id).status, 'open')
+    assert.equal(st.spy.calls.length, 1, 'only the confirm read the pointer')
+    // The same state: the hold page, the evidence and 「暂不处理」 answer as before, without a pointer read.
+    const page = dataOf(await listHolds(st, {}, CLAIMED))
+    assert.equal(page.page.holds.length, 1)
+    assert.equal((await evidence(st, row.id, CLAIMED)).statusCode, 200)
+    const kept = await keep(st, row.id, { holdFingerprint: hold.fingerprint }, CLAIMED)
+    assert.equal(kept.statusCode, 200, JSON.stringify(kept.body))
+    assert.deepEqual(kept.body.data, { kept: true, holdId: row.id })
+    assert.equal(st.spy.calls.length, 1, 'holds, evidence and keep read no pointer')
+  } finally { st.restore() }
+  // A relationship needing re-confirmation under the same disabled pointer: the detail and the escalation answer.
+  const rc = mountOnline({ mode: 'disabled' })
+  try {
+    const { confirmed } = await needsReconfirmation(rc, { count: 1 })
+    const read = await detail(rc, confirmed.continuationId, CLAIMED)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.equal(read.body.data.continuation.status, 'needs_reconfirmation')
+    const escalated = await end(rc, confirmed.continuationId, { revision: 1, outcome: 'escalate_special_repair' }, CLAIMED)
+    assert.equal(escalated.statusCode, 200, JSON.stringify(escalated.body))
+    assert.equal(escalated.body.data.holdsEscalated, 1)
+    assert.deepEqual(rc.spy.calls, [], 'detail and end read no pointer')
+  } finally { rc.restore() }
+})
+
+test('RT-RP5 (S1) switch ON: a read-plan store without the runtime read is 501 READ_PLAN_RUNTIME_UNAVAILABLE, a runtime read that fails is 503 READ_PLAN_RUNTIME_UNAVAILABLE (values-free); nothing persisted either way', async () => {
+  for (const [label, prepare, status] of [
+    ['no runtime read', (st) => { st.h.services.stockPreparationReadPlanStore = { async getActivation() { return null } } }, 501],
+    ['the runtime read fails', (st) => { st.spy.mode = 'throw' }, 503],
+  ]) {
+    const st = mountOnline()
+    try {
+      const { hold, row } = await seedCandidate(st)
+      const { body } = await readAndBindClaimed(st, row, hold)
+      await st.env.lock().bumpGeneration(sheetWriteScopeKey(st.sheetId), { reason: 'small_preview', tenantId: TENANT })
+      const before = persistedState(st)
+      prepare(st)
+      const res = await confirm(st, body, CLAIMED)
+      assert.equal(res.statusCode, status, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(errorOf(res).code, 'READ_PLAN_RUNTIME_UNAVAILABLE', label)
+      assert.equal(JSON.stringify(res.body).includes('rd-7c1e'), false, `${label}: the store's own text never leaves`)
+      assert.deepEqual(persistedState(st), before, `${label}: nothing persisted`)
+      assert.equal(st.continuations().length, 0, label)
+      assert.equal(st.holds().find((entry) => entry.id === row.id).status, 'open', label)
+    } finally { st.restore() }
+  }
+})
+
+test('RT-RP6 (S1) switch ON, NO pointer (the runtime read answers null): the confirm answers 201 and stamps the deployment digest; the pointer was read once', async () => {
+  const st = mountOnline({ mode: 'none' })
+  try {
+    const ids = await identitiesOf(st)
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    const done = await confirm(st, body, CLAIMED)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(st.continuations()[0].read_plan_digest, ids.deployment.readPlanDigest)
+    assert.equal(st.spy.calls.length, 1)
+  } finally { st.restore() }
+})
+
+test('RT-RP7 (S1) switch ON, an active pointer: the lanes\' verified-claim check — a claimless confirm is 403 TENANT_CLAIM_REQUIRED with nothing persisted; the same body with the claim is 201', async () => {
+  const st = mountOnline()
+  try {
+    const ids = await identitiesOf(st)
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    await st.env.lock().bumpGeneration(sheetWriteScopeKey(st.sheetId), { reason: 'small_preview', tenantId: TENANT })
+    const before = persistedState(st)
+    const claimless = await confirm(st, body)
+    assert.equal(claimless.statusCode, 403, JSON.stringify(claimless.body))
+    assert.equal(errorOf(claimless).code, 'TENANT_CLAIM_REQUIRED')
+    assert.deepEqual(persistedState(st), before, 'nothing persisted')
+    assert.equal(st.continuations().length, 0)
+    const claimed = await confirm(st, body, CLAIMED)
+    assert.equal(claimed.statusCode, 201, JSON.stringify(claimed.body))
+    assert.equal(st.continuations()[0].read_plan_digest, ids.online.readPlanDigest)
+  } finally { st.restore() }
+})
+
+test('RT-RP8 (S1) switch ON, R4 bindings (a tenant row and a workspace row naming the same source), the pointer only at the tenant scope: a confirm carrying ?workspaceId still resolves the HINT-LESS binding and stamps the effective digest', async () => {
+  const bindings = wiring.createSourceBindingStoreFake()
+  bindings.seed({ tenantId: TENANT, actionId: PLM_STOCK_PREPARATION_ACTION_ID, workspaceId: null, externalSystemId: RP_SYSTEM })
+  bindings.seed({ tenantId: TENANT, actionId: PLM_STOCK_PREPARATION_ACTION_ID, workspaceId: RP_WORKSPACE, externalSystemId: RP_SYSTEM })
+  const listed = await bindings.listForAction({ tenantId: TENANT, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+  assert.equal(listed.complete, true)
+  assert.deepEqual(listed.bindings.map((binding) => binding.workspaceId), [null, RP_WORKSPACE], 'calibration: R4')
+  assert.equal((await bindings.get({ tenantId: TENANT, actionId: PLM_STOCK_PREPARATION_ACTION_ID, workspaceId: RP_WORKSPACE })).matchedWorkspaceId, RP_WORKSPACE, 'calibration: the hint would bind the workspace row')
+  const st = mountOnline({ sourceBindingStore: bindings })
+  try {
+    const ids = await identitiesOf(st)
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    const done = await confirm(st, body, { ...CLAIMED, query: { workspaceId: RP_WORKSPACE } })
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(st.continuations()[0].read_plan_digest, ids.online.readPlanDigest, 'the hint-less (tenant) binding and its pointer')
+    assert.deepEqual(st.spy.calls.map((call) => call.workspaceId), [null])
   } finally { st.restore() }
 })
 

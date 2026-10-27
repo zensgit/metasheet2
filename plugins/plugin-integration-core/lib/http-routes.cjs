@@ -4770,8 +4770,12 @@ function requireStockPreparationAudit() {
    * the host-vouched operator scope (never a header; a tenantless platform admin is refused here); the audit
    * vocabulary probe; the resolved table action (an archived project refuses a WRITE purpose here) and its
    * tenant wall; ONE governance consult (503 unreadable / 409 retargeted or tenant mismatch / 501 unwired).
+   * S1: the CONFIRM route alone passes `effectiveReadPlan` (candidate confirm and re-confirm share it). With the
+   * online read-plan switch ON it resolves the EFFECTIVE action the hint-less lanes execute (reconcile,
+   * mvp-persist, the scheduled pull), so the source identity a confirm stamps is the one those lanes verify a
+   * relationship against; switch OFF, and on the five other routes, the deployment lookup below, unchanged.
    */
-  async function stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose, confirmTyped, auditAction, auditMigration }) {
+  async function stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose, confirmTyped, auditAction, auditMigration, effectiveReadPlan = false }) {
     if (!user) throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
     const audit = requireStockPreparationAudit()
     const projectNo = firstString(requestParams(req).projectNo)
@@ -4788,12 +4792,14 @@ function requireStockPreparationAudit() {
     })
     await requireStockPreparationAuditVocabulary(audit, auditAction, auditMigration, scope.tenantId)
     const services = requireStockPreparationContinuationDecisions()
-    const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
-      tenantId: scope.tenantId,
-      actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-      projectNo,
-      targetPurpose,
-    }))
+    const action = effectiveReadPlan && onlineReadPlansEnabled()
+      ? assertStockPreparationTargetReady(await resolveStockPreparationEffectiveActionForScope(req, { tenantId: scope.tenantId, projectNo, targetPurpose }))
+      : assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId: scope.tenantId,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        projectNo,
+        targetPurpose,
+      }))
     await assertResolvedProjectTargetTenancy(action, scope.tenantId)
     const consult = await refreshGovernanceFor(scope.tenantId).consult({ projectNo, sheetId: action.target.sheetId })
     return Object.freeze({
@@ -5028,7 +5034,7 @@ function requireStockPreparationAudit() {
    * runs every check of stock-preparation-pilot-readiness.cjs over server-held inputs only. Returns the
    * resolved action, its sheet write scope and the values-free readiness answer.
    */
-  async function evaluateStockPreparationProjectPilotReadiness({ tenantId, workspaceId, projectNo, pilotRow, store }) {
+  async function evaluateStockPreparationProjectPilotReadiness({ req, tenantId, workspaceId, projectNo, pilotRow, store }) {
     const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
       tenantId,
       actionId: PLM_STOCK_PREPARATION_ACTION_ID,
@@ -5060,6 +5066,12 @@ function requireStockPreparationAudit() {
       countOpenLargeJobs: () => countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId }),
       probeTableReadable: (table) => store.probeTableReadable(table),
       specReadPlanSlotDeclaration: stockPreparationPilotSpecSlotDeclaration(),
+      // N4: the 规格 slot must be declared by EVERY plan this project can execute — the deployment plan and, with
+      // the online read-plan switch ON, the effective plan of the hint-less lanes (a resolver refusal reads as
+      // not ok). Switch OFF: the deployment plan alone, no IO. Every other check keeps the deployment action.
+      specSlotReadPlans: async () => (onlineReadPlansEnabled()
+        ? [action.source.readPlan, (await resolveStockPreparationEffectiveActionForScope(req, { tenantId, projectNo, targetPurpose: 'write' })).source.readPlan]
+        : [action.source.readPlan]),
       packInstallStore: stockPreparationPackInstalls,
       customerPackDeclaration: stockPreparationPilotCustomerPackDeclaration(),
       collectGenericWriterTargets: () => collectStockPrepGenericWriterTargets({
@@ -5325,6 +5337,25 @@ function requireStockPreparationAudit() {
       if (execution.sourceValidation) executionSourceValidations.set(snapshotAction, execution.sourceValidation)
     }
     return action
+  }
+  async function resolveStockPreparationEffectiveActionForScope(req, { tenantId, projectNo, targetPurpose }) {
+    // S1 / N4: the action the HINT-LESS lanes execute for this tenant's project — the same lookup reconcile and
+    // mvp-persist make (tenant binding row, workspaceId null; never a request workspace hint) composed with the
+    // active read plan exactly as their execution resolver composes it. verifyTenant is the lanes' verified-claim
+    // check (a claimless principal is refused whenever a pointer exists). No snapshot and no project-identity
+    // probe: nothing executes here, the action only names what a lane would read. Callers gate on the
+    // per-request online read-plan switch; the resolution itself is switch-ON by construction.
+    const readPlanStore = services.stockPreparationReadPlanStore
+    const resolved = await tableActions.getTableActionForExecution({ tenantId, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, projectNo, targetPurpose })
+    const execution = await resolveStockPreparationReadPlanExecution({
+      resolved,
+      store: readPlanStore,
+      verifyTenant: () => resolveVerifiedClaimTenantId(req, { tenantId }),
+      projectNo,
+      projectIdentityRequired: false,
+      onlineReadPlansEnabled: true,
+    })
+    return execution.action
   }
   // An absent deployment action must not turn a request workspace hint into
   // activation authority. Bind once; otherwise resolve the source's actual row
@@ -11314,6 +11345,7 @@ function requireStockPreparationAudit() {
         return sendOk(res, { projectNo, status: pilotRow.status, pilot: publicStockPreparationPilot(pilotRow), readiness: null, may: { enable: false } })
       }
       const { readiness } = await evaluateStockPreparationProjectPilotReadiness({
+        req,
         tenantId,
         workspaceId: firstString(input.workspaceId),
         projectNo,
@@ -11376,6 +11408,7 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
       }
       const { action, projectId, writeScope, readiness } = await evaluateStockPreparationProjectPilotReadiness({
+        req,
         tenantId,
         workspaceId: null,
         projectNo,
@@ -13510,7 +13543,7 @@ function requireStockPreparationAudit() {
     async stockPreparationRefreshContinuationConfirm(req, res) {
       const user = requireAccess(req, STOCK_PREP_PULL)
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_CONFIRM_REQUEST_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
-      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration, effectiveReadPlan: true })
       return sendOk(res, await stockPreparationRefreshDecisions.confirm(ctx, input), 201)
     },
     async stockPreparationRefreshContinuationGet(req, res) {

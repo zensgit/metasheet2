@@ -135,7 +135,8 @@ function memoryDb() {
 const inert = (methods) => Object.fromEntries(methods.map((name) => [name, async () => { throw new Error(`unexpected synthetic call: ${name}`) }]))
 
 async function mount({ active = true, storeMissing = false, sourceWorkspaceId = null, matchedWorkspaceId = null, register = registerIntegrationRoutes, unconfigured = false, projectSheets = false, deployReadPlan,
-  readPlanExtra, sourceProject, sourceCaseInsensitive = false, projectRegistry, routeTransform, routeDependencies, governanceMissing = false } = {}) {
+  readPlanExtra, sourceProject, sourceCaseInsensitive = false, projectRegistry, routeTransform, routeDependencies, governanceMissing = false,
+  refreshOptions = {} } = {}) {
   const { db, state } = memoryDb()
   let sequence = 0
   const ledger = createStockPreparationReadPlanStore({ db, idGenerator: () => `synthetic-${++sequence}` })
@@ -230,8 +231,10 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
     readSourceCompositionConfigStore: inert(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     bridgeAgentChecklistStore: inert(['saveVersion', 'approve', 'retire', 'getForApply']),
   }
-  // Use the real refresh stores/reader over synthetic memory IO and this suite's write lock.
-  const refreshGovernanceEnv = wireRefreshGovernance(services)
+  // Use the real refresh stores/reader over synthetic memory IO and this suite's write lock. `refreshOptions` (S1
+  // RT-RP1b only): one db for the store and the real lock (the decision transaction's in-transaction bump) and the
+  // wiring's pack-install fake (a governed computation's strict pack read).
+  const refreshGovernanceEnv = wireRefreshGovernance(services, refreshOptions)
   if (governanceMissing) {
     delete services.stockPreparationRefreshGovernance
     delete services.stockPreparationContinuationStore
@@ -1702,4 +1705,99 @@ test('switch flips at run time (large-BOM job): every stored stage minted under 
   }
   assert.deepEqual(ioCounts(f), before, 'OFF: no pointer read, no adapter, no source or target read, no write')
   assert.deepEqual([...f.storage], storageBefore, 'OFF: stored jobs are unchanged')
+})
+
+// ── S1 / N4 (review candidate): the confirm stamps what the hint-less lanes verify ─────────────────────────────────
+// With the switch ON the decision route's confirm resolves the EFFECTIVE action of the hint-less lanes (its own
+// helper, http-routes.cjs resolveStockPreparationEffectiveActionForScope); the decision-route suite pins each
+// route answer (RT-RP1..RT-RP8). This suite closes the loop on the real ledger: what the confirm stamps is what the
+// next hint-less governed computation verifies the relationship against.
+const DECISIONS = '/api/integration/stock-preparation/projects/:projectNo/refresh'
+
+test('RT-RP1b (S1) route-level closure: switch ON, a real activation — a candidate confirmed through the decision route, then ONE hint-less governed dry-run through the route: its reconcile verifies that relationship\'s source step as valid, never source_scope_changed', async () => {
+  const pairing = require('../lib/stock-preparation-continuation-pairing.cjs')
+  const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+  const f = await mount({ projectSheets: true, refreshOptions: { lockOnRefreshDb: true, wirePackInstallStore: true } })
+  const env = f.refreshGovernanceEnv
+  // A governed lane lists every binding of the (tenant, action) first (R-1): this fixture's one tenant-level row.
+  f.services.stockPreparationSourceBindingStore.listForAction = async ({ tenantId, actionId }) => ({
+    bindings: [{ tenantId, actionId, workspaceId: null, externalSystemId: SYSTEM }], complete: true,
+  })
+  // The decision writes its audit row on the store's transaction handle.
+  f.services.stockPreparationAuditStore.appendWithin = async () => ({ ok: true })
+  // The pilot marker, seeded on the registry row directly (pilot enable is impossible on this build).
+  const registryRow = f.state[PROJECT_TARGET_TABLE].find((row) => row.project_no === PARAMS.projectNo)
+  Object.assign(registryRow, { pilot_enabled_at: new Date('2026-10-27T00:00:00Z'), pilot_enabled_by: USER.id, pilot_readiness_version: 1 })
+  // The refresh kit's canonical candidate, moved onto this fixture's project number (every key names it).
+  const fixture = await refreshKit.candidateHoldFixture()
+  const hold = JSON.parse(JSON.stringify(fixture.hold).split(fixture.projectNo).join(PARAMS.projectNo))
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  const scope = { tenantId: TENANT, sheetId: f.projectSheetId, projectNo: PARAMS.projectNo }
+  await env.seedHolds(scope, [hold])
+  const candidateRow = env.rows('hold').find((row) => row.fingerprint === hold.fingerprint && row.status === 'open')
+  assert.ok(candidateRow, 'the candidate hold is open')
+  // Read the whole hold (every pair page) through the decision route, then confirm it there.
+  const params = { projectNo: PARAMS.projectNo }
+  const first = await f.call(`${DECISIONS}/holds`, { method: 'GET', params })
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body))
+  let receipt = first.body.data.readReceipt
+  const entry = first.body.data.page.holds.find((item) => item.id === candidateRow.id)
+  for (let index = 1; index < (entry && entry.pairPage ? entry.pairPage.count : 1); index += 1) {
+    const next = await f.call(`${DECISIONS}/holds`, { method: 'GET', params, query: { holdId: candidateRow.id, pairCursor: index, receipt: receipt.id } })
+    assert.equal(next.statusCode, 200, JSON.stringify(next.body))
+    receipt = next.body.data.readReceipt
+  }
+  const ledgerBefore = f.calls.ledger.length
+  const confirmed = await f.call(`${DECISIONS}/continuations/confirm`, { params, body: {
+    confirmProjectNo: PARAMS.projectNo, holdId: candidateRow.id, holdFingerprint: hold.fingerprint,
+    comparisonFingerprint: hold.comparisonFingerprint, evidenceFingerprint: hold.evidenceFingerprint, candidateId: hold.pairingFingerprint,
+    readReceipt: receipt.id, basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true },
+  } })
+  assert.equal(confirmed.statusCode, 201, JSON.stringify(confirmed.body))
+  const confirmLedgerReads = f.calls.ledger.slice(ledgerBefore)
+  const continuationId = confirmed.body.data.continuationId
+  // ONE hint-less governed computation through the route: no workspaceId query, the verified claim.
+  const dry = await f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS } })
+  assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+  const continuation = env.rows('continuation').find((row) => row.id === continuationId)
+  assert.ok(continuation && continuation.last_verified_at, 'the computation reconciled and verified the relationship')
+  const verification = env.rows('hold').find((row) => row.continuation_id === continuationId && row.status === 'open')
+  assert.ok(verification, 'the reconcile persisted the relationship\'s verification hold')
+  // The source step is evaluated first and on its own (continuation-pairing.cjs verifyContinuation): the verdict
+  // may name this fixture's BOM (not the kit's), the source step may not.
+  assert.equal(verification.detail.steps.source, 'valid', 'the confirm stamped the identity the hint-less lane verifies against')
+  assert.notEqual(continuation.last_verdict, 'source_scope_changed')
+  // And the confirm itself read the real activation exactly once, at the tenant scope.
+  assert.deepEqual(confirmLedgerReads.map((input) => input.workspaceId), [null], 'the confirm read the real activation once')
+})
+
+// The call-site guard skips helpers, so the hint-less lookup of the S1 helper is pinned here (RT-RP8 pins it by
+// behaviour): workspace null, the lanes' verified-claim check, the switch-ON resolution — and both callers gate on
+// the per-request switch; only the confirm handler opts in.
+function assertEffectiveActionAnchor(source) {
+  const start = source.indexOf('  async function resolveStockPreparationEffectiveActionForScope(req, { tenantId, projectNo, targetPurpose }) {')
+  assert.notEqual(start, -1, 'the S1 helper exists')
+  const helper = source.slice(start, source.indexOf('\n  }\n', start))
+  assert.match(helper, /await tableActions\.getTableActionForExecution\(\{ tenantId, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, projectNo, targetPurpose \}\)/, 'the hint-less lookup')
+  assert.match(helper, /verifyTenant: \(\) => resolveVerifiedClaimTenantId\(req, \{ tenantId \}\),/, 'the lanes\' verified-claim check')
+  assert.match(helper, /\n {6}onlineReadPlansEnabled: true,\n/, 'the resolution is switch-ON by construction')
+  assert.match(source, /const action = effectiveReadPlan && onlineReadPlansEnabled\(\)\n {6}\? assertStockPreparationTargetReady\(await resolveStockPreparationEffectiveActionForScope\(req, /, 'the decision context gates on the per-request switch')
+  assert.match(source, /specSlotReadPlans: async \(\) => \(onlineReadPlansEnabled\(\)\n {8}\? \[action\.source\.readPlan, \(await resolveStockPreparationEffectiveActionForScope\(req, /, 'the readiness dep gates on the per-request switch')
+  assert.equal(source.split('effectiveReadPlan: true })').length - 1, 1, 'one handler opts in')
+  assert.match(source, /async stockPreparationRefreshContinuationConfirm\(req, res\) \{[^]*?effectiveReadPlan: true \}\)\n {6}return sendOk\(res, await stockPreparationRefreshDecisions\.confirm\(ctx, input\), 201\)/, 'and it is the confirm handler')
+}
+
+test('S1 anchor: the effective-action helper and its two gated callers, with a self-mutation pair (each seam mutated is refused)', () => {
+  assertEffectiveActionAnchor(routeSource)
+  for (const [label, needle, value] of [
+    ['a request workspace hint', 'getTableActionForExecution({ tenantId, workspaceId: null, actionId', 'getTableActionForExecution({ tenantId, workspaceId: resolveWorkspaceId(req, {}), actionId'],
+    ['the carried tenant', 'verifyTenant: () => resolveVerifiedClaimTenantId(req, { tenantId }),', 'verifyTenant: () => tenantId,'],
+    ['a switch-OFF resolution', '      onlineReadPlansEnabled: true,\n    })\n    return execution.action', '      onlineReadPlansEnabled: false,\n    })\n    return execution.action'],
+    ['an ungated decision context', 'const action = effectiveReadPlan && onlineReadPlansEnabled()', 'const action = effectiveReadPlan'],
+    ['an ungated readiness dep', 'specSlotReadPlans: async () => (onlineReadPlansEnabled()', 'specSlotReadPlans: async () => (true'],
+    ['the confirm opting out', 'decisionMigration, effectiveReadPlan: true })', 'decisionMigration })'],
+  ]) {
+    assert.equal(routeSource.split(needle).length - 1, 1, `${label}: the seam is unique`)
+    assert.throws(() => assertEffectiveActionAnchor(routeSource.replace(needle, value)), { name: 'AssertionError' }, label)
+  }
 })
