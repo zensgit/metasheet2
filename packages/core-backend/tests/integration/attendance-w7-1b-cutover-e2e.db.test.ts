@@ -3416,4 +3416,239 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     })
   }, 120_000)
 
+  it('EP01 authoritative manual and nonzero comp-time grant roll back retry and replay atomically', async () => {
+    const { w4OnlyOrg: orgId, w4OnlyUser: userId } = await seedIsolatedOvertimeFixture()
+    await withEnv({ ...BOTH_MACHINES_ENV(), [W4_ENV]: BOTH_MACHINES_ENV()[W4_ENV] + ',' + orgId }, async () => {
+      await pool.query("UPDATE users SET permissions = '[\"attendance:admin\"]'::jsonb WHERE id = $1", [userId])
+      await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [userId])
+      const headers = { Authorization: 'Bearer ' + await mintToken(userId, orgId), 'Content-Type': 'application/json' }
+      const settingsUrl = baseUrl + '/api/attendance/settings'
+      const settings = await requestJson(settingsUrl, { headers })
+      expect(settings.status).toBe(200)
+      const original = settings.body.data
+      const restoreSettings = {
+        compTimeFromOvertime: original.compTimeFromOvertime,
+        overtimeBankPolicy: original.overtimeBankPolicy,
+        overtimeSegmentation: original.overtimeSegmentation,
+      }
+      const ownedName = 'ep01_af_' + randomUUID().replaceAll('-', '')
+      const fault = 'public."' + ownedName + '"'
+      const seen = 'public."' + ownedName + '_seen"'
+      try {
+        // Main's disposable synthetic DB only: these settings are global in that DB.
+        const configured = await requestJson(settingsUrl, {
+          method: 'PUT', headers, body: JSON.stringify({
+            compTimeFromOvertime: { ...original.compTimeFromOvertime, enabled: true },
+            overtimeBankPolicy: { ...original.overtimeBankPolicy, enabled: false },
+            overtimeSegmentation: { ...original.overtimeSegmentation, enabled: false },
+          }),
+        })
+        expect(configured.status).toBe(200)
+        expect((await punch(userId, orgId, 'check_in')).status).toBe(200)
+        const parents = (await pool.query(
+          'SELECT id::text, work_date::text, current_calculation_id::text FROM attendance_records WHERE org_id = $1 AND user_id = $2', [orgId, userId],
+        )).rows
+        expect(parents).toHaveLength(1)
+        const parent = parents[0]
+        const live = (await pool.query(
+          'SELECT id::text, version, entrypoint, mode, outcome FROM attendance_record_calculations WHERE org_id = $1 AND id = $2::uuid', [orgId, parent.current_calculation_id],
+        )).rows
+        expect(live).toEqual([{ id: parent.current_calculation_id, version: 1, entrypoint: 'live', mode: 'authoritative', outcome: 'completed' }])
+        const manualOperationId = randomUUID()
+        const edited = await requestJson(baseUrl + '/api/attendance/anomaly-result-edits', {
+          method: 'POST', headers, body: JSON.stringify({
+            orgId, recordId: parent.id, operationId: manualOperationId, idempotencyKey: manualOperationId,
+            expectedCalculationId: live[0].id, expectedCalculationVersion: live[0].version,
+            targetStatus: 'adjusted', overrideMetrics: { workMinutes: 123, lateMinutes: 0, earlyLeaveMinutes: 0 },
+            reason: 'EP01 authoritative manual financial synthetic fixture', evidence: [],
+          }),
+        })
+        const manualErrorCode = edited.body?.error?.code ?? edited.body?.code
+        expect(edited.status, 'native linked manual edit; code=' + (
+          typeof manualErrorCode === 'string' && /^[A-Z][A-Z0-9_]{0,95}$/.test(manualErrorCode) ? manualErrorCode : 'unknown'
+        )).toBe(200)
+        const manualRows = (await pool.query(
+          'SELECT c.* FROM attendance_records r JOIN attendance_record_calculations c ON c.id = r.current_calculation_id WHERE r.org_id = $1 AND r.id = $2::uuid', [orgId, parent.id],
+        )).rows
+        expect(manualRows).toHaveLength(1)
+        const manual = manualRows[0]
+        expect(manual.id).toBe(edited.body.data.calculationId)
+        expect(manual.manual_override_snapshot).not.toBeNull()
+        expect(manual.manual_override_snapshot.editId).toBe(manualOperationId)
+        expect(manual.projected_work_minutes).toBe(123)
+        expect((await pool.query(
+          'SELECT id::text, record_id::text, idempotency_key FROM attendance_record_result_edits WHERE org_id = $1', [orgId],
+        )).rows).toEqual([{ id: manualOperationId, record_id: parent.id, idempotency_key: manualOperationId }])
+        const overtimeRuleId = randomUUID()
+        await pool.query('INSERT INTO attendance_overtime_rules (id, org_id, name, rounding_minutes) VALUES ($1, $2, $3, 1)', [overtimeRuleId, orgId, 'EP01_' + overtimeRuleId])
+        const created = await requestJson(baseUrl + '/api/attendance/requests', {
+          method: 'POST', headers, body: JSON.stringify({
+            operationId: randomUUID(), orgId, workDate: parent.work_date, requestType: 'overtime', overtimeRuleId,
+            requestedInAt: parent.work_date + 'T20:00:00.000Z', requestedOutAt: parent.work_date + 'T21:00:00.000Z',
+            minutes: 60, reason: 'EP01 authoritative nonzero financial fixture',
+          }),
+        })
+        expect(created.status).toBe(201)
+        const requestId = created.body.data.request.id
+        const cursors = (await pool.query(
+          'SELECT a.id, a.version, a.current_node_key FROM attendance_requests r JOIN approval_instances a ON a.id = r.approval_instance_id WHERE r.org_id = $1 AND r.id = $2::uuid', [orgId, requestId],
+        )).rows
+        expect(cursors).toHaveLength(1)
+        const approval = cursors[0]
+        await pool.query(
+          "INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, source_step, is_active, metadata) VALUES ($1, 'user', $2, $3, 0, TRUE, '{}'::jsonb)",
+          [approval.id, userId, approval.current_node_key],
+        )
+        const operationId = randomUUID()
+        const decisionBody = JSON.stringify({ operationId, expectedApprovalVersion: Number(approval.version), expectedApprovalNode: approval.current_node_key })
+        const approve = () => requestJson(baseUrl + '/api/attendance/requests/' + requestId + '/approve', { method: 'POST', headers, body: decisionBody })
+        const state = async () => (await pool.query(
+          `SELECT jsonb_build_object(
+            'request', (SELECT to_jsonb(r) FROM attendance_requests r WHERE r.org_id = $1 AND r.id = $2::uuid),
+            'approval', (SELECT to_jsonb(a) FROM approval_instances a WHERE a.id = $3),
+            'approvalRecords', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM approval_records a WHERE a.instance_id = $3),
+            'assignments', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM approval_assignments a WHERE a.instance_id = $3),
+            'records', (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM attendance_records r WHERE r.org_id = $1),
+            'events', (SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM attendance_events e WHERE e.org_id = $1),
+            'calculations', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.version, c.id) FROM attendance_record_calculations c WHERE c.org_id = $1),
+            'segments', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM attendance_record_segments s WHERE s.org_id = $1),
+            'manualEdits', (SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM attendance_record_result_edits e WHERE e.org_id = $1),
+            'snapshots', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.version) FROM attendance_request_calculation_snapshots s WHERE s.org_id = $1 AND s.request_id = $2::uuid),
+            'balances', (SELECT jsonb_agg(to_jsonb(b) ORDER BY b.id) FROM attendance_leave_balances b WHERE b.org_id = $1),
+            'balanceEvents', (SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM attendance_leave_balance_events e WHERE e.org_id = $1),
+            'operations', (SELECT jsonb_agg(to_jsonb(o) ORDER BY o.operation_id) FROM attendance_result_operations o WHERE o.org_id = $1),
+            'outbox', (SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM attendance_result_event_outbox o WHERE o.org_id = $1),
+            'companions', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.record_id) FROM attendance_timezone_context_companions c WHERE c.org_id = $1)
+          ) AS value`, [orgId, requestId, approval.id],
+        )).rows[0].value
+        const before = await state()
+        expect(before.request.status).toBe('pending')
+        expect(before.approval.status).toBe('pending')
+        expect(before.records).toHaveLength(1)
+        expect(before.records[0]).toMatchObject({ current_calculation_id: manual.id, work_minutes: 123 })
+        expect(before.snapshots).toHaveLength(1)
+        expect(before.balances).toBeNull()
+        expect(before.balanceEvents).toBeNull()
+        const frozen = before.snapshots[0]
+        await pool.query(`CREATE SEQUENCE ${seen} START WITH 1 INCREMENT BY 1 CACHE 1`)
+        await pool.query(`CREATE FUNCTION ${fault}() RETURNS trigger LANGUAGE plpgsql AS $ep01$
+          BEGIN
+            IF NEW.org_id = TG_ARGV[0] AND NEW.operation_id = TG_ARGV[1]::uuid
+              AND NEW.entrypoint = 'approved_overtime' AND NEW.mode = 'authoritative' THEN
+              IF (SELECT count(*) FROM attendance_leave_balances WHERE org_id = TG_ARGV[0]) <> 1
+                OR (SELECT count(*) FROM attendance_leave_balance_events WHERE org_id = TG_ARGV[0]) <> 1
+                OR NOT EXISTS (
+                  SELECT 1 FROM attendance_leave_balances b JOIN attendance_leave_balance_events e ON e.balance_id = b.id
+                  WHERE b.org_id = TG_ARGV[0] AND b.user_id = TG_ARGV[2]
+                    AND b.leave_type_code = 'comp_time' AND b.amount_minutes = 60 AND b.remaining_minutes = 60
+                    AND b.source_type = 'overtime_conversion' AND b.source_id = TG_ARGV[3]
+                    AND b.source_key = 'overtime_conversion:' || TG_ARGV[3] AND b.status = 'active'
+                    AND e.org_id = b.org_id AND e.user_id = b.user_id AND e.event_type = 'grant'
+                    AND e.delta_minutes = 60 AND e.source_type = b.source_type AND e.source_id = b.source_id
+                ) THEN
+                RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'EP01_AUTHORITATIVE_NONZERO_GRANT_NOT_OBSERVED';
+              END IF;
+              PERFORM nextval(TG_ARGV[4]::regclass);
+              RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'EP01_AUTHORITATIVE_FINANCIAL_SYNTHETIC_ABORT';
+            END IF;
+            RETURN NEW;
+          END;
+        $ep01$`)
+        // All interpolated arguments are locally generated UUIDs or the quoted owned identifier.
+        await pool.query(`CREATE TRIGGER "${ownedName}" BEFORE INSERT ON attendance_record_calculations
+          FOR EACH ROW EXECUTE FUNCTION ${fault}('${orgId}', '${operationId}', '${userId}', '${requestId}', '${seen}')`)
+        const observation = async () => (await pool.query(`SELECT is_called, last_value::text FROM ${seen}`)).rows
+        expect(await observation()).toEqual([{ is_called: false, last_value: '1' }])
+        expect((await approve()).status, 'owned canonical append fault aborts real final approval').toBe(500)
+        expect(await observation(), 'real nonzero lot and grant reached before append failure').toEqual([{ is_called: true, last_value: '1' }])
+        expect(await state(), 'all business rows and versions roll back exactly').toEqual(before)
+        await pool.query(`DROP TRIGGER "${ownedName}" ON attendance_record_calculations`)
+        const approved = await approve()
+        expect(approved.status, 'same operation retries after owned fault removal').toBe(200)
+        const after = await state()
+        expect(after.request.status).toBe('approved')
+        expect(after.approval.status).toBe('approved')
+        expect(Number(after.approval.version)).toBe(Number(before.approval.version) + 1)
+        expect(after.approvalRecords).toHaveLength((before.approvalRecords ?? []).length + 1)
+        expect(after.calculations).toHaveLength(before.calculations.length + 1)
+        expect(after.calculations.slice(0, -1)).toEqual(before.calculations)
+        const calculation = after.calculations[after.calculations.length - 1]
+        expect(calculation).toMatchObject({
+          operation_id: operationId, attendance_record_id: parent.id, entrypoint: 'approved_overtime',
+          mode: 'authoritative', outcome: 'completed', outcome_reason_code: 'calculated', projection_effect: 'set_active',
+          projected_status: 'adjusted', projected_work_minutes: 123,
+        })
+        expect(calculation.manual_override_snapshot).toEqual(manual.manual_override_snapshot)
+        expect(calculation.evidence_snapshot).toEqual(manual.evidence_snapshot)
+        expect(calculation.attribution_snapshot).toEqual(frozen.attribution_snapshot)
+        expect(calculation.context_snapshot).toEqual(frozen.context_snapshot)
+        expect(calculation.input_provenance.priorCalculations).toEqual([{
+          id: manual.id, semanticFingerprint: manual.semantic_input_fingerprint, provenanceFingerprint: manual.provenance_fingerprint,
+        }])
+        const binding = after.request.metadata.w4RequestSnapshotTerminalBinding
+        expect(binding.bindingPosture).toBe('bound')
+        expect(calculation.approved_facts_snapshot).toEqual([...manual.approved_facts_snapshot, {
+          kind: 'overtime', requestId, requestSnapshotVersion: frozen.version, requestSnapshotFingerprint: frozen.payload_fingerprint,
+          approvalVersion: binding.approvalVersion, approvalRecordId: binding.approvalRecordId,
+          coverage: { kind: 'bounded_interval', startAt: parent.work_date + 'T20:00:00.000Z', endAt: parent.work_date + 'T21:00:00.000Z', minutes: 60 },
+        }])
+        expect(after.records).toHaveLength(1)
+        expect(after.records[0]).toMatchObject({ id: parent.id, current_calculation_id: calculation.id, projection_owner: 'w4', visibility_state: 'active', work_minutes: 123, status: 'adjusted' })
+        expect(after.manualEdits).toEqual(before.manualEdits)
+        expect(after.snapshots).toEqual(before.snapshots)
+        const newEvents = after.events.filter((row: { id: string }) => !before.events.some((prior: { id: string }) => prior.id === row.id))
+        expect(after.events.filter((row: { id: string }) => before.events.some((prior: { id: string }) => prior.id === row.id))).toEqual(before.events)
+        expect(newEvents).toEqual([expect.objectContaining({
+          org_id: orgId, user_id: userId, work_date: parent.work_date, event_type: 'adjustment', source: 'request',
+          meta: expect.objectContaining({ requestId, requestType: 'overtime', minutes: 60 }),
+        })])
+        expect(after.segments.filter((row: { calculation_id: string }) => row.calculation_id === calculation.id)).toHaveLength(calculation.expected_segment_count)
+        expect(calculation.expected_segment_count).toBe(1)
+        expect(after.balances).toHaveLength(1)
+        expect(after.balances[0]).toMatchObject({
+          org_id: orgId, user_id: userId, leave_type_code: 'comp_time', amount_minutes: 60, remaining_minutes: 60,
+          source_type: 'overtime_conversion', source_id: requestId, source_key: 'overtime_conversion:' + requestId, status: 'active',
+        })
+        expect(after.balanceEvents).toHaveLength(1)
+        expect(after.balanceEvents[0]).toMatchObject({ org_id: orgId, user_id: userId, balance_id: after.balances[0].id, event_type: 'grant', delta_minutes: 60, source_type: 'overtime_conversion', source_id: requestId })
+        expect(after.operations.filter((row: { operation_id: string }) => row.operation_id !== operationId)).toEqual(before.operations)
+        expect(after.operations.filter((row: { operation_id: string }) => row.operation_id === operationId)).toEqual([expect.objectContaining({
+          state: 'completed', resolved_record_id: parent.id, resolved_calculation_id: calculation.id, resolved_request_id: requestId,
+          result_semantic_fingerprint: calculation.semantic_input_fingerprint, result_provenance_fingerprint: calculation.provenance_fingerprint,
+        })])
+        expect(after.outbox.filter((row: { operation_id: string }) => row.operation_id !== operationId)).toEqual(before.outbox)
+        expect(after.outbox.filter((row: { operation_id: string }) => row.operation_id === operationId)).toHaveLength(1)
+        const replay = await approve()
+        expect(replay.status).toBe(200)
+        expect(replay.body).toEqual(approved.body)
+        expect(await state(), 'sealed replay preserves exact rows and counts').toEqual(after)
+        expect(await observation()).toEqual([{ is_called: true, last_value: '1' }])
+      } finally {
+        // Only this case's UUID-named objects; nested finally still restores settings on cleanup failure.
+        try {
+          try {
+            await pool.query(`DROP TRIGGER IF EXISTS "${ownedName}" ON attendance_record_calculations`)
+          } finally {
+            try {
+              await pool.query(`DROP FUNCTION IF EXISTS ${fault}()`)
+            } finally {
+              await pool.query(`DROP SEQUENCE IF EXISTS ${seen}`)
+            }
+          }
+        } finally {
+          const restored = await requestJson(settingsUrl, { method: 'PUT', headers, body: JSON.stringify(restoreSettings) })
+          expect(restored.status, 'restore disposable synthetic DB settings').toBe(200)
+          const current = await requestJson(settingsUrl, { headers })
+          expect(current.status).toBe(200)
+          expect({
+            compTimeFromOvertime: current.body.data.compTimeFromOvertime,
+            overtimeBankPolicy: current.body.data.overtimeBankPolicy,
+            overtimeSegmentation: current.body.data.overtimeSegmentation,
+          }).toEqual(restoreSettings)
+        }
+      }
+    })
+  }, 120_000)
+
+
 })
