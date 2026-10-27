@@ -579,6 +579,14 @@ export interface MetaCapabilities {
    */
   canCopySheet?: boolean
   /**
+   * Customer feedback 2026-10-27: set by /context ONLY when true — the sheet's rows are maintained by the
+   * stock-preparation plugin (a `stockPreparation*` field namespace ∧ a plugin registry row), and
+   * `POST /records/:id/duplicate` answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET there. Sent only
+   * to an actor who could otherwise create. The drawer's duplicate entry is shown disabled with the reason.
+   * Absent ⇒ unchanged. Display only: the route refuses on its own.
+   */
+  recordDuplicateBlocked?: boolean
+  /**
    * R68 (#6454 judge note): set by /context ONLY when true — the sheet has a column people may not write
    * (`property.humanWriteLock`, the 备料 project sheet's PLM columns) that its own validation also marks
    * required, so a person-created record can never pass (empty fails the rule, filled is a locked write).
