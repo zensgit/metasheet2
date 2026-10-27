@@ -23,6 +23,9 @@
 //          is not revived by it — note 1).
 //   CP-NORM the review digest of the plan's after values equals the digest of what the REAL writer stores (numeric
 //          strings, booleans, unicode, null), read back through the project-scoped reader.
+//   CP-P09 review fix N3 (C06): a cell the latest review left on a row, moved on the sheet together with the source
+//          (sheet = source, V8PG-15), is held `reviewed_content_moved` (before = the reviewed value, after = the source),
+//          pilot or not; the plan confirmed from it matches and authorizes one UPDATE; no false positive, no duplicate.
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -359,6 +362,68 @@ test('CP-NORM the review digest of the after values equals the digest of what th
   const gone = new Map(byId)
   gone.delete('rec_n2')
   assert.notEqual(pairing.currentContentDigestOf({ records: stored, rowsByRecordId: gone, templateFields: TEMPLATE_FIELDS }), planned)
+})
+
+// ── CP-P09 (review fix N3) ───────────────────────────────────────────────────────────────────────
+
+// The expected content of PART-A's material as the latest review left it (the store's `expectedContentOf` shape).
+function expectedMaterial(row, after) {
+  return [{ recordId: pairing.recordRefOf(row).id, key: row.idempotencyKey, fields: { material: { after, afterCanonical: pairing.canonicalChangeValue(after, TEMPLATE_FIELDS.get('material')) } } }]
+}
+
+test('CP-P09 (N3, C06) a reviewed cell the sheet no longer carries is HELD even when the source moved to exactly that value (V8PG-15): reason reviewed_content_moved, before = the reviewed value, after = the source; the plan cycle closes; no duplicate, no false positive', async () => {
+  const sheet = await F.firstPullSheet()
+  const partA = sheet.find((row) => row.componentSourceId === 'PART-A')
+  // The source moved PART-A's material AND a host-side write put exactly that value into the sheet (version bumped).
+  const hostWritten = sheet.map((row) => (row === partA ? F.withRecordRef({ ...row, material: 'M-N3-NEW' }, pairing.recordRefOf(row).id, 4) : row))
+  const read = await contentRead({ material: 'M-N3-NEW', partCUsage: 4 })
+  const expected = expectedMaterial(partA, 'M-N3-REVIEWED')
+  // Without the expected content the planner sees nothing at all (the hole: sheet = source).
+  const blind = plan(read, hostWritten, {})
+  assert.equal(contentHolds(blind).length, 0, 'no ordinary detection fires')
+  // With it: ONE content hold for PART-A's material, from the reviewed value to the source value.
+  const held = plan(read, hostWritten, { expectedContent: expected })
+  const holds = contentHolds(held)
+  assert.equal(holds.length, 1, JSON.stringify(held.holds.map((hold) => hold.kind)))
+  assert.equal(holds[0].kind, 'content_change')
+  assert.equal(holds[0].detail.reason, pairing.REVIEWED_CONTENT_MOVED_REASON)
+  assert.equal(holds[0].detail.recordId, pairing.recordRefOf(partA).id)
+  assert.deepEqual(holds[0].detail.fields, { material: { before: 'M-N3-REVIEWED', after: 'M-N3-NEW' } })
+  assert.equal(held.suspended, true)
+  // Stable: the same computation again yields the same fingerprint (the hold is KEPT, never churned).
+  assert.equal(contentHolds(plan(read, hostWritten, { expectedContent: expected }))[0].fingerprint, holds[0].fingerprint)
+  // Pilot or not (the content under review stays under detection after a pilot exit).
+  assert.equal(contentHolds(plan(read, hostWritten, { pilot: false, expectedContent: expected }))[0].detail.reason, pairing.REVIEWED_CONTENT_MOVED_REASON)
+  // The plan cycle: confirmed from that hold, the next pass MATCHES and authorizes ONE UPDATE (the source value, the
+  // sheet already holds it) — no hold left.
+  const changePlan = planInputFor(held.holds)
+  const bound = plan(read, hostWritten, { expectedContent: expected, changePlan })
+  assert.equal(bound.continuation.changePlan.verdict, 'matches')
+  assert.equal(contentHolds(bound).length, 0)
+  const updates = changePlanUpdates(bound)
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].patch.material, 'M-N3-NEW')
+  // After that plan is written and reviewed, the expected content IS the sheet's: nothing is held.
+  assert.equal(contentHolds(plan(read, hostWritten, { expectedContent: expectedMaterial(partA, 'M-N3-NEW') })).length, 0)
+  // No false positive: the sheet still holds the reviewed value and the source agrees => nothing.
+  const untouched = await contentRead({ material: 'M-N3-REVIEWED', partCUsage: 4 })
+  const reviewedSheet = sheet.map((row) => (row === partA ? F.withRecordRef({ ...row, material: 'M-N3-REVIEWED' }, pairing.recordRefOf(row).id, 3) : row))
+  assert.equal(contentHolds(plan(untouched, reviewedSheet, { expectedContent: expected })).length, 0)
+  // No duplicate: a source that differs from the sheet is the ORDINARY hold (sheet value -> source value), alone.
+  const further = await contentRead({ material: 'M-N3-OTHER', partCUsage: 4 })
+  const ordinary = contentHolds(plan(further, hostWritten, { expectedContent: expected }))
+  assert.equal(ordinary.length, 1)
+  assert.notEqual(ordinary[0].detail.reason, pairing.REVIEWED_CONTENT_MOVED_REASON)
+  assert.deepEqual(ordinary[0].detail.fields.material, { before: 'M-N3-NEW', after: 'M-N3-OTHER' })
+  // A row the expected content names under ANOTHER key is not the reviewed row: nothing.
+  assert.equal(contentHolds(plan(read, hostWritten, { expectedContent: [{ ...expected[0], key: '{"other":true}' }] })).length, 0)
+  // A person's cell (not a trigger field) moving is never a reviewed-content move.
+  const noted = hostWritten.map((row) => (pairing.recordRefOf(row).id === pairing.recordRefOf(partA).id ? F.withRecordRef({ ...row, notes: 'synthetic person note' }, pairing.recordRefOf(row).id, 5) : row))
+  assert.equal(contentHolds(plan(read, noted, { expectedContent: expectedMaterial(partA, 'M-N3-NEW') })).length, 0)
+  // The closed shape: an unknown key / a cell without afterCanonical refuses (a lane defect).
+  for (const bad of [[{ ...expected[0], extra: 1 }], [{ ...expected[0], fields: { material: { after: 'x' } } }], [expected[0], expected[0]]]) {
+    assert.throws(() => pairing.normalizeContinuationInput(F.continuationInput({ expectedContent: bad })), (error) => error.code === pairing.CONTINUATION_ERROR_CODES.INPUT_INVALID)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-planner.test.cjs', tests)

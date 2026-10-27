@@ -710,6 +710,39 @@ function writeRecordIdsOf(recordSet) {
   return Array.from(ids).sort()
 }
 
+// Review fix N3 (plan §3.4 step 5 / C06 「复核前后再发生相关变化，旧复核不再有效，重新挂起」; design §10.3 (4)): the content
+// the project's latest REVIEWED plan and its pending WRITTEN plan (at most one of each per sheet + project) left on the
+// sheet — `[{ recordId, key, fields: { [fieldId]: { after, afterCanonical } } }]`, sorted by record id, the written plan
+// (newer than every review) winning per field; a record the newer plan names under another key keeps only the newer
+// plan's fields. PRIVATE values (the plans' record sets): server-held in the consult for the planner, which holds any
+// such cell the sheet no longer carries (`reviewed_content_moved`) — never a response body, never an error detail.
+function expectedContentOf(reviewedRow, writtenRows) {
+  const byRecord = new Map()
+  const take = (row) => {
+    for (const record of jsonArrayOf(row && row.record_set)) {
+      if (!isPlainObject(record) || !nonBlankString(record.recordId) || !nonBlankString(record.key) || !isPlainObject(record.fields)) continue
+      let entry = byRecord.get(record.recordId)
+      if (!entry || entry.key !== record.key) {
+        entry = { recordId: record.recordId, key: record.key, fields: {} }
+        byRecord.set(record.recordId, entry)
+      }
+      for (const [fieldId, cell] of Object.entries(record.fields)) {
+        if (!isPlainObject(cell)) continue
+        entry.fields[fieldId] = Object.freeze({
+          after: cell.after === undefined ? null : cell.after,
+          afterCanonical: cell.afterCanonical === undefined ? null : cell.afterCanonical,
+        })
+      }
+    }
+  }
+  if (reviewedRow) take(reviewedRow)
+  for (const row of writtenRows) take(row)
+  return Object.freeze(Array.from(byRecord.values())
+    .filter((entry) => Object.keys(entry.fields).length > 0)
+    .sort((left, right) => (left.recordId < right.recordId ? -1 : (left.recordId > right.recordId ? 1 : 0)))
+    .map((entry) => Object.freeze({ recordId: entry.recordId, key: entry.key, fields: Object.freeze(entry.fields) })))
+}
+
 // The VALUES-FREE projection the consult answers (never `record_set`, never the notes): handles, closed tokens,
 // digests, counts, server clocks — plus the scope triple the governance reader asserts (refutation m3).
 function rowToChangePlanSummary(row) {
@@ -1205,13 +1238,27 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       const executions = unionById(...executionLists)
       // Step 5 PR-8 (O-19): the PENDING change plans — `confirmed` (awaiting its controlled update) and `written`
       // (awaiting review) — by (sheet, project) AND by (tenant, project), one read per status (equality WHERE only),
-      // in the SAME snapshot. Values-free summaries: `record_set` / `review_notes` never leave the store here.
+      // in the SAME snapshot. Values-free summaries: `record_set` / `review_notes` never leave the store in them (the
+      // review fix N3 expected content below is the one private projection, for the planner).
       const changePlanLists = []
       for (const status of CHANGE_PLAN_PENDING_STATUSES) {
         changePlanLists.push(await selectAll(snapshot, T.changePlan, { ...bySheetProject, status }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' }))
         changePlanLists.push(await selectAll(snapshot, T.changePlan, { ...byProject, status }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' }))
       }
       const changePlans = unionById(...changePlanLists)
+      // Review fix N3 (C06): the LATEST reviewed plan of this sheet + project and the pending WRITTEN plan give the content
+      // the sheet must still hold (`expectedContentOf`). The latest review is the reviewed plan the state row's
+      // `reviewed_content_digest` names (only a review writes that digest) — selected by the digest in the same snapshot,
+      // never by a timestamp order (two reviews in one clock tick would tie); two reviewed plans with one digest carry
+      // the same (record, field, value) set. Private values, server-held for the planner; the `changePlans` summaries
+      // stay values-free. No review yet => no read.
+      const reviewState = states.find((row) => row && row.sheet_id === scope.sheetId && row.project_no === scope.projectNo) || null
+      const reviewedDigest = reviewState && nonBlankString(reviewState.reviewed_content_digest) ? reviewState.reviewed_content_digest : null
+      const reviewedLatest = reviewedDigest
+        ? await selectLimited(snapshot, T.changePlan, { where: { ...bySheetProject, status: 'reviewed', reviewed_content_digest: reviewedDigest }, orderBy: ['id', 'ASC'], limit: 1 }, 'read_change_plans')
+        : []
+      if (reviewedLatest[0] && reviewedLatest[0].tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
+      const writtenPlans = changePlans.filter((row) => row.status === 'written' && row.sheet_id === scope.sheetId && row.project_no === scope.projectNo)
       return Object.freeze({
         ok: true,
         scope,
@@ -1221,6 +1268,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         states: states.map(rowToState),
         executions: executions.map(rowToExecution),
         changePlans: changePlans.map(rowToChangePlanSummary),
+        expectedContent: expectedContentOf(reviewedLatest[0] || null, writtenPlans),
       })
     })
   }
@@ -2982,6 +3030,8 @@ module.exports = {
     rowToChangePlanSummary,
     absorbIntoRecordSet,
     writeRecordIdsOf,
+    // Review fix N3.
+    expectedContentOf,
     continuationFactsFromHold,
     claimsOverlap,
     takeoverGaps,

@@ -27,6 +27,9 @@
 //           pilot marker (before the state row); with it 201 — the relationship and the plan in ONE transaction.
 //   CR-N1   review fix N1: the pilot marker cleared AFTER the route's consult (the fast path passed) is refused 409
 //           NOT_PILOT by the store under the state-row lock — no plan, no relationship, no bump, no audit row.
+//   CR-N3   review fix N3 (C06): after a review the source moves AND a host-side write puts exactly that value into the
+//           reviewed cell: the next preview is suspended on a reviewed_content_moved hold (the formal surfaces refused),
+//           and confirm -> controlled update -> review closes it with the reviewed digest as the review baseline.
 //   CR-RV   the review: a confirmed (unwritten) plan STALE not_written; a live writer WRITE_LOCKED; a moved echo; a
 //           person's edit after the page => the receipt fingerprint_moved, then content_moved; an open hold BLOCKED; a
 //           confirmed plan BLOCKED change_plan_pending; that plan's write absorbs the written one (STALE plan_replaced)
@@ -50,6 +53,7 @@ const { RUN_FIELD_IDS } = require(path.join(LIB, 'stock-preparation-conflict-pla
 const { STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { PROJECT_WRITE_LOCK_TABLE, PROJECT_WRITE_ERROR_CODES, sheetWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 const { REFRESH_DECISION_ERROR_CODES: CODES, REFRESH_DECISION_AUDIT, READ_RECEIPT_KEY_PREFIX } = require(path.join(LIB, 'stock-preparation-refresh-decisions.cjs'))
+const { readProjectRefreshState, formalSurfaceVerdict } = require(path.join(LIB, 'stock-preparation-refresh-state.cjs'))
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -784,6 +788,64 @@ test('CR-N1 the combined confirm: the pilot marker cleared AFTER the route\'s co
     const done = await confirm(st, { ...body, candidates: [decision] })
     assert.equal(done.statusCode, 201, JSON.stringify(done.body))
     assert.equal(done.body.data.continuationIds.length, 1)
+  } finally {
+    st.restore()
+  }
+})
+
+// ── CR-N3 (review fix N3) ────────────────────────────────────────────────────────────────────────
+
+test('CR-N3 (C06) after a review the source moves AND a host-side write puts exactly that value into the reviewed cell (V8PG-15): the next preview is SUSPENDED on a reviewed_content_moved hold (formal surfaces refused); confirm -> controlled update -> review closes it with the reviewed digest as baseline', async () => {
+  const { st } = await writtenWorld()
+  try {
+    const page = dataOf(await current(st))
+    const view = page.current.written
+    const reviewed = await review(st, { changePlanId: view.id, contentDigest: view.writtenContentDigest, conclusion: 'handled', readReceipt: page.readReceipt.id })
+    assert.equal(reviewed.statusCode, 200, JSON.stringify(reviewed.body))
+    assert.equal(dataOf(await st.dryRun()).status, 'ready')
+    const derived = async () => readProjectRefreshState(await st.env.governance.consult(st.scope))
+    const complete = await derived()
+    assert.equal(complete.status, 'complete')
+    assert.equal(formalSurfaceVerdict(complete).allowed, true)
+    const reviewedDigest = st.state().reviewed_content_digest
+    // The source moves PART-A's material and a host-side write puts exactly that value into the sheet first.
+    st.source.data = changedSource({ material: 'M-CR-N3-NEW' })
+    st.sheet.personEdits('PART-A', { material: 'M-CR-N3-NEW' })
+    const preview = dataOf(await st.dryRun())
+    assert.equal(preview.status, 'suspended', JSON.stringify(preview.status))
+    assert.equal(preview.dryRunToken, null)
+    const holds = st.openHolds()
+    assert.equal(holds.length, 1, JSON.stringify(holds.map((row) => row.kind)))
+    assert.equal(holds[0].kind, 'content_change')
+    assert.equal(holds[0].detail.reason, pairing.REVIEWED_CONTENT_MOVED_REASON)
+    assert.deepEqual(Object.keys(holds[0].detail.fields), ['material'])
+    assert.equal(holds[0].detail.fields.material.before, CHANGED_MATERIAL, 'before = the REVIEWED value (the C06 baseline)')
+    assert.equal(holds[0].detail.fields.material.after, 'M-CR-N3-NEW')
+    const suspended = await derived()
+    assert.equal(suspended.status, 'pending_confirmation')
+    assert.deepEqual(formalSurfaceVerdict(suspended), { allowed: false, reason: 'state' })
+    // The five steps close it: the plan's review baseline is the REVIEWED digest; the controlled update rewrites the value.
+    const next = await boundConfirmBody(st)
+    const confirmedY = await confirm(st, next.body)
+    assert.equal(confirmedY.statusCode, 201, JSON.stringify(confirmedY.body))
+    const planY = st.plans().find((row) => row.id === confirmedY.body.data.changePlanId)
+    assert.equal(planY.review_baseline_digest, reviewedDigest)
+    const replan = dataOf(await st.dryRun())
+    assert.equal(replan.status, 'ready')
+    assert.ok(replan.dryRunToken)
+    dataOf(await st.apply(replan.dryRunToken))
+    assert.equal(st.plans().find((row) => row.id === planY.id).status, 'written')
+    assert.equal(st.sheet.cellOf(st.sheet.byComponent('PART-A'), 'material'), 'M-CR-N3-NEW')
+    const page2 = dataOf(await current(st))
+    const view2 = page2.current.written
+    assert.equal(view2.id, planY.id)
+    const reviewed2 = await review(st, { changePlanId: view2.id, contentDigest: view2.writtenContentDigest, conclusion: 'handled', readReceipt: page2.readReceipt.id })
+    assert.equal(reviewed2.statusCode, 200, JSON.stringify(reviewed2.body))
+    assert.equal(dataOf(await st.dryRun()).status, 'ready')
+    assert.equal(st.openHolds().length, 0)
+    const done = await derived()
+    assert.equal(done.status, 'complete')
+    assert.equal(formalSurfaceVerdict(done).allowed, true)
   } finally {
     st.restore()
   }

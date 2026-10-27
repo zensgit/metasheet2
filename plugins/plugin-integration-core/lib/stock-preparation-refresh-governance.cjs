@@ -65,11 +65,14 @@
 //
 // THE ANSWER is frozen and server-held (it carries the PRIVATE member keys the planner's projection needs;
 // it is never a response body): `{ ok: true, scope, governed, pilot, registry, continuations, members, holds,
-// state, executions, changePlans, lock: { state, generation }, decisionVersionObserved }` — exactly
+// state, executions, changePlans, expectedContent, lock: { state, generation }, decisionVersionObserved }` — exactly
 // what lib/stock-preparation-refresh-state.cjs `readProjectRefreshState` derives from and, through
 // `plannerSlice`, what the pure core's `normalizeContinuationInput` accepts (non-ended headers with
 // `memberCount`, claim_active members). `changePlans` (step 5 PR-8, migration 104; O-19 closed) are the PENDING
 // plans — `confirmed` and `written` — as the store's values-free summaries, read in the same snapshot.
+// `expectedContent` (PR-8 review fix N3, C06) is the content the latest reviewed plan and the pending written plan
+// left on the sheet (record ids, keys, after values — PRIVATE, like the member keys): the planner holds any such cell
+// the sheet no longer carries, so a review never stays valid over content it did not see.
 //
 // `governed` = pilot.enabled === true || any durable step-4 / step-5 row for (tenant, project) on any sheet — the
 // registry marker alone or persisted rows alone both govern (D3 / C10 / U07: clearing the pilot marker
@@ -284,6 +287,9 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     // carrying their scope triple). A store answer without the list is unreadable by name, never "no plan".
     if (!Array.isArray(rows.changePlans)) throw storeFailed('continuation', 'read_change_plans', null)
     assertRows(rows.changePlans, scope, 'continuation', 'change_plan')
+    // Review fix N3: the content the latest reviewed plan and the pending written plan left on the sheet (private, for
+    // the planner only). A store answer without it is unreadable by name, never "nothing to compare".
+    if (!Array.isArray(rows.expectedContent)) throw storeFailed('continuation', 'read_change_plans', null)
     if (rows.states.length > 1) throw retargeted('continuation', 'refresh_state', 'multiple_state_rows')
 
     let lockState
@@ -325,6 +331,7 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
       state,
       executions: Object.freeze(rows.executions.slice()),
       changePlans: Object.freeze(rows.changePlans.slice()),
+      expectedContent: Object.freeze(rows.expectedContent.slice()),
       lock,
       decisionVersionObserved: state ? state.decisionVersion : 0,
     })

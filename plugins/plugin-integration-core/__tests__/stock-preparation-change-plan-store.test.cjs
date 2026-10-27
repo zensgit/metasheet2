@@ -40,6 +40,9 @@
 //   CP-S14 review fix N1: the combined confirm re-reads the pilot marker on its own transaction handle after the state
 //          lock (the real governance reader over the same db): cleared / on another sheet => 409 NOT_PILOT, unwired =>
 //          501, nothing persisted, no bump; a content-only confirm never reads it.
+//   CP-S15 review fix N3 (C06): the consult's private `expectedContent` — the written plan's cells; after its review the
+//          reviewed plan the state's digest names (never a timestamp order); a later written plan wins per field; none
+//          without a review / write; a store answer without it is unreadable.
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -1002,6 +1005,66 @@ test('CP-S14 (N1) the combined confirm re-decides the pilot marker on its OWN tr
   await confirmPlan(w2)
   assert.deepEqual(w2.pilotReads, [])
   assert.equal(rowsOf(w2, 'changePlan').length, 1)
+})
+
+// ── CP-S15 (review fix N3) ───────────────────────────────────────────────────────────────────────
+
+function expectedCellsOf(record) {
+  return Object.fromEntries(Object.entries(record.fields).map(([fieldId, cell]) => [fieldId, { after: cell.after, afterCanonical: cell.afterCanonical }]))
+}
+
+test('CP-S15 (N3, C06) the consult carries the content the sheet must still hold: the WRITTEN plan\'s cells; after its review the reviewed plan the state digest names (never a timestamp order); a later written plan wins per field; private (never in the values-free summaries); none without a review / write', async () => {
+  const fresh = await world()
+  assert.deepEqual((await fresh.store.readGovernanceRows(fresh.scope)).expectedContent, [])
+  const { w, plan } = await writtenWorld()
+  const ids = plan.record_set.map((record) => record.recordId).sort()
+  // (a) a written plan awaiting review: exactly its cells.
+  let rows = await w.store.readGovernanceRows(w.scope)
+  assert.deepEqual(rows.expectedContent.map((entry) => entry.recordId), ids)
+  for (const entry of rows.expectedContent) {
+    const record = plan.record_set.find((candidate) => candidate.recordId === entry.recordId)
+    assert.equal(entry.key, record.key)
+    assert.deepEqual(entry.fields, expectedCellsOf(record))
+  }
+  assert.equal(JSON.stringify(rows.changePlans).includes(CHANGED_MATERIAL), false, 'the summaries stay values-free')
+  assert.equal(JSON.stringify(rows.expectedContent).includes(CHANGED_MATERIAL), true, 'the expected content is the one private projection')
+  // (b) reviewed: the plan the state row's reviewed digest names — a decoy reviewed row of ANOTHER digest at the SAME
+  // reviewed_at (the frozen clock of this kit) is never taken.
+  await review(w, plan)
+  const reviewedRow = rowsOf(w, 'changePlan').find((row) => row.id === plan.id)
+  const decoy = { ...kit.clone(reviewedRow), id: 'chp_zzzz_decoy', reviewed_content_digest: 'e'.repeat(64), record_set: reviewedRow.record_set.map((record) => ({ ...record, fields: Object.fromEntries(Object.entries(record.fields).map(([fieldId, cell]) => [fieldId, { ...cell, after: 'M-DECOY', afterCanonical: 'M-DECOY' }])) })) }
+  w.db.tables.get(T.changePlan).set(decoy.id, decoy)
+  rows = await w.store.readGovernanceRows(w.scope)
+  assert.deepEqual(rows.expectedContent.map((entry) => entry.recordId), ids)
+  for (const entry of rows.expectedContent) assert.deepEqual(entry.fields, expectedCellsOf(reviewedRow.record_set.find((record) => record.recordId === entry.recordId)))
+  assert.equal(JSON.stringify(rows.expectedContent).includes('M-DECOY'), false)
+  w.db.tables.get(T.changePlan).delete(decoy.id)
+  // (c) a later change confirmed and WRITTEN: the written plan wins per field over the review.
+  await reconcile(w, (await contentScenario({ partCUsage: 8 })).holds, { computation: { sourceContentDigest: SRC_2 } })
+  const second = await confirmPlan(w)
+  const execution = await beginBound(w, second.changePlanId)
+  await finish(w, execution.id)
+  const secondRow = rowsOf(w, 'changePlan').find((row) => row.id === second.changePlanId)
+  assert.equal(secondRow.status, 'written')
+  rows = await w.store.readGovernanceRows(w.scope)
+  for (const record of secondRow.record_set) {
+    const entry = rows.expectedContent.find((candidate) => candidate.recordId === record.recordId)
+    assert.ok(entry, record.recordId)
+    for (const [fieldId, cell] of Object.entries(expectedCellsOf(record))) assert.deepEqual(entry.fields[fieldId], cell, `${fieldId}: the written plan wins`)
+  }
+  // The governance consult hands it through (and refuses a store answer without it).
+  const governance = governanceModule.createStockPreparationRefreshGovernance({
+    continuationStore: w.store,
+    projectTargetStore: { getPilotState: async () => null, getPilotStateBySheetId: async () => null },
+    projectWriteLock: { readState: async () => FREE_LOCK.state, readGeneration: async () => FREE_LOCK.generation },
+  })
+  assert.deepEqual((await governance.consult(w.scope)).expectedContent.map((entry) => entry.recordId), rows.expectedContent.map((entry) => entry.recordId))
+  const stripped = governanceModule.createStockPreparationRefreshGovernance({
+    continuationStore: { readGovernanceRows: async (input, options) => { const answer = await w.store.readGovernanceRows(input, options); const { expectedContent: omitted, ...rest } = answer; void omitted; return rest } },
+    projectTargetStore: { getPilotState: async () => null, getPilotStateBySheetId: async () => null },
+    projectWriteLock: { readState: async () => FREE_LOCK.state, readGeneration: async () => FREE_LOCK.generation },
+  })
+  await expectError(stripped.consult(w.scope), { status: 503, code: 'STOCK_PREP_REFRESH_STORE_FAILED' })
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-store.test.cjs', tests)

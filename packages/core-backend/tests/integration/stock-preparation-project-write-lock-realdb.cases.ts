@@ -5896,6 +5896,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   S8-14 (review fix N1) the combined confirm with the pilot marker cleared between the route's consult and the
         //         store's state-row lock (the V8PG-09 interleaving): 409 NOT_PILOT decided under the lock, nothing written;
         //         the marker back => 201.
+        //   S8-15 (review fix N3, C06; the V8PG-15 interleaving) after a review the source moves and a host-side write puts
+        //         exactly that value into the reviewed cell: the preview suspends on a reviewed_content_moved hold, the
+        //         export 409; confirm -> controlled update -> review closes it (the reviewed digest as baseline), export 200.
         //   S8-I1 confirm vs apply (pg_blocking_pids): the confirm frozen before COMMIT; an apply's lease acquire queues on
         //         the lock row and is granted the confirm's token; the pre-confirm binding is refused.
         //   S8-I2 confirm vs reconcile: a computation's reconcile queues on the state row behind the frozen confirm, then
@@ -6743,6 +6746,71 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               decisionAuditsAdded: 0,
               holdsUnchanged: true,
               reEnabled: '201',
+            })
+          }, 300000)
+
+          test('S8-15 (review fix N3, the V8PG-15 interleaving; C06) after a review the PLM source moves AND a host-side write puts exactly the new source value into the reviewed machine cell: the next preview is SUSPENDED on a reviewed_content_moved hold and the export 409; confirm -> controlled update -> review closes it with the reviewed digest as baseline, and the export answers 200 again', async () => {
+            const { st, confirmed } = await s8Written('s8_15', { partCUsage: 5 })
+            await st.dryRun()
+            const { body } = await reviewBody(st)
+            const reviewed = await cpCall(st, 'POST', CPR.review, { body })
+            await st.dryRun()
+            const exportReviewed = await st.exportLines()
+            const stateReviewed = await stateOf(st)
+            // The source moves PART-A's material; a host-side write puts the SAME new value into the sheet first.
+            st.state.data = sourceWith({ material: 'M-S8-15-NEW', partCUsage: 5 })
+            const partA = await rowOf(st, 'PART-A')
+            await personSql(clientX, partA.id, physical(st, 'material'), 'M-S8-15-NEW')
+            const preview = await st.dryRun()
+            const holds = await openHoldRows(st)
+            const derivedHeld = (await derivedOf(st)).status
+            const exportHeld = await st.exportLines()
+            // The five steps close it.
+            const page = await boundBody(st)
+            const confirmY = await cpCall(st, 'POST', CPR.confirm, { body: page.body })
+            const planYId = confirmY.body.data ? confirmY.body.data.changePlanId : null
+            const planY = planYId ? await planById(planYId) : null
+            const replan = await st.dryRun()
+            const applied = replan.body.data && replan.body.data.dryRunToken ? await st.apply(st.users.puller, replan.body.data.dryRunToken) : null
+            const review2 = await reviewBody(st)
+            const reviewed2 = await cpCall(st, 'POST', CPR.review, { body: review2.body })
+            const settle = await st.dryRun()
+            const exportFinal = await st.exportLines()
+            const material = holds[0] && holds[0].detail && holds[0].detail.fields ? holds[0].detail.fields[physical(st, 'material')] || holds[0].detail.fields.material : null
+            const observed = {
+              review: answer(reviewed),
+              exportAfterReview: answer(exportReviewed),
+              preview: preview.body.data.status,
+              holds: holds.map((row: any) => `${row.kind}:${row.detail && row.detail.reason}`),
+              holdFromTheReviewedValue: Boolean(material && material.before === S8_MATERIAL && material.after === 'M-S8-15-NEW'),
+              derived: derivedHeld,
+              exportWhileHeld: answer(exportHeld),
+              confirmY: answer(confirmY),
+              baselineIsTheReviewedDigest: Boolean(planY && planY.review_baseline_digest === stateReviewed.reviewed_content_digest),
+              replan: replan.body.data.status,
+              applied: applied ? `${applied.statusCode}:${applied.body.data && applied.body.data.status}` : 'no_token',
+              review2: answer(reviewed2),
+              settle: settle.body.data.status,
+              exportFinal: answer(exportFinal),
+              plans: [(await planById(confirmed.changePlanId)).status, planYId ? (await planById(planYId)).status : 'none'],
+            }
+            console.log(`[S8-15] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              review: '200',
+              exportAfterReview: '200',
+              preview: 'suspended',
+              holds: ['content_change:reviewed_content_moved'],
+              holdFromTheReviewedValue: true,
+              derived: 'pending_confirmation',
+              exportWhileHeld: `409:${EXPORT_BLOCKED}:state:pending_confirmation`,
+              confirmY: '201',
+              baselineIsTheReviewedDigest: true,
+              replan: 'ready',
+              applied: '200:succeeded',
+              review2: '200',
+              settle: 'ready',
+              exportFinal: '200',
+              plans: ['reviewed', 'reviewed'],
             })
           }, 300000)
 

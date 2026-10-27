@@ -2489,7 +2489,8 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       // W4 carry: threaded from the deploy-time action config (undefined when the
       // config never opted in — the planner is then byte-identical to pre-wiring).
       carryPolicy: action.carryPolicy,
-      // PR-3a (O-16 + AMB-1) + PR-8 (`changePlan`): exactly the 10-key continuation input, governed only; absent otherwise.
+      // PR-3a (O-16 + AMB-1) + PR-8 (`changePlan`, review fix N3 `expectedContent`): exactly the 11-key continuation input,
+      // governed only; absent otherwise.
       ...(refresh && refresh.governed ? { continuation: continuationInputFor(refresh, { action, expansion, sourceContentDigest: stockPreparationSourceContentDigest(sourceContentRevision) }) } : {}),
     })
   }

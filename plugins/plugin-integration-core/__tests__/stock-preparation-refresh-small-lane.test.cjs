@@ -734,7 +734,7 @@ test('SL-G2 an unwired service or a malformed handle refuses 501 by name at cons
   assert.equal(w.source.state.calls.length, 0)
 })
 
-test('SL-G8 the planner input: a governed project hands BOTH planner calls exactly the 10 keys (O-16 + persistedHolds + changePlan, null without a confirmed plan) and the expander the recorder options; a not-governed project hands neither key', async () => {
+test('SL-G8 the planner input: a governed project hands BOTH planner calls exactly the 11 keys (O-16 + persistedHolds + changePlan, null without a confirmed plan, + expectedContent, [] without a reviewed / written plan) and the expander the recorder options; a not-governed project hands neither key', async () => {
   const w = await world()
   await w.firstPullApplied()
   w.source.state.data = F.secondPullSource()
@@ -743,8 +743,9 @@ test('SL-G8 the planner input: a governed project hands BOTH planner calls exact
   await w.dryRun()
   assert.ok(plannerInputs.length >= 1)
   for (const input of plannerInputs) {
-    assert.deepEqual(Object.keys(input.continuation).sort(), ['changePlan', 'continuations', 'demandEvidence', 'members', 'persistedHolds', 'pilot', 'projectNo', 'sourceIdentity', 'specSlotDeclared', 'storeState'])
+    assert.deepEqual(Object.keys(input.continuation).sort(), ['changePlan', 'continuations', 'demandEvidence', 'expectedContent', 'members', 'persistedHolds', 'pilot', 'projectNo', 'sourceIdentity', 'specSlotDeclared', 'storeState'])
     assert.equal(input.continuation.changePlan, null)
+    assert.deepEqual(input.continuation.expectedContent, [])
     assert.equal(input.continuation.pilot, true)
     assert.equal(input.continuation.storeState, 'ok')
     assert.ok(Array.isArray(input.continuation.persistedHolds))

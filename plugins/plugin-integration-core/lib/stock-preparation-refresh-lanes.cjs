@@ -16,8 +16,9 @@
 //                        then — governed only — the source-binding unanimity check (R-1, TD-21) and the STRICT
 //                        planning inputs (R-2, TD-22: the pack band and the ext mapping the computation plans,
 //                        verifies, settles and writes with). All before any source read.
-//   continuationInputFor the planner's `continuation` input, exactly the 10 keys (O-16 + persistedHolds + step 5's
-//                        changePlan: the consult's CONFIRMED change plan with THIS computation's source digest).
+//   continuationInputFor the planner's `continuation` input, exactly the 11 keys (O-16 + persistedHolds + step 5's
+//                        changePlan: the consult's CONFIRMED change plan with THIS computation's source digest, + review
+//                        fix N3's expectedContent: what the latest review / the written plan left on the sheet).
 //   change plan (PR-8)   changePlanVerdictOf / previewReviewOf / assertChangePlanCurrent / assertNoReviewPending —
 //                        the token and the execution are bound to a confirmed plan only when the planner matches it;
 //                        a written change awaiting review refuses every write but that controlled update.
@@ -256,8 +257,9 @@ function changePlanInputFor(consult, sourceContentDigest) {
 }
 
 /**
- * EXACTLY the 10-key planner input (O-16's 8 + `persistedHolds` + step 5's `changePlan`). Never spreads the consult.
- * `sourceContentDigest` is THIS computation's (built before planning; the plan fingerprint binds it).
+ * EXACTLY the 11-key planner input (O-16's 8 + `persistedHolds` + step 5's `changePlan` + review fix N3's
+ * `expectedContent`). Never spreads the consult. `sourceContentDigest` is THIS computation's (built before planning; the
+ * plan fingerprint binds it).
  */
 function continuationInputFor(refresh, { action, expansion, sourceContentDigest }) {
   const consult = refresh.consult
@@ -271,6 +273,9 @@ function continuationInputFor(refresh, { action, expansion, sourceContentDigest 
     specSlotDeclared: specSlotDeclaredFor(action),
     persistedHolds: consult.holds.map((hold) => pickPersistedHold(hold, consult.continuations)),
     changePlan: changePlanInputFor(consult, sourceContentDigest),
+    // Review fix N3 (C06): what the latest review and the pending written plan left on the sheet (the consult's private
+    // projection, in-process only): the planner holds a cell the sheet no longer carries.
+    expectedContent: Array.isArray(consult.expectedContent) ? consult.expectedContent : [],
   }
 }
 

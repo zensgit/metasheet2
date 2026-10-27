@@ -5,7 +5,7 @@
 // the routes drive them (the lock kit's lease and binder, the REAL governance reader and store over the faithful kit,
 // the REAL handle builder), REAL expansions over the canonical synthetic fixtures, a sheet fake with versions.
 //
-//   CP-L01 the 10-key planner input carries the CONFIRMED plan with THIS computation's source digest; the token's and
+//   CP-L01 the 11-key planner input carries the CONFIRMED plan with THIS computation's source digest; the token's and
 //          the execution's binding name the plan only when the planner matches it; the reconcile receives the verdict.
 //   CP-L02 the preview while a written change awaits review: `review_pending`, no token, no bump, the reconcile ran AND
 //          settled; `suspended` and `recovery_pending` keep precedence.

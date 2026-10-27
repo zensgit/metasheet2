@@ -1005,7 +1005,7 @@ test('ST-14 one consult snapshot (review X-1): every read in ONE transaction pin
   assert.deepEqual(log[1], ['trx.setTransactionIsolationLevel', 'repeatable read'], 'the pin is the transaction\'s FIRST statement')
   assert.deepEqual(log[log.length - 1], ['commit', null])
   const reads = log.slice(2, -1)
-  assert.equal(reads.length, 22, 'continuations x2, members x2, holds x2, states x2, executions (2 newest + 8 unfinished), change plans (PR-8: 2 pending statuses x 2)')
+  assert.equal(reads.length, 22, 'continuations x2, members x2, holds x2, states x2, executions (2 newest + 8 unfinished), change plans (PR-8: 2 pending statuses x 2; the latest reviewed plan only once a review wrote its digest — review fix N3)')
   assert.ok(reads.every(([method]) => method === 'trx.select'), `every read on the transaction handle, none in autocommit: ${JSON.stringify(reads)}`)
   // readFirst: once, on THE transaction handle, after BEGIN + the pin, before any step-4 read.
   assert.equal(seen.length, 1)
