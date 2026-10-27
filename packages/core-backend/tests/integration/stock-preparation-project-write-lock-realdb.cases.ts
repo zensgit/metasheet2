@@ -2139,8 +2139,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                   pg_get_expr(i.indpred, i.indrelid) AS predicate
              FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
             WHERE i.indrelid = ANY($1::regclass[])`,
-          // Step 5 PR-8: + the change-plan table (migration 104; its two partial uniques are in the kit's list).
-          [[RT.continuation, RT.member, RT.hold, RT.state, RT.changePlan]],
+          // Step 5 PR-8: + the change-plan table (migration 104; its two partial uniques are in the kit's list) and the
+          // reviewed-cell register (review fix N3-b, migration 104; its total unique is in the kit's list).
+          [[RT.continuation, RT.member, RT.hold, RT.state, RT.changePlan, RT.reviewedCell]],
         )
         for (const index of refreshKit.UNIQUE_INDEXES) {
           const row = indexes.rows.find((entry: any) => entry.name === index.name)
@@ -5905,6 +5906,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   S8-17 (review fix N3-a, round 2; the V8D-04 interleaving) after a review the source moves and the reviewed row is
         //         DELETED: the key is HELD (never re-added with content nobody reviewed), no token, export 409, the change
         //         plan blocked record_unbound; the source back on the reviewed value => the row is re-ADDed, export 200.
+        //   S8-18 (review fix N3-b, round 2; the V8D-05 interleaving) a cell an EARLIER plan reviewed stays protected after
+        //         an unrelated LATER plan is reviewed (the reviewed-cell register): the V8PG-15 move on it re-suspends the
+        //         project from the earlier review's value, export 409; the five steps close it.
         //   S8-I1 confirm vs apply (pg_blocking_pids): the confirm frozen before COMMIT; an apply's lease acquire queues on
         //         the lock row and is granted the confirm's token; the pre-confirm binding is refused.
         //   S8-I2 confirm vs reconcile: a computation's reconcile queues on the state row behind the frozen confirm, then
@@ -6969,6 +6973,76 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               exportFinal: '200',
               rowBackWithTheReviewedValue: true,
               openHoldsAfter: 0,
+            })
+          }, 300000)
+
+          test('S8-18 (review fix N3-b, the V8D-05 interleaving; C06) a cell reviewed by an EARLIER plan stays protected after an unrelated LATER plan is reviewed (the reviewed-cell register): the V8PG-15 move on it re-suspends the project from the EARLIER review\'s value and the export 409; the five steps close it, export 200', async () => {
+            const { st, confirmed } = await s8Written('s8_18', { partCUsage: 5 })
+            const r1 = await reviewWritten(st)
+            await st.dryRun()
+            // A later, unrelated change (PART-C only) confirmed, written and reviewed.
+            st.state.data = sourceWith({ partCUsage: 6 })
+            const s2 = await st.dryRun()
+            const { body: c2b } = await boundBody(st)
+            const c2 = await cpCall(st, 'POST', CPR.confirm, { body: c2b })
+            const plan2 = c2.body.data ? await planById(c2.body.data.changePlanId) : null
+            const rp2 = await st.dryRun()
+            const ap2 = rp2.body.data && rp2.body.data.dryRunToken ? await st.apply(st.users.puller, rp2.body.data.dryRunToken) : null
+            const r2 = await reviewWritten(st)
+            const settle2 = await st.dryRun()
+            const exportR2 = await st.exportLines()
+            const partA = await rowOf(st, 'PART-A')
+            const plan2HasPartA = Boolean(plan2 && (plan2.record_set as any[]).some((record: any) => record.recordId === partA.id))
+            const register = (await q(`SELECT record_key, field_id, record_id, change_plan_id FROM ${RT.reviewedCell} WHERE sheet_id = $1 AND project_no = $2`, [st.sheetId, st.projectNo])).rows
+            const partAMaterialCell = register.find((row: any) => row.record_id === partA.id && row.field_id === 'material')
+            // The V8PG-15 move on the cell only the EARLIER plan reviewed.
+            st.state.data = sourceWith({ material: 'M-S8-18-NEW', partCUsage: 6 })
+            await personSql(clientX, partA.id, physical(st, 'material'), 'M-S8-18-NEW')
+            const preview = await st.dryRun()
+            const holds = await openHoldRows(st)
+            const derivedHeld = (await derivedOf(st)).status
+            const exportHeld = await st.exportLines()
+            const closed = await closeByFiveSteps(st)
+            const material = materialCellOf(holds[0], st)
+            const observed = {
+              r1: answer(r1),
+              secondChange: s2.body.data.status,
+              confirm2: answer(c2),
+              plan2HasPartA,
+              applied2: ap2 ? answer(ap2) : 'no_token',
+              r2: answer(r2),
+              settle2: settle2.body.data.status,
+              exportR2: answer(exportR2),
+              registerKeepsTheEarlierCell: Boolean(partAMaterialCell && partAMaterialCell.change_plan_id === confirmed.changePlanId),
+              preview: preview.body.data.status,
+              holds: holds.map((row: any) => `${row.kind}:${row.detail && row.detail.reason}`),
+              holdFromTheEarlierReviewedValue: Boolean(material && material.before === S8_MATERIAL && material.after === 'M-S8-18-NEW'),
+              derived: derivedHeld,
+              exportWhileHeld: answer(exportHeld),
+              ...closed.steps,
+            }
+            console.log(`[S8-18] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              r1: '200',
+              secondChange: 'suspended',
+              confirm2: '201',
+              plan2HasPartA: false,
+              applied2: '200',
+              r2: '200',
+              settle2: 'ready',
+              exportR2: '200',
+              registerKeepsTheEarlierCell: true,
+              preview: 'suspended',
+              holds: ['content_change:reviewed_content_moved'],
+              holdFromTheEarlierReviewedValue: true,
+              derived: 'pending_confirmation',
+              exportWhileHeld: `409:${EXPORT_BLOCKED}:state:pending_confirmation`,
+              confirmY: '201',
+              replan: 'ready',
+              applied: '200:succeeded',
+              review2: '200',
+              settle: 'ready',
+              exportFinal: '200',
             })
           }, 300000)
 

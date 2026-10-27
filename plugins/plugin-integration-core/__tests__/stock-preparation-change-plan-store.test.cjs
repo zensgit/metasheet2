@@ -1013,7 +1013,7 @@ function expectedCellsOf(record) {
   return Object.fromEntries(Object.entries(record.fields).map(([fieldId, cell]) => [fieldId, { after: cell.after, afterCanonical: cell.afterCanonical }]))
 }
 
-test('CP-S15 (N3, C06) the consult carries the content the sheet must still hold: the WRITTEN plan\'s cells; after its review the reviewed plan the state digest names (never a timestamp order); a later written plan wins per field; private (never in the values-free summaries); none without a review / write', async () => {
+test('CP-S15 (N3, C06) the consult carries the content the sheet must still hold: the WRITTEN plan\'s cells; after its review the reviewed cells (round 2: the register the review wrote — a decoy reviewed plan row is never read); a later written plan wins per field; private (never in the values-free summaries); none without a review / write', async () => {
   const fresh = await world()
   assert.deepEqual((await fresh.store.readGovernanceRows(fresh.scope)).expectedContent, [])
   const { w, plan } = await writtenWorld()
@@ -1028,8 +1028,8 @@ test('CP-S15 (N3, C06) the consult carries the content the sheet must still hold
   }
   assert.equal(JSON.stringify(rows.changePlans).includes(CHANGED_MATERIAL), false, 'the summaries stay values-free')
   assert.equal(JSON.stringify(rows.expectedContent).includes(CHANGED_MATERIAL), true, 'the expected content is the one private projection')
-  // (b) reviewed: the plan the state row's reviewed digest names — a decoy reviewed row of ANOTHER digest at the SAME
-  // reviewed_at (the frozen clock of this kit) is never taken.
+  // (b) reviewed: exactly the cells that review bound (round 2: the reviewed-cell register it wrote) — a decoy reviewed
+  // plan row of ANOTHER digest at the SAME reviewed_at (the frozen clock of this kit) is never taken.
   await review(w, plan)
   const reviewedRow = rowsOf(w, 'changePlan').find((row) => row.id === plan.id)
   const decoy = { ...kit.clone(reviewedRow), id: 'chp_zzzz_decoy', reviewed_content_digest: 'e'.repeat(64), record_set: reviewedRow.record_set.map((record) => ({ ...record, fields: Object.fromEntries(Object.entries(record.fields).map(([fieldId, cell]) => [fieldId, { ...cell, after: 'M-DECOY', afterCanonical: 'M-DECOY' }])) })) }
@@ -1065,6 +1065,97 @@ test('CP-S15 (N3, C06) the consult carries the content the sheet must still hold
     projectWriteLock: { readState: async () => FREE_LOCK.state, readGeneration: async () => FREE_LOCK.generation },
   })
   await expectError(stripped.consult(w.scope), { status: 503, code: 'STOCK_PREP_REFRESH_STORE_FAILED' })
+})
+
+// ── CP-S16 (review fix N3-b, round 2) ────────────────────────────────────────────────────────────
+
+const registerRows = (w) => rowsOf(w, 'reviewedCell').slice().sort((left, right) => `${left.record_key}|${left.field_id}`.localeCompare(`${right.record_key}|${right.field_id}`))
+const consultReads = (w) => w.db.statements('trx.').filter(([method, table]) => method === 'trx.select' && table === T.reviewedCell).length
+
+test('CP-S16 (N3-b, C06; delta probe V8D-05) the REVIEWED-CELL REGISTER: the review writes one row per reviewed (key, field) in its own transaction, review-only cells included; a LATER review overwrites only its own cells, so a cell an EARLIER plan reviewed stays in the consult\'s expected content; an invalidated plan removes nothing (no path deletes a cell); the consult reads it only after a review; private; a foreign row refuses', async () => {
+  const { w, plan } = await writtenWorld()
+  const planCells = plan.record_set.flatMap((record) => Object.keys(record.fields).map((fieldId) => `${record.key}|${fieldId}`)).sort()
+  // (a) before any review: the register is empty and the consult does not read it (the state row says no review).
+  w.db.log.length = 0
+  await w.store.readGovernanceRows(w.scope)
+  assert.equal(consultReads(w), 0, 'no register read before a review')
+  assert.equal(rowsOf(w, 'reviewedCell').length, 0)
+  // (b) the review writes every cell of the plan's record set, on its transaction handle, after the plan row and before
+  //     the state row (the read gate) and the audit.
+  w.db.log.length = 0
+  await review(w, plan)
+  const order = statementsOf(w.db)
+  const upserts = order.filter((entry) => entry === 'upsertOne:reviewed_cell')
+  assert.equal(upserts.length, planCells.length, order.join(' > '))
+  assert.ok(order.indexOf('upsertOne:reviewed_cell') > order.indexOf('updateRow:change_plan'), order.join(' > '))
+  assert.ok(order.lastIndexOf('upsertOne:reviewed_cell') < order.indexOf('updateRow:refresh_state'), order.join(' > '))
+  const first = registerRows(w)
+  assert.deepEqual(first.map((row) => `${row.record_key}|${row.field_id}`), planCells)
+  for (const row of first) {
+    const record = plan.record_set.find((entry) => entry.key === row.record_key)
+    assert.equal(row.change_plan_id, plan.id)
+    assert.equal(row.record_id, record.recordId)
+    assert.equal(row.tenant_id, TENANT)
+    assert.deepEqual(row.reviewed_cell, { after: record.fields[row.field_id].after, afterCanonical: record.fields[row.field_id].afterCanonical })
+    assert.equal(row.record_key_digest, pairing.__internals.subjectDigest(row.record_key), 'the unique key carries the key\'s digest')
+  }
+  // The consult now reads it (once, in its snapshot) and hands every cell to the planner.
+  w.db.log.length = 0
+  let rows = await w.store.readGovernanceRows(w.scope)
+  assert.equal(consultReads(w), 1)
+  assert.deepEqual(rows.expectedContent.flatMap((entry) => Object.keys(entry.fields).map((fieldId) => `${entry.key}|${fieldId}`)).sort(), planCells)
+  const partA = plan.record_set.find((record) => Object.prototype.hasOwnProperty.call(record.fields, 'material'))
+  assert.ok(partA, 'plan 1 reviewed PART-A\'s material')
+  // (c) V8D-05: a LATER plan that changes only PART-C is confirmed, written and reviewed. Its cells overwrite PART-C's
+  //     entries; PART-A's material — reviewed by the EARLIER plan only — stays in the register and in the expected content.
+  await reconcile(w, (await contentScenario({ partAMaterial: 'M-STEEL', partCUsage: 8 })).holds, { computation: { sourceContentDigest: SRC_2 } })
+  const second = await confirmPlan(w)
+  const secondExecution = await beginBound(w, second.changePlanId)
+  await finish(w, secondExecution.id)
+  const secondRow = rowsOf(w, 'changePlan').find((row) => row.id === second.changePlanId)
+  assert.equal(secondRow.status, 'written')
+  assert.equal(secondRow.record_set.some((record) => record.recordId === partA.recordId && Object.prototype.hasOwnProperty.call(record.fields, 'material')), false, 'plan 2 does not carry PART-A\'s material')
+  await review(w, secondRow)
+  const after = registerRows(w)
+  const materialCell = after.find((row) => row.record_key === partA.key && row.field_id === 'material')
+  assert.ok(materialCell, 'the earlier review\'s cell survives the later review')
+  assert.equal(materialCell.change_plan_id, plan.id)
+  assert.deepEqual(materialCell.reviewed_cell, { after: CHANGED_MATERIAL, afterCanonical: partA.fields.material.afterCanonical })
+  for (const record of secondRow.record_set) {
+    for (const fieldId of Object.keys(record.fields)) {
+      const cell = after.find((row) => row.record_key === record.key && row.field_id === fieldId)
+      assert.equal(cell.change_plan_id, second.changePlanId, `${fieldId}: the later review overwrote its own cell`)
+      assert.deepEqual(cell.reviewed_cell.afterCanonical, record.fields[fieldId].afterCanonical)
+    }
+  }
+  assert.equal(new Set(after.map((row) => `${row.record_key}|${row.field_id}`)).size, after.length, 'one row per (key, field)')
+  rows = await w.store.readGovernanceRows(w.scope)
+  const entryA = rows.expectedContent.find((entry) => entry.key === partA.key)
+  assert.ok(entryA && entryA.fields.material, 'the consult still protects the cell the earlier plan reviewed')
+  assert.equal(entryA.fields.material.after, CHANGED_MATERIAL)
+  // (d) an INVALIDATED plan (a confirm whose source then moved) and the plans it never wrote remove nothing.
+  const snapshotBefore = JSON.stringify(registerRows(w))
+  await reconcile(w, (await contentScenario({ partAMaterial: 'M-ANOTHER', partCUsage: 8 })).holds, { computation: { sourceContentDigest: 'src_cps_3' } })
+  const third = await confirmPlan(w)
+  await reconcile(w, (await contentScenario({ partAMaterial: 'M-YET-ANOTHER', partCUsage: 8 })).holds, { computation: { sourceContentDigest: 'src_cps_4' }, changePlan: { id: third.changePlanId, verdict: 'stale' } })
+  assert.equal(rowsOf(w, 'changePlan').find((row) => row.id === third.changePlanId).status, 'invalidated')
+  assert.equal(JSON.stringify(registerRows(w)), snapshotBefore, 'an invalidated plan removes no reviewed cell')
+  // (e) a register row of ANOTHER tenant under this sheet + project is refused (never merged).
+  const foreign = { ...kit.clone(after[0]), id: 'rcell_foreign', tenant_id: 'tenant_cps_other', record_key_digest: 'f'.repeat(64) }
+  w.db.tables.get(T.reviewedCell).set(foreign.id, foreign)
+  await expectError(w.store.readGovernanceRows(w.scope), { status: 409, code: CODES.TENANT_MISMATCH })
+  w.db.tables.get(T.reviewedCell).delete(foreign.id)
+  // (f) private: the values-free summaries never carry a reviewed value; the expected content is the one projection.
+  rows = await w.store.readGovernanceRows(w.scope)
+  assert.equal(JSON.stringify(rows.changePlans).includes(CHANGED_MATERIAL), false)
+  assert.equal(JSON.stringify(rows.expectedContent).includes(CHANGED_MATERIAL), true)
+  // (g) a review-only (absorbed, B1) field is a reviewed cell too: the review bound it; a record the confirm could not
+  //     have written (no id / key) is not.
+  const cells = storeModule.__internals.reviewedCellsOf({ record_set: [
+    { recordId: 'rec_cps_x', key: '{"k":"x"}', fields: { material: { before: 'a', after: 'b', afterCanonical: 'b' }, totalQuantity: { before: 1, after: 2, afterCanonical: 2, baseline: 1, reviewOnly: true } } },
+    { recordId: '', key: '{"k":"y"}', fields: { material: { before: 'a', after: 'b', afterCanonical: 'b' } } },
+  ] })
+  assert.deepEqual(cells.map((cell) => `${cell.key}|${cell.fieldId}`).sort(), ['{"k":"x"}|material', '{"k":"x"}|totalQuantity'])
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-store.test.cjs', tests)

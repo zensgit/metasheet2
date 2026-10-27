@@ -127,6 +127,9 @@ const REFRESH_STORE_TABLES = Object.freeze({
   execution: 'integration_stock_prep_refresh_execution',
   // Step 5 PR-8 (migration 104).
   changePlan: 'integration_stock_prep_change_plan',
+  // PR-8 review fix N3-b (round 2, migration 104): the reviewed-cell register — written only by the review, read only by
+  // the consult (after a review), never deleted.
+  reviewedCell: 'integration_stock_prep_reviewed_cell',
 })
 
 // ── closed vocabularies (migrations 102 / 103 CHECKs; pinned against the pure core by the unit suite) ──
@@ -200,7 +203,13 @@ const CONSULT_SNAPSHOT_ISOLATION = 'repeatable read'
 
 // Paging: the scoped helper clamps a page at 10000; the ceilings bound what one consult may hold in memory.
 const READ_PAGE_SIZE = 1000
-const READ_CEILINGS = Object.freeze({ continuation: 5000, member: 20000, hold: 5000, state: 100, execution: 5000, changePlan: 100 })
+// `reviewedCell` (review fix N3-b): the register holds one row per reviewed (key, field) — at most the project's reviewed
+// keys x the content-trigger fields; above the ceiling the consult is unreadable (503 row_cap), never "nothing reviewed".
+const READ_CEILINGS = Object.freeze({ continuation: 5000, member: 20000, hold: 5000, state: 100, execution: 5000, changePlan: 100, reviewedCell: 100000 })
+// Review fix N3-b: the register's UPSERT key (migration 104's uniq_integration_stock_prep_reviewed_cell) and what a later
+// review of the same cell overwrites (never the scope columns, the row id or created_at).
+const REVIEWED_CELL_CONFLICT_COLUMNS = Object.freeze(['sheet_id', 'project_no', 'record_key_digest', 'field_id'])
+const REVIEWED_CELL_UPDATE_COLUMNS = Object.freeze(['record_id', 'reviewed_cell', 'change_plan_id', 'reviewed_at', 'updated_at'])
 const NEWEST_EXECUTIONS = 5
 
 class StockPreparationRefreshStoreError extends Error {
@@ -711,36 +720,72 @@ function writeRecordIdsOf(recordSet) {
 }
 
 // Review fix N3 (plan §3.4 step 5 / C06 「复核前后再发生相关变化，旧复核不再有效，重新挂起」; design §10.3 (4)): the content
-// the project's latest REVIEWED plan and its pending WRITTEN plan (at most one of each per sheet + project) left on the
-// sheet — `[{ recordId, key, fields: { [fieldId]: { after, afterCanonical } } }]`, sorted by record id, the written plan
-// (newer than every review) winning per field; a record the newer plan names under another key keeps only the newer
-// plan's fields. PRIVATE values (the plans' record sets): server-held in the consult for the planner, which holds any
+// the project's REVIEWS and its pending WRITTEN plan (at most one per sheet + project) left on the sheet —
+// `[{ recordId, key, fields: { [fieldId]: { after, afterCanonical } } }]`, one entry per record KEY (round 2, N3-a),
+// sorted by key. Round 2 (N3-b): the reviews are the REVIEWED-CELL REGISTER (`reviewedCellRows`, every cell any review
+// bound, the latest review of a cell winning — never only the latest plan's cells); the written plan (newer than every
+// review) wins per field; an entry's `recordId` is the record the newest of them bound under that key. PRIVATE values
+// (the register's cells, the written plan's record set): server-held in the consult for the planner, which holds any
 // such cell the sheet no longer carries (`reviewed_content_moved`) — never a response body, never an error detail.
-function expectedContentOf(reviewedRow, writtenRows) {
-  const byRecord = new Map()
-  const take = (row) => {
+function expectedContentOf(reviewedCellRows, writtenRows) {
+  const byKey = new Map()
+  const entryFor = (key, recordId) => {
+    let entry = byKey.get(key)
+    if (!entry) {
+      entry = { recordId, key, fields: {} }
+      byKey.set(key, entry)
+    }
+    entry.recordId = recordId
+    return entry
+  }
+  const cellOf = (cell) => Object.freeze({
+    after: cell.after === undefined ? null : cell.after,
+    afterCanonical: cell.afterCanonical === undefined ? null : cell.afterCanonical,
+  })
+  // The register, oldest review first (ties by row id), so the newest review names the entry's record.
+  const register = (Array.isArray(reviewedCellRows) ? reviewedCellRows : []).slice().sort((left, right) => {
+    const at = (row) => (row && row.reviewed_at ? new Date(row.reviewed_at).getTime() : 0)
+    return (at(left) - at(right)) || (String(left && left.id) < String(right && right.id) ? -1 : (String(left && left.id) > String(right && right.id) ? 1 : 0))
+  })
+  for (const row of register) {
+    if (!isPlainObject(row) || !nonBlankString(row.record_key) || !nonBlankString(row.field_id) || !nonBlankString(row.record_id)) continue
+    const cell = jsonOrNull(row.reviewed_cell)
+    if (!isPlainObject(cell)) continue
+    entryFor(row.record_key, row.record_id).fields[row.field_id] = cellOf(cell)
+  }
+  for (const row of writtenRows) {
     for (const record of jsonArrayOf(row && row.record_set)) {
       if (!isPlainObject(record) || !nonBlankString(record.recordId) || !nonBlankString(record.key) || !isPlainObject(record.fields)) continue
-      let entry = byRecord.get(record.recordId)
-      if (!entry || entry.key !== record.key) {
-        entry = { recordId: record.recordId, key: record.key, fields: {} }
-        byRecord.set(record.recordId, entry)
-      }
+      const entry = entryFor(record.key, record.recordId)
       for (const [fieldId, cell] of Object.entries(record.fields)) {
-        if (!isPlainObject(cell)) continue
-        entry.fields[fieldId] = Object.freeze({
-          after: cell.after === undefined ? null : cell.after,
-          afterCanonical: cell.afterCanonical === undefined ? null : cell.afterCanonical,
-        })
+        if (isPlainObject(cell)) entry.fields[fieldId] = cellOf(cell)
       }
     }
   }
-  if (reviewedRow) take(reviewedRow)
-  for (const row of writtenRows) take(row)
-  return Object.freeze(Array.from(byRecord.values())
+  return Object.freeze(Array.from(byKey.values())
     .filter((entry) => Object.keys(entry.fields).length > 0)
-    .sort((left, right) => (left.recordId < right.recordId ? -1 : (left.recordId > right.recordId ? 1 : 0)))
+    .sort((left, right) => (left.key < right.key ? -1 : (left.key > right.key ? 1 : 0)))
     .map((entry) => Object.freeze({ recordId: entry.recordId, key: entry.key, fields: Object.freeze(entry.fields) })))
+}
+
+// Review fix N3-b (round 2): the register rows ONE review writes — one per (record key, field) of the reviewed plan's
+// record set, write AND review-only (absorbed) fields alike (the review bound every one of them). Only the record shapes
+// the confirm writes (record id, key, fields) are taken.
+function reviewedCellsOf(planRow) {
+  const out = []
+  for (const record of jsonArrayOf(planRow && planRow.record_set)) {
+    if (!isPlainObject(record) || !nonBlankString(record.recordId) || !nonBlankString(record.key) || !isPlainObject(record.fields)) continue
+    for (const [fieldId, cell] of Object.entries(record.fields)) {
+      if (!isPlainObject(cell)) continue
+      out.push({
+        key: record.key,
+        fieldId,
+        recordId: record.recordId,
+        cell: { after: cell.after === undefined ? null : cell.after, afterCanonical: cell.afterCanonical === undefined ? null : cell.afterCanonical },
+      })
+    }
+  }
+  return out
 }
 
 // The VALUES-FREE projection the consult answers (never `record_set`, never the notes): handles, closed tokens,
@@ -1246,18 +1291,20 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         changePlanLists.push(await selectAll(snapshot, T.changePlan, { ...byProject, status }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' }))
       }
       const changePlans = unionById(...changePlanLists)
-      // Review fix N3 (C06): the LATEST reviewed plan of this sheet + project and the pending WRITTEN plan give the content
-      // the sheet must still hold (`expectedContentOf`). The latest review is the reviewed plan the state row's
-      // `reviewed_content_digest` names (only a review writes that digest) — selected by the digest in the same snapshot,
-      // never by a timestamp order (two reviews in one clock tick would tie); two reviewed plans with one digest carry
-      // the same (record, field, value) set. Private values, server-held for the planner; the `changePlans` summaries
-      // stay values-free. No review yet => no read.
+      // Review fix N3 (C06): the REVIEWED-CELL REGISTER of this sheet + project and the pending WRITTEN plan give the content
+      // the sheet must still hold (`expectedContentOf`). Round 2 (N3-b, delta probe V8D-05): the register holds EVERY cell
+      // any review bound (a later review of a cell overwrites it; superseded / invalidated plans never remove one) — not
+      // only the latest reviewed plan's cells, so a cell an EARLIER plan reviewed stays protected after an unrelated later
+      // review. Read in this snapshot ONLY once the state row says a review happened (only a review writes
+      // `reviewed_content_digest`, in the same transaction as its register rows): a project never reviewed — and every
+      // not-governed project — reads nothing new. Private values, server-held for the planner; the `changePlans`
+      // summaries stay values-free.
       const reviewState = states.find((row) => row && row.sheet_id === scope.sheetId && row.project_no === scope.projectNo) || null
-      const reviewedDigest = reviewState && nonBlankString(reviewState.reviewed_content_digest) ? reviewState.reviewed_content_digest : null
-      const reviewedLatest = reviewedDigest
-        ? await selectLimited(snapshot, T.changePlan, { where: { ...bySheetProject, status: 'reviewed', reviewed_content_digest: reviewedDigest }, orderBy: ['id', 'ASC'], limit: 1 }, 'read_change_plans')
+      const reviewed = Boolean(reviewState && nonBlankString(reviewState.reviewed_content_digest))
+      const reviewedCells = reviewed
+        ? await selectAll(snapshot, T.reviewedCell, bySheetProject, { ceiling: READ_CEILINGS.reviewedCell, operation: 'read_reviewed_cells' })
         : []
-      if (reviewedLatest[0] && reviewedLatest[0].tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
+      if (reviewedCells.some((row) => row.tenant_id !== scope.tenantId)) throw tenantMismatch('reviewed_cell')
       const writtenPlans = changePlans.filter((row) => row.status === 'written' && row.sheet_id === scope.sheetId && row.project_no === scope.projectNo)
       return Object.freeze({
         ok: true,
@@ -1268,7 +1315,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         states: states.map(rowToState),
         executions: executions.map(rowToExecution),
         changePlans: changePlans.map(rowToChangePlanSummary),
-        expectedContent: expectedContentOf(reviewedLatest[0] || null, writtenPlans),
+        expectedContent: expectedContentOf(reviewedCells, writtenPlans),
       })
     })
   }
@@ -2433,6 +2480,31 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         throw translate(error, 'change_plan_review')
       }
       if (rows.length !== 1) throw reviewStale('plan_moved')
+      // Review fix N3-b (round 2): every cell this review binds enters the REVIEWED-CELL REGISTER (one UPSERT per record key
+      // + field; a later review of the cell overwrites it, nothing removes it) — on this handle, under the state-row lock,
+      // so the register and `reviewed_content_digest` (the consult's read gate) commit together or not at all.
+      for (const entry of reviewedCellsOf(plan)) {
+        try {
+          await trx.upsertOne(REFRESH_STORE_TABLES.reviewedCell, {
+            id: newId('rcell'),
+            tenant_id: scope.tenantId,
+            sheet_id: scope.sheetId,
+            project_no: scope.projectNo,
+            write_scope_key: scope.writeScopeKey,
+            record_key: entry.key,
+            record_key_digest: keyDigest(entry.key),
+            field_id: entry.fieldId,
+            record_id: entry.recordId,
+            reviewed_cell: entry.cell,
+            change_plan_id: plan.id,
+            reviewed_at: at,
+            created_at: at,
+            updated_at: at,
+          }, { conflictColumns: REVIEWED_CELL_CONFLICT_COLUMNS, updateColumns: REVIEWED_CELL_UPDATE_COLUMNS })
+        } catch (error) {
+          throw translate(error, 'reviewed_cell_upsert')
+        }
+      }
       const decisionVersion = intOrNull(stateRow.decision_version) || 0
       let stateRows
       try {
@@ -3030,8 +3102,9 @@ module.exports = {
     rowToChangePlanSummary,
     absorbIntoRecordSet,
     writeRecordIdsOf,
-    // Review fix N3.
+    // Review fix N3 (round 2: N3-a / N3-b).
     expectedContentOf,
+    reviewedCellsOf,
     continuationFactsFromHold,
     claimsOverlap,
     takeoverGaps,

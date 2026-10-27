@@ -183,6 +183,8 @@ const UNIQUE_INDEXES = Object.freeze([
   // Step 5 PR-8 (migration 104): one plan awaiting its controlled update, one written plan awaiting review.
   { table: T.changePlan, name: 'uniq_integration_stock_prep_change_plan_confirmed', columns: ['sheet_id', 'project_no'], where: (row) => row.status === 'confirmed' },
   { table: T.changePlan, name: 'uniq_integration_stock_prep_change_plan_written', columns: ['sheet_id', 'project_no'], where: (row) => row.status === 'written' },
+  // PR-8 review fix N3-b (migration 104): ONE reviewed-cell register row per (sheet, project, record key digest, field).
+  { table: T.reviewedCell, name: 'uniq_integration_stock_prep_reviewed_cell', columns: ['sheet_id', 'project_no', 'record_key_digest', 'field_id'] },
 ])
 
 const isNull = (value) => value === null || value === undefined

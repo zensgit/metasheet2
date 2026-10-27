@@ -28,8 +28,8 @@
 -- cells) and `review_notes` are PRIVATE business values: they are answered only by the audited pull-tier route
 -- (GET …/refresh/change-plans/current). Every other column is a handle, a closed token, a digest, an integer or a
 -- server clock. The consult's plan summaries carry the values-free columns only; it also reads the `record_set` of
--- the pending written plan and of the latest reviewed plan as its server-held expected content (review fix N3, C06:
--- a reviewed cell the sheet no longer carries is held) — for the planner, never a response body.
+-- the pending written plan, and the REVIEWED-CELL REGISTER below, as its server-held expected content (review fix N3,
+-- C06: a reviewed cell the sheet no longer carries is held) — for the planner, never a response body.
 --
 -- SCOPE: tenant_id, sheet_id, project_no and write_scope_key (the sheet write lock's scope key, migration 100) on every
 -- row. INTEGER, not BIGINT.
@@ -45,8 +45,9 @@
 --   SELECT count(*) FROM integration_stock_prep_change_plan WHERE status IN ('confirmed', 'written');
 -- (zero required), next to migration 102's / 103's checks. Rows always stay.
 --
--- OWNER GATE Q-B (design §21 (ii), §23.9). Persisting `record_set` and `review_notes` on a customer instance, and their
--- retention, is decided with the pilot enable; development and CI are not blocked by it.
+-- OWNER GATE Q-B (design §21 (ii), §23.9). Persisting `record_set` and `review_notes` (and the reviewed-cell register's
+-- values, below) on a customer instance, and their retention, is decided with the pilot enable; development and CI are
+-- not blocked by it.
 
 CREATE TABLE IF NOT EXISTS integration_stock_prep_change_plan (
   id                            TEXT PRIMARY KEY,
@@ -124,3 +125,47 @@ CREATE INDEX IF NOT EXISTS idx_integration_stock_prep_change_plan_execution
 
 COMMENT ON TABLE integration_stock_prep_change_plan IS
   'Stock-preparation batch-refresh step 5: one row per change-plan confirm (confirmed -> written -> reviewed; invalidated / superseded). record_set and review_notes are PRIVATE (audited pull-tier route only); every other column is values-free. At most one confirmed and one written row per (sheet, project). Never deleted; no down().';
+
+-- THE REVIEWED-CELL REGISTER (review fix N3-b, round 2; plan C06 「复核前后再发生相关变化，旧复核不再有效，重新挂起」).
+--   One row per (sheet, project, record key, field) that a review bound: the reviewed value (`reviewed_cell` =
+--   { after, afterCanonical }, the raw value and the writer's canonical form), the record id the review bound, and the
+--   plan whose review last wrote it. WRITTEN ONLY BY THE REVIEW, in its own transaction under the state-row lock: one
+--   UPSERT per cell of the reviewed plan's record set (review-only / absorbed fields included — the review bound them
+--   too). A later review of the same key + field OVERWRITES that cell's row; nothing ever deletes a row (a superseded or
+--   invalidated plan never touches the register). READ ONLY BY THE CONSULT, in its REPEATABLE READ snapshot, and only once
+--   the state row says a review happened (`reviewed_content_digest`, written by the same review transaction) — a project
+--   never reviewed, and every not-governed project, reads nothing from it. The consult hands it, with the pending written
+--   plan's cells, to the planner as its private expected content: every reviewed cell stays held against a move the
+--   source and a host-side write make together, whichever plan reviewed it (the latest-plan-only read missed cells an
+--   earlier plan reviewed, delta probe V8D-05).
+--   PRIVATE values (owner gate Q-B, like `record_set`); every other column is a handle, a digest, a key or a clock (the
+--   key is the record's idempotency key, as `record_set` carries it). BOUNDED by the project's reviewed cells: at most
+--   (distinct record keys ever reviewed) x (content-trigger fields); the consult refuses 503 `row_cap` above 100000 rows
+--   (fail closed, never "nothing reviewed"). Rows always stay (no down(); the G10 stop condition is unchanged).
+--   ADDED IN REVIEW ROUND 2 to this still-unmerged migration: additive (one more table and its unique index, both
+--   IF NOT EXISTS; nothing above changed shape). A development database that already recorded the earlier 104 does NOT
+--   re-run it — re-create that database.
+CREATE TABLE IF NOT EXISTS integration_stock_prep_reviewed_cell (
+  id                            TEXT PRIMARY KEY,
+  tenant_id                     TEXT NOT NULL,
+  sheet_id                      TEXT NOT NULL,
+  project_no                    TEXT NOT NULL,
+  write_scope_key               TEXT NOT NULL,
+  record_key                    TEXT NOT NULL,
+  record_key_digest             TEXT NOT NULL,
+  field_id                      TEXT NOT NULL,
+  record_id                     TEXT NOT NULL,
+  reviewed_cell                 JSONB NOT NULL,
+  change_plan_id                TEXT NOT NULL,
+  reviewed_at                   TIMESTAMPTZ NOT NULL,
+  created_at                    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ONE entry per reviewed cell: the review's UPSERT conflicts here (the key by its digest — a key is a JSON path and can
+-- be long).
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_stock_prep_reviewed_cell
+  ON integration_stock_prep_reviewed_cell (sheet_id, project_no, record_key_digest, field_id);
+
+COMMENT ON TABLE integration_stock_prep_reviewed_cell IS
+  'Stock-preparation batch-refresh step 5 (review fix N3-b): every cell a change review bound, one row per (sheet, project, record key, field); a later review overwrites the cell; never deleted. reviewed_cell is PRIVATE (the consult''s expected content, planner only). No down().';

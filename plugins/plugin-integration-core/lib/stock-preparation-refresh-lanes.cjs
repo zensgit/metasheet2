@@ -18,7 +18,7 @@
 //                        verifies, settles and writes with). All before any source read.
 //   continuationInputFor the planner's `continuation` input, exactly the 11 keys (O-16 + persistedHolds + step 5's
 //                        changePlan: the consult's CONFIRMED change plan with THIS computation's source digest, + review
-//                        fix N3's expectedContent: what the latest review / the written plan left on the sheet).
+//                        fix N3's expectedContent: what the reviews / the written plan left on the sheet).
 //   change plan (PR-8)   changePlanVerdictOf / previewReviewOf / assertChangePlanCurrent / assertNoReviewPending —
 //                        the token and the execution are bound to a confirmed plan only when the planner matches it;
 //                        a written change awaiting review refuses every write but that controlled update.
@@ -273,8 +273,8 @@ function continuationInputFor(refresh, { action, expansion, sourceContentDigest 
     specSlotDeclared: specSlotDeclaredFor(action),
     persistedHolds: consult.holds.map((hold) => pickPersistedHold(hold, consult.continuations)),
     changePlan: changePlanInputFor(consult, sourceContentDigest),
-    // Review fix N3 (C06): what the latest review and the pending written plan left on the sheet (the consult's private
-    // projection, in-process only): the planner holds a cell the sheet no longer carries.
+    // Review fix N3 (C06): what the reviews (round 2: the reviewed-cell register) and the pending written plan left on the
+    // sheet (the consult's private projection, in-process only): the planner holds a cell the sheet no longer carries.
     expectedContent: Array.isArray(consult.expectedContent) ? consult.expectedContent : [],
   }
 }
