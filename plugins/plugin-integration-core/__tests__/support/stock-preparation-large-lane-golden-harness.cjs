@@ -10,11 +10,12 @@
 // governance (support/stock-preparation-refresh-governance-wiring.cjs) answers the consults through a recorder that
 // counts them per route.
 //
-// `__tests__/stock-preparation-refresh-large-lane.test.cjs` pins those digests as literals CAPTURED by running this very
-// harness over the route module of origin/main 4c4cd3aba (PR-3a, before PR-3b), and replays them on the head: the
-// not-governed large lane must answer, store and write byte for byte what it did before PR-3b — apart from ONE consult
-// per start / run / plan / approve call and the ONE new values-free key the plan records on the expansion job
-// (`governanceVerdict`, stripped here before digesting and returned apart so the suite asserts its shape).
+// `__tests__/stock-preparation-refresh-large-lane.test.cjs` pins those digests as literals: this very harness's capture
+// over the route module of origin/main 4c4cd3aba (PR-3a, before PR-3b), with the four digests that hash #6323/#6324's
+// v3 BOM evaluation identity updated as an explicit main -> v3 delta (see the suite's LL-12 block). It replays them on
+// the head: the not-governed large lane must answer, store and write byte for byte what it did before PR-3b — apart
+// from ONE consult per start / run / plan / approve call and the ONE new values-free key the plan records on the
+// expansion job (`governanceVerdict`, stripped here before digesting and returned apart so the suite asserts its shape).
 //
 // NORMALISATION (both sides alike): every UUID (job ids, lock tokens) is replaced by its ordinal of first appearance
 // across the whole observation, so two runs compare structurally and a token in a wrong place still moves a digest;

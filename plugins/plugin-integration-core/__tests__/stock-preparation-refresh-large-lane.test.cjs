@@ -34,11 +34,12 @@
 //   LL-11 brief item 2: an expansion planned while NOT governed, then governed (no bump) => approve 409 before the
 //         binder's bump (generation unchanged, no apply job); an apply job approved while not governed, then governed
 //         => the chunk 409 (PR-3a's gate), the job byte-identical, zero writes, the lease released.
-//   LL-12 L05 / C09 large (brief item 5): the not-governed large lane is byte-identical to origin/main 4c4cd3aba —
+//   LL-12 L05 / C09 large (brief item 5): the not-governed large lane matches the origin/main 4c4cd3aba capture —
 //         every route answer, both stored job records (minus the one new verdict key), the plan revision and artifact,
-//         the sheet rows, the records-API call sequence and the source reads (GOLDEN captured on 4c4cd3aba's route
-//         module with support/stock-preparation-large-lane-golden-harness.cjs) — apart from ONE consult per start /
-//         run / plan / approve (4c4cd3aba: 0; the chunk's one in-lease consult is PR-3a's on both).
+//         the sheet rows, the records-API call sequence and the source reads (support/stock-preparation-large-lane-
+//         golden-harness.cjs) — apart from ONE consult per start / run / plan / approve (4c4cd3aba: 0; the chunk's one
+//         in-lease consult is PR-3a's on both) and the four digests #6323/#6324's v3 BOM evaluation identity moves,
+//         pinned as an explicit main -> v3 delta in the LL-12 block below.
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -684,13 +685,23 @@ test('LL-11 (brief item 2) an expansion planned while NOT governed, then governe
 
 // ── LL-12 ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-// CAPTURED on the #6324 head 10fa41409 (a PR-branch commit, NOT origin/main: #6323/#6324's v3 BOM evaluation identity on
-// main 40ce1b47e, before PR-3b was merged into the branch) by running support/stock-preparation-large-lane-golden-harness.cjs
-// unmodified over that tree; the aligned head reproduced every value before this literal was written. On 10fa41409 the
-// consult counts were start 0, run 0, plan 0, approve 0, chunk 1 (PR-3a's in-lease gate) and the stored expansion job
-// carried no `governanceVerdict`. Relative to PR-3b's own capture base 4c4cd3aba only storedExpansionJob / storedApplyJob /
-// planRevision / planArtifact moved — the four digests that carry `bomEvaluationVersion` (and the plan artifact's
-// `sourceArtifactRevision`); every other literal below is byte-identical to the 4c4cd3aba capture.
+// PROVENANCE. The literals below are origin/main 4c4cd3aba's capture (PR-3a, before PR-3b; support/stock-preparation-
+// large-lane-golden-harness.cjs run over that route module) with exactly FOUR digests moved: the ones that hash
+// #6323/#6324's v3 BOM evaluation identity (`bomEvaluationVersion`, and the plan artifact's `sourceArtifactRevision`).
+// Every other literal is byte-identical to the 4c4cd3aba capture. The explicit main -> v3 delta:
+//   storedExpansionJob  7a436a91b2296b6a61929440e68a40d5dfb2b87dde6b0131ca207c89e69d898f
+//                    -> 92c324229673737e39b61786ce1dc2a83f17fc140ce578e6ae562a13842ada80
+//   storedApplyJob      fbb468ed6f8c1d7a2c76bfa8ae1799995493f15a9240e58515e82a2a06e62024
+//                    -> 66d0f75ca2c0866dc49dd190c4e7ce38717607b07214772f1764d17bfb56582c
+//   planRevision        8f3d54a18d17e039a202ea397719785498cef34ceb7404103ce135d9f864b7ec
+//                    -> 8a3c30e435fbec131fe52da7903c51b206a1a657f3dba879660c859658396621
+//   planArtifact        1accc34edc4fe05175646f7be30be74efdc346bcc65f9c538cab89cf7d6fb039
+//                    -> d8b0439422754bfd75302375db22e02b4fd091d09d483de36c417179fd7e5e8e
+// The v3 values came from running the same harness unmodified over the #6324 head 10fa41409 (#6323/#6324 on main
+// 40ce1b47e, before PR-3b; there the consult counts were start 0, run 0, plan 0, approve 0, chunk 1 — PR-3a's in-lease
+// gate — and the stored expansion job carried no `governanceVerdict`); the aligned heads reproduce all twelve values.
+// 10fa41409 is a PR-branch commit, never on origin/main: once #6324 is merged it stays reachable through
+// refs/pull/6324/head. GOLDEN_LARGE_BASE_SHA is a label the test name states; nothing fetches it.
 const GOLDEN_LARGE_BASE_SHA = '10fa41409e4c459aa6d00e7190d2f265c7f394c3'
 const GOLDEN_LARGE_LANE = Object.freeze({
   statuses: { start: 202, getQueued: 200, run: 200, plan: 200, approve: 202, getApply: 200, chunks: [200], getFinal: 200 },
