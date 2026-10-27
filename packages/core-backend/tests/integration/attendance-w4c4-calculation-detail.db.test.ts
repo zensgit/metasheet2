@@ -86,6 +86,9 @@ describeIfDatabase('W4C-4 calculation detail and DecisionTrace (real PostgreSQL)
   const calcToctouRecord = randomUUID()
   const segmentToctouRecord = randomUUID()
   const missingRecord = randomUUID()
+  const calc15TrackedUser = randomUUID()
+  const calc15TrackedRecord = randomUUID()
+  let calc15TrackedCalculationId = ''
   const shiftId = randomUUID()
   let historicalCalculationId = ''
   let currentCalculationId = ''
@@ -494,6 +497,7 @@ describeIfDatabase('W4C-4 calculation detail and DecisionTrace (real PostgreSQL)
     const users = [
       userA, userB, adminA, outsiderB, shadowUser, platformAdmin,
       invalidSchemaUser, invalidDiffUser, calculationRaceUser, segmentRaceUser,
+      calc15TrackedUser,
     ]
     await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [users]).catch(() => undefined)
     await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [users]).catch(() => undefined)
@@ -803,5 +807,137 @@ describeIfDatabase('W4C-4 calculation detail and DecisionTrace (real PostgreSQL)
     )
     expect(leakedSegment).not.toBe(ATTENDANCE_CALCULATION_DETAIL_NOT_FOUND)
     await forceRecordSubjectForMutation(segmentToctouRecord, segmentRaceUser)
+  })
+
+
+  describe('CALC15_ENVELOPE native read-only contract', () => {
+    const legacyUser = randomUUID()
+    const placeholderUser = randomUUID()
+    const legacyRecord = randomUUID()
+    const placeholderRecord = randomUUID()
+
+    beforeAll(async () => {
+      await seedUser(legacyUser, [orgA])
+      await seedUser(placeholderUser, [orgA])
+      await seedRecord(legacyRecord, orgA, legacyUser)
+      await seedUser(calc15TrackedUser, [orgA])
+      await seedRecord(calc15TrackedRecord, orgA, calc15TrackedUser)
+      const tracked = await seedCalculation({
+        recordId:calc15TrackedRecord,orgId:orgA,userId:calc15TrackedUser,version:1,mode:'authoritative',
+      })
+      calc15TrackedCalculationId = tracked.calculationId
+      await pointRecordAt(tracked)
+      await pool.query(
+        `INSERT INTO attendance_records
+         (id,user_id,org_id,work_date,timezone,first_in_at,last_out_at,
+          work_minutes,late_minutes,early_leave_minutes,status,is_workday,
+          meta,projection_owner,visibility_state,visibility_reason,updated_at)
+         VALUES ($1::uuid,$2,$3,$4::date,'UTC',NULL,NULL,
+                 0,0,0,'partial',true,'{}'::jsonb,
+                 'legacy_untracked','retired','review_placeholder',now())`,
+        [placeholderRecord,placeholderUser,orgA,workDate],
+      )
+    })
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM attendance_records WHERE id=ANY($1::uuid[])', [[legacyRecord,placeholderRecord]])
+      await pool.query('DELETE FROM user_orgs WHERE user_id=ANY($1::text[])', [[legacyUser,placeholderUser]])
+      await pool.query('DELETE FROM users WHERE id=ANY($1::text[])', [[legacyUser,placeholderUser]])
+    })
+
+    async function census(recordId: string): Promise<Record<string, unknown>> {
+      const parent = await pool.query('SELECT to_jsonb(r) AS row FROM attendance_records r WHERE id=$1::uuid AND org_id=$2', [recordId,orgA])
+      const calculations = await pool.query('SELECT to_jsonb(c) AS row FROM attendance_record_calculations c WHERE attendance_record_id=$1::uuid AND org_id=$2 ORDER BY version', [recordId,orgA])
+      const segments = await pool.query('SELECT to_jsonb(s) AS row FROM attendance_record_segments s WHERE record_id=$1::uuid AND org_id=$2 ORDER BY calculation_id,segment_index', [recordId,orgA])
+      return { parent:parent.rows, calculations:calculations.rows, segments:segments.rows }
+    }
+
+    it('labels a virgin legacy row through self/admin reads without manufacturing calculations or children', async () => {
+      const before = await census(legacyRecord)
+      expect(before.calculations).toEqual([])
+      expect(before.segments).toEqual([])
+      const expected = {
+        ok: true,
+        data: {
+          recordId: legacyRecord,
+          calculation: null,
+          segments: [],
+          current: {
+            projectionOwner: 'legacy_untracked',
+            visibilityState: 'active',
+            visibilityReason: 'active',
+            posture: 'undeterminable',
+            calculationMode: 'envelope_legacy',
+          },
+        },
+      }
+      const self = await request(makeApp(legacyUser, ['attendance:read']))
+        .get('/api/attendance/records/' + legacyRecord + '/calculation-detail?orgId=' + orgA)
+      const admin = await request(makeApp(adminA, ['attendance:admin']))
+        .get('/api/attendance-admin/records/' + legacyRecord + '/calculation-detail?orgId=' + orgA)
+      expect(self.status).toBe(200)
+      expect(self.body).toEqual(expected)
+      expect(admin.status).toBe(200)
+      expect(admin.body).toEqual(expected)
+      const after = await census(legacyRecord)
+      expect(after).toEqual(before)
+      console.log('CALC15_LEGACY_READ_RECEIPT ' + JSON.stringify({
+        arm:'visible-virgin-legacy',self:200,admin:200,parentRows:1,
+        calculations:0,segments:0,exactBeforeAfter:true,calculationMode:'envelope_legacy',
+      }))
+    })
+
+    it('keeps a review placeholder unlabeled and unchanged', async () => {
+      const before = await census(placeholderRecord)
+      const response = await request(makeApp(adminA, ['attendance:admin']))
+        .get('/api/attendance-admin/records/' + placeholderRecord + '/calculation-detail?orgId=' + orgA)
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({
+        ok:true,
+        data:{
+          recordId:placeholderRecord,calculation:null,segments:[],
+          current:{
+            projectionOwner:'legacy_untracked',visibilityState:'retired',
+            visibilityReason:'review_placeholder',posture:'undeterminable',
+          },
+        },
+      })
+      expect(await census(placeholderRecord)).toEqual(before)
+      console.log('CALC15_LEGACY_READ_RECEIPT ' + JSON.stringify({
+        arm:'retired-review-placeholder',status:200,labelAbsent:true,exactBeforeAfter:true,
+      }))
+    })
+
+    it('preserves the tracked completed response and existing child rows', async () => {
+      const before = await census(calc15TrackedRecord)
+      const consistency = await pool.query(
+        `SELECT r.status=c.projected_status AS status_matches,
+                r.work_minutes=c.projected_work_minutes AS work_matches,
+                r.late_minutes=c.projected_late_minutes AS late_matches,
+                r.early_leave_minutes=c.projected_early_leave_minutes AS early_matches,
+                r.first_in_at IS NOT DISTINCT FROM c.projected_first_in_at AS first_matches,
+                r.last_out_at IS NOT DISTINCT FROM c.projected_last_out_at AS last_matches
+         FROM attendance_records r JOIN attendance_record_calculations c
+           ON c.id=r.current_calculation_id AND c.attendance_record_id=r.id AND c.org_id=r.org_id
+         WHERE r.id=$1::uuid AND r.org_id=$2`,
+        [calc15TrackedRecord,orgA],
+      )
+      expect(consistency.rows, 'CALC15_TRACKED_CONTROL_MUST_BE_LEGAL').toEqual([{
+        status_matches:true,work_matches:true,late_matches:true,early_matches:true,
+        first_matches:true,last_matches:true,
+      }])
+      const response = await request(makeApp(adminA, ['attendance:admin']))
+        .get('/api/attendance-admin/records/' + calc15TrackedRecord + '/calculation-detail?orgId=' + orgA)
+      expect(response.status).toBe(200)
+      expect(response.body.data.current).toEqual({
+        projectionOwner:'w4',visibilityState:'active',visibilityReason:'active',posture:'authoritative',
+      })
+      expect(response.body.data.calculation.id).toBe(calc15TrackedCalculationId)
+      expect(response.body.data.segments).toHaveLength(1)
+      expect(await census(calc15TrackedRecord)).toEqual(before)
+      console.log('CALC15_LEGACY_READ_RECEIPT ' + JSON.stringify({
+        arm:'tracked-completed',status:200,labelAbsent:true,exactBeforeAfter:true,
+      }))
+    })
   })
 })
