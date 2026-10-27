@@ -36,9 +36,8 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, '..', '..', '..')
 
-// 旧「备料行」(prep-line) 与 旧「异常队列」(exception-queue) 已于 2026-10-27 下线(owner:「不用就去掉」).
+// 旧「仪表盘」(dashboard)、旧「备料行」(prep-line) 与 旧「异常队列」(exception-queue) 已于 2026-10-27 下线(owner:「不用就去掉」).
 const LEGACY_TAB_KEYS = [
-  'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
   'material-mapping',

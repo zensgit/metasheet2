@@ -814,7 +814,6 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([
-      'dashboard',
       'project-workspace',
       'bom-snapshot-diff',
       'material-mapping',

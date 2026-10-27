@@ -74,8 +74,8 @@
       <p class="stock-prep__panel-desc" :data-testid="`stock-prep-desc-${effectiveKey}`">
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
-      <!-- The dashboard tab aggregates MULTIPLE existing readonly endpoints client-side (H1/H2) — it
-           has no single endpoint to badge, so this line is skipped for it only.
+      <!-- A tab that aggregates several existing reads client-side (ops, members, help) has no single
+           endpoint to badge, so this line is skipped for it (`noEndpointBadge`).
 
            What this line says first is now WHAT THIS TAB CAN CHANGE — the only part of it a customer
            admin has a use for. The shape badge and the route path are what an implementer greps, so
@@ -87,12 +87,6 @@
           <code>{{ activeView.endpoint }}</code>
         </StockPrepTechnicalDetails>
       </div>
-      <!-- H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202): the dashboard tab is the
-           new default landing view — "operator enters the system and immediately sees current
-           project / current stage / blocking count / recommended next step". Its own picker updates
-           selectedProjectId WITHOUT switching tabs (handleDashboardProjectSelect), and its stepper /
-           recommend-action navigates by reusing this SAME activeKey (handleNavigateStage) — a
-           satellite of the one tab-nav surface, never a second one. -->
       <!-- O1' §附: the confirmation queue is what this page WAS ADOPTED FOR — the human confirmation
            loop's operator entry. It is the only tab a customer operator (stock-prep:read) sees; the
            six MVP tabs below were explicitly not revived by that ruling and stay platform-admin. -->
@@ -195,13 +189,10 @@
           <StockPreparationCodeHelpPanel />
         </section>
       </div>
-      <StockPreparationDashboardView
-        v-else-if="effectiveKey === 'dashboard'"
-        :project-id="selectedProjectId"
-        :scope="scope"
-        @select-project="handleDashboardProjectSelect"
-        @navigate-stage="handleNavigateStage"
-      />
+      <!-- 旧「仪表盘」(dashboard) was retired with 旧「异常队列」 and 旧「备料行」 (owner 2026-10-27,
+           「不用就去掉」): it was the six-stage navigator of that legacy pipeline, two of whose stages
+           (生成 -> prep-line, 异常 -> exception-queue) and whose 「去「异常队列」」 copy would have pointed
+           at removed pages. StockPreparationDashboardView.vue stays on disk unwired; revert to restore. -->
       <!-- Views 1-6 are all real views now (the placeholder branch remains only as a guard for any
            future tab). Views 2-6 share the shell-owned projectId context selected in view 1
            (#4017 pattern). -->
@@ -276,7 +267,6 @@ import { useLocale } from '../../../composables/useLocale'
 import { getDefaultIntegrationScope } from '../../../services/integration/workbench'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
-import StockPreparationDashboardView from './StockPreparationDashboardView.vue'
 import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorkspaceView.vue'
 import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
 import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
@@ -330,8 +320,8 @@ function bi(zh: string, en: string): string {
 
 type StockPreparationViewKey =
   // P1-1's four new keys. P1-1 REMOVED NO OLD KEY — `project-board`, `install` and the legacy keys
-  // all kept resolving. The owner's 2026-10-27 ruling (「不用就去掉」) later retired two legacy keys,
-  // `prep-line` and `exception-queue`; a stale `?tab=` naming either now folds to the landing.
+  // all kept resolving. The owner's 2026-10-27 ruling (「不用就去掉」) later retired three legacy keys,
+  // `dashboard`, `prep-line` and `exception-queue`; a stale `?tab=` naming any of them folds to the landing.
   | 'home'
   | 'getting-started'
   | 'ops'
@@ -344,7 +334,6 @@ type StockPreparationViewKey =
   // 备料分批拉取第一期 step 4 PR-7 (R-62 ①): 拉取待确认.
   | 'refresh-queue'
   | 'install'
-  | 'dashboard'
   | 'project-workspace'
   | 'bom-snapshot-diff'
   | 'material-mapping'
@@ -371,8 +360,8 @@ interface StockPreparationViewTab {
    * what it is instead of what the two older shapes are.
    */
   provisioning?: boolean
-  /** True only for the dashboard tab — it aggregates multiple existing GETs client-side (H1/H2), so
-   *  it has no single endpoint to badge (see the panel-endpoint paragraph's v-if). */
+  /** True for a tab that aggregates several existing reads client-side, so it has no single
+   *  endpoint to badge (see the panel-endpoint paragraph's v-if). */
   noEndpointBadge?: boolean
   /**
    * O2 / R-11. True for the six MVP tabs, whose every route is still PLATFORM-ADMIN gated and which
@@ -553,18 +542,8 @@ const views: StockPreparationViewTab[] = [
     endpoint: '',
     noEndpointBadge: true,
   },
-  // H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202 — PLANE A, values-free): the
-  // task-oriented entry for the legacy MVP surface.
-  {
-    key: 'dashboard',
-    legacyMvp: true,
-    zh: '仪表盘',
-    en: 'Dashboard',
-    zhDesc: '一眼看清:这个项目做到哪一步了、有几件事卡着、接下来该做什么。上面的数字都是从下面各页汇总来的。',
-    enDesc: 'At a glance: how far this project has got, how many things are stuck, and what to do next. Every number is summed up from the pages below.',
-    endpoint: '',
-    noEndpointBadge: true,
-  },
+  // 旧「仪表盘」(dashboard, H1/H2 #4202) was retired here on 2026-10-27 together with 旧「备料行」 and
+  // 旧「异常队列」 (owner: 「不用就去掉」) — it navigated the legacy pipeline those two tabs ended.
   {
     key: 'project-workspace',
     legacyMvp: true,
@@ -1120,14 +1099,6 @@ function handleProjectSelect(projectId: string): void {
   // Jump straight into view 2 already scoped — no re-select there.
   activeKey.value = 'bom-snapshot-diff'
   // Mirror the handle into the query (replace: selecting is not a history step).
-  void router.replace({ query: { ...shellQueryBase(), projectId } })
-}
-
-// H1: the dashboard's OWN picker updates the shared handle WITHOUT switching tabs — the operator
-// stays on the dashboard to read the stage overview for the project they just picked (unlike view 1's
-// row action above, which jumps straight to view 2).
-function handleDashboardProjectSelect(projectId: string): void {
-  selectedProjectId.value = projectId
   void router.replace({ query: { ...shellQueryBase(), projectId } })
 }
 
