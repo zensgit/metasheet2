@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+import { __resetRoleSeatNamesForTests, __setRoleSeatNamesFetchForTests } from '../src/approvals/roleSeatDisplay'
 import {
   createApp,
   defineComponent,
@@ -472,6 +473,7 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     markApprovalReadSpy.mockReset().mockResolvedValue({ ok: true })
     resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
     __resetResolvedDirectoryNamesForTests()
+    __resetRoleSeatNamesForTests()
     mockRoute.name = 'approval-list'
     mockRoute.query = {}
     setViewport('wide')
@@ -695,6 +697,65 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
     expect(text).toContain('钱八')
     expect(text).not.toContain('user_9')
+  })
+
+  // Customer issue 2026-10-27 6a-1: a role seat's id is a ROLE id. It used to go to the users-only
+  // resolver and read as 「成员 1」, as if it were one person.
+  it('a role seat renders 指定角色（N 个） (never 成员 N or the role id); the 成员 N ordinal numbers person seats only', async () => {
+    const roleFetch = vi.fn()
+    __setRoleSeatNamesFetchForTests(roleFetch)
+    const row = pendingRow('apv_1', '出差报销', {
+      assignments: [
+        { id: 'asg_r1', type: 'role', assigneeId: 'role_secret_555', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+        { id: 'asg_1', type: 'user', assigneeId: 'user_9', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+        { id: 'asg_r2', type: 'role', assigneeId: 'role_secret_556', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+      ],
+    })
+    getApprovalSpy.mockResolvedValue(row)
+    mockPendingApprovals.value = [row]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi(12)
+
+    const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
+    expect(text).toContain('待处理人：指定角色（2 个）、成员 1')
+    expect(text).not.toContain('成员 2')
+    expect(text).not.toContain('role_secret_555')
+    expect(text).not.toContain('role_secret_556')
+    const askedFor = resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])
+    expect(askedFor).toContain('user_9')
+    expect(askedFor).not.toContain('role_secret_555')
+    expect(askedFor).not.toContain('role_secret_556')
+    // Not a template admin: the authoring role directory is never asked.
+    expect(roleFetch).not.toHaveBeenCalled()
+  })
+
+  it('a template admin sees the role NAME in the pane, from the existing authoring role directory', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:act', 'approval-templates:manage']))
+    const roleFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ roles: [{ id: 'role_fin', name: '财务经理' }] }),
+    })
+    __setRoleSeatNamesFetchForTests(roleFetch)
+    const row = pendingRow('apv_1', '出差报销', {
+      assignments: [
+        { id: 'asg_r1', type: 'role', assigneeId: 'role_fin', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+      ],
+    })
+    getApprovalSpy.mockResolvedValue(row)
+    mockPendingApprovals.value = [row]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi(12)
+
+    const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
+    expect(roleFetch).toHaveBeenCalledTimes(1)
+    expect(roleFetch.mock.calls[0][0]).toBe('/api/approval-templates/directory/roles')
+    expect(text).toContain('待处理人：指定角色「财务经理」')
+    expect(text).not.toContain('role_fin')
   })
 
   // -------------------------------------------------------------------------
@@ -1466,6 +1527,7 @@ describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
     getApprovalSpy.mockReset()
     resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
     __resetResolvedDirectoryNamesForTests()
+    __resetRoleSeatNamesForTests()
     mockRoute.name = 'approval-list'
     mockRoute.query = {}
     setViewport('wide')

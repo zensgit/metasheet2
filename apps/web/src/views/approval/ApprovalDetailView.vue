@@ -1177,6 +1177,14 @@ import {
   isCancelRoundWorkflow,
 } from '../../approvals/cancelRound'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+import {
+  canViewRoleSeatNames,
+  ensureRoleSeatNamesLoaded,
+  groupCurrentSeats,
+  hasRoleSeat,
+  roleSeatGroupLabel,
+  userSeatIds,
+} from '../../approvals/roleSeatDisplay'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import { unknownUserLabel } from '../../approvals/components/approvalPickerLabels'
 import { useAuth } from '../../composables/useAuth'
@@ -1249,7 +1257,11 @@ const grammar = computed(() => memberActionDialogGrammar(isZh.value))
 // F4-S1: the add-sign dialog's placement / after-sign / aggregation copy for the current locale.
 const addSignCopy = computed(() => addSignPlacementCopy(isZh.value))
 const templateStore = useApprovalTemplateStore()
-const { canAct, permissions: approvalAccess } = useApprovalPermissions()
+const approvalPermissionsApi = useApprovalPermissions()
+const { canAct, permissions: approvalAccess } = approvalPermissionsApi
+// Customer issue 2026-10-27 6a-1: template admins may see a role seat's role NAME (roleSeatDisplay.ts).
+// Read defensively — several specs mock `useApprovalPermissions` with `canAct` only.
+const canSeeRoleSeatNames = computed(() => canViewRoleSeatNames(approvalPermissionsApi))
 const actionCommentInputRef = ref<{ focus: () => void } | null>(null)
 const MEMBER_ACTION_DIALOG_WIDTH = 'min(480px, calc(100vw - 32px))'
 const MEMBER_ACTION_FOCUSABLE_SELECTOR = [
@@ -1894,9 +1906,14 @@ interface CurrentHandlerEntry {
 // view, so a resolvable assignee now shows their real name instead of "审批人". Still values-free
 // on a miss (deactivated account / unresolved): the SAME generic placeholder as before, never the
 // raw id.
+//
+// Customer issue 2026-10-27 6a-1: only a `user` seat's id is a user id. Role seats never reach this
+// function (`currentHandlerEntries` groups them into one 「指定角色（N 个）」 line per node, see
+// roleSeatDisplay.ts); any other non-user seat keeps the generic placeholder and is never looked up.
 function assignmentDisplayLabel(assignment: ApprovalAssignmentDTO): string {
   const metaName = assignment.metadata.assigneeName
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  if (assignment.type !== 'user') return t.value.approverFallback
   const resolved = getResolvedUserName(assignment.assigneeId)
   if (resolved) return resolved
   return t.value.approverFallback
@@ -1927,11 +1944,33 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
       seatNamesWithheld: true,
     }]
   }
-  return active.map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
+  // Customer issue 2026-10-27 6a-1: a 「指定角色」 node holds ONE role seat per role (its id is the
+  // ROLE id). Those collapse into one line per node — the role count, or, for a template admin, the
+  // role name(s) — instead of each reading as a person called 「审批人」.
+  const showRoleNames = canSeeRoleSeatNames.value
+  return groupCurrentSeats(active).map((group) => (
+    group.kind === 'role'
+      ? { assignmentId: group.key, label: roleSeatGroupLabel(group.roleKeys, isZh.value, showRoleNames), wait }
+      : { assignmentId: group.assignment.id, label: assignmentDisplayLabel(group.assignment), wait }
+  ))
 })
 
+// Template admins only (see roleSeatDisplay.ts): load the role-name map once a current role seat is
+// in view. Never fires for an ordinary member, so it adds no request for them.
+watch(
+  () => canSeeRoleSeatNames.value
+    && approval.value?.status === 'pending'
+    && !isCancelRound.value
+    && hasRoleSeat((approval.value?.assignments ?? []).filter((a) => a.isActive)),
+  (needed) => {
+    if (needed) ensureRoleSeatNamesLoaded()
+  },
+  { immediate: true },
+)
+
 // member-display-identity (2026-08-19): kicks off the batch resolve for every member id this view
-// might need to display a name for — every `assignments` row's `assigneeId` (feeds
+// might need to display a name for — every USER `assignments` row's `assigneeId` (customer issue
+// 2026-10-27 6a-1: role / other seat ids are not user ids and are no longer sent; feeds
 // `assignmentDisplayLabel`/`reducibleAssignees` above/below) PLUS every history item's
 // `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below) PLUS (test report
 // 2026-10-08 T4cd) the actor id of every history row that stores only that id as its name (feeds
@@ -1943,7 +1982,7 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
 watch(
   () => {
     const ids: string[] = []
-    for (const a of approval.value?.assignments ?? []) ids.push(a.assigneeId)
+    ids.push(...userSeatIds(approval.value?.assignments))
     for (const item of store.history) {
       const cancelled = item.metadata?.aggregateCancelled
       if (Array.isArray(cancelled)) for (const id of cancelled) ids.push(String(id))

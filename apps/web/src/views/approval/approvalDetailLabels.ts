@@ -249,6 +249,8 @@ export const HISTORY_ACTION_ZH = {
   reduce_sign: '减签',
   cc: '抄送',
   handle: '办理',
+  // Customer issue 2026-10-27: a 催一下 writes a `remind` history row (routes/approvals.ts).
+  remind: '催办',
 }
 
 export const HISTORY_ACTION_EN: Record<keyof typeof HISTORY_ACTION_ZH, string> = {
@@ -264,6 +266,7 @@ export const HISTORY_ACTION_EN: Record<keyof typeof HISTORY_ACTION_ZH, string> =
   reduce_sign: 'Approver removed',
   cc: 'CC',
   handle: 'Handled',
+  remind: 'Reminded',
 }
 
 /** Approval modes (node aggregation) — keyed by `metadata.approvalMode`. */

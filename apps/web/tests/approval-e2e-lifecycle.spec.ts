@@ -11,6 +11,18 @@ import { computed, createApp, defineComponent, h, nextTick, ref, type App as Vue
 import { useLocale } from '../src/composables/useLocale'
 import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../src/approvals/addSignHonestyCopy'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+import type { ApprovalAssignmentDTO } from '../src/types/approval'
+import {
+  __resetRoleSeatNamesForTests,
+  __setRoleSeatNamesFetchForTests,
+  canViewRoleSeatNames,
+  ensureRoleSeatNamesLoaded,
+  groupCurrentSeats,
+  hasRoleSeat,
+  roleSeatGroupLabel,
+  roleSeatName,
+  userSeatIds,
+} from '../src/approvals/roleSeatDisplay'
 // Collect SFC modules before timed tests; keep cold imports out of mount helpers.
 import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
 import ApprovalNewView from '../src/views/approval/ApprovalNewView.vue'
@@ -580,6 +592,8 @@ describe('Approval E2E Lifecycle', () => {
     // (and its controllable mock) every test, or an earlier test's resolved name leaks forward.
     resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
     __resetResolvedDirectoryNamesForTests()
+    // Customer issue 2026-10-27 6a-1: the template-admin role-name cache is a module singleton too.
+    __resetRoleSeatNamesForTests()
 
     // Reset all reactive state
     mockActiveApproval.value = null
@@ -1698,8 +1712,19 @@ describe('Approval E2E Lifecycle', () => {
   describe('UX B2-08: current handler + upcoming nodes', () => {
     it('a pending instance renders 当前处理人 with a values-free label + 已等待', async () => {
       routeParams = { id: 'apv_pending_1' }
-      mockActiveApproval.value = mockPendingApproval()
+      // Customer issue 2026-10-27 6a-1: an explicit `user` seat, so this exercises the
+      // "user resolver miss" branch (the shared fixture's seat type is not `user`).
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'user', assigneeId: 'user_current', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: {},
+        }],
+      })
       await mountDetailView()
+      await flushUi(12)
+      // The user seat's id did go to the users-only resolver (which answers nothing here).
+      expect(resolveApprovalDirectoryUsersMock.mock.calls.flatMap((call) => call[0] as string[])).toContain('user_current')
 
       const section = container!.querySelector('[data-testid="approval-timeline-upcoming-section"]')
       expect(section).toBeTruthy()
@@ -1724,7 +1749,7 @@ describe('Approval E2E Lifecycle', () => {
       mockActiveApproval.value = mockPendingApproval({
         currentNodeKey: 'approval_1',
         assignments: [{
-          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          id: 'asgn_1', type: 'user', assigneeId: 'user_secret_777', sourceStep: 1,
           nodeKey: 'approval_1', isActive: true, metadata: {},
         }],
       })
@@ -1742,7 +1767,7 @@ describe('Approval E2E Lifecycle', () => {
       mockActiveApproval.value = mockPendingApproval({
         currentNodeKey: 'approval_1',
         assignments: [{
-          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          id: 'asgn_1', type: 'user', assigneeId: 'user_secret_777', sourceStep: 1,
           nodeKey: 'approval_1', isActive: true, metadata: { assigneeName: '王五' },
         }],
       })
@@ -1762,7 +1787,7 @@ describe('Approval E2E Lifecycle', () => {
       mockActiveApproval.value = mockPendingApproval({
         currentNodeKey: 'approval_1',
         assignments: [{
-          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          id: 'asgn_1', type: 'user', assigneeId: 'user_secret_777', sourceStep: 1,
           nodeKey: 'approval_1', isActive: true, metadata: {},
         }],
       })
@@ -1773,6 +1798,102 @@ describe('Approval E2E Lifecycle', () => {
       expect(item!.textContent).toContain('钱八')
       expect(item!.textContent).not.toContain('user_secret_777')
       expect(item!.textContent).not.toContain('审批人')
+    })
+
+    // Customer issue 2026-10-27 6a-1: a 「指定角色」 node writes ONE role seat whose id is the ROLE id.
+    // It used to go to the users-only resolver and read as a person called 「审批人」.
+    describe('customer issue 2026-10-27 6a-1: role seats', () => {
+      const roleSeat = (id: string, roleKey: string, nodeKey = 'approval_1') => ({
+        id, type: 'role', assigneeId: roleKey, sourceStep: 1, nodeKey, isActive: true, metadata: {},
+      })
+      const userSeat = (id: string, userKey: string, nodeKey = 'approval_1') => ({
+        id, type: 'user', assigneeId: userKey, sourceStep: 1, nodeKey, isActive: true, metadata: {},
+      })
+      const handlerTexts = () => Array.from(container!.querySelectorAll('[data-testid="approval-current-handler-item"]'))
+        .map((el) => el.textContent ?? '')
+      const resolverAskedFor = () => resolveApprovalDirectoryUsersMock.mock.calls.flatMap((call) => call[0] as string[])
+
+      it('a role seat renders 指定角色（1 个）, never 审批人 or the role id, and its id never reaches the user resolver', async () => {
+        mockPermissionState.value = { ...mockPermissionState.value, canManageTemplates: false }
+        const roleFetch = vi.fn()
+        __setRoleSeatNamesFetchForTests(roleFetch)
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [roleSeat('asgn_r1', 'role_secret_555')],
+        })
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(handlerTexts()).toEqual([expect.stringContaining('当前处理人：指定角色（1 个）')])
+        expect(handlerTexts()[0]).not.toContain('审批人')
+        expect(container!.innerHTML).not.toContain('role_secret_555')
+        expect(resolverAskedFor()).not.toContain('role_secret_555')
+        // An ordinary viewer never asks the template-admin role directory.
+        expect(roleFetch).not.toHaveBeenCalled()
+      })
+
+      it('role seats at one node collapse into one counted line; user seats keep one line each', async () => {
+        mockPermissionState.value = { ...mockPermissionState.value, canManageTemplates: false }
+        resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_seat_1', name: '孙七' }])
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [
+            roleSeat('asgn_r1', 'role_a'),
+            userSeat('asgn_u1', 'user_seat_1'),
+            roleSeat('asgn_r2', 'role_b'),
+          ],
+        })
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(handlerTexts()).toEqual([
+          expect.stringContaining('当前处理人：指定角色（2 个）'),
+          expect.stringContaining('当前处理人：孙七'),
+        ])
+        expect(resolverAskedFor()).toContain('user_seat_1')
+        expect(resolverAskedFor()).not.toContain('role_a')
+        expect(resolverAskedFor()).not.toContain('role_b')
+      })
+
+      it('a template admin sees the role NAME from the existing authoring role directory', async () => {
+        const roleFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ roles: [{ id: 'role_fin', name: '财务经理' }, { id: 'role_other', name: '其他角色' }] }),
+        })
+        __setRoleSeatNamesFetchForTests(roleFetch)
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [roleSeat('asgn_r1', 'role_fin')],
+        })
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(roleFetch).toHaveBeenCalledTimes(1)
+        expect(roleFetch.mock.calls[0][0]).toBe('/api/approval-templates/directory/roles')
+        expect(handlerTexts()).toEqual([expect.stringContaining('当前处理人：指定角色「财务经理」')])
+        expect(container!.innerHTML).not.toContain('role_fin')
+        // Only the seat's own role, never the rest of the directory.
+        expect(container!.textContent).not.toContain('其他角色')
+      })
+
+      it('a template admin whose role directory read is refused keeps the count', async () => {
+        const roleFetch = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({}) })
+        __setRoleSeatNamesFetchForTests(roleFetch)
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [roleSeat('asgn_r1', 'role_fin')],
+        })
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(handlerTexts()).toEqual([expect.stringContaining('当前处理人：指定角色（1 个）')])
+        expect(container!.innerHTML).not.toContain('role_fin')
+      })
     })
 
     it('a non-pending instance renders NO current/upcoming section', async () => {
@@ -1908,6 +2029,33 @@ describe('Approval E2E Lifecycle', () => {
       expect(avatar?.textContent?.trim()).toBe('王')
     })
 
+    // Customer issue 2026-10-27: a 催一下 writes a `remind` history row; it rendered as the raw verb.
+    it('remind history action renders 催办 (not raw remind)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      mockHistory.value = [
+        {
+          id: 'hist_remind_1',
+          action: 'remind',
+          actorId: 'user_1',
+          actorName: '张三',
+          comment: null,
+          fromStatus: 'pending',
+          toStatus: 'pending',
+          occurredAt: new Date().toISOString(),
+          metadata: {},
+        },
+      ] as never
+      await mountDetailView()
+
+      // Scoped to the timeline's action tags, so a 「已催办」 elsewhere on the page cannot satisfy it.
+      const actionTags = Array.from(
+        container!.querySelectorAll('.approval-detail__timeline-header [class*="el-tag--"]'),
+      ).map((tag) => tag.textContent?.trim())
+      expect(actionTags).toContain('催办')
+      expect(container!.textContent).not.toMatch(/\bremind\b/)
+    })
+
     it('after a successful approve, 下一条 → appears when another pending item exists and navigates to it', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
@@ -1952,6 +2100,178 @@ describe('Approval E2E Lifecycle', () => {
       await flushUi()
 
       expect(container!.querySelector('[data-testid="approval-next-pending"]')).toBeNull()
+    })
+  })
+})
+
+// =========================================================================
+// Customer issue 2026-10-27 6a-1 — unit coverage for src/approvals/roleSeatDisplay.ts, the role-seat
+// display helper shared by ApprovalDetailView (当前处理人) and ApprovalCenterDetailPane (待处理人).
+// Kept in this already-wired spec (rather than a new file) so it runs in both web lanes without new
+// token wiring. The mounted proofs are the 「6a-1: role seats」 cases above and in
+// approval-center-master-detail.spec.ts.
+// =========================================================================
+function roleSeatUnitSeat(id: string, type: string, assigneeId: string, nodeKey: string | null = 'approval_1'): ApprovalAssignmentDTO {
+  return { id, type, assigneeId, sourceStep: 1, nodeKey, isActive: true, metadata: {} }
+}
+
+async function roleSeatUnitFlush(cycles = 6): Promise<void> {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+
+function roleSeatUnitOkRoles(roles: unknown) {
+  return { ok: true, status: 200, json: async () => ({ roles }) } as unknown as Response
+}
+
+describe('roleSeatDisplay (customer issue 2026-10-27 6a-1)', () => {
+  beforeEach(() => {
+    __resetRoleSeatNamesForTests()
+  })
+
+  describe('groupCurrentSeats', () => {
+    it('keeps person seats one each and collapses role seats per node, in first-seen order', () => {
+      const groups = groupCurrentSeats([
+        roleSeatUnitSeat('a1', 'user', 'user_1'),
+        roleSeatUnitSeat('a2', 'role', 'role_a'),
+        roleSeatUnitSeat('a3', 'role', 'role_b'),
+        roleSeatUnitSeat('a4', 'source_queue', 'queue_1'),
+        roleSeatUnitSeat('a5', 'role', 'role_c', 'approval_2'),
+      ])
+      expect(groups.map((g) => g.kind)).toEqual(['person', 'role', 'person', 'role'])
+      expect(groups[1]).toMatchObject({ kind: 'role', nodeKey: 'approval_1', roleKeys: ['role_a', 'role_b'] })
+      expect(groups[3]).toMatchObject({ kind: 'role', nodeKey: 'approval_2', roleKeys: ['role_c'] })
+      expect(new Set(groups.map((g) => g.key)).size).toBe(groups.length)
+    })
+
+    it('returns nothing for no seats', () => {
+      expect(groupCurrentSeats([])).toEqual([])
+    })
+  })
+
+  describe('userSeatIds / hasRoleSeat', () => {
+    it('only user seat ids go to the users-only resolver', () => {
+      expect(userSeatIds([
+        roleSeatUnitSeat('a1', 'user', 'user_1'),
+        roleSeatUnitSeat('a2', 'role', 'role_a'),
+        roleSeatUnitSeat('a3', 'source_queue', 'queue_1'),
+        roleSeatUnitSeat('a4', 'user', 'user_2'),
+      ])).toEqual(['user_1', 'user_2'])
+      expect(userSeatIds(null)).toEqual([])
+    })
+
+    it('detects a role seat', () => {
+      expect(hasRoleSeat([roleSeatUnitSeat('a1', 'user', 'user_1')])).toBe(false)
+      expect(hasRoleSeat([roleSeatUnitSeat('a1', 'user', 'user_1'), roleSeatUnitSeat('a2', 'role', 'role_a')])).toBe(true)
+      expect(hasRoleSeat(undefined)).toBe(false)
+    })
+  })
+
+  describe('roleSeatGroupLabel', () => {
+    it('is the count, in both locales, when names are not shown', () => {
+      expect(roleSeatGroupLabel(['role_a'], true, false)).toBe('指定角色（1 个）')
+      expect(roleSeatGroupLabel(['role_a', 'role_b'], false, false)).toBe('Designated role (2)')
+    })
+
+    it('stays the count for a template admin until the names are loaded', () => {
+      expect(roleSeatGroupLabel(['role_a'], true, true)).toBe('指定角色（1 个）')
+    })
+
+    it('shows the names once loaded, and only when every role is named', async () => {
+      __setRoleSeatNamesFetchForTests(vi.fn().mockResolvedValue(roleSeatUnitOkRoles([
+        { id: 'role_a', name: ' 财务经理 ' },
+        { id: 'role_b', name: '出纳' },
+        { id: 'role_blank', name: '   ' },
+      ])))
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+
+      expect(roleSeatName('role_a')).toBe('财务经理')
+      expect(roleSeatGroupLabel(['role_a', 'role_b'], true, true)).toBe('指定角色「财务经理、出纳」')
+      expect(roleSeatGroupLabel(['role_a', 'role_b'], false, true)).toBe('Designated role: 财务经理, 出纳')
+      // A role missing from the directory (or with a blank name) keeps the whole line on the count.
+      expect(roleSeatGroupLabel(['role_a', 'role_missing'], true, true)).toBe('指定角色（2 个）')
+      expect(roleSeatGroupLabel(['role_blank'], true, true)).toBe('指定角色（1 个）')
+      // Not shown (an ordinary viewer): the count even though names are cached.
+      expect(roleSeatGroupLabel(['role_a'], true, false)).toBe('指定角色（1 个）')
+    })
+
+    it('never contains a role id', async () => {
+      __setRoleSeatNamesFetchForTests(vi.fn().mockResolvedValue(roleSeatUnitOkRoles([])))
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+      for (const label of [
+        roleSeatGroupLabel(['role_secret_1'], true, true),
+        roleSeatGroupLabel(['role_secret_1'], false, true),
+        roleSeatGroupLabel(['role_secret_1'], true, false),
+      ]) {
+        expect(label).not.toContain('role_secret_1')
+      }
+    })
+  })
+
+  describe('ensureRoleSeatNamesLoaded', () => {
+    it('reads the existing authoring role directory once per session', async () => {
+      const fetchFn = vi.fn().mockResolvedValue(roleSeatUnitOkRoles([{ id: 'role_a', name: '财务经理' }]))
+      __setRoleSeatNamesFetchForTests(fetchFn)
+      ensureRoleSeatNamesLoaded()
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+      ensureRoleSeatNamesLoaded()
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(fetchFn.mock.calls[0][0]).toBe('/api/approval-templates/directory/roles')
+      expect(fetchFn.mock.calls[0][1]).toMatchObject({ suppressUnauthorizedRedirect: true })
+    })
+
+    it('a 403 is terminal for the session (no retry, count kept)', async () => {
+      const fetchFn = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({}) })
+      __setRoleSeatNamesFetchForTests(fetchFn)
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(roleSeatName('role_a')).toBeNull()
+    })
+
+    it('a transient failure may be retried by the next trigger', async () => {
+      const fetchFn = vi.fn()
+        .mockRejectedValueOnce(new Error('network'))
+        .mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({}) })
+        .mockResolvedValueOnce(roleSeatUnitOkRoles([{ id: 'role_a', name: '财务经理' }]))
+      __setRoleSeatNamesFetchForTests(fetchFn)
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+      expect(roleSeatName('role_a')).toBeNull()
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+      expect(roleSeatName('role_a')).toBeNull()
+      ensureRoleSeatNamesLoaded()
+      await roleSeatUnitFlush()
+      expect(fetchFn).toHaveBeenCalledTimes(3)
+      expect(roleSeatName('role_a')).toBe('财务经理')
+    })
+
+    it('a reset drops a load still in flight', async () => {
+      let resolveFetch!: (value: Response) => void
+      __setRoleSeatNamesFetchForTests(vi.fn().mockReturnValue(new Promise<Response>((resolve) => { resolveFetch = resolve })))
+      ensureRoleSeatNamesLoaded()
+      __resetRoleSeatNamesForTests()
+      resolveFetch(roleSeatUnitOkRoles([{ id: 'role_a', name: '财务经理' }]))
+      await roleSeatUnitFlush()
+      expect(roleSeatName('role_a')).toBeNull()
+    })
+  })
+
+  describe('canViewRoleSeatNames', () => {
+    it('is true only for the template-admin capability, and tolerates a permissions object without it', () => {
+      expect(canViewRoleSeatNames({ canManageTemplates: { value: true } })).toBe(true)
+      expect(canViewRoleSeatNames({ canManageTemplates: { value: false } })).toBe(false)
+      expect(canViewRoleSeatNames({})).toBe(false)
+      expect(canViewRoleSeatNames(null)).toBe(false)
+      expect(canViewRoleSeatNames(undefined)).toBe(false)
     })
   })
 })
