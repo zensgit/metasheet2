@@ -622,6 +622,94 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Ask the platform admin.',
   }),
   /**
+   * 备料分批拉取第一期 step 4 PR-7b (PR-7 review: generic copy remained for step-4-adjacent codes). Each of these
+   * reaches a page as a typed answer (a 4xx, or a 500 / 501 with a code-shaped code passes the route's typed
+   * check), so each gets its own two lines instead of the generic sentence. The 500-class ones are defects or
+   * unwired services: nothing was written, and the code goes to the platform admin.
+   */
+  STOCK_PREP_PROJECT_WRITE_GUARD_SCOPE_MISMATCH: Object.freeze({
+    zh: '写入锁没有拿到要保护的表(系统内部问题),这一步没有继续,什么都没有写。',
+    en: 'The write lock was not given the sheet it protects (an internal problem), so this step stopped and nothing was written.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREP_CONTINUATION_INPUT_INVALID: Object.freeze({
+    zh: '分批拉取的计算输入不完整(系统内部问题),这次没有继续,什么都没有写。',
+    en: 'The batch-refresh computation got incomplete input (an internal problem), so it stopped and nothing was written.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREP_CONTINUATION_POSTCONDITION_VIOLATED: Object.freeze({
+    zh: '分批拉取的计划自检没有通过:计划会改动受沿用关系保护或正在挂起的行,所以整次被拒绝,什么都没有写。',
+    en: 'The batch-refresh plan failed its self-check: it would have changed rows a relationship protects or a hold suspends, so the whole run was refused and nothing was written.',
+    zhNext: '请把下面的代码交给平台管理员;不是重试能解决的。',
+    enNext: 'Give the code below to the platform admin; retrying does not help.',
+  }),
+  STOCK_PREP_SHEET_DIGEST_RECORD_REF_MISSING: Object.freeze({
+    zh: '备料表里有行缺少记录编号,没法核对整张表(系统内部问题);这一步没有继续。',
+    en: 'A row of the stock-prep sheet has no record reference, so the whole sheet cannot be checked (an internal problem); this step stopped.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREP_PILOT_STATE_MOVED: Object.freeze({
+    zh: '启用试点的同时,这个项目的登记刚好被改动了;这次没有启用,什么都没有改动。',
+    en: 'This project’s registration changed while the pilot was being enabled; it was not enabled and nothing was changed.',
+    zhNext: '刷新页面重新读取这个项目,确认无误后再启用一次。',
+    enNext: 'Refresh the page to read the project again, then enable it once more if it is still right.',
+  }),
+  LARGE_BOM_APPLY_JOB_SCAN_INVALID: Object.freeze({
+    zh: '检查后台大 BOM 写入任务时没有拿到要检查的表(系统内部问题),这一步没有继续。',
+    en: 'The check for background large-BOM write jobs was not given the sheet to check (an internal problem), so this step stopped.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  LARGE_BOM_JOB_STORE_UNAVAILABLE: Object.freeze({
+    zh: '后台大 BOM 任务的存储没有接通,这一步没有继续。',
+    en: 'The storage for background large-BOM jobs is not set up, so this step stopped.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  LARGE_BOM_PLAN_GOVERNANCE_VERDICT_INVALID: Object.freeze({
+    zh: '大 BOM 规划没有拿到有效的分批拉取检查结果(系统内部问题),什么都没有规划。',
+    en: 'The large-BOM plan was not given a valid batch-refresh check result (an internal problem), so nothing was planned.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY: Object.freeze({
+    zh: '这批物料重新试算后还不能存档(还有冲突行,或试算结果不能应用),这次没有存档。',
+    en: 'This batch cannot be archived after its preview (conflict rows remain, or the preview cannot be applied), so nothing was archived.',
+    zhNext: '先处理确认队列里的冲突,重新同步一次后再存档;一直这样请把代码交给平台管理员。',
+    enNext: 'Work through the conflicts in the confirmation queue, sync again, then archive; if it keeps happening, give the code to the platform admin.',
+  }),
+  /**
+   * The project-sheet registry's remaining refusals (projectTarget.ts STOCK_PREP_PROJECT_TARGET_ERROR_CODES lists them,
+   * so StockPreparationProjectTarget.spec.ts PT-CODES pins each one's two lines).
+   */
+  STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID: Object.freeze({
+    zh: '项目号不是一个有效的项目号(只能是普通的项目编号),什么都没有改动。',
+    en: 'The project number is not a valid plain project number, so nothing was changed.',
+    zhNext: '检查项目号后再试一次。',
+    enNext: 'Check the project number and try again.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID: Object.freeze({
+    zh: '项目备料表登记缺少必要的范围信息(系统内部问题),什么都没有改动。',
+    en: 'The project-sheet registration is missing required scope information (an internal problem), so nothing was changed.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE: Object.freeze({
+    zh: '项目备料表登记服务没有接通,这里不能创建、读取或存档项目备料表。',
+    en: 'The project-sheet registry is not set up, so project sheets cannot be created, read or archived here.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED: Object.freeze({
+    zh: '要检查的不是一张已登记的项目备料表,不能读它的 PLM 列锁定(系统内部问题);什么都没有改动。',
+    en: 'The sheet asked about is not a registered project stock-prep sheet, so its PLM column lock cannot be read (an internal problem); nothing was changed.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  /**
    * 备料分批拉取第一期 step 3 PR B — the pilot marker's own codes (plugin stock-preparation-pilot-gate.cjs). The
    * large-lane refusal reads 「试点项目不走大 BOM 通道」 on every large route; the over-cap refusal on the dry run;
    * NOT_READY lists the failing check ids beside the sentence (the board renders them); UNREADABLE fails closed.
@@ -1355,8 +1443,11 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
   'STOCK_PREP_EXPORT_BLOCKED/lease_in_flight': Object.freeze({
     zh: '一次拉取正在写这张表,或一次中断的拉取还占着写入;这时不导出,免得交出半新半旧的数据。什么都没有导出。',
     en: 'A pull is writing this sheet, or an interrupted pull still holds its write turn; nothing is exported now, so no half-old, half-new data is delivered.',
-    zhNext: '稍后再导出;如果一直如此,请拉取人员重新试算一次——试算会清掉中断留下的占用(普通操作员的试算清不掉)。',
-    enNext: 'Export again shortly; if it persists, ask a puller to preview once — a puller’s preview clears what an interrupted pull left (an operator’s cannot).',
+    // PR-7b (PR-7 review N9): only an APPLICABLE preview clears it — the generation bump that clears an abandoned
+    // lease runs only when the preview is about to issue a result that can be applied (http-routes.cjs
+    // `projectWriteGenerationBinder`); a suspended or refused preview clears nothing.
+    zhNext: '稍后再导出;如果一直如此,请拉取人员重新试算一次,而且要是一次能应用的试算(结果可以应用,没有被挂起或拒绝)——只有这样的试算才会清掉中断留下的占用(普通操作员的试算清不掉)。',
+    enNext: 'Export again shortly; if it persists, ask a puller to preview once, and it must be a preview that can be applied (not suspended or refused) — only such a preview clears what an interrupted pull left (an operator’s cannot).',
   }),
   'STOCK_PREP_EXPORT_BLOCKED/state': Object.freeze({
     zh: '本项目的分批拉取还有未完成的状态(待确认、待执行、待恢复或待复核),正式导出已暂停;什么都没有导出。',
@@ -1587,6 +1678,13 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
     zhNext: '看页面上标出的原因;需要时联系负责人。',
     enNext: 'See the reason shown beside it; ask the owner if needed.',
   }),
+  // PR-7b: the archive refused because the project's batch refresh is suspended (table-actions `refresh_suspended`).
+  'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY/refresh_suspended': Object.freeze({
+    zh: '本项目的分批拉取正挂起着(有待拉取人员确认的项),这次没有存档。',
+    en: 'This project’s batch refresh is suspended (items await the puller’s confirmation), so nothing was archived.',
+    zhNext: '请拉取人员先处理「拉取待确认」,重新试算后再存档。',
+    enNext: 'Ask a puller to work through “Pull Holds” first, preview again, then archive.',
+  }),
   'STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED/not_confirmable': Object.freeze({
     zh: '这一项现在不能确认(证据不全或结构不对应);什么都没有改动。',
     en: 'This item cannot be confirmed right now (incomplete evidence or a structure that does not match); nothing was changed.',
@@ -1798,8 +1896,10 @@ export const STOCK_PREP_REFRESH_RENDERING_PLAIN: Record<string, StockPrepPlainEn
 
 /** O-11 (design §23.3): the asymmetry of a governed project that left the pilot. */
 export const STOCK_PREP_REFRESH_NON_PILOT_ASYMMETRY: StockPrepPlainText = Object.freeze({
-  zh: '本项目已退出试点但仍受保护:图号、名称、材质、版本的变化仍会挂起整次拉取等确认;数量和规格等其他字段的变化按普通刷新直接写入,不再挂起。',
-  en: 'This project left the pilot but stays protected: a change of drawing number, name, material or version still suspends the whole pull for confirmation, while changes of quantity, spec and other fields are written by the normal refresh without suspending.',
+  // PR-7b (PR-7 review N7): a structure / parent change still suspends too — the governed planner raises a
+  // `structure_change` hold for a lineage change whether or not the project is a pilot (D-4).
+  zh: '本项目已退出试点但仍受保护:图号、名称、材质、版本的变化,以及结构或上级(父项)的变化,仍会挂起整次拉取等确认;数量和规格等其他字段的变化按普通刷新直接写入,不再挂起。',
+  en: 'This project left the pilot but stays protected: a change of drawing number, name, material or version, and a change of structure or parent, still suspends the whole pull for confirmation, while changes of quantity, spec and other fields are written by the normal refresh without suspending.',
 })
 
 /** Design §6.2's stated cost of a confirm: the legacy confirmation ledger is re-keyed. */
@@ -1827,6 +1927,87 @@ export const STOCK_PREP_REFRESH_ITEM_UPDATED: StockPrepPlainText = Object.freeze
   zh: '这一项已经更新(新的计算换了记录),请重新阅读后再处理。',
   en: 'This item has been updated (a newer computation replaced the record); read it again, then decide.',
 })
+
+// ---------------------------------------------------------------------------
+// 备料分批拉取第一期 step 4 PR-7b (PR-7 review N2 / N8; plan W7) — every server token the 「拉取待确认」 page shows,
+// in words. The page used to print the raw token (「其他待确认项(candidate_ambiguous)」, 「历史: history_unknown」,
+// 「沿用关系: needs_reconfirmation」, the comparison column's `equal`, a bare `notConfirmableReason`). Each map
+// below covers one CLOSED server vocabulary; StockPreparationRefreshState.spec.ts RS-WORDS reads the plugin's live
+// lists, so a new token without words reds CI (the RS-COPY pattern). A token outside the map (an older or newer
+// server) reads as 「未识别」 with the token shown apart from the sentence, never inside it.
+// ---------------------------------------------------------------------------
+
+/** Hold kinds (plugin stock-preparation-continuation-pairing.cjs `HOLD_KINDS`). */
+export const STOCK_PREP_REFRESH_HOLD_KIND_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  continuation_candidate: Object.freeze({ zh: '疑似同一份需求换了位置(待确认沿用)', en: 'Possibly the same demand at a new position (confirm the relationship)' }),
+  candidate_ambiguous: Object.freeze({ zh: '疑似换了位置,但能配对的位置不止一处', en: 'Possibly moved, but more than one position could pair' }),
+  candidate_target_occupied: Object.freeze({ zh: '疑似换了位置,但新位置上已经有记录', en: 'Possibly moved, but the new position already holds a record' }),
+  candidate_old_duplicate: Object.freeze({ zh: '疑似换了位置,但原位置上有重复的记录', en: 'Possibly moved, but the old position holds duplicate records' }),
+  candidate_keyless_rows: Object.freeze({ zh: '疑似换了位置,但有行缺少识别键', en: 'Possibly moved, but some rows have no identifying key' }),
+  candidate_structure_differs: Object.freeze({ zh: '疑似换了位置,但新旧两处的下级结构对不上', en: 'Possibly moved, but the structure below the old and new positions does not match' }),
+  candidate_incomplete_evidence: Object.freeze({ zh: '疑似换了位置,但需求依据不完整', en: 'Possibly moved, but the demand evidence is incomplete' }),
+  candidate_content_differs: Object.freeze({ zh: '疑似换了位置,但新旧两处的内容不一致', en: 'Possibly moved, but the old and new positions differ in content' }),
+  candidate_shape_unresolved: Object.freeze({ zh: '疑似换了位置,但这种 BOM 形态还没有客户规则', en: 'Possibly moved, but this BOM shape has no customer rule yet' }),
+  dropped_order_head_unresolved: Object.freeze({ zh: '一个下了单的上级件不在这次的 BOM 根件里了,去向待定', en: 'An ordered top-level part is no longer a root of this BOM; where it went is unresolved' }),
+  relationship_reconfirm: Object.freeze({ zh: '已有沿用关系需要重新确认', en: 'An existing relationship needs re-confirmation' }),
+  relationship_content_change: Object.freeze({ zh: '已有沿用关系的机器列内容有变化(待复核)', en: 'A machine column of an existing relationship changed (awaiting review)' }),
+  content_change: Object.freeze({ zh: '机器列内容有变化(待复核)', en: 'A machine column changed (awaiting review)' }),
+  structure_change: Object.freeze({ zh: '结构或上级(父项)有变化(待复核)', en: 'The structure or the parent changed (awaiting review)' }),
+})
+
+/** Why a hold has no confirm (plugin `NOT_CONFIRMABLE_REASONS`). Read after 「这一项现在不能确认:」. */
+export const STOCK_PREP_REFRESH_NOT_CONFIRMABLE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  specialist_repair: Object.freeze({ zh: '需要专项修复,请联系负责人按运行手册处理', en: 'it needs specialist repair; ask the owner to follow the runbook' }),
+  ambiguous_pairing: Object.freeze({ zh: '能配对的位置不止一处,系统不能替您选', en: 'more than one position could pair, and the system cannot choose for you' }),
+  keyless_rows_present: Object.freeze({ zh: '有行缺少识别键,没法逐行对照', en: 'some rows have no identifying key, so they cannot be compared row by row' }),
+  customer_rule_pending: Object.freeze({ zh: '这种情况还没有客户确认过的处理规则', en: 'there is no customer-approved rule for this case yet' }),
+  phase_2: Object.freeze({ zh: '第一期不处理这类结构变化,留到第二期', en: 'phase 1 does not handle this kind of structural change; it waits for phase 2' }),
+  evidence_incomplete: Object.freeze({ zh: '需求依据不完整', en: 'the demand evidence is incomplete' }),
+  needs_step5: Object.freeze({ zh: '要等「变更复核」上线后才能处理', en: 'it waits for the change review, which is not available yet' }),
+  reconfirm_not_admissible: Object.freeze({ zh: '这种变化第一期不能重新确认', en: 'phase 1 cannot re-confirm this kind of change' }),
+})
+
+/** BOM shapes a candidate could not be read as (plugin `SHAPE_TOKENS`). */
+export const STOCK_PREP_REFRESH_SHAPE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  old_root_still_ordered: Object.freeze({ zh: '原来的上级件仍在订单需求里', en: 'the old top-level part is still ordered' }),
+  sheet_metal_dual: Object.freeze({ zh: '钣金件的双重形态', en: 'a dual sheet-metal shape' }),
+  no_dash_hierarchy: Object.freeze({ zh: '图号没有横线层级', en: 'drawing numbers without a dash hierarchy' }),
+  root_selection_disabled: Object.freeze({ zh: '根件筛选没有启用', en: 'root selection is turned off' }),
+  parent_before_child: Object.freeze({ zh: '上级件排在下级件前面', en: 'a parent listed before its child' }),
+  dropped_other_rule: Object.freeze({ zh: '原来的根件被其他筛选规则去掉了', en: 'the old root was dropped by another selection rule' }),
+})
+
+/** Where a demand's history comes from (plugin store `EVIDENCE_HISTORY_STATUSES`). */
+export const STOCK_PREP_REFRESH_HISTORY_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  history_unknown: Object.freeze({ zh: '无法查证', en: 'cannot be verified' }),
+  relationship_snapshot: Object.freeze({ zh: '按沿用关系建立时的记录', en: 'as recorded when the relationship was made' }),
+  demand_evidence_store: Object.freeze({ zh: '按需求依据记录', en: 'from the demand evidence record' }),
+})
+
+/** A relationship's status (plugin store `CONTINUATION_ROW_STATUSES`). */
+export const STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  active: Object.freeze({ zh: '有效', en: 'active' }),
+  needs_reconfirmation: Object.freeze({ zh: '待重新确认', en: 'needs re-confirmation' }),
+  ended: Object.freeze({ zh: '已结束', en: 'ended' }),
+})
+
+/** One compared field's result (plugin pairing `compareSevenItems`; the spec scans its literals). */
+export const STOCK_PREP_REFRESH_COMPARISON_STATUS_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  equal: Object.freeze({ zh: '一致', en: 'same' }),
+  differs: Object.freeze({ zh: '不同', en: 'differs' }),
+  incomplete: Object.freeze({ zh: '缺数据,没法比较', en: 'missing data, not compared' }),
+  not_compared_spec_undeclared: Object.freeze({ zh: '规格列没有声明,不比较', en: 'spec column not declared, not compared' }),
+  excluded_root_order_quantity: Object.freeze({ zh: '根件的订单数量,不参与比较', en: 'the root’s order quantity, not compared' }),
+})
+
+/** A token outside its map: words for "not recognised"; the caller shows the token APART from the sentence. */
+export const STOCK_PREP_REFRESH_TOKEN_UNKNOWN: StockPrepPlainText = Object.freeze({ zh: '未识别', en: 'not recognised' })
+
+/** The words for `token` in `map`, or null when the map does not know it (the caller then says 「未识别」). */
+export function stockPrepRefreshTokenPlain(map: Record<string, StockPrepPlainText>, token: string | null | undefined): StockPrepPlainText | null {
+  if (typeof token !== 'string' || token.length === 0) return null
+  return Object.prototype.hasOwnProperty.call(map, token) ? map[token] : null
+}
 
 // ---------------------------------------------------------------------------
 // Confirmation-queue conflict types — 什么情况 (2026-09-10 field report).

@@ -863,13 +863,10 @@ export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.free
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([
-      'dashboard',
       'project-workspace',
       'bom-snapshot-diff',
       'material-mapping',
       'unit-conversion',
-      'prep-line',
-      'exception-queue',
     ]),
   }),
   Object.freeze({

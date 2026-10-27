@@ -12,8 +12,9 @@
 // All six are the PULL tier (`stock-prep:pull`; the ladder admits `stock-prep:admin` and a platform admin) and every
 // body / query is CLOSED-ALLOW-LISTED server-side (http-routes.cjs `VALID_STOCK_PREPARATION_REFRESH_*`): an extra key is
 // 400. So this module sends EXACTLY those keys — `tenantId` only when non-blank and NEVER `workspaceId` (the board's
-// `buildQuerySuffix({ tenantId, workspaceId })` would 400 here), and every write carries `confirmProjectNo` = the
-// opened project (the route compares it with the path). StockPreparationRefreshQueue.spec.ts (RQ-BODY) reads the
+// `buildQuerySuffix({ tenantId, workspaceId })` would 400 here), and every write carries `confirmProjectNo` (the route
+// compares it with the path): the number the puller TYPED for confirm / re-confirm / end (PR-7b, review N3), the
+// opened project for 「暂不处理」 (R-62 ⑧). StockPreparationRefreshQueue.spec.ts (RQ-BODY) reads the
 // server's allow-lists out of the plugin source, so a server change reds there.
 //
 // VALUES. The hold page, the evidence and the relationship detail are VALUE-BEARING by design (the pull tier, audited
