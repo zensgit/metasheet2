@@ -35,3 +35,47 @@ Receipts: frozen-attribution-diagnostic-main-audit.json, restore-unit-before-sta
 Direct rows through prepare/commit and bounded overtime only; not all import transports, correction target semantics, unbounded minute provenance, general missing/mixed/shadow/nonOT/reversal recovery, financial policy universe, all work-date fallback cases, full five-entrypoint EP01, real authentication/DingTalk delivery or UAT. Original-freeze hash and sibling malformed-input branches remain existing guards; the new tamper unit targets identity corruption, not every guard branch.
 
 All PRs Draft/HOLD. No Ready/merge/deploy/R71/tag/release/config/provider writes. Stream/lifecycle/externalwrites OFF. Real UAT/50004 excluded. Historical08 PUT inconclusive. No R76/R77 inclusion or enablement claim.
+
+
+## Shared outbox backlog isolation — CI follow-up
+
+The ae291b6 required backend job122415974501 failed only existing StageE leg9k:
+two own run-level deliveries were expected, zero observed. The original test and
+dispatcher are byte-identical to pinned main2e3aed2. The default dispatcher claims
+up to100 globally pending rows ordered by creation/id, so a single batch does not
+guarantee this test's newer two rows. The actual historical CI backlog contents
+were not captured; this is not a claimed natural-incident root cause.
+
+Controlled isolated PostgreSQL reproduction seeds101 legal older foreign pending
+events using the existing native seed shape. Original leg9k gives1 matching
+zero-vs-two failure/31filtered. The fixture-only repair holds currently visible
+foreign pending rows on a separate transaction while both original dispatcher
+calls and all original assertions execute, then rolls back/releases in finally.
+Production dispatcher, default100 batch, retry behavior, original expectations,
+hooks and budgets remain unchanged. Foreign rows are not deleted or updated.
+
+With the same101-row controlled backlog, the repaired leg passes1/31filtered,
+and all101 controlled foreign rows remain pending afterward. This is one unique
+case, not a whole32 local run or concurrency/parallel-suite proof. Both owned
+clusters stop and data is retained; existing452 migration ledger is reused.
+Removing this isolation wrapper reconstructs the exact original matching-red
+test block; no additional unchanged green cases are repeated.
+
+Same-path/config explicit ESLint retains8 existing diagnostics and introduces
+zero. Independent bounded source review has no confirmed introducedP1/P2.
+Limits: the lock covers visible rows, can briefly suppress foreign consumers,
+and does not isolate future inserts or prove arbitrary-backlog performance or
+abnormal-termination cleanup. This is synthetic test isolation, not a production
+exactly-once claim or the historical08PUT cause. Runtime/permissions/policies,
+dependencies/schema/workflows/config/flags are unchanged.
+
+Receipts: ci-122415974501-failed-receipt.json,
+ci-dispatch-backlog-reproduction-validation-state.json,
+ci-dispatch-backlog-fixed-validation-state.json,
+ci-dispatch-isolation-original-block-preservation.json,
+ci-dispatch-isolation-independent-review.json,
+ci-dispatch-isolation-lint-state.json.
+All new-head required CI must execute fresh; require whole StageE32 and original
+native34/timezone75/unit3 targets in actual logs. Draft/HOLD; no merge, deploy,
+R71 or external-write enablement. Full EP01 and original owner/manual/live gates
+remain open.
