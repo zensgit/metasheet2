@@ -110,6 +110,7 @@ node __tests__/stock-preparation-refresh-egress.test.cjs
 node __tests__/stock-preparation-refresh-scan.test.cjs
 node __tests__/stock-preparation-refresh-decisions.test.cjs
 node __tests__/stock-preparation-refresh-decision-routes.test.cjs
+node __tests__/stock-preparation-change-plan-routes.test.cjs
 node __tests__/stock-preparation-governed-sheet-probe.test.cjs
 node __tests__/metasheet-multitable-governed-sheet.test.cjs
 node __tests__/erp-feedback-governed-sheet.test.cjs

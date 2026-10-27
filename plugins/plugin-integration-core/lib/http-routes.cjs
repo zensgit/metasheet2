@@ -286,6 +286,14 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/confirm', 'stockPreparationRefreshContinuationConfirm'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id', 'stockPreparationRefreshContinuationGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end', 'stockPreparationRefreshContinuationEnd'],
+  // Batch-refresh step 5 PR-8 (design §10.3, §13; register R-63) — the CHANGE PLAN, PULL tier like the six above:
+  //   GET  refresh/change-plans/current        the proposal the open content holds make + the pending plan (audited
+  //                                            private read; a written plan's current diff is recorded on a receipt)
+  //   POST refresh/change-plans/confirm        the whole open content-class hold set as ONE plan (in-transaction bump)
+  //   POST refresh/change-reviews/complete     the review of the written plan, bound to the content the sheet holds
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current', 'stockPreparationRefreshChangePlanCurrent'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm', 'stockPreparationRefreshChangePlanConfirm'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete', 'stockPreparationRefreshChangeReviewComplete'],
   ['POST', '/api/integration/stock-preparation/project-overview/refresh', 'stockPreparationProjectOverviewRefresh'],
   ['POST', '/api/integration/stock-preparation/project-overview/ensure', 'stockPreparationProjectOverviewEnsure'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
@@ -2291,6 +2299,9 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationRefreshContinuationConfirm',
   'stockPreparationRefreshContinuationGet',
   'stockPreparationRefreshContinuationEnd',
+  'stockPreparationRefreshChangePlanCurrent',
+  'stockPreparationRefreshChangePlanConfirm',
+  'stockPreparationRefreshChangeReviewComplete',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -2888,6 +2899,12 @@ const VALID_STOCK_PREPARATION_REFRESH_CONFIRM_REQUEST_KEYS = new Set([
 ])
 const VALID_STOCK_PREPARATION_REFRESH_KEEP_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'holdFingerprint'])
 const VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'revision', 'outcome', 'note', 'factsHoldId', 'factsHoldFingerprint'])
+// Step 5 PR-8: the change-plan page's query is paging + the receipt id; the confirm binds the hold set, the plan
+// fingerprint and the source digest the page showed (+ the combined candidates); the review binds the plan id, the
+// content digest the page showed, a conclusion and optional private notes. Nothing else selects anything.
+const VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_QUERY_KEYS = new Set(['tenantId', 'recordCursor', 'recordLimit', 'receipt'])
+const VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_CONFIRM_KEYS = new Set(['tenantId', 'confirmProjectNo', 'holdIds', 'holdSetFingerprint', 'planFingerprint', 'sourceContentDigest', 'readReceipt', 'candidates'])
+const VALID_STOCK_PREPARATION_REFRESH_CHANGE_REVIEW_KEYS = new Set(['tenantId', 'confirmProjectNo', 'changePlanId', 'contentDigest', 'conclusion', 'notes', 'readReceipt'])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
 const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -4726,12 +4743,13 @@ function requireStockPreparationAudit() {
   // in-transaction bump and an audit store that appends inside a transaction — each refused 501 by name.
   function requireStockPreparationContinuationDecisions() {
     const { governance, store } = requireStockPreparationRefreshServices()
-    for (const method of ['confirmContinuation', 'reconfirmContinuation', 'endContinuation', 'readContinuation', 'readHold']) {
+    for (const method of ['confirmContinuation', 'reconfirmContinuation', 'endContinuation', 'readContinuation', 'readHold', 'readChangePlan', 'confirmChangePlan', 'completeChangeReview']) {
       if (typeof store[method] !== 'function') {
         throw new HttpRouteError(501, 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', 'the continuation store on this deployment cannot decide; nothing is confirmed or ended without it', { reason: 'decision_store' })
       }
     }
     const lock = requireStockPreparationProjectWriteLock()
+    // (PR-8: the review's `assertNoLiveWriter` is already required by requireStockPreparationProjectWriteLock.)
     if (typeof lock.bumpGenerationWithin !== 'function') {
       throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the sheet write lock offers no in-transaction bump; nothing is confirmed or ended without it', { reason: 'bump_within' })
     }
@@ -4777,6 +4795,17 @@ function requireStockPreparationAudit() {
     }))
     await assertResolvedProjectTargetTenancy(action, scope.tenantId)
     const consult = await refreshGovernanceFor(scope.tenantId).consult({ projectNo, sheetId: action.target.sheetId })
+    // Step 5 PR-8 (correction C9): the change-plan page and the review READ THE MAIN SHEET, so the sheet must be proven
+    // the caller's own before a single row is read — the table-action wall, UNCONDITIONALLY (the export's own posture;
+    // `assertResolvedProjectTargetTenancy` above walls only an overlaid target). Lazy: only those two reads call it.
+    const readSheetRows = async () => {
+      await assertTableActionTargetBelongsToTenant({
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        target: action.target,
+      })
+      return tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo)
+    }
     return Object.freeze({
       scope: Object.freeze({ tenantId: scope.tenantId, sheetId: action.target.sheetId, projectNo }),
       actorId: scope.actorId,
@@ -4787,6 +4816,7 @@ function requireStockPreparationAudit() {
       projectWriteLock: services.lock,
       audit,
       receipts: stockPreparationReadReceipts(),
+      readSheetRows,
     })
   }
   // THE handle a lane hands `computeDryRun` (built by the lane module, so a direct lib test drives the same
@@ -4803,6 +4833,23 @@ function requireStockPreparationAudit() {
       projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
       defaultObjectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
       extFieldMapping: stockPreparationExtFieldMapping,
+      // Step 5 PR-8 (refutation m2; C08 「每一步的状态、导出结果与审计可见」): a computation that invalidates a confirmed
+      // change plan appends ONE values-free `exception_resolve` / `change_plan_invalidated` row ON ITS OWN reconcile
+      // transaction (a system event: no actor). Resolved lazily — a deployment without the audit store refuses only
+      // that invalidation (501 by name), never an ordinary computation; a missing vocabulary fails the insert (503).
+      auditWithin: (trx, event) => requireStockPreparationAudit().appendWithin(trx, {
+        tenantId,
+        action: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction,
+        actor: null,
+        subjectId: event.changePlanId,
+        mode: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.modes.changePlanInvalidated,
+        detail: {
+          operation: event.operation,
+          reason: event.reason,
+          lane: event.lane,
+          recordCount: Number.isInteger(event.recordCount) ? event.recordCount : 0,
+        },
+      }),
     })
   }
   // The large lane refuses every governed project (design §7.1 rows 7-11): governed => 409
@@ -5244,6 +5291,8 @@ function requireStockPreparationAudit() {
   function previewStampCode(status) {
     if (status === 'suspended') return { code: 'STOCK_PREP_PULL_SUSPENDED' }
     if (status === 'recovery_pending') return { code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' }
+    // Step 5 PR-8: a written change awaits its review (the apply would answer REVIEW_PENDING).
+    if (status === 'review_pending') return { code: 'STOCK_PREP_REFRESH_REVIEW_PENDING' }
     return {}
   }
   const tableActions = createStockPreparationTableActionRegistry({
@@ -13308,6 +13357,25 @@ function requireStockPreparationAudit() {
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
       const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
       return sendOk(res, await stockPreparationRefreshDecisions.end(ctx, firstString(requestParams(req).id), input))
+    },
+    // Batch-refresh step 5 PR-8 (design §10.3, §13): the change plan — the same context, ONE lib call each.
+    async stockPreparationRefreshChangePlanCurrent(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestQuery(req), VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_QUERY_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'read', confirmTyped: false, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.readChangePlanCurrent(ctx, input))
+    },
+    async stockPreparationRefreshChangePlanConfirm(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_CONFIRM_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.confirmChangePlan(ctx, input), 201)
+    },
+    async stockPreparationRefreshChangeReviewComplete(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_CHANGE_REVIEW_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.completeChangeReview(ctx, input))
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the

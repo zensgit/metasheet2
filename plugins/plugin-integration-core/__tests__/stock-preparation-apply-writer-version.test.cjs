@@ -227,6 +227,52 @@ test('EV-2 a person\'s edit since the recompute => one re-read, one retry with t
   assert.equal(scalarQueriesOf(host).length >= 2, true, 'one fresh per-key read for the retry')
 })
 
+test('EV-2b the same under an EXPLICIT fieldIdMap (physical column ids, a pack ext_ column, a blank binding): the re-read is unmapped exactly like the planning read — a person\'s cell is never a false machine move', async () => {
+  const fieldIdMap = { material: 'fld_mat', notes: 'fld_notes', rawQuantity: 'fld_raw', idempotencyKey: 'fld_key', ext_nameAndSpec: 'fld_ext_ns', componentCode: '' }
+  const physical = (logical) => Object.fromEntries(Object.entries(logical).map(([field, value]) => [fieldIdMap[field] || field, value]))
+  const logicalSeed = { idempotencyKey: keyOf('A'), projectNo: 'P-EV', componentSourceId: 'A', componentCode: 'A-C', material: 'M-1', rawQuantity: 2, ext_nameAndSpec: 'A spec', notes: null }
+  const host = createHost([{ id: 'rec_a', sheetId: SHEET, version: 3, data: physical(logicalSeed) }])
+  // The planning read's logical row, as readExistingStockPreparationRows unmaps it (the RAW action map).
+  const inverse = Object.fromEntries(Object.entries(fieldIdMap).map(([logical, phys]) => [phys, logical]))
+  const plannedRow = Object.fromEntries(Object.entries(physical(logicalSeed)).map(([field, value]) => [inverse[field] || field, value]))
+  const expected = new Map([[keyOf('A'), { id: 'rec_a', version: 3, row: plannedRow }]])
+  let injected = false
+  host.hooks.beforeHostRead = async () => {
+    if (injected) return
+    injected = true
+    commit(host, 'rec_a', { fld_notes: 'synthetic person note' })
+  }
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan: { decisions: [updateDecision('A', { material: 'M-2' })] },
+    target: { sheetId: SHEET, objectId: 'stockPreparationMain', fieldIdMap, keyField: 'idempotencyKey' },
+    recordsApi: host.api,
+    expectedRecords: expected,
+  })
+  assert.equal(result.status, 'succeeded', JSON.stringify(result.abort && result.abort.error && result.abort.error.details))
+  assert.equal(patchesOf(host).length, 2, 'one conflict, one retry')
+  assert.equal(host.rows[0].data.fld_notes, 'synthetic person note')
+  assert.equal(host.rows[0].data.fld_mat, 'M-2')
+  // And a moved plugin-written PHYSICAL column (the pack's ext_ column) is a machine move.
+  const host2 = createHost([{ id: 'rec_a', sheetId: SHEET, version: 3, data: physical(logicalSeed) }])
+  let moved = false
+  host2.hooks.beforeHostRead = async () => {
+    if (moved) return
+    moved = true
+    commit(host2, 'rec_a', { fld_ext_ns: 'A spec (host write)' })
+  }
+  const stopped = await applyStockPreparationPlan({
+    permission: 'write',
+    plan: { decisions: [updateDecision('A', { material: 'M-2' })] },
+    target: { sheetId: SHEET, objectId: 'stockPreparationMain', fieldIdMap, keyField: 'idempotencyKey' },
+    recordsApi: host2.api,
+    expectedRecords: expected,
+    installedFieldProperties: [{ fieldId: 'ext_nameAndSpec', property: { stockPreparation: { ownership: 'plm_system', extension: true } } }],
+  })
+  assert.equal(stopped.status, 'aborted')
+  assert.equal(stopped.abort.error.details.reason, 'machine_columns_moved')
+})
+
 test('EV-3 a plugin-written column moved since the recompute => the run stops machine_columns_moved; nothing after it', async () => {
   const seed = [seedRow('A', 'rec_a'), seedRow('B', 'rec_b')]
   const host = createHost(seed)

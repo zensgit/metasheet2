@@ -712,6 +712,58 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Reopen the project page.',
   }),
   /**
+   * 备料分批拉取第一期 step 5 PR-8 (register R-63) — the change plan (变更计划确认 / 受控更新) and the review (变更复核).
+   * Minimal copy; the pages are PR-9's. Every refusal means nothing was confirmed, written or reviewed.
+   */
+  STOCK_PREP_CHANGE_PLAN_STALE: Object.freeze({
+    zh: '这次的内容变更已经不是系统现在算出的结果(来源、待确认项或表里的内容又变了),这次没有确认、也没有写入。',
+    en: 'This content change is no longer what the server computes now (the source, the holds or the sheet moved), so nothing was confirmed or written.',
+    zhNext: '请重新试算,再打开变更计划重新确认。',
+    enNext: 'Preview again, then reopen the change plan and confirm it again.',
+  }),
+  STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED: Object.freeze({
+    zh: '这次的内容变更现在不能作为变更计划确认;什么都没有改动。',
+    en: 'This content change cannot be confirmed as a change plan right now; nothing was changed.',
+    zhNext: '看页面上标出的原因;需要时联系负责人。',
+    enNext: 'See the reason shown on the page; ask the owner if needed.',
+  }),
+  STOCK_PREP_CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT: Object.freeze({
+    zh: '这个项目同时有结构变化(换物料、增删子件、改挂或配对变化);内容变更计划不能借此放行,整次拉取保持挂起。',
+    en: 'This project also has a structure change (another part, a child added or removed, a move or a pairing change); a content change plan cannot release it and the whole pull stays suspended.',
+    zhNext: '先处理结构变化(第二期或专项处理);什么都没有改动。',
+    enNext: 'Handle the structure change first (phase 2 or specialist handling); nothing was changed.',
+  }),
+  STOCK_PREP_CHANGE_PLAN_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这份变更计划。',
+    en: 'This project has no such change plan.',
+    zhNext: '请重新打开变更计划页。',
+    enNext: 'Reopen the change plan page.',
+  }),
+  STOCK_PREP_CHANGE_REVIEW_STALE: Object.freeze({
+    zh: '要复核的内容已经不是表里现在的内容(又有写入或计划已被替换),这次没有复核。',
+    en: 'The content being reviewed is no longer what the sheet holds (something was written or the plan was replaced), so nothing was reviewed.',
+    zhNext: '请重新打开复核页,看过当前差异后再复核。',
+    enNext: 'Reopen the review page, read the current difference, then review again.',
+  }),
+  STOCK_PREP_CHANGE_REVIEW_BLOCKED: Object.freeze({
+    zh: '这个项目还有别的待确认项、待执行的变更计划或未完成的写入,复核要等它们处理完;这次没有复核。',
+    en: 'This project still has another hold, a confirmed change awaiting its update or an unfinished write; the review waits for them, and nothing was reviewed now.',
+    zhNext: '先处理其他待办项,再回来复核。',
+    enNext: 'Handle the other open items first, then come back to review.',
+  }),
+  STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE: Object.freeze({
+    zh: '还没有看完当前差异的全部页,或差异在看完后又变了,不能完成复核。',
+    en: 'Not every page of the current difference has been read, or it changed after it was read, so the review cannot be completed.',
+    zhNext: '把复核页的每一页都看完后再完成复核。',
+    enNext: 'Read every page of the review, then complete it.',
+  }),
+  STOCK_PREP_REFRESH_REVIEW_PENDING: Object.freeze({
+    zh: '这个项目有一次已写入的内容变更在等待复核;复核完成之前只执行已确认的变更计划,正式导出也暂停。这次什么都没有写。',
+    en: 'A written content change of this project awaits its review; until it is reviewed only a confirmed change plan is executed and the formal export stays paused. Nothing was written now.',
+    zhNext: '请拉取人员打开变更复核页完成复核。',
+    enNext: 'Ask the puller to open the review page and complete the review.',
+  }),
+  /**
    * 备料分批拉取第一期 step 4 PR-3a / 3b / 5 / 6 and PR-4's remaining codes — copy added by PR-7 (the web
    * owns this file; server messages are untouched). Every code a governed project's pull, decision, export or
    * generic writer can answer has its own two lines here: RS-COPY (StockPreparationRefreshState.spec.ts) reads
@@ -1350,6 +1402,60 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
     en: 'A relationship of this project is under specialist repair, so carrying human entries is paused until the runbook closes it; nothing was written.',
     zhNext: '请联系负责人。',
     enNext: 'Ask the owner.',
+  }),
+  // 备料分批拉取第一期 step 5 PR-8: the change plan's finer readings.
+  'STOCK_PREP_CHANGE_PLAN_STALE/hold_set_moved': Object.freeze({
+    zh: '确认之前又有一次试算改变了待确认项;这次没有确认。',
+    en: 'A newer preview changed the holds before this confirm; nothing was confirmed.',
+    zhNext: '请重新打开变更计划再确认。',
+    enNext: 'Reopen the change plan and confirm again.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/source_moved': Object.freeze({
+    zh: '确认之前来源又变了;这次没有确认。',
+    en: 'The source changed again before this confirm; nothing was confirmed.',
+    zhNext: '请重新试算,再打开变更计划确认。',
+    enNext: 'Preview again, then reopen the change plan and confirm.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_fingerprint': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/hold_set_incomplete': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/hold_fingerprint': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_invalidated': Object.freeze({
+    zh: '已确认的变更计划因来源或表里的内容又变了而失效,这次没有写入任何内容。',
+    en: 'The confirmed change plan was voided because the source or the sheet moved again; nothing was written.',
+    zhNext: '请重新试算,看过新的变化后重新确认。',
+    enNext: 'Preview again, read the new change and confirm it again.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_replaced': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/machine_columns_moved': Object.freeze({
+    zh: '写入时发现系统维护的列在试算之后被改动了,写入已停止(不会盲目重试,也不会覆盖人工填写)。',
+    en: 'While writing, a column the system maintains was found changed since the preview; the write stopped (no blind retry, no human entry overwritten).',
+    zhNext: '请重新试算后再应用;已写入的行数见结果。',
+    enNext: 'Preview again, then apply; the rows already written are in the result.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/version_conflict_repeated': Object.freeze({
+    zh: '写入时同一行连续两次被别人改动,写入已停止,没有盲目重试。',
+    en: 'The same row was changed by someone else twice during the write; the write stopped without a blind retry.',
+    zhNext: '请稍后重新试算再应用。',
+    enNext: 'Preview again a little later, then apply.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED/runbook_only_hold_open': RUNBOOK_ONLY_OPEN,
+  'STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED/record_unbound': Object.freeze({
+    zh: '有一行变化找不到对应的表记录,不能确认;什么都没有改动。',
+    en: 'A changed row cannot be bound to its sheet record, so it cannot be confirmed; nothing was changed.',
+    zhNext: '请联系负责人检查这张表。',
+    enNext: 'Ask the owner to check this sheet.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_BLOCKED/hold_open': Object.freeze({
+    zh: '这个项目又出现了新的待确认项,要先处理它,复核才能完成;这次没有复核。',
+    en: 'A new hold appeared on this project; it must be handled before the review can complete, and nothing was reviewed now.',
+    zhNext: '先处理新的待确认项(需要时一起确认为新的变更计划),再回来复核。',
+    enNext: 'Handle the new hold first (confirm it into a new change plan if needed), then come back to review.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_STALE/content_moved': Object.freeze({
+    zh: '表里的内容在写入之后又变了,复核没有完成。',
+    en: 'The sheet changed after the write, so the review did not complete.',
+    zhNext: '请重新试算;新的变化会作为待确认项出现。',
+    enNext: 'Preview again; the new change shows up as a hold.',
   }),
   'STOCK_PREP_CONTINUATION_CONFIRM_STALE/hold_not_open': RELOAD_THIS_ITEM,
   'STOCK_PREP_CONTINUATION_CONFIRM_STALE/fingerprint': RELOAD_THIS_ITEM,

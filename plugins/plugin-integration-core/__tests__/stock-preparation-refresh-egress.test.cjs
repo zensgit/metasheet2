@@ -21,6 +21,11 @@
 //         plan's verdict is three values-free keys.
 //   EG-12c the census of PR-3b's refusals (the approval's two, the plan's verdict defect, every large-lane reason)
 //         driven with sentinel-bearing inputs: values-free messages, token / count details.
+// Step 5 PR-8 adds:
+//   EG-15 the change plan: its PRIVATE record set carries the value it writes (the sentinel) and its review notes; no
+//         egress carries either or a plan-private key — the previews (suspended, bound, review_pending), the token
+//         record and its binding, the apply response, the execution row, the consult's plan summaries, every audit /
+//         invalidation event, the CHANGE_PLAN_STALE and REVIEW_PENDING refusals.
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -406,6 +411,122 @@ test('EG-12c (PR-3b) the census: the approval\'s two refusals, the plan\'s verdi
     for (const [key, value] of Object.entries(error.details || {})) {
       assert.ok(['string', 'number', 'boolean'].includes(typeof value), `${label}.${key} is a token / count`)
     }
+  }
+})
+
+// ── Step 5 PR-8: the change plan ─────────────────────────────────────────────────────────────────────────────────
+
+const PLAN_PRIVATE_KEYS = Object.freeze(['recordSet', 'record_set', 'reviewNotes', 'review_notes', 'changePlans'])
+
+function planPrivateKeysOf(value, trail = [], out = []) {
+  if (Array.isArray(value)) value.forEach((entry, index) => planPrivateKeysOf(entry, trail.concat(index), out))
+  else if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      if (PLAN_PRIVATE_KEYS.includes(key)) out.push(trail.concat(key).join('.'))
+      planPrivateKeysOf(entry, trail.concat(key), out)
+    }
+  }
+  return out
+}
+
+function assertPlanClean(label, value) {
+  assertClean(label, value)
+  assert.deepEqual(planPrivateKeysOf(value), [], `${label}: carries a plan-private key`)
+}
+
+function changedPartA(material, partCUsage = 4) {
+  const parts = F.PARTS.map((part) => (part.OBJ_ID === 'PART-A' ? { ...part, Material: material } : part))
+  return F.project({ orders: [{ part: 'S-001', qty: 10 }], parts, boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage: partCUsage }] } })
+}
+
+test('EG-15 (step 5 PR-8) the change plan: its private record set carries the sentinel it writes and its review notes carry another — neither, nor a plan-private key, reaches any egress (previews, token record, apply response, execution row, consult summaries, audit / invalidation events, refusals)', async () => {
+  const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
+  const lanes = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
+  const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+  const { __internals: plannerInternals } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
+  const TABLES = storeModule.REFRESH_STORE_TABLES
+  const w = await libWorld()
+  const scope = { tenantId: TENANT, sheetId: SHEET, projectNo: PROJECT }
+  const events = []
+  const auditWithin = async (_trx, event) => { events.push(clone(event)) }
+  const first = await w.dryRun()
+  await w.apply(first.dryRunToken)
+  // The changed read: PART-A's material becomes the sentinel (a content hold, then a plan that writes it).
+  w.state.data = changedPartA(SENTINEL)
+  const suspended = await w.dryRun()
+  assert.equal(suspended.status, 'suspended')
+  assertPlanClean('EG-15 suspended preview', suspended)
+  const confirmAll = async () => {
+    const state = w.env.db.rows(TABLES.state)[0]
+    const content = w.env.db.rows(TABLES.hold).filter((row) => row.status === 'open').map(storeModule.__internals.rowToHold).filter(pairing.isContentClassHold)
+    const records = pairing.changePlanRecordsFromHolds(content)
+    return w.env.store.confirmChangePlan({
+      ...scope,
+      confirmedBy: 'u_eg_principal',
+      holds: content.map((hold) => ({ id: hold.id, fingerprint: hold.fingerprint })),
+      echo: { holdSetFingerprint: state.hold_set_fingerprint, planFingerprint: pairing.changePlanFingerprintOf({ projectNo: PROJECT, records, sourceContentDigest: state.last_computation_source_content_digest }), sourceContentDigest: state.last_computation_source_content_digest },
+      candidates: [],
+      sourceIdentity: lanes.refreshSourceIdentity({ action: tableActions.assertStockPreparationTargetReady({ actionId: 'plm.stock-preparation.pull-bom.v1', source: { externalSystemId: 'plm_eg', kind: 'data-source:sql-readonly' }, target: { sheetId: SHEET, objectId: 'stockPreparationMain' } }), tenantId: TENANT }),
+      template: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+    }, { bumpWithin: w.env.bump.bumpWithin, auditWithin })
+  }
+  const confirmed = await confirmAll()
+  assertPlanClean('EG-15 confirm answer', confirmed)
+  const consult = await w.env.governance.consult(scope)
+  assert.equal(consult.changePlans.length, 1)
+  assertPlanClean('EG-15 consult plan summaries', consult.changePlans.map((summary) => ({ ...summary })))
+  // The bound preview, its token, the apply, the execution row.
+  const replan = await w.dryRun()
+  assert.equal(replan.status, 'ready')
+  assertPlanClean('EG-15 bound preview', replan)
+  const record = w.tokenStore.map.get(`integration:table-action:dry-run-token:${replan.dryRunToken}`)
+  assertPlanClean('EG-15 token record', record)
+  assert.equal(record.refreshBinding.changePlanId, confirmed.changePlanId, 'the binding names the plan by id only')
+  const applied = await w.apply(replan.dryRunToken)
+  assertPlanClean('EG-15 apply response', applied)
+  const execution = w.env.db.rows(T.execution).find((row) => row.refresh_binding && row.refresh_binding.changePlanId === confirmed.changePlanId)
+  assert.ok(execution)
+  assertPlanClean('EG-15 execution row', execution)
+  const written = w.env.db.rows(TABLES.changePlan).find((row) => row.id === confirmed.changePlanId)
+  assert.equal(written.status, 'written')
+  assert.ok(JSON.stringify(written.record_set).includes(SENTINEL), 'calibration: the private record set carries the sentinel')
+  // The review_pending preview, and a forged unbound token's REVIEW_PENDING refusal.
+  const pending = await w.dryRun()
+  assert.equal(pending.status, 'review_pending')
+  assertPlanClean('EG-15 review_pending preview', pending)
+  const errors = []
+  const generation = await w.h.lock.bumpGeneration(sheetWriteScopeKey(SHEET), { reason: 'small_preview', tenantId: TENANT })
+  const forged = await tableActions.__internals.createDryRunToken(w.tokenStore, {
+    actionId: 'plm.stock-preparation.pull-bom.v1', parametersHash: tableActions.__internals.hashJson({ projectNo: PROJECT }), revision: 'forged', conflictPolicyReview: null,
+    ...writeBindingFromGeneration(generation),
+  })
+  await w.apply(forged).catch((error) => errors.push(error))
+  assert.equal(errors[0] && errors[0].code, 'STOCK_PREP_REFRESH_REVIEW_PENDING')
+  // The review with private notes (the second sentinel): the audit event says only that notes exist.
+  const NOTES = `${SENTINEL}-notes`
+  const existing = await tableActions.__internals.readExistingStockPreparationRows(w.sheet.api, { sheetId: SHEET }, PROJECT)
+  const byId = new Map(existing.map((row) => [pairing.recordRefOf(row).id, row]))
+  const current = pairing.currentContentDigestOf({ records: storeModule.__internals.rowToChangePlan(written).recordSet, rowsByRecordId: byId, templateFields: plannerInternals.fieldMapForTemplate(normalizeStockPreparationTemplate(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)) })
+  const reviewed = await w.env.store.completeChangeReview({ ...scope, changePlanId: written.id, reviewedBy: 'u_eg_principal', echoDigest: written.written_content_digest, currentContentDigest: current, conclusion: 'handled_with_notes', notes: NOTES }, { auditWithin })
+  assertPlanClean('EG-15 review answer', reviewed)
+  assert.equal(JSON.stringify(reviewed).includes(NOTES), false)
+  assert.equal(w.env.db.rows(TABLES.changePlan).find((row) => row.id === written.id).review_notes, NOTES, 'calibration: the notes are on the private row')
+  // A second plan, then a moved source: the bound token's CHANGE_PLAN_STALE refusal and the invalidation's audit event.
+  w.state.data = changedPartA(SENTINEL, 6)
+  assert.equal((await w.dryRun()).status, 'suspended')
+  const second = await confirmAll()
+  const bound = await w.dryRun()
+  assert.equal(bound.status, 'ready')
+  w.state.data = changedPartA(SENTINEL, 7)
+  await w.apply(bound.dryRunToken).catch((error) => errors.push(error))
+  assert.equal(errors[1] && errors[1].code, 'STOCK_PREP_CHANGE_PLAN_STALE')
+  assert.equal(w.env.db.rows(TABLES.changePlan).find((row) => row.id === second.changePlanId).status, 'invalidated')
+  assert.ok(w.env.invalidationAudits.length >= 1, 'the invalidation rode the reconcile with its audit event')
+  for (const entry of w.env.invalidationAudits) assertPlanClean('EG-15 invalidation audit event', entry.event)
+  for (const error of errors) assertPlanClean(`EG-15 ${error.code}`, { message: error.message, details: error.details })
+  for (const event of events) {
+    assertPlanClean('EG-15 decision audit event', event)
+    assert.equal(JSON.stringify(event).includes(NOTES), false)
   }
 })
 

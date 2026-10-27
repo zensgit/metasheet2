@@ -201,6 +201,14 @@
 //           here would read another tenant's values or confirm a relationship on its sheet; a
 //           TENANTLESS platform admin is refused (403 OPERATOR_SCOPE_TENANT_REQUIRED) — counts are the
 //           board's, values never theirs.
+//       29. GET  …/projects/:projectNo/refresh/change-plans/current        `stockPreparationRefreshChangePlanCurrent`
+//       30. POST …/projects/:projectNo/refresh/change-plans/confirm        `stockPreparationRefreshChangePlanConfirm`
+//       31. POST …/projects/:projectNo/refresh/change-reviews/complete     `stockPreparationRefreshChangeReviewComplete`
+//           备料分批拉取第一期 step 5 PR-8 (register R-63), PULL. The SAME shared context builder as 23–28 (no new
+//           call site): the change-plan page and the review READ the proven tenant's main sheet (behind the
+//           table-action wall) and its private record set; the confirm and the review decide over its step-4 /
+//           step-5 rows (the confirm bumps its sheet's plan generation). A header-fillable tenant here would read
+//           or approve another tenant's content change.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

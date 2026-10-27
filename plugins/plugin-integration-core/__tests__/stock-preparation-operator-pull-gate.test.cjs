@@ -1315,8 +1315,10 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
       // Batch-refresh step 4 PR-4 (R-59, D-14): the puller confirms — the six refresh routes (the private hold page,
       // the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end) are PULL members.
       'refresh.confirm', 'refresh.continuation', 'refresh.end', 'refresh.evidence', 'refresh.holds', 'refresh.keep',
-    ],
-    'P-14: exactly ten PULL-tier manifest capabilities — create, archive, restore, overview ensure and the six refresh routes',
+      // Batch-refresh step 5 PR-8 (R-63): the change plan — its page, its confirm and the review (the puller reviews).
+      'refresh.changePlan', 'refresh.changePlanConfirm', 'refresh.reviewComplete',
+    ].sort(),
+    'P-14: exactly thirteen PULL-tier manifest capabilities — create, archive, restore, overview ensure, the six refresh routes and the three change-plan routes',
   )
   for (const entry of pullTier) {
     for (const [user, expected, who] of [

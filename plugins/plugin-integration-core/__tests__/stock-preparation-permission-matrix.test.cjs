@@ -390,6 +390,11 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'refresh.confirm': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, holdId: 'hold_synthetic', holdFingerprint: 'a'.repeat(64), comparisonFingerprint: 'b'.repeat(64), evidenceFingerprint: 'c'.repeat(64), candidateId: 'd'.repeat(64), readReceipt: 'e'.repeat(32), basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } } }),
   'refresh.continuation': () => ({ params: { projectNo: PROJECT_NO, id: 'cont_synthetic' }, query: {} }),
   'refresh.end': () => ({ params: { projectNo: PROJECT_NO, id: 'cont_synthetic' }, body: { confirmProjectNo: PROJECT_NO, revision: 1, outcome: 'escalate_special_repair' } }),
+  // PR-8 (R-63): the three change-plan routes, PULL tier. Well-formed shapes (a 'pass' cell reaches the route's own
+  // answer on this bare mount, never a 400 that could mask the gate).
+  'refresh.changePlan': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'refresh.changePlanConfirm': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, holdIds: ['hold_synthetic'], holdSetFingerprint: 'a'.repeat(64), planFingerprint: 'b'.repeat(64), sourceContentDigest: 'c'.repeat(32), readReceipt: 'e'.repeat(32) } }),
+  'refresh.reviewComplete': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, changePlanId: 'chp_synthetic', contentDigest: 'd'.repeat(64), conclusion: 'handled', readReceipt: 'e'.repeat(32) } }),
   // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
   // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
   // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
@@ -456,6 +461,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'gate',
     'refresh.continuation': 'gate',
     'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -490,6 +498,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'gate',
     'refresh.continuation': 'gate',
     'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -524,6 +535,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'gate',
     'refresh.continuation': 'gate',
     'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -558,6 +572,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'gate',
     'refresh.continuation': 'gate',
     'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -592,6 +609,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'gate',
     'refresh.continuation': 'gate',
     'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -626,6 +646,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'gate',
     'refresh.continuation': 'gate',
     'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -660,6 +683,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'pass',
     'refresh.continuation': 'pass',
     'refresh.end': 'pass',
+    'refresh.changePlan': 'pass',
+    'refresh.changePlanConfirm': 'pass',
+    'refresh.reviewComplete': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -694,6 +720,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'pass',
     'refresh.continuation': 'pass',
     'refresh.end': 'pass',
+    'refresh.changePlan': 'pass',
+    'refresh.changePlanConfirm': 'pass',
+    'refresh.reviewComplete': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -731,6 +760,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'pass',
     'refresh.continuation': 'pass',
     'refresh.end': 'pass',
+    'refresh.changePlan': 'pass',
+    'refresh.changePlanConfirm': 'pass',
+    'refresh.reviewComplete': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -765,6 +797,9 @@ const MATRIX = Object.freeze({
     'refresh.confirm': 'gate',
     'refresh.continuation': 'gate',
     'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -1228,8 +1263,12 @@ async function orphanOperateGrantConfersNothing() {
       'refresh.evidence',
       'refresh.holds',
       'refresh.keep',
+      // Batch-refresh step 5 PR-8 (R-63): the change plan — the puller confirms the plan and reviews the change.
+      'refresh.changePlan',
+      'refresh.changePlanConfirm',
+      'refresh.reviewComplete',
     ].sort(),
-    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore, projectOverview.ensure and the six refresh routes to the operator tier',
+    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore, projectOverview.ensure, the six refresh routes and the three change-plan routes to the operator tier',
   )
   // …and the floor operator holds none of the four (archive / restore are the 拉取人员's, Q2).
   for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore']) {
@@ -1391,6 +1430,10 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       // is the host-vouched operator scope at the PULL tier, and every value read is audited before its
       // response. The gate is applied in the ONE shared context builder (stockPreparationRefreshDecisionContext),
       // which every handler body calls first.
+      // Batch-refresh step 5 PR-8 (R-63): the change-plan page, its confirm and the review — the same shared context.
+      'stockPreparationRefreshChangePlanConfirm',
+      'stockPreparationRefreshChangePlanCurrent',
+      'stockPreparationRefreshChangeReviewComplete',
       'stockPreparationRefreshContinuationConfirm',
       'stockPreparationRefreshContinuationEnd',
       'stockPreparationRefreshContinuationGet',
@@ -1398,7 +1441,7 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       'stockPreparationRefreshHoldKeep',
       'stockPreparationRefreshHolds',
     ],
-    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the overview ensure and the six refresh routes',
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the overview ensure, the six refresh routes and the three change-plan routes',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
   for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
@@ -1780,6 +1823,10 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'refresh.confirm',
   'refresh.continuation',
   'refresh.end',
+  // PR-8 (R-63): the three change-plan routes share that context (the same PULL-tier host-vouched scope).
+  'refresh.changePlan',
+  'refresh.changePlanConfirm',
+  'refresh.reviewComplete',
   // PR B (R-53 / R-54): both pilot routes resolve the host-vouched operator scope (never a header-fillable
   // tenant), so the door adds nothing to them.
   'projectTarget.pilotRead',

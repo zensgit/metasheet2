@@ -365,9 +365,11 @@ test('CP-L05 (B2) a concurrent computation\'s stale verdict: between the apply\'
       }),
     })
     const writes = w.sheet.writes()
+    const executionsBefore = w.rows('execution').length
     await expectCode(w.apply(replan.dryRunToken, { refreshGovernance: interposed }), { status: 409, code: 'STOCK_PREP_CHANGE_PLAN_STALE', reason: 'plan_invalidated' })
     assert.equal(w.sheet.writes(), writes, 'nothing written')
-    assert.equal(w.rows('execution').filter((row) => row.refresh_binding.changePlanId === confirmed.changePlanId).length, 0, 'no running row left behind')
+    assert.equal(w.rows('execution').length, executionsBefore, 'no execution row at all (the bound begin is one transaction)')
+    assert.equal(w.rows('execution').filter((row) => row.refresh_binding.changePlanId === confirmed.changePlanId).length, 0)
     assert.equal(w.rows('changePlan')[0].status, 'invalidated')
   }
   // (b) while the bound execution runs (a straddling preview read the sheet mid-write).
