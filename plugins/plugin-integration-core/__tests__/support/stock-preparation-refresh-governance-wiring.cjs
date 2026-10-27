@@ -253,7 +253,7 @@ function createRefreshGovernanceEnv(options = {}) {
       if (!row) throw new Error('wiring: the candidate hold was not persisted')
       return store.confirmContinuation({
         ...scope, holdId: row.id, echo: refreshKit.echoOf(hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy, sourceIdentity,
-      }, { bumpWithin: bump.bumpWithin })
+      }, { bumpWithin: bump.bumpWithin, pilotWithin: refreshKit.seedPilotWithin })
     },
     // R-6's corrected recipe: confirm -> reconcile a reconfirm hold WITH a status-reason verdict -> escalate.
     async seedEscalatedContinuation(input, hold, { sourceIdentity, verdict = 'source_scope_changed' } = {}) {

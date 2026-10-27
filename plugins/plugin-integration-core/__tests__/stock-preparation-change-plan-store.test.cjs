@@ -251,7 +251,7 @@ async function relationshipScenario(w, { material = CHANGED_MATERIAL, statusOver
   const fixture = await kit.candidateHoldFixture()
   await reconcile(w, [fixture.hold])
   const row = rowsOf(w, 'hold').find((entry) => entry.fingerprint === fixture.hold.fingerprint && entry.status === 'open')
-  await w.store.confirmContinuation({ ...w.scope, holdId: row.id, echo: kit.echoOf(fixture.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: F.SOURCE_IDENTITY }, { bumpWithin: w.bump.bumpWithin })
+  await w.store.confirmContinuation({ ...w.scope, holdId: row.id, echo: kit.echoOf(fixture.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: F.SOURCE_IDENTITY }, { bumpWithin: w.bump.bumpWithin, pilotWithin: kit.seedPilotWithin })
   if (statusOverride) {
     const cont = rowsOf(w, 'continuation')[0]
     await w.db.updateRow(T.continuation, statusOverride, { id: cont.id })
@@ -1156,6 +1156,49 @@ test('CP-S16 (N3-b, C06; delta probe V8D-05) the REVIEWED-CELL REGISTER: the rev
     { recordId: '', key: '{"k":"y"}', fields: { material: { before: 'a', after: 'b', afterCanonical: 'b' } } },
   ] })
   assert.deepEqual(cells.map((cell) => `${cell.key}|${cell.fieldId}`).sort(), ['{"k":"x"}|material', '{"k":"x"}|totalQuantity'])
+})
+
+// ── CP-S17 (review fix N1-b, round 2) ────────────────────────────────────────────────────────────
+
+test('CP-S17 (N1-b) the PLAIN continuation confirm (a continuation_candidate hold, PR-4) re-decides the pilot marker on its OWN transaction handle under the state lock: cleared since the consult / on another sheet => 409 NOT_PILOT, nothing persisted, no bump; unwired => 501 before any statement; the marker back => it commits', async () => {
+  const fixture = await kit.candidateHoldFixture()
+  const w = await world()
+  await reconcile(w, [fixture.hold])
+  const row = rowsOf(w, 'hold').find((entry) => entry.fingerprint === fixture.hold.fingerprint && entry.status === 'open')
+  assert.ok(row && row.kind === 'continuation_candidate')
+  const confirmPlain = (hooks = {}) => w.store.confirmContinuation({ ...w.scope, holdId: row.id, echo: kit.echoOf(fixture.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: F.SOURCE_IDENTITY }, { bumpWithin: w.bump.bumpWithin, auditWithin: w.auditWithin, pilotWithin: w.pilotWithin, ...hooks })
+  // (a) the marker cleared between the route's consult and this transaction: refused under the lock, nothing written.
+  w.setRegistry({ pilot_enabled_at: null, pilot_enabled_by: null, pilot_readiness_version: null })
+  const before = tablesSnapshot(w.db)
+  w.db.log.length = 0
+  const cleared = await expectError(confirmPlain(), { status: 409, code: CODES.NOT_PILOT })
+  assert.deepEqual(cleared.details, { decidedUnderLock: true, partial: false })
+  assert.equal(tablesSnapshot(w.db), before, 'nothing persisted')
+  assert.equal(w.bump.calls.length, 0, 'refused before the bump')
+  assert.deepEqual(w.pilotReads, [false])
+  // The read ran ON the confirm's transaction handle, after the state-row lock and the hold re-read, before any write.
+  const statements = statementsOf(w.db)
+  const stateLock = statements.indexOf('selectOneForUpdate:refresh_state')
+  const pilotRead = statements.indexOf('selectOne:project_target')
+  assert.ok(stateLock >= 0 && pilotRead > stateLock, statements.join(' > '))
+  assert.ok(statements.indexOf('selectOne:refresh_hold') < pilotRead, statements.join(' > '))
+  assert.equal(statements.some((entry) => /^(insertOne|insertMany|updateRow|upsertOne):/.test(entry) && entry !== 'upsertOne:refresh_state'), false, statements.join(' > '))
+  // (b) a pilot row registered on ANOTHER sheet is not this sheet's pilot.
+  w.setRegistry({ pilot_enabled_at: new Date('2026-10-24T00:00:00.000Z'), pilot_enabled_by: 'u_admin', pilot_readiness_version: 1, sheet_id: 'sheet_cps_elsewhere' })
+  await expectError(confirmPlain(), { status: 409, code: CODES.NOT_PILOT })
+  assert.equal(tablesSnapshot(w.db), before)
+  // (c) unwired: refused 501 by name BEFORE any statement (no transaction is opened).
+  w.setRegistry({ sheet_id: SHEET })
+  w.db.log.length = 0
+  await expectError(confirmPlain({ pilotWithin: undefined }), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'pilot_read_within' })
+  assert.equal(w.db.log.length, 0, 'no statement')
+  assert.equal(tablesSnapshot(w.db), before)
+  // (d) the marker back: the same confirm commits (one bump, one relationship), the read answered `enabled`.
+  const done = await confirmPlain()
+  assert.ok(done.continuationId)
+  assert.equal(w.bump.calls.length, 1)
+  assert.equal(rowsOf(w, 'continuation').length, 1)
+  assert.deepEqual(w.pilotReads, [false, false, true])
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-store.test.cjs', tests)

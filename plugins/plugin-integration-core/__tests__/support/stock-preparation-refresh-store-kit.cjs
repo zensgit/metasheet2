@@ -506,6 +506,13 @@ function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotCo
 // 2. A controllable clock and the fake lock bump
 // ---------------------------------------------------------------------------------------------------
 
+// PR-8 review fix N1-b: a relationship confirm re-reads the pilot marker on its own transaction handle (`pilotWithin`,
+// required by the store). Suites that SEED a relationship — the pilot decision is not what they test — hand this stub;
+// the pilot fact itself is pinned with the REAL reader (CP-S17, CR-N1b, S8-19).
+async function seedPilotWithin() {
+  return Object.freeze({ enabled: true })
+}
+
 function createClock(startIso = '2026-10-24T00:00:00.000Z') {
   let ms = Date.parse(startIso)
   return {
@@ -901,6 +908,7 @@ module.exports = {
   rerecordedTakeoverHold,
   registryRow,
   sameNewPositionHold,
+  seedPilotWithin,
   sqlError,
   writeLockedError,
 }

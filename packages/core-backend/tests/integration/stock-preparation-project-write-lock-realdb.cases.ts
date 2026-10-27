@@ -2212,8 +2212,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const scope = { tenantId: tenantFor(`s2_02_${label}`), sheetId: sheetFor(`s2_02_${label}`), projectNo: fixture.projectNo }
           const idOf = await seedOpenHolds(storeA, scope, [fixture.hold, rival])
           const [a, b] = await Promise.all([
-            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })),
-            settle(storeB.confirmContinuation(confirmInput(scope, idOf(rival), rival, fixture), { bumpWithin: testBumpWithin })),
+            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })),
+            settle(storeB.confirmContinuation(confirmInput(scope, idOf(rival), rival, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })),
           ])
           const winners = [a, b].filter((outcome) => outcome.ok)
           const losers = [a, b].filter((outcome) => !outcome.ok) as Array<{ ok: false; error: any }>
@@ -2247,8 +2247,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
           const input = confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture)
           const [a, b] = await Promise.all([
-            settle(storeA.confirmContinuation(input, { bumpWithin: testBumpWithin })),
-            settle(storeB.confirmContinuation(input, { bumpWithin: testBumpWithin })),
+            settle(storeA.confirmContinuation(input, { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })),
+            settle(storeB.confirmContinuation(input, { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })),
           ])
           expect([a, b].filter((outcome) => outcome.ok).length).toBe(1)
           const loser = [a, b].find((outcome) => !outcome.ok) as { ok: false; error: any }
@@ -2263,13 +2263,13 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         {
           const scope = { tenantId: tenantFor('s2_03b'), sheetId: sheetFor('s2_03b'), projectNo: fixture.projectNo }
           const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
-          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
           const rival = refreshKit.competingCandidateHold(fixture.hold)
           const reconfirm = refreshKit.reconfirmHoldFor(first.continuationId, { confirmable: false, verdict: 'structure_changed' })
           const idOf2 = await seedOpenHolds(storeA, scope, [rival, reconfirm], 1, { [first.continuationId]: 'structure_changed' })
           expect((await q(`SELECT status FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0].status).toBe('needs_reconfirmation')
           const [confirm, end] = await Promise.all([
-            settle(storeB.confirmContinuation(confirmInput(scope, idOf2(rival), rival, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin })),
+            settle(storeB.confirmContinuation(confirmInput(scope, idOf2(rival), rival, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })),
             settle(storeA.endContinuation({ ...scope, continuationId: first.continuationId, revision: 1, endedBy: 'u_scs_puller', outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin })),
           ])
           expect([confirm, end].filter((outcome) => outcome.ok).length, 'exactly one decision').toBe(1)
@@ -2293,7 +2293,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
           const rival = refreshKit.competingCandidateHold(fixture.hold)
           const [confirm, reconcile] = await Promise.all([
-            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })),
+            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })),
             settle(storeB.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [fixture.hold, rival], computation: computation() })),
           ])
           expect(confirm.ok, JSON.stringify((confirm as any).error && (confirm as any).error.details)).toBe(true)
@@ -2368,7 +2368,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const storeA = storeOn(clientA)
         const owner = { tenantId: tenantFor('s2_05'), sheetId: sheetFor('s2_05'), projectNo: fixture.projectNo }
         const idOf = await seedOpenHolds(storeA, owner, [fixture.hold])
-        await storeA.confirmContinuation(confirmInput(owner, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        await storeA.confirmContinuation(confirmInput(owner, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         const steered = { ...owner, tenantId: tenantFor('s2_05_steered') }
         // The store's reads under the steered tenant still surface the owner's rows (the sheet-keyed read) ...
         const rows = await storeA.readGovernanceRows(steered)
@@ -2394,7 +2394,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const storeA = storeOn(clientA)
         const home = { tenantId: tenantFor('s2_06'), sheetId: sheetFor('s2_06_home'), projectNo: fixture.projectNo }
         const idOf = await seedOpenHolds(storeA, home, [fixture.hold])
-        await storeA.confirmContinuation(confirmInput(home, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        await storeA.confirmContinuation(confirmInput(home, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         const elsewhere = { ...home, sheetId: sheetFor('s2_06_env') }
         const reader = readerOn(clientA)
         const refused = await settle(reader.consult(elsewhere))
@@ -2443,7 +2443,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const consultP = settle(pilotReaderOn(consultDb).consult(scope))
           await reached.promise
           // Another session decides while the consult is frozen inside its snapshot.
-          const confirmed = await storeB.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+          const confirmed = await storeB.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
           frozen.open()
           const consult = await consultP
           const row: Record<string, unknown> = { point: label.slice(0, 2), confirmDecisionVersion: confirmed.decisionVersion }
@@ -2548,7 +2548,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const aboutTo = gate()
           const confirmDb = hostLikeDb(({ sql, inTransaction }) => { if (inTransaction && trigger.test(sql)) aboutTo.open() })
           const confirmStore = continuationStoreModule.createStockPreparationContinuationStore({ db: confirmDb })
-          const confirmP = settle(confirmStore.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin }))
+          const confirmP = settle(confirmStore.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin }))
           await Promise.race([aboutTo.promise, confirmP])
           const offset = Math.floor(rounds / triggers.length) % 3
           if (offset > 0) await new Promise((resolve) => setTimeout(resolve, offset - 1))
@@ -2579,7 +2579,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const storeA = storeOn(clientA)
         const scope = { tenantId: tenantFor('s2_10'), sheetId: sheetFor('s2_10'), projectNo: fixture.projectNo }
         const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
-        const confirmed = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const confirmed = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         const id = confirmed.continuationId
         const endBase = { ...scope, continuationId: id, revision: 1, endedBy: 'u_scs_puller' }
         // ACTIVE with an OPEN hold naming it (a content_changed verdict keeps it active): only the status check refuses.
@@ -2633,26 +2633,26 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const storeA = storeOn(clientA)
         const scope = { tenantId: tenantFor('s2_11'), sheetId: sheetFor('s2_11'), projectNo: fixture.projectNo }
         const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
-        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         const disjoint = refreshKit.disjointCandidateHold(fixture.hold)
         const related = refreshKit.competingCandidateHold(fixture.hold)
         const idOf2 = await seedOpenHolds(storeA, scope, [disjoint, related], 1)
         const supersedes = { supersedes: { continuationId: first.continuationId, revision: 1 } }
         const before = await sheetFingerprint(scope.sheetId)
-        const refused = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture, supersedes), { bumpWithin: testBumpWithin }))
+        const refused = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture, supersedes), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin }))
         expect(refused.ok).toBe(false)
         expect((refused as any).error.code).toBe(RC.END_OUTCOME_NOT_ADMISSIBLE)
         expect((refused as any).error.status).toBe(409)
         expect((refused as any).error.details).toEqual({ reason: 'supersedes_unrelated', outcome: 'superseded_by_new_confirmation' })
         expect(await sheetFingerprint(scope.sheetId), 'nothing persisted: the relationship keeps its claims, no bump').toBe(before)
         // Control: the same candidate commits on its own — the refusal was the relatedness rule alone.
-        const alone = await storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture), { bumpWithin: testBumpWithin })
+        const alone = await storeA.confirmContinuation(confirmInput(scope, idOf2(disjoint), disjoint, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         expect(alone.supersededContinuationId).toBeNull()
         expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(2)
         // Related: the claims collide without `supersedes`; with it the old relationship ends and the new one claims.
-        const conflict = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture), { bumpWithin: testBumpWithin }))
+        const conflict = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin }))
         expect((conflict as any).error.code).toBe(RC.CONFIRM_CONFLICT)
-        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture, supersedes), { bumpWithin: testBumpWithin })
+        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(related), related, fixture, supersedes), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         expect(replaced.supersededContinuationId).toBe(first.continuationId)
         expect((await q(`SELECT status, ended_outcome, claim_active FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0])
           .toEqual({ status: 'ended', ended_outcome: 'superseded_by_new_confirmation', claim_active: false })
@@ -2693,7 +2693,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const oldRows = await seedRows(fixture.sheet)
           const original = F.plan(fixture.expansion, oldRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
           const idOf = await seedOpenHolds(storeA, scope, [original])
-          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin })
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
           // The reviewer's candidate, emitted by the REAL planner against an independent PART-A subtree on the same sheet:
           // two of the relationship's four new positions, none of its four old rows.
           const independent = await F.expand(F.project({ orders: [{ part: 'PART-A', qty: 20 }], parts: F.PARTS.slice(), boms: { 'PART-A': [{ part: 'PART-C', usage: 4 }] } }))
@@ -2706,7 +2706,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const idOf2 = await seedOpenHolds(storeA, scope, [partial], 1)
           // (a) the partial supersede.
           const before = await sheetFingerprint(scope.sheetId)
-          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(partial), partial, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin }))
+          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(partial), partial, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin }))
           observed.supersede = supersede.ok ? 'admitted' : `${(supersede as any).error.code}:${(supersede as any).error.details.reason}`
           observed.supersedeDetails = supersede.ok ? null : (supersede as any).error.details
           observed.stepFourRowsAndLockRowUnchanged = (await sheetFingerprint(scope.sheetId)) === before
@@ -2749,10 +2749,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const scope = { tenantId: tenantFor('s2_12_full'), sheetId: sheetFor('s2_12_full'), projectNo: fixture.projectNo }
         await registerProject(scope, { pilot: true })
         const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
-        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         const full = refreshKit.competingCandidateHold(fixture.hold)
         const idOf2 = await seedOpenHolds(storeA, scope, [full], 1)
-        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(full), full, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin })
+        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(full), full, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         await pilotExit(scope)
         const consult = await pilotReaderOn().consult(scope)
         const slice = governanceModule.plannerSlice(consult)
@@ -2817,7 +2817,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           // The relationship: the real planner pairs the four old rows with S-001 nested under Q-001 > P-001.
           const original = F.plan(scenario.expansion, oldRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
           const idOf = await seedOpenHolds(storeA, scope, [original])
-          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin })
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
           // The reviewer's SYNTHETIC step: five independent P-001 rows written to the same sheet after the confirm.
           const independentRows = await seedRows(scenario.independentRows)
           const complete = oldRows.concat(independentRows)
@@ -2835,7 +2835,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const idOf2 = await seedOpenHolds(storeA, scope, [candidate], consult0.decisionVersionObserved)
           // (a) the supersede.
           const before = await sheetFingerprint(scope.sheetId)
-          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(candidate), candidate, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin }))
+          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(candidate), candidate, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin }))
           observed.supersede = supersede.ok ? 'admitted' : `${(supersede as any).error.code}:${(supersede as any).error.details.reason}`
           observed.supersedeDetails = supersede.ok ? null : (supersede as any).error.details
           observed.stepFourRowsAndLockRowUnchanged = (await sheetFingerprint(scope.sheetId)) === before
@@ -3163,7 +3163,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             basis: { kind: 'puller_confirmed_same_demand' },
             confirmedBy: st.users.puller.id,
             sourceIdentity: st.sourceIdentity,
-          }, { bumpWithin: testBumpWithin })
+          }, { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
         }
 
         test('S3A-01 (A01, E-1 full entry) a pilot project\'s second pull through the REAL routes: read-tier and puller previews suspended (no token, no bump, one open confirmable candidate hold); apply with a forged token, a stale one and acceptManualConfirmHold 409 SUSPENDED; mvp-persist 409 NOT_READY refresh_suspended; reconcile keeps the same hold; the main sheet\'s meta_records and meta_record_revisions unchanged after every entry; no execution begun by a refusal', async () => {
@@ -3563,7 +3563,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           async function setup(label: string) {
             const scope = { tenantId: tenantFor(`s3a_17_${label}`), sheetId: sheetFor(`s3a_17_${label}`), projectNo: fixture.projectNo }
             const idOf = await seedOpenHolds(seedStore, scope, [fixture.hold])
-            const confirmed = await seedStore.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+            const confirmed = await seedStore.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
             const C = confirmed.continuationId
             const H = contentHold(`k_s3a_17_${label}`)
             const dv = await decisionVersionOf(scope)
@@ -4153,7 +4153,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           async function confirmSeededContinuation(st: any) {
             const fixture = await refreshKit.candidateHoldFixture()
             const holdIdOf = await seedOpenHolds(st.refresh.store, st.scope, [fixture.hold])
-            return st.refresh.store.confirmContinuation(confirmInput(st.scope, holdIdOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+            return st.refresh.store.confirmContinuation(confirmInput(st.scope, holdIdOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
           }
 
           test('S3B-01 (P3-L1..L4, S6(4), D-7) a project governed by a store-seeded CONFIRMED relationship (not pilot): start, run, plan and approve answer 409 LARGE_LANE_REFUSED `continuation` through the REAL routes — zero source reads, zero records reads, no large-BOM plugin_kv row written or changed, no apply job, the generation unchanged, the sheet\'s meta_records and meta_record_revisions unchanged, no step-4 write', async () => {
@@ -4667,7 +4667,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const guard = lockNow.createGuard(grant)
               const holdIdOf = await seedOpenHolds(store, scope, [fixture.hold])
               const holdId = holdIdOf(fixture.hold)
-              const confirmed = await store.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lockLater.bumpGenerationWithin })
+              const confirmed = await store.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lockLater.bumpGenerationWithin, pilotWithin: refreshKit.seedPilotWithin })
               const row = await lockRowOf(key)
               const stalled = await settle(guard.beforeWrite())
               observed.a = {
@@ -4703,7 +4703,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const before = await lockB.bumpGeneration(key, { reason: 'small_preview', tenantId: scope.tenantId })
               const holdIdOf = await seedOpenHolds(seedStore, scope, [fixture.hold])
               const holdId = holdIdOf(fixture.hold)
-              const confirming = storeA.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lockA.bumpGenerationWithin })
+              const confirming = storeA.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lockA.bumpGenerationWithin, pilotWithin: refreshKit.seedPilotWithin })
               await frozenAt
               const acquiring = lockB.acquire(key, { purpose: 'small_apply', runId: 's4-01c-acquire', tenantId: scope.tenantId })
               await waitUntil('the acquire to queue behind the frozen confirm', () => isBlockedBy(pidB, pidA))
@@ -4733,7 +4733,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const holdId = holdIdOf(fixture.hold)
               const grant = await lock.acquire(key, { purpose: 'small_apply', runId: 's4-01d', tenantId: scope.tenantId })
               const before = await sheetFingerprint(scope.sheetId)
-              const refused = await settle(store.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lock.bumpGenerationWithin }))
+              const refused = await settle(store.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lock.bumpGenerationWithin, pilotWithin: refreshKit.seedPilotWithin }))
               observed.d = {
                 code: refused.ok ? 'committed' : (refused as any).error.code,
                 holder: refused.ok ? null : (refused as any).error.details.holderPurpose,
@@ -4761,7 +4761,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                 expect(held.rows.length).toBe(1)
                 const before = await sheetFingerprint(scope.sheetId)
                 const started = Date.now()
-                const refused = await settle(store.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lockConfirm.bumpGenerationWithin }))
+                const refused = await settle(store.confirmContinuation(confirmInput(scope, holdId, fixture.hold, fixture), { bumpWithin: lockConfirm.bumpGenerationWithin, pilotWithin: refreshKit.seedPilotWithin }))
                 const elapsed = Date.now() - started
                 observed.e = {
                   code: refused.ok ? 'committed' : (refused as any).error.code,
@@ -5215,11 +5215,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const receipts = decisionsLib.createReadReceiptStore({ storage: { get: async (key: string) => (receiptMap.has(key) ? receiptMap.get(key) : null), set: async (key: string, value: unknown) => { receiptMap.set(key, value) } } })
               const action = { actionId: st.action.actionId, source: st.action.source }
               const consult = () => st.refresh.governance.consult(st.scope)
-              const ctxOf = (consultValue: any) => ({ scope: st.scope, actorId: st.users.puller.id, tenantClaimVerified: true, action, consult: consultValue, store: st.refresh.store, projectWriteLock: st.lock, audit, receipts })
+              // PR-8 review fix N1-b: the route-built context also carries the in-transaction pilot read (the REAL reader).
+              const ctxOf = (consultValue: any) => ({ scope: st.scope, actorId: st.users.puller.id, tenantClaimVerified: true, action, consult: consultValue, store: st.refresh.store, projectWriteLock: st.lock, audit, receipts, readPilotWithin: (trx: any) => st.refresh.governance.readPilotWithin(st.scope, trx) })
               const seed = (holds: any[], verdicts: Record<string, string> = {}) => decisionVersionOf(st.scope).then((observed) => seedOpenHolds(st.refresh.store, st.scope, holds, observed, verdicts))
               const confirmDirect = async (hold: any) => {
                 const idOf = await seed([hold])
-                return st.refresh.store.confirmContinuation(confirmInput(st.scope, idOf(hold), hold, fixture, { confirmedBy: st.users.puller.id }), { bumpWithin: st.lock.bumpGenerationWithin })
+                return st.refresh.store.confirmContinuation(confirmInput(st.scope, idOf(hold), hold, fixture, { confirmedBy: st.users.puller.id }), { bumpWithin: st.lock.bumpGenerationWithin, pilotWithin: refreshKit.seedPilotWithin })
               }
               const rowOf = async (id: string) => (await q(`SELECT status, claim_active, revision, ended_outcome FROM ${RT.continuation} WHERE id = $1`, [id])).rows[0]
               const openAbout = async (id: string) => (await q(`SELECT id, fingerprint, (detail->>'componentNewPositionCount')::int AS n FROM ${RT.hold} WHERE sheet_id = $1 AND continuation_id = $2 AND status = 'open' ORDER BY opened_at, id`, [st.sheetId, id])).rows
@@ -5909,6 +5910,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   S8-18 (review fix N3-b, round 2; the V8D-05 interleaving) a cell an EARLIER plan reviewed stays protected after
         //         an unrelated LATER plan is reviewed (the reviewed-cell register): the V8PG-15 move on it re-suspends the
         //         project from the earlier review's value, export 409; the five steps close it.
+        //   S8-19 (review fix N1-b, round 2) PR-4's PLAIN continuation confirm with the pilot marker cleared between the
+        //         route's consult and the store's state-row lock: 409 NOT_PILOT decided under the lock, nothing written;
+        //         the marker back => 201.
         //   S8-I1 confirm vs apply (pg_blocking_pids): the confirm frozen before COMMIT; an apply's lease acquire queues on
         //         the lock row and is granted the confirm's token; the pre-confirm binding is refused.
         //   S8-I2 confirm vs reconcile: a computation's reconcile queues on the state row behind the frozen confirm, then
@@ -7043,6 +7047,72 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               review2: '200',
               settle: 'ready',
               exportFinal: '200',
+            })
+          }, 300000)
+
+          test('S8-19 (review fix N1-b, the V8PG-09 interleaving on PR-4\'s PLAIN continuation confirm) a continuation_candidate confirm with the pilot marker cleared AFTER the route\'s consult, just before the store takes the state row: 409 NOT_PILOT decided under the lock — no relationship, no bump, no decision audit, the hold open; the marker back => the same body 201', async () => {
+            let fire: null | (() => Promise<void>) = null
+            const hook = async (event: StatementEvent) => {
+              if (fire && event.inTransaction && /integration_stock_prep_refresh_state[\s\S]*FOR UPDATE/i.test(String(event.sql))) {
+                const run = fire
+                fire = null
+                await run()
+              }
+            }
+            const st = await s3aStack('s8_19', { pilot: true, refresh: realRefreshServices(hostLikeDb(hook)) })
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource()
+            const suspended = await st.dryRun()
+            const row = (await openHoldRows(st)).find((entry: any) => entry.kind === 'continuation_candidate')
+            expect(row, 'an open candidate hold').toBeTruthy()
+            // Read the hold through the page (every pair page), then the confirm body bound to it.
+            const first = okData(await cpCall(st, 'GET', CPR.holds, { query: { holdId: row.id } }))
+            const entry = first.page.holds.find((item: any) => item.id === row.id)
+            let receipt = first.readReceipt
+            for (let index = 1; index < (entry.pairPage ? entry.pairPage.count : 1); index += 1) {
+              receipt = okData(await cpCall(st, 'GET', CPR.holds, { query: { holdId: row.id, pairCursor: String(index), receipt: receipt.id } })).readReceipt
+            }
+            const body = {
+              confirmProjectNo: st.projectNo,
+              holdId: row.id,
+              holdFingerprint: row.fingerprint,
+              comparisonFingerprint: row.comparison_fingerprint,
+              evidenceFingerprint: row.evidence_fingerprint,
+              candidateId: entry.pairingFingerprint,
+              readReceipt: receipt.id,
+              basis: { kind: 'puller_confirmed_same_demand' },
+              acknowledge: { historyUnknown: true },
+            }
+            const lock0 = await lockRowFor(st.key)
+            const audits0 = (await auditsOf(st.tenantId)).filter((item: any) => item.action === 'exception_resolve').length
+            const continuations0 = await countWhere(RT.continuation, 'sheet_id = $1', [st.sheetId])
+            fire = async () => { await st.pilotExit() }
+            const refused = await cpCall(st, 'POST', `${CP_BASE}/continuations/confirm`, { body })
+            const lock1 = await lockRowFor(st.key)
+            const observed = {
+              suspended: suspended.body.data.status,
+              fired: fire === null,
+              confirm: answer(refused),
+              decidedUnderLock: Boolean(errorOf(refused).details && errorOf(refused).details.decidedUnderLock === true),
+              relationshipsAdded: (await countWhere(RT.continuation, 'sheet_id = $1', [st.sheetId])) - continuations0,
+              bump: Number(lock1.generation) - Number(lock0.generation),
+              decisionAuditsAdded: (await auditsOf(st.tenantId)).filter((item: any) => item.action === 'exception_resolve').length - audits0,
+              holdStillOpen: (await openHoldRows(st)).some((item: any) => item.id === row.id),
+              reEnabled: '',
+            }
+            await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_s8_19_admin'])
+            observed.reEnabled = answer(await cpCall(st, 'POST', `${CP_BASE}/continuations/confirm`, { body }))
+            console.log(`[S8-19] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: 'suspended',
+              fired: true,
+              confirm: `409:${DC.NOT_PILOT}:`,
+              decidedUnderLock: true,
+              relationshipsAdded: 0,
+              bump: 0,
+              decisionAuditsAdded: 0,
+              holdStillOpen: true,
+              reEnabled: '201',
             })
           }, 300000)
 

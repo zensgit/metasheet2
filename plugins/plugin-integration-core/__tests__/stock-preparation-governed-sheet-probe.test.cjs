@@ -102,7 +102,7 @@ async function confirm(w, scope = w.scope) {
   const holdRow = w.db.rows(T.hold).find((row) => row.status === 'open' && row.sheet_id === scope.sheetId)
   return w.continuationStore.confirmContinuation({
     ...scope, holdId: holdRow.id, echo: refreshKit.echoOf(w.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: w.fixture.sourceIdentity,
-  }, { bumpWithin: w.bump.bumpWithin })
+  }, { bumpWithin: w.bump.bumpWithin, pilotWithin: refreshKit.seedPilotWithin })
 }
 
 async function beginExecution(w, scope = w.scope) {

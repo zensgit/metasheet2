@@ -197,7 +197,7 @@ async function world({ pilot = true, registered = true, sourceBindingStore, pack
         basis: { kind: 'puller_confirmed_same_demand' },
         confirmedBy: 'u_sl_puller',
         sourceIdentity: lanes.refreshSourceIdentity({ action: tableActions.assertStockPreparationTargetReady(w.action), tenantId: TENANT }),
-      }, { bumpWithin: env.bump.bumpWithin })
+      }, { bumpWithin: env.bump.bumpWithin, pilotWithin: refreshKit.seedPilotWithin })
     },
     async clearPilot() {
       // The registry row's pilot columns cleared (the admin's exit); the rows of step 4 stay (C10).

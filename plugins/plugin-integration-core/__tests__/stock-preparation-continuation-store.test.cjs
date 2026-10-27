@@ -168,7 +168,7 @@ async function confirmHold(w, hold, options = {}) {
     confirmedBy: PULLER,
     sourceIdentity,
     ...(options.input || {}),
-  }, { bumpWithin: bump.bumpWithin, ...(options.hooks || {}) })
+  }, { bumpWithin: bump.bumpWithin, pilotWithin: kit.seedPilotWithin, ...(options.hooks || {}) })
 }
 
 // The kit's (shared with the real-DB cases): a relationship_reconfirm hold about one continuation.
@@ -330,6 +330,7 @@ test('ST-04 confirm: statement order, rows, the read-back feeds the pure core, d
     ...scope, holdId: holdRow.id, echo: kit.echoOf(hold), basis: { kind: 'puller_confirmed_same_demand', note: '  same demand  ' }, confirmedBy: PULLER, sourceIdentity,
   }, {
     bumpWithin: bump.bumpWithin,
+    pilotWithin: kit.seedPilotWithin,
     auditWithin: async (trx, event) => { events.push({ trxIsHandle: typeof trx.selectOneForUpdate === 'function', event }) },
   })
   assert.equal(confirmed.revision, 1)
@@ -444,7 +445,7 @@ test('ST-05 confirm refusals: no bumpWithin, absent / resolved / foreign hold, k
   await expectError(store.confirmContinuation(base, {}), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'bump_within_missing' })
   assert.equal(db.log.length, 0)
   const bump = kit.createFakeBumpWithin()
-  const hooks = { bumpWithin: bump.bumpWithin }
+  const hooks = { bumpWithin: bump.bumpWithin, pilotWithin: kit.seedPilotWithin }
   // Absent hold -> STALE; another tenant's scope -> no state row -> STALE; a hold read under another tenant -> TENANT_MISMATCH.
   await expectError(store.confirmContinuation({ ...base, holdId: 'hold_nope' }, hooks), { status: 409, code: CODES.CONFIRM_STALE, reason: 'hold_absent' })
   await expectError(store.confirmContinuation({ ...base, tenantId: OTHER_TENANT }, hooks), { status: 409, code: CODES.TENANT_MISMATCH })
@@ -635,7 +636,7 @@ test('ST-08 end: escalate keeps the hold open runbook-only (a clean computation 
   // A reconfirm hold about it (structure_changed: not reconfirmable).
   await store.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [reconfirmHoldFor(cont.id, { confirmable: false, verdict: 'structure_changed' })], verdicts: { [cont.id]: 'structure_changed' }, computation: computation() })
   const endBase = { ...scope, continuationId: cont.id, revision: 1, endedBy: PULLER }
-  const hooks = { bumpWithin: bump.bumpWithin }
+  const hooks = { bumpWithin: bump.bumpWithin, pilotWithin: kit.seedPilotWithin }
   // superseded_by_new_confirmation is confirm-only; release is not admissible here (last verdict structure_changed).
   db.log.length = 0
   await expectError(store.endContinuation({ ...endBase, outcome: 'superseded_by_new_confirmation' }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'outcome_confirm_only' })
@@ -767,7 +768,7 @@ test('ST-09 re-confirm: UPDATE in place (same id, revision + 1, active, reason c
   const holdRow = db.rows(T.hold).find((row) => row.fingerprint === reconfirmHold.fingerprint)
   const newIdentity = { ...sourceIdentity, readPlanDigest: 'c'.repeat(64) }
   const base = { ...scope, continuationId: cont.id, revision: 1, holdId: holdRow.id, echo: kit.echoOf(reconfirmHold), confirmedBy: PULLER, sourceIdentity: newIdentity }
-  const hooks = { bumpWithin: bump.bumpWithin }
+  const hooks = { bumpWithin: bump.bumpWithin, pilotWithin: kit.seedPilotWithin }
   await expectError(store.reconfirmContinuation({ ...base, revision: 3 }, hooks), { status: 409, code: CODES.CONFIRM_STALE, reason: 'continuation_revision' })
   await expectError(store.reconfirmContinuation({ ...base, echo: { ...base.echo, evidenceFingerprint: 'z'.repeat(64) } }, hooks), { status: 409, code: CODES.CONFIRM_STALE, reason: 'evidence_fingerprint' })
   await expectError(store.reconfirmContinuation(base, {}), { status: 501, code: CODES.STORE_UNAVAILABLE })
@@ -1054,7 +1055,7 @@ test('ST-15 end admissibility (review X-2, design §9.3 / §8.4): an ACTIVE cont
   await seedHolds(w, [hold])
   const confirmed = await confirmHold(w, hold)
   const id = confirmed.continuationId
-  const hooks = { bumpWithin: bump.bumpWithin }
+  const hooks = { bumpWithin: bump.bumpWithin, pilotWithin: kit.seedPilotWithin }
   const endBase = { ...scope, continuationId: id, revision: 1, endedBy: PULLER }
   // (a) ACTIVE with an OPEN hold naming it: a content_changed verdict keeps the relationship active and raises a
   //     relationship_content_change hold. Only the status check stands between an escalation and ending an ACTIVE
@@ -1308,7 +1309,7 @@ test('ST-18 (M2) a release decides ONLY from the continuation\'s OWN open relati
   assert.equal(db.rows(T.hold).filter((row) => row.status === 'open' && row.continuation_id === idA).length, 0, 'A has NO open row of its own')
   const rowB = db.rows(T.hold).find((row) => row.status === 'open' && row.continuation_id === idB)
   assert.ok(rowB, 'B has its admissible open row')
-  const hooks = { bumpWithin: bump.bumpWithin }
+  const hooks = { bumpWithin: bump.bumpWithin, pilotWithin: kit.seedPilotWithin }
   const endA = (facts) => store.endContinuation({ ...scope, continuationId: idA, revision: 1, endedBy: PULLER, outcome: 'release_to_normal_refresh', facts }, hooks)
   const before = tablesSnapshot(db)
   const bumpsBefore = bump.calls.length
@@ -1328,7 +1329,7 @@ test('ST-19 (M3c) S25 on the RELEASE: while A\'s escalated hold is open runbook-
   const w = await world()
   const { store, db, scope, bump } = w
   const { idA, idB } = await twoRelationships(w)
-  const hooks = { bumpWithin: bump.bumpWithin }
+  const hooks = { bumpWithin: bump.bumpWithin, pilotWithin: kit.seedPilotWithin }
   // A: a structure_changed reconfirm row, then escalated (its row stays OPEN, runbook-only).
   await store.reconcileHolds({ ...scope, decisionVersionObserved: decisionVersionOf(w), holds: [reconfirmHoldFor(idA, { confirmable: false, verdict: 'structure_changed' })], verdicts: { [idA]: 'structure_changed' }, computation: computation() })
   await store.endContinuation({ ...scope, continuationId: idA, revision: 1, endedBy: PULLER, outcome: 'escalate_special_repair' }, hooks)

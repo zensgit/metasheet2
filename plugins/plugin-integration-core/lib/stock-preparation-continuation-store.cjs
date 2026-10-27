@@ -881,6 +881,16 @@ function requireBumpWithin(options) {
   return options.bumpWithin
 }
 
+// PR-8 review fix N1-b (round 2; the PR-4 rule — every admissibility fact under the lock): a candidate confirm ALWAYS
+// creates a relationship, which needs the pilot marker. It re-reads it on its own transaction handle (`pilotWithin`, the
+// governance reader's `readPilotWithin`), so the hook is required up front — unwired is 501 by name, before any statement.
+function requirePilotWithin(options) {
+  if (!isPlainObject(options) || typeof options.pilotWithin !== 'function') {
+    throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'a relationship confirm re-reads the pilot marker under the lock; the in-transaction pilot read is not wired', { reason: 'pilot_read_within' })
+  }
+  return options.pilotWithin
+}
+
 function auditHookOf(options) {
   if (isPlainObject(options) && options.auditWithin !== undefined && options.auditWithin !== null && typeof options.auditWithin !== 'function') {
     throw inputInvalid('auditWithin must be a function when given', 'auditWithin')
@@ -1632,7 +1642,9 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * Confirm a `continuation_candidate` hold into an ACTIVE continuation (revision 1) with its members.
    * Refusals before any row moves: the hold must be open, of that kind, confirmable, and carry exactly the
    * echoed fingerprints (409 CONFIRM_STALE / CONFIRM_NOT_ALLOWED); a store failure is 503. In the
-   * transaction: state FOR UPDATE -> hold re-read -> [the named continuation FOR UPDATE, its claim_active
+   * transaction: state FOR UPDATE -> hold re-read -> the registry's pilot marker re-read on this handle (PR-8 review fix
+   * N1-b: `options.pilotWithin`, REQUIRED — unwired is 501 `pilot_read_within` before any statement; cleared => 409
+   * NOT_PILOT, nothing written) -> [the named continuation FOR UPDATE, its claim_active
    * members read, refused 409 END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` when the claims share nothing
    * (claimsOverlap, review X-3) and `supersedes_incomplete` when the new claims do not cover every old record id
    * and old key digest of it (takeoverGaps, review round 2), then ended as superseded_by_new_confirmation] ->
@@ -1657,6 +1669,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       throw inputInvalid('supersedes needs { continuationId, revision }', 'supersedes', 400)
     }
     const bumpWithin = requireBumpWithin(options)
+    const pilotWithin = requirePilotWithin(options)
     const auditWithin = auditHookOf(options)
     const at = clock()
 
@@ -1670,6 +1683,12 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       assertEcho(holdRow, echo)
       const hold = rowToHold(holdRow)
       const facts = continuationFactsFromHold(hold, scope)
+      // PR-8 review fix N1-b (round 2): the pilot fact re-decided HERE — after the state-row lock, before any row moves and
+      // before the bump. A marker cleared since the route's consult refuses 409 NOT_PILOT and rolls back with nothing
+      // written (the route's consult-time NOT_PILOT is the fast, earlier picture). A plain read, no row lock: a pilot exit
+      // committing after it serialises as "the confirm came first", and clearing the marker never releases what rows
+      // protect (D3).
+      await assertPilotWithin(trx, pilotWithin)
 
       let supersededId = null
       if (supersedes) {

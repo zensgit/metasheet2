@@ -793,6 +793,59 @@ test('CR-N1 the combined confirm: the pilot marker cleared AFTER the route\'s co
   }
 })
 
+// ── CR-N1b (review fix N1-b, round 2) ────────────────────────────────────────────────────────────
+
+test('CR-N1b the PLAIN continuation confirm (POST …/continuations/confirm, a continuation_candidate hold): the pilot marker cleared AFTER the route\'s consult (its NOT_PILOT passed) is refused 409 NOT_PILOT by the store under the lock — no relationship, no bump, no decision audit, the hold open; the marker back => 201', async () => {
+  const ctl = { armed: false, h: null }
+  const st = mount({ consultHook: async () => { if (ctl.armed) { ctl.armed = false; setPilot(ctl.h, false) } } })
+  ctl.h = st.h
+  try {
+    await firstPull(st)
+    st.source.data = F.secondPullSource()
+    assert.equal(dataOf(await st.dryRun()).status, 'suspended')
+    const row = st.openHolds().find((entry) => entry.kind === 'continuation_candidate')
+    assert.ok(row && row.confirmable === true, 'one open confirmable candidate')
+    // Read the hold through the page (every pair page), then the confirm body bound to it.
+    const first = dataOf(await listHolds(st, { holdId: row.id }))
+    const entry = first.page.holds.find((item) => item.id === row.id)
+    let receipt = first.readReceipt
+    for (let index = 1; index < (entry.pairPage ? entry.pairPage.count : 1); index += 1) {
+      receipt = dataOf(await listHolds(st, { holdId: row.id, pairCursor: String(index), receipt: receipt.id })).readReceipt
+    }
+    const body = {
+      confirmProjectNo: PROJECT,
+      holdId: row.id,
+      holdFingerprint: row.fingerprint,
+      comparisonFingerprint: row.comparison_fingerprint,
+      evidenceFingerprint: row.evidence_fingerprint,
+      candidateId: entry.pairingFingerprint,
+      readReceipt: receipt.id,
+      basis: { kind: 'puller_confirmed_same_demand' },
+      acknowledge: { historyUnknown: true },
+    }
+    const continuationsBefore = st.continuations().length
+    const generationBefore = st.lockRow().generation
+    const auditsBefore = st.audits().filter((item) => item.action === REFRESH_DECISION_AUDIT.decisionAction).length
+    st.env.db.log.length = 0
+    ctl.armed = true
+    const refused = await call(st, 'POST', `${BASE}/continuations/confirm`, { body })
+    assert.equal(ctl.armed, false, 'the hook cleared the marker after the confirm route\'s consult')
+    const error = expectRefusal(refused, { status: 409, code: CODES.NOT_PILOT })
+    assert.equal(error.details.decidedUnderLock, true, 'refused by the STORE under the lock (the consult said pilot)')
+    assert.equal(stateRowTaken(st), true, 'the store transaction took the state row, then rolled back')
+    assert.equal(st.continuations().length, continuationsBefore, 'no relationship')
+    assert.equal(st.openHolds().some((item) => item.id === row.id), true, 'the hold stays open')
+    assert.equal(st.lockRow().generation, generationBefore, 'no bump')
+    assert.equal(st.audits().filter((item) => item.action === REFRESH_DECISION_AUDIT.decisionAction).length, auditsBefore, 'no decision audit row')
+    setPilot(st.h, true)
+    const done = await call(st, 'POST', `${BASE}/continuations/confirm`, { body })
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(st.continuations().length, continuationsBefore + 1)
+  } finally {
+    st.restore()
+  }
+})
+
 // ── CR-N3 (review fix N3) ────────────────────────────────────────────────────────────────────────
 
 test('CR-N3 (C06) after a review the source moves AND a host-side write puts exactly that value into the reviewed cell (V8PG-15): the next preview is SUSPENDED on a reviewed_content_moved hold (formal surfaces refused); confirm -> controlled update -> review closes it with the reviewed digest as baseline', async () => {
