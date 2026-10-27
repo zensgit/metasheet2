@@ -40,12 +40,14 @@
 //         snapshot-to-lock-read gap: C2 derives complete, the digest matches, G1's epoch catches it; (f) the same
 //         failure before G0: C1 refuses failed_pending_recovery; (g) a zero-write SELF-SETTLED success before G0:
 //         200 (the positive control).
-//   XR-07 UNWIRED: no governance service / no lock => 501 by name, before any records read.
+//   XR-07 UNWIRED: no governance service / no lock => 501 by name, before any records read; no records surface
+//         (PR-7b) => 501 before G0: no audit row, no lock read, no consult.
 //   XR-08 「最近导出」 skips `export_refused` rows.
 //   XR-09 EVERY failure of the gate call audits one `export_refused` row (step-4 review follow-ups, item 2): a
 //         lane-class refusal inside R (a), an untyped host failure (b), a typed host failure (c) — the code and
 //         closed tokens only; the row keeps `operation: 'prep_line_export'` and a store's own operation rides
-//         along as `storeOperation` (item 1).
+//         along as `storeOperation` (item 1). PR-7b: (d) an untyped error's own code-shaped code is never the
+//         refusal (the typed check); (e) a typed error's non-code-shaped code is never the refusal (the shape check).
 //   XR-10 a not-governed export under a live lease: 409 BLOCKED lease_in_flight with the cause-and-remedy message
 //         (item 3; XG-03 / XG-04 pin the messages by reason on the pure gate).
 //   XH-01..04 THE HANDOFF TERMINAL HOP: refused 409 (503 unreadable) under the same predicate; non-terminal hops
@@ -269,6 +271,8 @@ function mountExport({
   sheetId = GOV_SHEET,
   withGovernance = true,
   withLock = true,
+  // PR-7b (#6571 review, XR-07): `false` = a host without the multitable records surface.
+  withRecords = true,
   hooks = {},
 } = {}) {
   const routes = new Map()
@@ -294,7 +298,7 @@ function mountExport({
   const fieldIdMap = Object.fromEntries(TEMPLATE.fields.map((field) => [field.id, physicalFieldId(staging, MAIN_OBJECT_ID, field.id)]))
   const target = { sheetId, fieldIdMap }
   const context = {
-    api: { http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { records: countingRecords, provisioning } },
+    api: { http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { ...(withRecords ? { records: countingRecords } : {}), provisioning } },
     storage: new Map(),
     config: { stockPreparationTableActions: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID, source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' }, target }] },
   }
@@ -1007,6 +1011,26 @@ async function main() {
     assert.deepEqual(noLock.reads, [])
   })
 
+  // PR-7b (#6571 review correction 1): the records surface is looked up with the other unwired-capability 501s,
+  // BEFORE the gate's try — so an unwired host answers its 501 with no audit row, no lock read and no consult.
+  await run('XR-07 unwired: no multitable records surface => 501 TABLE_ACTION_RECORDS_API_UNAVAILABLE before G0 — no audit row, no lock read, no consult', async () => {
+    for (const [label, opts, user, projectNo] of [
+      ['not governed', { rows: goldenRows(), tenantId: GOLDEN_TENANT, sheetId: GOLDEN_SHEET, withRecords: false }, GOLDEN_OPERATOR, GOLDEN_PROJECT],
+      ['governed', { rows: await governedRows(), withRecords: false }, GOV_OPERATOR, GOV_PROJECT],
+    ]) {
+      const h = mountExport(opts)
+      const res = await h.exportAs(user, projectNo)
+      assert.equal(res.statusCode, 501, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(errorOf(res).code, 'TABLE_ACTION_RECORDS_API_UNAVAILABLE', label)
+      assert.deepEqual(h.auditAppends, [], `${label}: no audit row`)
+      assert.equal(h.counters.routeReadGeneration, 0, `${label}: no lock read (G0 never ran)`)
+      assert.equal(h.counters.readRefreshState, 0, `${label}: no consult (C1 never ran)`)
+      assert.deepEqual(h.reads, [], `${label}: no records read`)
+      assert.deepEqual(h.xlsxCalls, [], `${label}: no workbook`)
+      assert.equal(res.sentBuffer, null, `${label}: nothing streamed`)
+    }
+  })
+
   // ── XR-08 ──────────────────────────────────────────────────────────────────────────────────────
   await run('XR-08 「最近导出」 skips export_refused rows: a refused export never shadows the real one behind it, and a project with only refusals has none', async () => {
     const audit = {
@@ -1090,6 +1114,42 @@ async function main() {
     const ok = await control.exportAs(GOLDEN_OPERATOR, GOLDEN_PROJECT)
     assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
     assert.deepEqual(control.auditAppends, [GOLDEN_AUDIT])
+  })
+
+  // PR-7b (#6571 review correction 2): the refusal-code helper's TWO checks, each pinned on its own. A row records a
+  // caller's code only when the error is typed AND the code is code-shaped; otherwise the fixed route-failure code.
+  await run('XR-09d an UNTYPED failure carrying a code-shaped code (no status) => 500 STOCK_PREPARATION_ROUTE_FAILED; the row records the route-failure code, never the untyped error\'s own code (the typed check)', async () => {
+    const h = mountExport({
+      rows: goldenRows(),
+      tenantId: GOLDEN_TENANT,
+      sheetId: GOLDEN_SHEET,
+      hooks: { afterRecordsRead: async (n) => { if (n === 1) throw Object.assign(new Error(SENTINEL), { code: 'HOST_DRIVER_FAULT' }) } },
+    })
+    const res = await h.exportAs(GOLDEN_OPERATOR, GOLDEN_PROJECT)
+    assertRefused(h, res, 500, 'STOCK_PREPARATION_ROUTE_FAILED')
+    const row = h.auditAppends.find((entry) => entry.mode === 'export_refused')
+    assert.deepEqual(row.detail, { operation: 'prep_line_export', refusal: 'STOCK_PREPARATION_ROUTE_FAILED' }, 'an untyped error\'s code is never the refusal')
+    assert.equal(JSON.stringify(h.auditAppends).includes('HOST_DRIVER_FAULT'), false, 'the untyped code is not recorded')
+    noSentinelInAudit(h, '(d)')
+  })
+
+  await run('XR-09e a TYPED failure whose code is NOT code-shaped => the row records STOCK_PREPARATION_ROUTE_FAILED, never that code (the code-shape check)', async () => {
+    for (const code of ['host_records_unavailable', 'Host-Records-Unavailable', `HOST_${'X'.repeat(90)}`]) {
+      const h = mountExport({
+        rows: goldenRows(),
+        tenantId: GOLDEN_TENANT,
+        sheetId: GOLDEN_SHEET,
+        hooks: { afterRecordsRead: async (n) => { if (n === 1) throw Object.assign(new Error(SENTINEL), { status: 503, code }) } },
+      })
+      const res = await h.exportAs(GOLDEN_OPERATOR, GOLDEN_PROJECT)
+      assert.equal(res.statusCode, 503, `${code}: the typed status answers (${JSON.stringify(res.body)})`)
+      assert.equal(res.sentBuffer, null, `${code}: nothing streamed`)
+      const refused = h.auditAppends.filter((entry) => entry.action === 'prep_line_export' && entry.mode === 'export_refused')
+      assert.equal(refused.length, 1, `${code}: exactly one export_refused row`)
+      assert.deepEqual(refused[0].detail, { operation: 'prep_line_export', refusal: 'STOCK_PREPARATION_ROUTE_FAILED' }, `${code}: the row records the route-failure code`)
+      assert.deepEqual(h.xlsxCalls, [], `${code}: no workbook`)
+      noSentinelInAudit(h, `(e) ${code.slice(0, 24)}`)
+    }
   })
 
   // ── XR-10 ──────────────────────────────────────────────────────────────────────────────────────

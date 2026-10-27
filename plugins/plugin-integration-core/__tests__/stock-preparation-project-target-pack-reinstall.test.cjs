@@ -196,6 +196,11 @@ test('PK-00 the harness records surface honours filters (host semantics) and lim
   assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: 'PRJ-PK00-ONE' } })), ['k1', 'k3'], 'a project filter: that project\'s rows of that sheet only')
   assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: 'PRJ-PK00-ONE', idempotencyKey: 'k3' } })), ['k3'], 'filters are a conjunction')
   assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: 2 } })), ['k1'], 'String() coercion, as the host\'s ->> text comparison')
+  // PR-7b (#6571 review correction 3): the coercion leg that DISCRIMINATES — a STRING filter on NUMERIC data matches
+  // (the host compares `data ->> k` text with String(v)); a strict `===` reads it as nothing.
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: '2' } })), ['k1'], 'a string filter on numeric data: String() on the row side too')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: ['3', 4] } })), ['k2', 'k3'], 'a mixed list on numeric data: any element, compared as text')
+  assert.deepEqual(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: '2.0' } }), [], 'text, not numeric, equality (2 is "2", never "2.0")')
   assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: null } })), ['k4'], 'a null filter: only rows without the key')
   assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { note: null } })), ['k1', 'k2'], 'an explicit JSON null is not an absent key (data -> k IS NULL)')
   assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: ['PRJ-PK00-TWO', 'PRJ-PK00-ONE'] } })), ['k1', 'k2', 'k3'], 'a value list: any element')
