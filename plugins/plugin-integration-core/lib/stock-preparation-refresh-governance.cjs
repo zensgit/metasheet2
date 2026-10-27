@@ -331,6 +331,26 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
   }
 
   /**
+   * Step 5 PR-8 review fix N1: the pilot marker of ONE project read ON THE CALLER'S TRANSACTION HANDLE — PR B's
+   * projection by (tenant, project) with `{ executor: trx }`, the consult's own registry read. The combined change-plan
+   * confirm calls it after its state-row lock (the PR-4 rule: every admissibility fact under the lock). Answers
+   * `{ enabled }`: true only for a pilot row registered on THIS sheet (the consult refuses any other pilot row as
+   * retargeted). A thrown read is the governance 503 (never "not pilot"); unwired is 501.
+   */
+  async function readPilotWithin(input = {}, trx) {
+    const scope = normalizeScope(input)
+    requireWired()
+    if (!trx || typeof trx.selectOne !== 'function') throw unavailable('pilot_read_handle')
+    let row
+    try {
+      row = await projectTargetStore.getPilotState({ tenantId: scope.tenantId, projectNo: scope.projectNo }, { executor: trx })
+    } catch (error) {
+      throw translate('registry', 'pilot_state_within', error)
+    }
+    return Object.freeze({ enabled: Boolean(row && row.pilot === true && row.sheetId === scope.sheetId) })
+  }
+
+  /**
    * The derived state for a read surface (board / directory / overview / export gate): a store failure is
    * answered as the `unreadable` state (never thrown away as "no rows"); a tenant mismatch or a retarget is
    * a refusal and is RETHROWN — those must stop the caller, not be displayed as a state.
@@ -352,7 +372,7 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     return Object.freeze({ consult: answer, error: null, state: readProjectRefreshState(answer) })
   }
 
-  return Object.freeze({ consult, readRefreshState, plannerSlice })
+  return Object.freeze({ consult, readRefreshState, readPilotWithin, plannerSlice })
 }
 
 module.exports = {

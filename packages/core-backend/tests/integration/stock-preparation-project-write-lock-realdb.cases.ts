@@ -5893,6 +5893,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //         the write updates the old rows (no copy of the continued subtree), S root raw = total; the review completes.
         //   S8-13 (F15, register ①, NOT governed) the same human / machine interleavings on a not-governed project: the
         //         person's value kept, a machine move stops 409 with partial counts; no step-4 / step-5 row.
+        //   S8-14 (review fix N1) the combined confirm with the pilot marker cleared between the route's consult and the
+        //         store's state-row lock (the V8PG-09 interleaving): 409 NOT_PILOT decided under the lock, nothing written;
+        //         the marker back => 201.
         //   S8-I1 confirm vs apply (pg_blocking_pids): the confirm frozen before COMMIT; an apply's lease acquire queues on
         //         the lock row and is granted the confirm's token; the pre-confirm binding is refused.
         //   S8-I2 confirm vs reconcile: a computation's reconcile queues on the state row behind the frozen confirm, then
@@ -6688,6 +6691,58 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               machine: { waited: true, applied: `409:${DC.CHANGE_PLAN_STALE}:machine_columns_moved`, partialCounts: 'number' },
               stepFiveRows: 0,
               stepFourRows: 0,
+            })
+          }, 300000)
+
+          test('S8-14 (review fix N1, the V8PG-09 interleaving) the combined confirm with the pilot marker cleared AFTER the route\'s consult, just before the store takes the state row: 409 NOT_PILOT decided under the lock — no plan, no relationship, no bump, no audit row, the holds open; the marker back => the same body 201', async () => {
+            let fire: null | (() => Promise<void>) = null
+            const hook = async (event: StatementEvent) => {
+              if (fire && event.inTransaction && /integration_stock_prep_refresh_state[\s\S]*FOR UPDATE/i.test(String(event.sql))) {
+                const run = fire
+                fire = null
+                await run()
+              }
+            }
+            const st = await s3aStack('s8_14', { pilot: true, refresh: realRefreshServices(hostLikeDb(hook)) })
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource({ edge: 3 })
+            const suspended = await st.dryRun()
+            const { page, body } = await boundBody(st)
+            const candidate = page.proposal.candidates[0]
+            const decision = { holdId: candidate.holdId, candidateId: candidate.candidateId, basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } }
+            const lock0 = await lockRowFor(st.key)
+            const audits0 = (await auditsOf(st.tenantId)).filter((row: any) => row.action === 'exception_resolve').length
+            const continuations0 = await countWhere(RT.continuation, 'sheet_id = $1', [st.sheetId])
+            const holds0 = (await openHoldRows(st)).map((row: any) => row.id).sort()
+            fire = async () => { await st.pilotExit() }
+            const refused = await cpCall(st, 'POST', CPR.confirm, { body: { ...body, candidates: [decision] } })
+            const lock1 = await lockRowFor(st.key)
+            const observed = {
+              suspended: suspended.body.data.status,
+              fired: fire === null,
+              confirm: answer(refused),
+              decidedUnderLock: Boolean(errorOf(refused).details && errorOf(refused).details.decidedUnderLock === true),
+              plans: (await plansOf(st)).length,
+              relationshipsAdded: (await countWhere(RT.continuation, 'sheet_id = $1', [st.sheetId])) - continuations0,
+              bump: Number(lock1.generation) - Number(lock0.generation),
+              decisionAuditsAdded: (await auditsOf(st.tenantId)).filter((row: any) => row.action === 'exception_resolve').length - audits0,
+              holdsUnchanged: sameJson((await openHoldRows(st)).map((row: any) => row.id).sort(), holds0),
+              reEnabled: '',
+            }
+            await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_s8_14_admin'])
+            observed.reEnabled = answer(await cpCall(st, 'POST', CPR.confirm, { body: { ...body, candidates: [decision] } }))
+            console.log(`[S8-14] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: 'suspended',
+              fired: true,
+              confirm: `409:${DC.NOT_PILOT}:`,
+              decidedUnderLock: true,
+              plans: 0,
+              relationshipsAdded: 0,
+              bump: 0,
+              decisionAuditsAdded: 0,
+              holdsUnchanged: true,
+              reEnabled: '201',
             })
           }, 300000)
 

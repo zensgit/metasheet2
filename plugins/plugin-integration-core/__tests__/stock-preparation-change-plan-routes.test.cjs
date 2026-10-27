@@ -25,6 +25,8 @@
 //           unfinished execution (RECOVERY_PENDING); the page names each as `proposal.blocked`.
 //   CR-CMB  the combined confirm (candidate_content_differs): the history acknowledgement (400), NOT_PILOT without the
 //           pilot marker (before the state row); with it 201 — the relationship and the plan in ONE transaction.
+//   CR-N1   review fix N1: the pilot marker cleared AFTER the route's consult (the fast path passed) is refused 409
+//           NOT_PILOT by the store under the state-row lock — no plan, no relationship, no bump, no audit row.
 //   CR-RV   the review: a confirmed (unwritten) plan STALE not_written; a live writer WRITE_LOCKED; a moved echo; a
 //           person's edit after the page => the receipt fingerprint_moved, then content_moved; an open hold BLOCKED; a
 //           confirmed plan BLOCKED change_plan_pending; that plan's write absorbs the written one (STALE plan_replaced)
@@ -177,7 +179,7 @@ function setPilot(h, enabled) {
   }
 }
 
-function mount({ pilot = true, unwired = false, register = true } = {}) {
+function mount({ pilot = true, unwired = false, register = true, consultHook = null } = {}) {
   const source = { data: F.firstPullSource() }
   const adapter = {
     async read(input = {}) {
@@ -190,7 +192,9 @@ function mount({ pilot = true, unwired = false, register = true } = {}) {
     tenantId: TENANT,
     projectNo: PROJECT,
     switchOn: true,
-    refreshOptions: { lockOnRefreshDb: true },
+    // Review fix N1: `consultHook(n, scope)` runs after the n-th consult answered (a decision landing between a route's
+    // consult and its store transaction).
+    refreshOptions: { lockOnRefreshDb: true, ...(typeof consultHook === 'function' ? { consultHook } : {}) },
     serviceExtras: {
       stockPreparationConfirmationDecisionLease: LEASE,
       adapterRegistry: { createAdapter() { return adapter }, listAdapterKinds() { return [] } },
@@ -746,6 +750,43 @@ test('CR-CMB the combined confirm (candidate_content_differs): the unknown histo
     assert.equal(replan.status, 'ready')
     assert.ok(replan.dryRunToken)
   } finally { st.restore() }
+})
+
+// ── CR-N1 (review fix N1) ────────────────────────────────────────────────────────────────────────
+
+test('CR-N1 the combined confirm: the pilot marker cleared AFTER the route\'s consult (fast path passed) is refused 409 NOT_PILOT by the store under the lock — nothing decided; the marker back => 201', async () => {
+  const ctl = { armed: false, h: null }
+  const st = mount({ consultHook: async () => { if (ctl.armed) { ctl.armed = false; setPilot(ctl.h, false) } } })
+  ctl.h = st.h
+  try {
+    await firstPull(st)
+    st.source.data = F.secondPullSource({ edge: 3 })
+    assert.equal(dataOf(await st.dryRun()).status, 'suspended')
+    const { page, body } = await boundConfirmBody(st)
+    assert.equal(page.proposal.candidates.length, 1)
+    const candidate = page.proposal.candidates[0]
+    const decision = { holdId: candidate.holdId, candidateId: candidate.candidateId, basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } }
+    const before = snapshotOf(st)
+    const continuationsBefore = st.continuations().length
+    st.env.db.log.length = 0
+    ctl.armed = true
+    const refused = await confirm(st, { ...body, candidates: [decision] })
+    assert.equal(ctl.armed, false, 'the hook cleared the marker after the confirm route\'s consult')
+    const error = expectRefusal(refused, { status: 409, code: CODES.NOT_PILOT })
+    assert.equal(error.details.decidedUnderLock, true, 'refused by the STORE under the lock (the consult said pilot)')
+    assert.equal(stateRowTaken(st), true, 'the store transaction took the state row, then rolled back')
+    assert.equal(st.plans().length, before.plans, 'no plan row')
+    assert.equal(st.continuations().length, continuationsBefore, 'no relationship')
+    assert.equal(st.openHolds().length, before.openHolds, 'the holds stay open')
+    assert.equal(st.audits().filter((entry) => entry.action === REFRESH_DECISION_AUDIT.decisionAction).length, before.decisionAudits, 'no decision audit row')
+    assert.equal(st.lockRow().generation, before.generation, 'no bump')
+    setPilot(st.h, true)
+    const done = await confirm(st, { ...body, candidates: [decision] })
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(done.body.data.continuationIds.length, 1)
+  } finally {
+    st.restore()
+  }
 })
 
 // ── CR-RV ────────────────────────────────────────────────────────────────────────────────────────

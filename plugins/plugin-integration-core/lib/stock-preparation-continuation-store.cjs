@@ -189,6 +189,9 @@ const REFRESH_STORE_ERROR_CODES = Object.freeze({
   CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT: 'STOCK_PREP_CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT',
   CHANGE_REVIEW_STALE: 'STOCK_PREP_CHANGE_REVIEW_STALE',
   CHANGE_REVIEW_BLOCKED: 'STOCK_PREP_CHANGE_REVIEW_BLOCKED',
+  // PR-8 review fix N1: the decisions' NOT_PILOT token (stock-preparation-refresh-decisions.cjs REFRESH_DECISION_ERROR_CODES
+  // .NOT_PILOT), spelled here because the combined confirm re-decides the pilot marker under the state-row lock.
+  NOT_PILOT: 'STOCK_PREP_CONTINUATION_CONFIRM_NOT_PILOT',
 })
 
 // The consult's reads share ONE snapshot (review X-1): a lib/db.cjs whitelisted isolation level, pinned by the
@@ -369,6 +372,24 @@ function reviewStale(reason, extra = {}) {
 }
 
 // C12: the review does not complete while anything else on the project is unfinished.
+// PR-8 review fix N1 (the PR-4 rule: every admissibility fact under the lock). The combined confirm (design §10.3 (5))
+// creates a relationship, which needs the pilot marker (register R-63 ⑤). The route's NOT_PILOT is the consult's
+// picture; this re-decides it ON THE CONFIRM'S OWN HANDLE, after the state-row lock and before the bump: `pilotWithin`
+// (the governance reader's `readPilotWithin` — PR B's registry projection run with `{ executor: trx }`, exactly as the
+// consult runs it on its snapshot) answers `{ enabled }`. A marker cleared (or a row moved off this sheet) since the
+// consult refuses 409 NOT_PILOT and the transaction rolls back with nothing written; an unwired read is 501 by name;
+// a failed read throws (never "not pilot"). A plain read, no row lock: a pilot exit committing after it serialises as
+// "the confirm happened first", and clearing the marker never releases what rows protect (D3).
+async function assertPilotWithin(trx, pilotWithin) {
+  if (typeof pilotWithin !== 'function') {
+    throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'a combined change-plan confirm re-reads the pilot marker under the lock; the in-transaction pilot read is not wired', { reason: 'pilot_read_within' })
+  }
+  const pilot = await pilotWithin(trx)
+  if (!isPlainObject(pilot) || pilot.enabled !== true) {
+    throw new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.NOT_PILOT, 'this project is not a pilot of the batch refresh; a relationship cannot be confirmed for it', { decidedUnderLock: true, partial: false })
+  }
+}
+
 function reviewBlocked(reason, extra = {}) {
   return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CHANGE_REVIEW_BLOCKED, 'something else on this project is still open; the review completes after it', { reason, partial: false, ...extra })
 }
@@ -2089,7 +2110,8 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * re-read (S25: any runbook-only hold refuses `runbook_only_hold_open`; C07: any structure-class hold refuses
    * STRUCTURE_CHANGE_PRESENT; the named set must be EXACTLY the open content-class set, each with its fingerprint) ->
    * the record set DERIVED from those rows and its fingerprint recomputed -> the combined candidates (pairing
-   * fingerprint echoed, post-change pair present) -> every relationship a content hold names FOR UPDATE (active; or
+   * fingerprint echoed, post-change pair present) and, when there is one, the registry's pilot marker re-read on this
+   * handle (review fix N1: NOT_PILOT) -> every relationship a content hold names FOR UPDATE (active; or
    * needs_reconfirmation with a re-confirmable reason, M3) -> the pending plans FOR UPDATE (confirmed, then written) ->
    * `bumpWithin(change_plan_confirm)` -> the unfinished executions re-read (RECOVERY_PENDING) -> the combined
    * relationships INSERTED with the post-change stamps -> the named relationships re-stamped (revision + 1) -> the
@@ -2155,6 +2177,8 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         if ((hold.pairingFingerprint || null) !== decision.candidateId) throw changePlanStale('candidate')
         return { hold, decision, facts: continuationFactsFromHold(hold, scope), post: postChangeOf(hold) }
       })
+      // PR-8 review fix N1: the combined confirm's pilot fact, re-decided HERE (after the state-row lock, before the bump).
+      if (combined.length > 0) await assertPilotWithin(trx, options && options.pilotWithin)
 
       // The relationships a content hold names, locked in ascending id order (one verification hold per relationship).
       const relationshipHolds = content.filter((hold) => hold.kind === 'relationship_content_change' || hold.kind === 'relationship_reconfirm')

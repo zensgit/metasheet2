@@ -1246,7 +1246,9 @@ async function confirmChangePlan(ctx, body) {
   if (input.echo.holdSetFingerprint !== proposal.holdSetFingerprint) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'hold_set_moved')
   if (input.echo.sourceContentDigest !== proposal.sourceContentDigest) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'source_moved')
   if (input.echo.planFingerprint !== proposal.planFingerprint) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'plan_fingerprint')
-  // The combined confirm (§10.3 (5)): it creates a relationship, so it needs the pilot marker (register ⑤).
+  // The combined confirm (§10.3 (5)): it creates a relationship, so it needs the pilot marker (register ⑤). This is the
+  // consult's picture (fast, precise); the store re-reads the marker on its transaction handle under the state-row lock
+  // and refuses the same NOT_PILOT (review fix N1 — a marker cleared between this consult and the lock).
   const candidateHolds = classes.content.filter((hold) => hold.kind === 'candidate_content_differs')
   const decisions = new Map(input.candidates.map((entry) => [entry.holdId, entry]))
   if (candidateHolds.length > 0) assertPilot(consult)
@@ -1293,7 +1295,12 @@ async function confirmChangePlan(ctx, body) {
     candidates: input.candidates.map((entry) => ({ holdId: entry.holdId, candidateId: entry.candidateId, basis: entry.basis })),
     sourceIdentity: refreshSourceIdentity({ action: ctx.action, tenantId: ctx.scope.tenantId }),
     template: templateOf(ctx),
-  }, hooks)
+  }, {
+    ...hooks,
+    // Review fix N1: the store re-reads the pilot marker on its own transaction handle for a combined confirm (the route
+    // hands the governance reader's `readPilotWithin`, bound to this scope); without it a combined confirm is 501.
+    ...(typeof ctx.readPilotWithin === 'function' ? { pilotWithin: ctx.readPilotWithin } : {}),
+  })
   return Object.freeze({
     changePlanId: decided.changePlanId,
     recordCount: decided.recordCount,

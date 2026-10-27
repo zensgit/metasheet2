@@ -37,6 +37,9 @@
 //          observations refreshed on keep); the confirm built before the edit still commits.
 //   CP-S13 M3: a needs_reconfirmation relationship whose content changed (re-confirmable reason) is resolved and
 //          RE-ACTIVATED by the confirm; with a non-re-confirmable reason the hold says reconfirm_not_admissible.
+//   CP-S14 review fix N1: the combined confirm re-reads the pilot marker on its own transaction handle after the state
+//          lock (the real governance reader over the same db): cleared / on another sheet => 409 NOT_PILOT, unwired =>
+//          501, nothing persisted, no bump; a content-only confirm never reads it.
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -50,6 +53,7 @@ const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.c
 const governanceModule = require(path.join(LIB, 'stock-preparation-refresh-governance.cjs'))
 const { readProjectRefreshState } = require(path.join(LIB, 'stock-preparation-refresh-state.cjs'))
 const lockModule = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+const { createStockPreparationProjectTargetStore } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
 const { normalizeStockPreparationTemplate, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { __internals: plannerInternals } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
 
@@ -116,7 +120,26 @@ async function world({ realLock = false } = {}) {
   const lock = realLock ? lockModule.createStockPreparationProjectWriteLock({ db, now: clock.now }) : null
   const audits = []
   const auditWithin = async (trx, event) => { audits.push({ trx, event: clone(event) }) }
-  return { clock, db, store, scope, bump, lock, audits, auditWithin }
+  // Review fix N1: the project is a PILOT in the registry of the SAME kit db, and the combined confirm re-reads that marker
+  // through the REAL governance reader (PR B's projection with the store's transaction handle as executor).
+  const registryRowId = `pt_${SHEET}`
+  db.tables.get(kit.REGISTRY_TABLE).set(registryRowId, kit.registryRow({ id: registryRowId, tenantId: TENANT, projectNo: F.PROJECT_NO, sheetId: SHEET, pilot: true }))
+  const governance = governanceModule.createStockPreparationRefreshGovernance({
+    continuationStore: store,
+    projectTargetStore: createStockPreparationProjectTargetStore({ db }),
+    projectWriteLock: { readState: async () => FREE_LOCK.state, readGeneration: async () => FREE_LOCK.generation },
+  })
+  const pilotReads = []
+  const pilotWithin = async (trx) => {
+    const answer = await governance.readPilotWithin(scope, trx)
+    pilotReads.push(answer.enabled)
+    return answer
+  }
+  const setRegistry = (changes) => {
+    const row = db.tables.get(kit.REGISTRY_TABLE).get(registryRowId)
+    db.tables.get(kit.REGISTRY_TABLE).set(registryRowId, { ...row, ...changes })
+  }
+  return { clock, db, store, scope, bump, lock, audits, auditWithin, governance, pilotReads, pilotWithin, setRegistry }
 }
 
 function rowsOf(w, table) {
@@ -174,7 +197,7 @@ async function confirmPlan(w, { proposal = proposalOf(w), hooks = {}, input = {}
     sourceIdentity: F.SOURCE_IDENTITY,
     template: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
     ...input,
-  }, { bumpWithin: w.realLockBump || w.bump.bumpWithin, auditWithin: w.auditWithin, ...hooks })
+  }, { bumpWithin: w.realLockBump || w.bump.bumpWithin, auditWithin: w.auditWithin, pilotWithin: w.pilotWithin, ...hooks })
 }
 
 // A RUNNING execution bound to `changePlanId` (the bound begin under the state lock), and its finish.
@@ -934,6 +957,51 @@ test('CP-S13 (M3) a needs_reconfirmation relationship whose content changed: re-
   assert.equal(hold2.detail.postChange, undefined)
   assert.equal(pairing.isContentClassHold(hold2), false)
   assert.equal(pairing.isStructureClassHold(hold2), false)
+})
+
+// ── CP-S14 (review fix N1) ───────────────────────────────────────────────────────────────────────
+
+test('CP-S14 (N1) the combined confirm re-decides the pilot marker on its OWN transaction handle under the state lock: cleared since the consult / on another sheet => 409 NOT_PILOT, unwired => 501, nothing persisted; a content-only confirm never reads it', async () => {
+  const scenario = await candidateContentScenario()
+  // (a) the marker cleared between the route's consult and this transaction (V8PG-09): refused, nothing written.
+  const w = await world()
+  await reconcile(w, scenario.holds)
+  const proposal = proposalOf(w)
+  assert.equal(proposal.candidates.length, 1)
+  w.setRegistry({ pilot_enabled_at: null, pilot_enabled_by: null, pilot_readiness_version: null })
+  const before = tablesSnapshot(w.db)
+  w.db.log.length = 0
+  const cleared = await expectError(confirmPlan(w, { proposal }), { status: 409, code: CODES.NOT_PILOT })
+  assert.deepEqual(cleared.details, { decidedUnderLock: true, partial: false })
+  assert.equal(tablesSnapshot(w.db), before, 'nothing persisted')
+  assert.equal(w.bump.calls.length, 0, 'refused before the bump')
+  assert.deepEqual(w.pilotReads, [false])
+  // The read ran ON the confirm's transaction handle, AFTER the state-row lock.
+  const statements = statementsOf(w.db)
+  const stateLock = statements.indexOf('selectOneForUpdate:refresh_state')
+  const pilotRead = statements.indexOf('selectOne:project_target')
+  assert.ok(stateLock >= 0 && pilotRead > stateLock, statements.join(' > '))
+  // (b) a pilot row registered on ANOTHER sheet is not this sheet's pilot.
+  w.setRegistry({ pilot_enabled_at: new Date('2026-10-24T00:00:00.000Z'), pilot_enabled_by: 'u_admin', pilot_readiness_version: 1, sheet_id: 'sheet_cps_elsewhere' })
+  await expectError(confirmPlan(w, { proposal }), { status: 409, code: CODES.NOT_PILOT })
+  assert.equal(tablesSnapshot(w.db), before)
+  // (c) unwired: a combined confirm without the in-transaction read is 501 by name, never "pilot".
+  w.setRegistry({ sheet_id: SHEET })
+  await expectError(confirmPlan(w, { proposal, hooks: { pilotWithin: undefined } }), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'pilot_read_within' })
+  assert.equal(tablesSnapshot(w.db), before)
+  // (d) the marker back: the same confirm commits (one bump), the read answered `enabled`.
+  const done = await confirmPlan(w, { proposal })
+  assert.equal(done.createdContinuationIds.length, 1)
+  assert.equal(w.bump.calls.length, 1)
+  assert.deepEqual(w.pilotReads, [false, false, true])
+  // (e) a content-only plan (no candidate) is not a pilot decision: the marker is never read, and a cleared one is irrelevant.
+  const w2 = await world()
+  const content = await contentScenario()
+  await reconcile(w2, content.holds)
+  w2.setRegistry({ pilot_enabled_at: null, pilot_enabled_by: null, pilot_readiness_version: null })
+  await confirmPlan(w2)
+  assert.deepEqual(w2.pilotReads, [])
+  assert.equal(rowsOf(w2, 'changePlan').length, 1)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-store.test.cjs', tests)

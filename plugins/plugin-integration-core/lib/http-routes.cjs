@@ -4817,6 +4817,11 @@ function requireStockPreparationAudit() {
       audit,
       receipts: stockPreparationReadReceipts(),
       readSheetRows,
+      // Step 5 PR-8 review fix N1: the pilot marker read ON a decision transaction's handle (PR B's projection with the
+      // handle as executor), so the combined change-plan confirm re-decides it under the state-row lock.
+      readPilotWithin: typeof services.governance.readPilotWithin === 'function'
+        ? (trx) => services.governance.readPilotWithin({ tenantId: scope.tenantId, projectNo, sheetId: action.target.sheetId }, trx)
+        : null,
     })
   }
   // THE handle a lane hands `computeDryRun` (built by the lane module, so a direct lib test drives the same
