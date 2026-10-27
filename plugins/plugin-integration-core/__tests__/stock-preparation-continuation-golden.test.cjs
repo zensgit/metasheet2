@@ -282,8 +282,10 @@ function assertLargeV3Calibration({ full, largeProof, golden }) {
     ['version-free plan revision', reseal({ planRevisionOf: LEGACY_MAIN771_RECIPES.planRevision })],
     ['run job without the version', tamper((c) => { delete c.ran.bomEvaluationVersion })],
     ['plan artifact without the version', tamper((c) => { delete c.planned.planArtifact.bomEvaluationVersion })],
-    ['checkpoint apply job without the version', tamper((c) => { delete c.applyJob.bomEvaluationVersion })],
-    ['checkpoint apply job on another version', tamper((c) => { c.applyJob.bomEvaluationVersion = 'stock-preparation-bom.v2' })],
+    ...(capture.applyJob ? [
+      ['checkpoint apply job without the version', tamper((c) => { delete c.applyJob.bomEvaluationVersion })],
+      ['checkpoint apply job on another version', tamper((c) => { c.applyJob.bomEvaluationVersion = 'stock-preparation-bom.v2' })],
+    ] : []),
     ['run job artifact.revision alias', tamper((c) => { c.ran.artifact.revision = 'tampered' })],
     ['planned job artifact.revision alias', tamper((c) => { c.planned.artifact.revision = 'tampered' })],
     ['plan artifact revision alias', tamper((c) => { c.planned.planArtifact.revision = 'tampered' })],
@@ -487,16 +489,24 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
     const rawLargeCall = harness.calls[callsBeforeRun]
     const largeExistingRows = await tableActionInternals.readExistingStockPreparationRows(seededRecordsApi(scenario), runAction.target, scenario.projectNo)
     refs.large = recordRefsOf(largeExistingRows)
+    const lanesLib = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
+    const governanceVerdict = handle === 'wired'
+      ? lanesLib.largeLaneVerdictOf(await writeLock.refresh().governance.consult({ tenantId: scope.tenantId, projectNo: parameters.projectNo, sheetId: runAction.target.sheetId }), 'large_plan')
+      : undefined
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_scc_golden', existingRows: largeExistingRows, plannedAt: PLANNED_AT, now,
+      ...(governanceVerdict ? { governanceVerdict } : {}),
     })
+    const { governanceVerdict: storedVerdict, ...plannedWithoutVerdict } = planned
+    if (governanceVerdict) assert.deepEqual(storedVerdict, { consulted: true, verdict: 'not_governed', generationToken: governanceVerdict.generationToken }, 'the plan recorded the verdict, closed to three keys')
+    else assert.equal(Object.prototype.hasOwnProperty.call(planned, 'governanceVerdict'), false, 'a plan without a verdict records none')
     if (harness.calls.length !== callsBeforeRun + 1) throw new Error('continuation golden: planning must not expand the source')
     // The REAL metadata-only checkpoint approval of the planned job (same store and principal; no run,
     // no write): the apply job the v3 contract needs. It must not touch the planned record, the stored
     // records or the source.
     const plannedDigestBeforeApproval = digest(planned)
     const storedBeforeApproval = storageDigests(storage)
-    const applyJob = await largeBomJobs.createLargeBomCheckpointApplyJob({
+    const approveInput = {
       storage,
       ...scope,
       actionId: action.actionId,
@@ -506,7 +516,14 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       acceptManualConfirmHold: true,
       createApplyJobId: () => 'apply_job_scc_golden',
       now,
-    })
+    }
+    let applyJob = null
+    if (governanceVerdict) {
+      applyJob = await largeBomJobs.createLargeBomCheckpointApplyJob(approveInput)
+    } else {
+      await assert.rejects(largeBomJobs.createLargeBomCheckpointApplyJob(approveInput), (error) => error.status === 409 && error.code === 'LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED' && error.details.reason === 'verdict_absent')
+      assert.equal(await storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...scope, actionId: action.actionId, applyJobId: 'apply_job_scc_golden' })), null, 'no apply job is stored')
+    }
     if (harness.calls.length !== callsBeforeRun + 1 || harness.calls[callsBeforeRun] !== rawLargeCall) {
       throw new Error('continuation golden: the checkpoint approval must not re-expand the source')
     }
@@ -518,11 +535,11 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       }
     }
     const hashJson = productionHashJson(largeBomJobs, tableActions)
-    const capture = { ran, planned, applyJob, rawExpansion: rawLargeCall.result, existingRows: largeExistingRows }
+    const capture = { ran, planned: plannedWithoutVerdict, applyJob, rawExpansion: rawLargeCall.result, existingRows: largeExistingRows }
     // The v3 contract first (literal version on every holder, the four aliases, the source link, both
     // revisions recomputed), then the projection back to main771; GOLDEN sees the five keys it records.
     assertLargeV3Contract(capture, { hashJson })
-    const fullLarge = largeObservation(largeBomJobs, { ran, planned, applyJob })
+    const fullLarge = largeObservation(largeBomJobs, { ran, planned: plannedWithoutVerdict, applyJob })
     const projected = projectLargeToLegacyMain771({ large: fullLarge }, capture, { hashJson })
     observed.large = Object.fromEntries(GOLDEN_LARGE_KEYS.map((field) => {
       if (!Object.prototype.hasOwnProperty.call(projected.large, field)) throw new Error(`continuation golden: the projected large lane lacks ${field}`)

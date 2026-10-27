@@ -36,7 +36,9 @@
 // through the harness's `projectLargeToLegacyMain771`, which drops only the four version keys and
 // re-mints the two revisions with main 771170234's frozen recipes; (c) compares the UNPROJECTED ON /
 // THROWING legs to OFF in full; (d) calibrates that row or plan drift fails the projection and a
-// version-free hash input or a wrong / missing link or version fails the contract.
+// version-free hash input or a wrong / missing link or version fails the contract. On the ABSENT handle (batch-refresh
+// step 4 PR-3b) the large approval is refused and the capture carries `applyJob: null`: the apply-job leg of the
+// contract is the WIRED handle's, and `large.targetRevision` is the refusal token (see `goldenFor`).
 //
 // THE MATRIX. The same scenarios are replayed with the expander's demand-evidence capture OFF, ON,
 // and ON with a recorder that throws from every hook (the harness adds `demandEvidence` to the
@@ -519,8 +521,18 @@ async function main() {
     const observedByMode = {}
     const strippedByMode = {}
     // PR-3a: a handle-absent apply is refused by the writer (asserted in the harness) — the one section that leg
-    // cannot reproduce; every other section is the golden, byte for byte.
-    const goldenFor = (name) => (handle === 'absent' && GOLDEN[name].apply ? { ...GOLDEN[name], apply: 'refused_governance_absent' } : GOLDEN[name])
+    // cannot reproduce; every other section is the golden, byte for byte. PR-3b: likewise a large expansion planned
+    // without the plan route's governance verdict is refused at approval (asserted in the harness), so that leg's
+    // `large.targetRevision` is the refusal token; its artifact, plan revision, plan artifact and stored job (minus the
+    // one new `governanceVerdict` key, asserted apart) are still the golden's.
+    const goldenFor = (name) => {
+      if (handle !== 'absent') return GOLDEN[name]
+      return {
+        ...GOLDEN[name],
+        ...(GOLDEN[name].apply ? { apply: 'refused_governance_absent' } : {}),
+        ...(GOLDEN[name].large ? { large: { ...GOLDEN[name].large, targetRevision: 'refused_governance_unconsulted' } } : {}),
+      }
+    }
     for (const mode of MODES) {
       const observed = await observeAll(harness, mode, undefined, { handle })
       const stripped = stripHarnessKeys(observed)
@@ -534,6 +546,8 @@ async function main() {
       for (const name of Object.keys(GOLDEN)) {
         if (GOLDEN[name].large) {
           await run(`[${handle}][${mode}] ${name}: the large lane carries the literal ${STOCK_PREPARATION_BOM_V3} on job / artifact / plan artifact / apply job, linked and recomputable`, () => {
+            // PR-3b: only the ABSENT handle's approval is refused (no apply job to carry the literal); the WIRED one is a job.
+            assert.equal(observed[name].__large.applyJob === null, handle === 'absent', 'the apply job is present exactly on the wired handle')
             assertLargeV3Contract(observed[name].__large, { hashJson })
           })
           await run(`[${handle}][${mode}] ${name}: unprojected, the v3 identity moves exactly the version-bearing large keys`, () => {
@@ -684,7 +698,8 @@ async function main() {
           plannedJob: (capture) => capture.planned,
           plannedArtifact: (capture) => capture.planned.artifact,
           planArtifact: (capture) => capture.planned.planArtifact,
-          applyJob: (capture) => capture.applyJob,
+          // PR-3b: the ABSENT handle's approval was refused — there is no apply job to carry (or lose) the literal.
+          ...(large.applyJob === null ? {} : { applyJob: (capture) => capture.applyJob }),
         }
         for (const [label, holderOf] of Object.entries(holders)) {
           for (const breakVersion of [

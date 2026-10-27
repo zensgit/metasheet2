@@ -1471,19 +1471,43 @@ test('R6g (batch-refresh step 4 PR-3a: RW-G2 / RW-G6r / CG chunk legs) the chunk
     { name: 'retargeted', serviceExtras: {}, seed: async (h) => h.refresh.seedHolds({ tenantId: TENANT, sheetId: 'sheet_r6g_previous', projectNo: PROJECT }, [hold()]), status: 409, code: 'STOCK_PREP_REFRESH_TARGET_RETARGETED', reason: 'sheet' },
     { name: 'not governed', serviceExtras: {}, seed: async () => {}, status: 200 },
   ]
+  const lockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
   for (const leg of legs) {
     const env = kit.createInMemoryProjectWriteLock({ timers: 'real' })
     const records = makeRecordsApi()
     const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, records, serviceExtras: { stockPreparationProjectWriteLock: env.lock, ...leg.serviceExtras } })
     try {
       const { sheetId, objectId } = registerActive(h)
-      await leg.seed(h, sheetId)
       const jobId = `job-r6g-${leg.name.replace(/\s+/g, '-')}`
       await seedPlannedExpansionJob(h, { jobId, target: { sheetId, objectId, fieldIdMap: {} } })
-      assert.equal((await plan(h.routes, jobId)).statusCode, 200, leg.name)
-      const approved = await applyStart(h.routes, jobId)
-      assert.equal(approved.statusCode, 202, `${leg.name}: ${JSON.stringify(approved.body)}`)
-      const applyJobId = approved.body.data.jobId
+      // Batch-refresh step 4 PR-3b: the plan and approval ROUTES consult governance too, so the job is approved while
+      // the project is NOT governed and becomes governed only AFTERWARDS (a job approved before its project became
+      // governed — exactly what the chunk's in-lease gate exists for). An unwired deployment cannot plan through
+      // the route at all any more (501 at the plan); its job is planned and approved through the lib, with the
+      // route-shaped not-governed verdict, so the chunk's own unwired refusal is still what this leg proves.
+      let applyJobId
+      if (leg.name === 'unwired') {
+        const unwiredPlan = await plan(h.routes, jobId)
+        assert.equal(unwiredPlan.statusCode, 501, `unwired plan route: ${JSON.stringify(unwiredPlan.body)}`)
+        assert.equal(unwiredPlan.body.error.details.reason, 'governance_service')
+        const scope = lockLib.sheetWriteScopeKey(sheetId)
+        await largeBomJobs.planLargeBomBackgroundExpansionJob({
+          storage: h.context.storage, ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, existingRows: [],
+          governanceVerdict: { consulted: true, verdict: 'not_governed', generationToken: (await env.lock.readGeneration(scope)).generationToken },
+          writeGenerationReader: (observed) => env.lock.readGeneration(observed),
+        })
+        const libApproved = await largeBomJobs.createLargeBomCheckpointApplyJob({
+          storage: h.context.storage, ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, principal: PLATFORM_ADMIN.id, permission: 'write', acceptManualConfirmHold: true,
+          writeGenerationBinder: async (expect) => lockLib.writeBindingFromGeneration(await env.lock.bumpGeneration(scope, { reason: 'large_approval', tenantId: TENANT, expect })),
+        })
+        applyJobId = libApproved.jobId
+      } else {
+        assert.equal((await plan(h.routes, jobId)).statusCode, 200, leg.name)
+        const approved = await applyStart(h.routes, jobId)
+        assert.equal(approved.statusCode, 202, `${leg.name}: ${JSON.stringify(approved.body)}`)
+        applyJobId = approved.body.data.jobId
+      }
+      await leg.seed(h, sheetId)
       const before = await storedJob(h, applyJobId)
       const ran = await applyRun(h.routes, jobId, applyJobId)
       assert.equal(ran.statusCode, leg.status, `${leg.name}: ${JSON.stringify(ran.body)}`)

@@ -282,6 +282,9 @@ async function seedPlannedLargeBomJob({
   // P1-b: a seeded expansion + plan carries the observation the routes record (from the module harness's
   // lock), unless a test asks for a legacy (unobserved) one.
   observed = true,
+  // Batch-refresh step 4 PR-3b: ...and the not-governed verdict the plan route records (the approval requires it),
+  // unless a test asks for an unconsulted (pre-PR-3b) plan.
+  consulted = true,
 } = {}) {
   const actionId = 'plm.stock-preparation.pull-bom.v1'
   const writeObservation = observed && target && typeof target.sheetId === 'string'
@@ -340,6 +343,7 @@ async function seedPlannedLargeBomJob({
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
     ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
+    ...(consulted ? { governanceVerdict: { consulted: true, verdict: 'not_governed', generationToken: target && typeof target.sheetId === 'string' ? (await projectWriteLockHarness.lock.readGeneration(swlLockModule.sheetWriteScopeKey(target.sheetId))).generationToken : null } } : {}),
   }
   await storage.set(__internals.backgroundJobKey({ ...TEST_SCOPE, actionId, jobId }), job)
   return { storage, ...TEST_SCOPE, actionId, jobId, job }
@@ -2890,10 +2894,16 @@ async function testSwlB9UnobservedExpansionsAndBusySheetsAreRefused() {
   await runLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, actionId: action.actionId, jobId: 'swl-b9-legacy', sourceAdapter: swlKit.createSourceAdapter(swlKit.goldenPlmData()).adapter })
   await swlExpectStale(swlPlan(harness, storage, 'swl-b9-legacy'), 'expansion_unbound')
   // (b) planned without the reader (no recorded observation) -> a lock-wired approval refuses it.
+  // Batch-refresh step 4 PR-3b: a plan made with NEITHER the reader NOR a governance verdict answers the governance
+  // refusal first (it precedes the manual-confirm ack and the binder — stated precedence, both fail closed); the
+  // binder's `expansion_unbound` is what such a plan answers once it carries the route's not-governed verdict.
   await rawPlanLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, actionId: action.actionId, jobId: 'swl-b9-legacy', existingRows: [] })
+  await assert.rejects(swlApprove(harness, storage, 'swl-b9-legacy', 'swl-b9-legacy-unconsulted'), (error) => error.code === 'LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED' && error.status === 409 && error.details.reason === 'verdict_absent')
+  const notGoverned = { consulted: true, verdict: 'not_governed', generationToken: null }
+  await rawPlanLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, actionId: action.actionId, jobId: 'swl-b9-legacy', existingRows: [], governanceVerdict: notGoverned })
   await swlExpectStale(swlApprove(harness, storage, 'swl-b9-legacy', 'swl-b9-legacy-approval'), 'expansion_unbound')
   const observedButUnplanned = await swlPlannedExpansion(harness, { storage, jobId: 'swl-b9-observed' })
-  await rawPlanLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, actionId: action.actionId, jobId: observedButUnplanned.jobId, existingRows: [] })
+  await rawPlanLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, actionId: action.actionId, jobId: observedButUnplanned.jobId, existingRows: [], governanceVerdict: notGoverned })
   await swlExpectStale(swlApprove(harness, storage, observedButUnplanned.jobId, 'swl-b9-observed-approval'), 'expansion_unbound')
   // (c) an expansion cannot START while a live writer holds the sheet (no job is created).
   const scope = swlLock.sheetWriteScopeKey(action.target.sheetId)

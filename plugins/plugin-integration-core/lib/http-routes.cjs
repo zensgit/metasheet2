@@ -4670,7 +4670,9 @@ function requireStockPreparationAudit() {
     })
   }
   // The large lane refuses every governed project (design §7.1 rows 7-11): governed => 409
-  // STOCK_PREP_REFRESH_LARGE_LANE_REFUSED; otherwise the not-governed verdict the chunk hands its writer.
+  // STOCK_PREP_REFRESH_LARGE_LANE_REFUSED; otherwise the not-governed verdict the chunk hands its writer. Called by the
+  // four non-write routes (start, run, plan, approve — PR-3b; the plan records the verdict) right after PR B's pilot
+  // gate, and by the chunk's in-lease gate (PR-3a). One consult per call; never a store write.
   async function consultLargeLane({ tenantId, projectNo, sheetId }, lane) {
     const consult = await requireStockPreparationRefreshServices().governance.consult({ tenantId, projectNo, sheetId })
     return largeLaneVerdictOf(consult, lane)
@@ -8427,6 +8429,10 @@ function requireStockPreparationAudit() {
       // PR B (plan §9.4 L01): a pilot project never starts a large-BOM expansion — refused by project number
       // and by the resolved sheet, before the generation is observed and before any job exists.
       await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: parameters.projectNo, sheetId: action.target.sheetId }, 'large_expansion_start')
+      // Batch-refresh step 4 PR-3b (design §7.1 row 7, D-7): a project GOVERNED by refresh rows (a relationship, a
+      // hold, an execution, a state row), pilot or not, never starts one either — 409 LARGE_LANE_REFUSED; unreadable
+      // 503, retargeted / tenant mismatch 409, unwired 501 — before the generation is observed and before any job exists.
+      await consultLargeLane({ tenantId: routeScope.tenantId, projectNo: parameters.projectNo, sheetId: action.target.sheetId }, 'large_expansion_start')
       // P1-b (Codex review): the expansion records the target sheet's write generation it starts under
       // (refused 409 WRITE_LOCKED while a live writer holds the sheet — then no job exists). Plan and
       // approval require it unchanged. The observation never bumps or binds; the ONE lock write a read-tier
@@ -8493,6 +8499,9 @@ function requireStockPreparationAudit() {
       // PR B (L01 / L02): BEFORE the B2a registration and the adapter load — a pilot project's queued
       // expansion never reads its source (by project number and by the snapshot's sheet).
       await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: queuedJob.parameters && queuedJob.parameters.projectNo, sheetId: action.target.sheetId }, 'large_expansion_run')
+      // Batch-refresh step 4 PR-3b (§7.1 row 8): and a GOVERNED project's queued expansion — queued before its project
+      // became governed included — never reads its source either: refused before the B2a claim and the adapter load.
+      await consultLargeLane({ tenantId: routeScope.tenantId, projectNo: queuedJob.parameters && queuedJob.parameters.projectNo, sheetId: action.target.sheetId }, 'large_expansion_run')
       await resolveTableActionExecution(req, {
         actionId,
         projectNo: queuedJob.parameters && queuedJob.parameters.projectNo,
@@ -8597,6 +8606,10 @@ function requireStockPreparationAudit() {
       // PR B (L01): a pilot project is refused here — after the staleness check, before the field probe and
       // the existing-row read — by project number and by the snapshot's sheet.
       await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: job.parameters && job.parameters.projectNo, sheetId: action.target.sheetId }, 'large_plan')
+      // Batch-refresh step 4 PR-3b (§7.1 row 9, O-1): a GOVERNED project is refused here too, before the field probe and
+      // the existing-row read (zero records IO); otherwise the not-governed verdict rides into the plan, which records it
+      // beside its write observation (the approval requires it) and never hands the planner a `continuation`.
+      const planGovernance = await consultLargeLane({ tenantId: routeScope.tenantId, projectNo: job.parameters && job.parameters.projectNo, sheetId: action.target.sheetId }, 'large_plan')
       await resolveTableActionExecution(req, {
         actionId,
         projectNo: job.parameters && job.parameters.projectNo,
@@ -8636,6 +8649,8 @@ function requireStockPreparationAudit() {
         jobId,
         existingRows,
         conflictPolicyReview,
+        // PR-3b: the consulted not-governed verdict (values-free; not part of the plan revision).
+        governanceVerdict: planGovernance,
         writeGenerationReader: planWriteScope
           ? async (observedScope) => {
             if (observedScope !== planWriteScope) {
@@ -8721,6 +8736,10 @@ function requireStockPreparationAudit() {
       // PR B (L01): refused after the staleness check, before the probes, before any checkpoint job exists —
       // and before the binder's bump, so a pilot project answers the pilot code, never PLAN_SUPERSEDED.
       await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: expansionJob.parameters && expansionJob.parameters.projectNo, sheetId: snapshotAction.target.sheetId }, 'large_approve')
+      // Batch-refresh step 4 PR-3b (§7.1 row 10): a project that became GOVERNED after its expansion was planned is
+      // refused here, before the probes, before the binder's bump (the refusal supersedes no puller's preview) and
+      // before any checkpoint job exists. The lib then refuses a governed-shape plan or an unconsulted expansion itself.
+      await consultLargeLane({ tenantId: routeScope.tenantId, projectNo: expansionJob.parameters && expansionJob.parameters.projectNo, sheetId: snapshotAction.target.sheetId }, 'large_approve')
       const currentAction = await resolveTableActionExecution(req, {
         actionId,
         projectNo: expansionJob.parameters && expansionJob.parameters.projectNo,

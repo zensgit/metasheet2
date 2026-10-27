@@ -487,7 +487,10 @@ function mountWithSource({
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    // Batch-refresh step 4 PR-3b: the large expansion start / run / plan / approve consult the REAL refresh governance
+    // (support/stock-preparation-refresh-governance-wiring.cjs) right after their pilot gate — a not-governed project
+    // pays one consult and is served exactly as before; an unwired deployment would be 501 by name.
+    services: require('./support/stock-preparation-refresh-governance-wiring.cjs').withRefreshGovernance(services),
     logger: { info(message, detail) { logLines.push({ message, detail }) }, warn() {}, error() {} },
   })
   return {

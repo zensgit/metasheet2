@@ -349,6 +349,11 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
   const writeObservation = seedLock && target && typeof target.sheetId === 'string'
     ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
     : null
+  // Batch-refresh step 4 PR-3b: ...and the not-governed verdict the plan route records (its REAL consult over the
+  // mounted governance), which the approval requires.
+  const governanceVerdict = h.refresh && target && typeof target.sheetId === 'string'
+    ? require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs')).largeLaneVerdictOf(await h.refresh.governance.consult({ tenantId: TENANT, projectNo, sheetId: target.sheetId }), 'large_plan')
+    : null
   const registry = createStockPreparationTableActionRegistry({
     actions: h.context.config.stockPreparationTableActions,
     resolveProjectTarget: (input) => resolveProjectTargetForAction({
@@ -382,12 +387,16 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
   assert.deepEqual(expanded.artifact.rows, [])
   const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
     storage: h.context.storage, ...JOB_SCOPE, actionId: ACTION_ID, jobId, existingRows: [], plannedAt: at,
+    // PR-3b: the route-shaped not-governed verdict rides into the REAL plan exactly as the plan route hands it
+    // (`governanceVerdict: planGovernance`); the lib validates it before any IO and records it beside the plan.
+    ...(governanceVerdict ? { governanceVerdict } : {}),
   })
   largeBomJobs.assertAuthoritativeLargeBomPlan(planned)
   assert.deepEqual(planned.planArtifact.plan.decisions, [])
+  if (governanceVerdict) assert.deepEqual(planned.governanceVerdict, { consulted: true, verdict: 'not_governed', generationToken: governanceVerdict.generationToken }, 'the plan recorded the consulted not-governed verdict, closed to three keys')
   if (!writeObservation) return
   // The producers ran outside the routes, so the write generation the routes would have recorded is stamped
-  // onto the stored job — only that; the producer-minted identity and revisions stay exactly as minted.
+  // onto the stored job — only that; the producer-minted identity, revisions and the recorded verdict stay exactly as minted.
   const jobKey = largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, jobId })
   const stored = await h.context.storage.get(jobKey)
   assert.equal(stored && stored.jobId, jobId, 'the planned job is stored under its background-job key')

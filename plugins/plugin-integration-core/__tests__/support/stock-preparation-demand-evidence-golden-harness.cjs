@@ -491,9 +491,17 @@ function laneCalls(harness, { handle = 'wired' } = {}) {
   // Batch-refresh step 4 PR-3a (plan-final §2.10): `handle` WIRED = every small leg plans with the route's governance
   // handle for this NOT-governed project; ABSENT = none does (the dry-run opts out of the kit's injection).
   const governance = handle === 'wired' ? { refreshGovernance: writeLock.refresh().handleFor('tenant_rgw_default') } : { refreshGovernance: undefined }
+  // Batch-refresh step 4 PR-3b: the large PLAN route consults the same governance and hands the plan its not-governed
+  // verdict (`consultLargeLane` => `largeLaneVerdictOf`). WIRED = the plan gets the verdict of a REAL consult of this
+  // not-governed project; ABSENT = none (the approval then refuses GOVERNANCE_UNCONSULTED, asserted below).
+  const lanesLib = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
+  const largePlanVerdict = handle === 'wired'
+    ? async ({ tenantId, projectNo, sheetId }) => lanesLib.largeLaneVerdictOf(await writeLock.refresh().governance.consult({ tenantId, projectNo, sheetId }), 'large_plan')
+    : async () => undefined
   return {
     handle,
     governance,
+    largePlanVerdict,
     dryRun: writeLock.wrapDryRun(tableActions.dryRunStockPreparationAction),
     apply: writeLock.wrapApply(tableActions.applyStockPreparationAction),
     createLargeApplyJob: largeBomJobs.createLargeBomCheckpointApplyJob,
@@ -712,10 +720,19 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
     })
     if (harness.calls.length !== callsBeforeRun + 1) throw new Error('golden harness: the large run must expand exactly once')
     const rawLargeExpansion = harness.calls[callsBeforeRun].result
+    const governanceVerdict = await lanes.largePlanVerdict({ tenantId: TENANT_ID, projectNo: scenario.projectNo, sheetId: runAction.target.sheetId })
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_sde_golden', existingRows: [], plannedAt: PLANNED_AT, now,
+      ...(governanceVerdict ? { governanceVerdict } : {}),
     })
-    const applyJob = await lanes.createLargeApplyJob({
+    // PR-3b: the stored job carries the verdict the plan route records — one NEW key, beside `planWriteObservation`,
+    // values-free and outside the plan revision. It is asserted here and digested apart, so every other byte of the
+    // stored job is still the golden's.
+    const { governanceVerdict: storedVerdict, ...plannedWithoutVerdict } = planned
+    if (governanceVerdict) assert.deepEqual(storedVerdict, { consulted: true, verdict: 'not_governed', generationToken: governanceVerdict.generationToken }, 'the plan recorded the route\'s verdict, closed to three keys')
+    else assert.equal(Object.prototype.hasOwnProperty.call(planned, 'governanceVerdict'), false, 'a plan without a verdict records none')
+    assert.equal(digest(largeBomJobs.publicBackgroundExpansionJob(planned)), digest(largeBomJobs.publicBackgroundExpansionJob(plannedWithoutVerdict)), 'the verdict never reaches the public projection')
+    const approveInput = {
       storage,
       ...scope,
       actionId: action.actionId,
@@ -725,12 +742,25 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       acceptManualConfirmHold: true,
       createApplyJobId: () => 'apply_job_sde_golden',
       now,
-    })
+    }
+    // PR-3b: the approval, or its refusal. `applyJob` is the stored checkpoint apply job (handle WIRED) or `null` when
+    // the approval was refused for the missing verdict (handle ABSENT): the capture below carries that null, the
+    // observation records the refusal token as `large.targetRevision` (`largeObservation`), and the v3 contract checks
+    // the apply-job literal only on a job.
+    let applyJob = null
+    if (governanceVerdict) {
+      applyJob = await lanes.createLargeApplyJob(approveInput)
+    } else {
+      // PR-3b (O-1, P3-B1): an expansion planned without a governance verdict is never approved.
+      await assert.rejects(lanes.createLargeApplyJob(approveInput), (error) => error.status === 409 && error.code === 'LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED' && error.details.reason === 'verdict_absent')
+      assert.equal(await storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...scope, actionId: action.actionId, applyJobId: 'apply_job_sde_golden' })), null, 'no apply job is stored')
+    }
     if (harness.calls.length !== callsBeforeRun + 1) throw new Error('golden harness: planning and approval must not expand')
-    observed.large = largeObservation(largeBomJobs, { ran, planned, applyJob })
+    observed.large = largeObservation(largeBomJobs, { ran, planned: plannedWithoutVerdict, applyJob })
     // Test-only and stripped by `stripHarnessKeys`: the raw objects behind `large`, for the v3 contract
-    // and the main771 legacy projection below. `existingRows` is what the plan call above passed.
-    observed.__large = { ran, planned, applyJob, rawExpansion: rawLargeExpansion, existingRows: [] }
+    // and the main771 legacy projection below. `existingRows` is what the plan call above passed; `planned` is the
+    // stored job WITHOUT its verdict key (the one key the golden never sees — `assertLargeV3Contract` pins that).
+    observed.__large = { ran, planned: plannedWithoutVerdict, applyJob, rawExpansion: rawLargeExpansion, existingRows: [] }
   }
   return observed
 }
@@ -774,6 +804,11 @@ function stripHarnessKeys(observations) {
 //                                revisions with main 771170234's frozen recipes, rewrite every reference
 //                                to them. status / targetRevision / publicJobDigest stay as observed.
 //   resealLargeCapture           negative calibration only: re-mint a mutated capture with chosen recipes.
+//
+// Batch-refresh step 4 PR-3b: a capture's `planned` is the stored job WITHOUT its `governanceVerdict` key (values-free,
+// outside the plan revision and the public projection; asserted apart where the capture is taken — the contract below
+// refuses a capture that still carries it), and `applyJob` is `null` when the approval was refused for a missing
+// verdict (the ABSENT handle): no apply job exists, and `large.targetRevision` is then the refusal token.
 //
 // The revision INPUTS are restated here, not taken from the producer; only `hashJson` is production's.
 
@@ -843,7 +878,9 @@ const V3_RECIPES = Object.freeze({
   },
 })
 
-// What `observed.large` records, from the real objects (the digests GOLDEN pins).
+// What `observed.large` records, from the real objects (the digests GOLDEN pins). `applyJob === null` is an approval
+// refused for a missing governance verdict (PR-3b): the refusal token stands as the target revision, as the golden
+// suite's `goldenFor` expects of the ABSENT handle. Anything else must be the stored checkpoint apply job.
 function largeObservation(largeBomJobs, { ran, planned, applyJob }) {
   return {
     status: ran.status,
@@ -851,7 +888,7 @@ function largeObservation(largeBomJobs, { ran, planned, applyJob }) {
     artifactDigest: digest(ran.artifact),
     planRevision: planned.planRevision,
     planArtifactDigest: digest(planned.planArtifact),
-    targetRevision: applyJob.targetRevision,
+    targetRevision: applyJob === null ? 'refused_governance_unconsulted' : applyJob.targetRevision,
     publicJobDigest: digest(largeBomJobs.publicBackgroundExpansionJob(planned)),
     storedJobDigest: digest(planned),
   }
@@ -881,15 +918,19 @@ function assertLiteralV3(holder, label) {
 
 function assertLargeV3Contract(large, { hashJson } = {}) {
   assert.equal(typeof hashJson, 'function', 'the v3 contract needs the production hashJson')
-  assert.ok(large && large.ran && large.planned && large.applyJob && large.rawExpansion && Array.isArray(large.existingRows),
-    'the large capture (run job, planned job, apply job, raw expansion, existing rows) is present')
+  assert.ok(large && large.ran && large.planned && hasOwn(large, 'applyJob') && large.rawExpansion && Array.isArray(large.existingRows),
+    'the large capture (run job, planned job, apply job or its refusal, raw expansion, existing rows) is present')
   const { ran, planned, applyJob, rawExpansion } = large
+  // PR-3b: the stored job's verdict is digested apart and never part of a capture (see the header above).
+  assert.equal(hasOwn(planned, 'governanceVerdict'), false, 'the captured planned job carries no governanceVerdict (strip it before the capture)')
   assertLiteralV3(ran, 'run job')
   assertLiteralV3(ran.artifact, 'run job artifact')
   assertLiteralV3(planned, 'planned job')
   assertLiteralV3(planned.artifact, 'planned job artifact')
   assertLiteralV3(planned.planArtifact, 'plan artifact')
-  assertLiteralV3(applyJob, 'checkpoint apply job')
+  // PR-3b: `null` is an approval refused for a missing verdict (asserted where the capture is taken) — no apply job
+  // exists to carry the literal. Anything else must be the stored checkpoint apply job.
+  if (applyJob !== null) assertLiteralV3(applyJob, 'checkpoint apply job')
   assert.equal(ran.planArtifact, undefined, 'the run job carries no plan artifact')
   assert.match(String(ran.artifactRevision), /^[0-9a-f]{64}$/, 'the run job carries a 64-hex artifact revision')
   assert.equal(planned.artifactRevision, ran.artifactRevision, 'planning kept the artifact revision')
@@ -974,7 +1015,7 @@ function resealLargeCapture(large, {
   artifactRevisionOf = V3_RECIPES.artifactRevision,
   planRevisionOf = V3_RECIPES.planRevision,
 } = {}) {
-  assert.ok(large && large.ran && large.planned && large.applyJob && large.rawExpansion, 'a real large capture to reseal')
+  assert.ok(large && large.ran && large.planned && hasOwn(large, 'applyJob') && large.rawExpansion, 'a real large capture to reseal')
   const copy = (value) => replaceRevisionReferences(value, new Map())
   const next = {
     ran: copy(large.ran),
