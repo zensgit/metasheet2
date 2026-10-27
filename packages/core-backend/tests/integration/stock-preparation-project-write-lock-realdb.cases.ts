@@ -5880,6 +5880,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   S8-07 (C06, B1) W written, a change elsewhere: W's review refused hold_open, then change_plan_pending once B is
         //         confirmed; B's preview mints (no deadlock), B's write absorbs W (superseded, review-only fields); W's review
         //         STALE plan_replaced; the export waits for B's review.
+        //   S8-07c (B1, refutation trace 1) W written, B confirmed for a change elsewhere, then that change reverts: B is
+        //         invalidated before any write and W stays `written` — change_pending_review and the export 409 until W's
+        //         own review (the obligation never depended on B).
         //   S8-08 (C05 / U03) the gate on the real stack: read tier 403, tenantless 403 (no audit row), another tenant's plan
         //         id and an unknown id answer the same bytes.
         //   S8-09 (E09) the confirm's audit insert fails (BEFORE INSERT trigger 42501): 503 audit, nothing persisted,
@@ -5894,6 +5897,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //         the lock row and is granted the confirm's token; the pre-confirm binding is refused.
         //   S8-I2 confirm vs reconcile: a computation's reconcile queues on the state row behind the frozen confirm, then
         //         misses its CAS (STATE_MOVED): the plan stays confirmed, the holds stay resolved.
+        //   S8-B2 (refutation B2) a computation that calls the plan stale while its bound execution RUNS defers the
+        //         invalidation (the finish writes the plan); a plan invalidated before the bound begin refuses that begin.
         //   S8-I3 review vs live writer: a live lease => the review 409 WRITE_LOCKED; the review frozen before COMMIT holds
         //         the state row and a computation's reconcile queues behind it, then STATE_MOVED; the plan reviewed.
         describe('S8 step-5 PR-8 change plans (real Postgres, real lock, real host, real reader)', () => {
@@ -6439,6 +6444,49 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             })
           }, 300000)
 
+          test('S8-07c (B1, refutation trace 1) W written; B confirmed for a change elsewhere; the change reverts before B is applied: B is invalidated, W stays written — change_pending_review and the export 409 until W\'s own review, then 200', async () => {
+            const { st, confirmed: w } = await s8Written('s8_07c')
+            st.state.data = sourceWith({ partCUsage: 5 })
+            const suspended = await st.dryRun()
+            const { body: bBody } = await boundBody(st)
+            const b = await cpCall(st, 'POST', CPR.confirm, { body: bBody })
+            st.state.data = sourceWith({ partCUsage: 4 })
+            const reverted = await st.dryRun()
+            const bRow = await planById(b.body.data.changePlanId)
+            const wRow = await planById(w.changePlanId)
+            const derivedAfterRevert = (await derivedOf(st)).status
+            const exportWhilePending = await st.exportLines()
+            const wPage = await reviewBody(st, w.changePlanId)
+            const reviewed = await cpCall(st, 'POST', CPR.review, { body: wPage.body })
+            const settled = await st.dryRun()
+            const exportAfter = await st.exportLines()
+            const observed = {
+              suspended: suspended.body.data.status,
+              confirmB: b.statusCode,
+              reverted: reverted.body.data.status,
+              b: `${bRow.status}:${bRow.invalidated_reason}`,
+              w: wRow.status,
+              derivedAfterRevert,
+              exportWhilePending: answer(exportWhilePending),
+              reviewW: reviewed.statusCode,
+              settled: settled.body.data.status,
+              exportAfter: answer(exportAfter),
+            }
+            console.log(`[S8-07c] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: 'suspended',
+              confirmB: 201,
+              reverted: 'review_pending',
+              b: 'invalidated:source_changed',
+              w: 'written',
+              derivedAfterRevert: 'change_pending_review',
+              exportWhilePending: `409:${EXPORT_BLOCKED}:state:change_pending_review`,
+              reviewW: 200,
+              settled: 'ready',
+              exportAfter: '200',
+            })
+          }, 300000)
+
           test('S8-08 (C05 / U03) the gate on the real stack: the read tier 403 and a tenantless platform admin 403 on all three routes (no audit row); another tenant\'s plan id and an unknown id answer the SAME bytes', async () => {
             const { st, confirmed } = await s8Written('s8_08')
             const tenantless = { id: `u_s8_08_platform_${TOKEN}`, roles: ['admin'], permissions: ['integration:admin'] }
@@ -6748,6 +6796,50 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             } finally {
               commitGate.open()
             }
+          }, 120000)
+
+          test('S8-B2 (refutation B2) on PostgreSQL: (a) a computation calling the plan stale while its bound execution RUNS defers the invalidation and the finish writes the plan; (b) a plan invalidated before the bound begin refuses that begin — no execution row', async () => {
+            const guardFor = (label: string) => ({ leaseRunId: `run_${label}`, leaseId: `lease_${label}`, fencingEpoch: 1, generation: 1, generationToken: `tok_${label}` })
+            const beginInput = (scenario: any, label: string, changePlanId: string) => ({
+              ...scenario.scope, lane: 'small_apply', guard: guardFor(label), tokenRevision: `rev_${label}`, planDigest: `plan_${label}`,
+              plannedCounts: { add: 0, update: 2, inactive: 0 }, refreshBinding: { continuations: [], changePlanId, holdSetFingerprint: null }, startedBy: `u_${label}`,
+            })
+            const staleReconcile = (store: any, scenario: any, changePlanId: string, dv: number, label: string) => store.reconcileHolds({
+              ...scenario.scope, decisionVersionObserved: dv, holds: [], computation: computation({ suspended: false, sourceContentDigest: `src_${label}_next` }),
+              changePlan: { id: changePlanId, verdict: 'stale' },
+            }, { auditWithin: noAudit })
+            const store = continuationStoreLib.createStockPreparationContinuationStore({ db: hostLikeDb() })
+            // (a) deferred while the bound execution runs.
+            const a = await storeScenario('s8_b2a')
+            const planA = await store.confirmChangePlan(a.input, { bumpWithin: testBumpWithin, auditWithin: noAudit })
+            const execution = await store.beginExecution(beginInput(a, 's8_b2a', planA.changePlanId))
+            const deferred = await staleReconcile(store, a, planA.changePlanId, await decisionVersionOf(a.scope), 's8_b2a')
+            const whileRunning = (await planById(planA.changePlanId)).status
+            await store.finishExecution({ ...a.scope, executionId: execution.id, status: 'succeeded', written: 2, attemptedWrites: 2, counts: { updated: 2 } })
+            const afterFinish = await planById(planA.changePlanId)
+            // (b) invalidated first: the bound begin is refused under the state-row lock.
+            const b = await storeScenario('s8_b2b')
+            const planB = await store.confirmChangePlan(b.input, { bumpWithin: testBumpWithin, auditWithin: noAudit })
+            await staleReconcile(store, b, planB.changePlanId, await decisionVersionOf(b.scope), 's8_b2b')
+            const invalidated = await planById(planB.changePlanId)
+            const begin = await settle(store.beginExecution(beginInput(b, 's8_b2b', planB.changePlanId)))
+            const observed = {
+              a: {
+                deferred: deferred.changePlan ? `${deferred.changePlan.verdict}:${deferred.changePlan.deferred}` : 'none',
+                whileRunning,
+                afterFinish: `${afterFinish.status}:${afterFinish.execution_id === execution.id}`,
+              },
+              b: {
+                plan: `${invalidated.status}:${invalidated.invalidated_reason}`,
+                begin: begin.ok ? 'began' : `${(begin as any).error.code}:${(begin as any).error.details && (begin as any).error.details.reason}`,
+                executions: await countWhere(RT.execution, 'sheet_id = $1', [b.scope.sheetId]),
+              },
+            }
+            console.log(`[S8-B2] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              a: { deferred: 'stale:true', whileRunning: 'confirmed', afterFinish: 'written:true' },
+              b: { plan: 'invalidated:source_changed', begin: `${RC.CHANGE_PLAN_STALE}:plan_invalidated`, executions: 0 },
+            })
           }, 120000)
 
           test('S8-I3 review vs live writer: a live lease => the review 409 WRITE_LOCKED; the review frozen before COMMIT holds the state row, a computation\'s reconcile queues behind it (pg_blocking_pids) and then misses its CAS; the plan reviewed', async () => {
