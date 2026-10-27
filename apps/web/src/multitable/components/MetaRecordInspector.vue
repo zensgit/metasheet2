@@ -1983,52 +1983,14 @@ function formatCommentTimestamp(iso: string): string {
    is exactly the "pill look" this change is required to keep. */
 .meta-record-drawer__tabs { display: inline-flex; flex-wrap: wrap; row-gap: 4px; column-gap: 4px; padding: 3px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
 .meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
-/* P2-A (2026-09-05, PR-A §1.3): below 420px container width the four tabs stay on ONE row at the
-   360px panel floor. N1 correction (2026-09-05, round 3): an earlier version of this comment
-   attributed the pill's width to `flex: 1` on `.meta-record-drawer__tabs` itself -- that declaration
-   is INERT. `flex` only applies to flex ITEMS, and this pill's parent, `.meta-record-drawer__tabs-bar`
-   (see its rule above), is a block-level box, not a flex container, so the pill is never a flex item
-   and `flex: 1` / `min-width: 0` on it have no effect at any width. (The bar's own comment records
-   that adding `display: flex` to the bar -- which WOULD have activated this `flex: 1` -- measured as a
-   no-op for the shipped label set; that is consistent with this correction: at the 360px floor the
-   pill already lands at the available width by the mechanism below, so activating `flex: 1` had
-   nothing left to add.) The REAL one-row mechanism is two-part: (a) the pill is `display: inline-flex`
-   (base rule above), i.e. shrink-to-fit = min(max-content, available width), so once the tabs'
-   combined natural width exceeds the panel's content width the pill is clamped to the available
-   width -- it does not "grow to fill", it stops growing; and (b) each TAB gets `flex: 1; min-width:
-   0` -- the tabs ARE flex items of the pill -- so the tabs shrink evenly to share that clamped width
-   instead of each holding its own `min-width: 76px` floor (4 x 76px + gaps alone exceeds the panel's
-   content width at the 360px floor, which is exactly what forced the `flex-wrap: wrap` fallback above
-   to engage there before this query existed). The pill's `flex: 1; min-width: 0` declarations are
-   deliberately LEFT IN PLACE (harmless, inert): the design brief §1.3 and the header spec's source
-   pin both name them, and removing them is a separate, visible change to that pin -- not a layout
-   fix. The one-row OUTCOME is unchanged by this correction (comment-only).
-   PR-B1 update (record inspector v3, 2026-09-05): `.meta-record-drawer__tabs-bar` IS now a wrapping
-   flex row (it hosts the hide-empty toggle beside the pill — see its own rule/comment above), so the
-   pill IS a flex item and this block's `flex: 1; min-width: 0` on it is no longer inert below 420px:
-   the pill fills the row there and the toggle wraps under it — the design's own 360px mock ("wraps
-   under pill only at 360"). At >=420px the pill keeps its shrink-to-fit width (default `flex: 0 1
-   auto`), so the "pill look" at normal/wide widths is unchanged. The four-tabs-on-one-row outcome is
-   unchanged either way; still jsdom-unverifiable, same caveat as below.
-   PLACEMENT (real-browser-verified defect, caught and fixed before landing): this block must come
-   AFTER both `.meta-record-drawer__tabs` and `.meta-record-drawer__tab`'s own base rules above, not
-   between them -- an earlier draft placed it right after `.tabs` and before `.tab`, and the tab's own
-   UNCONDITIONAL `min-width: 76px` (same specificity, later in source) then won the cascade over this
-   block's conditional `min-width: 0` at EVERY width, container query match or not (a `@container`
-   wrapper adds no specificity of its own -- only normal cascade order decides ties, exactly the same
-   way `@media` does). Verified with an isolated Chromium repro (identical markup/CSS, `min-width`
-   observed via `getComputedStyle` before/after reordering): 76px unconditionally with the old
-   placement, 0px (query matching) here. `flex-wrap: wrap` on the `.tabs` rule above is UNCHANGED and
-   stays the fallback for a `@container`-less browser (every evergreen target this app supports has
-   shipped Container Queries since 2023 -- this fallback is expected to matter only in the
-   jsdom-can't-render-CSS test suite, per the P2 comment's own framing, not in production). The
-   REMAINING layout claim -- that this actually renders as one row inside the real component, not just
-   in the isolated repro -- is NOT verified in this PR; same jsdom-can't-render-CSS caveat as every
-   other layout claim in this file; see the PR's real-browser checklist item "four tabs on one row at
-   360". */
+/* At the narrow-panel floor, reserve a full row for the tab pill so hide-empty wraps below.
+   A zero flex-basis lets the toggle squeeze the pill; equal-width tabs then overlap their text.
+   Use compact padding and label-based sizes to fit one row at 360px. Preserve wrapping when
+   a mobile overlay is narrower than that floor. Keep this block after the base
+   tab rules so their min-width does not override it. Rendered coverage: record-inspector-tabs.spec.ts. */
 @container (width < 420px) {
-  .meta-record-drawer__tabs { flex: 1; min-width: 0; }
-  .meta-record-drawer__tab { flex: 1; min-width: 0; }
+  .meta-record-drawer__tabs { flex: 1 0 100%; min-width: 0; }
+  .meta-record-drawer__tab { flex: 1 1 auto; min-width: 0; padding: 5px 10px; }
 }
 .meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
 /* W2 S3 (lock §3.3 focus ring convention, H4-2/#4281 lineage, same token as MetaSheetViewRail.vue).

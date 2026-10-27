@@ -357,23 +357,20 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(labelRule).toMatch(/white-space:\s*nowrap/)
     })
 
-    // P2-A (2026-09-05, design brief §1.3): `.meta-record-drawer__tabs-bar` is the container-query
-    // container, and below 420px both the tabs pill and each tab get `flex: 1; min-width: 0` so all
-    // four stay on one row at the 360px panel floor. Source-text pin only — jsdom implements neither
-    // layout nor CSS Container Queries, so the resulting one-row layout itself is NOT verified here
-    // (same caveat this file's sibling flex-wrap pin above already discloses); real-browser
-    // verification is this PR's own checklist item "four tabs on one row at 360".
-    it('[source] .meta-record-drawer__tabs-bar is a container, and @container (width < 420px) sets flex:1/min-width:0 on both the tabs pill and each tab (jsdom cannot verify the resulting one-row layout)', () => {
+    // Provision pin only: Chromium's record-inspector-tabs.spec.ts proves readable text,
+    // one-row tabs and hide-empty below at 360; jsdom cannot prove those rendered outcomes.
+    it('[source] narrow tab pill reserves a full row and tabs retain label-based flex sizes', () => {
       const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
       const tabsBarRule = src.match(/\.meta-record-drawer__tabs-bar\s*\{[^}]*\}/)?.[0] ?? ''
       expect(tabsBarRule).toMatch(/container-type:\s*inline-size/)
       const query = src.match(/@container \(width < 420px\)\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
       expect(query).toBeTruthy()
       const tabsRule = query.match(/\.meta-record-drawer__tabs\s*\{[^}]*\}/)?.[0] ?? ''
-      expect(tabsRule).toMatch(/flex:\s*1/)
+      expect(tabsRule).toMatch(/flex:\s*1 0 100%/)
       expect(tabsRule).toMatch(/min-width:\s*0/)
       const tabRule = query.match(/\.meta-record-drawer__tab\s*\{[^}]*\}/)?.[0] ?? ''
-      expect(tabRule).toMatch(/flex:\s*1/)
+      expect(tabRule).toMatch(/flex:\s*1 1 auto/)
+      expect(tabRule).toMatch(/padding:\s*5px 10px/)
       expect(tabRule).toMatch(/min-width:\s*0/)
 
       // Placement (real-browser-verified defect, caught before landing — see the @container block's
