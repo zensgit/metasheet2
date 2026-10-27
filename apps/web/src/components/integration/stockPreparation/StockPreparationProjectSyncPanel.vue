@@ -1273,28 +1273,58 @@ const checkPhase = ref<'idle' | 'submitted' | 'answered'>('idle')
 watch(() => [props.refreshStatus, props.refreshSettled] as const, () => {
   if (checkPhase.value === 'submitted') checkPhase.value = 'answered'
 })
-watch(() => props.projectNo, () => {
+// A CHECK ANSWER BELONGS TO THE PROJECT, SCOPE AND SESSION IT WAS ASKED FOR (#6324 review N1). The check can read
+// PLM for minutes; meanwhile the board may open another project, the scope may move, or another principal may take
+// the browser session. `clearCheck` bumps a generation on each of those (and on unmount), and a late answer whose
+// generation or session no longer matches is DROPPED: no result line (「核对发现还有 N 处要写入…」 on the wrong
+// project) and no `synced(null)`. The session is compared by value at landing as well, because another tab
+// replacing the token notifies nobody (authPrincipal.ts `onAuthPrincipalChange`).
+let checkGeneration = 0
+let checkMounted = true
+function clearCheck(): void {
+  checkGeneration += 1
   checkResult.value = null
   checkPhase.value = 'idle'
+}
+function readCheckSessionSignature(): string {
+  try {
+    const session = readAuthSessionSignature()
+    if (session === 'invalid') return 'invalid'
+    // A focus refresh can replace the access snapshot without rotating the token.
+    return JSON.stringify([session, localStorage.getItem('user_permissions'), localStorage.getItem('user_roles')])
+  } catch {
+    return 'invalid'
+  }
+}
+watch([() => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], clearCheck, { flush: 'sync' })
+const unsubscribeCheckSession = onAuthPrincipalChange(clearCheck)
+onUnmounted(() => {
+  checkMounted = false
+  clearCheck()
+  unsubscribeCheckSession()
 })
 
 async function runSettlementCheck(): Promise<void> {
   if (!showsCheck.value || busy.value || checkBusy.value) return
   const target = (props.projectNo || projectNo.value).trim()
   if (!target) return
+  clearCheck()
+  const generation = checkGeneration
+  const session = readCheckSessionSignature()
   checkBusy.value = true
   busy.value = true
-  checkResult.value = null
-  checkPhase.value = 'idle'
+  let result: StockPreparationSettlementCheckResult | null = null
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
-    checkResult.value = await runStockPreparationSettlementCheck(api, target, { dryRun: dryRunOptions() })
-    checkPhase.value = 'submitted'
+    result = await runStockPreparationSettlementCheck(api, target, { dryRun: dryRunOptions() })
   } finally {
     dryRunProgress.value = null
     busy.value = false
     checkBusy.value = false
   }
+  if (!checkMounted || generation !== checkGeneration || session === 'invalid' || session !== readCheckSessionSignature()) return
+  checkResult.value = result
+  checkPhase.value = 'submitted'
   // The board re-reads its stanza; that re-read is the authority (see above).
   emit('synced', null)
 }
