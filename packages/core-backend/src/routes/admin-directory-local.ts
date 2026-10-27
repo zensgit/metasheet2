@@ -34,6 +34,7 @@ import {
   updateLocalAccount,
   updateLocalDepartment,
 } from '../directory/local-directory-org'
+import { LocalMemberProjectionError, projectLocalOrganizationMember } from '../directory/local-organization-member-projection'
 import { setLocalMembershipManager } from '../directory/directory-sync'
 import { jsonError, jsonOk } from '../util/response'
 
@@ -268,6 +269,43 @@ export function adminDirectoryLocalRouter(): Router {
       jsonOk(res, { department })
     } catch (error) {
       handleLocalDirectoryError(res, error, 'Failed to archive local department')
+    }
+  })
+
+
+  // Approved narrow representation door: never joins/reactivates an organization or grants access.
+  router.post('/member-projections', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (rejectUnlistedFields(req, res, ['integrationId', 'localUserId'])) return
+    const body = req.body as Record<string, unknown> | undefined
+    if (!body || Array.isArray(body) || typeof body.integrationId !== 'string' ||
+        !UUID_SHAPE_RE.test(body.integrationId) || typeof body.localUserId !== 'string' ||
+        !body.localUserId.trim() || body.localUserId.trim().length > 200) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'Expected a local anchor and member')
+      return
+    }
+    try {
+      const projection = await projectLocalOrganizationMember(resolveLocalDirectoryOrgId(req), {
+        integrationId: body.integrationId,
+        localUserId: body.localUserId.trim(),
+        actorId: adminUserId,
+      })
+      if (projection.created) {
+        await auditLog({
+          actorId: adminUserId, actorType: 'user', action: 'directory.local_member.project',
+          resourceType: 'directory-account', resourceId: projection.accountId,
+          meta: { integrationId: body.integrationId },
+        })
+      }
+      jsonOk(res, { projection })
+    } catch (error) {
+      if (error instanceof LocalMemberProjectionError) {
+        jsonError(res, error.status, error.code, error.message)
+        return
+      }
+      logger.warn('Local member projection failed')
+      jsonError(res, 500, 'LOCAL_ORG_INTERNAL_ERROR', 'Local member projection failed')
     }
   })
 
