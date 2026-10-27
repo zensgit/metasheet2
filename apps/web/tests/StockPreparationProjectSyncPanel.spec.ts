@@ -958,6 +958,66 @@ describe('StockPreparationProjectSyncPanel', () => {
       expect(onSynced).toHaveBeenCalledTimes(1)
     })
 
+    // The large-BOM background channel is ticked FROM THE PAGE (largeBomPull.ts): unmounting it would cut A's
+    // write short. A board switch therefore hides it and lets it finish; a session switch stops it.
+    const LARGE_PLAN = { status: 'large_bom_bounded', canApply: false, dryRunToken: null, counts: {} }
+    async function largeTrialOnAHeldAtChunk() {
+      const chunk = held({ jobId: 'large-bom-apply-panel-1', status: 'succeeded', counts: { created: 40, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 } })
+      const jobApi = largeBomJobApi({ runApplyChunk: chunk.fn as never })
+      const double = api({ dryRun: vi.fn().mockResolvedValue(LARGE_PLAN) })
+      const mounted = mountOnBoard({ api: double, largeBomApi: jobApi, largeBomPollWait: vi.fn().mockResolvedValue(undefined) })
+      await flushUi()
+      await press(mounted.root, 'stock-prep-project-sync-run')
+      const channel = mounted.root.querySelector('[data-testid="stock-prep-large-bom-pull"]') as HTMLElement
+      expect(channel, 'the trial on A mounted its background channel').not.toBeNull()
+      expect(jobApi.startExpansion).toHaveBeenCalledWith(PROJECT_A)
+      expect(jobApi.runApplyChunk).toHaveBeenCalledTimes(1)
+      expect(channel.getAttribute('data-phase')).toBe('applying')
+      expect(mounted.onSynced).toHaveBeenCalledTimes(1)
+      return { ...mounted, jobApi, channel, releaseChunk: chunk.release }
+    }
+
+    it('large BOM: after the board opens B, A\'s background write is hidden there but runs to done', async () => {
+      const { root, board, onSynced, jobApi, channel, releaseChunk } = await largeTrialOnAHeldAtChunk()
+      board.projectNo = PROJECT_B
+      await flushUi()
+      expect(verdictOf(root)).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]'), 'still mounted: unmounting would stop A\'s write').toBe(channel)
+      expect(channel.style.display, 'not shown on B\'s board').toBe('none')
+      releaseChunk()
+      await flushUi(12)
+      expect(channel.getAttribute('data-phase')).toBe('done')
+      expect(jobApi.runApplyChunk).toHaveBeenCalledTimes(1)
+      // The channel's own completion is `synced(null)` — "re-read your board", never A's report.
+      expect(onSynced.mock.calls.map((call) => call[0])).toEqual([expect.objectContaining({ verdict: expect.any(String) }), null])
+    })
+
+    it('large BOM: a session switch stops the page-driven write (it never continues under another principal)', async () => {
+      const { root, jobApi, releaseChunk } = await largeTrialOnAHeldAtChunk()
+      localStorage.setItem('auth_token', 'synthetic-session-other')
+      notifyAuthPrincipalChange()
+      await flushUi()
+      expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')).toBeNull()
+      releaseChunk()
+      await flushUi(12)
+      expect(jobApi.runApplyChunk).toHaveBeenCalledTimes(1)
+    })
+
+    it('large BOM: a trial of A that lands after the board opened B starts no background write there', async () => {
+      const plan = held(LARGE_PLAN)
+      const jobApi = largeBomJobApi()
+      const { root, board, onSynced } = mountOnBoard({ api: api({ dryRun: plan.fn as never }), largeBomApi: jobApi, largeBomPollWait: vi.fn().mockResolvedValue(undefined) })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      board.projectNo = PROJECT_B
+      await flushUi()
+      plan.release()
+      await flushUi(12)
+      expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')).toBeNull()
+      expect(jobApi.startExpansion).not.toHaveBeenCalled()
+      expect(onSynced).not.toHaveBeenCalled()
+    })
+
     function activeTarget(log: string[], options: { restore?: () => Promise<unknown>; archived?: boolean } = {}): StockPreparationProjectTargetApi {
       const state = (archived: boolean) => ({
         status: archived ? 'archived' : 'active',

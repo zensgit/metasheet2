@@ -513,12 +513,15 @@
       </li>
     </ol>
 
-    <!-- The large-BOM background channel. `:key="submittedProjectNo"` remounts it per run rather
-         than reusing one instance across two different large projects. -->
+    <!-- The large-BOM background channel. `:key` remounts it per run rather than reusing one instance
+         across two different large projects. It is a CLIENT-DRIVEN write, so once started it is never
+         unmounted by a board switch (that would cut the write short) — only hidden on another project's
+         board (see `largeBomChannel`). -->
     <StockPreparationLargeBomPullPanel
-      v-if="showsLargeBomPull"
-      :key="submittedProjectNo"
-      :project-no="submittedProjectNo"
+      v-if="largeBomChannel"
+      v-show="largeBomChannel.epoch === runEpoch"
+      :key="largeBomChannel.projectNo"
+      :project-no="largeBomChannel.projectNo"
       :scope="scope"
       :api="largeBomApi"
       :wait="largeBomPollWait"
@@ -1020,6 +1023,7 @@ function applyPullOutcome(outcome: StockPrepProjectPullOutcome): void {
     return
   }
   report.value = outcome.report
+  if (showsLargeBomPull.value) largeBomChannel.value = { projectNo: submittedProjectNo.value, epoch: runEpoch.value }
   afterState.value = outcome.after
   lastRunOnProjectSheet.value = outcome.mode !== 'legacy'
   armedNote.value = false
@@ -1047,7 +1051,22 @@ function resetRunState(): void {
 // dropped is the RENDERING: no verdict, no steps, no notice, no `project-target-changed` and no `synced(report)` —
 // the board's 「下一步」 bar must never read project A's report while project B is open. Invalidation also clears
 // whatever this panel was showing, so a FINISHED run's verdict does not stay on the next project's board either.
-const runGuard = createStockPrepProjectSyncRunGuard(resetRunState)
+/** Bumped on every invalidation, reactively (the guard's own generation is not); the large-BOM channel compares it. */
+const runEpoch = ref(0)
+const runGuard = createStockPrepProjectSyncRunGuard((cause) => {
+  runEpoch.value += 1
+  resetRunState()
+  // A write ticked from this page never continues under another principal's session.
+  if (cause === 'session') largeBomChannel.value = null
+})
+/**
+ * The large-BOM background channel this panel started, and the epoch it started in. NOT derived from `report`: an
+ * invalidation clears `report`, and the channel's apply is ticked from this page (largeBomPull.ts), so unmounting
+ * it would cut the write for its project short. After the board moves to another project or scope it keeps running,
+ * hidden; a session switch stops it; the next run this panel starts replaces it (as before). A trial that LANDS after
+ * the board moved starts no channel at all.
+ */
+const largeBomChannel = ref<{ projectNo: string; epoch: number } | null>(null)
 watch([() => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], () => runGuard.invalidate(), { flush: 'sync' })
 onUnmounted(() => runGuard.dispose())
 
@@ -1125,6 +1144,7 @@ async function onRun(): Promise<void> {
   const target = projectNo.value.trim()
   submittedProjectNo.value = target
   resetRunState()
+  largeBomChannel.value = null
   const ticket = runGuard.ticket()
   busy.value = true
   let outcome: StockPrepProjectPullOutcome
@@ -1149,6 +1169,7 @@ async function onRepair(): Promise<void> {
   const target = submittedProjectNo.value
   if (!target || busy.value || !canRun.value) return
   resetRunState()
+  largeBomChannel.value = null
   const ticket = runGuard.ticket()
   busy.value = true
   let outcome: StockPrepProjectPullOutcome

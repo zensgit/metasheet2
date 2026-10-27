@@ -10,7 +10,8 @@
 // own generation) so the one fix applies wherever the panel's run path is the same:
 //   * `invalidate()` bumps a generation; the panel calls it when the project / scope it is about changes, and the
 //     guard calls it itself when the browser session actually switches (`onAuthSessionSwitch`, not the raw reset
-//     funnel, because invalidating also CLEARS what the panel shows).
+//     funnel, because invalidating also CLEARS what the panel shows). The callback is told which: a session switch
+//     must also stop work the panel drives from the page, which would otherwise go on under the next principal.
 //   * `ticket()` is taken before a run's first await; `isCurrent(ticket)` is asked when the run lands. The session
 //     is compared BY VALUE at landing as well, because another tab replacing the token notifies nobody.
 //   * `dispose()` on unmount: nothing lands into a torn-down panel.
@@ -24,8 +25,11 @@ export interface StockPrepProjectSyncRunTicket {
   readonly session: string
 }
 
+/** `context`: the project or scope the panel is about moved. `session`: the browser session switched principal. */
+export type StockPrepProjectSyncRunInvalidation = 'context' | 'session'
+
 export interface StockPrepProjectSyncRunGuard {
-  /** The project / scope / session this panel is about changed: every run in flight lands nowhere. */
+  /** The project / scope this panel is about changed: every run in flight lands nowhere. */
   invalidate(): void
   /** Taken before a run's first await. */
   ticket(): StockPrepProjectSyncRunTicket
@@ -50,16 +54,16 @@ export function readStockPrepProjectSyncRunSession(): string {
   }
 }
 
-export function createStockPrepProjectSyncRunGuard(onInvalidate: () => void): StockPrepProjectSyncRunGuard {
+export function createStockPrepProjectSyncRunGuard(onInvalidate: (cause: StockPrepProjectSyncRunInvalidation) => void): StockPrepProjectSyncRunGuard {
   let generation = 0
   let mounted = true
-  function invalidate(): void {
+  function invalidate(cause: StockPrepProjectSyncRunInvalidation): void {
     generation += 1
-    if (mounted) onInvalidate()
+    if (mounted) onInvalidate(cause)
   }
-  const stopSessionSwitch = onAuthSessionSwitch(invalidate)
+  const stopSessionSwitch = onAuthSessionSwitch(() => invalidate('session'))
   return {
-    invalidate,
+    invalidate: () => invalidate('context'),
     ticket: () => ({ generation, session: readStockPrepProjectSyncRunSession() }),
     isCurrent(ticket: StockPrepProjectSyncRunTicket): boolean {
       if (!mounted || ticket.generation !== generation || ticket.session === 'invalid') return false
