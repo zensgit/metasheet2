@@ -636,6 +636,7 @@ import {
   type StockPrepProjectTargetState,
   type StockPreparationProjectTargetApi,
 } from '../../../services/integration/stockPreparation/projectTarget'
+import { createStockPrepProjectSyncRunGuard, type StockPrepProjectSyncRunTicket } from '../../../services/integration/stockPreparation/projectSyncRunGuard'
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
@@ -1001,9 +1002,11 @@ onUnmounted(() => {
   dryRunAbort = null
 })
 
-function syncRunner(api: StockPreparationProjectSyncApi, target: string) {
+function syncRunner(api: StockPreparationProjectSyncApi, target: string, ticket: StockPrepProjectSyncRunTicket) {
   dryRunWatchEpoch += 1
   return (hooks: Parameters<typeof runStockPreparationProjectSync>[3]) => runStockPreparationProjectSync(api, target, (step) => {
+    // A step of a run the board has moved away from is not painted (see `runGuard` below); the run goes on.
+    if (!runGuard.isCurrent(ticket)) return
     // Render each step AS IT LANDS: a run that stops at the plan must still show the plan's counts.
     if (step.id === 'dry-run') dryRunProgress.value = null
     results.value = [...results.value, step]
@@ -1036,6 +1039,28 @@ function resetRunState(): void {
   restoreRefusal.value = null
 }
 
+// A RUN'S OUTCOME BELONGS TO THE PROJECT, SCOPE AND SESSION IT WAS STARTED FOR (#6591 review, follow-up O2). A
+// 同步 can read PLM and write for minutes; meanwhile the board may open another project (this panel stays mounted
+// across that switch — only its `projectNo` prop moves), the scope may move, or another principal may take the
+// session. The run itself is NOT stopped and its writes are NOT touched: they are complete and correct for the
+// project it ran on, and that project's board re-reads them from the server when it is opened again. What is
+// dropped is the RENDERING: no verdict, no steps, no notice, no `project-target-changed` and no `synced(report)` —
+// the board's 「下一步」 bar must never read project A's report while project B is open. Invalidation also clears
+// whatever this panel was showing, so a FINISHED run's verdict does not stay on the next project's board either.
+const runGuard = createStockPrepProjectSyncRunGuard(resetRunState)
+watch([() => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], () => runGuard.invalidate(), { flush: 'sync' })
+onUnmounted(() => runGuard.dispose())
+
+/** A run lands: its own board renders it; any other board is left as the switch left it (nothing of this run). */
+function landPullOutcome(ticket: StockPrepProjectSyncRunTicket, outcome: StockPrepProjectPullOutcome): void {
+  if (!runGuard.isCurrent(ticket)) {
+    // Also covers a session replaced from another tab, which notifies nobody: what was painted mid-run goes too.
+    resetRunState()
+    return
+  }
+  applyPullOutcome(outcome)
+}
+
 // ── S4 (R-38) — 「恢复并重新拉取」 ───────────────────────────────────────────────────────────────────
 const restorePrompt = ref(false)
 const restoreTyped = ref('')
@@ -1065,12 +1090,18 @@ const restoreRefusalText = computed<StockPrepPlainEntry>(() => {
 async function onRestoreAndRepull(): Promise<void> {
   const target = submittedProjectNo.value
   if (!target || busy.value || !canRun.value) return
+  const ticket = runGuard.ticket()
   busy.value = true
   let outcome: StockPrepProjectLifecycleOutcome
   try {
     outcome = await changeStockPreparationProjectTargetLifecycle({ targetApi: resolveTargetApi(), canPull: canRun.value }, 'restore', target, restoreTyped.value)
   } finally {
     busy.value = false
+  }
+  // The restore itself stands; the pull it was going to start is not started on another project's board.
+  if (!runGuard.isCurrent(ticket)) {
+    resetRunState()
+    return
   }
   if (outcome.kind !== 'done') {
     restoreRefusal.value = outcome
@@ -1094,20 +1125,23 @@ async function onRun(): Promise<void> {
   const target = projectNo.value.trim()
   submittedProjectNo.value = target
   resetRunState()
+  const ticket = runGuard.ticket()
   busy.value = true
+  let outcome: StockPrepProjectPullOutcome
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
-    applyPullOutcome(await runStockPreparationProjectPull({
+    outcome = await runStockPreparationProjectPull({
       targetApi: resolveTargetApi(),
       canPull: canRun.value,
       confirm: askOperator,
-      runSync: syncRunner(api, target),
-    }, target))
+      runSync: syncRunner(api, target, ticket),
+    }, target)
   } finally {
     targetPrompt.value = null
     dryRunProgress.value = null
     busy.value = false
   }
+  landPullOutcome(ticket, outcome)
 }
 
 /** 「修复项目表（重装客户包）」: the create route's replay heals the pack, then the four steps again. */
@@ -1115,18 +1149,21 @@ async function onRepair(): Promise<void> {
   const target = submittedProjectNo.value
   if (!target || busy.value || !canRun.value) return
   resetRunState()
+  const ticket = runGuard.ticket()
   busy.value = true
+  let outcome: StockPrepProjectPullOutcome
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
-    applyPullOutcome(await repairStockPreparationProjectSheet({
+    outcome = await repairStockPreparationProjectSheet({
       targetApi: resolveTargetApi(),
       canPull: canRun.value,
-      runSync: syncRunner(api, target),
-    }, target))
+      runSync: syncRunner(api, target, ticket),
+    }, target)
   } finally {
     dryRunProgress.value = null
     busy.value = false
   }
+  landPullOutcome(ticket, outcome)
 }
 
 /** P0-3: the workspace title badge's only window into "a run is happening right now". */
