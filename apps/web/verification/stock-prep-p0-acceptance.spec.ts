@@ -356,9 +356,10 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
       home: 1,
       'getting-started': 2,
       install: 1,
-      dashboard: 1,
+      // dashboard retired 2026-10-27 (owner: 「不用就去掉」).
       'project-workspace': 1,
-      'exception-queue': 1,
+      // 'exception-queue' retired 2026-10-27 (owner: 「不用就去掉」); its switch assertion now lands on unit-conversion.
+      'unit-conversion': 1,
       'bom-snapshot-diff': 1,
     }
     for (const [key, floor] of Object.entries(landingFloor)) {

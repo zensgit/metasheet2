@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 // 备料分批拉取第一期 step 4 PR-7 — the PURE half of the web's batch-refresh consumers (design §9.1, §11, §13; plan §8).
 //
@@ -11,7 +13,11 @@ import { createRequire } from 'node:module'
 //   RS-BANNER  per-status banner copy; the link only for a puller with holds to decide; none when nothing blocks.
 //   RS-COPY    every code of the plugin's live step-4 vocabularies has its OWN copy (a backend code without web copy
 //              reds here) — #6565 review N6, the five export codes, the PR-3/4/6 codes.
-//   RS-REASON  `<code>/<reason>` readings (PR-5 pg review N1 lease_in_flight; F-19 'preview again').
+//              PR-7b: plus the pairing core's and the write lock's vocabularies and the codes the PR-7 review found on
+//              the generic sentence.
+//   RS-WORDS   (PR-7b, review N2 / N8) every token of the plugin's live hold-page vocabularies (hold kinds,
+//              not-confirmable reasons, shapes, history, relationship status, comparison status) has words.
+//   RS-REASON  `<code>/<reason>` readings (PR-5 pg review N1 lease_in_flight; F-19 'preview again'; PR-7b N9).
 //   RS-ERR     the export client carries a CLAMPED `details.reason` / `details.status`, never a value (W2).
 //   PS-*       projectSync learns `suspended` / `recovery_pending` / the refresh refusals / 「核对」 (W4).
 //   NS-*       the 下一步 bar's rule 3b — puller vs floor, never an action for the floor (R-11) (W5).
@@ -39,6 +45,13 @@ import {
   STOCK_PREP_ERROR_REASON_PLAIN,
   STOCK_PREP_LARGE_BOM_ERROR_PLAIN,
   STOCK_PREP_SYNC_REASON_PLAIN,
+  STOCK_PREP_REFRESH_COMPARISON_STATUS_PLAIN,
+  STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN,
+  STOCK_PREP_REFRESH_HISTORY_PLAIN,
+  STOCK_PREP_REFRESH_HOLD_KIND_PLAIN,
+  STOCK_PREP_REFRESH_NOT_CONFIRMABLE_PLAIN,
+  STOCK_PREP_REFRESH_SHAPE_PLAIN,
+  stockPrepRefreshTokenPlain,
   stockPrepBoardErrorPlain,
   stockPrepErrorPlain,
   stockPrepExportRefreshGatePlain,
@@ -212,15 +225,56 @@ describe('RS-COPY — every step-4 code has its own copy (the cross-side tripwir
     add((nodeRequire(`${PLUGIN_LIB}stock-preparation-refresh-governance.cjs`) as { REFRESH_GOVERNANCE_ERROR_CODES: Record<string, string> }).REFRESH_GOVERNANCE_ERROR_CODES)
     add((nodeRequire(`${PLUGIN_LIB}stock-preparation-export-gate.cjs`) as { EXPORT_GATE_ERROR_CODES: Record<string, string> }).EXPORT_GATE_ERROR_CODES)
     add((nodeRequire(`${PLUGIN_LIB}stock-preparation-governed-sheet-probe.cjs`) as { GOVERNED_SHEET_WRITE_CODES: Record<string, string> }).GOVERNED_SHEET_WRITE_CODES)
+    // PR-7b (PR-7 review: generic copy remained for step-4-adjacent codes): the pairing core's and the write lock's
+    // own vocabularies, and the pilot marker's STATE_MOVED, read LIVE too.
+    add((nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-pairing.cjs`) as { CONTINUATION_ERROR_CODES: Record<string, string> }).CONTINUATION_ERROR_CODES)
+    add((nodeRequire(`${PLUGIN_LIB}stock-preparation-project-write-lock.cjs`) as { PROJECT_WRITE_ERROR_CODES: Record<string, string> }).PROJECT_WRITE_ERROR_CODES)
+    codes.add((nodeRequire(`${PLUGIN_LIB}stock-preparation-project-target-store.cjs`) as { PROJECT_TARGET_PILOT_STATE_MOVED_CODE: string }).PROJECT_TARGET_PILOT_STATE_MOVED_CODE)
     for (const literal of [
       'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE',
       'LARGE_BOM_APPLY_PLAN_SUSPENDED',
       'LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED',
       'STOCK_PREP_CONTINUATION_PROJECTION_INCONSISTENT',
       'AUDIT_STORE_UNAVAILABLE',
+      // PR-7b: thrown by name (no exported map) — the large-BOM job store and the table-actions archive lane.
+      'LARGE_BOM_APPLY_JOB_SCAN_INVALID',
+      'LARGE_BOM_JOB_STORE_UNAVAILABLE',
+      'LARGE_BOM_PLAN_GOVERNANCE_VERDICT_INVALID',
+      'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY',
     ]) codes.add(literal)
     return [...codes].sort()
   }
+
+  it('RS-COPY (PR-7b): the thirteen codes the PR-7 review found on the generic sentence each have their own two lines', () => {
+    // The literal codes above are each thrown by the plugin source (a rename there must rename them here).
+    const libSource = (name: string) => readFileSync(resolve(__dirname, PLUGIN_LIB, name), 'utf8')
+    expect(libSource('stock-preparation-large-bom-jobs.cjs')).toContain("'LARGE_BOM_APPLY_JOB_SCAN_INVALID'")
+    expect(libSource('stock-preparation-large-bom-jobs.cjs')).toContain("'LARGE_BOM_JOB_STORE_UNAVAILABLE'")
+    expect(libSource('stock-preparation-large-bom-jobs.cjs')).toContain("'LARGE_BOM_PLAN_GOVERNANCE_VERDICT_INVALID'")
+    expect(libSource('stock-preparation-table-actions.cjs')).toContain("'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY'")
+    for (const code of [
+      'LARGE_BOM_APPLY_JOB_SCAN_INVALID',
+      'LARGE_BOM_JOB_STORE_UNAVAILABLE',
+      'LARGE_BOM_PLAN_GOVERNANCE_VERDICT_INVALID',
+      'STOCK_PREP_CONTINUATION_INPUT_INVALID',
+      'STOCK_PREP_CONTINUATION_POSTCONDITION_VIOLATED',
+      'STOCK_PREP_PILOT_STATE_MOVED',
+      'STOCK_PREP_PROJECT_WRITE_GUARD_SCOPE_MISMATCH',
+      'STOCK_PREP_SHEET_DIGEST_RECORD_REF_MISSING',
+      'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY',
+      'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED',
+      'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID',
+      'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE',
+    ]) {
+      const plain = stockPrepErrorPlain(code)
+      expect(plain, code).not.toBe(STOCK_PREP_ERROR_GENERIC)
+      for (const key of ['zh', 'en', 'zhNext', 'enNext'] as const) expect(String(plain[key] ?? '').trim().length, `${code}.${key}`).toBeGreaterThan(0)
+      expect(plain.zh, `${code}: no raw token inside the sentence`).not.toMatch(/[A-Z]{3,}_[A-Z_]+/)
+    }
+    // The archive refused for a suspended pull reads by its reason.
+    expect(stockPrepErrorPlain('STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', 'refresh_suspended').zhNext).toContain('拉取待确认')
+  })
 
   it('RS-COPY: each code resolves to its OWN entry (not the generic) with both lines', () => {
     const codes = liveCodes()
@@ -251,6 +305,10 @@ describe('RS-COPY — every step-4 code has its own copy (the cross-side tripwir
     // PR-5 pg review N1: the remedy names the TIER that can clear an abandoned lease.
     expect(lease.zhNext).toContain('拉取人员')
     expect(lease.zhNext).toContain('试算')
+    // PR-7b (PR-7 review N9): only an APPLICABLE preview clears an abandoned lease (the generation bump runs only
+    // when the preview is about to issue an applicable result) — the remedy says so.
+    expect(lease.zhNext).toContain('能应用的试算')
+    expect(lease.enNext).toContain('can be applied')
     expect(stockPrepErrorPlain('STOCK_PREP_EXPORT_BLOCKED', 'not_a_reason')).toBe(STOCK_PREP_ERROR_PLAIN.STOCK_PREP_EXPORT_BLOCKED)
     // F-19: STATE_MOVED during a preview reads "preview again", with the cause.
     const moved = stockPrepErrorPlain('STOCK_PREP_PULL_STATE_MOVED', 'execution_finished_during_preview')
@@ -266,6 +324,64 @@ describe('RS-COPY — every step-4 code has its own copy (the cross-side tripwir
     // 今天要处理's card export resolves the gate codes; anything else is not its business.
     expect(stockPrepExportRefreshGatePlain('STOCK_PREP_EXPORT_BLOCKED', 'not_settled')).toBe(notSettled)
     expect(stockPrepExportRefreshGatePlain('FORBIDDEN', null)).toBeNull()
+  })
+})
+
+// PR-7b (PR-7 review N2 / N8; plan W7) — RS-WORDS: every token of the plugin's LIVE closed vocabularies that the
+// 「拉取待确认」 page shows has words of its own, so a new server token without words reds here (the RS-COPY pattern).
+describe('RS-WORDS — every hold-page token has words (the cross-side tripwire)', () => {
+  const pairing = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-pairing.cjs`) as {
+    HOLD_KINDS: readonly string[]
+    NOT_CONFIRMABLE_REASONS: readonly string[]
+    SHAPE_TOKENS: readonly string[]
+  }
+  const store = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-store.cjs`) as {
+    EVIDENCE_HISTORY_STATUSES: readonly string[]
+    CONTINUATION_ROW_STATUSES: readonly string[]
+  }
+
+  /** The field statuses `compareSevenItems` assigns, scanned out of the plugin source (they are not exported). */
+  function comparisonStatuses(): string[] {
+    const source = readFileSync(resolve(__dirname, PLUGIN_LIB, 'stock-preparation-continuation-pairing.cjs'), 'utf8').replace(/\r\n/g, '\n')
+    const start = source.indexOf('function compareSevenItems(')
+    expect(start, 'compareSevenItems in the pairing source').toBeGreaterThan(0)
+    const end = source.indexOf('\nfunction ', start + 1)
+    const body = source.slice(start, end > start ? end : undefined)
+    const tokens = new Set<string>()
+    for (const match of body.matchAll(/\bstatus(?: =|:) '([a-z_]+)'/g)) tokens.add(match[1])
+    // `status = <test> ? 'equal' : 'differs'` (the field's status only, not the item's `outcome`).
+    for (const match of body.matchAll(/\bstatus = [^\n]*\? '([a-z_]+)' : '([a-z_]+)'/g)) { tokens.add(match[1]); tokens.add(match[2]) }
+    return [...tokens].sort()
+  }
+
+  function expectWords(label: string, map: Record<string, { zh: string; en: string }>, tokens: readonly string[], minimum: number): void {
+    expect(tokens.length, `${label}: the live list`).toBeGreaterThanOrEqual(minimum)
+    const missing = tokens.filter((token) => stockPrepRefreshTokenPlain(map, token) === null)
+    expect(missing, `${label} without words:\n${missing.join('\n')}`).toEqual([])
+    for (const token of tokens) {
+      const entry = map[token]
+      expect(entry.zh.trim().length, `${label}.${token}.zh`).toBeGreaterThan(0)
+      expect(entry.en.trim().length, `${label}.${token}.en`).toBeGreaterThan(0)
+      // Words, not the token again.
+      expect(entry.zh, `${label}.${token}: no raw token`).not.toMatch(/[a-z]+_[a-z_]+/)
+    }
+    // Nothing stale either: every key of the map is a live token.
+    expect(Object.keys(map).filter((key) => !tokens.includes(key)), `${label}: words for tokens the server no longer has`).toEqual([])
+  }
+
+  it('RS-WORDS: hold kinds, not-confirmable reasons, shapes, history, relationship status and comparison status', () => {
+    expectWords('hold kind', STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, pairing.HOLD_KINDS, 14)
+    expectWords('not-confirmable reason', STOCK_PREP_REFRESH_NOT_CONFIRMABLE_PLAIN, pairing.NOT_CONFIRMABLE_REASONS, 8)
+    expectWords('shape', STOCK_PREP_REFRESH_SHAPE_PLAIN, pairing.SHAPE_TOKENS, 6)
+    expectWords('history', STOCK_PREP_REFRESH_HISTORY_PLAIN, store.EVIDENCE_HISTORY_STATUSES, 3)
+    expectWords('relationship status', STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN, store.CONTINUATION_ROW_STATUSES, 3)
+    const statuses = comparisonStatuses()
+    expect(statuses).toEqual(expect.arrayContaining(['equal', 'differs', 'incomplete']))
+    expectWords('comparison status', STOCK_PREP_REFRESH_COMPARISON_STATUS_PLAIN, statuses, 5)
+    // An unknown token is null (the page then says 「未识别」 and shows the token apart from the sentence).
+    expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, 'not_a_kind')).toBeNull()
+    expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, 'toString')).toBeNull()
+    expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, null)).toBeNull()
   })
 })
 
