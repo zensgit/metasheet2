@@ -19,6 +19,10 @@ import { useLocale } from '../src/composables/useLocale'
 import { AppRouteNames } from '../src/router/types'
 import type { AutomationRule, DingTalkGroupDelivery, DingTalkPersonDelivery } from '../src/multitable/types'
 import { epOptions, epSelectValue, epSelectValues, epSetSelect } from './helpers/epControls'
+import {
+  automationDuplicateRuleConfirmMessage,
+  findDuplicateAutomationRule,
+} from '../src/multitable/utils/automation-duplicate-rule'
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -832,6 +836,91 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-rule="rule_new"]')?.textContent).toContain('Advanced DingTalk group')
     expect(container.querySelector('[data-automation-rule="rule_new"] .meta-automation__card-desc')?.textContent).toContain('Send DingTalk group message')
     expect(container.querySelector('.meta-rule-editor')).toBeNull()
+  })
+
+  // 客户反馈 2026-10-27 4d: saving a rule whose trigger + actions match an enabled rule asks first (never refuses).
+  describe('possible duplicate rule on advanced-editor save', () => {
+    const existingNotify = () => fakeRule({
+      id: 'rule_dup',
+      name: 'Update test',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'send_notification',
+      actionConfig: { userIds: ['user_1'], message: 'Updated' },
+      actions: [{ type: 'send_notification', config: { userIds: ['user_1'], message: 'Updated' } }],
+    })
+
+    async function openNewNotificationRule(rules: AutomationRule[], userIds: string) {
+      const { client, fetchFn } = mockClient(rules)
+      const updatedSpy = vi.fn()
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onUpdated: updatedSpy })
+      await flushPromises()
+      ;(container.querySelector('[data-automation-new-rule="advanced"]') as HTMLButtonElement).click()
+      await flushPromises()
+      const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+      nameInput.value = 'Update 2'
+      nameInput.dispatchEvent(new Event('input'))
+      epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_notification')
+      await flushPromises()
+      const userIdsInput = container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement
+      userIdsInput.value = userIds
+      userIdsInput.dispatchEvent(new Event('input'))
+      const messageInput = container.querySelector('[data-field="notificationMessage"]') as HTMLTextAreaElement
+      messageInput.value = 'Another message'
+      messageInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(false)
+      return { container, fetchFn, updatedSpy, saveBtn }
+    }
+
+    const postCount = (fetchFn: ReturnType<typeof mockClient>['fetchFn']) =>
+      fetchFn.mock.calls.filter(([url, init]: [string, RequestInit | undefined]) => init?.method === 'POST' && !String(url).includes('recipient-status')).length
+
+    it('asks with the existing rule name; cancel keeps the editor open and saves nothing', async () => {
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
+      const { container, fetchFn, updatedSpy, saveBtn } = await openNewNotificationRule([existingNotify()], 'user_1')
+      saveBtn.click()
+      await flushPromises()
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(String(confirmSpy.mock.calls[0]?.[0])).toBe('Rule "Update test" already has the same trigger and actions. Save anyway?')
+      expect(postCount(fetchFn)).toBe(0)
+      expect(updatedSpy).not.toHaveBeenCalled()
+      expect(container.querySelector('.meta-rule-editor')).not.toBeNull()
+    })
+
+    it('confirm saves as usual', async () => {
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const { container, fetchFn, updatedSpy, saveBtn } = await openNewNotificationRule([existingNotify()], 'user_1')
+      saveBtn.click()
+      await flushPromises()
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(postCount(fetchFn)).toBe(1)
+      expect(updatedSpy).toHaveBeenCalledTimes(1)
+      expect(container.querySelector('.meta-rule-editor')).toBeNull()
+    })
+
+    it('does not ask when the recipients differ', async () => {
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const { fetchFn, saveBtn } = await openNewNotificationRule([existingNotify()], 'user_2')
+      saveBtn.click()
+      await flushPromises()
+
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(postCount(fetchFn)).toBe(1)
+    })
+
+    it('does not ask when the matching rule is disabled', async () => {
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const { fetchFn, saveBtn } = await openNewNotificationRule([{ ...existingNotify(), enabled: false }], 'user_1')
+      saveBtn.click()
+      await flushPromises()
+
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(postCount(fetchFn)).toBe(1)
+    })
   })
 
   it('creates DingTalk person automation via the advanced rule editor', async () => {
@@ -3828,5 +3917,126 @@ describe('MetaAutomationManager', () => {
     expect(body.actionType).toBe('send_notification')
     expect(body.actionConfig).toEqual({ userIds: ['user_1'], message: 'Hello!' })
     expect(JSON.stringify(body)).not.toContain('lin@example.com')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Pure duplicate-rule comparison behind the confirm above (src/multitable/utils/automation-duplicate-rule.ts).
+// Kept in this already-gated spec file so no new required-lane token is needed.
+// ---------------------------------------------------------------------------
+// 客户反馈 2026-10-27 4d: two enabled rules with the same trigger and actions each send a notification.
+
+function dupStoredRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
+  return {
+    id: 'rule_a',
+    sheetId: 'sheet_1',
+    name: '更新测试',
+    triggerType: 'record.updated',
+    triggerConfig: {},
+    actionType: 'send_notification',
+    actionConfig: { userIds: ['user_1'], message: '更新了' },
+    actions: [{ type: 'send_notification', config: { userIds: ['user_1'], message: '更新了' } }],
+    enabled: true,
+    ...overrides,
+  }
+}
+
+function dupDraftPayload(overrides: Partial<AutomationRule> = {}): Partial<AutomationRule> {
+  return {
+    name: '更新2',
+    triggerType: 'record.updated',
+    triggerConfig: {},
+    trigger: { type: 'record.updated', config: {} },
+    conditions: undefined,
+    actions: [{ type: 'send_notification', config: { userIds: ['user_1'], message: '另一句话' } }],
+    actionType: 'send_notification',
+    actionConfig: { userIds: ['user_1'], message: '另一句话' },
+    ...overrides,
+  }
+}
+
+describe('findDuplicateAutomationRule (客户反馈 2026-10-27 4d)', () => {
+  it('finds an enabled rule with the same trigger, action types and notification recipients (message ignored)', () => {
+    const existing = dupStoredRule()
+    expect(findDuplicateAutomationRule(dupDraftPayload(), [existing])?.id).toBe('rule_a')
+  })
+
+  it('never reports the rule being edited as a duplicate of itself', () => {
+    expect(findDuplicateAutomationRule(dupDraftPayload(), [dupStoredRule()], { excludeRuleId: 'rule_a' })).toBeNull()
+  })
+
+  it('ignores disabled rules (they do not fire)', () => {
+    expect(findDuplicateAutomationRule(dupDraftPayload(), [dupStoredRule({ enabled: false })])).toBeNull()
+  })
+
+  it('differs on trigger type', () => {
+    expect(findDuplicateAutomationRule(dupDraftPayload({ triggerType: 'record.created' }), [dupStoredRule()])).toBeNull()
+  })
+
+  it('compares trigger config ignoring key order and set-like array order', () => {
+    const existing = dupStoredRule({
+      triggerType: 'field.value_changed',
+      triggerConfig: { fieldIds: ['fld_b', 'fld_a'], condition: 'any' },
+    })
+    const same = dupDraftPayload({ triggerType: 'field.value_changed', triggerConfig: { condition: 'any', fieldIds: ['fld_a', 'fld_b'] } })
+    expect(findDuplicateAutomationRule(same, [existing])?.id).toBe('rule_a')
+
+    const otherField = dupDraftPayload({ triggerType: 'field.value_changed', triggerConfig: { condition: 'any', fieldIds: ['fld_c'] } })
+    expect(findDuplicateAutomationRule(otherField, [existing])).toBeNull()
+  })
+
+  it('differs on notification recipients (compared as a set)', () => {
+    const existing = dupStoredRule({
+      actions: [{ type: 'send_notification', config: { userIds: ['user_1', 'user_2'], message: 'x' } }],
+    })
+    const reordered = dupDraftPayload({ actions: [{ type: 'send_notification', config: { userIds: ['user_2', 'user_1'], message: 'y' } }] })
+    expect(findDuplicateAutomationRule(reordered, [existing])?.id).toBe('rule_a')
+
+    const other = dupDraftPayload({ actions: [{ type: 'send_notification', config: { userIds: ['user_3'], message: 'y' } }] })
+    expect(findDuplicateAutomationRule(other, [existing])).toBeNull()
+  })
+
+  it('differs on the set of action types', () => {
+    const extra = dupDraftPayload({
+      actions: [
+        { type: 'send_notification', config: { userIds: ['user_1'], message: 'y' } },
+        { type: 'send_webhook', config: { url: 'https://example.com/hook' } },
+      ],
+    })
+    expect(findDuplicateAutomationRule(extra, [dupStoredRule()])).toBeNull()
+  })
+
+  it('folds a legacy single-action rule (actionType + actionConfig.userId string, notify alias)', () => {
+    const legacy = dupStoredRule({
+      actions: undefined,
+      actionType: 'notify',
+      actionConfig: { userId: 'user_1', message: 'old' },
+    })
+    expect(findDuplicateAutomationRule(dupDraftPayload(), [legacy])?.id).toBe('rule_a')
+  })
+
+  it('rules that differ only in their conditions are not duplicates', () => {
+    const existing = dupStoredRule({
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'A' }] },
+    })
+    const otherCondition = dupDraftPayload({
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'B' }] },
+    })
+    expect(findDuplicateAutomationRule(otherCondition, [existing])).toBeNull()
+
+    const sameCondition = dupDraftPayload({
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'A' }] },
+    })
+    expect(findDuplicateAutomationRule(sameCondition, [existing])?.id).toBe('rule_a')
+  })
+
+  it('never checks webhook.received rules (each has its own endpoint)', () => {
+    const existing = dupStoredRule({ triggerType: 'webhook.received', triggerConfig: { secret: '<redacted>' } })
+    expect(findDuplicateAutomationRule(dupDraftPayload({ triggerType: 'webhook.received', triggerConfig: undefined }), [existing])).toBeNull()
+  })
+
+  it('uses the task wording for the confirm message', () => {
+    expect(automationDuplicateRuleConfirmMessage('更新测试', true)).toBe('已有规则『更新测试』的触发器和动作相同，仍要保存吗？')
+    expect(automationDuplicateRuleConfirmMessage('Notify', false)).toBe('Rule "Notify" already has the same trigger and actions. Save anyway?')
   })
 })

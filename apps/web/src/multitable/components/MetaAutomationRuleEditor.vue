@@ -68,6 +68,25 @@
             <el-option value="approval.task_created" data-value="approval.task_created" :label="automationTriggerTypeLabel('approval.task_created', isZh)" />
           </el-select>
 
+          <!-- 客户反馈 2026-10-27 4e: form.submitted has no config, but authors could not find where the form is.
+               Say what fires it (a form-view submit only — editing cells in the grid does not) and list this
+               sheet's form views; with none, point to where one is created. Display only. -->
+          <template v-if="draft.triggerType === 'form.submitted'">
+            <div class="meta-rule-editor__hint" data-field="formSubmittedHint">
+              {{ isZh
+                ? '需先在「视图」中新建表单视图。只有通过表单视图新建或修改一条记录并点提交时才会触发；在表格里直接改单元格不会触发。本表任意一个表单视图提交都会触发。'
+                : 'Needs a form view first (create one under "Views"). Fires only when a record is created or edited through a form view and submitted; editing cells directly in the grid does not fire it. A submit from any form view of this table fires it.' }}
+            </div>
+            <div v-if="formViews.length > 0" class="meta-rule-editor__hint" data-field="formSubmittedFormViews">
+              {{ isZh ? '本表已有的表单视图：' : 'Form views on this table: ' }}{{ formViews.map((view) => view.name || view.id).join(isZh ? '、' : ', ') }}
+            </div>
+            <div v-else class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="formSubmittedNoFormView">
+              {{ isZh
+                ? '本表还没有表单视图。请先关闭此窗口，在表格上方工具栏点「视图」→ 新建视图，类型选「表单」；建好后在左侧视图栏打开即可填写提交。（「视图」按钮需要视图管理权限，没有时请联系表格管理员。）'
+                : 'This table has no form view yet. Close this dialog, then in the toolbar choose "Views" → new view, type "Form"; open it from the view list to fill in and submit. (The "Views" button needs view-management permission; otherwise ask the table admin.)' }}
+            </div>
+          </template>
+
           <!-- field.value_changed config -->
           <template v-if="draft.triggerType === 'field.value_changed'">
             <label class="meta-rule-editor__label">{{ automationLabel('trigger.watchField', isZh) }}</label>
@@ -3981,8 +4000,13 @@ function buildActionSummarySnapshot(action: DraftAction): ActionSummarySnapshot 
       method: typeof action.config.method === 'string' ? action.config.method : '',
     }
   } else if (action.type === 'send_notification') {
+    // 客户反馈 2026-10-27 4f-b: names come from the same directory the recipient chips use. An id with no
+    // directory entry (lookup pending, failed, or no such member) is passed as name '' so the summary
+    // shows 「未匹配用户」 instead of the raw id.
     snapshot.notification = {
-      userId: typeof action.config.userId === 'string' ? action.config.userId : '',
+      recipients: selectedNotificationRecipients(action.config).map((recipient) => ({
+        name: recipient.named ? recipient.label : '',
+      })),
       message: typeof action.config.message === 'string' ? action.config.message : '',
     }
   } else if (action.type === 'start_approval') {
@@ -4489,6 +4513,8 @@ function selectedNotificationRecipients(holder: NotificationRecipientHolder) {
     return {
       id,
       label: directoryEntry?.label ?? id,
+      /** true only when a directory entry supplied the label (the label is then a name, not the raw id). */
+      named: !!directoryEntry && !!directoryEntry.label,
       subtitle: directoryEntry?.subtitle,
       unresolved: !directoryEntry && notificationRecipientMisses.value[id] === true,
     }

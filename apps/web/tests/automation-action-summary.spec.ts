@@ -99,16 +99,44 @@ describe('automationActionSummary (G-B2-25)', () => {
 
   describe('send_notification', () => {
     it('flags a missing recipient', () => {
-      const snapshot: ActionSummarySnapshot = { type: 'send_notification', notification: { userId: '', message: 'hi' } }
+      const snapshot: ActionSummarySnapshot = { type: 'send_notification', notification: { recipients: [], message: 'hi' } }
       expect(summarizeAutomationAction(snapshot, false)).toBe('Send notification (not configured)')
     })
 
-    it('reports recipient + message, placeholdering a blank message', () => {
-      const withMessage: ActionSummarySnapshot = { type: 'send_notification', notification: { userId: 'user_1', message: 'Please review' } }
-      expect(summarizeAutomationAction(withMessage, false)).toBe('Send notification to user_1: Please review')
+    it('reports the recipient NAME + message, placeholdering a blank message', () => {
+      const withMessage: ActionSummarySnapshot = { type: 'send_notification', notification: { recipients: [{ name: 'Lin Lan' }], message: 'Please review' } }
+      expect(summarizeAutomationAction(withMessage, false)).toBe('Send notification to Lin Lan: Please review')
+      expect(summarizeAutomationAction(withMessage, true)).toBe('发送通知给 Lin Lan：Please review')
 
-      const noMessage: ActionSummarySnapshot = { type: 'send_notification', notification: { userId: 'user_1', message: '' } }
-      expect(summarizeAutomationAction(noMessage, false)).toBe('Send notification to user_1: (no message)')
+      const noMessage: ActionSummarySnapshot = { type: 'send_notification', notification: { recipients: [{ name: 'Lin Lan' }], message: '' } }
+      expect(summarizeAutomationAction(noMessage, false)).toBe('Send notification to Lin Lan: (no message)')
+    })
+
+    // 客户反馈 2026-10-27 4f-b
+    it('several recipients: leads with the first named one and counts everyone', () => {
+      const snapshot: ActionSummarySnapshot = {
+        type: 'send_notification',
+        notification: { recipients: [{ name: '' }, { name: '张三' }, { name: '李四' }], message: '提交了' },
+      }
+      expect(summarizeAutomationAction(snapshot, true)).toBe('发送通知给 张三 等 3 人：提交了')
+      expect(summarizeAutomationAction(snapshot, false)).toBe('Send notification to 张三 and 2 more: 提交了')
+    })
+
+    it('an unmatched recipient reads 「未匹配用户」, never a raw id', () => {
+      const one: ActionSummarySnapshot = { type: 'send_notification', notification: { recipients: [{ name: '' }], message: '提交了' } }
+      expect(summarizeAutomationAction(one, true)).toBe('发送通知给 未匹配用户：提交了')
+      expect(summarizeAutomationAction(one, false)).toBe('Send notification to unmatched user: 提交了')
+
+      const two: ActionSummarySnapshot = { type: 'send_notification', notification: { recipients: [{ name: ' ' }, { name: '' }], message: 'x' } }
+      expect(summarizeAutomationAction(two, true)).toBe('发送通知给 未匹配用户 等 2 人：x')
+    })
+
+    it('truncates a very long recipient name so the summary stays one line', () => {
+      const snapshot: ActionSummarySnapshot = {
+        type: 'send_notification',
+        notification: { recipients: [{ name: 'A very long display name that goes on' }], message: 'm' },
+      }
+      expect(summarizeAutomationAction(snapshot, false)).toBe('Send notification to A very long dis…: m')
     })
   })
 

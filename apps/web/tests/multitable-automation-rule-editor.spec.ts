@@ -708,6 +708,41 @@ describe('MetaAutomationRuleEditor', () => {
     expect(epSelectValue(triggerSelect)).toBe('form.submitted')
   })
 
+  // 客户反馈 2026-10-27 4e: form.submitted explains where the form is and what does (not) fire it.
+  it('4e: form.submitted explains the trigger and lists this sheet\'s form views', async () => {
+    const otherSheetForm = { id: 'view_other_form', sheetId: 'sheet_2', name: 'Other Sheet Form', type: 'form' }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: [...views, otherSheetForm] })
+    await flushPromises()
+    expect(container.querySelector('[data-field="formSubmittedHint"]')).toBeNull()
+
+    epSetSelect(container.querySelector('[data-field="triggerType"]') as HTMLElement, 'form.submitted')
+    await flushPromises()
+
+    const hint = container.querySelector('[data-field="formSubmittedHint"]') as HTMLElement
+    expect(hint.textContent).toContain('form view')
+    expect(hint.textContent).toContain('editing cells directly in the grid does not fire it')
+    const list = container.querySelector('[data-field="formSubmittedFormViews"]') as HTMLElement
+    expect(list.textContent).toContain('Public Form')
+    expect(list.textContent).not.toContain('Grid')
+    expect(list.textContent).not.toContain('Other Sheet Form')
+    expect(container.querySelector('[data-field="formSubmittedNoFormView"]')).toBeNull()
+  })
+
+  it('4e: with no form view on the sheet, form.submitted says how to create one (zh)', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: [views[0]] })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-field="triggerType"]') as HTMLElement, 'form.submitted')
+    await flushPromises()
+
+    expect((container.querySelector('[data-field="formSubmittedHint"]') as HTMLElement).textContent)
+      .toContain('在表格里直接改单元格不会触发')
+    expect(container.querySelector('[data-field="formSubmittedFormViews"]')).toBeNull()
+    const guide = container.querySelector('[data-field="formSubmittedNoFormView"]') as HTMLElement
+    expect(guide.textContent).toContain('本表还没有表单视图')
+    expect(guide.textContent).toContain('类型选「表单」')
+  })
+
   it('exposes start_approval as a selectable action with template + form-data mapping, and saves it', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
@@ -5327,6 +5362,74 @@ describe('MetaAutomationRuleEditor', () => {
       expect(saved.mock.calls[0][0].actions).toEqual([
         { type: 'send_notification', config: { userIds: ['user_9'], message: 'Hi' } },
       ])
+    })
+
+    // 客户反馈 2026-10-27 4f-b: the collapsed one-line summary names recipients, never the raw user id.
+    it('4f-b: the summary of a saved notification shows the resolved name, not the raw user id', async () => {
+      const client = rosterClient()
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['user_1'], message: 'Submitted' },
+        actions: [{ type: 'send_notification', config: { userIds: ['user_1'], message: 'Submitted' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule })
+      await flushPromises()
+      await flushPromises()
+
+      const summary = container.querySelector('[data-field="actionSummary"]') as HTMLElement
+      expect(summary.textContent?.trim()).toBe('Send notification to Lin Lan: Submitted')
+      expect(summary.textContent).not.toContain('user_1')
+    })
+
+    it('4f-b: several recipients read "name and N more"; an unmatched id reads as an unmatched user', async () => {
+      const client = rosterClient()
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['4', 'user_1'], message: 'Ping' },
+        actions: [{ type: 'send_notification', config: { userIds: ['4', 'user_1'], message: 'Ping' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule })
+      await flushPromises()
+      await flushPromises()
+
+      const summary = container.querySelector('[data-field="actionSummary"]') as HTMLElement
+      // Leads with the first NAMED recipient; total count includes the unmatched one.
+      expect(summary.textContent?.trim()).toBe('Send notification to Lin Lan and 1 more: Ping')
+
+      // Removing the named user leaves only the unmatched id: placeholder, never "4".
+      ;(container.querySelector('[data-notification-recipient="user_1"]') as HTMLElement).click()
+      await flushPromises()
+      expect(summary.textContent?.trim()).toBe('Send notification to unmatched user: Ping')
+    })
+
+    it('4f-b: zh summary uses 「某某 等 N 人」 and 「未匹配用户」', async () => {
+      useLocale().setLocale('zh-CN')
+      const client = rosterClient()
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['user_1', '4'], message: '提交了' },
+        actions: [{ type: 'send_notification', config: { userIds: ['user_1', '4'], message: '提交了' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule })
+      await flushPromises()
+      await flushPromises()
+      const summary = container.querySelector('[data-field="actionSummary"]') as HTMLElement
+      expect(summary.textContent?.trim()).toBe('发送通知给 Lin Lan 等 2 人：提交了')
+    })
+
+    it('4f-b: while a lookup has failed the summary still never prints the raw id', async () => {
+      const client = rosterClient()
+      client.listFormShareCandidates = vi.fn(async () => { throw new Error('Forbidden') })
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['user_9'], message: 'Hi' },
+        actions: [{ type: 'send_notification', config: { userIds: ['user_9'], message: 'Hi' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule })
+      await flushPromises()
+      const summary = container.querySelector('[data-field="actionSummary"]') as HTMLElement
+      expect(summary.textContent?.trim()).toBe('Send notification to unmatched user: Hi')
+      expect(summary.textContent).not.toContain('user_9')
     })
   })
 
