@@ -5907,6 +5907,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   S8-17 (review fix N3-a, round 2; the V8D-04 interleaving) after a review the source moves and the reviewed row is
         //         DELETED: the key is HELD (never re-added with content nobody reviewed), no token, export 409, the change
         //         plan blocked record_unbound; the source back on the reviewed value => the row is re-ADDed, export 200.
+        //   S8-20 (review fix N3-a, round 2; the inactive sibling) after a review the source DROPS a reviewed row (the sweep
+        //         marks it inactive, no hold) and later RE-ADDS it with other quantities: HELD, not silently revived; the
+        //         plan's UPDATE writes the inactive record, the review binds it, the next pass revives it, export 200.
         //   S8-18 (review fix N3-b, round 2; the V8D-05 interleaving) a cell an EARLIER plan reviewed stays protected after
         //         an unrelated LATER plan is reviewed (the reviewed-cell register): the V8PG-15 move on it re-suspends the
         //         project from the earlier review's value, export 409; the five steps close it.
@@ -6977,6 +6980,88 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               exportFinal: '200',
               rowBackWithTheReviewedValue: true,
               openHoldsAfter: 0,
+            })
+          }, 300000)
+
+          test('S8-20 (review fix N3-a, the inactive sibling; C06) after a review the PLM source DROPS a reviewed row (the governed sweep marks it inactive, no hold) and later RE-ADDS it with other quantities: the revive is HELD (a content change from the reviewed quantities), the export 409; the plan\'s UPDATE writes the inactive record without reviving it, the review binds it, the next pass revives it and the export answers 200', async () => {
+            const { st } = await s8Written('s8_20', { partCUsage: 5 })
+            const reviewed = await reviewWritten(st)
+            await st.dryRun()
+            const reviewedC = await rowOf(st, 'PART-C')
+            const quantityOf = (row: any) => Number(row.data[physical(st, 'rawQuantity')])
+            const activeOf = (row: any) => row.data[physical(st, 'active')] !== false
+            // The source drops PART-C: the governed sweep marks the row inactive.
+            const parts = CF.PARTS.map((part: any) => (part.OBJ_ID === 'PART-A' ? { ...part, Material: S8_MATERIAL } : part))
+            st.state.data = CF.project({ orders: [{ part: 'S-001', qty: 10 }], parts, boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }] } })
+            const drop = await st.dryRun()
+            const dropApplied = drop.body.data && drop.body.data.dryRunToken ? await st.apply(st.users.puller, drop.body.data.dryRunToken) : null
+            await st.dryRun()
+            const droppedC = await rowOf(st, 'PART-C')
+            // The source re-adds PART-C with usage 7.
+            st.state.data = sourceWith({ partCUsage: 7 })
+            const readd = await st.dryRun()
+            const holds = await openHoldRows(st)
+            const derivedHeld = (await derivedOf(st)).status
+            const exportHeld = await st.exportLines()
+            // The five steps: the plan's UPDATE writes the inactive record (no revive), the review binds it.
+            const page = await boundBody(st)
+            const confirmY = await cpCall(st, 'POST', CPR.confirm, { body: page.body })
+            const replan = await st.dryRun()
+            const applied = replan.body.data && replan.body.data.dryRunToken ? await st.apply(st.users.puller, replan.body.data.dryRunToken) : null
+            const writtenC = await rowOf(st, 'PART-C')
+            const reviewed2 = await reviewWritten(st)
+            // The next pass revives it (no content change left: the register carries the written quantities).
+            const revive = await st.dryRun()
+            const revived = revive.body.data && revive.body.data.dryRunToken ? await st.apply(st.users.puller, revive.body.data.dryRunToken) : null
+            const settle = await st.dryRun()
+            const exportFinal = await st.exportLines()
+            const finalC = await rowOf(st, 'PART-C')
+            const observed = {
+              review: answer(reviewed),
+              drop: drop.body.data ? `${drop.body.data.status}:inactive=${drop.body.data.counts && drop.body.data.counts.inactive}` : answer(drop),
+              dropApplied: dropApplied ? answer(dropApplied) : 'no_token',
+              droppedInactive: !activeOf(droppedC),
+              readd: readd.body.data.status,
+              token: readd.body.data.dryRunToken ? 'minted' : null,
+              holds: holds.map((row: any) => `${row.kind}:${row.detail && row.detail.reason}`),
+              holdBindsTheInactiveRecord: Boolean(holds[0] && holds[0].detail && holds[0].detail.recordId === droppedC.id),
+              holdFromTheReviewedQuantity: Boolean(holds[0] && holds[0].detail && holds[0].detail.fields && holds[0].detail.fields.rawQuantity && Number(holds[0].detail.fields.rawQuantity.before) === quantityOf(reviewedC)),
+              derived: derivedHeld,
+              exportWhileHeld: answer(exportHeld),
+              confirmY: answer(confirmY),
+              replan: replan.body.data ? replan.body.data.status : answer(replan),
+              applied: applied ? `${applied.statusCode}:${applied.body.data && applied.body.data.status}` : 'no_token',
+              writtenStillInactive: !activeOf(writtenC) && quantityOf(writtenC) === 7,
+              review2: answer(reviewed2),
+              revive: revive.body.data ? revive.body.data.status : answer(revive),
+              revived: revived ? `${revived.statusCode}:${revived.body.data && revived.body.data.status}` : 'no_token',
+              settle: settle.body.data.status,
+              exportFinal: answer(exportFinal),
+              revivedWithTheReviewedQuantity: activeOf(finalC) && quantityOf(finalC) === 7,
+            }
+            console.log(`[S8-20] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              review: '200',
+              drop: 'ready:inactive=1',
+              dropApplied: '200',
+              droppedInactive: true,
+              readd: 'suspended',
+              token: null,
+              holds: ['content_change:plm_system_refresh'],
+              holdBindsTheInactiveRecord: true,
+              holdFromTheReviewedQuantity: true,
+              derived: 'pending_confirmation',
+              exportWhileHeld: `409:${EXPORT_BLOCKED}:state:pending_confirmation`,
+              confirmY: '201',
+              replan: 'ready',
+              applied: '200:succeeded',
+              writtenStillInactive: true,
+              review2: '200',
+              revive: 'ready',
+              revived: '200:succeeded',
+              settle: 'ready',
+              exportFinal: '200',
+              revivedWithTheReviewedQuantity: true,
             })
           }, 300000)
 

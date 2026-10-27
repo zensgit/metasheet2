@@ -1805,7 +1805,10 @@ function planOnce(input, continuationInput, changePlanAuthorization) {
     // trigger fields itself and returns when none changed.
     // Step 5 PR-8: detection also covers the records a confirmed plan writes, pilot or not (M4); the plan's own
     // change of this row is its controlled UPDATE (REGARDLESS of `refreshPlmSystemFields`, like the detection, O-3).
-    if (governed && governed.detectsContentOf(existingRow) && existingRow.active !== false) {
+    // Review fix N3-a (round 2): an INACTIVE row is skipped (a revive is not a content change) — except under a key the
+    // reviews / the written plan left content on: its revive with other content is held like any content change, and the
+    // plan's UPDATE writes it without reviving (the revive comes on the pass after the review).
+    if (governed && governed.detectsContentOf(existingRow) && (existingRow.active !== false || governed.isReviewedKey(existingRow))) {
       const authorized = governed.authorizedChangeFor(existingRow)
       if (authorized) {
         addDecision(decisions, counts, makeChangePlanUpdateDecision(existingRow.idempotencyKey, authorized, runId, plannedAt, humanFields, governed.authorization.changePlanId))

@@ -508,4 +508,59 @@ test('CP-P10 (N3-a, C06) the expected content is matched by record KEY: a review
   void oldId
 })
 
+// ── CP-P11 (review fix N3-a, round 2: the inactive sibling) ──────────────────────────────────────
+
+test('CP-P11 (N3-a, C06) a reviewed row the source DROPPED (swept INACTIVE) and later RE-ADDS with other content is HELD, not silently revived: the plan\'s UPDATE writes the inactive record without reviving it, and the revive comes on the pass after the review; a key with no reviewed content keeps the step-4 rule (a revive is not a content change)', async () => {
+  const readWith = (usage) => F.expand(F.project({ orders: [{ part: 'S-001', qty: 10 }], parts: F.PARTS.slice(), boms: usage === null ? { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }] } : { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage }] } }))
+  const cellOf = (fieldId, value) => ({ after: value, afterCanonical: pairing.canonicalChangeValue(value, TEMPLATE_FIELDS.get(fieldId)) })
+  const quantitiesOf = (row) => ({ rawQuantity: cellOf('rawQuantity', row.rawQuantity), totalQuantity: cellOf('totalQuantity', row.totalQuantity) })
+  // PART-C's quantities (usage 5) were written and reviewed.
+  const sheet0 = F.applyToSheet(F.plan(await readWith(5), []), [], { idPrefix: 'rec_s' })
+  const partC0 = sheet0.find((row) => row.componentSourceId === 'PART-C')
+  const expected = [{ recordId: pairing.recordRefOf(partC0).id, key: partC0.idempotencyKey, fields: quantitiesOf(partC0) }]
+  // The source drops PART-C: the governed sweep marks the row INACTIVE (no hold — a drop is not a content change).
+  const dropped = await readWith(null)
+  const sweep = plan(dropped, sheet0, { expectedContent: expected })
+  assert.equal(sweep.decisions.find((decision) => decision.idempotencyKey === partC0.idempotencyKey).decision, DECISIONS.INACTIVE)
+  assert.equal(contentHolds(sweep).length, 0)
+  const sheet1 = F.applyToSheet(sweep, sheet0, { idPrefix: 'rec_s' })
+  const partC1 = sheet1.find((row) => row.idempotencyKey === partC0.idempotencyKey)
+  assert.equal(partC1.active, false)
+  // The source re-adds PART-C with usage 7: HELD (from the reviewed quantities to the source's), pilot or not.
+  const readded = await readWith(7)
+  for (const pilot of [true, false]) {
+    const held = plan(readded, sheet1, { pilot, expectedContent: expected })
+    const holds = contentHolds(held)
+    assert.equal(holds.length, 1, `pilot=${pilot}: ${JSON.stringify((held.holds || []).map((hold) => hold.kind))}`)
+    assert.equal(holds[0].detail.recordId, pairing.recordRefOf(partC1).id, 'bound to the inactive record')
+    assert.deepEqual(Object.keys(holds[0].detail.fields).sort(), ['rawQuantity', 'totalQuantity'])
+    assert.equal(holds[0].detail.fields.rawQuantity.before, partC0.rawQuantity)
+    assert.equal(held.suspended, true)
+  }
+  // The plan cycle: the confirmed plan MATCHES; its UPDATE writes the quantities WITHOUT reviving the row.
+  const heldOnce = plan(readded, sheet1, { expectedContent: expected })
+  const changePlan = planInputFor(heldOnce.holds)
+  const bound = plan(readded, sheet1, { expectedContent: expected, changePlan })
+  assert.equal(bound.continuation.changePlan.verdict, 'matches')
+  assert.equal(contentHolds(bound).length, 0)
+  const updates = changePlanUpdates(bound)
+  assert.equal(updates.length, 1)
+  assert.equal(Object.prototype.hasOwnProperty.call(updates[0].patch, 'active'), false, 'a change-plan UPDATE never revives (note 1)')
+  // Written and reviewed (the register now carries the new quantities): no hold, and the pass revives the row.
+  const sheet2 = F.applyToSheet(bound, sheet1, { idPrefix: 'rec_s' })
+  const partC2 = sheet2.find((row) => row.idempotencyKey === partC0.idempotencyKey)
+  assert.equal(partC2.active, false)
+  const reviewedAfter = [{ ...expected[0], fields: quantitiesOf(partC2) }]
+  const revived = plan(readded, sheet2, { expectedContent: reviewedAfter })
+  assert.equal(contentHolds(revived).length, 0)
+  assert.equal(revived.suspended, false)
+  const revive = revived.decisions.find((decision) => decision.idempotencyKey === partC0.idempotencyKey)
+  assert.equal(revive.decision, DECISIONS.UPDATE)
+  assert.equal(revive.patch.active, true)
+  // A key with NO reviewed content keeps the step-4 rule: the same re-add revives with the new content, unheld.
+  const unreviewed = plan(readded, sheet1, { pilot: false, expectedContent: [] })
+  assert.equal(contentHolds(unreviewed).length, 0)
+  assert.equal(unreviewed.decisions.find((decision) => decision.idempotencyKey === partC0.idempotencyKey).patch.active, true)
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-planner.test.cjs', tests)

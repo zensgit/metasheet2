@@ -1939,6 +1939,13 @@ function prepareGovernedPlanning(args) {
       if (!ref) return false
       return Boolean((forcedRecordIds && forcedRecordIds.has(ref.id)) || expectedByRecordId.has(ref.id))
     },
+    // Review fix N3-a (round 2, the inactive sibling): a row under a reviewed / written KEY stays under content detection
+    // even while INACTIVE (the source dropped it and the sweep marked it inactive). The step-4 rule "a revive is not a
+    // content change" would otherwise let the source bring the row back with content nobody reviewed, unheld. Keys with
+    // no reviewed / written content keep that rule.
+    isReviewedKey(existingRow) {
+      return expectedByKey.has(keyOf(existingRow))
+    },
     // Step 5 PR-8: the authorized change of a NOT-continued row (null otherwise).
     authorizedChangeFor(existingRow) {
       const entry = authorizedEntryFor(existingRow)
