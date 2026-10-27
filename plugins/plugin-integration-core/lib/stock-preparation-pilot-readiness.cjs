@@ -18,8 +18,10 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 2 — version 1 was the first fifteen; the pre-enable hardening of step-4
-// design §23.4 F-3 / F-5 added the three marked ★, which only ever refuse more):
+// THE LIST (PILOT_READINESS_VERSION 3 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// design §23.4 F-3 / F-5 added the three marked ★ (version 2); version 3 (#6324 S1/N4) makes
+// spec_read_plan_slot also require the effective online plan's slot while online read plans are ON. Every
+// version change only ever refuses more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -81,7 +83,7 @@ const continuationSupport = require('./stock-preparation-continuation-support.cj
 // O-6: the continuation core's own "active" / "root" predicates (see no_two_copy_component above).
 const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')
 
-const PILOT_READINESS_VERSION = 2
+const PILOT_READINESS_VERSION = 3
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;

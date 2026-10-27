@@ -341,7 +341,9 @@ async function withContinuationSupport(version, fn) {
 
 test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the version are pinned; the answer is values-free', async () => {
   // Version 2 (pre-enable hardening, step-4 design §23.4 F-3 / F-5): three checks added, none removed or renamed.
-  assert.equal(readiness.PILOT_READINESS_VERSION, 2)
+  // Version 3 (#6324 S1/N4): spec_read_plan_slot also requires the effective online plan's slot while online read
+  // plans are ON; same ids, only refuses more.
+  assert.equal(readiness.PILOT_READINESS_VERSION, 3)
   assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
@@ -354,7 +356,7 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps()))
   assert.equal(answer.ready, true, JSON.stringify(answer.failing))
   assert.deepEqual([...answer.failing], [])
-  assert.equal(answer.version, 2)
+  assert.equal(answer.version, readiness.PILOT_READINESS_VERSION)
   assert.deepEqual(answer.checks.map((check) => check.id), [...readiness.PILOT_READINESS_CHECK_IDS])
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
