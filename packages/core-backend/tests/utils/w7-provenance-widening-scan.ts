@@ -812,6 +812,10 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'rule_live\'', rule: 'closed_set_member_list' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'snapshot\'', rule: 'closed_set_member_list' },
   { file: 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', text: 'const PROJECTION_OWNERS = ATTENDANCE_PROJECTION_OWNERS_V1', rule: 'widened_predicate' },
+  // CALC15 selects only the legacy member for a read label; other owners remain unchanged.
+  { file: 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', text: "...(row.projection_owner === 'legacy_untracked' && row.current_calculation_id === null", rule: 'single_member_selector' },
+  // Contract prose emits no domain state and contains no comparison or branch.
+  { file: 'packages/openapi/src/base.yml', text: 'description: Present only for an active visible legacy_untracked daily projection with no current calculation pointer. Does not classify immutable history.', rule: 'write_side_emitter' },
   { file: 'packages/openapi/src/base.yml', text: 'projectionOwner: { type: string, enum: [legacy_untracked, w4, w4_group] }', rule: 'closed_set_member_list' },
   { file: 'scripts/attendance/execute-ops-retirement-cleanup.cjs', text: 'if (row.projection_owner != null && row.projection_owner !== \'legacy_untracked\') return true', rule: 'legacy_polarity' },
   { file: 'scripts/attendance/generate-cleanup-sql.cjs', text: 'OR r.projection_owner IS DISTINCT FROM \'legacy_untracked\'', rule: 'legacy_polarity' },

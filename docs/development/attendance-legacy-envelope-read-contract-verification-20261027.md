@@ -83,3 +83,9 @@ No Ready/merge/deploy/R71/tag/release/business configuration/flags.
 Stream/lifecycle and external writes OFF; realUAT/50004excluded; historical
 08PUT INCONCLUSIVE. This current-projection label does not invent or classify
 all historical calculations or fabricate segments.
+
+## Required-CI provenance registration repair
+
+The original Draft head d8df7f1e24f1be5654ff7382cc729b4eb1d7e4f9 failed the W7 completeness assertion because the new legacy-label selector and contract description had not been registered. The gate correctly reported two unledgered derived sites. Later backend/native jobs did not execute; no current-head native CI success is claimed.
+
+The repair adds two exact entries using existing single-member-selector and non-branching-emitter rules, plus an omission discriminator for each entry. The scanner, rule predicates and all original test contents reconstruct byte-for-byte by removing only these additions. The whole affected W7 file passed 27 actual assertions with zero skip/filter. Runtime, OpenAPI, SDK, flags and every original candidate input remained byte-identical before this verification note. Previously successful business suites were not repeated. Final evidence still requires new-head required CI and actual calculation-detail native execution.
