@@ -118,3 +118,68 @@ describe('GET /api/approvals/record-link-options — People sheet read window at
     expect(response.body.page).toEqual({ limit: 50, offset: 0, total: 50, hasMore: false })
   })
 })
+
+describe('GET /api/approvals/record-link-options — configured display columns at the route', () => {
+  let app: Express
+  const recordSelectParams: unknown[][] = []
+
+  async function ordinarySheetQuery(sql: string, params?: unknown[]) {
+    const q = sql.replace(/\s+/g, ' ')
+    if (q.includes("to_jsonb(s) ->> 'system_kind'") && q.includes('FROM meta_sheets')) {
+      return { rows: [{ description: 'ordinary sheet', system_kind: null }] }
+    }
+    if (q.includes('FROM meta_fields')) {
+      return {
+        rows: [
+          { id: 'f_project', type: 'string', property: {} },
+          { id: 'f_dwg', type: 'string', property: {} },
+          { id: 'f_name', type: 'string', property: {} },
+        ],
+      }
+    }
+    if (q.includes('COUNT(*)') && q.includes('FROM meta_records')) return { rows: [{ n: 1 }] }
+    if (q.includes('FROM meta_records') && q.includes('LIMIT')) {
+      recordSelectParams.push([...(params ?? [])])
+      return {
+        rows: [{
+          id: 'rec-1',
+          data: { f_project: 'P-1', f_dwg: 'DWG-01', f_name: '支架' },
+          display_label: 'DWG-01',
+        }],
+      }
+    }
+    return peopleSheetQuery(sql, params)
+  }
+
+  beforeEach(async () => {
+    vi.resetModules()
+    recordSelectParams.length = 0
+    pgState.pool.query.mockReset()
+    pgState.pool.query.mockImplementation(ordinarySheetQuery)
+    const { approvalsRouter } = await import('../../src/routes/approvals')
+    app = express()
+    app.use(express.json())
+    app.use(approvalsRouter())
+    pinned.setApp(app)
+  })
+
+  it('passes up to three comma-separated ids through and returns label + subtitle', async () => {
+    const response = await request(pinned.url())
+      .get('/api/approvals/record-link-options')
+      .query({ baseId: 'base-1', sheetId: 'sheet-1', displayFieldIds: 'f_dwg, f_name,f_dwg,f_x,f_y' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.records).toEqual([{ id: 'rec-1', display: 'DWG-01', subtitle: '支架' }])
+    // Configured order leads the label chain; unknown f_x is dropped by the intersection.
+    expect(recordSelectParams[0]!.slice(1, 4)).toEqual(['f_dwg', 'f_name', 'f_project'])
+  })
+
+  it('a repeated / malformed parameter is treated as absent (unchanged response shape)', async () => {
+    const response = await request(pinned.url())
+      .get('/api/approvals/record-link-options?baseId=base-1&sheetId=sheet-1&displayFieldIds=f_dwg&displayFieldIds=f_name')
+
+    expect(response.status).toBe(200)
+    expect(response.body.records).toEqual([{ id: 'rec-1', display: 'DWG-01' }])
+    expect(recordSelectParams[0]!.slice(1, 4)).toEqual(['f_project', 'f_dwg', 'f_name'])
+  })
+})

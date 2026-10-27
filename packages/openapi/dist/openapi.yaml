@@ -5717,6 +5717,16 @@ components:
           description: |
             Pinned multitable sheet id (publish-time; filler cannot override).
             Must be non-blank after trim — whitespace-only is invalid.
+        displayFieldIds:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            pattern: .*\S.*
+          description: Display columns; first is the label.
       required:
         - baseId
         - sheetId
@@ -11809,6 +11819,11 @@ paths:
             Optional case-insensitive search against the effective display
             label.
         - in: query
+          name: displayFieldIds
+          schema:
+            type: string
+          description: Comma-separated display field ids.
+        - in: query
           name: limit
           schema:
             type: integer
@@ -11850,6 +11865,9 @@ paths:
                           description: >-
                             Human label from visible source fields, or a generic
                             placeholder.
+                        subtitle:
+                          type: string
+                          description: Other display column values, joined.
                   page:
                     type: object
                     required:

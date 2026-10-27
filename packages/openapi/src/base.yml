@@ -4547,6 +4547,21 @@ components:
           description: |
             Pinned multitable sheet id (publish-time; filler cannot override).
             Must be non-blank after trim — whitespace-only is invalid.
+        # Optional author-configured display columns for the filler's record picker: at most
+        # three distinct field ids of the pinned sheet (display-eligible, visible to the
+        # publisher; checked at publish). Absent = today's automatic label. At fill time only the
+        # columns the filler can see are used: the first non-blank one is the option label, the
+        # rest form the option subtitle, and search covers all of them.
+        displayFieldIds:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            pattern: '.*\S.*'
+          description: Display columns; first is the label.
       required: [baseId, sheetId]
     DepartmentFieldProps:
       type: object

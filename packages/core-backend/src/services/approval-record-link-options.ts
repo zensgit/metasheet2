@@ -19,7 +19,13 @@
  *     statements; page membership may drift slightly mid-write, not a frozen MVCC snapshot);
  *   - missing sheet / base mismatch / existing-but-unreadable share one public error shape
  *     (no existence oracle) and run the same base+sheet auth query depth before refusing;
- *   - DB failures return a fixed values-free 503 (never host/port/user/query/raw err.message).
+ *   - DB failures return a fixed values-free 503 (never host/port/user/query/raw err.message);
+ *   - optional author-configured display columns (template field props.displayFieldIds, at most
+ *     three): the effective columns are configured ∩ visible-for-this-actor, in configured order.
+ *     The first non-blank effective column is the label (falling back to today's chain when every
+ *     effective column is blank), the other effective columns form a subtitle, and search also
+ *     matches each effective column. An empty intersection behaves exactly as if nothing were
+ *     configured (same SQL, same binds, no subtitle).
  */
 import { pool } from '../db/pg'
 import {
@@ -49,6 +55,11 @@ export type ApprovalRecordLinkOption = {
   id: string
   /** Human label only — never a raw record id. */
   display: string
+  /**
+   * Values of the other configured display columns (visible to this actor), joined by
+   * APPROVAL_RECORD_LINK_SUBTITLE_SEPARATOR. Present only when non-empty.
+   */
+  subtitle?: string
 }
 
 export type ApprovalRecordLinkOptionsResult =
@@ -61,6 +72,12 @@ export type ApprovalRecordLinkOptionsResult =
 
 /** Values-free label when no allowed visible field has a usable value (never the record id). */
 export const APPROVAL_RECORD_LINK_GENERIC_LABEL = '未命名记录'
+
+/** Upper bound on author-configured display columns for one record-link field. */
+export const APPROVAL_RECORD_LINK_MAX_DISPLAY_FIELDS = 3
+
+/** Joins the non-label display column values into the option subtitle. */
+export const APPROVAL_RECORD_LINK_SUBTITLE_SEPARATOR = ' · '
 
 /** Fixed values-free 503 message — never includes host, port, user, SQL, or raw err.message. */
 export const APPROVAL_RECORD_LINK_DATABASE_UNAVAILABLE_MESSAGE = 'Database not available'
@@ -137,6 +154,78 @@ export function formatApprovalRecordLinkDisplay(
     }
   }
   return APPROVAL_RECORD_LINK_GENERIC_LABEL
+}
+
+/**
+ * Sanitize author/client-supplied display column ids: strings only, trimmed, non-blank,
+ * de-duplicated (first occurrence wins), capped at APPROVAL_RECORD_LINK_MAX_DISPLAY_FIELDS.
+ * Anything that is not an array of strings is treated as "not configured".
+ */
+export function sanitizeRecordLinkDisplayFieldIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const id = entry.trim()
+    if (!id || out.includes(id)) continue
+    out.push(id)
+    if (out.length >= APPROVAL_RECORD_LINK_MAX_DISPLAY_FIELDS) break
+  }
+  return out
+}
+
+/**
+ * Parse the `displayFieldIds` query parameter (comma-separated). A repeated / non-string value
+ * is treated as absent; blanks and duplicates are dropped; at most three ids are kept.
+ */
+export function parseRecordLinkDisplayFieldIdsQuery(raw: unknown): string[] {
+  if (typeof raw !== 'string') return []
+  return sanitizeRecordLinkDisplayFieldIds(raw.split(','))
+}
+
+/**
+ * Configured display columns the actor may actually see: configured order, filtered to the
+ * actor's visible display-eligible fields. Never adds a column that was not configured.
+ */
+export function intersectRecordLinkDisplayFieldIds(
+  configured: readonly string[],
+  visible: readonly string[],
+): string[] {
+  if (configured.length === 0 || visible.length === 0) return []
+  const allowed = new Set(visible)
+  return configured.filter((id) => allowed.has(id))
+}
+
+function usableDisplayValue(raw: unknown, recordId: string): string | null {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed || (recordId && trimmed === recordId)) return null
+    return trimmed
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const asText = String(raw)
+    if (recordId && asText === recordId) return null
+    return asText
+  }
+  return null
+}
+
+/**
+ * Subtitle for one option: the usable values of the effective display columns other than the
+ * first usable one (which is the label), joined by the subtitle separator. Same blank /
+ * value-equals-record-id rule as the label. Empty string when there is nothing to show.
+ */
+export function formatApprovalRecordLinkSubtitle(
+  data: Record<string, unknown> | null | undefined,
+  effectiveFieldIds: readonly string[],
+  recordId?: string,
+): string {
+  if (!data || typeof data !== 'object' || effectiveFieldIds.length < 2) return ''
+  const id = typeof recordId === 'string' ? recordId.trim() : ''
+  const values = effectiveFieldIds
+    .map((fieldId) => usableDisplayValue(data[fieldId], id))
+    .filter((value): value is string => value !== null)
+  return values.slice(1).join(APPROVAL_RECORD_LINK_SUBTITLE_SEPARATOR)
 }
 
 /**
@@ -217,6 +306,24 @@ export async function resolveVisibleDisplayFieldIds(
     .map((field) => field.id)
 }
 
+/**
+ * Publish-time check for author-configured display columns: every configured id must be a
+ * display-eligible (non-computed text / number / select) field of the sheet that the given
+ * actor can see. Returns false on any miss; callers refuse with one values-free message.
+ */
+export async function areRecordLinkDisplayFieldIdsVisible(
+  queryFn: QueryFn,
+  sheetId: string,
+  userId: string,
+  capabilities: { canEditRecord: boolean; canCreateRecord: boolean },
+  configured: readonly string[],
+): Promise<boolean> {
+  if (configured.length === 0) return true
+  const visible = await resolveVisibleDisplayFieldIds(queryFn, sheetId, userId, capabilities)
+  const allowed = new Set(visible)
+  return configured.every((id) => allowed.has(id))
+}
+
 export async function listApprovalRecordLinkOptions(input: {
   userId: string
   baseId: string
@@ -224,6 +331,8 @@ export async function listApprovalRecordLinkOptions(input: {
   search?: string
   limit?: number
   offset?: number
+  /** Author-configured display columns from the form field (sanitized here again). */
+  displayFieldIds?: readonly string[]
 }): Promise<ApprovalRecordLinkOptionsResult> {
   if (!pool) {
     return {
@@ -299,6 +408,19 @@ export async function listApprovalRecordLinkOptions(input: {
     preferredFieldIds = []
   }
 
+  // Configured display columns: only those this actor can see, in configured order. When none
+  // survive, everything below is identical to the unconfigured path.
+  const effectiveDisplayFieldIds = intersectRecordLinkDisplayFieldIds(
+    sanitizeRecordLinkDisplayFieldIds(input.displayFieldIds ?? []),
+    preferredFieldIds,
+  )
+  const labelFieldIds = effectiveDisplayFieldIds.length > 0
+    ? [
+        ...effectiveDisplayFieldIds,
+        ...preferredFieldIds.filter((id) => !effectiveDisplayFieldIds.includes(id)),
+      ]
+    : preferredFieldIds
+
   // One deny-set load (no per-row N+1). Admins skip deny filtering.
   let deniedIds: string[] = []
   if (!isAdminRole) {
@@ -324,7 +446,8 @@ export async function listApprovalRecordLinkOptions(input: {
   // Full param list for SELECT (and search): base + COALESCE binds (fields + generic) + optional
   // pattern + limit/offset. COUNT without search keeps baseParams only so unused binds never land.
   const selectParams: unknown[] = [...baseParams]
-  const displaySql = buildDisplayLabelSqlExpression(preferredFieldIds, selectParams.length + 1)
+  const labelParamStart = selectParams.length + 1
+  const displaySql = buildDisplayLabelSqlExpression(labelFieldIds, labelParamStart)
   for (const bind of displaySql.bindParams) selectParams.push(bind)
   const displayExpr = displaySql.expression
 
@@ -333,7 +456,16 @@ export async function listApprovalRecordLinkOptions(input: {
     selectParams.push(`%${search}%`)
     const patternParam = selectParams.length
     // Same effective display text as SELECT label / response (incl. generic fallback).
-    where += ` AND lower(${displayExpr}) LIKE $${patternParam}`
+    if (effectiveDisplayFieldIds.length > 0) {
+      // Configured columns lead the label chain, so their ids are already bound at
+      // labelParamStart.. — reuse those binds (no new params; COUNT/SELECT stay in step).
+      const columnArms = effectiveDisplayFieldIds.map((_, i) => (
+        `lower(NULLIF(NULLIF(BTRIM(data->>$${labelParamStart + i}), ''), id)) LIKE $${patternParam}`
+      ))
+      where += ` AND (lower(${displayExpr}) LIKE $${patternParam} OR ${columnArms.join(' OR ')})`
+    } else {
+      where += ` AND lower(${displayExpr}) LIKE $${patternParam}`
+    }
   }
 
   let total = 0
@@ -389,18 +521,20 @@ export async function listApprovalRecordLinkOptions(input: {
   rows = boundEnumeratedRows(peopleBound, rows, offset)
 
   const records: ApprovalRecordLinkOption[] = rows.map((row) => {
+    const data = row.data && typeof row.data === 'object' && !Array.isArray(row.data)
+      ? (row.data as Record<string, unknown>)
+      : {}
     // Prefer the SQL effective label (same expression as search); fall back to pure formatter.
     let display = typeof row.display_label === 'string' && row.display_label.trim()
       ? row.display_label.trim()
-      : (() => {
-          const data = row.data && typeof row.data === 'object' && !Array.isArray(row.data)
-            ? (row.data as Record<string, unknown>)
-            : {}
-          return formatApprovalRecordLinkDisplay(data, preferredFieldIds, row.id)
-        })()
+      : formatApprovalRecordLinkDisplay(data, labelFieldIds, row.id)
     // Never surface a raw record id as the label (belt after SQL effective-label collapse).
     if (display === row.id || !nonBlank(display)) {
       display = APPROVAL_RECORD_LINK_GENERIC_LABEL
+    }
+    if (effectiveDisplayFieldIds.length > 1) {
+      const subtitle = formatApprovalRecordLinkSubtitle(data, effectiveDisplayFieldIds, row.id)
+      if (subtitle && subtitle !== row.id) return { id: row.id, display, subtitle }
     }
     return { id: row.id, display }
   })

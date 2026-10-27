@@ -206,6 +206,58 @@
                 </el-select>
               </el-form-item>
             </div>
+            <!-- Optional display columns (at most three) for the filler's record picker. Options
+                 are the target sheet's column names from the parent-owned catalog. -->
+            <div
+              v-if="field.recordLinkSheetId.trim()"
+              class="template-authoring__record-link-display"
+              data-testid="approval-record-link-display-config"
+            >
+              <div class="template-authoring__hint">{{ RECORD_LINK_DISPLAY_FIELDS_LABEL }}</div>
+              <div
+                v-if="recordLinkDisplayFieldsEntryFor(field)?.error"
+                class="template-authoring__hint template-authoring__record-link-catalog-error"
+                data-testid="approval-record-link-display-error"
+              >
+                <span>{{ recordLinkDisplayFieldsEntryFor(field)?.error }}</span>
+                <el-button
+                  type="primary"
+                  link
+                  size="small"
+                  :loading="recordLinkDisplayFieldsEntryFor(field)?.loading === true"
+                  data-testid="approval-record-link-display-retry"
+                  @click="retryRecordLinkDisplayFields(field)"
+                >
+                  重试
+                </el-button>
+              </div>
+              <div class="template-authoring__grid">
+                <el-form-item
+                  v-for="slotIndex in recordLinkDisplaySlotsFor(field)"
+                  :key="slotIndex"
+                  :label="`显示列 ${slotIndex + 1}`"
+                >
+                  <el-select
+                    :model-value="field.recordLinkDisplayFieldIds[slotIndex] || undefined"
+                    :disabled="readOnly || recordLinkDisplayFieldsEntryFor(field)?.loading === true"
+                    filterable
+                    clearable
+                    class="ms-w-100pct"
+                    :placeholder="slotIndex === 0 ? '自动（默认规则）' : '不设置'"
+                    :data-testid="`approval-record-link-display-select-${slotIndex}`"
+                    @update:model-value="(value: string | null | undefined) => onRecordLinkDisplayFieldChange(field, slotIndex, value)"
+                  >
+                    <el-option
+                      v-for="opt in recordLinkDisplayFieldOptionsFor(field, slotIndex)"
+                      :key="opt.value"
+                      :label="opt.label"
+                      :value="opt.value"
+                    />
+                  </el-select>
+                </el-form-item>
+              </div>
+              <div class="template-authoring__hint">{{ RECORD_LINK_DISPLAY_FIELDS_HINT }}</div>
+            </div>
             <div class="template-authoring__hint">
               仅可选择目标表中的一条记录。提交时会验证发起人是否可查看所选记录；不可用的历史目标需重新选择。
             </div>
@@ -674,8 +726,9 @@
  * - add-field-of-type, palette-drag-start, preview-drop, select-field-focus,
  *   field-drag-start, field-drop, move-field, remove-field,
  *   invalidate-record-link-deps, retry-record-link-catalog,
- *   record-link-base-change, record-link-sheet-change, add-detail-column,
- *   remove-detail-column.
+ *   record-link-base-change, record-link-sheet-change,
+ *   record-link-display-field-change, retry-record-link-display-fields,
+ *   add-detail-column, remove-detail-column.
  *
  * No injections are used.
  */
@@ -713,6 +766,12 @@ import {
 } from '../conditionValueTyping'
 import { useLocale } from '../../composables/useLocale'
 import ApprovalDepartmentPicker, { type ApprovalDepartmentValue } from './ApprovalDepartmentPicker.vue'
+import {
+  RECORD_LINK_DISPLAY_FIELDS_HINT,
+  RECORD_LINK_DISPLAY_FIELDS_LABEL,
+  RECORD_LINK_MAX_DISPLAY_FIELDS,
+  type RecordLinkDisplayFieldCatalogEntry,
+} from '../recordLinkField'
 
 interface ApprovalFormFieldPaletteEntry {
   type: AuthorableFieldType
@@ -755,6 +814,10 @@ const props = defineProps<{
   recordLinkCatalogLoaded: boolean
   recordLinkBaseOptionsFor: (field: FieldAuthoringDraft) => ApprovalFormSelectOption[]
   recordLinkSheetOptionsFor: (field: FieldAuthoringDraft) => ApprovalFormSelectOption[]
+  /** Parent-owned per-sheet display-column catalog entry for this field's target sheet. */
+  recordLinkDisplayFieldsEntryFor?: (field: FieldAuthoringDraft) => RecordLinkDisplayFieldCatalogEntry | null
+  /** Parent-owned option derivation for one display-column slot. */
+  recordLinkDisplayFieldOptionsFor?: (field: FieldAuthoringDraft, slot: number) => ApprovalFormSelectOption[]
   visibilityFieldOptions: (field: FieldAuthoringDraft) => ApprovalFormVisibilityFieldOption[]
 }>()
 
@@ -771,6 +834,8 @@ const emit = defineEmits<{
   (e: 'retry-record-link-catalog'): void
   (e: 'record-link-base-change', field: FieldAuthoringDraft, value: string | null | undefined): void
   (e: 'record-link-sheet-change', field: FieldAuthoringDraft, value: string | null | undefined): void
+  (e: 'record-link-display-field-change', field: FieldAuthoringDraft, slot: number, value: string | null | undefined): void
+  (e: 'retry-record-link-display-fields', sheetId: string): void
   (e: 'add-detail-column', field: FieldAuthoringDraft): void
   (e: 'remove-detail-column', field: FieldAuthoringDraft, index: number): void
 }>()
@@ -946,6 +1011,28 @@ function onRecordLinkBaseChange(field: FieldAuthoringDraft, value: string | null
 }
 function onRecordLinkSheetChange(field: FieldAuthoringDraft, value: string | null | undefined): void {
   emit('record-link-sheet-change', field, value)
+}
+function recordLinkDisplayFieldsEntryFor(field: FieldAuthoringDraft): RecordLinkDisplayFieldCatalogEntry | null {
+  return props.recordLinkDisplayFieldsEntryFor?.(field) ?? null
+}
+function recordLinkDisplayFieldOptionsFor(field: FieldAuthoringDraft, slot: number): ApprovalFormSelectOption[] {
+  return props.recordLinkDisplayFieldOptionsFor?.(field, slot) ?? []
+}
+/** Every filled slot plus one empty slot, up to the maximum. */
+function recordLinkDisplaySlotsFor(field: FieldAuthoringDraft): number[] {
+  const count = Math.min(field.recordLinkDisplayFieldIds.length + 1, RECORD_LINK_MAX_DISPLAY_FIELDS)
+  return Array.from({ length: count }, (_, index) => index)
+}
+function onRecordLinkDisplayFieldChange(
+  field: FieldAuthoringDraft,
+  slot: number,
+  value: string | null | undefined,
+): void {
+  emit('record-link-display-field-change', field, slot, value)
+}
+function retryRecordLinkDisplayFields(field: FieldAuthoringDraft): void {
+  const sheetId = field.recordLinkSheetId.trim()
+  if (sheetId) emit('retry-record-link-display-fields', sheetId)
 }
 function addDetailColumn(field: FieldAuthoringDraft): void {
   emit('add-detail-column', field)

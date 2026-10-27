@@ -52,8 +52,16 @@
             :checked="selectedId === rec.id"
             @change="selectedId = rec.id"
           />
-          <!-- Display is always a human label from the server — never a raw id. -->
-          <span data-testid="approval-record-link-picker-item-label">{{ rec.display }}</span>
+          <!-- Display is always a human label from the server — never a raw id. With configured
+               display columns the server may add a subtitle (second, grey line). -->
+          <span class="approval-record-link-picker__item-text">
+            <span data-testid="approval-record-link-picker-item-label">{{ rec.display }}</span>
+            <span
+              v-if="rec.subtitle"
+              class="approval-record-link-picker__item-subtitle"
+              data-testid="approval-record-link-picker-item-subtitle"
+            >{{ rec.subtitle }}</span>
+          </span>
         </label>
         <div
           v-if="!loading && !errorMessage && records.length === 0"
@@ -113,7 +121,12 @@ const props = defineProps<{
   baseId: string
   sheetId: string
   currentRecordId?: string | null
+  /** Configured display columns of the published field (server intersects with what the filler sees). */
+  displayFieldIds?: readonly string[]
 }>()
+
+/** Stable key so two fields on the same sheet with different columns still reload. */
+const displayFieldKey = computed(() => (props.displayFieldIds ?? []).join(','))
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -190,7 +203,7 @@ function reconcileSelectionWithLoadedOptions() {
 }
 
 watch(
-  () => [props.visible, props.baseId, props.sheetId] as const,
+  () => [props.visible, props.baseId, props.sheetId, displayFieldKey.value] as const,
   async ([visible]) => {
     // Always clear the pending debounce BEFORE close return or open/pin reset. Repro:
     // type → close → reopen <300ms: an uncleared timer would fire loadRecords, bump
@@ -253,6 +266,9 @@ async function loadRecords(reset: boolean) {
       search: search.value || undefined,
       limit: page.value.limit,
       offset: nextOffset,
+      ...(props.displayFieldIds && props.displayFieldIds.length > 0
+        ? { displayFieldIds: props.displayFieldIds }
+        : {}),
     })
     // Stale response: a newer search / pin / load-more already owns the UI state.
     if (generation !== loadGeneration) return
@@ -358,6 +374,16 @@ function onConfirm() {
   padding: 6px 0;
   cursor: pointer;
   font-size: 13px;
+}
+.approval-record-link-picker__item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.approval-record-link-picker__item-subtitle {
+  font-size: 12px;
+  color: var(--ms-text-2);
+  overflow-wrap: anywhere;
 }
 .approval-record-link-picker__loading,
 .approval-record-link-picker__error,

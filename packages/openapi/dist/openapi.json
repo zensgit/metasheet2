@@ -7421,6 +7421,18 @@
             "minLength": 1,
             "pattern": ".*\\S.*",
             "description": "Pinned multitable sheet id (publish-time; filler cannot override).\nMust be non-blank after trim — whitespace-only is invalid.\n"
+          },
+          "displayFieldIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            },
+            "description": "Display columns; first is the label."
           }
         },
         "required": [
@@ -15555,6 +15567,14 @@
           },
           {
             "in": "query",
+            "name": "displayFieldIds",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated display field ids."
+          },
+          {
+            "in": "query",
             "name": "limit",
             "schema": {
               "type": "integer",
@@ -15601,6 +15621,10 @@
                           "display": {
                             "type": "string",
                             "description": "Human label from visible source fields, or a generic placeholder."
+                          },
+                          "subtitle": {
+                            "type": "string",
+                            "description": "Other display column values, joined."
                           }
                         }
                       }
