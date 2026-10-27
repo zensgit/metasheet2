@@ -3651,4 +3651,197 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
   }, 120_000)
 
 
+  it('EP01 native imported evidence survives approved overtime and later live check-out', async () => {
+    const { w4OnlyOrg, w4OnlyUser } = await seedIsolatedOvertimeFixture()
+    await withEnv({ ...BOTH_MACHINES_ENV(), [W4_ENV]: BOTH_MACHINES_ENV()[W4_ENV] + ',' + w4OnlyOrg }, async () => {
+      await pool.query("UPDATE users SET permissions = '[\"attendance:admin\"]'::jsonb WHERE id = $1", [w4OnlyUser])
+      await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [w4OnlyUser])
+      const headers = {
+        Authorization: `Bearer ${await mintToken(w4OnlyUser, w4OnlyOrg)}`,
+        'Content-Type': 'application/json',
+      }
+      const workDate = '2026-10-20'
+      const prepared = await requestJson(baseUrl + '/api/attendance/import/prepare', {
+        method: 'POST', headers, body: JSON.stringify({ orgId: w4OnlyOrg }),
+      })
+      expect(prepared.status, 'native import prepare').toBe(200)
+      expect(prepared.body.data.commitToken).toEqual(expect.any(String))
+      const imported = await requestJson(baseUrl + '/api/attendance/import/commit', {
+        method: 'POST', headers, body: JSON.stringify({
+          orgId: w4OnlyOrg, userId: w4OnlyUser, timezone: 'UTC', mode: 'override',
+          idempotencyKey: randomUUID(), commitToken: prepared.body.data.commitToken,
+          rows: [{ workDate, fields: {
+            firstInAt: workDate + 'T00:00:00.000Z',
+          } }],
+        }),
+      })
+      expect(imported.status, 'native import commit; code=' + String(imported.body?.error?.code ?? 'none')).toBe(200)
+      expect(imported.body.data.batchId).toEqual(expect.any(String))
+      const before = await pool.query(
+        'SELECT id::text, work_date::text, current_calculation_id::text FROM attendance_records WHERE org_id = $1 AND user_id = $2',
+        [w4OnlyOrg, w4OnlyUser],
+      )
+      expect(before.rows).toHaveLength(1)
+      const record = before.rows[0]
+      expect(record.current_calculation_id).toEqual(expect.any(String))
+      expect(record.work_date).toBe(workDate)
+      const c1 = (await pool.query(
+        'SELECT * FROM attendance_record_calculations WHERE org_id = $1 AND id = $2::uuid',
+        [w4OnlyOrg, record.current_calculation_id],
+      )).rows
+      expect(c1).toHaveLength(1)
+      expect(c1[0]).toMatchObject({ mode: 'authoritative', outcome: 'completed', projection_effect: 'set_active' })
+      expect(c1[0].evidence_snapshot).toEqual([
+        { kind: 'punch', ref: 'import:' + imported.body.data.batchId + ':0:check_in', direction: 'check_in', source: 'import', occurredAt: workDate + 'T00:00:00.000Z' },
+      ])
+      expect((await pool.query('SELECT id FROM attendance_events WHERE org_id = $1 AND user_id = $2', [w4OnlyOrg, w4OnlyUser])).rows).toEqual([])
+
+      const overtimeRuleId = randomUUID()
+      await pool.query('INSERT INTO attendance_overtime_rules (id, org_id, name, rounding_minutes) VALUES ($1, $2, $3, 1)', [overtimeRuleId, w4OnlyOrg, 'EP01_' + overtimeRuleId])
+      const created = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          operationId: randomUUID(), orgId: w4OnlyOrg, workDate: record.work_date,
+          requestType: 'overtime', overtimeRuleId, requestedInAt: record.work_date + 'T20:00:00.000Z',
+          requestedOutAt: record.work_date + 'T21:00:00.000Z', minutes: 60,
+          reason: 'EP01 synthetic overtime bridge',
+        }),
+      })
+      expect(created.status, 'overtime request create status; code=' + String(created.body?.error?.code ?? 'none')).toBe(201)
+      const requestId = created.body?.data?.request?.id
+      expect(requestId).toEqual(expect.any(String))
+      const cursor = await pool.query(
+        'SELECT ai.id, ai.version, ai.current_node_key FROM attendance_requests ar JOIN approval_instances ai ON ai.id = ar.approval_instance_id WHERE ar.id = $1::uuid',
+        [requestId],
+      )
+      expect(cursor.rows).toHaveLength(1)
+      const approval = cursor.rows[0]
+      await pool.query(
+        "INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, source_step, is_active, metadata) VALUES ($1, 'user', $2, $3, 0, TRUE, '{}'::jsonb)",
+        [approval.id, w4OnlyUser, approval.current_node_key],
+      )
+      const frozen = await pool.query(
+        'SELECT version, payload_fingerprint, attribution_snapshot, context_snapshot FROM attendance_request_calculation_snapshots WHERE org_id = $1 AND request_id = $2::uuid ORDER BY version DESC LIMIT 1',
+        [w4OnlyOrg, requestId],
+      )
+      expect(frozen.rows).toHaveLength(1)
+      const priorCalculation = await pool.query(
+        'SELECT evidence_snapshot, approved_facts_snapshot, manual_override_snapshot FROM attendance_record_calculations WHERE org_id = $1 AND id = $2::uuid',
+        [w4OnlyOrg, record.current_calculation_id],
+      )
+      expect(priorCalculation.rows).toHaveLength(1)
+      const decisionOperationId = randomUUID()
+      const approved = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          operationId: decisionOperationId, expectedApprovalVersion: Number(approval.version),
+          expectedApprovalNode: approval.current_node_key, comment: 'EP01 synthetic final decision',
+        }),
+      })
+      expect(approved.status, 'final overtime approval status; code=' + String(approved.body?.error?.code ?? 'none')).toBe(200)
+      const after = await pool.query(
+        'SELECT ar.current_calculation_id::text, c.entrypoint, c.approved_facts_snapshot, c.evidence_snapshot, c.manual_override_snapshot, c.attribution_snapshot, c.context_snapshot, c.semantic_input_fingerprint, c.provenance_fingerprint FROM attendance_records ar LEFT JOIN attendance_record_calculations c ON c.id = ar.current_calculation_id WHERE ar.id = $1::uuid AND ar.org_id = $2',
+        [record.id, w4OnlyOrg],
+      )
+      expect(after.rows).toHaveLength(1)
+      expect(after.rows[0].current_calculation_id, 'final approval must move canonical calculation pointer').not.toBe(record.current_calculation_id)
+      const calculation = after.rows[0]
+      expect(calculation.entrypoint).toBe('approved_overtime')
+      expect(calculation.attribution_snapshot).toEqual(frozen.rows[0].attribution_snapshot)
+      expect(calculation.context_snapshot).toEqual(frozen.rows[0].context_snapshot)
+      expect(calculation.evidence_snapshot).toEqual(priorCalculation.rows[0].evidence_snapshot)
+      expect(calculation.manual_override_snapshot).toEqual(priorCalculation.rows[0].manual_override_snapshot)
+      const terminal = await pool.query('SELECT metadata FROM attendance_requests WHERE org_id = $1 AND id = $2::uuid', [w4OnlyOrg, requestId])
+      const binding = terminal.rows[0].metadata.w4RequestSnapshotTerminalBinding
+      expect(calculation.approved_facts_snapshot).toEqual([
+        ...priorCalculation.rows[0].approved_facts_snapshot,
+        {
+          kind: 'overtime', requestId,
+          requestSnapshotVersion: frozen.rows[0].version,
+          requestSnapshotFingerprint: frozen.rows[0].payload_fingerprint,
+          approvalVersion: binding.approvalVersion,
+          approvalRecordId: binding.approvalRecordId,
+          coverage: {
+            kind: 'bounded_interval', startAt: record.work_date + 'T20:00:00.000Z',
+            endAt: record.work_date + 'T21:00:00.000Z', minutes: 60,
+          },
+        },
+      ])
+      const sealed = await pool.query(
+        'SELECT state, resolved_record_id::text, resolved_calculation_id::text, resolved_request_id::text, result_semantic_fingerprint, result_provenance_fingerprint FROM attendance_result_operations WHERE org_id = $1 AND operation_id = $2::uuid',
+        [w4OnlyOrg, decisionOperationId],
+      )
+      expect(sealed.rows).toEqual([{
+        state: 'completed', resolved_record_id: record.id,
+        resolved_calculation_id: calculation.current_calculation_id, resolved_request_id: requestId,
+        result_semantic_fingerprint: calculation.semantic_input_fingerprint,
+        result_provenance_fingerprint: calculation.provenance_fingerprint,
+      }])
+      expect(approved.body.data).not.toHaveProperty('calculationProof')
+
+      const beforeLive = (await pool.query(
+        'SELECT * FROM attendance_record_calculations WHERE org_id = $1 AND attendance_record_id = $2::uuid ORDER BY version',
+        [w4OnlyOrg, record.id],
+      )).rows
+      expect(beforeLive).toHaveLength(2)
+      expect(beforeLive[0]).toEqual(c1[0])
+      const c2 = beforeLive[1]
+      expect(c2.id).toBe(calculation.current_calculation_id)
+      expect(c2.evidence_snapshot).toEqual(c1[0].evidence_snapshot)
+      const punchOperationId = randomUUID()
+      const { withOnlinePunchFixtureTime } = await import('../utils/attendance-online-punch-fixture')
+      const checkout = () => withOnlinePunchFixtureTime({
+        orgId: w4OnlyOrg, eventType: 'check_out', timezone: 'UTC', operationId: punchOperationId,
+        occurredAt: workDate + 'T21:30:00.000Z',
+      }, onlineBody => requestJson(baseUrl + '/api/attendance/punch', {
+        method: 'POST', headers, body: JSON.stringify(onlineBody),
+      }))
+      const checkedOut = await checkout()
+      expect(checkedOut.status, 'native check-out after import and approval; code=' + String(checkedOut.body?.error?.code ?? 'none')).toBe(200)
+      const history = () => pool.query(
+        'SELECT * FROM attendance_record_calculations WHERE org_id = $1 AND attendance_record_id = $2::uuid ORDER BY version',
+        [w4OnlyOrg, record.id],
+      ).then(result => result.rows)
+      const afterLive = await history()
+      expect(afterLive).toHaveLength(3)
+      expect(afterLive.slice(0, 2), 'both prior immutable calculation rows remain exact').toEqual(beforeLive)
+      const c3 = afterLive[2]
+      expect(c3).toMatchObject({ entrypoint: 'live', mode: 'authoritative', outcome: 'completed', projection_effect: 'set_active' })
+      expect(c3.attribution_snapshot).toEqual(c2.attribution_snapshot)
+      expect(c3.context_snapshot).toEqual(c2.context_snapshot)
+      expect(c3.approved_facts_snapshot).toEqual(c2.approved_facts_snapshot)
+      expect(c3.manual_override_snapshot).toEqual(c2.manual_override_snapshot)
+      const physical = (await pool.query(
+        "SELECT id::text, occurred_at FROM attendance_events WHERE org_id = $1 AND user_id = $2 AND event_type = 'check_out'",
+        [w4OnlyOrg, w4OnlyUser],
+      )).rows
+      expect(physical).toHaveLength(1)
+      expect(physical[0].occurred_at.toISOString(), 'test server clock is the intended historical instant').toBe(workDate + 'T21:30:00.000Z')
+      expect(c3.evidence_snapshot).toEqual([...c2.evidence_snapshot, {
+        kind: 'punch', ref: physical[0].id, direction: 'check_out',
+        occurredAt: physical[0].occurred_at.toISOString(), source: 'attendance_event',
+      }])
+      expect(c3.evidence_snapshot.filter((item: { source: string }) => item.source === 'import')).toEqual(c1[0].evidence_snapshot)
+      expect((await pool.query(
+        'SELECT current_calculation_id::text, work_date::text FROM attendance_records WHERE org_id = $1 AND id = $2::uuid',
+        [w4OnlyOrg, record.id],
+      )).rows).toEqual([{ current_calculation_id: c3.id, work_date: workDate }])
+      expect((await pool.query(
+        'SELECT state, resolved_calculation_id::text, result_semantic_fingerprint, result_provenance_fingerprint FROM attendance_result_operations WHERE org_id = $1 AND operation_id = $2::uuid',
+        [w4OnlyOrg, punchOperationId],
+      )).rows).toEqual([{
+        state: 'completed', resolved_calculation_id: c3.id,
+        result_semantic_fingerprint: c3.semantic_input_fingerprint,
+        result_provenance_fingerprint: c3.provenance_fingerprint,
+      }])
+      const replay = await checkout()
+      expect(replay.status).toBe(200)
+      expect(replay.body).toEqual(checkedOut.body)
+      expect(await history()).toEqual(afterLive)
+
+
+    })
+  }, 120_000)
+
+
 })
