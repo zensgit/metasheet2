@@ -3,7 +3,8 @@ import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
-import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
+import { describeCreateUserError, describePasswordPolicyFailure, getCreateUserRuleHints } from '../src/utils/createUserValidationCopy'
+import { describeAdminResetPasswordInlineError } from '../src/views/adminTemporaryPasswordFeedback'
 
 const apiFetchMock = vi.fn()
 
@@ -1828,6 +1829,10 @@ describe('UserManagementView', () => {
       }, 'zh')).toBe('密码不符合要求：至少 8 位；Some future rule')
       // No mapping at all -> null, so the view keeps the server message.
       expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { details: ['x'] } }, 'zh')).toBeNull()
+      // The shared sentence builder used by the forced first-login change page.
+      expect(describePasswordPolicyFailure(['no_lowercase', 'no_uppercase'], 'zh')).toBe('密码不符合要求：要有小写字母；要有大写字母')
+      expect(describePasswordPolicyFailure(['no_digit'], 'en')).toBe('Password does not meet requirements: at least one number')
+      expect(describePasswordPolicyFailure([], 'zh')).toBeNull()
       expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { reasons: ['future_rule'] } }, 'zh')).toBeNull()
       expect(describeCreateUserError({ code: 'INVALID_USERNAME', details: { rule: 'something_else' } }, 'zh')).toBeNull()
       expect(describeCreateUserError({ code: 'INVALID_USERNAME' }, 'zh')).toBeNull()
@@ -2882,11 +2887,15 @@ describe('UserManagementView', () => {
   })
 
   describe('admin reset-password inline rule', () => {
-    const RULE_COPY = '至少 8 位。留空则自动生成临时密码。'
+    // Customer report 2026-10-27: the reset rule now matches create-user (full password policy).
+    const RULE_COPY = '临时密码：8–128 位，要同时有大写字母、小写字母和数字，不能包含 123456、password 这类常见片段；留空则自动生成临时密码。'
     const SHORT_COPY = '临时密码不足 8 位，未重置。'
+    const POLICY_COPY = '临时密码不符合要求：要有大写字母；要有数字。未重置。'
     const SERVER_SHORT_ENGLISH = 'Password must be at least 8 characters long'
+    const SERVER_POLICY_ENGLISH = 'Password does not meet requirements'
+    const COMPLIANT_VALUE = 'Abcdefg1'
 
-    type ResetOutcome = 'ok' | 'short' | 'other-400' | 'failed'
+    type ResetOutcome = 'ok' | 'short' | 'policy' | 'other-400' | 'failed'
     const resets: Array<{ userId: string; passwordLength: number | null }> = []
     const revokes: string[] = []
     let resetOutcome: ResetOutcome = 'ok'
@@ -2919,6 +2928,22 @@ describe('UserManagementView', () => {
             return createJsonResponse({
               ok: false,
               error: { code: 'PASSWORD_TOO_SHORT', message: SERVER_SHORT_ENGLISH },
+            }, 400)
+          }
+          if (resetOutcome === 'policy') {
+            return createJsonResponse({
+              ok: false,
+              error: {
+                code: 'PASSWORD_POLICY_FAILED',
+                message: SERVER_POLICY_ENGLISH,
+                details: {
+                  details: [
+                    'Password must contain at least one uppercase letter',
+                    'Password must contain at least one number',
+                  ],
+                  reasons: ['no_uppercase', 'no_digit'],
+                },
+              },
             }, 400)
           }
           if (resetOutcome === 'other-400') {
@@ -3004,12 +3029,37 @@ describe('UserManagementView', () => {
       await waitForCondition(() => ruleEl() !== null)
     }
 
+    it('maps PASSWORD_POLICY_FAILED reason codes to Chinese inline copy without echoing the value', () => {
+      expect(describeAdminResetPasswordInlineError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['no_lowercase', 'no_uppercase'] },
+      })).toBe('临时密码不符合要求：要有小写字母；要有大写字母。未重置。')
+      expect(describeAdminResetPasswordInlineError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['too_short'] },
+      })).toBe('临时密码不符合要求：至少 8 位。未重置。')
+      // Nothing mappable still gives a Chinese sentence rather than the English server message.
+      expect(describeAdminResetPasswordInlineError({ code: 'PASSWORD_POLICY_FAILED' })).toBe('临时密码不符合密码规则，未重置。')
+      expect(describeAdminResetPasswordInlineError({ code: 'PASSWORD_TOO_SHORT' })).toBe(SHORT_COPY)
+      expect(describeAdminResetPasswordInlineError({ code: 'USER_ID_REQUIRED' })).toBeNull()
+      expect(describeAdminResetPasswordInlineError(null)).toBeNull()
+    })
+
+    it('uses the same rule wording as the create-user password hint', () => {
+      const createHint = getCreateUserRuleHints('zh').password
+      expect(RULE_COPY.replace(/^临时密码：/, '')).toBe(createHint.replace(/^初始密码：/, ''))
+    })
+
     it('shows the length rule beside the input and blocks a trimmed short value before POST', async () => {
       await mountAdmin()
       const input = passwordInput()
       const rule = ruleEl()
       expect(rule?.textContent?.trim()).toBe(RULE_COPY)
-      expect(rule?.textContent).not.toMatch(/大写|小写|弱口令/)
+      // Same rule sentence as create-user: length, all three character classes, common fragments.
+      expect(rule?.textContent).toContain('8–128 位')
+      expect(rule?.textContent).toContain('大写字母、小写字母和数字')
+      expect(rule?.textContent).toContain('不能包含 123456、password')
+      expect(rule?.textContent).not.toMatch(/至少 8 位。/)
       expect(input.compareDocumentPosition(rule!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       expect(sessionHint()?.textContent).toContain('现有会话失效')
       expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
@@ -3032,12 +3082,31 @@ describe('UserManagementView', () => {
       expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
     })
 
-    it('posts a trimmed 8-character value that has no other character classes', async () => {
+    it('shows the server policy reasons in Chinese for an 8-character value with no other character classes, and does not reset', async () => {
       await mountAdmin()
+      resetOutcome = 'policy'
       await typeManual(`  ${marks(8)}  `)
       await clickReset()
-      await waitForCondition(() => resets.length === 1 && pageBanner()?.textContent?.includes('密码已重置') === true)
+      await waitForCondition(() => errorEl() !== null)
       expect(resets).toEqual([{ userId: 'user-1', passwordLength: 8 }])
+      expect(errorEl()?.textContent?.trim()).toBe(POLICY_COPY)
+      expect(errorEl()?.classList.contains('user-admin__status--error')).toBe(true)
+      expect(errorEl()?.textContent || '').not.toContain(SERVER_POLICY_ENGLISH)
+      expect(errorEl()?.textContent || '').not.toContain('Password')
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_POLICY_ENGLISH)
+      expect(pageBanner()?.textContent || '').not.toContain('密码已重置')
+      expect(container!.querySelector('[data-testid="admin-reset-temporary-password"]')).toBeNull()
+      expect(passwordInput().value.trim()).toHaveLength(8)
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('true')
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+    })
+
+    it('posts a trimmed value that meets the policy and shows the issued temporary password', async () => {
+      await mountAdmin()
+      await typeManual(`  ${COMPLIANT_VALUE}  `)
+      await clickReset()
+      await waitForCondition(() => resets.length === 1 && pageBanner()?.textContent?.includes('密码已重置') === true)
+      expect(resets).toEqual([{ userId: 'user-1', passwordLength: COMPLIANT_VALUE.length }])
       expect(errorEl()).toBeNull()
       expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
       expect(passwordInput().value).toBe('')
@@ -3063,7 +3132,7 @@ describe('UserManagementView', () => {
       expect(pageBanner()?.textContent).toContain('密码已重置')
     })
 
-    it('maps server PASSWORD_TOO_SHORT to the inline sentence and leaves other reset failures on the page error', async () => {
+    it('still maps an older server PASSWORD_TOO_SHORT to the inline sentence and leaves other reset failures on the page error', async () => {
       await mountAdmin()
       resetOutcome = 'short'
       await typeManual(marks(8))
@@ -3097,12 +3166,13 @@ describe('UserManagementView', () => {
 
     it('clears the inline error on success and keeps the rule', async () => {
       await mountAdmin()
-      resetOutcome = 'short'
+      resetOutcome = 'policy'
       await typeManual(marks(8))
       await clickReset()
-      await waitForCondition(() => errorEl()?.textContent?.includes(SHORT_COPY) === true)
+      await waitForCondition(() => errorEl()?.textContent?.includes(POLICY_COPY) === true)
 
       resetOutcome = 'ok'
+      await typeManual(COMPLIANT_VALUE)
       await clickReset()
       await waitForCondition(() => pageBanner()?.textContent?.includes('密码已重置') === true)
       expect(errorEl()).toBeNull()
