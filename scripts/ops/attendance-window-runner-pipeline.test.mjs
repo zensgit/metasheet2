@@ -762,6 +762,19 @@ test('EXECUTABLE (Recovery09 precheck): unapplied and not pending still fails cl
     /Recovery09 provisioning migration is not pending in the exact target image/,
   )
   assert.doesNotMatch(provisioningOnly.artifact, /recovery09_ledger=applied/)
+
+  const singleOrg = runRecovery09Precheck({
+    ledgerNames: [],
+    pendingNames: ['090_create_integration_yida_delivery_ledger'],
+    rows: {
+      distinct_active_org_count: '1',
+      recovery09_repairable_user_count: '7',
+      legacy_anchor_active_membership_witness_count: '0',
+    },
+  })
+  assert.equal(singleOrg.status, 0, `a single active org must not demand Recovery09; stderr=${singleOrg.stderr}`)
+  assert.doesNotMatch(singleOrg.artifact, /recovery09_ledger=applied/)
+  assert.doesNotMatch(singleOrg.dockerLog, /kysely_migration/, 'the ledger read stays inside the multi-org gate')
 })
 
 test('EXECUTABLE (Recovery09 precheck): a pending chain still fails when the legacy anchor premise does not hold', () => {
@@ -812,7 +825,7 @@ test('MUTATION (Recovery09 precheck): deleting the applied-ledger branch turns t
     fnBody: mutated,
   })
   assert.notEqual(r.status, 0, 'without the applied branch the same ledger must fail closed')
-  assert.match(r.stderr, /not pending in the exact target image/)
+  assert.match(r.stderr, /Recovery09 chain is neither applied nor pending/)
   assert.doesNotMatch(r.artifact, /recovery09_repairable_users_informational=/)
 })
 
