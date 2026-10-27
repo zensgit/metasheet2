@@ -189,6 +189,8 @@ describe('StockPreparationProjectSyncPanel', () => {
     { status: 'not_found', canApply: false, manual: 0, zh: '未找到此项目', en: 'Project not found' },
     { status: 'large_bom_bounded', canApply: false, manual: 0, zh: '没有启动后台任务', en: 'no background job was started' },
     { status: 'failed', canApply: false, manual: 0, zh: '变更计划未通过检查', en: 'did not pass checks' },
+    { status: 'suspended', canApply: false, manual: 0, zh: '这次拉取已整体挂起', en: 'this pull is suspended as a whole' },
+    { status: 'recovery_pending', canApply: false, manual: 0, zh: '这个项目在等恢复', en: 'this project awaits recovery' },
   ]
 
   it.each(['zh-CN', 'en'].flatMap(locale => statuses.map(status => ({ ...status, locale }))))('previews only status and counts for $status in $locale', async ({ status, canApply, manual, zh, en, locale }) => {
@@ -239,6 +241,16 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(double.apply).not.toHaveBeenCalled()
   })
 
+  it.each(['suspended', 'recovery_pending'])('never sends a %s preview to the source-and-mappings sentence', async status => {
+    h.fetch.mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { status, canApply: false,
+      counts: { add: 3, update: 2, skip: 7, inactive: 0, manual_confirm: 0 } } })))
+    const root = mountPanel()
+    await runPreview(root)
+    expect(previewNode(root)?.getAttribute('data-status')).toBe(status)
+    expect(previewNode(root)?.textContent).not.toContain('来源和映射')
+    expect(previewNode(root)?.textContent).toContain('尚未写入')
+  })
+
   it('rejects ambiguous HTTP success and hides arbitrary error codes and messages', async () => {
     h.fetch.mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { status: 'ready', canApply: true,
       counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }, error: { code: 'PRIVATE_POISON_CODE', message: PLANTED_SECRET } })))
@@ -258,6 +270,22 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(root.textContent).not.toContain(PLANTED_SECRET)
     expect(root.textContent).not.toContain('PRIVATE_POISON_CODE')
     expect(double.apply).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [409, 'STOCK_PREP_PULL_STATE_MOVED', '这次预览作废'],
+    [409, 'STOCK_PREP_REFRESH_RECOVERY_PENDING', '这个项目在等恢复'],
+    [503, 'STOCK_PREP_REFRESH_STORE_FAILED', '状态存储读写失败'],
+    [409, 'STOCK_PREP_REFRESH_TARGET_RETARGETED', '不在这张备料表上'],
+  ])('shows the batch-refresh sentence for a refused preview %s/%s', async (status, code, guidance) => {
+    h.fetch.mockResolvedValue(new Response(JSON.stringify({ ok: false, error: { code, message: PLANTED_SECRET } }), { status }))
+    const root = mountPanel()
+    await runPreview(root)
+    expect(previewNode(root)?.textContent).toContain(guidance)
+    expect(previewNode(root)?.textContent).not.toContain('未能生成预览')
+    expect(root.querySelector('[data-testid="stock-prep-project-preview-counts"]')).toBeNull()
+    expect(root.textContent).not.toContain(code)
+    expect(root.textContent).not.toContain(PLANTED_SECRET)
   })
 
   function projectTargetApi(status: StockPrepProjectTargetState['status']): StockPreparationProjectTargetApi {

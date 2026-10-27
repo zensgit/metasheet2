@@ -866,6 +866,12 @@ const previewStatusText = computed(() => {
     case 'PLAN_TARGET_NOT_OURS': return bi('项目目标表的归属无法核实。请联系管理员检查目标和权限；仅预览不会更换或修复目标。', 'The project target’s ownership could not be verified. Ask an administrator to check the target and permissions; preview alone neither changes nor repairs a target.')
     case 'PLAN_TARGET_SCHEMA_INCOMPLETE': return bi('项目备料表缺少必需字段。请联系拉取人员通过明确的修复流程处理；仅预览不会修复表。', 'The project’s stock-preparation sheet is missing required fields. Ask a pull operator to use the explicit repair flow; preview alone repairs no sheet.')
     case 'PLAN_NOT_APPLYABLE': return bi('变更计划未通过检查，尚未写入。请联系管理员检查来源和映射。', 'The change plan did not pass checks; nothing has been written. Ask an administrator to check the source and mappings.')
+    // PR-7 batch-refresh answers (plainLanguage.ts PLAN_SUSPENDED … PLAN_REFRESH_SCOPE_CHANGED, worded for a preview).
+    case 'PLAN_SUSPENDED': return bi('变更计划已生成，但这次拉取已整体挂起：有等拉取人员确认的项。请拉取人员在「拉取待确认」里处理后再预览；尚未写入。', 'Change plan generated, but this pull is suspended as a whole: some items await the puller’s confirmation. The puller decides them on “Pull holds”, then previews again; nothing has been written.')
+    case 'PLAN_RECOVERY_PENDING': return bi('上次写入没有正常结束，这个项目在等恢复。这不是数据源的问题，重试也不能解决；请联系平台管理员按手册恢复。尚未写入。', 'The last write did not finish cleanly; this project awaits recovery. It is not a data-source problem and retrying will not fix it; ask the platform admin to recover it per the runbook. Nothing has been written.')
+    case 'PLAN_STATE_MOVED': return bi('预览期间项目状态变了，这次预览作废。请重新预览；尚未写入。', 'The project’s state moved during the preview, so this preview is void. Preview again; nothing has been written.')
+    case 'PLAN_REFRESH_STORE_UNAVAILABLE': return bi('分批拉取的状态存储读写失败，预览没有继续。请稍后再试；一直这样请联系平台管理员。尚未写入。', 'The batch-refresh state store could not be read or written, so the preview did not continue. Try again shortly; if it persists, ask the platform admin. Nothing has been written.')
+    case 'PLAN_REFRESH_SCOPE_CHANGED': return bi('这个项目的分批拉取记录不在这张备料表上，预览什么都没有读。请联系负责人核对项目表登记；尚未写入。', 'This project’s batch-refresh records are not on this sheet, so the preview read nothing. Ask the owner to check the project-sheet registration; nothing has been written.')
     default: return bi('未能生成预览，请检查来源状态后手动重试。', 'The preview could not be generated. Check the source status, then retry manually.')
   }
 })

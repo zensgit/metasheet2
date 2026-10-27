@@ -147,6 +147,8 @@ describe('preview change plan only', () => {
     ['not_found', false, 0, 'PLAN_PROJECT_NOT_FOUND'],
     ['large_bom_bounded', false, 0, 'PLAN_LARGE_BOM_BOUNDED'],
     ['failed', false, 0, 'PLAN_NOT_APPLYABLE'],
+    ['suspended', false, 0, 'PLAN_SUSPENDED'],
+    ['recovery_pending', false, 0, 'PLAN_RECOVERY_PENDING'],
   ])('projects %s without writing even when a token exists', async (status, canApply, manualConfirm, reason) => {
     const counts = status === 'not_found'
       ? { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }
@@ -198,6 +200,10 @@ describe('preview change plan only', () => {
     [new StockPreparationProjectSyncCallError(401, '/dry-run'), 'PLAN_READ_UNAUTHENTICATED'],
     [new StockPreparationProjectSyncCallError(403, '/dry-run'), 'PLAN_READ_NOT_PERMITTED'],
     [new StockPreparationProjectSyncCallError(200, '/dry-run', { malformed: true }), 'PLAN_MALFORMED_RESPONSE'],
+    [new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'STOCK_PREP_PULL_STATE_MOVED' }), 'PLAN_STATE_MOVED'],
+    [new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' }), 'PLAN_RECOVERY_PENDING'],
+    [new StockPreparationProjectSyncCallError(503, '/dry-run', { code: 'STOCK_PREP_REFRESH_STORE_FAILED' }), 'PLAN_REFRESH_STORE_UNAVAILABLE'],
+    [new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'STOCK_PREP_REFRESH_TARGET_RETARGETED' }), 'PLAN_REFRESH_SCOPE_CHANGED'],
   ])('projects errors to fixed reasons only %#', async (error, reason) => {
     const api = makeApi({ dryRun: vi.fn().mockRejectedValue(error) })
     expect(await runStockPreparationProjectPreview(api, PROJECT_NO)).toEqual({ status: null, reason, counts: null })

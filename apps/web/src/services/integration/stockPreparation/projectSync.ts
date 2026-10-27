@@ -657,7 +657,10 @@ export type StockPreparationProjectPlanFailureReason = Extract<StockPreparationP
   | 'PLAN_PROJECT_SHEET_ABSENT' | 'PLAN_PROJECT_SHEET_ARCHIVED' | 'PLAN_TARGET_NOT_OURS'
   | 'PLAN_TARGET_SCHEMA_INCOMPLETE' | 'PLAN_DRY_RUN_BUSY' | 'PLAN_DRY_RUN_INTERRUPTED'
   | 'PLAN_PROJECT_WRITE_LOCKED' | 'PLAN_WRITE_LOCK_UNAVAILABLE' | 'PLAN_WRITE_LOCK_BUSY'
-  | 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT' | 'PLAN_PILOT_STATE_UNREADABLE'>
+  | 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT' | 'PLAN_PILOT_STATE_UNREADABLE'
+  // PR-7 (F-19): a refused dry run's batch-refresh codes — read failures by construction (only the refused paths call
+  // classifyPlanReadFailureReason), so they belong to this closed vocabulary.
+  | 'PLAN_STATE_MOVED' | 'PLAN_RECOVERY_PENDING' | 'PLAN_REFRESH_STORE_UNAVAILABLE' | 'PLAN_REFRESH_SCOPE_CHANGED'>
 
 export const STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectPlanFailureReason>> = Object.freeze({
   STOCK_PREPARATION_PROJECT_ABSENT: 'PLAN_PROJECT_SHEET_ABSENT',
@@ -1103,12 +1106,12 @@ export interface StockPreparationProjectSyncApi {
 
 export type StockPreparationProjectPreviewReason = Extract<StockPreparationProjectSyncReason,
   | 'PLAN_READY' | 'PLAN_HELD_FOR_CONFIRMATION' | 'PLAN_PROJECT_NOT_FOUND' | 'PLAN_LARGE_BOM_BOUNDED'
-  | 'PLAN_NOT_APPLYABLE' | 'PLAN_MALFORMED_RESPONSE'>
+  | 'PLAN_NOT_APPLYABLE' | 'PLAN_MALFORMED_RESPONSE' | 'PLAN_SUSPENDED'>
   | StockPreparationProjectPlanFailureReason | 'PROJECT_NUMBER_INVALID'
 
 /** Change-plan counts only. No execution token, revision, raw evidence or BOM rows survive here. */
 export interface StockPreparationProjectPreviewReport {
-  status: 'ready' | 'manual_confirm_required' | 'not_found' | 'large_bom_bounded' | 'failed' | null
+  status: 'ready' | 'manual_confirm_required' | 'not_found' | 'large_bom_bounded' | 'failed' | 'suspended' | 'recovery_pending' | null
   reason: StockPreparationProjectPreviewReason
   counts: { add: number; update: number; skip: number; inactive: number; manualConfirm: number } | null
 }
@@ -1148,7 +1151,10 @@ export async function runStockPreparationProjectPreview(
     const reason: StockPreparationProjectPreviewReason = status === 'ready' ? 'PLAN_READY'
       : status === 'manual_confirm_required' ? 'PLAN_HELD_FOR_CONFIRMATION'
         : status === 'not_found' ? 'PLAN_PROJECT_NOT_FOUND'
-          : status === 'large_bom_bounded' ? 'PLAN_LARGE_BOM_BOUNDED' : 'PLAN_NOT_APPLYABLE'
+          : status === 'large_bom_bounded' ? 'PLAN_LARGE_BOM_BOUNDED'
+            // PR-7: a governed project's own answers, never PLAN_NOT_APPLYABLE's source-and-mappings sentence.
+            : status === 'suspended' ? 'PLAN_SUSPENDED'
+              : status === 'recovery_pending' ? 'PLAN_RECOVERY_PENDING' : 'PLAN_NOT_APPLYABLE'
     return { status, reason, counts }
   } catch (error) {
     return unavailable(isMalformed(error) ? 'PLAN_MALFORMED_RESPONSE' : classifyPlanReadFailureReason(statusOf(error), codeOf(error)))
