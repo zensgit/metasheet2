@@ -1526,6 +1526,7 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
+  adminAccess \
   adminPageContentSearch.spec.ts \
   amountAutoSum \
   approval-amount-in-words \
@@ -1693,9 +1694,6 @@ exec npx vitest run \
   directoryConfigPickers \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
-  localOrganizationClient \
-  localOrganizationView \
-  adminAccess \
   featureFlagsApprovalMobile \
   formViewValidation \
   integrationErrorCodeLabels \
@@ -1705,6 +1703,8 @@ exec npx vitest run \
   IntegrationStockPrepPanel \
   IntegrationWorkbenchView \
   lineDerivation \
+  localOrganizationClient \
+  localOrganizationView \
   LoginView.spec.ts \
   meta-ai-bulk-labels \
   meta-api-error-labels \

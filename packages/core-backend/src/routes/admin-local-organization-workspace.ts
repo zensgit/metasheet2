@@ -47,8 +47,16 @@ function pageInput(req: Request): LocalOrganizationPage {
 }
 
 function fail(res: Response, error: unknown): void {
-  if (error instanceof LocalOrganizationWorkspaceError) {
-    jsonError(res, error.status, error.code, error.message)
+  if (error instanceof LocalOrganizationWorkspaceError && error.status === 400) {
+    jsonError(res, 400, error.code, error.message)
+    return
+  }
+  if (error instanceof LocalOrganizationWorkspaceError && error.status === 404) {
+    jsonError(res, 404, error.code, error.message)
+    return
+  }
+  if (error instanceof LocalOrganizationWorkspaceError && error.status === 409) {
+    jsonError(res, 409, error.code, error.message)
     return
   }
   logger.warn('Local organization request failed')

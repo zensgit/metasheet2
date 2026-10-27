@@ -300,8 +300,12 @@ export function adminDirectoryLocalRouter(): Router {
       }
       jsonOk(res, { projection })
     } catch (error) {
-      if (error instanceof LocalMemberProjectionError) {
-        jsonError(res, error.status, error.code, error.message)
+      if (error instanceof LocalMemberProjectionError && error.status === 404) {
+        jsonError(res, 404, error.code, error.message)
+        return
+      }
+      if (error instanceof LocalMemberProjectionError && error.status === 409) {
+        jsonError(res, 409, error.code, error.message)
         return
       }
       logger.warn('Local member projection failed')

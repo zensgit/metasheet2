@@ -50,3 +50,14 @@ Synthetic data only. These show the current viewport after selecting a member; s
 ## Remaining gates and nonclaims
 
 Private composition is locally evidenced above. Exact-head PR CI remains outstanding before final closure. No main-reference green or R74 backport green substitutes for this branch. Human accessibility, native OS select-menu acceptance, source/title/individual-manager policy decisions, owner gates, frozen transfers and live/provider gates remain separate. Historical 08:00 PUT remains inconclusive.
+
+
+## Exact-head CI repair after b9056948
+
+The original backend core lane failed four assertions across two guard files: three newly inserted required-web tokens were outside alphabetical position; the workspace mount lacked values-free scan registration; the new typed projection error used a dynamic status that the 5xx scanner cannot prove excludes500. This is separate from the current-head native22, domain and required-web actual38+67+5 successes, all retained as parent evidence.
+
+The minimal repair sorts the same525 filter tokens without dropping or adding any; registers the workspace in SCANNED and the exact mount census; adds actual AST scanner positive and in-memory500-echo negative. Typed projection404/409 and workspace400/404/409 branches now pass literal statuses while preserving the original code/message for those closed unions. Unexpected statuses reach the existing fixed500 fallback. Existing account-create and subsequent CRUD remain unchanged.
+
+Actual affected validation:12 assertions passed,160 filtered and excluded (four former failures, affected registration checks, two new scanner cases and matching structural controls). Native22 and browser/frontend suites were not rerun. Token manifest --check passed with generated token bytes unchanged. Backend type-check passed after the route change. Explicit lint reported one existing no-extra-semi at scanner line531; baseline/current same-path comparison is identical, introduced0. No full-file lint-zero claim. Independent bounded source review found no introduced P1/P2 or false-green scanner wiring.
+
+All prior phase boundaries remain. New head required CI must finish independently; parent green checks are not reused as new-head success.
