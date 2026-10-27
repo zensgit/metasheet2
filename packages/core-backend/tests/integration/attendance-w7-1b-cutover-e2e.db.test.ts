@@ -3303,4 +3303,117 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     })
   }, 120_000)
 
+  it.each(['shift', 'calendar'] as const)('EP01 native frozen source decision ignores later current configuration: %s', async (mode) => {
+    const { w4OnlyOrg: orgId, w4OnlyUser: userId, w4OnlyShift: shiftId } = await seedIsolatedOvertimeFixture()
+    const overtimeRuleId = randomUUID()
+    await pool.query("UPDATE users SET permissions = '[\"attendance:admin\"]'::jsonb WHERE id = $1", [userId])
+    await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [userId])
+    await pool.query('INSERT INTO attendance_overtime_rules (id, org_id, name, rounding_minutes) VALUES ($1, $2, $3, 1)', [overtimeRuleId, orgId, 'EP01_' + overtimeRuleId])
+    await withEnv({ ...BOTH_MACHINES_ENV(), [W4_ENV]: BOTH_MACHINES_ENV()[W4_ENV] + ',' + orgId }, async () => {
+      const headers = { Authorization: 'Bearer ' + await mintToken(userId, orgId), 'Content-Type': 'application/json' }
+      const punched = await punch(userId, orgId, 'check_in')
+      expect(punched.status, 'initial canonical punch').toBe(200)
+      const parents = async () => (await pool.query('SELECT to_jsonb(r) AS value FROM attendance_records r WHERE org_id = $1 AND user_id = $2', [orgId, userId])).rows.map(row => row.value)
+      const history = async () => (await pool.query('SELECT to_jsonb(c) AS value FROM attendance_record_calculations c WHERE org_id = $1 ORDER BY version', [orgId])).rows.map(row => row.value)
+      const beforeParents = await parents()
+      const beforeHistory = await history()
+      expect(beforeParents).toHaveLength(1)
+      expect(beforeHistory).toHaveLength(1)
+      const parent = beforeParents[0]
+      expect(beforeHistory[0]).toMatchObject({ id: parent.current_calculation_id, outcome: 'completed' })
+      const workDate = parent.work_date
+      const created = await requestJson(baseUrl + '/api/attendance/requests', {
+        method: 'POST', headers, body: JSON.stringify({
+          operationId: randomUUID(), orgId, workDate, requestType: 'overtime', overtimeRuleId,
+          requestedInAt: workDate + 'T20:00:00.000Z', requestedOutAt: workDate + 'T21:00:00.000Z',
+          minutes: 60, reason: 'EP01 frozen source validation',
+        }),
+      })
+      expect(created.status, 'bounded OT create').toBe(201)
+      const requestId = created.body.data.request.id
+      const snapshots = async () => (await pool.query('SELECT to_jsonb(s) AS value FROM attendance_request_calculation_snapshots s WHERE org_id = $1 AND request_id = $2::uuid ORDER BY version', [orgId, requestId])).rows.map(row => row.value)
+      const beforeSnapshots = await snapshots()
+      expect(beforeSnapshots).toHaveLength(1)
+      const frozen = beforeSnapshots[0]
+      expect(frozen.context_snapshot.timezone).toBe('UTC')
+      expect(frozen.context_snapshot.isWorkday).toBe(true)
+      expect(frozen.context_snapshot.holidayKind).toBeNull()
+      const holidayId = randomUUID()
+      if (mode === 'shift') {
+        await pool.query("UPDATE attendance_shifts SET timezone = 'Asia/Tokyo', late_grace_minutes = late_grace_minutes + 17 WHERE org_id = $1 AND id = $2", [orgId, shiftId])
+      } else {
+        await pool.query("INSERT INTO attendance_holidays(id,org_id,holiday_date,name,is_working_day,origin) VALUES($1,$2,$3::date,'EP01 synthetic calendar change',false,'manual')", [holidayId, orgId, workDate])
+      }
+      try {
+        const currentSource = async () => (await pool.query(
+          'SELECT s.timezone, s.late_grace_minutes, h.is_working_day FROM attendance_shifts s LEFT JOIN attendance_holidays h ON h.org_id = s.org_id AND h.holiday_date = $3::date WHERE s.org_id = $1 AND s.id = $2',
+          [orgId, shiftId, workDate],
+        )).rows
+        const changed = await currentSource()
+        expect(changed).toHaveLength(1)
+        if (mode === 'shift') {
+          expect(changed[0].timezone).toBe('Asia/Tokyo')
+          expect(changed[0].late_grace_minutes).toBe(frozen.context_snapshot.segments[0].lateGraceMinutes + 17)
+        } else expect(changed[0].is_working_day).toBe(false)
+        expect(await snapshots()).toEqual(beforeSnapshots)
+        const approval = (await pool.query(
+          'SELECT ai.id, ai.version, ai.current_node_key FROM attendance_requests r JOIN approval_instances ai ON ai.id = r.approval_instance_id WHERE r.org_id = $1 AND r.id = $2::uuid', [orgId, requestId],
+        )).rows[0]
+        await pool.query("INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, source_step, is_active, metadata) VALUES ($1, 'user', $2, $3, 0, TRUE, '{}'::jsonb)", [approval.id, userId, approval.current_node_key])
+        const operationId = randomUUID()
+        const decisionBody = JSON.stringify({ operationId, expectedApprovalVersion: Number(approval.version), expectedApprovalNode: approval.current_node_key })
+        const url = baseUrl + '/api/attendance/requests/' + requestId + '/approve'
+        const approved = await requestJson(url, { method: 'POST', headers, body: decisionBody })
+        expect(approved.status, 'frozen decision status; code=' + String(approved.body?.error?.code ?? 'none')).toBe(200)
+        const after = await history()
+        expect(after).toHaveLength(2)
+        expect(after[0]).toEqual(beforeHistory[0])
+        const calc = after[1]
+        expect(calc).toMatchObject({ entrypoint: 'approved_overtime', mode: 'authoritative', outcome: 'completed', outcome_reason_code: 'calculated', projection_effect: 'set_active', operation_id: operationId })
+        expect(calc.attribution_snapshot).toEqual(frozen.attribution_snapshot)
+        expect(calc.context_snapshot).toEqual(frozen.context_snapshot)
+        expect(calc.evidence_snapshot).toEqual(beforeHistory[0].evidence_snapshot)
+        expect(calc.manual_override_snapshot).toEqual(beforeHistory[0].manual_override_snapshot)
+        const terminal = (await pool.query('SELECT status, metadata FROM attendance_requests WHERE org_id = $1 AND id = $2::uuid', [orgId, requestId])).rows[0]
+        expect(terminal.status).toBe('approved')
+        const binding = terminal.metadata.w4RequestSnapshotTerminalBinding
+        expect(calc.approved_facts_snapshot).toEqual([...beforeHistory[0].approved_facts_snapshot, {
+          kind: 'overtime', requestId, requestSnapshotVersion: frozen.version, requestSnapshotFingerprint: frozen.payload_fingerprint,
+          approvalVersion: binding.approvalVersion, approvalRecordId: binding.approvalRecordId,
+          coverage: { kind: 'bounded_interval', startAt: workDate + 'T20:00:00.000Z', endAt: workDate + 'T21:00:00.000Z', minutes: 60 },
+        }])
+        const { computeAttendanceSemanticInputFingerprintV1, computeAttendanceProvenanceFingerprintV1 } = await import('../../src/attendance/w4c0-fingerprints')
+        const { computeAttendanceSourceDefinitionFingerprintV1 } = await import('../../src/attendance/w4c1-fingerprints')
+        expect(calc.semantic_input_fingerprint).toBe(computeAttendanceSemanticInputFingerprintV1({
+          attribution: calc.attribution_snapshot, context: calc.context_snapshot, evidence: calc.evidence_snapshot,
+          approvedFacts: calc.approved_facts_snapshot, manualOverride: calc.manual_override_snapshot,
+          mergePolicy: calc.merge_policy, calculationTier: calc.calculation_tier, engineVersion: calc.engine_version, snapshotSchemaVersion: calc.snapshot_schema_version,
+        }))
+        const ref = calc.input_provenance
+        expect(calc.provenance_fingerprint).toBe(computeAttendanceProvenanceFingerprintV1({
+          transport: ref.transport, sourceRef: ref.sourceRef, artifactSha256: ref.artifactSha256, normalizedCsvSha256: ref.normalizedCsvSha256, convertedSheetName: ref.convertedSheetName,
+        }))
+        expect(calc.source_definition_fingerprint).toBe(computeAttendanceSourceDefinitionFingerprintV1({ attribution: calc.attribution_snapshot, context: calc.context_snapshot }))
+        const afterParents = await parents()
+        expect(afterParents[0]).toMatchObject({ id: parent.id, current_calculation_id: calc.id, projection_owner: 'w4', visibility_state: 'active', visibility_reason: 'active', is_workday: true })
+        expect((await pool.query('SELECT state, resolved_record_id::text, resolved_calculation_id::text, result_semantic_fingerprint, result_provenance_fingerprint FROM attendance_result_operations WHERE org_id = $1 AND operation_id = $2::uuid', [orgId, operationId])).rows).toEqual([{
+          state: 'completed', resolved_record_id: parent.id, resolved_calculation_id: calc.id,
+          result_semantic_fingerprint: calc.semantic_input_fingerprint, result_provenance_fingerprint: calc.provenance_fingerprint,
+        }])
+        expect(await snapshots()).toEqual(beforeSnapshots)
+        expect(await currentSource()).toEqual(changed)
+        const counts = await businessCounts(orgId)
+        const replay = await requestJson(url, { method: 'POST', headers, body: decisionBody })
+        expect(replay.status).toBe(200)
+        expect(replay.body).toEqual(approved.body)
+        expect(await businessCounts(orgId)).toEqual(counts)
+        expect(await history()).toEqual(after)
+        expect(await parents()).toEqual(afterParents)
+        expect(await currentSource()).toEqual(changed)
+      } finally {
+        await pool.query('DELETE FROM attendance_holidays WHERE org_id = $1 AND id = $2', [orgId, holidayId])
+      }
+    })
+  }, 120_000)
+
 })
