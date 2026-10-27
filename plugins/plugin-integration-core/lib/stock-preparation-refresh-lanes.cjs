@@ -449,6 +449,16 @@ function executionFinishedDuringPreview() {
 }
 
 /**
+ * Design §23.8 F-18 (step-4 review follow-ups): true for exactly the straddle refusal above. It describes ANOTHER
+ * run — the one that just finished and stamped its own outcome — so the route does not stamp it `refused` over
+ * that outcome (as for WRITE_LOCKED). Narrow on purpose: every other STATE_MOVED reason keeps its stamp.
+ */
+function isExecutionFinishedDuringPreview(error) {
+  return Boolean(error) && error.code === REFRESH_LANE_ERROR_CODES.STATE_MOVED
+    && isPlainObject(error.details) && error.details.reason === 'execution_finished_during_preview'
+}
+
+/**
  * THE PREVIEW's recovery answer: `previewRecoveryOf`, with ONE re-consult when it rests only on lease-less `running`
  * rows. Rows still open => the fresh count (a dead run, or the run ended partial / failed / aborted). None left =>
  * that run finished while this preview read; the plan was computed against the earlier picture, so 409 STATE_MOVED
@@ -692,6 +702,7 @@ module.exports = {
   executionFinishStatus,
   governanceVerdictOf,
   isCompleteComputation,
+  isExecutionFinishedDuringPreview,
   largeLaneRefusalReason,
   largeLaneVerdictOf,
   mapContinuationStraddle,

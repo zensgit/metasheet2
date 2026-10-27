@@ -74,6 +74,7 @@ const {
   STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GATES,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_PULL,
   STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
@@ -381,6 +382,14 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // stock-preparation-pilot-routes.test.cjs; the read also joins M-12 below.
   'projectTarget.pilotRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   'projectTarget.pilotEnable': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  // PR-4 (R-59): the six refresh routes. Well-formed shapes, so a 'pass' cell reaches the route's own answer
+  // (an unconfigured action / no such hold on this bare mount) and never a 400 that could mask the gate.
+  'refresh.holds': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'refresh.evidence': () => ({ params: { projectNo: PROJECT_NO, holdId: 'hold_synthetic' }, query: {} }),
+  'refresh.keep': () => ({ params: { projectNo: PROJECT_NO, holdId: 'hold_synthetic' }, body: { confirmProjectNo: PROJECT_NO } }),
+  'refresh.confirm': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, holdId: 'hold_synthetic', holdFingerprint: 'a'.repeat(64), comparisonFingerprint: 'b'.repeat(64), evidenceFingerprint: 'c'.repeat(64), candidateId: 'd'.repeat(64), readReceipt: 'e'.repeat(32), basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } } }),
+  'refresh.continuation': () => ({ params: { projectNo: PROJECT_NO, id: 'cont_synthetic' }, query: {} }),
+  'refresh.end': () => ({ params: { projectNo: PROJECT_NO, id: 'cont_synthetic' }, body: { confirmProjectNo: PROJECT_NO, revision: 1, outcome: 'escalate_special_repair' } }),
   // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
   // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
   // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
@@ -441,6 +450,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -469,6 +484,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -497,6 +518,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -525,6 +552,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -553,6 +586,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -581,6 +620,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -609,6 +654,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'pass',
     'projectTarget.pilotRead': 'pass',
     'projectTarget.pilotEnable': 'pass',
+    'refresh.holds': 'pass',
+    'refresh.evidence': 'pass',
+    'refresh.keep': 'pass',
+    'refresh.confirm': 'pass',
+    'refresh.continuation': 'pass',
+    'refresh.end': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -637,6 +688,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'pass',
     'projectTarget.pilotRead': 'pass',
     'projectTarget.pilotEnable': 'pass',
+    'refresh.holds': 'pass',
+    'refresh.evidence': 'pass',
+    'refresh.keep': 'pass',
+    'refresh.confirm': 'pass',
+    'refresh.continuation': 'pass',
+    'refresh.end': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -668,6 +725,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'pass',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'pass',
+    'refresh.evidence': 'pass',
+    'refresh.keep': 'pass',
+    'refresh.confirm': 'pass',
+    'refresh.continuation': 'pass',
+    'refresh.end': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -696,6 +759,12 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -1152,8 +1221,15 @@ async function orphanOperateGrantConfersNothing() {
       'projectTarget.archive',
       'projectTarget.create',
       'projectTarget.restore',
+      // Batch-refresh step 4 PR-4 (R-59, D-14): the puller confirms — the six refresh routes are PULL members.
+      'refresh.confirm',
+      'refresh.continuation',
+      'refresh.end',
+      'refresh.evidence',
+      'refresh.holds',
+      'refresh.keep',
     ].sort(),
-    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore and projectOverview.ensure to the operator tier',
+    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore, projectOverview.ensure and the six refresh routes to the operator tier',
   )
   // …and the floor operator holds none of the four (archive / restore are the 拉取人员's, Q2).
   for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore']) {
@@ -1304,8 +1380,25 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
       /requireAccess\(req,\s*STOCK_PREP_PULL\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
     )).sort(),
-    ['stockPreparationProjectOverviewEnsure', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetCreate', 'stockPreparationProjectTargetRestore'],
-    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers and the overview ensure',
+    [
+      'stockPreparationProjectOverviewEnsure',
+      'stockPreparationProjectTargetArchive',
+      'stockPreparationProjectTargetCreate',
+      'stockPreparationProjectTargetRestore',
+      // Batch-refresh step 4 PR-4 (design §13 / D-14; R-59): the six refresh routes — the puller's private
+      // hold page, the evidence behind a hold, a relationship's detail, and the three decisions (confirm /
+      // 「暂不处理」 / end). The puller confirms (D-14); all six are manifest members (refresh.*), their tenant
+      // is the host-vouched operator scope at the PULL tier, and every value read is audited before its
+      // response. The gate is applied in the ONE shared context builder (stockPreparationRefreshDecisionContext),
+      // which every handler body calls first.
+      'stockPreparationRefreshContinuationConfirm',
+      'stockPreparationRefreshContinuationEnd',
+      'stockPreparationRefreshContinuationGet',
+      'stockPreparationRefreshHoldEvidence',
+      'stockPreparationRefreshHoldKeep',
+      'stockPreparationRefreshHolds',
+    ],
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the overview ensure and the six refresh routes',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
   for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
@@ -1679,6 +1772,14 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'projectFields.update',
   'projectOverview.refresh',
   'projectOverview.ensure',
+  // PR-4 (R-59): the six refresh routes resolve the host-vouched operator scope at the PULL tier, before any
+  // host work; a carried tenant is already refused with the door open.
+  'refresh.holds',
+  'refresh.evidence',
+  'refresh.keep',
+  'refresh.confirm',
+  'refresh.continuation',
+  'refresh.end',
   // PR B (R-53 / R-54): both pilot routes resolve the host-vouched operator scope (never a header-fillable
   // tenant), so the door adds nothing to them.
   'projectTarget.pilotRead',
@@ -1867,10 +1968,12 @@ function theRailVocabularyAndTheLandingRuleHold() {
   // directory union 今天要处理 reads plus the selected project's own board, and a `stock-prep:read`
   // queue watcher must not be handed a page of project numbers.
   const work = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'work')
+  // 备料分批拉取第一期 step 4 PR-7 (register R-62 ①): 拉取待确认 is appended LAST, on the PULL gate — exactly the
+  // six refresh routes' own `requireAccess(req, STOCK_PREP_PULL)`.
   assert.deepEqual(
     work.items.map((item) => item.key),
-    ['home', 'project-board', 'project-query', 'confirmation-queue'],
-    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列',
+    ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue'],
+    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列, and 拉取待确认 last',
   )
   assert.deepEqual(
     work.items.map((item) => item.gate),
@@ -1879,9 +1982,11 @@ function theRailVocabularyAndTheLandingRuleHold() {
       STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
       STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
       STOCK_PREP_RAIL_GATE_ROUTE,
+      STOCK_PREP_RAIL_GATE_PULL,
     ],
-    'rail: 项目查询 rides the operator tier, like the two items it sits beside',
+    'rail: 项目查询 rides the operator tier, like the two items it sits beside; 拉取待确认 rides PULL',
   )
+  assert.equal(STOCK_PREP_RAIL_GATE_PULL, 'pull', 'rail: the PULL gate token')
 
   // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
   // the platform-admin gate they were always on.
@@ -1900,15 +2005,18 @@ function theRailVocabularyAndTheLandingRuleHold() {
   // THE GATE RESOLVER. Per actor, per token, plus the refusal an unknown token must produce for
   // EVERYONE — a mistyped gate must hide a group, never open one.
   const cases = [
-    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
-    // R-33: the pull code re-tiers NO rail item — the 拉取人员 sees exactly the operator's rail.
-    { name: 'puller', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'orphan pull', permissions: [STOCK_PREP_PULL], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false } },
-    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true } },
+    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    // R-33 said "the pull code re-tiers NO rail item". PR-7 (R-62 ①) reverses that for exactly ONE item: the 拉取人员
+    // additionally opens 拉取待确认 (the `pull` gate); every other item answers exactly as for the operator.
+    { name: 'puller', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false, pull: true } },
+    { name: 'orphan pull', permissions: [STOCK_PREP_PULL], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    // The legacy write tier is NOT the pull tier (design §13's "or legacy integration:write" corrected, R-62 ①).
+    { name: 'integration:write only', permissions: ['integration:write'], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false, pull: true } },
+    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true, pull: true } },
   ]
   for (const testCase of cases) {
     for (const gate of STOCK_PREP_RAIL_GATES) {

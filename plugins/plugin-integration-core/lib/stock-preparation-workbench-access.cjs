@@ -341,6 +341,58 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
     control: 'stock-prep-project-pilot-enable',
   }),
+  // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
+  // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
+  // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;
+  // `stock-prep:admin` and the platform admin through the ladder, a TENANTLESS platform admin refused by the
+  // host-vouched scope). VALUE-BEARING (keys, quantities, before/after cells), every read audited.
+  //
+  // PR-7 (register R-62) assigned their control ids: they live on the 「拉取待确认」 tab of the 「工作」 group
+  // (the web's StockPreparationRefreshQueueView.vue), never on the confirmation-queue view; the web's
+  // StockPreparationRefreshQueue.spec.ts (RQ-ALIGN) asserts presence = grant where they live, and the browser
+  // mirror stays byte-equal (F-01).
+  Object.freeze({
+    capability: 'refresh.holds',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds',
+    control: 'stock-prep-refresh-holds',
+  }),
+  Object.freeze({
+    capability: 'refresh.evidence',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/evidence',
+    control: 'stock-prep-refresh-evidence',
+  }),
+  Object.freeze({
+    capability: 'refresh.keep',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/keep',
+    control: 'stock-prep-refresh-keep',
+  }),
+  Object.freeze({
+    capability: 'refresh.confirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/confirm',
+    control: 'stock-prep-refresh-confirm',
+  }),
+  Object.freeze({
+    capability: 'refresh.continuation',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id',
+    control: 'stock-prep-refresh-continuation',
+  }),
+  Object.freeze({
+    capability: 'refresh.end',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
+    control: 'stock-prep-refresh-end',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
@@ -713,12 +765,19 @@ const STOCK_PREP_RAIL_GATE_OPERATOR_BOARD = 'operator-board'
 const STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN = 'workbench-admin'
 /** Platform admin — the legacy MVP tabs, folded into 深度工具 but NOT re-tiered. */
 const STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN = 'platform-admin'
+/**
+ * 备料分批拉取第一期 step 4 PR-7 (register R-62 ①): the PULL tier exactly (`stock-prep:pull` ∧ operate ∧ read; the
+ * ladder admits `stock-prep:admin` and a platform admin) — 「拉取待确认」, whose six routes gate on exactly this
+ * code. NOT `integration:write`: `satisfiesStockPrepAccess` never grants a stock-prep code to it.
+ */
+const STOCK_PREP_RAIL_GATE_PULL = 'pull'
 
 const STOCK_PREP_RAIL_GATES = Object.freeze([
   STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
   STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN,
   STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+  STOCK_PREP_RAIL_GATE_PULL,
 ])
 
 /**
@@ -736,6 +795,10 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
       // not already granted, and nothing a lower tier may be shown.
       Object.freeze({ key: 'project-query', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
       Object.freeze({ key: 'confirmation-queue', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
+      // 拉取待确认 (PR-7, R-62 ①) — the puller's holds of a governed project. The PULL tier re-tiers this one rail
+      // item (R-33's "the pull code re-tiers no rail item" no longer holds); appended LAST so every existing
+      // item keeps its position.
+      Object.freeze({ key: 'refresh-queue', gate: STOCK_PREP_RAIL_GATE_PULL }),
     ]),
   }),
   Object.freeze({
@@ -779,6 +842,7 @@ function satisfiesStockPrepRailGate(permissions, gate) {
   if (gate === STOCK_PREP_RAIL_GATE_OPERATOR_BOARD) return satisfiesStockPrepAccess(held, STOCK_PREP_OPERATE)
   if (gate === STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN) return satisfiesStockPrepAccess(held, STOCK_PREP_ADMIN)
   if (gate === STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN) return holdsPlatformAdmin(held)
+  if (gate === STOCK_PREP_RAIL_GATE_PULL) return satisfiesStockPrepAccess(held, STOCK_PREP_PULL)
   return false
 }
 
@@ -838,6 +902,7 @@ module.exports = {
   STOCK_PREP_RAIL_GATES,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
   STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+  STOCK_PREP_RAIL_GATE_PULL,
   STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN,
   STOCK_PREP_RAIL_GROUPS,

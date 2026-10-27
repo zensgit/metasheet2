@@ -650,6 +650,236 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '下面列出的每一项都通过后才能启用;什么都没有改动。',
     enNext: 'Every listed check must pass before it can be enabled; nothing was changed.',
   }),
+  /**
+   * 备料分批拉取第一期 step 4 PR-4 — the puller's confirm / end routes (plugin stock-preparation-refresh-decisions.cjs
+   * and the continuation store). Every one of these means "nothing was confirmed, nothing was ended": the decision
+   * runs in one transaction and every refusal rolls it back. The page (PR-7) renders these beside the hold.
+   */
+  STOCK_PREP_CONTINUATION_CONFIRM_NOT_PILOT: Object.freeze({
+    zh: '这个项目不是分批拉取的试点项目,不能在这里确认沿用关系;什么都没有改动。',
+    en: 'This project is not a batch-refresh pilot, so a relationship cannot be confirmed here; nothing was changed.',
+    zhNext: '请联系负责人确认项目是否应启用试点。',
+    enNext: 'Ask the owner whether this project should be enabled as a pilot.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_STALE: Object.freeze({
+    zh: '页面上的这条待确认项已经不是系统现在算出的结果,没有确认。',
+    en: 'This item is no longer what the server computes now, so it was not confirmed.',
+    zhNext: '请重新打开待确认列表后再确认。',
+    enNext: 'Reopen the list of holds, then confirm again.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED: Object.freeze({
+    zh: '这条待确认项现在不能确认(需要专项处理或别的前置步骤);什么都没有改动。',
+    en: 'This hold cannot be confirmed right now (it needs specialist handling or another step first); nothing was changed.',
+    zhNext: '看页面上标出的原因;需要时联系负责人。',
+    enNext: 'See the reason shown beside it; ask the owner if needed.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_CONFLICT: Object.freeze({
+    zh: '另一条确认已经占用了这些旧行或新位置,这次没有确认。',
+    en: 'Another confirmation already claims these old rows or this new position, so this one was not recorded.',
+    zhNext: '请重新试算并重新打开待确认列表。',
+    enNext: 'Preview again and reopen the list of holds.',
+  }),
+  STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE: Object.freeze({
+    zh: '还没有读完这条待确认项的全部对照页,不能确认。',
+    en: 'Not every page of this hold has been read yet, so it cannot be confirmed.',
+    zhNext: '把这条待确认项的每一页都看完后再确认。',
+    enNext: 'Read every page of this hold, then confirm.',
+  }),
+  STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE: Object.freeze({
+    zh: '按关系现在的状态,这个结束方式不允许;什么都没有改动。',
+    en: 'This way of ending the relationship is not allowed in its current state; nothing was changed.',
+    zhNext: '请重新试算后再看可用的处理方式。',
+    enNext: 'Preview again, then see which outcomes are available.',
+  }),
+  // PR-7 (design §23.8 F-19): "awaiting recovery" — it is not a source-data problem and not a transient one; the
+  // lanes (preview / apply / carry) and the decisions (confirm / end) all answer it, so the sentence names all three.
+  STOCK_PREP_REFRESH_RECOVERY_PENDING: Object.freeze({
+    zh: '上次写入没有正常结束,正在等待恢复;恢复之前这个项目不能写入、确认或结束沿用关系,这次什么都没有改动。',
+    en: 'The last write did not finish cleanly and is awaiting recovery; until then this project cannot be written, confirmed or ended, and nothing was changed now.',
+    zhNext: '这不是数据源的问题。请联系平台管理员按手册恢复。',
+    enNext: 'This is not a data-source problem. Ask the platform admin to recover it per the runbook.',
+  }),
+  STOCK_PREP_REFRESH_HOLD_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这条待确认项。',
+    en: 'This project has no such hold.',
+    zhNext: '请重新打开待确认列表。',
+    enNext: 'Reopen the list of holds.',
+  }),
+  STOCK_PREP_CONTINUATION_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这条沿用关系。',
+    en: 'This project has no such relationship.',
+    zhNext: '请重新打开项目备料页。',
+    enNext: 'Reopen the project page.',
+  }),
+  /**
+   * 备料分批拉取第一期 step 4 PR-3a / 3b / 5 / 6 and PR-4's remaining codes — copy added by PR-7 (the web
+   * owns this file; server messages are untouched). Every code a governed project's pull, decision, export or
+   * generic writer can answer has its own two lines here: RS-COPY (StockPreparationRefreshState.spec.ts) reads
+   * the plugin's live vocabularies and reds when a code has none. Keyed on the CODE; the finer
+   * `<code>/<details.reason>` readings live in STOCK_PREP_ERROR_REASON_PLAIN below.
+   */
+  STOCK_PREP_PULL_SUSPENDED: Object.freeze({
+    zh: '这次拉取已整体挂起:有待拉取人员确认的项,什么都没有写。',
+    en: 'This pull is suspended as a whole: some items await the puller’s confirmation, and nothing was written.',
+    zhNext: '拉取人员在「拉取待确认」里处理完,再重新试算。',
+    enNext: 'The puller decides them on the “Pull holds” page, then previews again.',
+  }),
+  STOCK_PREP_REFRESH_BINDING_STALE: Object.freeze({
+    zh: '试算之后沿用关系变了,这份计划作废,什么都没有写。',
+    en: 'The relationships changed after this preview, so the plan is void and nothing was written.',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  STOCK_PREP_PULL_STATE_MOVED: Object.freeze({
+    zh: '刚才项目状态变了(一次写入刚好结束,或有人刚确认/结束了沿用关系),这次试算作废,什么都没有写。',
+    en: 'The project’s state moved just now (a write finished, or someone just confirmed or ended a relationship), so this preview is void and nothing was written.',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  STOCK_PREP_REFRESH_LARGE_LANE_REFUSED: Object.freeze({
+    zh: '这个项目受分批拉取保护(有沿用关系、待确认项或未完成的执行),不走后台大 BOM 通道;什么都没有写。',
+    en: 'This project is protected by the batch refresh (relationships, holds or an unfinished execution), so it never takes the background large-BOM channel; nothing was written.',
+    zhNext: '请联系负责人。',
+    enNext: 'Ask the owner.',
+  }),
+  STOCK_PREP_REFRESH_TARGET_RETARGETED: Object.freeze({
+    zh: '这个项目的分批拉取记录在另一张备料表上(目标表改指过),什么都没有读、没有写、没有导出。',
+    en: 'This project’s batch-refresh records sit on another stock-prep sheet (the target was re-pointed), so nothing was read, written or exported.',
+    zhNext: '请联系负责人核对项目表登记。',
+    enNext: 'Ask the owner to check the project-sheet registration.',
+  }),
+  STOCK_PREP_REFRESH_TENANT_MISMATCH: Object.freeze({
+    zh: '这个项目的分批拉取记录与当前租户不一致,什么都没有读、没有写、没有导出。',
+    en: 'This project’s batch-refresh records do not match the current tenant, so nothing was read, written or exported.',
+    zhNext: '请联系负责人核对项目表登记。',
+    enNext: 'Ask the owner to check the project-sheet registration.',
+  }),
+  STOCK_PREP_REFRESH_SOURCE_BINDING_SPLIT: Object.freeze({
+    zh: '这次要读的数据源和分批拉取记录绑定的数据源不一致,什么都没有写。',
+    en: 'The source this run would read differs from the one the batch-refresh records are bound to, so nothing was written.',
+    zhNext: '请联系负责人核对数据源绑定。',
+    enNext: 'Ask the owner to check the source binding.',
+  }),
+  STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED: Object.freeze({
+    zh: '服务端没有完成分批拉取检查,什么都没有写。',
+    en: 'The server did not complete the batch-refresh check, so nothing was written.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  // #6565 review N6 / pg 2f: a transient store failure (a lock wait, a dropped connection) or a missing migration.
+  STOCK_PREP_REFRESH_STORE_FAILED: Object.freeze({
+    zh: '分批拉取的状态存储暂时读写失败,什么都没有确认、没有写入。',
+    en: 'The batch-refresh state store could not be read or written just now; nothing was confirmed or written.',
+    zhNext: '稍后再试一次;一直这样请联系平台管理员(数据库可能缺迁移 102/103)。',
+    enNext: 'Try again shortly; if it keeps happening, ask the platform admin (the database may lack migrations 102/103).',
+  }),
+  STOCK_PREP_REFRESH_STORE_UNAVAILABLE: Object.freeze({
+    zh: '分批拉取的状态存储没有接通,什么都没有确认、没有写入。',
+    en: 'The batch-refresh state store is not set up, so nothing was confirmed or written.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  STOCK_PREP_REFRESH_INPUT_INVALID: Object.freeze({
+    zh: '系统内部检查没通过,什么都没有改动。',
+    en: 'An internal check did not pass, so nothing was changed.',
+    zhNext: '请把报错代码给平台管理员。',
+    enNext: 'Give the platform admin the error code.',
+  }),
+  STOCK_PREP_CONTINUATION_HOLD_MALFORMED: Object.freeze({
+    zh: '系统内部检查没通过,什么都没有改动。',
+    en: 'An internal check did not pass, so nothing was changed.',
+    zhNext: '请把报错代码给平台管理员。',
+    enNext: 'Give the platform admin the error code.',
+  }),
+  STOCK_PREP_CONTINUATION_PROJECTION_INCONSISTENT: Object.freeze({
+    zh: '系统内部检查没通过,什么都没有改动。',
+    en: 'An internal check did not pass, so nothing was changed.',
+    zhNext: '请把报错代码给平台管理员。',
+    enNext: 'Give the platform admin the error code.',
+  }),
+  // PR-4's two codes without copy until now (#6565 bd note 15) and the audit store the decision routes need.
+  STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID: Object.freeze({
+    zh: '请求缺少或带错了字段,什么都没有改动。',
+    en: 'The request was missing a field or carried a wrong one, so nothing was changed.',
+    zhNext: '请重新打开「拉取待确认」再操作。',
+    enNext: 'Reopen “Pull holds” and try again.',
+  }),
+  STOCK_PREP_REFRESH_READ_RECEIPT_STORE_UNAVAILABLE: Object.freeze({
+    zh: '阅读记录服务没有接通,这一页不能显示,也不能确认。',
+    en: 'The read-receipt service is not set up, so this page cannot be shown or confirmed.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  AUDIT_STORE_UNAVAILABLE: Object.freeze({
+    zh: '审计记录服务没有接通,没有记录就不显示数据、也不做决定;什么都没有改动。',
+    en: 'The audit service is not set up; without a record nothing is shown or decided, and nothing was changed.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  // PR-5 — the formal export gate (plugin stock-preparation-export-gate.cjs). Nothing is ever exported on any of them.
+  STOCK_PREP_EXPORT_BLOCKED: Object.freeze({
+    zh: '本项目的分批拉取还没完成核对,正式导出已暂停;什么都没有导出。',
+    en: 'This project’s batch refresh is not checked yet, so the formal export is paused; nothing was exported.',
+    zhNext: '请拉取人员处理完待确认项并核对(再试算一次)后再导出。',
+    enNext: 'The puller decides the holds and runs the check (another preview), then export.',
+  }),
+  STOCK_PREP_EXPORT_STATE_UNREADABLE: Object.freeze({
+    zh: '分批拉取状态读不出,正式导出已拒绝;什么都没有导出。',
+    en: 'The batch-refresh state could not be read, so the formal export was refused; nothing was exported.',
+    zhNext: '请联系平台管理员(数据库可能缺迁移 102/103)。',
+    enNext: 'Ask the platform admin (the database may lack migrations 102/103).',
+  }),
+  STOCK_PREP_EXPORT_SHEET_CHANGED_SINCE_SETTLEMENT: Object.freeze({
+    zh: '上次核对之后,备料表的机器列被改动过,正式导出已拒绝;什么都没有导出。',
+    en: 'A machine column of the sheet changed after the last check, so the formal export was refused; nothing was exported.',
+    zhNext: '请拉取人员重新试算核对后再导出。',
+    enNext: 'The puller previews again to re-check, then export.',
+  }),
+  STOCK_PREP_EXPORT_STATE_CHANGED: Object.freeze({
+    zh: '导出过程中项目在写入或状态变了,没有交付半新半旧的文件。',
+    en: 'The project was written or its state moved during the export, so no half-old, half-new file was delivered.',
+    zhNext: '稍后再导出一次。',
+    enNext: 'Export again shortly.',
+  }),
+  STOCK_PREP_EXPORT_GATE_INVALID: Object.freeze({
+    zh: '系统内部检查没通过,什么都没有导出。',
+    en: 'An internal check did not pass, so nothing was exported.',
+    zhNext: '请把报错代码给平台管理员。',
+    enNext: 'Give the platform admin the error code.',
+  }),
+  // PR-5 — the handoff's terminal hop.
+  STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE: Object.freeze({
+    zh: '本项目分批拉取还没完成,最后一步通知暂不能发出;什么都没有发送。',
+    en: 'This project’s batch refresh is not finished, so the final notification cannot be sent yet; nothing was sent.',
+    zhNext: '等拉取人员处理完并核对后再发。',
+    enNext: 'Send it after the puller has finished and checked.',
+  }),
+  // PR-3b — the large lane's job-level refusals (also in STOCK_PREP_LARGE_BOM_ERROR_PLAIN, which the large panel reads first).
+  LARGE_BOM_APPLY_PLAN_SUSPENDED: Object.freeze({
+    zh: '这个大 BOM 作业的计划已挂起(有待拉取人员确认的项),没有写入。',
+    en: 'This large-BOM job’s plan is suspended (items await the puller’s confirmation), so it was not written.',
+    zhNext: '拉取人员在「拉取待确认」里处理完后,重新展开。',
+    enNext: 'After the puller decides them on “Pull holds”, expand again.',
+  }),
+  LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED: Object.freeze({
+    zh: '这个大 BOM 作业没有经过分批拉取检查,没有写入。',
+    en: 'This large-BOM job was not checked by the batch refresh, so it was not written.',
+    zhNext: '请重新展开;一直这样请联系平台管理员。',
+    enNext: 'Expand again; if it keeps happening, ask the platform admin.',
+  }),
+  // PR-6 — a generic configured writer (pipeline, write-back) refused by a governed stock-prep sheet.
+  METASHEET_MULTITABLE_STOCK_PREP_GOVERNED_SHEET: Object.freeze({
+    zh: '这张备料表受分批拉取保护,通用写入(流水线/回写)被拒绝;什么都没有写。',
+    en: 'This stock-prep sheet is protected by the batch refresh, so generic writes (pipelines, write-back) are refused; nothing was written.',
+    zhNext: '备料表只由备料拉取写入;需要改写请联系负责人。',
+    enNext: 'Only the stock-prep pull writes this sheet; ask the owner if it must be changed.',
+  }),
+  STOCK_PREP_GOVERNED_SHEET_PROBE_UNWIRED: Object.freeze({
+    zh: '服务端没有接通备料表保护检查,通用写入没有进行;什么都没有写。',
+    en: 'The server’s stock-prep sheet protection check is not wired, so the generic write did not run; nothing was written.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
   STOCK_PREPARATION_CONFIRM_REQUEST_FAILED: Object.freeze({
     zh: '这一步没有保存成功,数据没有变化。',
     en: 'That did not save; nothing was changed.',
@@ -1070,8 +1300,196 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
   enNext: 'Try again shortly; if it keeps happening, give an administrator the code below.',
 })
 
-export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
-  return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+/**
+ * 备料分批拉取第一期 step 4 PR-7 — the per-REASON readings of a code, keyed `<code>/<details.reason>` (the
+ * `STOCK_PREP_LARGE_BOM_ERROR_REASON_PLAIN` precedent). One code covers states a person handles differently:
+ * an export blocked by an in-flight lease is "wait, or have a puller preview to clear an abandoned one", one
+ * blocked by an unchecked state is "the puller has to check first". Resolution: reason entry → code entry →
+ * generic. Kept OUT of codeHelp.ts's table list on purpose: its keys are not bare codes a person copies.
+ * VALUES-FREE: the reason is a clamped lower_snake token (confirmApi / projectSync clamp it), never a message.
+ */
+const RELOAD_THIS_ITEM: StockPrepPlainEntry = Object.freeze({
+  zh: '这一项已经更新(新的计算换了记录),这次没有确认。',
+  en: 'This item has been updated (a newer computation replaced the record), so it was not confirmed.',
+  zhNext: '请重新阅读后再处理。',
+  enNext: 'Read it again, then decide.',
+})
+
+const RUNBOOK_ONLY_OPEN: StockPrepPlainEntry = Object.freeze({
+  zh: '这个项目有一条沿用关系已升级为专项修复,运行手册关闭之前不能确认、重新确认或放回普通刷新;什么都没有改动。',
+  en: 'A relationship of this project was escalated to specialist repair; until the runbook closes it nothing can be confirmed, re-confirmed or released; nothing was changed.',
+  zhNext: '请联系负责人按运行手册处理。',
+  enNext: 'Ask the owner to handle it per the runbook.',
+})
+
+export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  // PR-5 pg review N1 — the one refusal an ORDINARY (not governed) project can meet: a write in flight, or an
+  // abandoned lease of a crashed pull. Only a pull-tier preview clears an abandoned lease (the floor tier's is 403).
+  'STOCK_PREP_EXPORT_BLOCKED/lease_in_flight': Object.freeze({
+    zh: '一次拉取正在写这张表,或一次中断的拉取还占着写入;这时不导出,免得交出半新半旧的数据。什么都没有导出。',
+    en: 'A pull is writing this sheet, or an interrupted pull still holds its write turn; nothing is exported now, so no half-old, half-new data is delivered.',
+    zhNext: '稍后再导出;如果一直如此,请拉取人员重新试算一次——试算会清掉中断留下的占用(普通操作员的试算清不掉)。',
+    enNext: 'Export again shortly; if it persists, ask a puller to preview once — a puller’s preview clears what an interrupted pull left (an operator’s cannot).',
+  }),
+  'STOCK_PREP_EXPORT_BLOCKED/state': Object.freeze({
+    zh: '本项目的分批拉取还有未完成的状态(待确认、待执行、待恢复或待复核),正式导出已暂停;什么都没有导出。',
+    en: 'This project’s batch refresh has an unfinished state (awaiting confirmation, execution, recovery or review), so the formal export is paused; nothing was exported.',
+    zhNext: '请拉取人员处理完后再导出;不是重试能解决的。',
+    enNext: 'The puller finishes it first; retrying does not help.',
+  }),
+  'STOCK_PREP_EXPORT_BLOCKED/not_settled': Object.freeze({
+    zh: '本项目还没有核对过:需要拉取人员再试算一次,核对通过后才能正式导出。什么都没有导出。',
+    en: 'This project has not been checked yet: a puller previews once more, and the formal export opens once the check passes. Nothing was exported.',
+    zhNext: '请拉取人员点「核对」(再试算一次)。',
+    enNext: 'Ask a puller to press “Check” (one more preview).',
+  }),
+  'STOCK_PREP_EXPORT_STATE_CHANGED/generation_moved': Object.freeze({
+    zh: '导出过程中有一次写入或试算刚好结束,文件没有交付。',
+    en: 'A write or preview finished while the export ran, so the file was not delivered.',
+    zhNext: '稍后再导出一次。',
+    enNext: 'Export again shortly.',
+  }),
+  'STOCK_PREP_EXPORT_STATE_CHANGED/lease_in_flight': Object.freeze({
+    zh: '导出过程中有一次拉取开始写这张表,文件没有交付。',
+    en: 'A pull started writing this sheet while the export ran, so the file was not delivered.',
+    zhNext: '等这次拉取结束后再导出。',
+    enNext: 'Export again after that pull finishes.',
+  }),
+  // F-19: 'preview again', with the reason shown — never 「没能连上取数」.
+  'STOCK_PREP_PULL_STATE_MOVED/execution_finished_during_preview': Object.freeze({
+    zh: '试算期间,这个项目的一次写入刚好结束;这次试算作废,什么都没有写。',
+    en: 'A write of this project finished while this preview ran; the preview is void and nothing was written.',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  'STOCK_PREP_PULL_STATE_MOVED/decision_version': Object.freeze({
+    zh: '试算期间,有人刚确认或结束了沿用关系;这次试算作废,什么都没有写。',
+    en: 'Someone just confirmed or ended a relationship while this preview ran; the preview is void and nothing was written.',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  'STOCK_PREP_PULL_STATE_MOVED/projection_inconsistent': Object.freeze({
+    zh: '试算期间沿用关系的记录刚好变动;这次试算作废,什么都没有写。',
+    en: 'The relationship records moved while this preview ran; the preview is void and nothing was written.',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  // The carry-confirm lane's O-15 refusal (the confirmation queue's carry confirm meets it).
+  'STOCK_PREP_PULL_SUSPENDED/runbook_only_hold': Object.freeze({
+    zh: '这个项目有一条沿用关系在做专项修复,人工填写的搬运暂停到运行手册关闭;什么都没有写。',
+    en: 'A relationship of this project is under specialist repair, so carrying human entries is paused until the runbook closes it; nothing was written.',
+    zhNext: '请联系负责人。',
+    enNext: 'Ask the owner.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/hold_not_open': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/fingerprint': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/candidate': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/continuation': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/continuation_revision': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/continuation_ended': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/hold_fingerprint': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/hold_moved': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/continuation_moved': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_STALE/facts_moved': Object.freeze({
+    zh: '页面上的结束依据已经过时(最新一次计算换了记录),没有结束。',
+    en: 'The facts this page showed for ending are out of date (the latest computation replaced the record), so nothing was ended.',
+    zhNext: '请重新阅读后再处理。',
+    enNext: 'Read it again, then decide.',
+  }),
+  'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE/new_position_present': Object.freeze({
+    zh: '最新一次计算显示这个零件在新位置上仍然存在,不能放回普通刷新;什么都没有改动。',
+    en: 'The latest computation still finds this part at a new position, so it cannot be released to the normal refresh; nothing was changed.',
+    zhNext: '请重新试算后再看可用的处理方式。',
+    enNext: 'Preview again, then see which outcomes are available.',
+  }),
+  // Delta review N-5 / N-7: no count recorded — a release needs one.
+  'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE/facts_missing': Object.freeze({
+    zh: '这次计算还没有记录新位置数,不能放回普通刷新;什么都没有改动。',
+    en: 'This computation recorded no new-position count, so it cannot be released to the normal refresh; nothing was changed.',
+    zhNext: '请重新试算后再结束。',
+    enNext: 'Preview again, then end it.',
+  }),
+  'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE/runbook_only_hold_open': RUNBOOK_ONLY_OPEN,
+  'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE/no_open_hold': Object.freeze({
+    zh: '没有一次计算提到这条沿用关系,不能按计算结果结束;什么都没有改动。',
+    en: 'No computation names this relationship, so it cannot be ended on a computation’s facts; nothing was changed.',
+    zhNext: '请重新试算后再结束。',
+    enNext: 'Preview again, then end it.',
+  }),
+  'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE/last_verdict': Object.freeze({
+    zh: '这条沿用关系最新的核验结论不允许这样结束;什么都没有改动。',
+    en: 'The relationship’s latest verification verdict does not allow this ending; nothing was changed.',
+    zhNext: '请重新试算后再看可用的处理方式。',
+    enNext: 'Preview again, then see which outcomes are available.',
+  }),
+  'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE/facts_ambiguous': Object.freeze({
+    zh: '有不止一次计算同时提到这条沿用关系,不能确定按哪一次结束;什么都没有改动。',
+    en: 'More than one computation names this relationship, so which one to end on is ambiguous; nothing was changed.',
+    zhNext: '请重新试算后再结束。',
+    enNext: 'Preview again, then end it.',
+  }),
+  'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE/status': Object.freeze({
+    zh: '这条沿用关系现在正常生效,不需要结束;什么都没有改动。',
+    en: 'This relationship is active and needs no ending; nothing was changed.',
+    zhNext: '请重新打开「拉取待确认」。',
+    enNext: 'Reopen “Pull holds”.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE/pages_missing': Object.freeze({
+    zh: '这一项还有对照页没有打开过,不能确认。',
+    en: 'Some comparison pages of this item have not been opened yet, so it cannot be confirmed.',
+    zhNext: '把这一项的每一页都打开看过后再确认。',
+    enNext: 'Open every page of this item, then confirm.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE/receipt_absent': Object.freeze({
+    zh: '找不到您这次阅读的记录(可能已过期),不能确认。',
+    en: 'No record of what you read was found (it may have expired), so it cannot be confirmed.',
+    zhNext: '请重新打开「拉取待确认」,把这一项再看一遍。',
+    enNext: 'Reopen “Pull holds” and read the item again.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE/receipt_expired': Object.freeze({
+    zh: '您这次阅读的记录已过期,不能确认。',
+    en: 'The record of what you read has expired, so it cannot be confirmed.',
+    zhNext: '请重新打开「拉取待确认」,把这一项再看一遍。',
+    enNext: 'Reopen “Pull holds” and read the item again.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE/receipt_actor': Object.freeze({
+    zh: '这份阅读记录不是您本人的,不能用来确认。',
+    en: 'This read record is not yours, so it cannot be used to confirm.',
+    zhNext: '请自己把这一项看一遍再确认。',
+    enNext: 'Read the item yourself, then confirm.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE/receipt_scope': Object.freeze({
+    zh: '这份阅读记录属于另一个项目,不能用来确认。',
+    en: 'This read record belongs to another project, so it cannot be used to confirm.',
+    zhNext: '请重新打开本项目的「拉取待确认」。',
+    enNext: 'Reopen “Pull holds” for this project.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE/hold_not_in_receipt': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE/fingerprint_moved': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED/runbook_only_hold_open': RUNBOOK_ONLY_OPEN,
+  'STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED/kind': Object.freeze({
+    zh: '这一类待确认项没有「确认」操作;什么都没有改动。',
+    en: 'This kind of hold has no confirm action; nothing was changed.',
+    zhNext: '看页面上标出的原因;需要时联系负责人。',
+    enNext: 'See the reason shown beside it; ask the owner if needed.',
+  }),
+  'STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED/not_confirmable': Object.freeze({
+    zh: '这一项现在不能确认(证据不全或结构不对应);什么都没有改动。',
+    en: 'This item cannot be confirmed right now (incomplete evidence or a structure that does not match); nothing was changed.',
+    zhNext: '看页面上标出的原因;需要时联系负责人。',
+    enNext: 'See the reason shown beside it; ask the owner if needed.',
+  }),
+})
+
+/**
+ * The plain-language entry for a server code. PR-7: an optional second argument, the server's clamped
+ * `details.reason` token, picks a finer reading from STOCK_PREP_ERROR_REASON_PLAIN first; every existing
+ * one-argument call resolves exactly as before.
+ */
+export function stockPrepErrorPlain(code: string, reason?: string | null): StockPrepPlainEntry {
+  return (reason ? lookup(STOCK_PREP_ERROR_REASON_PLAIN, `${code}/${reason}`) : null)
+    ?? lookup(STOCK_PREP_ERROR_PLAIN, code)
+    ?? STOCK_PREP_ERROR_GENERIC
 }
 
 /**
@@ -1092,6 +1510,22 @@ export const STOCK_PREP_LARGE_BOM_ERROR_PLAIN: Record<string, StockPrepPlainEntr
   STOCK_PREP_PILOT_LARGE_LANE_REFUSED: Object.freeze({
     zh: '这是试点项目，第一期不走后台大 BOM 通道；这个作业没有写入任何数据。',
     en: 'This is a pilot project: phase 1 never takes the background large-BOM channel; this job wrote nothing.',
+  }),
+  /**
+   * PR-7 (step 4 PR-3b's job-level refusals, in the large panel's own register): the job is final for this
+   * channel while the project is governed — the holds are decided on 「拉取待确认」, never by re-approving.
+   */
+  LARGE_BOM_APPLY_PLAN_SUSPENDED: Object.freeze({
+    zh: '这个项目受分批拉取保护,作业的计划已挂起(有待拉取人员确认的项);这个作业没有写入任何数据。',
+    en: 'This project is protected by the batch refresh and the job’s plan is suspended (items await the puller); this job wrote nothing.',
+  }),
+  LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED: Object.freeze({
+    zh: '这个作业没有经过分批拉取检查;这个作业没有写入任何数据。',
+    en: 'This job was not checked by the batch refresh; this job wrote nothing.',
+  }),
+  STOCK_PREP_REFRESH_LARGE_LANE_REFUSED: Object.freeze({
+    zh: '这个项目受分批拉取保护,不走后台大 BOM 通道;这个作业没有写入任何数据。',
+    en: 'This project is protected by the batch refresh and never takes the background large-BOM channel; this job wrote nothing.',
   }),
 })
 
@@ -1136,6 +1570,149 @@ export function stockPrepExportTenantWallPlain(code: unknown): StockPrepPlainEnt
   if (typeof code !== 'string' || !STOCK_PREP_EXPORT_TENANT_WALL_CODES.includes(code)) return null
   return lookup(STOCK_PREP_ERROR_PLAIN, code)
 }
+
+/**
+ * PR-7: the export refusals of the batch refresh (plugin stock-preparation-export-gate.cjs + the retarget wall).
+ * A surface that otherwise answers every export failure with 「稍后再点一次」 — 今天要处理's per-card export —
+ * must show these instead: for `not_settled` / `state` retrying is the one instruction that never works.
+ */
+export const STOCK_PREP_EXPORT_REFRESH_GATE_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_EXPORT_BLOCKED',
+  'STOCK_PREP_EXPORT_STATE_UNREADABLE',
+  'STOCK_PREP_EXPORT_SHEET_CHANGED_SINCE_SETTLEMENT',
+  'STOCK_PREP_EXPORT_STATE_CHANGED',
+  'STOCK_PREP_EXPORT_GATE_INVALID',
+  'STOCK_PREP_REFRESH_TARGET_RETARGETED',
+])
+
+/** The plain-language entry for a refresh-gate export refusal (reason-aware), or `null` for any other code. */
+export function stockPrepExportRefreshGatePlain(code: unknown, reason?: string | null): StockPrepPlainEntry | null {
+  if (typeof code !== 'string' || !STOCK_PREP_EXPORT_REFRESH_GATE_CODES.includes(code)) return null
+  return stockPrepErrorPlain(code, reason)
+}
+
+// ---------------------------------------------------------------------------
+// 备料分批拉取第一期 step 4 PR-7 — the board's refresh stanza in words (design §13; plan §8)
+// ---------------------------------------------------------------------------
+//
+// THE BANNER (项目备料页, everyone who can open the board). One sentence per unfinished status, every one ending
+// in 「正式导出已暂停」 because that is what the server's gate does about it. `{n}` is the ONLY interpolation —
+// the open-hold count (a count of decisions, never a business quantity). Absent for a not-governed project, for a
+// complete AND settled one, and for an older backend that sends no stanza (refreshState.ts decides that).
+export const STOCK_PREP_REFRESH_BANNER_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  pending_confirmation: Object.freeze({
+    zh: '本项目有 {n} 项待拉取人员确认,正式导出已暂停。',
+    en: '{n} item(s) of this project await the puller’s confirmation; the formal export is paused.',
+    zhNext: '拉取人员在「拉取待确认」里逐项处理;处理完要重新试算。',
+    enNext: 'The puller decides them one by one on “Pull holds”, then previews again.',
+  }),
+  change_pending_review: Object.freeze({
+    zh: '本项目有变更待复核,正式导出已暂停。',
+    en: 'This project has a change awaiting review; the formal export is paused.',
+    zhNext: '请联系拉取人员。',
+    enNext: 'Contact the puller.',
+  }),
+  failed_pending_recovery: Object.freeze({
+    zh: '本项目上次写入没有正常结束,执行失败待恢复,正式导出已暂停。',
+    en: 'This project’s last write did not finish cleanly and awaits recovery; the formal export is paused.',
+    zhNext: '这不是数据源的问题。请联系平台管理员按手册恢复。',
+    enNext: 'This is not a data-source problem. Ask the platform admin to recover it per the runbook.',
+  }),
+  executed_pending_settlement: Object.freeze({
+    zh: '本项目已写入、待核对,正式导出已暂停。',
+    en: 'This project was written and awaits its check; the formal export is paused.',
+    zhNext: '拉取人员点「核对」(再试算一次),核对通过后即可导出。',
+    enNext: 'The puller presses “Check” (one more preview); the export opens once it passes.',
+  }),
+  unsettled: Object.freeze({
+    zh: '本项目已写入、待核对,正式导出已暂停。',
+    en: 'This project was written and awaits its check; the formal export is paused.',
+    zhNext: '拉取人员点「核对」(再试算一次),核对通过后即可导出。',
+    enNext: 'The puller presses “Check” (one more preview); the export opens once it passes.',
+  }),
+  confirmed_pending_execution: Object.freeze({
+    zh: '沿用关系已确认、尚未写入,正式导出已暂停。',
+    en: 'The relationship is confirmed but not written yet; the formal export is paused.',
+    zhNext: '拉取人员重新试算并写入。',
+    enNext: 'The puller previews again and writes.',
+  }),
+  executing: Object.freeze({
+    zh: '本项目正在写入,正式导出暂停到写入结束。',
+    en: 'This project is being written; the formal export is paused until the write ends.',
+    zhNext: '稍后刷新本页。',
+    enNext: 'Refresh this page shortly.',
+  }),
+  unreadable: Object.freeze({
+    zh: '分批拉取状态读取失败,正式导出已暂停。',
+    en: 'The batch-refresh state could not be read; the formal export is paused.',
+    zhNext: '稍后刷新本页;一直这样请联系平台管理员。',
+    enNext: 'Refresh this page shortly; if it persists, ask the platform admin.',
+  }),
+})
+
+/**
+ * THE THREE RENDERINGS (plan §8 「未启用 / 读取失败 / 无待处理」) — never one for another: an unreadable state is
+ * not "nothing pending", and a project the batch refresh does not govern is not "nothing pending" either.
+ * Plus the page's own 未选项目.
+ */
+export const STOCK_PREP_REFRESH_RENDERING_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  not_governed: Object.freeze({
+    zh: '未启用:本项目没有启用分批拉取(没有沿用关系,也没有待确认项)。',
+    en: 'Not enabled: this project does not use the batch refresh (no relationships and no holds).',
+    zhNext: '这里没有需要您处理的事。',
+    enNext: 'Nothing here needs you.',
+  }),
+  unreadable: Object.freeze({
+    zh: '读取失败:读不出本项目的分批拉取状态;不能判断有没有待处理项,写入和正式导出都已暂停。',
+    en: 'Unreadable: this project’s batch-refresh state could not be read; whether anything is pending is unknown, and writing and the formal export are paused.',
+    zhNext: '稍后刷新;一直这样请联系平台管理员。',
+    enNext: 'Refresh shortly; if it persists, ask the platform admin.',
+  }),
+  none_pending: Object.freeze({
+    zh: '无待处理:没有等拉取人员确认的项。',
+    en: 'Nothing pending: no item awaits the puller’s confirmation.',
+    zhNext: '本项目的分批拉取状态见项目备料页。',
+    enNext: 'The project page shows this project’s batch-refresh state.',
+  }),
+  no_project: Object.freeze({
+    zh: '还没有打开项目。',
+    en: 'No project is open yet.',
+    zhNext: '先在「项目备料」里打开一个项目。',
+    enNext: 'Open a project in “Project prep” first.',
+  }),
+})
+
+/** O-11 (design §23.3): the asymmetry of a governed project that left the pilot. */
+export const STOCK_PREP_REFRESH_NON_PILOT_ASYMMETRY: StockPrepPlainText = Object.freeze({
+  zh: '本项目已退出试点但仍受保护:图号、名称、材质、版本的变化仍会挂起整次拉取等确认;数量和规格等其他字段的变化按普通刷新直接写入,不再挂起。',
+  en: 'This project left the pilot but stays protected: a change of drawing number, name, material or version still suspends the whole pull for confirmation, while changes of quantity, spec and other fields are written by the normal refresh without suspending.',
+})
+
+/** Design §6.2's stated cost of a confirm: the legacy confirmation ledger is re-keyed. */
+export const STOCK_PREP_REFRESH_LEDGER_REKEY_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '沿用确认后,本项目其他待确认项需要重新对账后再确认。',
+  en: 'After a relationship is confirmed, this project’s other pending confirmations are reconciled again before they can be decided.',
+})
+
+/** #6565 residual: the read receipt proves pages were SERVED, not understood. */
+export const STOCK_PREP_REFRESH_RECEIPT_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '确认按钮要等这一项的每一页对照都打开看过才可用;系统只记录"页面已送达",不代表已读懂。',
+  en: 'The confirm button opens once every comparison page of this item has been opened; the system records only that a page was delivered, not that it was understood.',
+})
+
+/** After a confirm / end (E-4: `nextStep: 'preview_again'`). */
+export const STOCK_PREP_REFRESH_PREVIEW_AGAIN: StockPrepPlainEntry = Object.freeze({
+  zh: '已记录。必须重新试算,新的计划才会生效。',
+  en: 'Recorded. Preview again — the new plan takes effect only then.',
+  zhNext: '去项目备料页重新试算。',
+  enNext: 'Preview again on the project page.',
+})
+
+/** Hold-id churn (#6565 residual): a newer computation re-opened the item under a new id. */
+export const STOCK_PREP_REFRESH_ITEM_UPDATED: StockPrepPlainText = Object.freeze({
+  zh: '这一项已经更新(新的计算换了记录),请重新阅读后再处理。',
+  en: 'This item has been updated (a newer computation replaced the record); read it again, then decide.',
+})
 
 // ---------------------------------------------------------------------------
 // Confirmation-queue conflict types — 什么情况 (2026-09-10 field report).
@@ -1313,6 +1890,26 @@ export const STOCK_PREP_BOARD_ERROR_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'The project number in that request was not valid — type it again.',
     zhNext: '项目号只认字母、数字和短横线;去掉空格和中文标点再试。',
     enNext: 'A project number takes letters, digits and hyphens only — drop spaces and punctuation, then try again.',
+  }),
+  // PR-7 (PR-5 bd N4): the board READ itself refuses when the project's batch-refresh records sit elsewhere or
+  // cannot be read (plugin stock-preparation-project-board.cjs rethrows the reader's refusals). READ-shaped.
+  STOCK_PREP_REFRESH_TARGET_RETARGETED: Object.freeze({
+    zh: '这个项目的分批拉取记录在另一张备料表上(目标表改指过),项目情况没有显示。',
+    en: 'This project’s batch-refresh records sit on another stock-prep sheet (the target was re-pointed), so its status is not shown.',
+    zhNext: '请联系负责人核对项目表登记;什么都没有改动。',
+    enNext: 'Ask the owner to check the project-sheet registration; nothing was changed.',
+  }),
+  STOCK_PREP_REFRESH_TENANT_MISMATCH: Object.freeze({
+    zh: '这个项目的分批拉取记录与当前租户不一致,项目情况没有显示。',
+    en: 'This project’s batch-refresh records do not match the current tenant, so its status is not shown.',
+    zhNext: '请联系负责人核对项目表登记;什么都没有改动。',
+    enNext: 'Ask the owner to check the project-sheet registration; nothing was changed.',
+  }),
+  STOCK_PREP_REFRESH_STORE_FAILED: Object.freeze({
+    zh: '分批拉取的状态存储暂时读不出,项目情况没有显示。',
+    en: 'The batch-refresh state store could not be read just now, so this project’s status is not shown.',
+    zhNext: '稍后再刷新;一直这样请联系平台管理员(数据库可能缺迁移 102/103)。',
+    enNext: 'Refresh again shortly; if it persists, ask the platform admin (the database may lack migrations 102/103).',
   }),
 })
 
@@ -2090,6 +2687,40 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     enNext: 'Something in the source data is blocking it. Nothing was changed; you can try again later.',
   }),
   /**
+   * 备料分批拉取第一期 step 4 PR-7 (design §13, §23.8 F-19). A governed project's preview: the plan was produced
+   * and the pull is SUSPENDED — holds only a 拉取人员 decides. Not a fault, and never the source-data sentence above.
+   */
+  PLAN_SUSPENDED: Object.freeze({
+    zh: '试算完成,这次拉取已整体挂起:有等拉取人员确认的项',
+    en: 'The preview is done and this pull is suspended as a whole: some items await the puller’s confirmation',
+    zhNext: '拉取人员在「拉取待确认」里逐项处理(确认沿用、暂不处理或结束沿用关系),处理完再重新试算;什么都没有写。',
+    enNext: 'The puller decides them on “Pull holds” (confirm, keep for now, or end the relationship), then previews again; nothing was written.',
+  }),
+  PLAN_RECOVERY_PENDING: Object.freeze({
+    zh: '上次写入没有正常结束,这个项目在等恢复',
+    en: 'The last write did not finish cleanly; this project awaits recovery',
+    zhNext: '这不是数据源的问题,也不是重试能解决的。请联系平台管理员按手册恢复;什么都没有写。',
+    enNext: 'This is not a data-source problem and retrying will not fix it. Ask the platform admin to recover it per the runbook; nothing was written.',
+  }),
+  PLAN_STATE_MOVED: Object.freeze({
+    zh: '试算期间项目状态变了(一次写入刚好结束,或有人刚确认/结束了沿用关系),这次试算作废',
+    en: 'The project’s state moved during the preview (a write finished, or a relationship was just decided), so this preview is void',
+    zhNext: '请重新试算;什么都没有写。下面的技术详情里有原因代码。',
+    enNext: 'Preview again; nothing was written. The reason code is in the technical details below.',
+  }),
+  PLAN_REFRESH_STORE_UNAVAILABLE: Object.freeze({
+    zh: '分批拉取的状态存储读写失败,这次试算没有继续',
+    en: 'The batch-refresh state store could not be read or written, so this preview did not continue',
+    zhNext: '稍后再试一次;一直这样请联系平台管理员(数据库可能缺迁移 102/103)。什么都没有写。',
+    enNext: 'Try again shortly; if it persists, ask the platform admin (the database may lack migrations 102/103). Nothing was written.',
+  }),
+  PLAN_REFRESH_SCOPE_CHANGED: Object.freeze({
+    zh: '这个项目的分批拉取记录不在这张备料表上(目标表改指过,或租户/数据源对不上),这次什么都没有读',
+    en: 'This project’s batch-refresh records are not on this sheet (the target was re-pointed, or the tenant / source does not match), so nothing was read',
+    zhNext: '请联系负责人核对项目表登记;什么都没有写。',
+    enNext: 'Ask the owner to check the project-sheet registration; nothing was written.',
+  }),
+  /**
    * 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) — THE FOUR ROWS BELOW, split out of what
    * used to be a single always-the-same sentence. `classifyPlanReadFailureReason` in projectSync.ts
    * is what decides WHICH of these five keys (this one plus the four below it) a failed dry run gets;
@@ -2204,6 +2835,13 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '如果这次试算里有拿不准的行,它们就还没进「确认队列」,这次也不会写入。请找平台管理员跑一次这一步;如果试算没有拿不准的行,这一步跳过不影响写入。',
     enNext: 'If this plan held any uncertain rows, they have NOT reached the confirmation queue and will not be written this time. Ask a platform administrator to run this step. If the plan held nothing uncertain, skipping it does not affect the write.',
   }),
+  // PR-7 (R-62 ⑦): a suspended pull defers the ledger — the holds come first.
+  RECONCILE_DEFERRED_SUSPENDED: Object.freeze({
+    zh: '这次拉取已挂起,确认队列这一步先不跑',
+    en: 'This pull is suspended, so the confirmation-queue step waits',
+    zhNext: '拉取人员处理完「拉取待确认」并重新试算后,拿不准的行才会进「确认队列」(沿用确认会让队列重新对账,现在问您会白问)。',
+    enNext: 'Uncertain rows reach the confirmation queue after the puller decides “Pull holds” and previews again (a confirmed relationship re-reconciles the queue, so asking now would be asked again).',
+  }),
 
   // 3. 写入
   IMPORTED: Object.freeze({
@@ -2317,6 +2955,43 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'You chose not to write after the preview, so nothing was written',
     zhNext: '备料表已经建好,状态是「还没拉过」;需要时再按「从PLM拉取数据」,不会再建第二张表。不要的空表由拉取人员归档。',
     enNext: 'The sheet exists and reads "not pulled yet". Press 从PLM拉取数据 whenever you are ready — no second sheet is created. A pull operator archives an empty sheet nobody needs.',
+  }),
+  // PR-7 — the apply's batch-refresh refusals (plugin stock-preparation-refresh-lanes.cjs).
+  WRITE_PULL_SUSPENDED: Object.freeze({
+    zh: '这次拉取已整体挂起,没有写入',
+    en: 'This pull is suspended as a whole, so nothing was written',
+    zhNext: '有等拉取人员确认的项;拉取人员在「拉取待确认」里处理完再重新试算。这不是出错。',
+    enNext: 'Items await the puller’s confirmation; the puller decides them on “Pull holds” and previews again. This is not an error.',
+  }),
+  WRITE_BINDING_STALE: Object.freeze({
+    zh: '试算之后沿用关系变了,这份计划作废,没有写入',
+    en: 'The relationships changed after the preview, so the plan is void and nothing was written',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  WRITE_RECOVERY_PENDING: Object.freeze({
+    zh: '上次写入没有正常结束,这个项目在等恢复,没有写入',
+    en: 'The last write did not finish cleanly; this project awaits recovery and nothing was written',
+    zhNext: '这不是数据源的问题。请联系平台管理员按手册恢复。',
+    enNext: 'This is not a data-source problem. Ask the platform admin to recover it per the runbook.',
+  }),
+  WRITE_STATE_MOVED: Object.freeze({
+    zh: '试算之后项目状态变了,这次没有写入',
+    en: 'The project’s state moved after the preview, so nothing was written',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  WRITE_REFRESH_STORE_UNAVAILABLE: Object.freeze({
+    zh: '分批拉取的状态存储读写失败,写入没有继续',
+    en: 'The batch-refresh state store could not be read or written, so writing did not continue',
+    zhNext: '稍后再试一次;一直这样请联系平台管理员。技术详情里 partial 为 1 时可能已写进一部分行(不会重复写),为 0 时什么都没有写。',
+    enNext: 'Try again shortly; if it persists, ask the platform admin. When the technical details show partial 1 some rows may have landed (never written twice); partial 0 means nothing was written.',
+  }),
+  WRITE_REFRESH_SCOPE_CHANGED: Object.freeze({
+    zh: '这个项目的分批拉取记录不在这张备料表上,没有写入',
+    en: 'This project’s batch-refresh records are not on this sheet, so nothing was written',
+    zhNext: '请联系负责人核对项目表登记。',
+    enNext: 'Ask the owner to check the project-sheet registration.',
   }),
 
   // 4. 批次存档
@@ -2550,6 +3225,20 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
     en: 'Nothing was written — you chose not to after the preview, and nothing in the table changed.',
     zhNext: '备料表已经建好、还没拉过;需要时再按一次「从PLM拉取数据」。',
     enNext: 'The sheet exists and has not been pulled yet; press 从PLM拉取数据 again whenever you are ready.',
+  }),
+  // PR-7: a governed project's pull, suspended for a puller's decision — work, not a fault.
+  suspended: Object.freeze({
+    zh: '这次拉取已整体挂起 —— 有等拉取人员先确认的项,什么都没有写。',
+    en: 'This pull is suspended as a whole — some items await the puller’s confirmation, and nothing was written.',
+    zhNext: '不是出错:拉取人员在「拉取待确认」里处理完再重新试算,就会照常写入。',
+    enNext: 'This is not an error: once the puller decides them on “Pull holds” and previews again, it writes as usual.',
+  }),
+  // PR-7 (F-19): awaiting recovery — not the source, not a retry.
+  awaiting_recovery: Object.freeze({
+    zh: '上次写入没有正常结束,这个项目在等恢复;这次什么都没有写。',
+    en: 'The last write did not finish cleanly and this project awaits recovery; nothing was written this time.',
+    zhNext: '请联系平台管理员按手册恢复,不是数据源的问题。',
+    enNext: 'Ask the platform admin to recover it per the runbook; it is not a data-source problem.',
   }),
   blocked: Object.freeze({
     zh: '这次没有导入成功,数据没有变化。',

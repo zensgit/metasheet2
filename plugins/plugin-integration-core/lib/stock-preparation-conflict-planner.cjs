@@ -877,11 +877,15 @@ function duplicateGroupDiscriminator(rows) {
 // expansion's own idempotency key, a JSON object that EMBEDS its projectNo — bom-expansion makeIdempotencyKey).
 // The readers that strip the suffix do it through this ONE helper: the continuation core's claim maps (pairing
 // `baseKeyOf`), the carry route's project number and the carry executor's key-vs-rows project check (batch-refresh
-// step 4 PR-3a review round 1, V50B-16). Two key parsers do NOT strip it and fail closed on a suffixed key: the
-// pairing's `keyPathTokens` (a continuation root key => `structure_changed`) and the continuation store's
-// `parseKey` (a candidate hold's new root key => `new_root_key_unparsable`) — so a relationship whose ROOT row is
-// duplicate-resolved is not confirmable / verifiable today (read in the code; no test pins it yet — PR-3a
-// follow-up, 2026-10-26). A key without the suffix is returned unchanged; a non-string is returned as given.
+// step 4 PR-3a review round 1, V50B-16). Two key parsers do NOT strip it and fail closed on a suffixed key BY
+// DESIGN (batch-refresh step 4 PR-4, design §23.8 F-15): the pairing's `keyPathTokens` (a continuation root key
+// => `structure_changed`) and the continuation store's `parseKey` (a candidate hold's new root key =>
+// `new_root_key_unparsable`). A relationship whose ROOT row is duplicate-resolved is UNSUPPORTED: the claim maps
+// are base-keyed, so a stripped root would protect / suppress BOTH duplicate twins, one of which is an
+// independent row. The candidate detector therefore never emits a confirmable candidate on such a root (it
+// answers `candidate_ambiguous`, pairing `detectCandidates`), and the two parsers are the pinned backstops
+// (planner suite F-15a / F-15b, store suite ST-F15). A key without the suffix is returned unchanged; a non-string
+// is returned as given.
 const DUPLICATE_RESOLVED_KEY_SEPARATOR = '::duplicate:'
 function baseIdempotencyKeyOf(key) {
   if (typeof key !== 'string') return key

@@ -369,7 +369,28 @@ function makeRecordsApi({ provisioning = null } = {}) {
   const refuseOverview = (sheetId) => { if (stampedOverviewSheet(sheetId)) throw overviewReadOnlyError() }
   const api = {
     calls,
-    async queryRecords(input = {}) { calls.push(['queryRecords', input.sheetId]); return rows.filter((row) => row.sheetId === input.sheetId).map(clone) },
+    // Step-4 review follow-ups (item 11): the HOST's filter and paging semantics
+    // (packages/core-backend/src/multitable/query-service.ts `queryRecords`) — equality on `data ->> k` with
+    // String() coercion (an object as its JSON text), a `null` filter matches only rows WITHOUT the key
+    // (`data -> k IS NULL`; an explicit JSON null is a present key), a value list matches any element, then
+    // OFFSET / LIMIT. Rows keep insertion order (the host orders by id text; no suite depends on cross-page
+    // order). `search` / `orderBy` are not modelled.
+    async queryRecords(input = {}) {
+      calls.push(['queryRecords', input.sheetId])
+      const filters = input.filters && typeof input.filters === 'object' ? input.filters : {}
+      const textOf = (value) => (typeof value === 'object' ? JSON.stringify(value) : String(value))
+      const hit = (row) => Object.entries(filters).every(([key, wanted]) => {
+        const data = row.data || {}
+        const present = Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined
+        if (wanted === null || wanted === undefined) return !present
+        if (!present || data[key] === null) return false
+        const text = textOf(data[key])
+        return Array.isArray(wanted) ? wanted.map(String).includes(text) : text === String(wanted)
+      })
+      const matched = rows.filter((row) => row.sheetId === input.sheetId && hit(row))
+      const offset = Number.isInteger(input.offset) ? input.offset : 0
+      return matched.slice(offset, Number.isInteger(input.limit) ? offset + input.limit : undefined).map(clone)
+    },
     async createRecord(input = {}) { calls.push(['createRecord', input.sheetId]); refuseOverview(input.sheetId); const created = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }; rows.push(created); return clone(created) },
     async patchRecord(input = {}) { calls.push(['patchRecord', input.sheetId]); refuseOverview(input.sheetId); return { id: input.recordId, sheetId: input.sheetId, version: 2, data: { ...(input.changes || {}) } } },
     // S3 fix round 1 (R3): the plugin SDK delete (since fix round 2 the overview deletes through its port).
@@ -496,6 +517,9 @@ function mountProjectSheetRoutes({
   sourceBindingStore = null,
   configExtras = {},
   serviceExtras = {},
+  // PR-4: options for the refresh governance wiring (e.g. `{ lockOnRefreshDb: true }`: one fake db for the store
+  // and the REAL lock, so the decision routes' in-transaction bump runs on the store's handle).
+  refreshOptions = {},
 } = {}) {
   const staging = `${tenantId}:integration-core`
   const routes = new Map()
@@ -579,7 +603,7 @@ function mountProjectSheetRoutes({
   // `stockPreparationRefreshGovernance` in `serviceExtras` (even to null: an unwired deployment) opts out.
   const refresh = Object.prototype.hasOwnProperty.call(serviceExtras, 'stockPreparationRefreshGovernance')
     ? null
-    : require('./stock-preparation-refresh-governance-wiring.cjs').wireRefreshGovernance(services)
+    : require('./stock-preparation-refresh-governance-wiring.cjs').wireRefreshGovernance(services, refreshOptions)
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,

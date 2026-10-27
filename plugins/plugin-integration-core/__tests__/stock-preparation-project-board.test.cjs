@@ -190,6 +190,8 @@ function mount({
   // PR-5: `false` mounts WITHOUT the refresh governance / continuation store (a deployment that has not wired them):
   // the board's `refresh` stanza must then say unreadable by name and its pending counts cannot be trusted.
   wireRefreshGovernance = true,
+  // Step-4 review follow-ups (item 5): an optional wrapper over the wired governance service (identity when absent).
+  wrapRefreshGovernance = null,
   // `undefined` = the action is bound to the caller's own canonical fill table (the normal case).
   // `null` = nothing is bound at all. An object = whatever the deployment configured, verbatim.
   boundTarget,
@@ -493,9 +495,13 @@ function mount({
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
   services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
+  if (wireRefreshGovernance !== false) {
+    withRefreshGovernance(services)
+    if (typeof wrapRefreshGovernance === 'function') services.stockPreparationRefreshGovernance = wrapRefreshGovernance(services.stockPreparationRefreshGovernance)
+  }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: wireRefreshGovernance === false ? services : withRefreshGovernance(services),
+    services,
     logger: { info() {}, warn() {}, error() {} },
   })
   return {
@@ -1710,6 +1716,37 @@ async function theBoardCarriesTheRefreshStateAndUnionsTheOpenHolds() {
     assert.equal(stanza.exportAllowed, false)
     assert.deepEqual(stanza.unreadable, { reason: 'store_read_failed', store: 'governance', operation: 'reader_absent' })
     assert.equal(res.body.data.ledgerReady, false, 'B-PR5: an unwired hold store is never "no holds"')
+  }
+  // Step-4 review follow-ups (item 5, #6566 N4): a READER REFUSAL (here 409 RETARGETED — a stale hold for this
+  // project number on ANOTHER sheet) is the board's `unreadable` stanza with the overview's token
+  // `consult_refused`, not a 409 for the whole board (R-60 ⑤: a read surface that cannot read says 状态读取失败).
+  // Values-free: nothing of the refusal (no sheet id, no hold value) reaches the body.
+  {
+    const OTHER_SHEET = 'sheet_board_pr5_other_sheet'
+    const h = mount()
+    await h.services.refreshGovernanceEnv.seedHolds({ tenantId: TENANT_A, sheetId: OTHER_SHEET, projectNo: PROJECT_A_NO }, [hold])
+    h.auditAppends.length = 0
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, `B-PR5: a reader refusal does not fail the board — ${JSON.stringify(res.body)}`)
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.deepEqual(stanza, { readable: false, status: 'unreadable', statusLabel: '状态读取失败', governed: 'unknown', exportAllowed: false, settled: false, counts: null, unreadable: { reason: 'store_read_failed', store: 'governance', operation: 'consult_refused' } })
+    assert.ok(h.auditAppends.some((entry) => entry.mode === 'operator_project_board'), 'B-PR5: the board read is audited')
+    const body = JSON.stringify(res.body)
+    assert.equal(body.includes(OTHER_SHEET), false, 'B-PR5: the other sheet id never crosses the board')
+    assert.equal(body.includes('D100-01'), false, 'B-PR5: no hold value crosses the board')
+    assert.equal(body.includes('RETARGETED'), false, 'B-PR5: the refusal itself is not echoed')
+    // D-3 is untouched: the reader itself still refuses (the export and every lane keep their 409).
+    await assert.rejects(
+      h.services.stockPreparationRefreshGovernance.readRefreshState({ tenantId: TENANT_A, projectNo: PROJECT_A_NO, sheetId: MAIN_SHEET_A }),
+      (error) => error.status === 409 && /RETARGETED/.test(error.code),
+    )
+  }
+  // ...while any OTHER reader throw still fails the board (the fixed values-free 500), never a quiet stanza.
+  {
+    const h = mount({ wrapRefreshGovernance: (governance) => Object.freeze({ ...governance, readRefreshState: async () => { throw new Error('reader defect ZZBOARDSENTINELZZ') } }) })
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 500, JSON.stringify(res.body))
+    assert.equal(JSON.stringify(res.body).includes('ZZBOARDSENTINELZZ'), false)
   }
 }
 

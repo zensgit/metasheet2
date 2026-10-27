@@ -530,7 +530,9 @@ test('L11 constants and vocabularies are pinned', () => {
   // PR-0 (batch-refresh phase 2 step 4): `carry_confirm` names the carry-confirm lease and its post-release bump.
   // Batch-refresh step 3 PR B: the pilot enable holds the lease (purpose) after bumping the generation (reason).
   assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
-  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable'])
+  // Batch-refresh step 4 PR-4: the continuation confirm / re-confirm and end bump INSIDE their transaction
+  // (bumpGenerationWithin) — reasons only, never a purpose (a decision never holds the lease).
+  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {
     WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
     PLAN_SUPERSEDED: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED',
@@ -1021,6 +1023,213 @@ test('L19 bump with the absent-row expectation ({ null, 0 }): its INSERT loses t
   assert.equal(row().generation, 0, 'nothing bumped: the row is the acquire\'s')
   assert.equal(row().lease_run_id, 'swl-l19-apply')
   assert.equal(row().generation_reason, null)
+})
+
+// ── L20 (batch-refresh step 4 PR-4, design §8.1 / O-17 / F-2): THE IN-TRANSACTION BUMP ─────────────────
+// `bumpGenerationWithin(trx, scope, { reason, tenantId })` mirrors every branch of `bumpGeneration` on the
+// caller's transaction handle: every statement runs on the handle (never in autocommit), the row-lock wait is
+// bounded FIRST, and every refusal is a throw that rolls the caller back.
+
+// Run the bump the way the continuation store does: inside the fake db's transaction, on its handle.
+const bumpWithin = (env, reason = 'continuation_confirm', tenantId = 'tenant_swl_l20') => env.db.transaction((trx) => env.lock.bumpGenerationWithin(trx, env.scope, { reason, tenantId }))
+
+test('L20a free row: +1, a fresh token, an INTEGER fencingEpoch (O-17), the reason and tenant recorded; every statement on the transaction handle, the bound set first', async () => {
+  const env = setup({ rowLockWaitMs: 2345 })
+  const { lock, scope, row, db } = env
+  const first = await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  db.log.length = 0
+  const bumped = await bumpWithin(env, 'continuation_confirm')
+  assert.deepEqual(db.log.map(([m, a]) => (m === 'setLocalLockTimeout' ? `setLocalLockTimeout:${a.ms}` : m)), ['transaction', 'setLocalLockTimeout:2345', 'selectOne', 'updateRow'], 'bound first, then the read, then ONE CAS — all on the handle')
+  assert.equal(bumped.scopeKey, scope)
+  assert.equal(bumped.generation, first.generation + 1)
+  assert.notEqual(bumped.generationToken, first.generationToken)
+  assert.ok(Number.isInteger(bumped.fencingEpoch), 'fencingEpoch is an integer')
+  assert.equal(bumped.fencingEpoch, row().fencing_epoch)
+  assert.equal(row().generation_token, bumped.generationToken)
+  assert.equal(row().generation_reason, 'continuation_confirm')
+  assert.equal(row().tenant_id, 'tenant_swl_l20')
+  const ended = await bumpWithin(env, 'continuation_end')
+  assert.equal(ended.generation, bumped.generation + 1)
+  assert.equal(row().generation_reason, 'continuation_end')
+  assert.equal((await lock.readState(scope)).generationReason, 'continuation_end', 'readState admits the new reasons')
+  // The default bound is the pinned constant.
+  const env2 = setup()
+  await bumpWithin(env2)
+  assert.ok(env2.db.log.some(([m, a]) => m === 'setLocalLockTimeout' && a.ms === lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS))
+})
+
+test('L20b absent row: INSERT generation 1 / epoch 0 with the reason; a 23505 on that INSERT (another session created the row) is 409 contention, never busy and never a retry', async () => {
+  const env = setup()
+  const { scope, row, db } = env
+  const bumped = await bumpWithin(env)
+  assert.deepEqual({ generation: bumped.generation, fencingEpoch: bumped.fencingEpoch }, { generation: 1, fencingEpoch: 0 })
+  assert.equal(row().generation_reason, 'continuation_confirm')
+  assert.equal(row().lease_id, null)
+  // A second session's INSERT wins the race: ours is 23505 inside the transaction.
+  const fresh = setup()
+  fresh.db.faults.insertOne = kit.uniqueViolation()
+  await assert.rejects(() => bumpWithin(fresh), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.equal(error.status, 409)
+    assert.equal(error.details.reason, 'contention')
+    return true
+  })
+  assert.equal(fresh.db.log.filter(([m]) => m === 'insertOne').length, 1, 'one INSERT, no retry inside the transaction')
+  assert.equal(fresh.row(), null, 'nothing written by the loser')
+  void scope
+  void db
+})
+
+test('L20c a LIVE lease (grace included): 409 WRITE_LOCKED, the holder named, no statement after the read, nothing moved', async () => {
+  const env = setup()
+  const { lock, scope, row, clock, db } = env
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l20c' })
+  const before = row()
+  for (const advance of [0, TTL + GRACE - 1]) {
+    clock.advance(advance)
+    db.log.length = 0
+    await assert.rejects(() => bumpWithin(env), (error) => {
+      assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+      assert.equal(error.status, 409)
+      assert.equal(error.details.holderPurpose, 'small_apply')
+      assert.equal(error.details.reason, undefined, 'a live holder is a writer, not contention')
+      return true
+    })
+    assert.deepEqual(db.log.map(([m]) => m), ['transaction', 'setLocalLockTimeout', 'selectOne'], 'refused after the read, before any write')
+    assert.deepEqual(row(), before, 'nothing moved')
+  }
+})
+
+test('L20d an ABANDONED lease (beyond expiry + grace): the pinned clear-and-bump CAS — lease columns NULL, epoch + 1, the interruption recorded, generation + 1 — and the stalled holder can no longer write', async () => {
+  const env = setup()
+  const { lock, scope, row, clock } = env
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const grant = await lock.acquire(scope, { purpose: 'carry_confirm', runId: 'swl-l20d-holder' })
+  clock.advance(TTL + GRACE)
+  const bumped = await bumpWithin(env, 'continuation_confirm')
+  const after = row()
+  assert.equal(bumped.generation, 2)
+  assert.equal(bumped.fencingEpoch, grant.fencingEpoch + 1)
+  assert.equal(after.lease_id, null)
+  assert.equal(after.lease_expires_at, null)
+  assert.equal(after.lease_purpose, null)
+  assert.equal(after.fencing_epoch, grant.fencingEpoch + 1)
+  assert.equal(after.last_interrupted_purpose, 'carry_confirm')
+  assert.equal(after.last_interrupted_run_id, 'swl-l20d-holder')
+  assert.equal(typeof after.last_interrupted_at, 'string')
+  assert.equal(after.generation_reason, 'continuation_confirm')
+  const guard = lock.createGuard(grant)
+  await assert.rejects(() => guard.beforeWrite(), rejectsWith(PROJECT_WRITE_ERROR_CODES.LEASE_LOST, 409))
+  // The CAS is pinned to the observed seq: a holder that renewed between the read and the CAS keeps its lease.
+  const env2 = setup()
+  await env2.lock.bumpGeneration(env2.scope, { reason: 'small_preview' })
+  const grant2 = await env2.lock.acquire(env2.scope, { purpose: 'small_apply', runId: 'swl-l20d-renewer' })
+  env2.clock.advance(TTL + GRACE)
+  const guard2 = env2.lock.createGuard(grant2)
+  env2.db.pauses.updateRow = async (args) => {
+    if (args.set && args.set.fencing_epoch === grant2.fencingEpoch + 1) {
+      delete env2.db.pauses.updateRow
+      await guard2.heartbeat()
+    }
+  }
+  await assert.rejects(() => bumpWithin(env2), rejectsWith(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 409))
+  assert.equal(env2.row().lease_id, grant2.leaseId, 'the renewed holder keeps its lease')
+  assert.equal(env2.row().generation, 1, 'nothing bumped')
+})
+
+test('L20e 55P03 on the abandoned clear (the stalled holder\'s fenced write is in flight): 409 WRITE_LOCKED holder_in_write within the bound, nothing moved', async () => {
+  const env = setup({ rowLockWaitMs: 1500 })
+  const { lock, scope, row, clock, db } = env
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l20e-holder' })
+  clock.advance(TTL + GRACE)
+  const before = row()
+  failBoundedUpdateWith55P03(db, (set) => set.fencing_epoch === grant.fencingEpoch + 1)
+  await assert.rejects(() => bumpWithin(env), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.equal(error.status, 409)
+    assert.equal(error.details.reason, 'holder_in_write')
+    assert.equal(error.details.holderPurpose, 'small_apply')
+    assert.equal(error.details.retryAfterMs, 1500)
+    return true
+  })
+  assert.deepEqual(row(), before, 'nothing moved')
+  delete db.faults.updateRow
+})
+
+test('L20f a CAS that matches nothing is re-read ONCE on the handle: a holder that took the sheet meanwhile is named (WRITE_LOCKED), anything else is contention — never a second CAS', async () => {
+  // (1) free-row CAS lost to an acquire that landed between the read and the CAS -> WRITE_LOCKED, the holder named.
+  const env = setup()
+  const { lock, scope, row, db } = env
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const other = kit.createInMemoryProjectWriteLock({ db, clock: env.clock }).lock
+  let raced = false
+  db.pauses.updateRow = async (args) => {
+    if (!raced && args.where && args.where.lease_id === null) {
+      raced = true
+      delete db.pauses.updateRow
+      await other.acquire(scope, { purpose: 'small_apply', runId: 'swl-l20f-apply' })
+    }
+  }
+  await assert.rejects(() => bumpWithin(env), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.equal(error.details.holderPurpose, 'small_apply')
+    assert.equal(error.details.reason, undefined)
+    return true
+  })
+  assert.equal(db.log.filter(([m]) => m === 'updateRow').length, 2, 'the bump\'s one CAS plus the acquire\'s')
+  assert.equal(row().generation, 1, 'nothing bumped')
+  assert.equal(row().lease_run_id, 'swl-l20f-apply')
+  // (2) free-row CAS lost to a concurrent bump (token moved, no holder) -> contention.
+  const env2 = setup()
+  await env2.lock.bumpGeneration(env2.scope, { reason: 'small_preview' })
+  const other2 = kit.createInMemoryProjectWriteLock({ db: env2.db, clock: env2.clock }).lock
+  let raced2 = false
+  env2.db.pauses.updateRow = async (args) => {
+    if (!raced2 && args.set && args.set.generation_reason === 'continuation_end') {
+      raced2 = true
+      delete env2.db.pauses.updateRow
+      await other2.bumpGeneration(env2.scope, { reason: 'small_preview' })
+    }
+  }
+  await assert.rejects(() => bumpWithin(env2, 'continuation_end'), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.equal(error.details.reason, 'contention')
+    return true
+  })
+  assert.equal(env2.row().generation, 2, 'only the other bump landed')
+  assert.equal(env2.row().generation_reason, 'small_preview')
+})
+
+test('L20g an unknown reason, a missing handle and a blank scope are refused before any statement; bumpGeneration itself is unchanged by the new reasons', async () => {
+  const env = setup()
+  const { lock, scope, db } = env
+  db.log.length = 0
+  await assert.rejects(() => env.db.transaction((trx) => lock.bumpGenerationWithin(trx, scope, { reason: 'made_up' })), rejectsWith(PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 500))
+  await assert.rejects(() => lock.bumpGenerationWithin({ selectOne() {} }, scope, { reason: 'continuation_confirm' }), (error) => error.code === PROJECT_WRITE_ERROR_CODES.UNAVAILABLE && error.details.reason === 'transaction_handle')
+  await assert.rejects(() => lock.bumpGenerationWithin(db, scope, { reason: 'continuation_confirm' }), (error) => error.code === PROJECT_WRITE_ERROR_CODES.UNAVAILABLE && error.details.reason === 'transaction_handle', 'the autocommit helper is not a transaction handle')
+  await assert.rejects(() => env.db.transaction((trx) => lock.bumpGenerationWithin(trx, '', { reason: 'continuation_confirm' })), rejectsWith(PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 500))
+  assert.deepEqual(db.log.filter(([m]) => ['selectOne', 'insertOne', 'updateRow'].includes(m)), [], 'no statement')
+  // The autocommit bump accepts the new reasons too (readState filters by the same closed list).
+  const bumped = await lock.bumpGeneration(scope, { reason: 'continuation_end' })
+  assert.equal(bumped.generation, 1)
+  assert.equal((await lock.readState(scope)).generationReason, 'continuation_end')
+})
+
+test('L20h a store failure inside the bump is 503 STORE_FAILED (bump, partial:false) — the SET LOCAL, the read and the CAS each', async () => {
+  for (const method of ['setLocalLockTimeout', 'selectOne', 'updateRow']) {
+    const env = setup()
+    await env.lock.bumpGeneration(env.scope, { reason: 'small_preview' })
+    env.db.faults[method] = Object.assign(new Error('synthetic'), { code: '08006' })
+    await assert.rejects(() => bumpWithin(env), (error) => {
+      assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.STORE_FAILED, method)
+      assert.equal(error.status, 503, method)
+      assert.deepEqual(error.details, { operation: 'bump', sqlState: '08006', partial: false }, method)
+      return true
+    })
+    assert.equal(env.row().generation, 1, `${method}: nothing moved`)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-write-lock.test.cjs', tests, { passLine: '✓ stock-preparation-project-write-lock' })

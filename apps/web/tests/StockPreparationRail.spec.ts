@@ -147,7 +147,16 @@ const ACTORS: RailActor[] = [
     name: 'stock-prep:admin',
     permissions: ['stock-prep:read', 'stock-prep:admin'],
     roles: [],
-    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help'],
+    // PR-7 (R-62 ①): 拉取待确认 is PULL tier, which `stock-prep:admin` satisfies on the server's ladder.
+    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue', 'getting-started', 'install', 'ops', 'help'],
+  },
+  {
+    // 拉取人员 (pull ∧ operate ∧ read, R-33) — 【工作】 in full INCLUDING 拉取待确认 (PR-7, R-62 ①: the pull code
+    // now re-tiers exactly this one rail item); nothing from 【部署与接入】.
+    name: '拉取人员 (read+operate+pull)',
+    permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'],
+    roles: [],
+    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue', 'help'],
   },
   {
     // 平台管理员 — everything, 深度工具's seven included.
@@ -155,7 +164,7 @@ const ACTORS: RailActor[] = [
     permissions: [],
     roles: ['admin'],
     keys: [
-      'home', 'project-board', 'project-query', 'confirmation-queue',
+      'home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue',
       'getting-started', 'install', 'ops',
       ...LEGACY_MVP_VIEW_KEYS,
       'help',
@@ -169,7 +178,7 @@ const ACTORS: RailActor[] = [
     permissions: ['integration:admin'],
     roles: [],
     keys: [
-      'home', 'project-board', 'project-query', 'confirmation-queue',
+      'home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue',
       'getting-started', 'install', 'ops',
       ...LEGACY_MVP_VIEW_KEYS,
       'help',
@@ -845,7 +854,8 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     ;(root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLButtonElement).click()
     await flushUi()
     const tabs = [...root.querySelectorAll('[role="tab"]')] as HTMLElement[]
-    expect(tabs.length, '8 常驻 + 7 折叠').toBe(15)
+    // PR-7: 8 -> 9 常驻 (拉取待确认, 【工作】 last).
+    expect(tabs.length, '9 常驻 + 7 折叠').toBe(16)
     for (const tab of tabs) {
       const refs = String(tab.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean)
       expect(refs.length, `${tab.dataset.testid} 必须借组标题 + 自己两个 id`).toBe(2)

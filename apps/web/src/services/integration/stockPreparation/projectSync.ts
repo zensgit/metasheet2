@@ -116,6 +116,18 @@ export type StockPreparationProjectSyncReason =
   // Its sibling: the server could not READ the pilot marker (503) — also a failure, fail closed.
   | 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT'
   | 'PLAN_PILOT_STATE_UNREADABLE'
+  // 备料分批拉取第一期 step 4 PR-7 (design §13, §23.8 F-19). SUSPENDED: a governed project's preview found holds only
+  // a 拉取人员 decides (on 「拉取待确认」) — the plan WAS produced, so the step is OK with the counts, and the write
+  // SKIPs. RECOVERY_PENDING: an earlier write did not finish ("awaiting recovery" — never the source-data sentence of
+  // PLAN_NOT_APPLYABLE). STATE_MOVED: 409, a write finished / a relationship was decided during this preview
+  // ("preview again", the reason shown — never 「没能连上取数」). REFRESH_STORE_UNAVAILABLE: the batch-refresh store
+  // answered 503/501 (not the transient source sentence). REFRESH_SCOPE_CHANGED: the records sit on another sheet /
+  // tenant / source binding (409, nothing read).
+  | 'PLAN_SUSPENDED'
+  | 'PLAN_RECOVERY_PENDING'
+  | 'PLAN_STATE_MOVED'
+  | 'PLAN_REFRESH_STORE_UNAVAILABLE'
+  | 'PLAN_REFRESH_SCOPE_CHANGED'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -129,6 +141,9 @@ export type StockPreparationProjectSyncReason =
   // is no later in which the SAME caller's 403 becomes a 200, and telling them to retry would be a
   // lie.
   | 'RECONCILE_NOT_PERMITTED'
+  // PR-7 (R-62 ⑦): a SUSPENDED pull skips the ledger reconcile — the holds are decided first, and a confirm re-keys
+  // the legacy ledger (design §6.2), so asking the floor now would be asked again.
+  | 'RECONCILE_DEFERRED_SUSPENDED'
   // 3. 写入
   | 'IMPORTED'
   | 'ALREADY_UP_TO_DATE'
@@ -159,6 +174,16 @@ export type StockPreparationProjectSyncReason =
   // S2 (R-36, Q4): the puller looked at the preview of a freshly created sheet and chose not to write.
   // Nothing was written; the new sheet stays (empty, 「还没拉过」) — there is no 「撤销新建」.
   | 'WRITE_NOT_CONFIRMED'
+  // PR-7 — the apply's batch-refresh refusals (plugin stock-preparation-refresh-lanes.cjs), each with its own next
+  // step: PULL_SUSPENDED (a SKIP — holds to decide, nothing written by construction), BINDING_STALE / STATE_MOVED
+  // (preview again), RECOVERY_PENDING (awaiting recovery), REFRESH_STORE_UNAVAILABLE (503/501; "may have landed"
+  // only on details.partial === true), REFRESH_SCOPE_CHANGED (the records sit elsewhere).
+  | 'WRITE_PULL_SUSPENDED'
+  | 'WRITE_BINDING_STALE'
+  | 'WRITE_RECOVERY_PENDING'
+  | 'WRITE_STATE_MOVED'
+  | 'WRITE_REFRESH_STORE_UNAVAILABLE'
+  | 'WRITE_REFRESH_SCOPE_CHANGED'
   // 4. 批次存档
   | 'BATCH_ARCHIVED'
   | 'BATCH_ALREADY_ARCHIVED'
@@ -251,6 +276,10 @@ export const STOCK_PREPARATION_DRY_RUN_STATUSES: readonly string[] = Object.free
   'not_found',
   'large_bom_bounded',
   'failed',
+  // 备料分批拉取第一期 step 4 PR-3a (server `dryRunStatus` / the preview's recovery answer) — learned by PR-7. Before,
+  // both clamped to `other` and read as PLAN_NOT_APPLYABLE's source-data sentence.
+  'suspended',
+  'recovery_pending',
 ])
 
 /** The apply status vocabulary (`applyStatus()` in stock-preparation-apply-writer.cjs). */
@@ -479,6 +508,10 @@ export type StockPreparationProjectSyncVerdict =
   | 'held'
   // S2: the operator declined the write after the preview. Not `blocked` — nothing refused anything.
   | 'not_written'
+  // PR-7: a governed project's pull is suspended until a 拉取人员 decides its holds. Human work, not a fault.
+  | 'suspended'
+  // PR-7 (F-19): an earlier write of a governed project did not finish; the project waits for recovery.
+  | 'awaiting_recovery'
   | 'blocked'
   | 'not_run'
 
@@ -515,6 +548,12 @@ export interface StockPreparationProjectSyncReport {
   /** True when no step FAILed. A run of OK + SKIP passes — held is not broken. */
   pass: boolean
   failedStepId: StockPreparationProjectSyncStepId | null
+  /**
+   * PR-7: the batch-refresh counts this run saw (values-free integers): the preview's `refreshHold` stanza
+   * (`holdCount` / `confirmableCount`) or the apply refusal's `holdCount`, and the recovery stanza's
+   * `openExecutions`. `null` for every not-governed run (the server sends no stanza).
+   */
+  refresh: { holdCount: number | null; confirmableCount: number | null; openExecutions: number | null } | null
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +703,39 @@ export const STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON = 'contention'
 export const STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED_CODE = 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED'
 export const STOCK_PREP_PILOT_STATE_UNREADABLE_CODE = 'STOCK_PREP_PILOT_STATE_UNREADABLE'
 
+/**
+ * 备料分批拉取第一期 step 4 — the batch-refresh codes a pull can meet (plugin stock-preparation-refresh-lanes.cjs
+ * REFRESH_LANE_ERROR_CODES, the continuation store and the governance reader). PR-7 gives each its own reason.
+ */
+export const STOCK_PREP_PULL_SUSPENDED_CODE = 'STOCK_PREP_PULL_SUSPENDED'
+export const STOCK_PREP_REFRESH_BINDING_STALE_CODE = 'STOCK_PREP_REFRESH_BINDING_STALE'
+export const STOCK_PREP_REFRESH_RECOVERY_PENDING_CODE = 'STOCK_PREP_REFRESH_RECOVERY_PENDING'
+export const STOCK_PREP_PULL_STATE_MOVED_CODE = 'STOCK_PREP_PULL_STATE_MOVED'
+export const STOCK_PREP_REFRESH_STORE_UNAVAILABLE_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_REFRESH_STORE_FAILED',
+  'STOCK_PREP_REFRESH_STORE_UNAVAILABLE',
+  'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED',
+])
+export const STOCK_PREP_REFRESH_SCOPE_CHANGED_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_REFRESH_TARGET_RETARGETED',
+  'STOCK_PREP_REFRESH_TENANT_MISMATCH',
+  'STOCK_PREP_REFRESH_SOURCE_BINDING_SPLIT',
+])
+
+/**
+ * PR-7: the apply step's batch-refresh refusals; `null` for every other failure. Checked AFTER the write-lock
+ * classifier (unchanged). PULL_SUSPENDED is a refusal before any write by construction (`details.partial: false`).
+ */
+export function classifyRefreshApplyFailure(errorCode: string | null): StockPreparationProjectSyncReason | null {
+  if (errorCode === STOCK_PREP_PULL_SUSPENDED_CODE) return 'WRITE_PULL_SUSPENDED'
+  if (errorCode === STOCK_PREP_REFRESH_BINDING_STALE_CODE) return 'WRITE_BINDING_STALE'
+  if (errorCode === STOCK_PREP_REFRESH_RECOVERY_PENDING_CODE) return 'WRITE_RECOVERY_PENDING'
+  if (errorCode === STOCK_PREP_PULL_STATE_MOVED_CODE) return 'WRITE_STATE_MOVED'
+  if (errorCode && STOCK_PREP_REFRESH_STORE_UNAVAILABLE_CODES.includes(errorCode)) return 'WRITE_REFRESH_STORE_UNAVAILABLE'
+  if (errorCode && STOCK_PREP_REFRESH_SCOPE_CHANGED_CODES.includes(errorCode)) return 'WRITE_REFRESH_SCOPE_CHANGED'
+  return null
+}
+
 /** The server's `details.reason` when a dry-run token was minted UNBOUND (review round 2, F6). */
 export const STOCK_PREP_PROJECT_TOKEN_UNBOUND_REASON = 'token_unbound'
 /** The lock-not-wired code: it is refused before any lock IO, so it never follows a write. */
@@ -726,6 +798,13 @@ export function classifyPlanReadFailureReason(
     return context.detailReason === STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON ? 'PLAN_WRITE_LOCK_BUSY' : 'PLAN_PROJECT_WRITE_LOCKED'
   }
   if (errorCode && STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES.includes(errorCode)) return 'PLAN_WRITE_LOCK_UNAVAILABLE'
+  // PR-7 (F-19): the batch-refresh refusals BY CODE, ahead of the status rules — a 409 STATE_MOVED is "preview
+  // again" (never PLAN_READ_FAILED_UNKNOWN's 「截图发给管理员」), a 503 store failure is not the transient source
+  // sentence, a retargeted record is "nothing was read".
+  if (errorCode === STOCK_PREP_PULL_STATE_MOVED_CODE) return 'PLAN_STATE_MOVED'
+  if (errorCode === STOCK_PREP_REFRESH_RECOVERY_PENDING_CODE) return 'PLAN_RECOVERY_PENDING'
+  if (errorCode && STOCK_PREP_REFRESH_STORE_UNAVAILABLE_CODES.includes(errorCode)) return 'PLAN_REFRESH_STORE_UNAVAILABLE'
+  if (errorCode && STOCK_PREP_REFRESH_SCOPE_CHANGED_CODES.includes(errorCode)) return 'PLAN_REFRESH_SCOPE_CHANGED'
   if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE) return 'PLAN_DRY_RUN_BUSY'
   if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE) return 'PLAN_DRY_RUN_INTERRUPTED'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
@@ -745,7 +824,7 @@ export function classifyPlanReadFailureReason(
  */
 export function classifyPlanStep(
   index: number,
-  plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number> } | null,
+  plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number>; refreshHold?: unknown; refreshRecovery?: unknown } | null,
   options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean; detailReason?: string | null } = {},
 ): StockPreparationProjectSyncStepResult {
   if (options.malformed) {
@@ -755,6 +834,8 @@ export function classifyPlanStep(
     const status = options.status ?? 0
     const detail: Record<string, string | number> = { status }
     if (options.errorCode) detail.code = options.errorCode
+    // PR-7 (F-19 "show the reason"): the server's clamped `details.reason` token rides to the step detail.
+    if (options.detailReason) detail.reason = options.detailReason
     const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true, detailReason: options.detailReason ?? null })
     return result(index, 'dry-run', 'fail', reason, detail)
   }
@@ -769,11 +850,27 @@ export function classifyPlanStep(
     manualConfirm: planned.manualConfirm,
   }
 
+  // PR-7 (F-19): AWAITING RECOVERY — first, in the server's own precedence (the preview answers `recovery_pending`
+  // over not_found / large_bom_bounded, table-actions.cjs). A FAIL, with its own sentence: not the source-data one.
+  if (status === 'recovery_pending') {
+    const recovery = refreshRecoveryOf(plan)
+    const detail = { ...base }
+    if (recovery && recovery.openExecutions !== null) detail.openExecutions = recovery.openExecutions
+    return result(index, 'dry-run', 'fail', 'PLAN_RECOVERY_PENDING', detail)
+  }
   // A project number the source does not know. Almost always a typo, occasionally a project that has
   // not reached PLM yet — either way it is something for a person to check, not a broken system.
   if (status === 'not_found') return result(index, 'dry-run', 'skip', 'PLAN_PROJECT_NOT_FOUND', base)
   // The BOM is too large for an interactive expansion; the background channel owns it.
   if (status === 'large_bom_bounded') return result(index, 'dry-run', 'skip', 'PLAN_LARGE_BOM_BOUNDED', base)
+  // PR-7 (design §13 "step ① SUSPENDED with counts"): the plan WAS produced — the step is OK, the write SKIPs.
+  if (status === 'suspended') {
+    const hold = refreshHoldOf(plan)
+    const detail = { ...base }
+    if (hold && hold.holdCount !== null) detail.holdCount = hold.holdCount
+    if (hold && hold.confirmableCount !== null) detail.confirmableCount = hold.confirmableCount
+    return result(index, 'dry-run', 'ok', 'PLAN_SUSPENDED', detail)
+  }
   if (plan.canApply !== true) return result(index, 'dry-run', 'fail', 'PLAN_NOT_APPLYABLE', base)
   if (planned.manualConfirm > 0 || status === 'manual_confirm_required') {
     return result(index, 'dry-run', 'ok', 'PLAN_HELD_FOR_CONFIRMATION', base)
@@ -791,10 +888,13 @@ export function summarizeProjectSync(
     written: StockPreparationProjectSyncReport['written']
     missingComponents: StockPreparationProjectSyncReport['missingComponents']
     missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason']
+    /** PR-7: the batch-refresh counts the run saw; absent = none (every not-governed run). */
+    refresh?: StockPreparationProjectSyncReport['refresh']
   },
 ): StockPreparationProjectSyncReport {
   const failed = steps.find((step) => step.status === 'fail') ?? null
   const write = steps.find((step) => step.id === 'apply') ?? null
+  const plan = steps.find((step) => step.id === 'dry-run') ?? null
   const imported = write?.status === 'ok' && write.reason === 'IMPORTED'
   const upToDate = write?.status === 'ok' && write.reason === 'ALREADY_UP_TO_DATE'
 
@@ -806,6 +906,10 @@ export function summarizeProjectSync(
   else if (write?.reason === 'WRITE_PARTIAL') verdict = 'partial'
   else if (write?.reason === 'WRITE_HELD_FOR_CONFIRMATION') verdict = 'held'
   else if (write?.reason === 'WRITE_NOT_CONFIRMED') verdict = 'not_written'
+  // PR-7: a suspended pull (at the preview, or refused at the apply) is human work for a puller, not a fault;
+  // an awaiting-recovery project says so instead of 「这次没有导入成功」.
+  else if (plan?.reason === 'PLAN_SUSPENDED' || write?.reason === 'WRITE_PULL_SUSPENDED') verdict = 'suspended'
+  else if (plan?.reason === 'PLAN_RECOVERY_PENDING' || write?.reason === 'WRITE_RECOVERY_PENDING') verdict = 'awaiting_recovery'
   else if (steps.length > 0) verdict = 'blocked'
 
   return {
@@ -824,6 +928,7 @@ export function summarizeProjectSync(
     missingComponentsUnavailableReason: context.missingComponentsUnavailableReason,
     pass: failed === null,
     failedStepId: failed ? failed.id : null,
+    refresh: context.refresh ?? null,
   }
 }
 
@@ -850,6 +955,33 @@ export interface StockPreparationProjectSyncPlan {
    * exercise the report's handling of it without going through the retry.
    */
   missingComponentsUnavailableReason?: StockPreparationMissingComponentsUnavailableReason
+  /**
+   * PR-7: the values-free hold stanza a GOVERNED preview answers beside `evidence` (server refresh-lanes.cjs
+   * `refreshHoldStanza`: `{ held, holdCount, confirmableCount, kinds, holdSetFingerprint }`); absent for every
+   * not-governed preview. Untyped at the boundary: read through `refreshHoldOf`, which keeps two integers only.
+   */
+  refreshHold?: unknown
+  /** PR-7: the recovery stanza (`{ pending, openExecutions }`) of a preview answering `recovery_pending`. */
+  refreshRecovery?: unknown
+}
+
+function nonNegativeIntegerOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/** PR-7: the preview's hold stanza, as two integers (never `kinds`, never the digest), or null when absent. */
+export function refreshHoldOf(plan: { refreshHold?: unknown } | null | undefined): { holdCount: number | null; confirmableCount: number | null } | null {
+  const raw = plan?.refreshHold
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const stanza = raw as { holdCount?: unknown; confirmableCount?: unknown }
+  return { holdCount: nonNegativeIntegerOrNull(stanza.holdCount), confirmableCount: nonNegativeIntegerOrNull(stanza.confirmableCount) }
+}
+
+/** PR-7: the preview's recovery stanza, as one integer, or null when absent. */
+export function refreshRecoveryOf(plan: { refreshRecovery?: unknown } | null | undefined): { openExecutions: number | null } | null {
+  const raw = plan?.refreshRecovery
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  return { openExecutions: nonNegativeIntegerOrNull((raw as { openExecutions?: unknown }).openExecutions) }
 }
 
 export interface StockPreparationProjectSyncApplyResult {
@@ -1042,13 +1174,19 @@ export class StockPreparationProjectSyncCallError extends Error {
    */
   detailPartial: boolean | null
 
+  /**
+   * PR-7: the server's `details.holdCount` on a batch-refresh refusal (STOCK_PREP_PULL_SUSPENDED) — a non-negative
+   * integer, else null. Never the `kinds` map beside it.
+   */
+  detailHoldCount: number | null
+
   /** True when the transport succeeded and the payload was not this API's envelope. */
   malformed: boolean
 
   constructor(
     status: number,
     route: string,
-    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null; detailPartial?: unknown } = {},
+    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null; detailPartial?: unknown; detailHoldCount?: unknown } = {},
   ) {
     super(`stock-preparation project sync call failed (${route} -> ${status})`)
     this.name = 'StockPreparationProjectSyncCallError'
@@ -1057,6 +1195,9 @@ export class StockPreparationProjectSyncCallError extends Error {
     this.detailTarget = clampErrorDetailToken(options.detailTarget)
     this.detailReason = clampErrorDetailToken(options.detailReason)
     this.detailPartial = options.detailPartial === true ? true : (options.detailPartial === false ? false : null)
+    this.detailHoldCount = typeof options.detailHoldCount === 'number' && Number.isInteger(options.detailHoldCount) && options.detailHoldCount >= 0
+      ? options.detailHoldCount
+      : null
     this.malformed = options.malformed === true
   }
 }
@@ -1275,6 +1416,8 @@ export async function runStockPreparationProjectSync(
   let written: StockPreparationProjectSyncReport['written'] = null
   let missingComponents: StockPreparationProjectSyncReport['missingComponents'] = null
   let missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason'] = null
+  // PR-7: the batch-refresh counts this run saw (null for every not-governed run).
+  let refresh: StockPreparationProjectSyncReport['refresh'] = null
 
   function record(step: StockPreparationProjectSyncStepResult): StockPreparationProjectSyncStepResult {
     steps.push(step)
@@ -1290,6 +1433,7 @@ export async function runStockPreparationProjectSync(
       written,
       missingComponents,
       missingComponentsUnavailableReason,
+      refresh,
     })
   }
 
@@ -1306,6 +1450,15 @@ export async function runStockPreparationProjectSync(
     // use it. `missingComponents` is `null` in that branch by construction (the retried request never
     // asked for the key), so this reason is the ONLY signal the panel has for WHY.
     missingComponentsUnavailableReason = missingComponentsUnavailableReasonOf(plan?.missingComponentsUnavailableReason)
+    const hold = refreshHoldOf(plan)
+    const recovery = refreshRecoveryOf(plan)
+    if (hold || recovery) {
+      refresh = {
+        holdCount: hold ? hold.holdCount : null,
+        confirmableCount: hold ? hold.confirmableCount : null,
+        openExecutions: recovery ? recovery.openExecutions : null,
+      }
+    }
     planStep = record(classifyPlanStep(1, plan))
   } catch (error) {
     planStep = record(classifyPlanStep(1, null, {
@@ -1317,6 +1470,17 @@ export async function runStockPreparationProjectSync(
     }))
   }
   if (planStep.status !== 'ok') return done()
+
+  // PR-7 (design §13; R-62 ⑦): a SUSPENDED pull stops here. The holds are a puller's decision on 「拉取待确认」 first;
+  // the ledger reconcile is deferred (a confirm re-keys it, design §6.2) and the write is NEVER attempted — not with
+  // the absent token, and never with `acceptManualConfirmHold` (the module header's rule extends to holds).
+  if (planStep.reason === 'PLAN_SUSPENDED') {
+    const holdCount = refresh && refresh.holdCount !== null ? refresh.holdCount : 0
+    record(result(2, 'confirm-queue', 'skip', 'RECONCILE_DEFERRED_SUSPENDED', { holdCount }))
+    record(result(3, 'apply', 'skip', 'WRITE_PULL_SUSPENDED', { holdCount }))
+    record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
+    return done()
+  }
 
   // ---- 2. 确认 -------------------------------------------------------------
   const held = planStep.reason === 'PLAN_HELD_FOR_CONFIRMATION'
@@ -1430,7 +1594,22 @@ export async function runStockPreparationProjectSync(
       partial: error instanceof StockPreparationProjectSyncCallError ? error.detailPartial : null,
       detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
     })
-    record(result(3, 'apply', 'fail', lockReason ?? 'WRITE_FAILED', detail))
+    // PR-7: the batch-refresh refusals, after the lock's (unchanged). A suspended pull is a SKIP (nothing was
+    // written by construction); the rest FAIL with their own next step. The tri-state `partial` and the reason
+    // token ride to the detail so "may have landed" is said only on `true`.
+    const refreshReason = lockReason ? null : classifyRefreshApplyFailure(code)
+    if (refreshReason && error instanceof StockPreparationProjectSyncCallError) {
+      if (error.detailReason) detail.reason = error.detailReason
+      if (error.detailPartial !== null) detail.partial = error.detailPartial ? 1 : 0
+    }
+    if (refreshReason === 'WRITE_PULL_SUSPENDED') {
+      const holdCount = error instanceof StockPreparationProjectSyncCallError ? error.detailHoldCount : null
+      if (holdCount !== null) detail.holdCount = holdCount
+      refresh = { holdCount, confirmableCount: null, openExecutions: refresh?.openExecutions ?? null }
+      record(result(3, 'apply', 'skip', 'WRITE_PULL_SUSPENDED', detail))
+    } else {
+      record(result(3, 'apply', 'fail', lockReason ?? refreshReason ?? 'WRITE_FAILED', detail))
+    }
   }
 
   // ---- 4. 批次存档 ---------------------------------------------------------
@@ -1493,6 +1672,61 @@ export async function runStockPreparationProjectSync(
 }
 
 // ---------------------------------------------------------------------------
+// 「核对」 — PR-7 (design §9.2, §13; R-62 ⑦)
+// ---------------------------------------------------------------------------
+
+export type StockPreparationSettlementCheckOutcome = 'settled' | 'changes_pending' | 'suspended' | 'awaiting_recovery' | 'failed'
+
+export interface StockPreparationSettlementCheckResult {
+  /**
+   * What the ONE preview answered. `settled` means only "the preview was clean and planned nothing to write" — the
+   * server writes the settled columns itself in that preview's reconcile; the CLIENT never claims 「核对通过」 from
+   * this: the authority is the board's re-read stanza (`settled`), which the panel waits for.
+   */
+  outcome: StockPreparationSettlementCheckOutcome
+  /** The plan's counts (null when the preview failed). */
+  planned: NonNullable<StockPreparationProjectSyncReport['planned']> | null
+  /** The step-① reason the preview classified as (the same vocabulary the panel's step list renders). */
+  reason: StockPreparationProjectSyncReason
+  detail: Record<string, string | number>
+}
+
+/**
+ * 「核对」: ONE dry run (the same hooks, so the background lane), and NOTHING else — no reconcile, no apply, no
+ * archive. Not a fifth sync step: STOCK_PREPARATION_PROJECT_SYNC_STEPS is unchanged. After an execution that wrote
+ * something the project is `executed_pending_settlement`; a clean computation after it settles it (design §9.2) —
+ * this is that computation, on demand.
+ */
+export async function runStockPreparationSettlementCheck(
+  api: Pick<StockPreparationProjectSyncApi, 'dryRun'>,
+  projectNo: string,
+  hooks: Pick<StockPreparationProjectSyncHooks, 'dryRun' | 'projectSheet'> = {},
+): Promise<StockPreparationSettlementCheckResult> {
+  let plan: StockPreparationProjectSyncPlan | null = null
+  try {
+    plan = await (hooks.dryRun ? api.dryRun(projectNo, hooks.dryRun) : api.dryRun(projectNo))
+  } catch (error) {
+    const step = classifyPlanStep(1, null, {
+      status: statusOf(error),
+      malformed: isMalformed(error),
+      errorCode: codeOf(error),
+      projectSheet: hooks.projectSheet === true,
+      detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
+    })
+    return { outcome: 'failed', planned: null, reason: step.reason, detail: step.detail }
+  }
+  const step = classifyPlanStep(1, plan)
+  const planned = plannedCountsOf(plan?.counts)
+  if (step.reason === 'PLAN_SUSPENDED') return { outcome: 'suspended', planned, reason: step.reason, detail: step.detail }
+  if (step.reason === 'PLAN_RECOVERY_PENDING') return { outcome: 'awaiting_recovery', planned, reason: step.reason, detail: step.detail }
+  if (step.reason === 'PLAN_READY') {
+    const writes = planned.add + planned.update + planned.inactive
+    return { outcome: writes === 0 ? 'settled' : 'changes_pending', planned, reason: step.reason, detail: step.detail }
+  }
+  return { outcome: 'failed', planned, reason: step.reason, detail: step.detail }
+}
+
+// ---------------------------------------------------------------------------
 // the default API implementation — existing routes only, existing gates only
 // ---------------------------------------------------------------------------
 
@@ -1517,7 +1751,7 @@ async function readEnvelope<T>(response: Response | undefined, route: string, st
       ? (envelope.error as { details?: unknown }).details
       : undefined
     const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
-      ? details as { target?: unknown; reason?: unknown; partial?: unknown }
+      ? details as { target?: unknown; reason?: unknown; partial?: unknown; holdCount?: unknown }
       : {}
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
@@ -1525,6 +1759,8 @@ async function readEnvelope<T>(response: Response | undefined, route: string, st
       detailTarget: typeof detailRecord.target === 'string' ? detailRecord.target : null,
       detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
       detailPartial: detailRecord.partial,
+      // PR-7: an integer or nothing (clamped in the constructor).
+      detailHoldCount: detailRecord.holdCount,
     })
   }
   if (!envelope || envelope.ok !== true || (strictPreview && Object.prototype.hasOwnProperty.call(envelope, 'error'))) {

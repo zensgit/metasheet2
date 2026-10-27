@@ -104,6 +104,7 @@ import {
   canOpenStockPrepMembersPage,
   canOpenStockPrepProjectQuery,
   canOpenStockPrepRailItem,
+  canOpenStockPrepRefreshQueue,
   canOpenStockPrepYidaEntries,
   canUseLegacyMvpTabs,
   grantedStockPrepCapabilities,
@@ -326,6 +327,16 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-members-custom-role-create',
   'stock-prep-members-custom-role-save',
   'stock-prep-members-custom-role-add-tables',
+  // 备料分批拉取第一期 step 4 PR-7 (R-62): the six refresh controls (PR-4's rows, `control: null` until now) live
+  // on 「拉取待确认」 — StockPreparationRefreshQueueView.vue, its own PULL-tier rail item — never on this view.
+  // Their alignment, both directions, per actor, through the real shell, is asserted where they live:
+  // apps/web/tests/StockPreparationRefreshQueue.spec.ts (RQ-ALIGN).
+  'stock-prep-refresh-holds',
+  'stock-prep-refresh-evidence',
+  'stock-prep-refresh-keep',
+  'stock-prep-refresh-confirm',
+  'stock-prep-refresh-continuation',
+  'stock-prep-refresh-end',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */
@@ -677,7 +688,8 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     // adding a rail item without a view — or a view without a rail item — has to be deliberate.
     // 14 -> 15 是 P2-1 的 项目查询(设计稿 §6.3 第一行),【工作】里排在 项目备料 之后。
     // 15 -> 16 是 S5b(R-39)的 成员与权限,【部署与接入】的最后一项;它另外受服务端开关约束(见 SMW-SHELL)。
-    expect(keys.length).toBe(16)
+    // 16 -> 17 是 备料分批拉取第一期 step 4 PR-7(R-62 ①)的 拉取待确认,【工作】的最后一项,PULL 档(`pull` 闸)。
+    expect(keys.length).toBe(17)
     expect(new Set(keys).size).toBe(keys.length)
     for (const key of keys) {
       expect(workspace, `${key} must be a view key in the shell`).toContain(`key: '${key}',`)
@@ -736,7 +748,18 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
         .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'route'))
       expect(canUseLegacyMvpTabs(principal()), `${actor.name} 深度工具`)
         .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'platform-admin'))
+      // PR-7 (R-62 ①): 拉取待确认 rides the PULL tier exactly — the server's `pull` gate, which is the six refresh
+      // routes' own `requireAccess(req, STOCK_PREP_PULL)`. An `integration:write` holder is NOT admitted (the
+      // server never grants a stock-prep code to it), and that actor is a row of ACTORS.
+      expect(canOpenStockPrepRefreshQueue(principal()), `${actor.name} refresh-queue`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'pull'))
+      expect(canOpenStockPrepRefreshQueue(principal()), `${actor.name} refresh-queue = the routes' code`)
+        .toBe(backendAccess.satisfiesStockPrepAccess(flattened(), STOCK_PREP_PULL))
     }
+    // The named actor the design text once admitted ("pull or legacy integration:write"): refused on both sides.
+    asActor({ name: 'integration:write only', roles: [], permissions: ['integration:write'] })
+    expect(canOpenStockPrepRefreshQueue(principal())).toBe(false)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened(), 'pull')).toBe(false)
   })
 
   it('F-09 / D2=A: the landing key agrees with the server for EVERY actor and all three postures', () => {

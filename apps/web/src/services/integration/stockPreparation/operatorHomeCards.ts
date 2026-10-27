@@ -171,16 +171,25 @@ export function buildOperatorHomeCards(
     if (hiddenSet && hiddenSet.has(no) && !live) continue
     const memoryKey = remembered.get(no) ?? null
     // S3: a registry row speaks for itself when its counts can (see `registryPosture`).
-    const fromRegistry = registryPosture(project, pending)
+    const registry = registryPosture(project, pending)
+    // PR-7 (R-62 ⑥) — FAIL-CLOSED FOLD: a registry row derives 「可以导出」 from `pulledRowCount` alone, but the
+    // directory row carries no refresh state; when THIS browser last saw the live board say the refresh is
+    // unfinished (`blocked_pull_state`), that outranks a registry-derived 「可以导出」. Dormant for every
+    // not-governed project (memory never holds the key for one). Never the other way: a remembered 「可以导出」 does
+    // not override a registry 「刷新未完成」 (the registry never produces it).
+    const foldBlocked = registry !== null && registry.key === 'ready' && memoryKey === 'blocked_pull_state'
+    const fromRegistry = foldBlocked ? null : registry
     cards.push({
       projectNo: no,
       projectName: project.projectName,
       source: 'directory',
       posture: fromRegistry
-        ?? (live
-          ? stockPrepPosture({ pendingDecisionCount: pending })
-          : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true }))),
-      postureFromMemory: !fromRegistry && !live && memoryKey !== null,
+        ?? (foldBlocked
+          ? memoryPosture('blocked_pull_state')
+          : (live
+            ? stockPrepPosture({ pendingDecisionCount: pending })
+            : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true })))),
+      postureFromMemory: foldBlocked || (!fromRegistry && !live && memoryKey !== null),
       pendingDecisionCount: pending,
       archived,
     })

@@ -359,13 +359,11 @@ test('manual_confirm_required is recorded and NEVER applied, even with --apply',
   assert.equal(lines[1].summary.skippedManualConfirmRequired, 1)
   assert.equal(lines[1].summary.failed, 0)
 
-  // Batch-refresh step 4 PR-3a (E-1(c) scheduled-pull leg, refuter R-8): a SUSPENDED preview — the status a governed
-  // project's held pull now answers (no token, canApply false) — is never applied either, and until PR-7 adds
-  // `skipped_suspended` it fails CLOSED as an unknown status: `error`, `failed: true`, non-zero exit. Review round 1:
-  // a `recovery_pending` preview (an earlier execution of a governed project did not finish cleanly) likewise.
-  // Asserted inside this existing subtest on purpose: the ops TAP `# tests` count (EXPECTED_OPS_TESTS_COUNT) does
-  // not move.
-  for (const heldStatus of ['suspended', 'recovery_pending']) {
+  // Batch-refresh step 4 PR-3a review round 1: a `recovery_pending` preview (an earlier execution of a governed
+  // project did not finish cleanly) is never applied and fails BY NAME (non-zero exit). PR-7 (R-62 ②) moved its
+  // sibling `suspended` out of this loop into its own subtest below — a suspended pull is a recorded skip now.
+  // Asserted inside this existing subtest on purpose: the ops TAP `# tests` count does not move for it.
+  for (const heldStatus of ['recovery_pending']) {
     const held = await withMockFetch(
       (record) => {
         if (record.url.includes('/dry-run')) {
@@ -382,13 +380,58 @@ test('manual_confirm_required is recorded and NEVER applied, even with --apply',
     assert.equal(heldLines[0].failed, true, heldStatus)
     assert.equal(heldLines[1].summary.failed, 1, heldStatus)
     // PR-3a follow-up: `recovery_pending` fails by its own code with a recovery note, not as an unexpected status.
-    if (heldStatus === 'recovery_pending') {
-      assert.equal(heldLines[0].error, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
-      assert.match(heldLines[0].note, /recovered/)
-    } else {
-      assert.equal(heldLines[0].error, `unexpected dry-run status: ${heldStatus}`)
-    }
+    assert.equal(heldLines[0].error, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
+    assert.match(heldLines[0].note, /recovered/)
   }
+})
+
+// Batch-refresh step 4 PR-7 (register R-62 ②; design §17 PR-7 row): a governed project whose pull is SUSPENDED (the
+// preview found holds only a 拉取人员 decides, on the 拉取待确认 page) is a RECORDED SKIP — the manual_confirm_required
+// class — never applied, never a failure. Two legs: the preview answers `suspended`; and the preview answered
+// `ready` but a hold opened before the apply, which the server refuses 409 STOCK_PREP_PULL_SUSPENDED with
+// `partial: false`. Values-free: only the integer `holdCount` is copied, never the `kinds` map or the digest.
+test('suspended is recorded as skipped_suspended and NEVER applied, even with --apply', async () => {
+  const SENTINEL_KIND = 'syn_kind_sentinel_never_printed'
+  const suspended = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'suspended', canApply: false, dryRunToken: null, counts: {}, refreshHold: { held: true, holdCount: 2, confirmableCount: 1, kinds: { [SENTINEL_KIND]: 2 }, holdSetFingerprint: 'f'.repeat(64) } } } }
+      }
+      return { status: 500, json: { ok: false, error: { code: 'SHOULD_NOT_BE_CALLED' } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(suspended.result.code, 0, `${suspended.result.stdout}\n${suspended.result.stderr}`)
+  assert.equal(suspended.requests.length, 1, 'a suspended pull is never applied')
+  const lines = jsonLines(suspended.result.stdout)
+  assert.equal(lines[0].action, 'skipped_suspended')
+  assert.equal(lines[0].holdCount, 2)
+  assert.equal(lines[0].failed, undefined)
+  assert.match(lines[0].note, /拉取待确认/)
+  assert.equal(lines[1].summary.skippedSuspended, 1)
+  assert.equal(lines[1].summary.failed, 0)
+  assert.ok(!suspended.result.stdout.includes(SENTINEL_KIND), 'the kinds map never reaches the output')
+
+  // The apply leg: ready at the preview, suspended by the time of the apply.
+  const applyLeg = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_suspended_apply', revision: 'rev_1', counts: {} } } }
+      }
+      return { status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PULL_SUSPENDED', message: 'this pull is suspended until its holds are decided; nothing was written', details: { partial: false, holdCount: 3, kinds: { [SENTINEL_KIND]: 3 } } } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(applyLeg.result.code, 0, `${applyLeg.result.stdout}\n${applyLeg.result.stderr}`)
+  assert.equal(applyLeg.requests.length, 2, 'the apply was attempted once and refused')
+  const applyLines = jsonLines(applyLeg.result.stdout)
+  assert.equal(applyLines[0].action, 'skipped_suspended')
+  assert.equal(applyLines[0].phase, 'apply')
+  assert.equal(applyLines[0].holdCount, 3)
+  assert.equal(applyLines[0].failed, undefined)
+  assert.equal(applyLines[1].summary.skippedSuspended, 1)
+  assert.equal(applyLines[1].summary.failed, 0)
+  assert.ok(!applyLeg.result.stdout.includes(SENTINEL_KIND), 'the kinds map never reaches the output')
 })
 
 test('large_bom_bounded is recorded as skipped and NEVER applied', async () => {
