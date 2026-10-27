@@ -15,7 +15,10 @@
 --   confirmed   -> written      the controlled update's execution SUCCEEDED (the store, in the execution's finish)
 --   confirmed   -> invalidated  a computation's change set no longer equals the plan (`source_changed`) — never while an
 --                               execution bound to the plan runs — or the bound execution failed (`execution_failed`)
---   confirmed   -> superseded   a later confirm replaced it before it was executed
+--   confirmed   -> superseded   a later confirm replaced it before it was executed — DEFENSIVE, product-unreachable
+--                               today (pg review V8PG-05a): while a plan is confirmed the planner never emits further
+--                               content holds beside the change it matches, and a bound running execution makes a
+--                               second confirm 409 RECOVERY_PENDING; only a seeded hold set reaches it
 --   written     -> reviewed     the review completed against the content the sheet holds (and nothing else is open)
 --   written     -> superseded   a later plan's write ABSORBED every unreviewed field of it (the later plan's review covers
 --                               them, against the same review baseline) — a written change never escapes review
@@ -24,15 +27,17 @@
 -- PRIVATE vs VALUES-FREE (design §4.4). `record_set` (record ids, keys and the per-field before / after / baseline
 -- cells) and `review_notes` are PRIVATE business values: they are answered only by the audited pull-tier route
 -- (GET …/refresh/change-plans/current). Every other column is a handle, a closed token, a digest, an integer or a
--- server clock — the consult reads the values-free columns only.
+-- server clock. The consult's plan summaries carry the values-free columns only; it also reads the `record_set` of
+-- the pending written plan and of the latest reviewed plan as its server-held expected content (review fix N3, C06:
+-- a reviewed cell the sheet no longer carries is held) — for the planner, never a response body.
 --
 -- SCOPE: tenant_id, sheet_id, project_no and write_scope_key (the sheet write lock's scope key, migration 100) on every
 -- row. INTEGER, not BIGINT.
 --
 -- FAIL CLOSED. The governance consult reads this table on EVERY consult (pending plans by (tenant, project) and by
--- (sheet, project)): a plugin build with step 5 on a database without this migration answers 503
--- STOCK_PREP_REFRESH_STORE_FAILED (`read_change_plans`, 42P01) for every pull and every formal export of a governed
--- project — deploy this migration WITH the build, never after it.
+-- (sheet, project)), for EVERY project — governed or not, the consult has to read it to know: a plugin build with step
+-- 5 on a database without this migration answers 503 STOCK_PREP_REFRESH_STORE_FAILED (`read_change_plans`, 42P01) for
+-- every pull and every formal export of EVERY project — deploy this migration WITH the build, never after it.
 --
 -- ROLLBACK. Plugin SQL migrations are up-only; there is no down(). A rolled-back build cannot run `db:migrate` while 104
 -- is recorded (roll back with RunMigrations 0). Rolling the PLUGIN build back to one that does not know change plans is
