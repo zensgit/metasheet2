@@ -8,8 +8,12 @@ import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue
 // / myDelegationViewFakePickers site-level specs for the per-site tripwire + presence assertions).
 // This file covers the component's OWN contract in isolation.
 const searchSpy = vi.fn()
+// 按人查单 / 批量转交: the administrator directory (`includeInactive`). A separate spy, so every
+// test can tell WHICH directory the picker asked.
+const adminSearchSpy = vi.fn()
 vi.mock('../src/approvals/api', () => ({
   searchApprovalDirectoryUsers: (...args: unknown[]) => searchSpy(...args),
+  searchApprovalAdminDirectoryUsers: (...args: unknown[]) => adminSearchSpy(...args),
 }))
 
 import ApprovalUserPicker from '../src/approvals/components/ApprovalUserPicker.vue'
@@ -84,6 +88,8 @@ describe('ApprovalUserPicker', () => {
   beforeEach(() => {
     searchSpy.mockReset()
     searchSpy.mockResolvedValue([])
+    adminSearchSpy.mockReset()
+    adminSearchSpy.mockResolvedValue([])
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -353,5 +359,69 @@ describe('ApprovalUserPicker', () => {
     const option = container!.querySelector('option') as HTMLOptionElement
     expect(option.value).toBe('u-preset')
     expect(option.disabled).toBe(false)
+  })
+
+  // 按人查单 / 批量转交 — the administrator mode. Default (member surfaces) is unchanged: the
+  // participant directory, active users only, no tag.
+  it('default mode searches the participant directory only and never tags an option', async () => {
+    searchSpy.mockResolvedValue([{ id: 'u1', name: 'Alice', email: '' }])
+    await mountPicker()
+
+    expect(searchSpy).toHaveBeenCalledWith('')
+    expect(adminSearchSpy).not.toHaveBeenCalled()
+    const options = Array.from(container!.querySelectorAll('option')).map((o) => o.textContent)
+    expect(options).toEqual(['Alice'])
+  })
+
+  it('includeInactive searches the administrator directory and tags a deactivated account 「已停用」', async () => {
+    adminSearchSpy.mockResolvedValue([
+      { id: 'u-active', name: 'Alice', email: 'a@x.io', isActive: true },
+      { id: 'u-gone', name: 'Bob', email: '', isActive: false },
+    ])
+    await mountPicker({ includeInactive: true })
+
+    expect(adminSearchSpy).toHaveBeenCalledWith('')
+    expect(searchSpy).not.toHaveBeenCalled()
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options.map((o) => o.textContent)).toEqual(['Alice · a@x.io', 'Bob（已停用）'])
+    // A deactivated account is the point of this mode: it must stay selectable.
+    expect(options.map((o) => o.disabled)).toEqual([false, false])
+  })
+
+  it('includeInactive: picking a deactivated account emits its id', async () => {
+    adminSearchSpy.mockResolvedValue([{ id: 'u-gone', name: 'Bob', email: '', isActive: false }])
+    const events = await mountPicker({ includeInactive: true })
+
+    const select = container!.querySelector('[data-testid="stub-select"]') as HTMLSelectElement
+    select.value = 'u-gone'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(events['update:modelValue']).toEqual(['u-gone'])
+    expect(events.select).toEqual([{ id: 'u-gone', name: 'Bob', email: '', isActive: false }])
+  })
+
+  it('includeInactive: typed searches also go to the administrator directory', async () => {
+    vi.useFakeTimers()
+    await mountPicker({ includeInactive: true })
+    adminSearchSpy.mockClear()
+
+    const input = container!.querySelector('[data-testid="stub-query-input"]') as HTMLInputElement
+    input.value = 'bo'
+    input.dispatchEvent(new Event('input'))
+    await vi.advanceTimersByTimeAsync(350)
+
+    expect(adminSearchSpy).toHaveBeenCalledTimes(1)
+    expect(adminSearchSpy).toHaveBeenCalledWith('bo')
+    expect(searchSpy).not.toHaveBeenCalled()
+  })
+
+  it('the deactivated tag follows the shell locale', async () => {
+    useLocale().setLocale('en')
+    adminSearchSpy.mockResolvedValue([{ id: 'u-gone', name: 'Bob', email: '', isActive: false }])
+    await mountPicker({ includeInactive: true })
+
+    const option = container!.querySelector('option') as HTMLOptionElement
+    expect(option.textContent).toBe('Bob (Deactivated)')
   })
 })

@@ -37,6 +37,7 @@ import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { isOrgPinEnabled, viewerActiveOrgIds, viewerRolesFailClosed } from './approval-instance-readability'
 import { approvalCcTabConditionSql, approvalCcUnreadConditionSql } from './approval-cc-predicate'
 import { approvalMineOutcomeUnseenConditionSql } from './approval-mine-outcome-predicate'
+import { approvalActiveAssigneeConditionSql, approvalByUserConditionSql, isApprovalByUserKind } from './approval-by-user-predicate'
 import {
   collectActiveNodeKeys,
   redactHiddenFormFields,
@@ -520,14 +521,7 @@ export class ApprovalBridgeService {
       params.push(options.businessKey)
     }
     if (options?.assignee) {
-      conditions.push(
-        `id IN (
-          SELECT instance_id
-          FROM approval_assignments
-          WHERE assignee_id = $${paramIndex++}
-            AND is_active = TRUE
-        )`,
-      )
+      conditions.push(approvalActiveAssigneeConditionSql(paramIndex++))
       params.push(options.assignee)
     }
     if (options?.search) {
@@ -549,6 +543,15 @@ export class ApprovalBridgeService {
     if (options?.createdTo) {
       conditions.push(`created_at <= $${paramIndex++}`)
       params.push(options.createdTo)
+    }
+    // 按人查单（管理员）: one more client FILTER, pushed only when supplied, so every existing
+    // statement is unchanged. It narrows within the scope appended below, never replaces it.
+    if (options?.byUser) {
+      if (!isApprovalByUserKind(options.byUser.kind) || !options.byUser.userId) {
+        throw new TypeError('listApprovals: invalid byUser filter')
+      }
+      conditions.push(approvalByUserConditionSql(options.byUser.kind, paramIndex++))
+      params.push(options.byUser.userId)
     }
     const sourceSystem = options?.sourceSystem
     const includeExternalTabSources = options?.includeExternalTabSources === true

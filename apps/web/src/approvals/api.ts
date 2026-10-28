@@ -1825,6 +1825,11 @@ export interface ApprovalDirectoryUser {
   id: string
   name: string
   email: string
+  /**
+   * Set ONLY by the approval-administrator directory (`searchApprovalAdminDirectoryUsers`), which
+   * also returns deactivated accounts. The participant directory never sets it.
+   */
+  isActive?: boolean
 }
 
 /**
@@ -1864,6 +1869,42 @@ export async function searchApprovalDirectoryUsers(
         id,
         name: typeof record.name === 'string' ? record.name : '',
         email: typeof record.email === 'string' ? record.email : '',
+      })
+    }
+    return users
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 按人查单 / 批量转交 — the approval-administrator user search
+ * (`GET /api/approvals/admin/directory/users`, `approvals:admin`). Unlike the participant directory
+ * it also returns deactivated accounts, each row carrying `isActive`. Same contract as
+ * `searchApprovalDirectoryUsers`: never throws, resolves to `[]` on any failure.
+ */
+export async function searchApprovalAdminDirectoryUsers(q: string, limit = 20): Promise<ApprovalDirectoryUser[]> {
+  try {
+    const params = new URLSearchParams()
+    const normalized = q.trim()
+    if (normalized) params.set('q', normalized)
+    params.set('limit', String(limit))
+    const response = await apiFetch(`/api/approvals/admin/directory/users?${params.toString()}`)
+    if (!response.ok) return []
+    const payload = await response.json().catch(() => null) as { users?: unknown } | null
+    if (!payload || !Array.isArray(payload.users)) return []
+    const users: ApprovalDirectoryUser[] = []
+    for (const entry of payload.users) {
+      if (!entry || typeof entry !== 'object') continue
+      const record = entry as Record<string, unknown>
+      const id = typeof record.id === 'string' ? record.id : ''
+      if (!id) continue
+      users.push({
+        id,
+        name: typeof record.name === 'string' ? record.name : '',
+        email: typeof record.email === 'string' ? record.email : '',
+        // Only an explicit `false` is a deactivated account; anything else reads as active.
+        isActive: record.isActive !== false,
       })
     }
     return users
@@ -2104,6 +2145,99 @@ export async function listApprovalRecordLinkOptions(params: {
   } catch {
     return { ok: false, status: 0, code: 'NETWORK_ERROR', message: 'Network error' }
   }
+}
+
+// ---------------------------------------------------------------------------
+// 按人查单（管理员）— GET /api/approvals/admin/by-user (`approvals:admin`, the
+// same permission as 批量转交; no new permission code). Access checks stay
+// consistent with the existing approval read permission and the detail /
+// history endpoints. The page gates on `useApprovalAdminCapability` like 批量转交.
+// ---------------------------------------------------------------------------
+
+export const APPROVAL_BY_USER_KINDS = ['pending', 'decided', 'involved'] as const
+export type ApprovalByUserKind = typeof APPROVAL_BY_USER_KINDS[number]
+export const APPROVAL_BY_USER_DEFAULT_PAGE_SIZE = 20
+/** The server's own cap; a larger value is refused with 400, never clamped. */
+export const APPROVAL_BY_USER_MAX_PAGE_SIZE = 100
+
+export interface ApprovalByUserRow {
+  id: string
+  requestNo: string | null
+  title: string | null
+  status: string
+  templateId: string | null
+  requester: { id: string | null; name: string | null }
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ApprovalByUserPage {
+  kind: ApprovalByUserKind
+  items: ApprovalByUserRow[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+function asNullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/**
+ * Reads the `{ ok: true, data }` envelope. Anything that is not a page — a missing `items` array,
+ * a non-numeric total, a different kind than asked — is a failed read and THROWS, so a caller can
+ * never render "this person has no approvals" off an answer it could not read.
+ */
+export function normalizeApprovalByUserEnvelope(payload: unknown, expectedKind: ApprovalByUserKind): ApprovalByUserPage {
+  const data = (payload as { ok?: unknown; data?: unknown } | null)?.data as Record<string, unknown> | undefined
+  if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
+    throw new Error('approval by-user lookup: malformed response')
+  }
+  if (data.kind !== expectedKind) {
+    throw new Error('approval by-user lookup: kind mismatch')
+  }
+  const total = data.total
+  const page = data.page
+  const pageSize = data.pageSize
+  if (typeof total !== 'number' || !Number.isFinite(total) || total < 0
+    || typeof page !== 'number' || typeof pageSize !== 'number') {
+    throw new Error('approval by-user lookup: malformed paging')
+  }
+  const items: ApprovalByUserRow[] = []
+  for (const entry of data.items) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    if (typeof record.id !== 'string' || !record.id) continue
+    const requester = (record.requester && typeof record.requester === 'object'
+      ? record.requester
+      : {}) as Record<string, unknown>
+    items.push({
+      id: record.id,
+      requestNo: asNullableString(record.requestNo),
+      title: asNullableString(record.title),
+      status: typeof record.status === 'string' ? record.status : '',
+      templateId: asNullableString(record.templateId),
+      requester: { id: asNullableString(requester.id), name: asNullableString(requester.name) },
+      createdAt: typeof record.createdAt === 'string' ? record.createdAt : '',
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
+    })
+  }
+  return { kind: expectedKind, items, total, page, pageSize }
+}
+
+export async function listApprovalsByUser(
+  userId: string,
+  kind: ApprovalByUserKind,
+  page = 1,
+  pageSize = APPROVAL_BY_USER_DEFAULT_PAGE_SIZE,
+): Promise<ApprovalByUserPage> {
+  const params = new URLSearchParams()
+  params.set('userId', userId)
+  params.set('kind', kind)
+  params.set('page', String(page))
+  params.set('pageSize', String(pageSize))
+  const payload = await apiGet<unknown>(`/api/approvals/admin/by-user?${params.toString()}`)
+  return normalizeApprovalByUserEnvelope(payload, kind)
 }
 
 // ---------------------------------------------------------------------------

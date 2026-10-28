@@ -15,6 +15,11 @@ export interface DirectoryUserOption {
   id: string
   name: string
   email: string
+  /**
+   * Present ONLY on an `includeInactive` search (the approval-administrator directory). Every
+   * other caller gets the `{ id, name, email }` shape unchanged.
+   */
+  isActive?: boolean
 }
 
 export interface DirectoryRoleOption {
@@ -108,9 +113,19 @@ export async function listApprovalDepartments(
 export interface DirectoryUserSearchScope {
   userIds?: string[]
   roleIds?: string[]
+  /**
+   * 按人查单 / 批量转交 (approval-administrator routes only): also return deactivated accounts, and
+   * mark every row with `isActive`. Off by default, so the participant and template-authoring
+   * pickers keep searching active users only, with the minimal shape.
+   */
+  includeInactive?: boolean
 }
 
-/** Search active users by id/name/email/username. Returns id/name/email only. */
+/**
+ * Search active users by id/name/email/username. Returns id/name/email only. With
+ * `scope.includeInactive` (administrator routes only) deactivated users are included and each row
+ * carries `isActive`.
+ */
 export async function searchDirectoryUsers(
   q: string,
   limit: number,
@@ -119,7 +134,8 @@ export async function searchDirectoryUsers(
   const safeLimit = clampLimit(limit)
   const term = q ? `%${q}%` : null
   const params: unknown[] = []
-  const conditions: string[] = ['is_active = TRUE']
+  const includeInactive = scope.includeInactive === true
+  const conditions: string[] = [includeInactive ? 'TRUE' : 'is_active = TRUE']
   if (term) {
     params.push(term)
     const p = `$${params.length}`
@@ -137,13 +153,23 @@ export async function searchDirectoryUsers(
   }
   params.push(safeLimit)
   const sql = `
-    SELECT id, name, COALESCE(email, '') AS email
+    SELECT id, name, COALESCE(email, '') AS email${includeInactive ? ', is_active' : ''}
     FROM users
     WHERE ${conditions.join(' AND ')}
     ORDER BY name ASC
     LIMIT $${params.length}
   `
-  const result = await query<{ id: string; name: string; email: string }>(sql, params)
+  const result = await query<{ id: string; name: string; email: string; is_active?: boolean | null }>(sql, params)
+  if (includeInactive) {
+    // Same reading as the reassign target check (`COALESCE(is_active, TRUE)`): only an explicit
+    // FALSE is a deactivated account.
+    return result.rows.map((row) => ({
+      id: row.id,
+      name: row.name ?? '',
+      email: row.email ?? '',
+      isActive: row.is_active !== false,
+    }))
+  }
   return result.rows.map((row) => ({ id: row.id, name: row.name ?? '', email: row.email ?? '' }))
 }
 

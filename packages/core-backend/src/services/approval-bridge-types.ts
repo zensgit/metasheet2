@@ -10,6 +10,7 @@ import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { ApprovalHistoryEntry, ApprovalRequest } from '../data-adapters/PLMAdapter'
 import type { ApprovalNodeType, FormSchema, NodeFieldAccess } from '../types/approval-product'
 import type { EffectiveNodeOperations } from './approval-effective-node-operations'
+import type { ApprovalByUserKind } from './approval-by-user-predicate'
 
 // ── Unified Approval DTO (API response shape) ──
 
@@ -286,6 +287,11 @@ export interface ApprovalQueryOptions {
   templateId?: string
   createdFrom?: string
   createdTo?: string
+  /**
+   * 按人查单（管理员）: narrow the feed to instances that involve `userId` in the `kind` sense
+   * (`approval-by-user-predicate.ts`). A filter inside the server-determined scope, like the others.
+   */
+  byUser?: { userId: string; kind: ApprovalByUserKind }
   /**
    * B3-01 adds `processed` (我已处理): every instance the actor has ANY `approval_records` row
    * for (a reverse lookup on `actor_id`), regardless of the instance's CURRENT status — unlike

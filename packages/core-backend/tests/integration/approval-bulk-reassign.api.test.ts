@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
+import { randomUUID } from 'node:crypto'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
@@ -330,5 +331,170 @@ describeIfDatabase('Approval T2-1+2 scoped admins + bulk handover — real DB', 
     expect(roleGuard.status, await roleGuard.clone().text()).toBe(200)
     const roleGuardBody = await roleGuard.json() as { data: { skipped: Array<{ id: string; reason: string }> } }
     expect(roleGuardBody.data.skipped).toEqual([{ id: roleApproval.id, reason: 'not-assigned' }])
+  })
+
+  // 按人查单（管理员）: GET /api/approvals/admin/by-user and GET /api/approvals/admin/directory/users,
+  // against real PostgreSQL. Rows are seeded directly so each one exercises exactly ONE way a user
+  // can be tied to an instance; every kind is asserted as a whole set over this test's own rows.
+  it('looks up one (deactivated) user\'s pending / decided / involved approvals, admin-only', async () => {
+    const suffix = randomUUID().slice(0, 8)
+    const dbAdminId = `byuser-db-admin-${suffix}`
+    const tokenAdminId = `byuser-token-admin-${suffix}`
+    const departedId = `byuser-departed-${suffix}`
+    const otherId = `byuser-other-${suffix}`
+    const departedName = `ByUserDeparted ${suffix}`
+
+    const seedUser = async (id: string, name: string, options: { isActive: boolean; isAdmin: boolean }) => {
+      createdUserIds.add(id)
+      await pool().query(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+         VALUES ($1, $1 || '@example.test', $2, 'test', 'user', '[]'::jsonb, $3, $4)
+         ON CONFLICT (id) DO UPDATE
+           SET name = EXCLUDED.name, is_active = EXCLUDED.is_active, is_admin = EXCLUDED.is_admin, updated_at = now()`,
+        [id, name, options.isActive, options.isAdmin],
+      )
+    }
+    await seedUser(dbAdminId, dbAdminId, { isActive: true, isAdmin: true })
+    await seedUser(tokenAdminId, tokenAdminId, { isActive: true, isAdmin: false })
+    // The person being looked up has left: the account is deactivated.
+    await seedUser(departedId, departedName, { isActive: false, isAdmin: false })
+    await seedUser(otherId, otherId, { isActive: true, isAdmin: false })
+
+    const seedInstance = async (key: string, status: string, requesterId: string, sourceSystem = 'platform') => {
+      const id = `byuser_${suffix}_${key}`
+      createdApprovalIds.add(id)
+      await pool().query(
+        `INSERT INTO approval_instances
+           (id, status, version, source_system, workflow_key, business_key, title,
+            requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+            current_step, total_steps, sync_status, created_at, updated_at)
+         VALUES ($1, $2, 0, $3, $4, $5, $6, $7::jsonb,
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 0, 0, 'ok', now(), now())`,
+        [id, status, sourceSystem, `byuser-wf-${suffix}`, `byuser:${id}`, `ByUser ${key}`,
+          JSON.stringify({ id: requesterId, name: requesterId })],
+      )
+      return id
+    }
+    const seedSeat = async (instanceId: string, assigneeId: string, isActive: boolean, assignmentType = 'user') => {
+      await pool().query(
+        `INSERT INTO approval_assignments
+           (id, instance_id, assignment_type, assignee_id, source_step, is_active, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 0, $5, '{}'::jsonb, now(), now())`,
+        [randomUUID(), instanceId, assignmentType, assigneeId, isActive],
+      )
+    }
+    const seedRecord = async (instanceId: string, action: string, actorId: string, metadata: JsonRecord = {}) => {
+      await pool().query(
+        `INSERT INTO approval_records (instance_id, action, actor_id, to_status, metadata, occurred_at)
+         VALUES ($1, $2, $3, 'pending', $4::jsonb, now())`,
+        [instanceId, action, actorId, JSON.stringify(metadata)],
+      )
+    }
+
+    // Each row ties the departed user to the instance in exactly one way.
+    const pendingSeat = await seedInstance('pending_seat', 'pending', otherId)
+    await seedSeat(pendingSeat, departedId, true)
+    const approvedByThem = await seedInstance('approved_by_them', 'approved', otherId)
+    await seedSeat(approvedByThem, departedId, false)
+    await seedRecord(approvedByThem, 'approve', departedId)
+    const returnedByThem = await seedInstance('returned_by_them', 'pending', otherId)
+    await seedRecord(returnedByThem, 'return', departedId)
+    const transferredAway = await seedInstance('transferred_away', 'pending', otherId)
+    await seedSeat(transferredAway, departedId, false)
+    await seedRecord(transferredAway, 'transfer', departedId)
+    const commentOnly = await seedInstance('comment_only', 'pending', otherId)
+    await seedRecord(commentOnly, 'comment', departedId)
+    const ccOnly = await seedInstance('cc_only', 'pending', otherId)
+    await seedRecord(ccOnly, 'cc', otherId, { targetType: 'user', targetId: departedId })
+    const requestedByThem = await seedInstance('requested_by_them', 'approved', departedId)
+    // Negative controls: none of these involves the departed user as a participant.
+    const unrelated = await seedInstance('unrelated', 'pending', otherId)
+    await seedSeat(unrelated, otherId, true)
+    // A role-typed seat whose assignee_id happens to equal the user id (inactive, so `pending` —
+    // which mirrors the batch-transfer queue read and does not look at the seat type — cannot
+    // admit it either). Only the `assignment_type = 'user'` conjunct keeps it out of `involved`.
+    const roleSeatOnly = await seedInstance('role_seat_only', 'pending', otherId)
+    await seedSeat(roleSeatOnly, departedId, false, 'role')
+    const reassignActorOnly = await seedInstance('reassign_actor_only', 'pending', otherId)
+    await seedRecord(reassignActorOnly, 'reassign', departedId)
+    const externalMirror = await seedInstance('external_mirror', 'pending', departedId, 'plm')
+
+    const ownRows = new Set([
+      pendingSeat, approvedByThem, returnedByThem, transferredAway, commentOnly, ccOnly, requestedByThem,
+      unrelated, roleSeatOnly, reassignActorOnly, externalMirror,
+    ])
+    const lookup = async (token: string, query: string) => jsonRequest(baseUrl, `/api/approvals/admin/by-user?${query}`, token)
+    const lookupIds = async (token: string, kind: string): Promise<string[]> => {
+      const response = await lookup(token, `userId=${encodeURIComponent(departedId)}&kind=${kind}&pageSize=100`)
+      expect(response.status, await response.clone().text()).toBe(200)
+      const body = await response.json() as { ok: boolean; data: { kind: string; items: Array<{ id: string }>; total: number } }
+      expect(body.ok).toBe(true)
+      expect(body.data.kind).toBe(kind)
+      return body.data.items.map((item) => item.id).filter((id) => ownRows.has(id)).sort()
+    }
+
+    const dbAdminToken = await authToken(baseUrl, dbAdminId, 'approvals:admin', 'user')
+    // 当前待审批: the active seat only — the same seat read 批量转交 loads. The inactive seats were
+    // handed on.
+    expect(await lookupIds(dbAdminToken, 'pending')).toEqual([pendingSeat])
+    // 已审批: decision actions only — approve and return count, transfer and comment do not.
+    expect(await lookupIds(dbAdminToken, 'decided')).toEqual([approvedByThem, returnedByThem].sort())
+    // 参与过: requester, any user seat, participant actions, user CC. Not an administrator's
+    // reassign row, not a role seat, not an external mirror.
+    expect(await lookupIds(dbAdminToken, 'involved')).toEqual([
+      pendingSeat, approvedByThem, returnedByThem, transferredAway, commentOnly, ccOnly, requestedByThem,
+    ].sort())
+
+    // Paging: one row per page, the total covers the whole kind.
+    const firstPage = await lookup(dbAdminToken, `userId=${encodeURIComponent(departedId)}&kind=decided&page=1&pageSize=1`)
+    expect(firstPage.status).toBe(200)
+    const firstBody = await firstPage.json() as { data: { items: Array<{ id: string }>; total: number; page: number; pageSize: number } }
+    expect(firstBody.data.items).toHaveLength(1)
+    expect(firstBody.data.total).toBe(2)
+    expect(firstBody.data.page).toBe(1)
+    expect(firstBody.data.pageSize).toBe(1)
+    const secondPage = await lookup(dbAdminToken, `userId=${encodeURIComponent(departedId)}&kind=decided&page=2&pageSize=1`)
+    const secondBody = await secondPage.json() as { data: { items: Array<{ id: string }> } }
+    expect(secondBody.data.items).toHaveLength(1)
+    expect(secondBody.data.items[0].id).not.toBe(firstBody.data.items[0].id)
+
+    // Enum-strict and bounded.
+    const badKind = await lookup(dbAdminToken, `userId=${encodeURIComponent(departedId)}&kind=all`)
+    expect(badKind.status).toBe(400)
+    expect(((await badKind.json()) as { error: { code: string } }).error.code).toBe('APPROVAL_BY_USER_KIND_INVALID')
+    const overPage = await lookup(dbAdminToken, `userId=${encodeURIComponent(departedId)}&kind=involved&pageSize=101`)
+    expect(overPage.status).toBe(400)
+
+    // Access stays consistent with the existing approval read permission: this caller gets no rows.
+    const tokenAdminToken = await authToken(baseUrl, tokenAdminId, 'approvals:admin', 'admin')
+    expect(await lookupIds(tokenAdminToken, 'involved')).toEqual([])
+
+    // Same permission as 批量转交: without approvals:admin the route is refused.
+    const reader = await authToken(baseUrl, `byuser-reader-${suffix}`, 'approvals:read', 'user')
+    expect((await lookup(reader, `userId=${encodeURIComponent(departedId)}&kind=involved`)).status).toBe(403)
+    const templateAdmin = await authToken(baseUrl, `byuser-template-admin-${suffix}`, 'approvals:admin-templates', 'user')
+    expect((await lookup(templateAdmin, `userId=${encodeURIComponent(departedId)}&kind=involved`)).status).toBe(403)
+
+    // The administrator directory finds the deactivated account and marks it; the participant
+    // directory still does not return it.
+    const adminDirectory = await jsonRequest(
+      baseUrl,
+      `/api/approvals/admin/directory/users?q=${encodeURIComponent(departedName)}`,
+      dbAdminToken,
+    )
+    expect(adminDirectory.status).toBe(200)
+    const adminUsers = ((await adminDirectory.json()) as { users: Array<Record<string, unknown>> }).users
+    expect(adminUsers).toEqual([
+      { id: departedId, name: departedName, email: `${departedId}@example.test`, isActive: false },
+    ])
+    const participantDirectory = await jsonRequest(
+      baseUrl,
+      `/api/approvals/directory/users?q=${encodeURIComponent(departedName)}`,
+      reader,
+    )
+    expect(participantDirectory.status).toBe(200)
+    expect(((await participantDirectory.json()) as { users: unknown[] }).users).toEqual([])
+    expect((await jsonRequest(baseUrl, `/api/approvals/admin/directory/users?q=${encodeURIComponent(departedName)}`, reader)).status)
+      .toBe(403)
   })
 })

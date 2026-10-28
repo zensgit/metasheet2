@@ -65,11 +65,14 @@ export const USER_PICKER_ZH = {
   // Test report 2026-10-08 (T4b / T4cd): what a member id renders as when no display name can be
   // resolved for it (inactive or nameless account, or a lookup still in flight) — never the id.
   unknownUser: '未知用户',
+  // 按人查单 / 批量转交 (administrator directory only): marks a deactivated account in the option.
+  deactivatedSuffix: '（已停用）',
 }
 
 export const USER_PICKER_EN: Record<keyof typeof USER_PICKER_ZH, string> = {
   defaultPlaceholder: 'Search by name / email / ID',
   unknownUser: 'Unknown user',
+  deactivatedSuffix: ' (Deactivated)',
 }
 
 /** The values-free label for a member id with no resolvable display name, in the shell locale. */

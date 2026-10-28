@@ -817,7 +817,13 @@ npx vitest run approval-detail-return-candidates --reporter=dot
 # existing token is a prefix of `approvalBatchTransferView` nor it of one; `approvalBatchTransferView`
 # and `approvalNavBatchTransferEntry` do not contain each other either. Each verified green in
 # isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") before wiring.
-npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot
+#
+# 按人查单 (2026-10-27): ONE token added to this command, `approvalUserLookupView` — the admin
+# lookup page beside 批量转交 (a person's pending / decided / involved approvals over
+# GET /api/approvals/admin/by-user), its route gate, its pure helpers and its envelope reader.
+# Bidirectional substring scan (same counting rule as above, case-insensitive): no existing token
+# contains it or is contained by it, and it matches exactly one spec file.
+npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry approvalUserLookupView --reporter=dot
 
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
