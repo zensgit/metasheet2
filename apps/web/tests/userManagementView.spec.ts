@@ -24,6 +24,12 @@ async function flushUi(cycles = 8): Promise<void> {
   }
 }
 
+/** One macrotask turn (flushUi only drains microtasks / Vue ticks). */
+async function macrotaskTurn(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await flushUi(2)
+}
+
 async function waitForCondition(predicate: () => boolean, attempts = 40): Promise<void> {
   for (let index = 0; index < attempts; index += 1) {
     await flushUi(2)
@@ -1860,6 +1866,9 @@ describe('UserManagementView', () => {
       usernameInput.value = 'org.tester'
       usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
       await flushUi(2)
+      // Let one macrotask turn pass first, so a deferred (setTimeout) default would land before the
+      // request body is captured.
+      await macrotaskTurn()
       findButtonByText(container!, '创建用户').click()
       await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST'))
       await flushUi(8)
@@ -1871,6 +1880,7 @@ describe('UserManagementView', () => {
     it('lists the session orgs but never pre-selects one, even when it is the only option', async () => {
       mountWith({ sessionOrgs: ['org-alpha'] })
       await flushUi(20)
+      await macrotaskTurn()
 
       expect(callLog).toContain('/api/auth/session-orgs')
       const select = orgSelect()
@@ -1893,6 +1903,7 @@ describe('UserManagementView', () => {
       it(`does not pre-select or send an org without a choice (${label})`, async () => {
         mountWith({ sessionOrgs: [...sessionOrgs], sessionCurrentOrgId })
         await flushUi(20)
+        await macrotaskTurn()
 
         const select = orgSelect()
         expect(Array.from(select.options).map((option) => option.value)).toEqual(['', ...sessionOrgs])
@@ -2041,6 +2052,34 @@ describe('UserManagementView', () => {
         await setSelectValue(groupSelect(), GROUP_ID)
         await setSelectValue(shiftSelect(), SHIFT_ID)
         expect(note()).toBe('所选考勤组和默认班次属于不同的组织，创建会被拒绝；请改选其中之一。')
+      })
+
+      it('group and shift in the same org: names that org and both as the source', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha', attendanceShiftOrgId: 'org-alpha' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        await setSelectValue(shiftSelect(), SHIFT_ID)
+        expect(note()).toBe('新用户将加入组织 org-alpha（所选考勤组和默认班次所属的组织）。')
+        expect(orgSelect().value).toBe('')
+      })
+
+      it('shows nothing when the group\'s org is known but the picked shift\'s org is not', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        expect(note()).not.toBeNull()
+        await setSelectValue(shiftSelect(), SHIFT_ID)
+        expect(note()).toBeNull()
+      })
+
+      it('shows nothing (never a guessed default) when only a shift is picked and the shift list carries no org', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'] })
+        await flushUi(20)
+        await setSelectValue(shiftSelect(), SHIFT_ID)
+        expect(note()).toBeNull()
+        const body = await fillRequiredAndSubmit()
+        expect(body.defaultShiftId).toBe(SHIFT_ID)
+        expect(body).not.toHaveProperty('attendanceOrgId')
       })
 
       it('shows nothing (never a guessed default) when the group list carries no org', async () => {

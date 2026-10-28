@@ -2563,8 +2563,9 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
  *
  * Idempotent + concurrency-safe: returns the existing active local integration if present;
  * otherwise inserts one. Two concurrent callers for the same org cannot both create a row — the
- * partial unique index `one_active_local_integration_per_org` makes the loser's INSERT raise a
- * unique_violation (23505), which we catch and resolve by re-reading the winner.
+ * partial unique index `one_active_local_integration_per_org` makes the loser's
+ * `INSERT … ON CONFLICT DO NOTHING` return zero rows, and the loser then re-selects the committed
+ * winner (see `getOrCreateLocalIntegrationInTransaction` below for the mechanism).
  */
 // The canonical local anchor's name — the ONE `provider='local'` integration bootstrap creates per
 // org. Used for both the bootstrap INSERT and the PB4-4 reactivation WHERE, so the reactivation
