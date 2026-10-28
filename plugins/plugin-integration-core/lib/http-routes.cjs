@@ -9489,8 +9489,10 @@ function requireStockPreparationAudit() {
       if (!action) {
         exactSourceScope = await resolveUnconfiguredPreflightSourceScope({ tenantId, workspaceId, externalSystemId })
         // Off, no online plan can execute, so there is no pointer to probe (and no read-plan table to need).
+        // S1b: the probe reads the tenant scope, the only scope a pointer can occupy; the matched source scope
+        // (exactSourceScope) still selects the row the adapter loads below.
         if (onlineReadPlansEnabled()) {
-          const active = await readActiveStockPreparationReadPlan(services.stockPreparationReadPlanStore, { ...exactSourceScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: externalSystemId })
+          const active = await readActiveStockPreparationReadPlan(services.stockPreparationReadPlanStore, { tenantId: exactSourceScope.tenantId, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: externalSystemId })
           if (active !== null) throw new HttpRouteError(409, 'READ_PLAN_ACTION_REQUIRED', 'approved read plan requires a configured action')
         }
       }

@@ -580,15 +580,24 @@ test('unconfigured preflight resolves actual binding scope before activation, ne
       }
     }
   }
-  // A genuinely matched workspace binding is distinct from a hint that fell
-  // back to null. Do not impose the unrelated tenant activation on it.
-  const f = await mount({ register, matchedWorkspaceId: 'real-workspace' })
-  await f.ledger.deactivate({ ...SCOPE, actionId: ACTION, actor: USER.id, expectedGeneration: 1 })
-  const result = await f.call(PREFLIGHT, { method: 'GET', query: { externalSystemId: SYSTEM, workspaceId: 'real-workspace' } })
-  assert.equal(result.statusCode, 200, JSON.stringify(result.body))
-  assert.equal(f.calls.binding.length, 1)
-  assert.equal(f.calls.ledger[0].workspaceId, 'real-workspace')
-  assert.equal(f.calls.adapter[0].workspaceId, 'real-workspace')
+  // S1b: a genuinely matched workspace binding selects the SOURCE row only; the pointer is probed at the tenant
+  // scope, the only scope it can occupy, so a tenant activation applies to it like to every other lane.
+  for (const status of ['disabled', 'active', 'absent']) {
+    const f = await mount({ register, matchedWorkspaceId: 'real-workspace' })
+    if (status === 'disabled') await f.ledger.deactivate({ ...SCOPE, actionId: ACTION, actor: USER.id, expectedGeneration: 1 })
+    if (status === 'absent') f.state[ACTIVATION_TABLE].length = 0
+    const result = await f.call(PREFLIGHT, { method: 'GET', query: { externalSystemId: SYSTEM, workspaceId: 'real-workspace' } })
+    assert.equal(f.calls.binding.length, 1)
+    assert.deepEqual(f.calls.ledger.map((input) => input.workspaceId), [null], `${status}: the probe reads the tenant scope`)
+    if (status === 'absent') {
+      assert.equal(result.statusCode, 200, JSON.stringify(result.body))
+      assert.equal(f.calls.adapter[0].workspaceId, 'real-workspace', 'the matched row is the source the preflight loads')
+    } else {
+      assert.equal(result.statusCode, 409, `${status}: ${JSON.stringify(result.body)}`)
+      assert.equal(result.body.error.code, status === 'disabled' ? 'READ_PLAN_ACTIVATION_DISABLED' : 'READ_PLAN_ACTION_REQUIRED')
+      assert.equal(f.calls.adapter.length, 0)
+    }
+  }
 })
 
 test('unconfigured and unbound preflight resolves source metadata fallback before activation', async () => {
@@ -672,14 +681,15 @@ test('route omission mutations are rejected by real-path assertions without edit
   }
   const cases = [
     {
-      name: 'use request hint for unconfigured preflight activation',
-      options: { unconfigured: true },
+      // S1b: the pointer probe is the tenant scope's whatever the source scope, so the observable of a hint taking
+      // over the resolved source scope is the row the adapter loads (no pointer: the preflight measures the source).
+      name: 'use request hint for unconfigured preflight source scope',
+      options: { unconfigured: true, active: false },
       transform: replace('exactSourceScope = await resolveUnconfiguredPreflightSourceScope({ tenantId, workspaceId, externalSystemId })', 'exactSourceScope = { tenantId, workspaceId: workspaceId || null }'),
       async oracle(f) {
-        await f.ledger.deactivate({ ...SCOPE, actionId: ACTION, actor: USER.id, expectedGeneration: 1 })
         const result = await f.call(PREFLIGHT, { method: 'GET', query: { externalSystemId: SYSTEM, workspaceId: 'fallback-selector' } })
-        assert.equal(result.statusCode, 409)
-        assert.equal(f.calls.adapter.length, 0)
+        assert.equal(result.statusCode, 200, JSON.stringify(result.body))
+        assert.equal(f.calls.adapter[0].workspaceId, null, 'the resolved binding row (tenant level), never the request hint')
       },
     },
     {
