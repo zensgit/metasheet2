@@ -46,7 +46,8 @@
 //           (RT-RP6), a request workspace hint over R4 bindings (RT-RP8); switch unset no route reads a pointer
 //           (RT-RP3); a disabled pointer, an unavailable runtime or a claimless principal refuse the confirm with
 //           nothing persisted while the other routes answer as before (RT-RP4, RT-RP5, RT-RP7); S1b: a binding set
-//           that is not one agreeing source refuses the confirm before any pointer read (RT-RP9, RT-RP10)
+//           that is not one agreeing source refuses the confirm before any pointer read (RT-RP9, RT-RP10); R3 bound
+//           to a system other than the deployment default confirms with that system's online digest (RT-RP11)
 // Synthetic values only; the pilot column is seeded directly (pilot enable is impossible on this build: the
 // readiness marker CONTINUATION_SUPPORT_VERSION is 0).
 
@@ -1308,11 +1309,11 @@ function canonicalJson(value) {
 
 // One approved, activated online plan for (TENANT, workspace null) naming the deployment's source, as the runtime read
 // answers it: { activation, version, sourceValidation } (UUID revisions, read-plan-runtime.cjs).
-function onlinePlanFixture() {
+function onlinePlanFixture(systemId = RP_SYSTEM) {
   const config = validateStockPreparationReadPlanConfig({
     schemaVersion: 1,
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-    systemId: RP_SYSTEM,
+    systemId,
     readPlan: {
       id: 'plm.stock-preparation.bom-read.user-draft.v1', sourceKind: 'data-source:sql-readonly', matchField: 'project', maxReadCount: 100,
       pathExAttr: { object: 'SYN_RD_PathLink', matchField: 'project', pathIdField: 'path' },
@@ -1325,8 +1326,8 @@ function onlinePlanFixture() {
     },
   })
   const contentKey = crypto.createHash('sha256').update(canonicalJson(config)).digest('hex')
-  const version = { id: 'rpv_rd_1', tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: RP_SYSTEM, schemaVersion: 1, version: 1, status: 'approved', config, contentKey }
-  const activation = { id: 'rpa_rd_1', tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: RP_SYSTEM, versionId: version.id, contentKey, generation: 1, status: 'active', validationId: 'rpval_rd_1' }
+  const version = { id: 'rpv_rd_1', tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId, schemaVersion: 1, version: 1, status: 'approved', config, contentKey }
+  const activation = { id: 'rpa_rd_1', tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId, versionId: version.id, contentKey, generation: 1, status: 'active', validationId: 'rpval_rd_1' }
   const sourceValidation = { connectionId: 'conn_rd_synthetic', connectionRevision: '22222222-2222-4222-8222-222222222222', bindingRevision: '11111111-1111-4111-8111-111111111111' }
   return Object.freeze({ activation, version, sourceValidation })
 }
@@ -1352,7 +1353,7 @@ function spyReadPlanStore(plan, mode) {
 
 // mount()'s stack (the real store, reader and lock over one db, the registered pilot project) with the switch set
 // (`online`) or unset, the spy ledger patched on, and optionally a source-binding store.
-function mountOnline({ online = true, mode = 'active', sourceBindingStore = null } = {}) {
+function mountOnline({ online = true, mode = 'active', sourceBindingStore = null, planSystemId = RP_SYSTEM } = {}) {
   const previous = process.env[ONLINE_READ_PLANS_ENABLED_ENV]
   const restoreSwitch = () => {
     if (previous === undefined) delete process.env[ONLINE_READ_PLANS_ENABLED_ENV]
@@ -1378,7 +1379,7 @@ function mountOnline({ online = true, mode = 'active', sourceBindingStore = null
   }
   const registered = h.seedRegistryRow(PROJECT)
   markPilot(h)
-  const plan = onlinePlanFixture()
+  const plan = onlinePlanFixture(planSystemId)
   const spy = spyReadPlanStore(plan, mode)
   h.services.stockPreparationReadPlanStore = spy
   const env = h.refresh
@@ -1657,6 +1658,61 @@ test('RT-RP9 (S1b) switch ON, an active pointer, R4 with DIFFERENT systems (a te
 
 test('RT-RP10 (S1b) switch ON, an active pointer, C6 (two workspace rows of the same source, no tenant row): the confirm is 409 READ_PLAN_SOURCE_BINDING_SPLIT bindings_ambiguous, nothing persisted and no pointer read', async () => {
   await assertConfirmRefusedSplit([[RP_WORKSPACE, RP_SYSTEM], ['ws_rd_second', RP_SYSTEM]], 'bindings_ambiguous')
+})
+
+// The REAL source-binding store over synthetic memory rows ([workspaceId, externalSystemId] each), its hint-less
+// single-workspace fallback included (the wiring fake's `get` answers only the exact and tenant-null legs). Read-only:
+// every write entry point refuses. `listed` counts the binding-set listings.
+function realBindingStore(rows) {
+  const { createStockPreparationSourceBindingStore, BINDING_TABLE } = require(path.join(LIB, 'stock-preparation-source-binding-store.cjs'))
+  const table = rows.map(([workspaceId, externalSystemId]) => ({ tenant_id: TENANT, workspace_id: workspaceId, action_id: PLM_STOCK_PREPARATION_ACTION_ID, external_system_id: externalSystemId }))
+  const matches = (row, where) => Object.entries(where || {}).every(([key, value]) => row[key] === value)
+  const refuse = async () => { throw new Error('the synthetic binding rows are read-only here') }
+  const db = {
+    async selectOne(name, where) { assert.equal(name, BINDING_TABLE); const row = table.find((entry) => matches(entry, where)); return row ? { ...row } : null },
+    async select(name, { where, limit } = {}) {
+      assert.equal(name, BINDING_TABLE)
+      const found = table.filter((entry) => matches(entry, where)).map((entry) => ({ ...entry }))
+      return typeof limit === 'number' ? found.slice(0, limit) : found
+    },
+    insertOne: refuse, updateRow: refuse, transaction: refuse, selectOneForKeyShare: refuse,
+  }
+  const real = createStockPreparationSourceBindingStore({ db })
+  const listed = []
+  return { ...real, listed, async listForAction(input, options) { listed.push({ ...input }); return real.listForAction(input, options) } }
+}
+
+// Every case above binds the deployment's own source, where the system the hint-less lookup resolved and the
+// deployment's system are the same. R3 bound to ANOTHER system tells them apart: the S1 helper must compare the
+// binding set with the RESOLVED system, so the confirm stamps what every hint-less lane executes.
+const RP_BOUND_SYSTEM = 'plm_sql_source_bound_synthetic'
+
+test('RT-RP11 (S1b) switch ON, R3 (one workspace row, no tenant row) bound to a system that is NOT the deployment default, an active pointer for the bound system: the confirm answers 201 and stamps the online digest of the bound system — the set is compared with the RESOLVED system, never the deployment\'s', async () => {
+  const bindings = realBindingStore([[RP_WORKSPACE, RP_BOUND_SYSTEM]])
+  const hintless = await bindings.get({ tenantId: TENANT, actionId: PLM_STOCK_PREPARATION_ACTION_ID, workspaceId: null })
+  assert.deepEqual([hintless.externalSystemId, hintless.matchedWorkspaceId, hintless.scopeFallback], [RP_BOUND_SYSTEM, RP_WORKSPACE, 'single_workspace_binding'], 'calibration: R3, the hint-less lookup resolves the bound workspace row')
+  const st = mountOnline({ sourceBindingStore: bindings, planSystemId: RP_BOUND_SYSTEM })
+  try {
+    const actions = st.h.context.config.stockPreparationTableActions
+    const deploymentAction = await createStockPreparationTableActionRegistry({ actions }).getTableAction({ tenantId: TENANT })
+    assert.notEqual(deploymentAction.source.externalSystemId, RP_BOUND_SYSTEM, 'calibration: the deployment default is not the bound system')
+    const boundAction = await createStockPreparationTableActionRegistry({ actions, resolveSourceBinding: (scope) => bindings.get(scope) }).getTableAction({ tenantId: TENANT })
+    assert.equal(boundAction.source.externalSystemId, RP_BOUND_SYSTEM, 'calibration: the hint-less registry lookup names the bound system')
+    const bound = refreshSourceIdentity({ action: boundAction, tenantId: TENANT })
+    const online = refreshSourceIdentity({ action: composeStockPreparationReadPlanAction({ action: boundAction, scope: { tenantId: TENANT, workspaceId: null }, activation: st.plan.activation, version: st.plan.version }), tenantId: TENANT })
+    assert.notEqual(online.readPlanDigest, bound.readPlanDigest, 'calibration: the online plan is not the deployment plan')
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    const listedBefore = bindings.listed.length
+    const done = await confirm(st, body, CLAIMED)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    const cont = st.continuations()[0]
+    assert.equal(cont.read_plan_digest, online.readPlanDigest, 'the online plan of the bound system')
+    assert.equal(cont.external_system_id, RP_BOUND_SYSTEM)
+    assert.equal(cont.source_scope_digest, online.sourceScopeDigest)
+    assert.equal(bindings.listed.length - listedBefore, 1, 'the confirm listed the binding set once: the canonical assert ran')
+    assert.deepEqual(st.spy.calls, [{ tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: RP_BOUND_SYSTEM }], 'one pointer read, at the tenant scope, for the BOUND system')
+  } finally { st.restore() }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-decision-routes.test.cjs', tests)

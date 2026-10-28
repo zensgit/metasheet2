@@ -2046,6 +2046,23 @@ test('PAR-R4 (S1b) C6 (two workspace rows, no tenant row, the same system): ever
   assert.deepEqual(f.calls.ledger.map((input) => input.workspaceId), [null, null])
 })
 
+// The reason order (ambiguous before hint_unbound) is only observable when the hint-less lane resolves a system that
+// is in none of the rows: C6 with the deployment default != the bound system. PAR-R4 binds the deployment's own
+// system, so either order reports bindings_ambiguous there.
+test('PAR-R4b (S1b) C6 with the deployment default != the bound system: the hint-less lookup resolves the deployment default (no tenant row, two workspace rows), and the lane still refuses bindings_ambiguous, never hint_unbound, before any pointer or source read', async () => {
+  const f = await mount({ deploySystemId: 'system-deploy-default' })
+  useRealBindings(f, [['ws-1', SYSTEM], ['ws-2', SYSTEM]])
+  const store = f.services.stockPreparationSourceBindingStore
+  assert.equal(await store.get({ tenantId: TENANT, actionId: ACTION, workspaceId: null }), null, 'calibration: C6 hint-less resolves no row, so the lane resolves the deployment default')
+  assert.notEqual(f.action.source.externalSystemId, SYSTEM, 'calibration: the deployment default is not the bound system')
+  const before = ioCounts(f)
+  const listedBefore = f.calls.listed.length
+  assertSplit(await dryRun(f), 'bindings_ambiguous', 'hint-less')
+  assertSplit(await dryRun(f, 'ws-1'), 'bindings_ambiguous', 'hint ws-1')
+  assert.deepEqual(ioCounts(f), before, 'no pointer, adapter, source or target read, no write')
+  assert.equal(f.calls.listed.length - listedBefore, 2, 'each lane listed the binding set once')
+})
+
 test('PAR-R5 (S1b) an unlistable, incomplete or failing binding listing refuses every lane before any pointer or source read; the store text never leaves', async () => {
   for (const [label, prepare, status, code, reason] of [
     ['no listForAction', (store) => { delete store.listForAction }, 409, SPLIT, 'bindings_unverifiable'],

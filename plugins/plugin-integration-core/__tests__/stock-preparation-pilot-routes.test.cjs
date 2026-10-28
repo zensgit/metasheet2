@@ -56,7 +56,8 @@
 //        only ⇒ failing, ENABLE refused with nothing done; (b) online only ⇒ failing (today's answer); (c) both ⇒ ok;
 //        (d) a disabled pointer ⇒ failing; (e) switch unset ⇒ P-04 / P-05 as today, no pointer read; (f) declared not
 //        applicable ⇒ ok without asking for any plan; (g, S1b) a binding set naming two systems ⇒ failing before any
-//        pointer read (the effective resolver refuses it)
+//        pointer read (the effective resolver refuses it); (h, S1b) R3 bound to the plan's system while the deployment
+//        default names another ⇒ ok (the set is compared with the resolved system)
 //
 // Synthetic values only.
 
@@ -1196,7 +1197,7 @@ function withOnlineSwitch(online) {
  * pack declared not applicable, the 规格 slot declared not applicable only when asked, the switch set or unset, and
  * the spy ledger answering an online plan that declares the column or not.
  */
-function mountN4({ online = true, mode = 'active', deploymentSpec, onlineSpec, specNotApplicable = false, sourceBindingStore = null }) {
+function mountN4({ online = true, mode = 'active', deploymentSpec, onlineSpec, specNotApplicable = false, sourceBindingStore = null, deploySystemId = N4_SYSTEM }) {
   const restoreSwitch = withOnlineSwitch(online)
   let ready
   try {
@@ -1206,7 +1207,7 @@ function mountN4({ online = true, mode = 'active', deploymentSpec, onlineSpec, s
         stockPreparationPilot: { customerPack: CUSTOMER_PACK_NOT_APPLICABLE, ...(specNotApplicable ? { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } : {}) },
         stockPreparationTableActions: [{
           actionId: ACTION_ID,
-          source: { externalSystemId: N4_SYSTEM, kind: 'data-source:sql-readonly', readPlan: n4ReadPlan({ spec: deploymentSpec }) },
+          source: { externalSystemId: deploySystemId, kind: 'data-source:sql-readonly', readPlan: n4ReadPlan({ spec: deploymentSpec }) },
           target: { sheetId: 'sheet_env_synthetic', objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} },
         }],
       },
@@ -1336,6 +1337,46 @@ test('PR-N4g (S1b) switch ON, an active pointer, both plans declaring the 规格
     assert.ok(!JSON.stringify(read.body).includes('READ_PLAN_'), 'the readiness answer stays values-free: an id and a boolean')
     await assertEnableRefusedNothingDone(h, ['spec_read_plan_slot'], 'split binding set')
     assert.deepEqual(h.spy.calls, [], 'refused before any pointer read')
+  } finally { h.restore() }
+})
+
+// The REAL source-binding store over synthetic memory rows ([workspaceId, externalSystemId] each), its hint-less
+// single-workspace fallback included (the wiring fake's `get` answers only the exact and tenant-null legs). Read-only:
+// every write entry point refuses. `listed` counts the binding-set listings.
+function n4RealBindingStore(rows) {
+  const { createStockPreparationSourceBindingStore, BINDING_TABLE } = require(path.join(LIB, 'stock-preparation-source-binding-store.cjs'))
+  const table = rows.map(([workspaceId, externalSystemId]) => ({ tenant_id: TENANT, workspace_id: workspaceId, action_id: ACTION_ID, external_system_id: externalSystemId }))
+  const matches = (row, where) => Object.entries(where || {}).every(([key, value]) => row[key] === value)
+  const refuse = async () => { throw new Error('the synthetic binding rows are read-only here') }
+  const db = {
+    async selectOne(name, where) { assert.equal(name, BINDING_TABLE); const row = table.find((entry) => matches(entry, where)); return row ? { ...row } : null },
+    async select(name, { where, limit } = {}) {
+      assert.equal(name, BINDING_TABLE)
+      const found = table.filter((entry) => matches(entry, where)).map((entry) => ({ ...entry }))
+      return typeof limit === 'number' ? found.slice(0, limit) : found
+    },
+    insertOne: refuse, updateRow: refuse, transaction: refuse, selectOneForKeyShare: refuse,
+  }
+  const real = createStockPreparationSourceBindingStore({ db })
+  const listed = []
+  return { ...real, listed, async listForAction(input, options) { listed.push({ ...input }); return real.listForAction(input, options) } }
+}
+
+test('PR-N4h (S1b) switch ON, R3 (one workspace row, no tenant row) bound to the plan\'s system while the DEPLOYMENT default names another, an active pointer for the bound system, both plans declaring the 规格 column: spec_read_plan_slot is ok — the effective resolver compares the binding set with the system its hint-less lookup RESOLVED, never the deployment\'s', async () => {
+  const deployDefault = 'plm_sql_source_deploy_default_synthetic'
+  const bindings = n4RealBindingStore([['ws_pb_bound', N4_SYSTEM]])
+  const hintless = await bindings.get({ tenantId: TENANT, actionId: ACTION_ID, workspaceId: null })
+  assert.deepEqual([hintless.externalSystemId, hintless.matchedWorkspaceId, hintless.scopeFallback], [N4_SYSTEM, 'ws_pb_bound', 'single_workspace_binding'], 'calibration: R3, the hint-less lookup resolves the bound workspace row')
+  assert.notEqual(deployDefault, N4_SYSTEM, 'calibration: the deployment default is not the bound system')
+  const h = mountN4({ deploymentSpec: true, onlineSpec: true, sourceBindingStore: bindings, deploySystemId: deployDefault })
+  try {
+    const read = await getPilotClaimed(h)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, [])
+    assert.equal(read.body.data.readiness.checks.find((check) => check.id === 'spec_read_plan_slot').ok, true)
+    assert.deepEqual(read.body.data.may, { enable: true })
+    assert.ok(bindings.listed.length >= 1, 'the canonical assert listed the binding set')
+    assert.deepEqual(h.spy.calls, [{ tenantId: TENANT, workspaceId: null, actionId: ACTION_ID, systemId: N4_SYSTEM }], 'one pointer read, at the tenant scope, for the BOUND system')
   } finally { h.restore() }
 })
 
