@@ -162,10 +162,13 @@
                  (buildDisplayFields), so readers see field labels and option labels instead of
                  raw machine keys/values. `detail` fields are excluded here; they keep rendering
                  via the detailTables loop below, unchanged. -->
+            <!-- 参与打印：模板里设为不参与打印的字段，屏幕照常显示，打印时由 @media print 隐藏。
+                 三处字段块（普通字段 / 附件 / 明细）用同一份冻结 formSchema 判断。 -->
             <div
               v-for="field in displayFields"
               :key="field.key"
               class="approval-detail__field"
+              :class="{ 'approval-detail__hide-on-print': printHiddenFieldIds.has(field.key) }"
             >
               <span class="approval-detail__label">{{ field.label }}</span>
               <span>{{ field.value }}</span>
@@ -180,6 +183,7 @@
               v-for="group in attachmentFields"
               :key="`att_${group.fieldId}`"
               class="approval-detail__field"
+              :class="{ 'approval-detail__hide-on-print': printHiddenFieldIds.has(group.fieldId) }"
               data-testid="approval-detail-attachments"
             >
               <span class="approval-detail__label">{{ group.label }}</span>
@@ -208,6 +212,7 @@
               v-for="(table, key) in detailTables"
               :key="key"
               class="approval-detail__field"
+              :class="{ 'approval-detail__hide-on-print': printHiddenFieldIds.has(String(key)) }"
             >
               <span class="approval-detail__label">{{ key }}</span>
               <el-table
@@ -1197,6 +1202,7 @@ import {
   collectFormUserIds,
   findDetailFieldInSchema,
   formatUserFieldValue,
+  nonPrintableFieldIds,
   type DetailDisplayColumn,
   type DetailDisplayTable,
   type DisplayField,
@@ -1583,6 +1589,10 @@ const displayFields = computed<DisplayField[]>(() =>
     resolveUserName: getResolvedUserName,
   }),
 )
+
+// 参与打印：冻结 formSchema 里设为不参与打印的顶层字段 id。只影响打印（模板里给这些字段块
+// 加 `approval-detail__hide-on-print`），屏幕显示与读取的数据都不变。
+const printHiddenFieldIds = computed<Set<string>>(() => nonPrintableFieldIds(approval.value?.formSchema ?? null))
 
 // B3-07 §8 (#4195): resolve the snapshot's frozen attachment ids → metadata for the authorized
 // participants of THIS instance. The server applies the same visibility + hidden-field predicates the

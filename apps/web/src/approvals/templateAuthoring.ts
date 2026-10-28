@@ -185,6 +185,11 @@ export interface FieldAuthoringDraft {
   label: string
   required: boolean
   placeholder: string
+  /**
+   * 参与打印。默认 `true`（旧模板缺省即参与）；`false` 时打印页不输出该字段，屏幕显示不变。
+   * 只在顶层字段上编辑；明细子字段不带这个开关。
+   */
+  printable: boolean
   optionsText: string
   visibility: FieldVisibilityDraft
   // detail / sub-form authoring — meaningful only when `type === 'detail'`. `columns` is the
@@ -461,6 +466,7 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     label: `字段 ${index}`,
     required: false,
     placeholder: '',
+    printable: true,
     optionsText: '',
     visibility: emptyVisibilityDraft(),
     detailColumns: [],
@@ -964,6 +970,8 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     label: field.label,
     required: field.required === true,
     placeholder: field.placeholder ?? '',
+    // 只有存下来的 `false` 才算不参与；缺省或其他值都按参与处理（旧模板行为不变）。
+    printable: field.printable !== false,
     optionsText: formatOptionsText(field.options),
     visibility: visibilityDraftFromRule(field.visibilityRule),
     detailColumns: field.type === 'detail' ? detailColumnDraftsFromField(field) : [],
@@ -1966,6 +1974,13 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       }
       if (!field.placeholder.trim()) {
         delete next.placeholder
+      }
+      // 参与打印：编辑器说了算。只输出 `false`；参与时删掉键，免得 `original` 里旧的 `false`
+      // 被带回来，也让从未改过的旧模板保存后不多出一个键。
+      if (field.printable === false) {
+        next.printable = false
+      } else {
+        delete next.printable
       }
       // Lock-8 L8-A (§1.1, OD-L8-2, A-1): explanation is DISPLAY-ONLY — force `required: false` and
       // strip `placeholder`/`defaultValue` regardless of what the draft or `original` spread carries.
