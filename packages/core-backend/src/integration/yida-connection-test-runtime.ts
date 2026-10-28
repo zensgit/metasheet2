@@ -62,8 +62,9 @@ export const YIDA_CONNECTION_TEST_COOLDOWN_MS = 5000
 // Both the start window and the cooldown read the wall clock (Date.now), which the tests drive with
 // a fake Date. A backward wall-clock step gives a negative elapsed time, which counts as "not
 // throttled" and "inside the window", so it never locks the limiter; at most it can cost one extra
-// cooldown later, once the wall clock passes the old stamp again. A forward step can only refuse
-// (UNAVAILABLE before the exchange, nothing stamped), which is fail-closed and can be retried at once.
+// cooldown later, once the wall clock passes the old stamp again. A forward step either refuses one
+// run at the window check (UNAVAILABLE before the exchange, nothing stamped, retry at once) or, landing
+// after a started exchange, ends that cooldown early; each click is still at most one exchange.
 function elapsedSince(start: number): number { return Date.now() - start }
 const MAX_RUNS = 32
 const RECEIPT_OUTCOMES = new Set<unknown>(['ok', 'upstream_rejected', 'unreachable'])

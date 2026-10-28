@@ -595,7 +595,7 @@ describe('Yida owner connection test behind the server display bit', () => {
     ['YIDA_CONNECTION_TEST_DISABLED', 403, '未向钉钉发出请求'],
     ['YIDA_CONNECTION_TEST_CONFLICT', 409, '请手动 GET 刷新后再试'],
     ['YIDA_CONNECTION_TEST_THROTTLED', 429, '约 5 秒'],
-    ['YIDA_CONNECTION_TEST_INPUT', 400, '不超过 4096 字符'],
+    ['YIDA_CONNECTION_TEST_INPUT', 400, '请求格式'],
     ['YIDA_CONNECTION_TEST_INACTIVE', 503, 'lib/yida-connection-probe.cjs'],
     ['YIDA_CONNECTION_TEST_CANCELLED', 409, '无法确定钉钉是否已收到请求'],
     ['YIDA_CONNECTION_TEST_UNAVAILABLE', 503, '无法确定钉钉是否已收到请求'],

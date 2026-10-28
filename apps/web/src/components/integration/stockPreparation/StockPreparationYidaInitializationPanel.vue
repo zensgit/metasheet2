@@ -63,10 +63,10 @@ const refusalHints: Readonly<Record<string, string>> = Object.freeze({
   YIDA_CONNECTION_TEST_DENIED: '服务器拒绝：当前登录不是部署指定的 owner、租户不符或已无管理员权限；本页材料已清空。未向钉钉发出请求。',
   YIDA_CONNECTION_TEST_CONFLICT: '另一次测试正在进行，或初始化命令已变、本地槽已初始化；请手动 GET 刷新后再试。未向钉钉发出请求。',
   YIDA_CONNECTION_TEST_THROTTLED: '两次测试至少间隔约 5 秒，请稍候再点。未向钉钉发出请求。',
-  YIDA_CONNECTION_TEST_INPUT: '服务器拒绝了输入：appKey/appSecret 不能为空白，且各不超过 4096 字符。未向钉钉发出请求。',
-  YIDA_CONNECTION_TEST_INACTIVE: '服务器上的测试连接组件没有启用：插件未加载，或安装包缺少探针组件（lib/yida-connection-probe.cjs）；请服务器操作员检查。',
+  YIDA_CONNECTION_TEST_INPUT: '服务器拒绝了请求格式（初始化命令号或登录身份不合规；appKey/appSecret 的空白与长度本页已先检查）；请手动 GET 刷新后再试。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_INACTIVE: '服务器上的测试连接组件没有启用：插件未加载，或安装包缺少探针组件（lib/yida-connection-probe.cjs）；插件重载或服务停止期间点击也会出现。请稍后重试一次，仍然出现再请服务器操作员检查。',
   YIDA_CONNECTION_TEST_CANCELLED: '服务器中途取消了本次测试（例如插件重载或服务停止）；无法确定钉钉是否已收到请求，令牌不会被保留。可稍后重试。',
-  YIDA_CONNECTION_TEST_UNAVAILABLE: '服务器未能完成本次测试（例如锚点缺失、数据库过慢或探针答复异常）；无法确定钉钉是否已收到请求，令牌不会被保留。请服务器操作员查看。',
+  YIDA_CONNECTION_TEST_UNAVAILABLE: '服务器未能完成本次测试（例如服务器过忙、数据库出错或探针答复异常）；无法确定钉钉是否已收到请求，令牌不会被保留。请稍后重试一次，仍然出现再请服务器操作员查看。',
   YIDA_INITIALIZATION_CANCELLED: '页面 15 秒内没有收到服务器答复，已停止等待；无法确定钉钉是否已收到请求，令牌不会被保留。可稍后重试。',
   YIDA_INITIALIZATION_UNAVAILABLE: '没有收到服务器的有效答复（网络或服务器故障）；无法确定钉钉是否已收到请求，令牌不会被保留。可稍后重试。',
 })
