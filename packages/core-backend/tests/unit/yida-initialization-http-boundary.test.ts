@@ -79,8 +79,8 @@ function actualInputBoundary(removeIdentityGuard = false): (value: unknown) => u
 describe('YiDa initialization HTTP contract — no IO fake host port', () => {
   it('GET ready and POST initialized preserve status, exact metadata and trusted actor', async () => {
     const f = port(), request = input()
-    expect(await dispatch('GET', undefined, f.value)).toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false } } })
-    expect(await dispatch('POST', request, f.value)).toEqual({ status: 201, result: { ok: true, data: { ...initialized(), sendEnabled: false } } })
+    expect(await dispatch('GET', undefined, f.value)).toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false, connectionTestEnabled: false } } })
+    expect(await dispatch('POST', request, f.value)).toEqual({ status: 201, result: { ok: true, data: { ...initialized(), sendEnabled: false, connectionTestEnabled: false } } })
     expect(f.calls).toHaveLength(2); expect(f.calls[1].actor).toEqual(actor)
     expect(f.calls[1].input).toEqual(request); expect(f.calls[1].signal.aborted).toBe(false)
     expect(JSON.stringify(initialized())).not.toContain(request.material.appSecret)
@@ -90,10 +90,10 @@ describe('YiDa initialization HTTP contract — no IO fake host port', () => {
     const owner = (value: unknown) => ({ sendEnabled() { reads.push(value); if (value instanceof Error) throw value; return value } }) as unknown as YidaOwnerHttpPort
     for (const [value, expected] of [[true, true], [false, false], ['true', false], [1, false], [new Error('PRIVATE_SWITCH_CANARY'), false]] as const) {
       expect(await dispatch('GET', undefined, f.value, { owner: owner(value) }))
-        .toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: expected } } })
+        .toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: expected, connectionTestEnabled: false } } })
     }
     expect(await dispatch('POST', input(), f.value, { owner: owner(true) }))
-      .toEqual({ status: 201, result: { ok: true, data: { ...initialized(), sendEnabled: true } } })
+      .toEqual({ status: 201, result: { ok: true, data: { ...initialized(), sendEnabled: true, connectionTestEnabled: false } } })
     reads.length = 0
     const denied: YidaInitializationHttpPort = { ...f.value, async status() { throw new YidaInitializationError('DENIED') } }
     expect(await dispatch('GET', undefined, denied, { owner: owner(true) }))

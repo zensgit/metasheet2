@@ -1,7 +1,7 @@
 <template>
   <section class="sp-yida-initialization" data-testid="stock-prep-yida-initialization-panel">
     <h4>宜搭本地初始化（不发送）</h4>
-    <p>发送开关关闭时也可独立配置；服务器仍核部署指定 owner、租户及实时权限。本页不交换令牌，不查询宜搭，不授权发送。</p>
+    <p>发送开关关闭时也可独立配置；服务器仍核部署指定 owner、租户及实时权限。初始化本身不交换令牌，不查询宜搭，不授权发送。</p>
     <p>先手动查看本地状态。永久单槽不可通过此页转移、清空或重建；材料仅暂存在本页，离开即清空。</p>
     <button type="button" data-testid="sp-yida-init-refresh" :disabled="busy || invalidated" @click="refresh">手动 GET 本地初始化状态</button>
     <p v-if="commandId" data-testid="sp-yida-init-command">初始化命令：{{ commandId }}</p>
@@ -13,6 +13,13 @@
       <label v-for="field in materialFields" :key="field">{{ field }}<input type="password" :value="material[field]" :data-testid="`sp-yida-init-${field}`" autocomplete="off" spellcheck="false" @input="setMaterial(field, $event)" @paste="pasteMaterial(field, $event)"></label>
       <label>人工审核编号<input :value="reviewRef" data-testid="sp-yida-init-review" autocomplete="off" @input="setReview('review', $event)"></label>
       <label>人工确认 organizationId<input :value="organizationId" data-testid="sp-yida-init-organization" autocomplete="off" @input="setReview('organization', $event)"></label>
+      <section v-if="state?.status === 'ready' && state.connectionTestEnabled === true" class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
+        <p>测试连接（服务器已开通）：只用上面的 appKey/appSecret 向钉钉换一次令牌并当场丢弃；不写宜搭、不保存、不授权发送。须先由服务器操作员执行 bootstrap-yida-initialization-owner 建立锚点，并已手动 GET 到初始化命令。结果 ok 只证明 appKey/appSecret 是有效应用对；systemToken、userId、appType、formUuid 要到首次真实新建才知道。</p>
+        <button type="button" data-testid="sp-yida-init-connection-test" :disabled="!mayTestConnection" @click="testConnection">测试连接（仅换令牌，不写表单）</button>
+        <p v-if="connectionOutcome" data-testid="sp-yida-init-connection-result">{{ outcomeCopy[connectionOutcome] }}</p>
+        <p v-if="testedPairMismatch" data-testid="sp-yida-init-connection-mismatch">已测试的凭据与当前输入不一致，请重新测试</p>
+        <label v-if="testedPairMismatch"><input :checked="overrideTested" type="checkbox" data-testid="sp-yida-init-connection-override" @change="setOverride">不重新测试，仍按当前输入初始化（owner 明确决定）</label>
+      </section>
       <label><input :checked="acknowledged" type="checkbox" data-testid="sp-yida-init-ack" @change="setAcknowledgement">我已人工审核目标与执行身份，确认永久单槽仅归服务器指定 owner；此操作不发送。</label>
       <button type="button" data-testid="sp-yida-init-submit" :disabled="!mayInitialize" @click="initialize">仅初始化本地材料、草稿和人工目标</button>
     </fieldset>
@@ -28,7 +35,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
-import { createYidaInitializationClient, YidaInitializationClientError, type YidaInitializationMaterial, type YidaInitializationState } from '../../../services/integration/yidaInitialization'
+import { createYidaInitializationClient, YidaInitializationClientError, type YidaConnectionTestOutcome, type YidaInitializationMaterial, type YidaInitializationState } from '../../../services/integration/yidaInitialization'
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
 
 const props = defineProps<{ draftInput: YidaOwnerDraftInput | null }>()
@@ -39,6 +46,23 @@ const reviewRef = ref(''), organizationId = ref(''), acknowledged = ref(false)
 const state = shallowRef<YidaInitializationState | null>(null)
 const commandId = ref<string | null>(null), selectedRowKey = ref('')
 const busy = ref(false), uncertain = ref(false), invalidated = ref(false), errorCode = ref('')
+// 测试连接 (display only behind the server bit). The pair that got 'ok' is a NON-reactive copy, never
+// exposed to the template or devtools state; only a version counter is reactive. No hashing: the page
+// may be served over plain HTTP where crypto.subtle is unavailable.
+const outcomeCopy: Readonly<Record<YidaConnectionTestOutcome, string>> = Object.freeze({
+  ok: 'ok：钉钉为这组 appKey/appSecret 发了令牌（令牌已在服务器丢弃）。只证明 appKey/appSecret 是有效应用对；systemToken、userId、appType、formUuid 未验证。',
+  upstream_rejected: '钉钉有应答但没有发令牌：最常见是 appKey/appSecret 不匹配，也可能是限流、代理拦截页或接口变更，系统无法区分。',
+  unreachable: '连不上钉钉：DNS、TLS、连接、重定向或代理问题；与凭据无关。',
+  timeout: '12 秒内无应答：可能是出网被防火墙丢弃或未配置代理，也可能是钉钉慢；与凭据无关',
+})
+const connectionOutcome = ref<YidaConnectionTestOutcome | ''>(''), overrideTested = ref(false), testedVersion = ref(0)
+let testedPair: { appKey: string; appSecret: string } | null = null
+function forgetTestedPair(): void { testedPair = null; testedVersion.value += 1; overrideTested.value = false; connectionOutcome.value = '' }
+const testedPairMismatch = computed(() => testedVersion.value >= 0 && testedPair !== null
+  && (testedPair.appKey !== material.appKey || testedPair.appSecret !== material.appSecret))
+// The owner override answers one mismatch only: once the inputs equal the tested pair again it is spent,
+// so a later different edit needs a fresh tick.
+watch(testedPairMismatch, mismatch => { if (!mismatch) overrideTested.value = false }, { flush: 'sync' })
 let generation = 0
 let client: ReturnType<typeof createYidaInitializationClient> | null = null
 const locked = computed(() => busy.value || uncertain.value)
@@ -47,11 +71,17 @@ watch(locked, value => emit('locked-change', value), { immediate: true, flush: '
 watch(() => state.value?.sendEnabled === true, value => emit('send-enabled-change', value), { immediate: true, flush: 'sync' })
 const mayInitialize = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
   && !!props.draftInput && acknowledged.value && materialFields.every(field => material[field].trim().length > 0)
-  && reviewRef.value.length > 0 && organizationId.value.length > 0)
+  && reviewRef.value.length > 0 && organizationId.value.length > 0
+  && (!testedPairMismatch.value || overrideTested.value))
+const mayTestConnection = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
+  && state.value.connectionTestEnabled === true && !!commandId.value
+  && material.appKey.trim().length > 0 && material.appSecret.trim().length > 0)
 function clearPrivate(): void {
   for (const field of materialFields) material[field] = ''
   reviewRef.value = ''; organizationId.value = ''; acknowledged.value = false
+  forgetTestedPair()
 }
+function setOverride(event: Event): void { if (editAllowed()) overrideTested.value = (event.target as HTMLInputElement).checked }
 function invalidateSession(code?: string): void {
   generation += 1; client?.dispose(); client = null
   clearPrivate(); state.value = null; commandId.value = null; selectedRowKey.value = ''
@@ -103,6 +133,21 @@ async function refresh(): Promise<void> {
     if (commandId.value !== null && result.commandId !== commandId.value) throw new YidaInitializationClientError('YIDA_INITIALIZATION_RESPONSE_INVALID')
     commandId.value = result.commandId; state.value = result; uncertain.value = false
     if (result.status === 'initialized') clearPrivate()
+  } catch (error) {
+    if (active === generation) errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'
+  } finally { if (active === generation) busy.value = false }
+}
+async function testConnection(): Promise<void> {
+  if (!mayTestConnection.value || !commandId.value) return
+  const active = generation
+  // The exact bytes sent; inputs keep them (a probe never clears secrets or sets uncertain).
+  const sent = { appKey: material.appKey, appSecret: material.appSecret }
+  busy.value = true; errorCode.value = ''; forgetTestedPair()
+  try {
+    const tested = await sessionClient().testConnection({ commandId: commandId.value, mode: 'candidate', material: { ...sent } })
+    if (active !== generation) return
+    connectionOutcome.value = tested.outcome
+    if (tested.outcome === 'ok') { testedPair = { ...sent }; testedVersion.value += 1 }
   } catch (error) {
     if (active === generation) errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'
   } finally { if (active === generation) busy.value = false }

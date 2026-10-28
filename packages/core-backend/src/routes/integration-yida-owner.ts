@@ -3,6 +3,7 @@ import { Router, type ErrorRequestHandler, type Request, type RequestHandler, ty
 import { yidaOwnerRuntimeErrorCode, type createYidaOwnerRuntime, type YidaOwnerActor } from '../integration/yida-owner-runtime'
 import { yidaSendApprovalErrorCode } from '../integration/yida-send-approval-service'
 import { yidaInitializationErrorCode, type YidaInitializationInput } from '../integration/yida-initialization-runtime'
+import { yidaConnectionTestErrorCode, type YidaConnectionTestInput } from '../integration/yida-connection-test-runtime'
 import { YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../integration/yida-owner-http-observation'
 
 /** Dedicated host owner boundary, after actual JWT. Never a communication API.
@@ -12,6 +13,11 @@ export type YidaOwnerHttpPort = Pick<ReturnType<typeof createYidaOwnerRuntime>,
 export type YidaInitializationHttpPort = Readonly<{
   status(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
   initialize(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
+}>
+/** Owner-run token-only 测试连接 (ADR adr-yida-connection-test-20261028); never send authority. */
+export type YidaConnectionTestHttpPort = Readonly<{
+  test(actor: YidaOwnerActor, input: YidaConnectionTestInput, options: { signal: AbortSignal }): Promise<unknown>
+  connectionTestEnabled(): boolean
 }>
 type Data = Record<string, unknown>
 const ownErrors = new WeakMap<object, string>()
@@ -27,6 +33,9 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   YIDA_SEND_APPROVAL_INPUT: 400, YIDA_SEND_APPROVAL_NOT_FOUND: 404, YIDA_SEND_APPROVAL_CONFLICT: 409,
   YIDA_SEND_APPROVAL_EXPIRED: 409, YIDA_SEND_APPROVAL_REVOKED: 409,
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
+  YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
+  YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
+  YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,
 })
 function fail(code = 'YIDA_OWNER_HTTP_INPUT'): never {
   const error = new Error(code)
@@ -175,17 +184,39 @@ function initializationInput(value: unknown) {
   if (attestation.executionIdentity !== material.userId) fail()
   return { commandId: id(parsed.commandId), material, draft: candidate, attestation }
 }
-function initialization(value: unknown, sendEnabled: boolean) {
+function connectionTestInput(value: unknown) {
+  const parsed = record(value, ['commandId', 'mode', 'material'])
+  if (parsed.mode !== 'candidate') fail()
+  const material = record(parsed.material, ['appKey', 'appSecret'])
+  for (const key of Object.keys(material)) {
+    if (typeof material[key] !== 'string' || !material[key].trim() || material[key].length > 4096) fail()
+  }
+  if (Buffer.byteLength(JSON.stringify(material), 'utf8') > 16 * 1024) fail()
+  return { commandId: id(parsed.commandId), mode: 'candidate' as const,
+    material: { appKey: material.appKey as string, appSecret: material.appSecret as string } }
+}
+const connectionTestOutcomes = ['ok', 'upstream_rejected', 'unreachable', 'timeout']
+function connectionTestView(value: unknown, commandId: string) {
+  const row = record(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])
+  if (id(row.commandId) !== commandId || row.mode !== 'candidate' || typeof row.outcome !== 'string'
+    || !connectionTestOutcomes.includes(row.outcome) || row.tokenIssued !== (row.outcome === 'ok')
+    || row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) fail()
+  return { commandId, mode: 'candidate', outcome: row.outcome, tokenIssued: row.outcome === 'ok',
+    tokenRetained: false, externalWriteAttempted: false, canSend: false }
+}
+function initialization(value: unknown, sendEnabled: boolean, connectionTestEnabled: boolean) {
   const row = record(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
   if (!['ready', 'initialized'].includes(String(row.status)) || row.canSend !== false
     || row.tokenIssued !== false || row.externalWriteAttempted !== false
     || (row.status === 'ready') !== (row.draft === null)) fail()
   return { commandId: id(row.commandId), status: row.status,
-    draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled }
+    draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
+    connectionTestEnabled }
 }
 function dto(project: () => unknown) { try { return project() } catch { fail('YIDA_OWNER_HTTP_UNAVAILABLE') } }
 function sendError(res: Response, error: unknown) {
   const code = ownErrors.get(error as object) ?? yidaOwnerRuntimeErrorCode(error) ?? yidaSendApprovalErrorCode(error)
+    ?? yidaConnectionTestErrorCode(error)
   const initializationCode = yidaInitializationErrorCode(error)
   const initializationStatus: Readonly<Record<string, number>> = { INPUT: 400, DENIED: 403, CONFLICT: 409, CANCELLED: 409,
     INACTIVE: 503, UNAVAILABLE: 503 }
@@ -222,7 +253,8 @@ export const yidaOwnerParseErrorHandler: ErrorRequestHandler = (error: unknown, 
   res.status(status).json({ ok: false, error: { code: status === 503 ? 'YIDA_OWNER_HTTP_UNAVAILABLE' : 'YIDA_OWNER_HTTP_INPUT' } })
 }
 export { YIDA_OWNER_HTTP_PREFIX } from '../integration/yida-owner-http-observation'
-export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initializationPort?: YidaInitializationHttpPort): Router {
+export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initializationPort?: YidaInitializationHttpPort,
+  connectionTestPort?: YidaConnectionTestHttpPort): Router {
   const router = Router()
   const route = (status: number, operation: (req: Request, owner: YidaOwnerActor, signal: AbortSignal) => Promise<unknown>) =>
     async (req: Request, res: Response) => {
@@ -275,17 +307,27 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   // Read only after the initialization port authorized this owner + live admin,
   // so the UI may show the send entry; a display bit, never send authority.
   const sendEnabled = () => { try { return port.sendEnabled() === true } catch { return false } }
+  // Same rule for the 测试连接 display bit: shown only on an owner-authorized reply, never authority.
+  const connectionTestEnabled = () => { try { return connectionTestPort?.connectionTestEnabled() === true } catch { return false } }
   router.get('/initialization', route(200, async (req, owner, signal) => {
     empty(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.status(owner, { signal })
-    return dto(() => initialization(result, sendEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled()))
   }))
   router.post('/initialization', route(201, async (req, owner, signal) => {
     const input = initializationInput(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.initialize(owner, input, { signal })
-    return dto(() => initialization(result, sendEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled()))
+  }))
+  // Owner-run token-only connection test before initialization. The runtime authorizes; the route
+  // only closes the body and the DTO. No send authority, no form IO, nothing persisted.
+  router.post('/initialization/connection-test', route(200, async (req, owner, signal) => {
+    const input = connectionTestInput(req.body)
+    if (!connectionTestPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await connectionTestPort.test(owner, input, { signal })
+    return dto(() => connectionTestView(result, input.commandId))
   }))
   router.use((_req, res) => { res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } }) })
   return router

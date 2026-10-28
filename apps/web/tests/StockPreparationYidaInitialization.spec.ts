@@ -26,8 +26,8 @@ function draftInput(): YidaOwnerDraftInput {
 }
 function metadata() { return { targetRef: ids.target, operationId: ids.operation, status: 'unverified', identityKind: 'local-unverified',
   canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false, rowCount: 1, rows: [{ rowKey: ids.row, index: 0 }], reused: false } }
-function ready(sendEnabled = false) { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled } }
-function initialized(sendEnabled = false) { return { ...ready(sendEnabled), status: 'initialized', draft: metadata() } }
+function ready(sendEnabled = false, connectionTestEnabled = false) { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled, connectionTestEnabled } }
+function initialized(sendEnabled = false, connectionTestEnabled = false) { return { ...ready(sendEnabled, connectionTestEnabled), status: 'initialized', draft: metadata() } }
 const material: YidaInitializationMaterial = { appKey: ' SYN-KEY\r\n原字节 ', appSecret: ' SYN-SECRET\n原字节 ', systemToken: ' SYN-TOKEN\r\n原字节 ', userId: 'SYN-EXECUTION' }
 function payload(): YidaInitializationInput { return { commandId: ids.command, material: { ...material }, draft: draftInput(),
   attestation: { kind: 'owner-reviewed-target', reviewRef: 'SYN-REVIEW', organizationId: 'SYN-ORG', executionIdentity: material.userId } } }
@@ -477,5 +477,151 @@ describe('actual component guard-removal probes with an isolated client boundary
       q('appKey').dispatchEvent(paste); expect(paste.defaultPrevented).toBe(!removed)
       app.unmount(); root.remove(); app = null; root = null
     }
+  })
+})
+
+// Owner-run token-only 测试连接 (ADR adr-yida-connection-test-20261028). Mocked HTTP/jsdom only: the
+// server bit, the probe DTO and the refusals are synthetic; no DingTalk request exists here.
+describe('Yida owner connection test behind the server display bit', () => {
+  const probeEndpoint = `${endpoint}/connection-test`
+  const probeView = (outcome = 'ok') => ({ commandId: ids.command, mode: 'candidate', outcome, tokenIssued: outcome === 'ok',
+    tokenRetained: false, externalWriteAttempted: false, canSend: false })
+  async function observe(enabled: boolean) { fetchSpy.mockResolvedValueOnce(json(ready(false, enabled))); await click('refresh') }
+  async function probe(response: Response) { fetchSpy.mockResolvedValueOnce(response); await click('connection-test') }
+  const clients: ReturnType<typeof createYidaInitializationClient>[] = []
+  afterEach(() => { for (const value of clients.splice(0)) value.dispose() })
+  const client = () => { const value = createYidaInitializationClient(); clients.push(value); return value }
+  const request = () => ({ commandId: ids.command, mode: 'candidate' as const, material: { appKey: material.appKey, appSecret: material.appSecret } })
+
+  it('is not rendered while the server bit is false; rendered (with the anchor prerequisite) when true', async () => {
+    mountPanel(); await observe(false); await fill()
+    expect(absent('connection')).toBe(true); expect(absent('connection-test')).toBe(true)
+    await observe(true)
+    expect(q('connection').textContent).toContain('bootstrap-yida-initialization-owner')
+    expect(q('connection').textContent).toContain('只证明 appKey/appSecret')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    await fill(); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('POSTs exactly commandId, mode and the raw appKey/appSecret with Bearer only; keeps every input byte; never uncertain', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('ok')))
+    const [url, init] = fetchSpy.mock.calls[1]
+    expect(url).toBe(probeEndpoint)
+    expect(init).toMatchObject({ method: 'POST', credentials: 'omit', mode: 'same-origin', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer' })
+    expect(Object.keys(init.headers)).toEqual(['Accept', 'Authorization', 'Content-Type'])
+    expect(init.headers.Authorization === `Bearer ${token}`).toBe(true)
+    const body = JSON.parse(init.body as string)
+    expect(Object.keys(body)).toEqual(['commandId', 'mode', 'material']); expect(Object.keys(body.material)).toEqual(['appKey', 'appSecret'])
+    expect(body.commandId === ids.command && body.mode === 'candidate').toBe(true)
+    expect(body.material.appKey === material.appKey && body.material.appSecret === material.appSecret).toBe(true)
+    expect(absent('uncertain')).toBe(true); expect(absent('connection-mismatch')).toBe(true)
+    expect(q('connection-result').textContent).toContain('令牌已在服务器丢弃')
+    // The probe neither cleared the private inputs nor consumed the ready command: the same bytes initialize.
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
+    expect(fetchSpy.mock.calls[2][0]).toBe(endpoint)
+    expect(JSON.stringify(JSON.parse(fetchSpy.mock.calls[2][1].body as string)) === JSON.stringify(payload())).toBe(true)
+    expect(q('initialized').textContent).toContain('canSend=false'); expect(absent('connection')).toBe(true)
+  })
+
+  it.each([
+    ['upstream_rejected', '系统无法区分'],
+    ['unreachable', '与凭据无关'],
+    ['timeout', '12 秒内无应答：可能是出网被防火墙丢弃或未配置代理，也可能是钉钉慢；与凭据无关'],
+  ])('renders %s as a class only, and initialization stays possible', async (outcome, copy) => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView(outcome)))
+    expect(q('connection-result').textContent).toContain(copy)
+    expect(absent('connection-mismatch')).toBe(true); expect(absent('uncertain')).toBe(true)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+  })
+
+  it('a refusal shows its closed code; DENIED closes the panel and clears private inputs', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(error('YIDA_CONNECTION_TEST_THROTTLED', 429))
+    expect(q('error').textContent).toBe('YIDA_CONNECTION_TEST_THROTTLED'); expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    await probe(error('YIDA_CONNECTION_TEST_DENIED', 403))
+    expect(q('error').textContent).toBe('YIDA_CONNECTION_TEST_DENIED'); noSecrets()
+    expect(q<HTMLButtonElement>('refresh').disabled).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+  })
+
+  it('tested-pair check: an edit after ok blocks initialization until a re-test or the explicit owner override', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('ok')))
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    await type('appSecret', 'SYN-SECRET-EDITED')
+    expect(q('connection-mismatch').textContent).toBe('已测试的凭据与当前输入不一致，请重新测试')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    const override = q<HTMLInputElement>('connection-override'); override.checked = true; override.dispatchEvent(new Event('change')); await flush()
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    override.checked = false; override.dispatchEvent(new Event('change')); await flush()
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    await probe(json(probeView('ok')))
+    expect(JSON.parse(fetchSpy.mock.calls[2][1].body as string).material.appSecret === 'SYN-SECRET-EDITED').toBe(true)
+    expect(absent('connection-mismatch')).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    // Editing back to the tested bytes also clears the notice; a non-ok re-test forgets the tested pair.
+    await type('appSecret', 'SYN-SECRET-OTHER'); expect(absent('connection-mismatch')).toBe(false)
+    await type('appSecret', 'SYN-SECRET-EDITED'); expect(absent('connection-mismatch')).toBe(true)
+    await type('appKey', 'SYN-KEY-EDITED'); await probe(json(probeView('upstream_rejected')))
+    expect(absent('connection-mismatch')).toBe(true)
+  })
+
+  it('tested-pair override is spent once the inputs match the tested pair again; a third value needs a fresh tick', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('ok')))
+    await type('appSecret', 'SYN-SECRET-EDITED')
+    const override = q<HTMLInputElement>('connection-override'); override.checked = true; override.dispatchEvent(new Event('change')); await flush()
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    // Paste the exact tested bytes back (an input event would strip the newline): the mismatch clears.
+    const back = new Event('paste', { cancelable: true })
+    Object.defineProperty(back, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? material.appSecret : '' } })
+    q('appSecret').dispatchEvent(back); await flush()
+    expect(absent('connection-mismatch')).toBe(true); expect(absent('connection-override')).toBe(true)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    await type('appSecret', 'SYN-SECRET-THIRD')
+    expect(absent('connection-mismatch')).toBe(false)
+    expect(q<HTMLInputElement>('connection-override').checked).toBe(false)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    const again = q<HTMLInputElement>('connection-override'); again.checked = true; again.dispatchEvent(new Event('change')); await flush()
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('the client requires the observed ready command, does not consume it, and closes the probe DTO', async () => {
+    const value = client()
+    await expect(value.testConnection(request())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_STATE_UNCONFIRMED' })
+    fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await value.observe()
+    await expect(value.testConnection({ ...request(), commandId: ids.other })).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_STATE_UNCONFIRMED' })
+    await expect(value.testConnection({ ...request(), material: { appKey: '   ', appSecret: 'SYN' } })).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    fetchSpy.mockResolvedValueOnce(json(probeView('ok'))); await expect(value.testConnection(request())).resolves.toEqual(probeView('ok'))
+    for (const bad of [{ ...probeView(), token: 'SYN-LEAKED-TOKEN' }, { ...probeView(), tokenRetained: true }, { ...probeView(), canSend: true },
+      { ...probeView(), externalWriteAttempted: true }, { ...probeView(), tokenIssued: false }, { ...probeView('timeout'), tokenIssued: true },
+      { ...probeView(), outcome: 'SYN' }, { ...probeView(), commandId: ids.other }, { ...probeView(), mode: 'stored' }]) {
+      fetchSpy.mockResolvedValueOnce(json(bad)); await expect(value.testConnection(request())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
+    }
+    fetchSpy.mockResolvedValueOnce(json(probeView('ok'), 201)); await expect(value.testConnection(request())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await expect(value.initialize(payload())).resolves.toMatchObject({ status: 'initialized' })
+    fetchSpy.mockResolvedValueOnce(json({ ...ready(), connectionTestEnabled: 'true' })); await expect(client().observe()).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
+  })
+
+  it('removing the boolean connectionTestEnabled check accepts the same rejected state (negative assertion red)', async () => {
+    const sample = { ...ready(), connectionTestEnabled: 'true' }
+    const baseline = createYidaInitializationClient(); fetchSpy.mockResolvedValueOnce(json(sample))
+    await expect(baseline.observe()).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' }); baseline.dispose()
+    const mutant = memoryService("  if (typeof row.connectionTestEnabled !== 'boolean') invalid()", '')(); fetchSpy.mockResolvedValueOnce(json(sample))
+    await expect(mutant.observe()).resolves.toBeDefined(); mutant.dispose()
+  })
+  it('removing the closed probe-DTO flags accepts a tokenRetained=true reply (negative assertion red)', async () => {
+    const check = async (factory: typeof createYidaInitializationClient, accepts: boolean) => {
+      const value = factory(); fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await value.observe()
+      fetchSpy.mockResolvedValueOnce(json({ ...probeView(), tokenRetained: true }))
+      if (accepts) await expect(value.testConnection(request())).resolves.toBeDefined()
+      else await expect(value.testConnection(request())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
+      value.dispose()
+    }
+    await check(createYidaInitializationClient, false)
+    await check(memoryService('  if (row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) invalid()', ''), true)
   })
 })

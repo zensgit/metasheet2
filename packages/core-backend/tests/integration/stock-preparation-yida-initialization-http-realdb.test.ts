@@ -24,9 +24,11 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     expect(result.headers['x-content-type-options']).toBe('nosniff')
     expect(Object.keys(result.body).sort()).toEqual(['data', 'ok']); expect(result.body.ok).toBe(true)
     const view = result.body.data as Data
-    expect(Object.keys(view).sort()).toEqual(['canSend', 'commandId', 'draft', 'externalWriteAttempted', 'sendEnabled', 'status', 'tokenIssued'])
+    expect(Object.keys(view).sort()).toEqual(['canSend', 'commandId', 'connectionTestEnabled', 'draft', 'externalWriteAttempted', 'sendEnabled', 'status', 'tokenIssued'])
     expect(view).toMatchObject({ canSend: false, tokenIssued: false, externalWriteAttempted: false })
     expect(typeof view.sendEnabled).toBe('boolean')
+    // This fixture wires no connection-test port: the display bit is always false here.
+    expect(view.connectionTestEnabled).toBe(false)
     return view
   }
   function denied(result: Awaited<ReturnType<YidaOwnerHttpRealdbFixture['http']>>, status: number, code: string) {
@@ -55,13 +57,13 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
   it('OFF initialization writes 090/091/092/result in one host transaction and GET alone recovers closed metadata', async () => {
     expect((await f.initializationProof()).counts).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0])
     const ready = data(await f.http('GET', '/initialization'), 200)
-    expect(ready).toMatchObject({ status: 'ready', draft: null, sendEnabled: false })
+    expect(ready).toMatchObject({ status: 'ready', draft: null, sendEnabled: false, connectionTestEnabled: false })
     const anchor = (await f.rows('integration_yida_initialization_anchor'))[0]
     expect(ready.commandId).toBe(anchor.command_id)
     expect(anchor).toMatchObject({ owner_id: principals.owner, tenant_id: tenant, workspace_id: null })
     f.sql.length = 0
     const made = data(await f.http('POST', '/initialization', input(ready.commandId)), 201)
-    expect(made.status).toBe('initialized')
+    expect(made.status).toBe('initialized'); expect(made.connectionTestEnabled).toBe(false)
     expect(made.draft).toMatchObject({ status: 'unverified', reused: false, rowCount: 1 })
     expect((await f.initializationProof()).counts).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1])
     expect(f.sql.filter(sql => /^BEGIN\b/u.test(sql))).toEqual(['BEGIN ISOLATION LEVEL READ COMMITTED'])
@@ -76,9 +78,9 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     await noExternalWrite()
     // The display bit follows the host's exact-literal send switch, only on this owner-authorized reply.
     f.setEnablement('true')
-    expect(data(await f.http('GET', '/initialization'), 200)).toEqual({ ...recovered, sendEnabled: true })
+    expect(data(await f.http('GET', '/initialization'), 200)).toEqual({ ...recovered, sendEnabled: true, connectionTestEnabled: false })
     f.setEnablement('TRUE')
-    expect(data(await f.http('GET', '/initialization'), 200)).toEqual({ ...recovered, sendEnabled: false })
+    expect(data(await f.http('GET', '/initialization'), 200)).toEqual({ ...recovered, sendEnabled: false, connectionTestEnabled: false })
     f.setEnablement('false')
     expect(await f.initializationProof()).toEqual(before); await noExternalWrite()
     const output = JSON.stringify([made, recovered])
