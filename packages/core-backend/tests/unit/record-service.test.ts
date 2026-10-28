@@ -708,6 +708,50 @@ describe('RecordService', () => {
     )
   })
 
+  // 备料 option B (human-write-lock.ts): the REST single-record spine's OWN floor. The route gates in front of it
+  // answer first in production; these pin that the service refuses on its own (defense in depth) and never writes.
+  it('B: patch rejects a human-write-locked field as read-only and writes nothing', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [{ id: 'fld_plm', name: 'PLM key', type: 'string', property: { humanWriteLock: 'plm_system' } }],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.patchRecord({
+      recordId: 'rec_existing',
+      sheetId: 'sheet_ops',
+      data: { fld_plm: 'HACK' },
+      access: { userId: 'user_1', permissions: [], isAdminRole: true },
+      capabilities: fullCapabilities,
+    })).rejects.toMatchObject({ code: 'FIELD_READONLY', statusCode: 403, fieldErrors: { fld_plm: 'Field is readonly' } })
+    expect(pool.queryMock).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE meta_records'), expect.any(Array))
+  })
+
+  it('B: create rejects seeding a human-write-locked field with FIELD_READONLY_PLM_SYSTEM and inserts nothing', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [
+          { id: 'fld_plm', name: 'PLM key', type: 'string', property: { humanWriteLock: 'plm_system' } },
+          { id: 'fld_title', name: 'Title', type: 'string', property: {} },
+        ],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'ok', fld_plm: 'FAKE' },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })).rejects.toMatchObject({ name: 'RecordFieldForbiddenError', code: 'FIELD_READONLY_PLM_SYSTEM', fieldId: 'fld_plm' })
+    expect(pool.queryMock).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO meta_records'), expect.any(Array))
+
+    // Control: the same create without the locked column lands.
+    const created = await service.createRecord({ sheetId: 'sheet_ops', data: { fld_title: 'ok' }, actorId: 'user_1', capabilities: fullCapabilities })
+    expect(created.data).toEqual({ fld_title: 'ok' })
+  })
+
   it('patch rejects hidden fields with the legacy forbidden response classification', async () => {
     pool = createMockPool({
       SELECT_FIELDS: {

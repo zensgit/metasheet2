@@ -1209,4 +1209,99 @@ describe('MetaViewManager', () => {
 
     app.unmount()
   })
+
+  // Customer field report 2026-10-21 (#8): adding a non-grid view (e.g. gallery) creates it at once, yet
+  // closing the dialog asked to discard unsaved changes — the add cleared the name but left the type
+  // select on 'gallery', which alone counted as a pending new-view draft.
+  it('closes without a discard prompt after a non-grid view was added', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const closeSpy = vi.fn()
+    const createSpy = vi.fn()
+    const dirtySpy = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_grid',
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          views: [{ id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' }],
+          onClose: closeSpy,
+          onCreateView: createSpy,
+          'onUpdate:dirty': dirtySpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const nameInput = container.querySelector('.meta-view-mgr__add-row .meta-view-mgr__input') as HTMLInputElement
+    const typeSelect = container.querySelector('.meta-view-mgr__add-row .meta-view-mgr__select') as HTMLSelectElement
+    nameInput.value = 'Photos'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    typeSelect.value = 'gallery'
+    typeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    expect(dirtySpy).toHaveBeenLastCalledWith(true)
+
+    ;(container.querySelector('.meta-view-mgr__add-row .meta-view-mgr__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+
+    expect(createSpy).toHaveBeenCalledWith({ sheetId: 'sheet_1', name: 'Photos', type: 'gallery' })
+    expect(nameInput.value).toBe('')
+    expect(typeSelect.value).toBe('grid')
+    expect(dirtySpy).toHaveBeenLastCalledWith(false)
+
+    ;(container.querySelector('.meta-view-mgr__close') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(closeSpy).toHaveBeenCalledTimes(1)
+
+    app.unmount()
+  })
+
+  it('still asks before closing when a rename was typed but not saved', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const closeSpy = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_grid',
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          views: [{ id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' }],
+          onClose: closeSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const renameButton = Array.from(container.querySelectorAll('.meta-view-mgr__action'))
+      .find((button) => (button as HTMLButtonElement).title === 'Rename') as HTMLButtonElement
+    renameButton.click()
+    await nextTick()
+    const renameInput = container.querySelector('.meta-view-mgr__rename') as HTMLInputElement
+    renameInput.value = 'Primary Grid'
+    renameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__close') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved view manager changes?')
+    expect(closeSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+  })
 })

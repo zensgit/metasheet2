@@ -760,13 +760,14 @@ describe('link chips (§1.3 "Link chips", HI-1)', () => {
     await flushUi()
     const chips = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-test="link-chip"]'))
     expect(chips.map((c) => c.textContent?.trim())).toEqual(['Acme Supply', 'Beacon Labs'])
-    expect(container.querySelector('.meta-linked-record-popover')).toBeNull()
+    // The popover teleports to <body> (see MetaLinkedRecordPopover.vue), so it is looked up on the document.
+    expect(document.querySelector('.meta-linked-record-popover')).toBeNull()
     chips[0].click()
     await flushUi()
     expect(fetchRecord).toHaveBeenCalledTimes(1)
     expect(fetchRecord).toHaveBeenCalledWith('vendor_1')
-    expect(container.querySelector('.meta-linked-record-popover [role="dialog"]')).not.toBeNull()
-    expect(container.querySelector('.meta-linked-record-popover')?.textContent).toContain('Acme Supply')
+    expect(document.querySelector('.meta-linked-record-popover [role="dialog"]')).not.toBeNull()
+    expect(document.querySelector('.meta-linked-record-popover')?.textContent).toContain('Acme Supply')
     // the picker button is still there, now reading record.editLinks (chips carry the names/count)
     const btn = container.querySelector<HTMLButtonElement>('.meta-record-drawer__link-btn')!
     expect(btn.textContent?.trim()).toBe(recordLabel('record.editLinks', false))

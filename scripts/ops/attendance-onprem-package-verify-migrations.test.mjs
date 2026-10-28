@@ -36,6 +36,8 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   const placeholderFiles = [
     'apps/web/package.json',
     'packages/core-backend/package.json',
+    'packages/mssql-readonly-utils/package.json',
+    'packages/mssql-readonly-utils/index.cjs',
     'packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js',
     'plugins/plugin-attendance/plugin.json',
     'plugins/plugin-attendance/index.cjs',

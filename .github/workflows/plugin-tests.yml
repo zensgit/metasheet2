@@ -126,7 +126,9 @@ jobs:
 
   test:
     # Public-repository CI runs on an isolated GitHub-hosted VM, not a persistent development host.
-    runs-on: ubuntu-latest
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
     # Leave headroom for the full integration suite without using the six-hour default timeout.
     timeout-minutes: 150
 
@@ -145,6 +147,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -162,7 +171,13 @@ jobs:
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs scripts/ops/multitable-onprem-preflight.test.mjs
 
       - name: Attendance legacy repair package contracts
-        run: node --test scripts/ops/attendance-onprem-package-verify-migrations.test.mjs
+        run: node --test scripts/ops/attendance-onprem-package-verify-migrations.test.mjs scripts/ops/onprem-package-runtime-closure.test.mjs
+
+      # Dockerfile.frontend builds apps/web from listed COPYs, and the image build runs only on push to
+      # main. No deps, no DB: fails the required `test` check if apps/web/src reaches a file the
+      # builder stage does not copy (the #6315 YiDa panel's plugin-lib imports red main this way).
+      - name: Frontend Docker build-context closure
+        run: node --test scripts/ops/frontend-docker-context-closure.test.mjs
 
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
@@ -190,6 +205,7 @@ jobs:
         if: matrix.node-version == '20.x'
         run: |
           node --test scripts/ops/dingtalk-production-readiness-inventory-contract.test.mjs
+          node --test scripts/ops/dingtalk-oauth-staging-config-contract.test.mjs scripts/ops/dingtalk-oauth-staging-config-env.test.mjs
           node --test scripts/ops/dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
           node --test scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
@@ -746,7 +762,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_LIB_TESTS=68
+          EXPECTED_LIB_TESTS=69
           if ! lib_out="$(pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts 2>&1)"; then
             printf '%s\n' "$lib_out"
             echo "W4C-5 tooling unit tests: tsx --test exited non-zero (output above)" >&2
@@ -801,6 +817,14 @@ jobs:
             exit 1
           fi
           echo "W7-3 tooling unit tests: exactly $w7_tests subtests ran."
+
+      - name: Run attendance daily calendar units (#5999)
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-daily-calendar.test.ts \
+            tests/unit/attendance-daily-calendar-wiring.test.ts \
+            tests/unit/attendance-daily-calendar-registered.test.ts \
+            --reporter=dot
 
       # Multi-timezone D1: whole-file foundation units; runtime remains unconnected.
       - name: Run attendance timezone policy foundation units
@@ -916,6 +940,30 @@ jobs:
         run: |
           pnpm type-check
 
+      # The YiDa bootstrap CLI runs on the deployed server as a COMPILED program, while the vitest
+      # suites only import its source (which by design never runs it). No other required job builds
+      # core-backend, so this step builds it (tsc, about a minute here) and spawns the compiled file
+      # with no arguments and no database: a silent exit 0 or a file missing from dist is red. The
+      # dist it creates is removed again, so later steps see the same tree as before; a dist that
+      # already exists is refused rather than reused or deleted.
+      - name: Run compiled YiDa bootstrap CLI smoke
+        if: matrix.node-version == '20.x'
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          set -euo pipefail
+          test ! -e packages/core-backend/dist
+          trap 'rm -rf packages/core-backend/dist' EXIT
+          pnpm --filter @metasheet/core-backend build
+          smoke_out="$(node --test --test-reporter=tap scripts/ops/yida-bootstrap-cli-compiled-smoke.test.mjs 2>&1)" || { printf '%s\n' "$smoke_out"; echo 'compiled YiDa CLI smoke failed (output above)' >&2; exit 1; }
+          printf '%s\n' "$smoke_out"
+          smoke_tests="$(printf '%s\n' "$smoke_out" | grep -Eo '^# tests [0-9]+$' | tail -n 1 || true)"
+          [ "$smoke_tests" = '# tests 1' ] || { echo "compiled YiDa CLI smoke: expected '# tests 1', got '${smoke_tests:-no summary}'" >&2; exit 1; }
+          # node --test also reports a file that exits 0 before declaring its test as '# tests 1'
+          # ('ok 1 - <file path>'), so require the named test's own TAP line as well.
+          grep -Fxq 'ok 1 - compiled YiDa bootstrap CLI refuses an empty invocation as a program' <<<"$smoke_out" || { echo 'compiled YiDa CLI smoke: the named test did not run' >&2; exit 1; }
+
       - name: Run core-backend tests
         run: |
           pnpm --filter @metasheet/core-backend test
@@ -940,16 +988,17 @@ jobs:
       # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
       # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory —
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
-      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
+      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (36) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) = 97. Get each file's own
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) +
+      # multitable-onprem-package-range-fill.test.mjs (39) = 138. Get each file's own
       # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=97
+          EXPECTED_OPS_TESTS_COUNT=138
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1135,12 +1184,42 @@ jobs:
           dropdb -U postgres --if-exists metasheet_test
           createdb -U postgres metasheet_test || true
 
+      # #6032: mandatory real handlers -> token -> SERIALIZABLE core host proof.
+      # Reuses this job's PostgreSQL; the suite creates/drops only its own scratch DB
+      # and applies production attendance migrations. Missing DB is a hard failure.
+      - name: Run attendance import timezone protocol gate
+        id: attendance-import-timezone-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for attendance import timezone protocol}"
+          pnpm --filter @metasheet/core-backend exec vitest --config tests/attendance-import-timezone-protocol/vitest.config.ts run --watch=false --cache=false --reporter=verbose --reporter=json --outputFile.json=../../artifacts/6032/protocol-result.json
+
+      # CSV must exercise real upload and the streamed plan builder, not just parser units.
+      - name: Run attendance CSV calendar protocol gate
+        id: attendance-csv-calendar-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for attendance CSV calendar protocol}"
+          pnpm --filter @metasheet/core-backend exec vitest --config tests/attendance-import-timezone-protocol/vitest.csv.config.ts run --watch=false --cache=false --reporter=verbose --reporter=json --outputFile.json=../../artifacts/csv-calendar/csv-result.json
+
       - name: Run private-db backend drain proof
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/timemachine-private-db-backend-drain.db.test.ts \
+            --reporter=verbose
+
+      # Partial rule overrides must preserve base defaults through the real sync host.
+      - name: Run attendance partial rule override protocol
+        id: attendance-rule-override-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            --config tests/attendance-rule-override-protocol/vitest.config.ts \
             --reporter=verbose
 
       - name: Run isolated manual checkpoint acceptance
@@ -1327,11 +1406,46 @@ jobs:
             tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts \
             --reporter=verbose
 
+      - name: Install Chromium for owner YiDa real-DB acceptance
+        id: stock-preparation-yida-owner-browser-install
+        if: matrix.node-version == '20.x'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install hash-pinned Chromium candidate for owner YiDa acceptance
+        id: stock-preparation-pinned-browser-install
+        if: matrix.node-version == '20.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep Playwright's default install above for other consumers. Only the
+          # explicit YiDa acceptance command below select this candidate.
+          candidate_parent="$(realpath "$GITHUB_WORKSPACE/..")/browser-fix-probe"
+          candidate_target="$candidate_parent/upstream-1719529"
+          test ! -e "$candidate_target"
+          test ! -L "$candidate_parent"
+          mkdir -p "$candidate_parent"
+          candidate_stage="$(mktemp -d "$candidate_parent/.chromium-1719529-XXXXXX")"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --connect-timeout 20 --max-time 300 \
+            https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719529/chrome-linux.zip \
+            --output "$candidate_stage/chrome-linux.zip"
+          printf '%s  %s\n' '691d6469ab37218a362aaffff974fd378985d1428c2a690c6dbeb73501bbe51d' \
+            "$candidate_stage/chrome-linux.zip" | sha256sum --check --status
+          unzip -q "$candidate_stage/chrome-linux.zip" -d "$candidate_stage/extracted"
+          printf '%s  %s\n' '43624de70dc3b379406282ec4a1365d9ba574c9741e4ab099d915b7e92811925' \
+            "$candidate_stage/extracted/chrome-linux/chrome" | sha256sum --check --status
+          # Exclusive publication directory: a pre-existing target is never reused.
+          mkdir "$candidate_target"
+          mv -T "$candidate_stage/extracted/chrome-linux" "$candidate_target/chrome-linux"
+          node -e "const p=require('./scripts/ops/lib/stock-preparation-yida-browser-candidate.cjs'); p.pinnedBrowserForRoot(process.cwd(),p.ID)"
+
       # #6076 lock protocol (#5923 residual): delete-side FOR UPDATE + serial dependent counts,
       # writer-side FOR KEY SHARE, READ COMMITTED pinned as the first statement of every
       # participating transaction. Two-session races against a real PostgreSQL; the suite's own
       # sentinel makes a missing DATABASE_URL fail (EXPECT_DB=1), never skip-green. Excluded from
       # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
+      # #6315 host boundaries (yida-host-*-realdb) boot the actual MetaSheetServer against this
+      # migrated database; each file stops its own server, so each needs its own fork (the default).
       - name: Run external-system delete x pointer-write lock protocol real-DB proof
         id: external-system-delete-bind-lock-protocol-real-db
         if: matrix.node-version == '20.x'
@@ -1342,7 +1456,86 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
+            tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts \
+            tests/integration/stock-preparation-yida-create-fence-realdb.test.ts \
+            tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts \
+            tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts \
+            tests/integration/stock-preparation-yida-approved-target-realdb.test.ts \
+            tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts \
+            tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts \
+            tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts \
+            tests/integration/automation-live-authority-realdb.test.ts \
+            tests/integration/yida-host-boundaries-realdb.test.ts \
+            tests/integration/yida-host-initialization-barrier-realdb.test.ts \
             --reporter=verbose
+
+      # These files each import the real native AuthService/JWT and scoped pool.
+      # Isolated fresh forks, no broad setup RBAC bypass, no suite skip-green.
+      # Chromium comes from the required owner-browser install step above; only YiDa responses
+      # are synthetic, never a customer request or an API response stub.
+      - name: Run owner YiDa JWT HTTP and browser real-DB proof
+        id: stock-preparation-yida-owner-real-db
+        if: matrix.node-version == '20.x'
+        run: |
+          # Clean before the FIRST Node exec, not only before its children.
+          # The launcher owns a fresh local PG and a loopback-only USER/NET/PID tree;
+          # All five whole files still exercise actual JWT/HTTP/Chromium.
+          if ! yida_node_command="$(command -v node 2>/dev/null)" || test -z "$yida_node_command"; then
+            echo 'YIDA_CALLER_PREFLIGHT: node-resolution' >&2
+            exit 1
+          fi
+          if ! yida_node="$(/usr/bin/readlink -f "$yida_node_command" 2>/dev/null)" || test -z "$yida_node"; then
+            echo 'YIDA_CALLER_PREFLIGHT: node-canonical' >&2
+            exit 1
+          fi
+          # Match the PostgreSQL 14 installation above, independent of system pg_config.
+          if ! yida_pg_bin="$(/usr/bin/readlink -f /usr/lib/postgresql/14/bin 2>/dev/null)" || test -z "$yida_pg_bin"; then
+            echo 'YIDA_CALLER_PREFLIGHT: pg-bin-canonical' >&2
+            exit 1
+          fi
+          for yida_role_tool in "node:$yida_node" "initdb:$yida_pg_bin/initdb" "pg_ctl:$yida_pg_bin/pg_ctl" \
+            "postgres:$yida_pg_bin/postgres" unshare:/usr/bin/unshare setpriv:/usr/bin/setpriv python3:/usr/bin/python3 ip:/usr/sbin/ip; do
+            yida_role="${yida_role_tool%%:*}"
+            yida_tool="${yida_role_tool#*:}"
+            if ! test -x "$yida_tool"; then
+              echo "YIDA_CALLER_PREFLIGHT: $yida_role" >&2
+              exit 1
+            fi
+          done
+          # Exact subtest count: node --test reports a contract file that exits 0 before declaring its
+          # tests as ONE passing test, so the exit code alone could go green with the contracts unrun.
+          # `tests N` also counts skipped and todo subtests, so both must be 0. Every comparison is the
+          # positive form: a `[` error fails closed. Change the count in the same commit that adds or
+          # removes a test in either contract file.
+          EXPECTED_YIDA_CONTRACT_TESTS=80
+          if ! yida_contract_out="$(/usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+            "$yida_node" --test scripts/ops/stock-preparation-yida-browser-ci.test.mjs \
+            scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs 2>&1)"; then
+            printf '%s\n' "$yida_contract_out"
+            echo 'YIDA_CALLER_CONTRACT: node --test exited non-zero (output above)' >&2
+            exit 1
+          fi
+          printf '%s\n' "$yida_contract_out"
+          if ! yida_contract_tests="$(printf '%s\n' "$yida_contract_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$')"; then
+            echo "YIDA_CALLER_CONTRACT_COUNT: no 'tests <N>' summary line found" >&2
+            exit 1
+          fi
+          [ "$yida_contract_tests" -eq "$EXPECTED_YIDA_CONTRACT_TESTS" ] || {
+            echo "YIDA_CALLER_CONTRACT_COUNT: $yida_contract_tests subtests ran, expected exactly $EXPECTED_YIDA_CONTRACT_TESTS" >&2
+            exit 1
+          }
+          for yida_contract_key in skipped todo; do
+            if ! yida_contract_value="$(printf '%s\n' "$yida_contract_out" | grep -Eo "$yida_contract_key [0-9]+\$" | tail -n 1 | grep -Eo '[0-9]+$')"; then
+              echo "YIDA_CALLER_CONTRACT_COUNT: no '$yida_contract_key <N>' summary line found" >&2
+              exit 1
+            fi
+            [ "$yida_contract_value" -eq 0 ] || {
+              echo "YIDA_CALLER_CONTRACT_COUNT: $yida_contract_value subtests $yida_contract_key, expected 0" >&2
+              exit 1
+            }
+          done
+          /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+            "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin" --browser-candidate upstream-1719529
 
       - name: Run required after-sales install integration
         if: matrix.node-version == '20.x'
@@ -1432,6 +1625,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           METASHEET_REAL_DB_TEST_STEP: '1' # marks the real-DB allowlist step so a fail-not-skip sentinel can scope its throw here only
+          EXPECT_DB: '1' # a DB-expected run: EXPECT_DB-gated sentinels fail instead of skipping
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for multitable real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
@@ -1647,6 +1841,9 @@ jobs:
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \
             tests/integration/multitable-webhook-durable-dedup.test.ts \
+            tests/integration/multitable-webhook-floor-realdb.test.ts \
+            tests/integration/multitable-webhook-switch-on-realdb.test.ts \
+            tests/integration/multitable-webhook-scoping-realdb.test.ts \
             tests/integration/multitable-ai-shortcut-run.test.ts \
             tests/integration/multitable-ai-bulk-preview.test.ts \
             tests/integration/multitable-ai-bulk-commit.test.ts \
@@ -1748,6 +1945,7 @@ jobs:
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
+            tests/integration/directory-dingtalk-openid-grant-path.db.test.ts \
             tests/integration/approval-requester-department.db.test.ts \
             tests/integration/approval-requester-title.db.test.ts \
             tests/integration/approval-requester-role.db.test.ts \
@@ -1768,6 +1966,7 @@ jobs:
             tests/integration/approval-node-signature-policy.api.test.ts \
             tests/integration/dingtalk-approval-card-deliveries.db.test.ts \
             tests/integration/dingtalk-container-login.db.test.ts \
+            tests/integration/dingtalk-identity-boundaries.db.test.ts \
             tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts \
             tests/integration/directory-primary-department-write.db.test.ts \
             tests/integration/directory-primary-department-backfill.db.test.ts \
@@ -2005,6 +2204,16 @@ jobs:
             tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts \
             tests/integration/attendance-w4c2-sweep-fairness.db.test.ts \
             tests/integration/attendance-w4c2-sweep-call-through.db.test.ts \
+            tests/integration/attendance-coordination-key-credential.db.test.ts \
+            tests/integration/attendance-coordination-s1s2-snapshot.db.test.ts \
+            tests/integration/attendance-coordination-cleanup.db.test.ts \
+            tests/integration/attendance-coordination-acquire.db.test.ts \
+            tests/integration/attendance-coordination-approval-handover.db.test.ts \
+            tests/integration/attendance-coordination-port.db.test.ts \
+            tests/integration/attendance-w4-release-destroy.db.test.ts \
+            tests/integration/attendance-p11-hotpath-compare.db.test.ts \
+            tests/integration/attendance-p11-inertness-baseline.db.test.ts \
+            tests/integration/attendance-p11-inertness-head.db.test.ts \
             tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts \
             tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts \
             tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts \
@@ -2102,6 +2311,7 @@ jobs:
             tests/integration/attendance-timezone-scheduled.db.test.ts \
             tests/integration/attendance-trip-context-transition-dates.db.test.ts \
             tests/integration/attendance-timezone-policy-store.db.test.ts \
+            tests/integration/attendance-daily-calendar.db.test.ts \
             --reporter=dot
 
       - name: Remove isolated attendance timezone database

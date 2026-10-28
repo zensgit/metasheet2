@@ -78,6 +78,12 @@
 //           its tenant from `scope.tenantId` rather than from `resolveTenantId`, because the tenant
 //           chosen there is the tenant whose PLM binding is opened and whose part numbers therefore
 //           come back. Without the flag the handler is byte-for-byte the values-free route it was.
+//        5b. GET …/table-actions/:actionId/dry-run-jobs  `tableActionDryRunJobGet`
+//           R67 ④: the read-back of (5) run in the background — the stored result IS (5)'s response,
+//           missing-component list included when the job was enqueued with the opt-in. A value-bearing
+//           job is a separate record that only a poll carrying `includeMissingComponents=true` can
+//           address, and that poll resolves the scope here and takes its tenant from it, exactly as
+//           (5) does; without the flag it is the values-free job, on `resolveTenantId`, as (5) is.
 //      (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
 //      live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
 //
@@ -172,6 +178,29 @@
 //           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
 //           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
 //           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
+//       21. GET  …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotGet`
+//       22. POST …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotEnable`
+//           备料分批拉取第一期 step 3 PR B (register R-53 / R-54), ADMIN. The GET answers the pilot
+//           marker and a values-free readiness list about the proven tenant's registry row and sheet
+//           (the staging project the probes read is derived from this scope with no request
+//           projectId, in the shared readiness helper). The POST is a WRITE: it bumps the sheet's plan
+//           generation, asks the host to stamp the sheet closed for grid export and marks the registry
+//           row — keyed by the proven tenant; a header-fillable tenant here would mark another
+//           tenant's project pilot. Set-once; there is no unset surface.
+//       23. GET  …/projects/:projectNo/refresh/holds                       `stockPreparationRefreshHolds`
+//       24. GET  …/projects/:projectNo/refresh/holds/:holdId/evidence      `stockPreparationRefreshHoldEvidence`
+//       25. POST …/projects/:projectNo/refresh/holds/:holdId/keep          `stockPreparationRefreshHoldKeep`
+//       26. POST …/projects/:projectNo/refresh/continuations/confirm       `stockPreparationRefreshContinuationConfirm`
+//       27. GET  …/projects/:projectNo/refresh/continuations/:id           `stockPreparationRefreshContinuationGet`
+//       28. POST …/projects/:projectNo/refresh/continuations/:id/end       `stockPreparationRefreshContinuationEnd`
+//           备料分批拉取第一期 step 4 PR-4 (register R-59), PULL. ONE resolution for the six, in the shared
+//           context builder `stockPreparationRefreshDecisionContext` (http-routes.cjs), at the PULL tier:
+//           the hold page, the evidence and the relationship detail carry the proven tenant's PRIVATE
+//           business values (keys, quantities, before / after cells), and the confirm / keep / end
+//           decide over its step-4 rows and bump its sheet's plan generation. A header-fillable tenant
+//           here would read another tenant's values or confirm a relationship on its sheet; a
+//           TENANTLESS platform admin is refused (403 OPERATOR_SCOPE_TENANT_REQUIRED) — counts are the
+//           board's, values never theirs.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

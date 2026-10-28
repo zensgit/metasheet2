@@ -271,6 +271,13 @@ const KNOWN_SITES: KnownSite[] = [
     kind: 'display',
   },
   {
+    // localDateKey() reads year/month/day only for scheduler calendar keys.
+    // 'display' is this guard's no-hour classification, not a UI-use claim.
+    file: 'plugins/plugin-attendance/lib/attendance-daily-calendar.cjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
+    kind: 'display',
+  },
+  {
     // localDate() reads only ISO year/month/day parts to build a date key.
     // calendar/numberingSystem are explicit; no hour part is requested.
     file: 'plugins/plugin-attendance/lib/attendance-timezone-read-context.cjs',
@@ -750,7 +757,8 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // 29 = 28 + the hour-free history-reconcile local-day key.
     // 31 = 29 + two hour-free attendance timezone validity probes.
     // 37 = 31 + three hour-free multi-timezone date keys and three validity probes.
-    expect(KNOWN_SITES.length).toBe(37)
+    // 38 = 37 + the daily scheduler's hour-free year/month/day key.
+    expect(KNOWN_SITES.length).toBe(38)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

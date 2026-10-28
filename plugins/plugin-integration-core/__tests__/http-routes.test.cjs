@@ -1,6 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 // MODEL THE PRODUCT, NOT A CONVENIENCE. The real `getExternalSystem` is the PUBLIC accessor and
@@ -92,6 +95,13 @@ function createMemoryStorage() {
     async delete(key) {
       map.delete(key)
     },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!map.has(key)) return null
+      const value = map.get(key)
+      map.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
+    },
   }
 }
 
@@ -116,6 +126,13 @@ function createSharedDurableStorage(backing = new Map()) {
     async delete(key) {
       backing.delete(key)
     },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!backing.has(key)) return null
+      const value = backing.get(key)
+      backing.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
+    },
     async list() {
       return Array.from(backing.keys()).sort()
     },
@@ -133,6 +150,10 @@ function createFailingDurableStorage(operation = 'set') {
       if (operation === 'set') throw createDurableStorageFailure('set')
     },
     async delete() {},
+    async consume() {
+      if (operation === 'consume') throw createDurableStorageFailure('consume')
+      return null
+    },
     async list() {
       return []
     },
@@ -178,7 +199,7 @@ function createMockContext(options = {}) {
         },
         multitable: {
           provisioning,
-          records,
+          records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records),
         },
         dataSourceWrites: options.dataSourceWrites || {
           async test() { throw new Error('dataSourceWrites.test not configured in test context') },
@@ -263,6 +284,8 @@ function createMockServices(overrides = {}) {
   }
 
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       async listExternalSystems(input) {
         calls.push(['listExternalSystems', input])
@@ -571,6 +594,9 @@ function createMockServices(overrides = {}) {
 }
 
 function mountRoutes(services, contextOptions = {}) {
+  // Batch-refresh step 4 PR-3a: the REAL refresh governance every planning / writing route now consults (a test
+  // that sets `stockPreparationRefreshGovernance` itself — even to null — keeps its own).
+  if (services && Object.isExtensible(services) && !Object.prototype.hasOwnProperty.call(services, 'stockPreparationRefreshGovernance')) withRefreshGovernance(services)
   const { context, routes } = createMockContext(contextOptions)
   const registerRoutes = httpRoutes.registerIntegrationRoutes || httpRoutes.createIntegrationHttpRouter
   assert.equal(typeof registerRoutes, 'function', 'HTTP routes module exports a registration function')
@@ -5447,6 +5473,16 @@ async function testTableActionRoutes() {
   assert.equal(records.calls[0][1].sheetId, 'sheet_stock_configured', 'existing-row read is scoped to configured target sheet')
   assert.deepEqual(records.calls[0][1].filters, { projectNo: 'P-001' }, 'existing-row read is project-scoped')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'dry-run evidence is values-free')
+  // Batch-refresh phase 0 step 1, review round 1: a READ-tier preview is answered in full but its token is
+  // UNBOUND (it supersedes nothing, and apply refuses it). The apply sequence below plans as the write tier.
+  // PADDED on purpose (review round 2): the token binds the NORMALIZED parameters, so this padded preview
+  // must apply as the trimmed number below — a regression that hashed the raw parameters turns this red.
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: ' P-001 ' } },
+  })
+  assertOkResponse(res, 200)
   const dryRunToken = res.body.data.dryRunToken
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
@@ -6532,7 +6568,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(JSON.stringify(res.body.data).includes('user_admin'), false, 'policy response hides approver identity')
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
-    user: READ_USER,
+    user: WRITE_USER, // review round 1: an applied token must come from a caller who may apply (read-tier tokens are unbound)
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
     body: { parameters: { projectNo: 'P-001' } },
   })
@@ -6556,7 +6592,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(res.body.error.code, 'TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED', 'resolved duplicate groups need explicit apply acknowledgement')
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
-    user: READ_USER,
+    user: WRITE_USER, // review round 1: see above
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
     body: {
       parameters: { projectNo: 'P-001' },
@@ -7030,6 +7066,150 @@ async function testPipelineExternalWriteMultitableRoute() {
   })
   assert.equal(res.statusCode, 403, 'read-only integration user cannot apply multitable C6 writes')
   assert.equal(rows.length, 2, 'rejected apply wrote nothing')
+}
+
+// Batch-refresh step 4 PR-6 (design §7.1 row 17, D-21): the C6 routes build the multitable write-source WITH the
+// governed-sheet probe from `services` (index.cjs), so a governed stock-prep sheet is refused by the write-source's
+// `test()` — before the token is minted (dry-run) and before any row (apply). The REAL probe over the refresh-store
+// kit (real continuation store + real registry store on one fake plugin db) decides.
+//   H-01 dry-run on a governed sheet (an open hold on it): 409 METASHEET_MULTITABLE_STOCK_PREP_GOVERNED_SHEET
+//        `surface: c6_target_test`, no token in storage, zero record IO, values-free body.
+//   H-02 apply with a token minted BEFORE the sheet was governed: 409, zero writes, the token gone from storage.
+//   H-03 services WITHOUT the probe: an object key in the stock-prep namespace => 501
+//        STOCK_PREP_GOVERNED_SHEET_PROBE_UNWIRED, nothing read or written (the probe-less legacy path for any other
+//        key is testPipelineExternalWriteMultitableRoute above, unchanged).
+async function testPipelineExternalWriteGovernedSheetRoute() {
+  const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+  const storeModule = require('../lib/stock-preparation-continuation-store.cjs')
+  const registryModule = require('../lib/stock-preparation-project-target-store.cjs')
+  const probeModule = require('../lib/stock-preparation-governed-sheet-probe.cjs')
+  const GOVERNED = probeModule.GOVERNED_SHEET_WRITE_CODES.REFUSED
+
+  function world(objectKey = 'approved_materials', { probe = true } = {}) {
+    const storage = createMemoryStorage()
+    const rows = [{ id: 'rec_g2', sheetId: 'sheet_governed_c6', version: 1, data: { code: 'G-2', name: 'Gadget', qty: 5 } }]
+    const recordCalls = []
+    const recordsApi = {
+      async queryRecords(input) {
+        recordCalls.push(['queryRecords', input.sheetId])
+        return rows.filter((r) => r.sheetId === input.sheetId && Object.entries(input.filters || {}).every(([f, v]) => r.data[f] === v)).slice(0, input.limit || 1000)
+      },
+      async createRecord(input) { recordCalls.push(['createRecord', input.sheetId]); const row = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...input.data } }; rows.push(row); return row },
+      async patchRecord(input) { recordCalls.push(['patchRecord', input.sheetId]); const row = rows.find((r) => r.id === input.recordId); row.data = { ...row.data, ...input.changes }; return row },
+    }
+    const clock = refreshKit.createClock()
+    const db = refreshKit.createFakeRefreshDb({ clock })
+    const continuationStore = storeModule.createStockPreparationContinuationStore({ db, now: clock.now })
+    const governedSheetProbe = probeModule.createStockPreparationGovernedSheetProbe({ continuationStore, projectTargetStore: registryModule.createStockPreparationProjectTargetStore({ db }) })
+    const sourceSystem = { id: 'source_gc6', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'Readonly source', kind: 'data-source:sql-readonly', role: 'source', status: 'active', config: { dataSourceId: 'readonly-ds', object: 'src_items' } }
+    const targetSystem = {
+      id: 'target_gc6', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'Own multitable target', kind: 'metasheet:multitable', role: 'target', status: 'active',
+      config: { objects: { [objectKey]: { name: 'Governed', sheetId: 'sheet_governed_c6', keyFields: ['code'], fieldDetails: [{ id: 'code' }, { id: 'name' }, { id: 'qty' }] } } },
+    }
+    const pipeline = {
+      id: 'pipe_gc6', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'C6 governed', status: 'active',
+      sourceSystemId: sourceSystem.id, sourceObject: 'src_items', targetSystemId: targetSystem.id, targetObject: objectKey, createdBy: 'owner-7',
+      options: { source: { filters: { approvedSlice: 'fixture' } } },
+      fieldMappings: [{ sourceField: 'c', targetField: 'code' }, { sourceField: 'n', targetField: 'name' }, { sourceField: 'q', targetField: 'qty' }],
+    }
+    let sourceReads = 0
+    const { services } = createMockServices({
+      externalSystemRegistry: {
+        async getExternalSystemForAdapter(input) { return input.id === sourceSystem.id ? { ...sourceSystem } : null },
+        async getExternalSystem(input) { return input.id === targetSystem.id ? publicTargetView(targetSystem) : null },
+      },
+      adapterRegistry: {
+        createAdapter() {
+          return { async read() { sourceReads += 1; return { records: [{ c: 'G-1', n: 'CELLVALUE_BOLT', q: 2 }, { c: 'G-2', n: 'Gadget', q: 9 }], done: true, nextCursor: null } } }
+        },
+      },
+      pipelineRegistry: { async getPipeline(input) { return { ...pipeline, id: input.id } } },
+      ...(probe ? { stockPreparationGovernedSheetProbe: governedSheetProbe } : {}),
+    })
+    const { routes } = mountRoutes(services, { storage, recordsApi })
+    const tokens = () => Array.from(storage.map.keys()).filter((key) => key.startsWith('integration:c6-write-dry-run-token:'))
+    async function governSheet() {
+      const fixture = await refreshKit.candidateHoldFixture()
+      await continuationStore.reconcileHolds({ tenantId: 'tenant_1', projectNo: fixture.projectNo, sheetId: 'sheet_governed_c6', decisionVersionObserved: 0, holds: [fixture.hold], computation: { lane: 'small_preview', suspended: true, generationToken: 'g', sourceContentDigest: 's' } })
+    }
+    const dryRun = (user = WRITE_USER) => invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', { user, params: { id: pipeline.id }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' } })
+    const apply = (token) => invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', { user: WRITE_USER, params: { id: pipeline.id }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: token } } })
+    return { storage, rows, recordCalls, tokens, governSheet, dryRun, apply, sourceReads: () => sourceReads }
+  }
+
+  // H-01: governed => 409 before the source read and the mint.
+  const h1 = world()
+  await h1.governSheet()
+  let res = await h1.dryRun(READ_USER)
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, GOVERNED)
+  assert.equal(res.body.error.details.surface, 'c6_target_test')
+  assert.equal(res.body.error.details.reason, 'hold')
+  assert.equal(res.body.error.details.object, 'approved_materials')
+  assert.equal(res.body.error.details.partial, false)
+  assert.deepEqual(h1.tokens(), [], 'no dry-run token minted')
+  assert.equal(h1.sourceReads(), 0, 'no source read')
+  assert.deepEqual(h1.recordCalls, [], 'no record IO at all')
+  const text = JSON.stringify(res.body)
+  for (const forbidden of ['sheet_governed_c6', 'CELLVALUE', 'G-1']) assert.equal(text.includes(forbidden), false, `${forbidden} leaked`)
+
+  // H-02: a token minted while NOT governed; the sheet becomes governed; the apply is refused and burns the token.
+  const h2 = world()
+  res = await h2.dryRun()
+  assertOkResponse(res, 200)
+  const token = res.body.data.dryRunToken
+  assert.equal(typeof token, 'string')
+  assert.equal(h2.tokens().length, 1)
+  await h2.governSheet()
+  res = await h2.apply(token)
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, GOVERNED)
+  assert.equal(res.body.error.details.surface, 'c6_target_test')
+  assert.deepEqual(h2.tokens(), [], 'the token was consumed (burned) before the re-plan refused')
+  assert.equal(h2.recordCalls.some(([name]) => name === 'createRecord' || name === 'patchRecord'), false, 'zero writes')
+  assert.equal(h2.rows.length, 1)
+  res = await h2.dryRun()
+  assert.equal(res.statusCode, 409, 'a re-preview answers 409 and mints nothing')
+  assert.deepEqual(h2.tokens(), [])
+
+  // H-03: services without the probe and a namespace object key => 501 by name, nothing read.
+  const h3 = world('plm_stock_preparation_main', { probe: false })
+  res = await h3.dryRun()
+  assert.equal(res.statusCode, 501, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, probeModule.GOVERNED_SHEET_WRITE_CODES.PROBE_UNWIRED)
+  assert.equal(res.body.error.details.reason, 'probe_absent')
+  assert.equal(h3.sourceReads(), 0)
+  assert.deepEqual(h3.recordCalls, [])
+  assert.deepEqual(h3.tokens(), [])
+  // ...and the same services with an ordinary key still dry-run (the probe-less legacy path).
+  const h3b = world('approved_materials', { probe: false })
+  res = await h3b.dryRun()
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.canApply, true)
+}
+
+// Batch-refresh step 4 PR-6: the pipelines run and dead-letter replay routes surface a target refusal as the runner's
+// PipelineRunnerError (422) whose `details.cause` carries the refusal code (pipeline-runner-governed-sheet.test.cjs
+// R-01 / R-02 drive the real runner and the real adapter; here the route's mapping).
+//   H-04 run => 422 PipelineRunnerError with the code in details.cause; replay => the same, and the route answers no
+//        replayed letter.
+async function testPipelineRunGovernedSheetRefusalRoute() {
+  const { PipelineRunnerError } = require('../lib/pipeline-runner.cjs')
+  const probeModule = require('../lib/stock-preparation-governed-sheet-probe.cjs')
+  const refusal = probeModule.governedSheetRefusal({ surface: 'pipeline_upsert', reason: 'pilot', objectId: 'main' })
+  const { services } = createMockServices()
+  services.pipelineRunner = {
+    async runPipeline() { throw new PipelineRunnerError('pipeline run failed', { run: { id: 'run_g', status: 'failed' }, cause: refusal.message }) },
+    async replayDeadLetter() { throw new PipelineRunnerError('pipeline run failed', { run: { id: 'run_gr', status: 'failed' }, cause: refusal.message }) },
+  }
+  const { routes } = mountRoutes(services)
+  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', { user: WRITE_USER, params: { id: 'pipe_1' }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', mode: 'manual' } })
+  assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, 'PipelineRunnerError')
+  assert.ok(String(res.body.error.details.cause).startsWith(`${probeModule.GOVERNED_SHEET_WRITE_CODES.REFUSED}: object "main"`))
+  res = await invoke(routes, 'POST', '/api/integration/dead-letters/:id/replay', { user: WRITE_USER, params: { id: 'dl_1' }, body: { tenantId: 'tenant_1', workspaceId: 'workspace_1' } })
+  assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+  assert.ok(String(res.body.error.details.cause).includes(probeModule.GOVERNED_SHEET_WRITE_CODES.REFUSED))
 }
 
 // S3-1: integration-template object CRUD routes (declarative; no instantiation route exists).
@@ -9960,6 +10140,8 @@ async function main() {
   await testPipelineExternalWriteApplyRoute()
   await testPipelineExternalWriteApplyDerivesTenantFromAuthenticatedPrincipal()
   await testPipelineExternalWriteMultitableRoute()
+  await testPipelineExternalWriteGovernedSheetRoute()
+  await testPipelineRunGovernedSheetRefusalRoute()
   await testPipelineExternalWriteApplyTestFailureInjectionRoute()
   await testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance()
   await testPipelineExternalWriteApplyDoesNotOverstateProvenancePersistence()

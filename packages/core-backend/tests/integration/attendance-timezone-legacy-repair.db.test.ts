@@ -94,6 +94,9 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
   }
   it('OFF: read-only plan, unchanged parent, checkout and replay keep archived UTC after current rules change',async()=>{
     const h=await historical()
+    // Same-zone pre-companion dates now follow the unfrozen pre-upgrade path;
+    // a changed default zone (same local date at 18:00Z) still needs the controlled repair.
+    await live.pool.query("UPDATE attendance_rules SET timezone='America/New_York' WHERE org_id=$1 AND is_default=true",[live.orgId])
     const blocked=await punch(h.actor,'check_out','18:00')
     expect(blocked).toMatchObject({status:409,body:{error:{code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'}}})
     const admission=await inspect(live.pool,{orgId:live.orgId,actorId:admin.userId})
@@ -246,6 +249,22 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
       expect(await row(h.recordId)).toEqual(h.original)
     } finally {await rm(directory,{recursive:true,force:true})}
   },60000)
+  it('preflight splits a same-zone untracked record out of BLOCKED only under multi-timezone off and the same default zone',async()=>{
+    const scan=async()=>(await inspect(live.pool,{orgId:live.orgId,actorId:admin.userId})).counts
+    const base=await scan()
+    await historical()
+    const same=await scan()
+    expect(same.writableNowLegacyRecordsWithoutCompanion-base.writableNowLegacyRecordsWithoutCompanion).toBe(1)
+    expect(same.ordinaryLegacyRecordsWithoutCompanion-base.ordinaryLegacyRecordsWithoutCompanion).toBe(1)
+    await live.pool.query("UPDATE attendance_rules SET timezone='America/New_York' WHERE org_id=$1 AND is_default=true",[live.orgId])
+    const other=await scan()
+    expect(other.writableNowLegacyRecordsWithoutCompanion).toBe(0)
+    expect(other.ordinaryLegacyRecordsWithoutCompanion).toBe(same.ordinaryLegacyRecordsWithoutCompanion)
+    await live.pool.query("UPDATE attendance_rules SET timezone='UTC' WHERE org_id=$1 AND is_default=true",[live.orgId])
+    await live.pool.query('INSERT INTO attendance_timezone_policies(org_id,enabled,version,updated_by) VALUES($1,true,1,$2)',[live.orgId,admin.userId])
+    try { expect((await scan()).writableNowLegacyRecordsWithoutCompanion).toBe(0) }
+    finally { await live.pool.query('DELETE FROM attendance_timezone_policies WHERE org_id=$1',[live.orgId]) }
+  })
   it('rejects repair creation and use after a persisted shadow transition even when flags are OFF',async()=>{
     const repaired=await historical();await repair(repaired.evidence)
     const unbound=await historical()
@@ -257,6 +276,19 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
     expect(await punch(repaired.actor,'check_out','18:00')).toMatchObject({status:409,body:{error:{code:'ATTENDANCE_TIMEZONE_REPAIR_POSTURE_UNSUPPORTED'}}})
     expect(await row(repaired.recordId)).toEqual(repaired.original)
     expect((await inspect(live.pool,{orgId:live.orgId,actorId:admin.userId}))).toMatchObject({code:'ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED',scanComplete:true})
+  })
+  it('preflight does not count a same-zone untracked record as writable now under a persisted shadow posture',async()=>{
+    // Rollout rows cannot be deleted; the previous case leaves the org in shadow, so only ensure it here.
+    await live.pool.query(`INSERT INTO attendance_calculation_rollout_state
+      (org_id,state,engine_version,reason_code,actor_id,version,prior_state)
+      VALUES($1,'shadow','repair-synthetic','TEST_FIXTURE',$2,1,'legacy') ON CONFLICT(org_id) DO NOTHING`,[live.orgId,admin.userId])
+    expect((await live.pool.query('SELECT state FROM attendance_calculation_rollout_state WHERE org_id=$1',[live.orgId])).rows).toEqual([{state:'shadow'}])
+    const before=(await inspect(live.pool,{orgId:live.orgId,actorId:admin.userId})).counts
+    await historical()
+    const after=(await inspect(live.pool,{orgId:live.orgId,actorId:admin.userId}))
+    expect(after.counts.writableNowLegacyRecordsWithoutCompanion).toBe(0)
+    expect(after.counts.ordinaryLegacyRecordsWithoutCompanion-before.ordinaryLegacyRecordsWithoutCompanion).toBe(1)
+    expect(after.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
   })
 
 })

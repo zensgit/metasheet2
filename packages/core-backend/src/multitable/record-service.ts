@@ -50,7 +50,8 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
+import { isFieldAlwaysReadOnly, isFieldPermissionHidden, isFieldReadOnlyForPeople } from './permission-derivation'
+import { fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
@@ -525,7 +526,8 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
       const property = normalizeJson(field.property)
       const base: FieldMutationGuard = {
         type: field.type,
-        readOnly: isFieldAlwaysReadOnly(field),
+        // Person write spine (REST single-record patch): always-read-only OR the human write lock.
+        readOnly: isFieldReadOnlyForPeople(field),
         hidden: isFieldPermissionHidden(field),
         property,
       }
@@ -699,11 +701,26 @@ export class RecordService {
         const fid = typeof row.id === 'string' ? row.id : ''
         if (fid && ids.length > 0) personRestrictByFieldId.set(fid, ids)
       }
+      // Human write lock (human-write-lock.ts), read off the RAW stored property: the create guard map keeps
+      // no property for scalar types, and a person must not seed a PLM-system column on a NEW row either
+      // (REST create and xlsx import land here; record duplicate already drops read-only fields upstream via
+      // `deriveFieldPermissions`). Closed code, 403 at POST /records. The copy-sheet caller never meets a
+      // lock: `remapFieldProperty` drops it from the copy's fields.
+      const humanLockKindByFieldId = new Map<string, NonNullable<ReturnType<typeof fieldHumanWriteLockKind>>>()
+      for (const row of fieldRes.rows as Array<Record<string, unknown>>) {
+        const kind = fieldHumanWriteLockKind({ property: row.property })
+        if (kind && typeof row.id === 'string') humanLockKindByFieldId.set(row.id, kind)
+      }
 
       for (const [fieldId, value] of Object.entries(data)) {
         const field = fieldById.get(fieldId)
         if (!field) {
           throw new RecordValidationError(`Unknown fieldId: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
+        }
+
+        const humanLockKind = humanLockKindByFieldId.get(fieldId)
+        if (humanLockKind) {
+          throw new RecordFieldForbiddenError(`Field is read-only (system-written): ${fieldId}`, fieldId, humanWriteLockRefusalCode(humanLockKind))
         }
 
         if (isFieldAlwaysReadOnly(field)) {

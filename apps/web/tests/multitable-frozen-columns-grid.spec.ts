@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, type App } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
@@ -232,5 +234,60 @@ describe('MetaGridTable frozen columns — pin interaction', () => {
     pins(root)[0].click()
     expect(onSetFrozen).toHaveBeenCalledTimes(1)
     expect(onToggleSort).not.toHaveBeenCalled()
+  })
+})
+
+// Customer field report 2026-10-21 (#5): the header corner (select-all checkbox + row-number header) is a
+// scoped-CSS rule, the header/body cells carry inline z-indexes. The corner used to TIE with the plain
+// header tier (3), and a later DOM sibling wins a tie, so a scrolled header cell hid the select-all. jsdom
+// cannot stack or hit-test (the real check is verification/cell-text-keyboard-paste.spec.ts); this pins
+// the tier ORDER across both sources so neither side can drift into a tie again.
+describe('MetaGridTable header corner stacking tier', () => {
+  function cornerZIndex(): number {
+    const source = readFileSync(resolve(process.cwd(), 'src/multitable/components/MetaGridTable.vue'), 'utf8').replace(/\r\n/g, '\n')
+    const match = source.match(/\nthead \.meta-grid__row-num,\nthead \.meta-grid__check-col \{([^}]*)\}/)
+    expect(match).not.toBeNull()
+    const z = match![1].match(/z-index:\s*(\d+);/)
+    expect(z).not.toBeNull()
+    return Number(z![1])
+  }
+
+  it('the corner sits strictly above every header cell and every frozen body cell (no ties)', () => {
+    const root = mountGrid({
+      rows: [
+        { id: 'r1', version: 1, data: { f1: 'A' } },
+        { id: 'r2', version: 1, data: { f1: 'B' } },
+      ],
+      frozenLeftColumnIds: ['f1'],
+      frozenTopRowCount: 1,
+      columnWidths: { f1: 100 },
+      enableMultiSelect: true,
+    })
+    const corner = cornerZIndex()
+    const [frozenHeader, , plainHeader] = headers(root)
+    expect(frozenHeader.style.left).not.toBe('') // f1 is frozen
+    expect(plainHeader.style.left).toBe('') // f3 is not
+    const frozenRow = root.querySelector('.meta-grid__row--frozen-top') as HTMLElement
+    expect(frozenRow).not.toBeNull()
+    const frozenRowCheck = frozenRow.querySelector('.meta-grid__check-col') as HTMLElement
+    const frozenRowNum = frozenRow.querySelector('.meta-grid__row-num') as HTMLElement
+    const bothAxesCell = frozenRow.querySelector('.meta-grid__cell') as HTMLElement // frozen row AND frozen column
+    const tiers = [plainHeader, frozenHeader, frozenRowCheck, frozenRowNum, bothAxesCell].map((el) => Number(el.style.zIndex))
+    expect(tiers.every((z) => Number.isFinite(z) && z > 0)).toBe(true)
+    for (const z of tiers) expect(corner).toBeGreaterThan(z)
+    // ...and a frozen header still sits above a plain (scrolling) header cell.
+    expect(Number(frozenHeader.style.zIndex)).toBeGreaterThan(Number(plainHeader.style.zIndex))
+  })
+
+  // These tiers must stay LOCAL to the grid: corner 5 would otherwise tie MultitableWorkbench's narrow-width
+  // rail drawer (position:absolute; z-index:5, same parent stacking context) and, being later in the DOM,
+  // paint over it. The real click check is verification/rail-drawer.spec.ts ('drawer controls stay on top').
+  it('the grid root isolates its own stacking context', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/multitable/components/MetaGridTable.vue'), 'utf8').replace(/\r\n/g, '\n')
+    const match = source.match(/\n\.meta-grid \{([^}]*)\}/)
+    expect(match).not.toBeNull()
+    const body = match![1].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body).toMatch(/(^|[\s;])position: relative;/)
+    expect(body).toMatch(/(^|[\s;])isolation: isolate;/)
   })
 })

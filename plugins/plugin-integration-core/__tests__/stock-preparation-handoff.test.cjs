@@ -64,6 +64,11 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+// Batch-refresh step 4 PR-5: the TERMINAL hop is a formal handover and consults the REAL refresh governance (over
+// the kit's empty step-4 tables => not governed: the hop completes as before). Required by name (501) on that hop
+// only, so the mount wires it with a lock for the reader's generation read.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const { STOCK_PREP_OPERATE, STOCK_PREP_READ, STOCK_PREP_WORKBENCH_CAPABILITIES } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { STOCK_PREP_AUDIT_ACTIONS, __internals: auditInternals } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const {
@@ -400,12 +405,13 @@ function mount({
   })
   services.stockPreparationHandoffNotifier = notifier
   services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, auditCalls, notifier, db, records, tenantPrincipalDirectory }
+  return { routes, auditAppends, auditCalls, notifier, db, records, tenantPrincipalDirectory, services }
 }
 
 function createResponse() {
@@ -3057,8 +3063,15 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // name and the staging project its G1 grants address are the proven tenant's.
   // The G1 field defect (R67) added ONE — the options-sync REPAIR leg (section D, item 20): the registry
   // row it patches and the staging project the patch addresses are the proven tenant's.
-  assert.equal(callSites, 21, 'G9: twenty-one call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions']) {
+  // R67 ④ added ONE — the background dry-run's poll (section A, item 5b): a value-bearing job's result
+  // is (5)'s missing-component list, so its poll proves the scope exactly as (5) does.
+  // 备料分批拉取第一期 step 3 PR B (R-53 / R-54) added TWO — the pilot GET and ENABLE (section D, items
+  // 21–22): the registry row the read describes and the enable marks is keyed by the proven tenant.
+  // 备料分批拉取第一期 step 4 PR-4 (R-59) added ONE call site for SIX routes — the shared decision context
+  // `stockPreparationRefreshDecisionContext` (section D, items 23–28): the hold page, the evidence, the
+  // relationship detail, confirm / keep / end all resolve the PULL-tier scope there, before any host work.
+  assert.equal(callSites, 25, 'G9: twenty-five call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable', 'stockPreparationRefreshDecisionContext', 'stockPreparationRefreshContinuationConfirm']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

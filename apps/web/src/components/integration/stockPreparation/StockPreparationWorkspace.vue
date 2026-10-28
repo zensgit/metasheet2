@@ -36,6 +36,7 @@
       <StockPreparationRail
         :groups="railGroups"
         :active-key="effectiveKey"
+        :counts="railCounts"
         @select="handleRailSelect"
       />
 
@@ -73,8 +74,8 @@
       <p class="stock-prep__panel-desc" :data-testid="`stock-prep-desc-${effectiveKey}`">
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
-      <!-- The dashboard tab aggregates MULTIPLE existing readonly endpoints client-side (H1/H2) — it
-           has no single endpoint to badge, so this line is skipped for it only.
+      <!-- A tab that aggregates several existing reads client-side (ops, members, help) has no single
+           endpoint to badge, so this line is skipped for it (`noEndpointBadge`).
 
            What this line says first is now WHAT THIS TAB CAN CHANGE — the only part of it a customer
            admin has a use for. The shape badge and the route path are what an implementer greps, so
@@ -86,12 +87,6 @@
           <code>{{ activeView.endpoint }}</code>
         </StockPrepTechnicalDetails>
       </div>
-      <!-- H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202): the dashboard tab is the
-           new default landing view — "operator enters the system and immediately sees current
-           project / current stage / blocking count / recommended next step". Its own picker updates
-           selectedProjectId WITHOUT switching tabs (handleDashboardProjectSelect), and its stepper /
-           recommend-action navigates by reusing this SAME activeKey (handleNavigateStage) — a
-           satellite of the one tab-nav surface, never a second one. -->
       <!-- O1' §附: the confirmation queue is what this page WAS ADOPTED FOR — the human confirmation
            loop's operator entry. It is the only tab a customer operator (stock-prep:read) sees; the
            six MVP tabs below were explicitly not revived by that ruling and stay platform-admin. -->
@@ -111,6 +106,7 @@
         @navigate-stage="handleNavigateStage"
         @open-multitable="handleOpenFillTarget"
         @select-project-no="handleProjectNoSelect"
+        @refresh-changed="onRefreshChanged"
       />
       <!-- 项目查询 (P2-1) — 「怎么查询」。A SIBLING BRANCH of 今天要处理 / 项目备料, not a passenger
            on them: it owns four URL state bits of its own (`q` / `status` / `source` / `sel`) and one
@@ -134,6 +130,15 @@
         :project-no="selectedProjectNo"
         @admin-action="handleAdminAction"
         @navigate-stage="handleNavigateStage"
+      />
+      <!-- 拉取待确认 (备料分批拉取第一期 step 4 PR-7, R-62 ①) — the puller's holds of the OPEN project. INSIDE the v-if
+           chain (see the chain-split warning at its end). PULL tier only (`visibleViews`). -->
+      <StockPreparationRefreshQueueView
+        v-else-if="effectiveKey === 'refresh-queue'"
+        :scope="scope"
+        :project-no="selectedProjectNo"
+        @navigate-stage="handleNavigateStage"
+        @refresh-changed="onRefreshChanged"
       />
       <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
            out for a customer admin to confirm, the deployment preflight, and a SKIP-aware install run
@@ -184,13 +189,10 @@
           <StockPreparationCodeHelpPanel />
         </section>
       </div>
-      <StockPreparationDashboardView
-        v-else-if="effectiveKey === 'dashboard'"
-        :project-id="selectedProjectId"
-        :scope="scope"
-        @select-project="handleDashboardProjectSelect"
-        @navigate-stage="handleNavigateStage"
-      />
+      <!-- 旧「仪表盘」(dashboard) was retired with 旧「异常队列」 and 旧「备料行」 (owner 2026-10-27,
+           「不用就去掉」): it was the six-stage navigator of that legacy pipeline, two of whose stages
+           (生成 -> prep-line, 异常 -> exception-queue) and whose 「去「异常队列」」 copy would have pointed
+           at removed pages. StockPreparationDashboardView.vue stays on disk unwired; revert to restore. -->
       <!-- Views 1-6 are all real views now (the placeholder branch remains only as a guard for any
            future tab). Views 2-6 share the shell-owned projectId context selected in view 1
            (#4017 pattern). -->
@@ -217,16 +219,10 @@
         :project-id="selectedProjectId"
         :scope="scope"
       />
-      <StockPreparationPrepLineView
-        v-else-if="effectiveKey === 'prep-line'"
-        :project-id="selectedProjectId"
-        :scope="scope"
-      />
-      <StockPreparationExceptionQueueView
-        v-else-if="effectiveKey === 'exception-queue'"
-        :project-id="selectedProjectId"
-        :scope="scope"
-      />
+      <!-- 旧「备料行」(prep-line) 与 旧「异常队列」(exception-queue) 已下线 (owner 2026-10-27:「不用就去掉」).
+           UI entry only: the two view components, their services and specs stay on disk unwired, and the
+           backend routes (/prep-lines, /generation/run, /exceptions*) and their tables are untouched, so
+           reverting this change restores both tabs. A stale `?tab=` for either key folds to the landing. -->
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
       </p>
@@ -271,16 +267,14 @@ import { useLocale } from '../../../composables/useLocale'
 import { getDefaultIntegrationScope } from '../../../services/integration/workbench'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
-import StockPreparationDashboardView from './StockPreparationDashboardView.vue'
 import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorkspaceView.vue'
 import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
 import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
 import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
-import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
-import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import StockPreparationProjectBoardView from './StockPreparationProjectBoardView.vue'
 import StockPreparationProjectQueryView from './StockPreparationProjectQueryView.vue'
+import StockPreparationRefreshQueueView from './StockPreparationRefreshQueueView.vue'
 import StockPreparationInstallView from './StockPreparationInstallView.vue'
 import StockPreparationOpsPanel from './StockPreparationOpsPanel.vue'
 import StockPreparationMembersView from './StockPreparationMembersView.vue'
@@ -296,10 +290,12 @@ import {
   canOpenStockPrepMembersPage,
   canOpenStockPrepProjectBoard,
   canOpenStockPrepProjectQuery,
+  canOpenStockPrepRefreshQueue,
   canUseLegacyMvpTabs,
   landsOnStockPrepProjectBoard,
   stockPrepLandingKey,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
+import { stockPrepRefreshRailCount, type StockPrepRefreshStanza } from '../../../services/integration/stockPreparation/refreshState'
 import { readStockPreparationPreflight } from '../../../services/integration/stockPreparation/installPlan'
 import { readStockPrepMembers, type StockPrepMembersReadOutcome } from '../../../services/integration/stockPreparation/members'
 import { createStockPreparationInstallApi } from '../../../services/integration/stockPreparation/installRun'
@@ -323,9 +319,9 @@ function bi(zh: string, en: string): string {
 }
 
 type StockPreparationViewKey =
-  // P1-1's four new keys. NO OLD KEY WAS REMOVED — `project-board`, `install` and the seven legacy
-  // keys all still resolve, so every existing deep link, every `navigate-stage` caller and every
-  // spec that names one keeps working.
+  // P1-1's four new keys. P1-1 REMOVED NO OLD KEY — `project-board`, `install` and the legacy keys
+  // all kept resolving. The owner's 2026-10-27 ruling (「不用就去掉」) later retired three legacy keys,
+  // `dashboard`, `prep-line` and `exception-queue`; a stale `?tab=` naming any of them folds to the landing.
   | 'home'
   | 'getting-started'
   | 'ops'
@@ -335,14 +331,13 @@ type StockPreparationViewKey =
   | 'project-board'
   | 'project-query'
   | 'confirmation-queue'
+  // 备料分批拉取第一期 step 4 PR-7 (R-62 ①): 拉取待确认.
+  | 'refresh-queue'
   | 'install'
-  | 'dashboard'
   | 'project-workspace'
   | 'bom-snapshot-diff'
   | 'material-mapping'
   | 'unit-conversion'
-  | 'prep-line'
-  | 'exception-queue'
 
 interface StockPreparationViewTab {
   key: StockPreparationViewKey
@@ -365,8 +360,8 @@ interface StockPreparationViewTab {
    * what it is instead of what the two older shapes are.
    */
   provisioning?: boolean
-  /** True only for the dashboard tab — it aggregates multiple existing GETs client-side (H1/H2), so
-   *  it has no single endpoint to badge (see the panel-endpoint paragraph's v-if). */
+  /** True for a tab that aggregates several existing reads client-side, so it has no single
+   *  endpoint to badge (see the panel-endpoint paragraph's v-if). */
   noEndpointBadge?: boolean
   /**
    * O2 / R-11. True for the six MVP tabs, whose every route is still PLATFORM-ADMIN gated and which
@@ -404,6 +399,11 @@ interface StockPreparationViewTab {
    * admin or the stock-prep delegated admin). Switch off ⇒ 404 ⇒ the tab does not exist.
    */
   membersPage?: boolean
+  /**
+   * 拉取待确认 (备料分批拉取第一期 step 4 PR-7, R-62 ①). Gated on the PULL tier exactly
+   * (`canOpenStockPrepRefreshQueue` — the six routes' own gate; never `integration:write`).
+   */
+  pullQueue?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -467,6 +467,20 @@ const views: StockPreparationViewTab[] = [
     endpoint: '/api/integration/stock-preparation/confirmation-decisions',
     confirmWrites: true,
   },
+  // 拉取待确认 — 备料分批拉取第一期 step 4 PR-7 (design §13; R-62 ①). The puller's page for a GOVERNED project's
+  // holds: a whole pull is suspended until a 拉取人员 has looked at each held item (old vs new, the demand evidence)
+  // and confirmed the relationship, kept it for now, or ended it. PULL tier only; a distinct label so a platform
+  // admin never sees two 「异常队列」 (the legacy one stays in 深度工具). Never `legacyMvp` (F-06 counts 7).
+  {
+    key: 'refresh-queue',
+    pullQueue: true,
+    zh: '拉取待确认',
+    en: 'Pull Holds',
+    zhDesc: '异常队列(分批拉取):整次挂起的拉取在这里逐项看清新旧对照和需求依据,由拉取人员确认沿用、暂不处理或结束沿用关系;处理完要重新试算。',
+    enDesc: 'Batch-refresh holds: a suspended pull lists each held item here with its old-versus-new comparison and demand evidence; the puller confirms the relationship, keeps it for now, or ends it — then previews again.',
+    endpoint: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds',
+    confirmWrites: true,
+  },
   // §14 (docs/development/platform-overall-design/multitable-application-model-20260830.md):
   // "安装页展示默认配置,由客户确认". Listed SECOND so the confirmation queue stays the landing view
   // for the operator this page was adopted for, while the customer admin who has to install the app
@@ -528,18 +542,8 @@ const views: StockPreparationViewTab[] = [
     endpoint: '',
     noEndpointBadge: true,
   },
-  // H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202 — PLANE A, values-free): the
-  // task-oriented entry for the legacy MVP surface.
-  {
-    key: 'dashboard',
-    legacyMvp: true,
-    zh: '仪表盘',
-    en: 'Dashboard',
-    zhDesc: '一眼看清:这个项目做到哪一步了、有几件事卡着、接下来该做什么。上面的数字都是从下面各页汇总来的。',
-    enDesc: 'At a glance: how far this project has got, how many things are stuck, and what to do next. Every number is summed up from the pages below.',
-    endpoint: '',
-    noEndpointBadge: true,
-  },
+  // 旧「仪表盘」(dashboard, H1/H2 #4202) was retired here on 2026-10-27 together with 旧「备料行」 and
+  // 旧「异常队列」 (owner: 「不用就去掉」) — it navigated the legacy pipeline those two tabs ended.
   {
     key: 'project-workspace',
     legacyMvp: true,
@@ -578,27 +582,10 @@ const views: StockPreparationViewTab[] = [
     endpoint: '/api/integration/stock-preparation/unit-conversions/summary',
     confirmWrites: true,
   },
-  {
-    key: 'prep-line',
-    legacyMvp: true,
-    zh: '备料行',
-    en: 'Prep Lines',
-    zhDesc: '只有确认过的数据才会生成备料明细。物料对应关系或单位还没定下来的,不会产出可以用的行。',
-    enDesc: 'Prep lines are built only from data you have confirmed. While a material match or a unit is still unresolved, no usable line is produced.',
-    endpoint: '/api/integration/stock-preparation/prep-lines',
-    // View 5's generation run is a MULTITABLE-INTERNAL table op (W4a) — badge drops the GET-only claim.
-    confirmWrites: true,
-  },
-  {
-    key: 'exception-queue',
-    legacyMvp: true,
-    zh: '异常队列',
-    en: 'Exception Queue',
-    zhDesc: '所有拿不准的行都在这里,可以逐条处理。拦路的问题会一直显示着,不处理就出不了最终结果。',
-    enDesc: 'Everything the system is unsure about is here and can be worked through. Blocking problems stay visible and hold up the final result until they are handled.',
-    endpoint: '/api/integration/stock-preparation/exceptions',
-    confirmWrites: true,
-  },
+  // 旧「备料行」(prep-line) and 旧「异常队列」(exception-queue) were retired here (owner 2026-10-27:
+  // 「不用就去掉」). Nothing live fed them: the exception sheet's only writer is the generation run, which
+  // only the 备料行 tab triggered, and its rows were cleared only from the 异常队列 tab. Backend routes and
+  // tables stay; revert this change to bring both tabs back.
   // 【帮助】— 怎么用这个页面 + 错误码对照. LAST in this array on purpose: `landingKey` falls back to
   // `visible[0]` only when no landing candidate is visible at all, and a help page is the one view
   // nobody should ever be dropped onto by default.
@@ -653,6 +640,8 @@ const visibleViews = computed(() => {
     if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(principal)
     // S5b: the permission half AND the server's answer — see `membersOutcome`.
     if (view.membersPage) return canOpenStockPrepMembersPage(principal) && membersPageAvailable.value
+    // PR-7: 拉取待确认 rides its OWN named predicate — the rail manifest's `pull` gate (F-09 pins the two equal).
+    if (view.pullQueue) return canOpenStockPrepRefreshQueue(principal)
     // 项目查询 rides its OWN named predicate rather than the board's, even though the two are one
     // expression today: the rail manifest gates it on its own token, and a shell that consulted a
     // different predicate than the manifest names is precisely the drift F-09 exists to catch.
@@ -661,6 +650,25 @@ const visibleViews = computed(() => {
     if (view.helpOnly) return canOpenStockPrepHelp(principal)
     return true
   })
+})
+
+/**
+ * 拉取待确认's rail count (备料分批拉取第一期 step 4 PR-7, R-62 ④): the OPEN project's open holds, as the board (or the
+ * holds page) last reported them — values-free. Shown ONLY to a PULL-tier viewer (「只显示本人能处理的计数」, design
+ * §13); a floor operator sees the board's banner instead. Reset when the opened project changes.
+ */
+const currentRefresh = ref<StockPrepRefreshStanza | null>(null)
+
+function onRefreshChanged(stanza: StockPrepRefreshStanza | null): void {
+  currentRefresh.value = stanza
+}
+
+const railCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {}
+  if (!canOpenStockPrepRefreshQueue(auth.getAccessSnapshot())) return counts
+  const count = stockPrepRefreshRailCount(currentRefresh.value)
+  if (count !== null) counts['refresh-queue'] = count
+  return counts
 })
 
 /** The visible keys as plain strings — what the help card checks its links against. */
@@ -968,7 +976,7 @@ function dropStaleProjectQueryState(): void {
  * SEEDED SYNCHRONOUSLY, during setup, so a shared link paints its destination on the FIRST frame
  * rather than painting the landing and then swapping. It is read through `views` (not through a
  * literal list), so EVERY key is accepted — the four new ones and every old one, `project-board` and
- * the seven legacy keys included. An unknown value is ignored rather than treated as an error: a
+ * the remaining legacy keys included. An unknown value (a retired key among them) is ignored rather than treated as an error: a
  * stale link should land somewhere sensible, and `activeView` folds any key this principal cannot
  * see back to their landing anyway.
  *
@@ -1013,6 +1021,12 @@ function projectNoFromQuery(): string {
 }
 
 const selectedProjectNo = ref<string>(projectNoFromQuery())
+
+// PR-7 (R-62 ④): the rail count is the OPEN project's — a different project starts from nothing until its board or
+// holds page reports.
+watch(selectedProjectNo, () => {
+  currentRefresh.value = null
+})
 
 // The `?tab=` seed, applied now that `route` exists. Synchronous — before the first render — so a
 // deep link never paints the landing first.
@@ -1085,14 +1099,6 @@ function handleProjectSelect(projectId: string): void {
   // Jump straight into view 2 already scoped — no re-select there.
   activeKey.value = 'bom-snapshot-diff'
   // Mirror the handle into the query (replace: selecting is not a history step).
-  void router.replace({ query: { ...shellQueryBase(), projectId } })
-}
-
-// H1: the dashboard's OWN picker updates the shared handle WITHOUT switching tabs — the operator
-// stays on the dashboard to read the stage overview for the project they just picked (unlike view 1's
-// row action above, which jumps straight to view 2).
-function handleDashboardProjectSelect(projectId: string): void {
-  selectedProjectId.value = projectId
   void router.replace({ query: { ...shellQueryBase(), projectId } })
 }
 

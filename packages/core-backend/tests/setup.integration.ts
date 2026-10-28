@@ -1,6 +1,12 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { beforeAll, afterAll, vi } from 'vitest'
+import { setSettlementCoordinationNestingModeV1 } from '../src/attendance/coordination/settlement-coordination-context'
+
+// Settlement coordination (P1-1, r6.1 §3.2 step 11, acceptance A11): the real-database suites refuse a
+// main-pool access inside a live coordination context, as the unit setup does (tests/setup.ts). Production
+// only counts it.
+setSettlementCoordinationNestingModeV1('throw')
 
 process.env.NODE_ENV = 'test'
 process.env.LOG_LEVEL = 'error'

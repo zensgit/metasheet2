@@ -12,6 +12,7 @@
  */
 
 import type { ConditionalRule } from './permission-rule-evaluator'
+import { FIELD_HUMAN_WRITE_LOCK_PROPERTY_KEY } from './human-write-lock'
 
 export const COPY_UNMAPPED_FIELD_REF = 'COPY_UNMAPPED_FIELD_REF'
 export const COPY_SOURCE_RULE_UNBUILDABLE = 'COPY_SOURCE_RULE_UNBUILDABLE'
@@ -133,6 +134,9 @@ const HANDLED_PROPERTY_KEYS: ReadonlySet<string> = new Set([
   'actionType',
   'actionConfig',
   'aiShortcut',
+  // 人写锁（human-write-lock.ts）：复制出来的表归复制者，没有系统写手 —— 锁**不**带过去（不写 next），
+  // 否则这些列在副本上永远没人能写，且复制行时 createRecord 会以 FIELD_READONLY_PLM_SYSTEM 整次失败。
+  FIELD_HUMAN_WRITE_LOCK_PROPERTY_KEY,
 ])
 
 function foreignSheetIdOf(property: Record<string, unknown>): string {

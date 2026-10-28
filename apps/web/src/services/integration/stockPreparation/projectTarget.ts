@@ -122,6 +122,12 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE',
   // 2026-10-10 audit: the project-target routes' (list / get / create / archive / restore) one values-free 500.
   'STOCK_PREPARATION_ROUTE_FAILED',
+  // 备料分批拉取第一期 step 4 PR-7b (PR-7 review: codes still on the generic sentence): a malformed project number,
+  // the registry's scope refusal, an unwired registry and the PLM column-lock read on a sheet that is not one.
+  'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+  'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID',
+  'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE',
+  'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED',
 ])
 
 /**
@@ -579,11 +585,13 @@ export class StockPreparationProjectTargetCallError extends Error {
   code: string | null
   malformed: boolean
   field: StockPrepProjectFieldKey | 'body' | null
+  /** PR B: the pilot NOT_READY refusal's failing check ids (closed tokens), else empty. */
+  detailFailing: string[]
 
   constructor(
     status: number,
     route: string,
-    options: { code?: string | null; malformed?: boolean; field?: StockPrepProjectFieldKey | 'body' | null } = {},
+    options: { code?: string | null; malformed?: boolean; field?: StockPrepProjectFieldKey | 'body' | null; failing?: string[] } = {},
   ) {
     super(`stock-preparation project target call failed (${route} -> ${status})`)
     this.name = 'StockPreparationProjectTargetCallError'
@@ -591,7 +599,15 @@ export class StockPreparationProjectTargetCallError extends Error {
     this.code = options.code ?? null
     this.malformed = options.malformed === true
     this.field = options.field ?? null
+    this.detailFailing = Array.isArray(options.failing) ? [...options.failing] : []
   }
+}
+
+/** PR B: `details.failing` clamped to closed check-id tokens — anything else is dropped. */
+function refusalFailingOf(details: unknown): string[] {
+  const failing = isRecord(details) ? details.failing : null
+  if (!Array.isArray(failing)) return []
+  return failing.filter((id): id is string => typeof id === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(id))
 }
 
 /** `details.field` clamped to the closed whitelist (plus the body itself) — anything else is null. */
@@ -627,6 +643,9 @@ export interface StockPreparationProjectTargetApi {
   /** S4 (R-38). Optional so an older test double still type-checks; the real client has both. */
   archive?(projectNo: string, confirmProjectNo: string): Promise<StockPrepProjectTargetLifecycleResult>
   restore?(projectNo: string, confirmProjectNo: string): Promise<StockPrepProjectTargetLifecycleResult>
+  /** PR B (R-53 / R-54). Optional for the same reason; a double without them simply shows no pilot line. */
+  getPilot?(projectNo: string): Promise<StockPrepProjectPilotState>
+  enablePilot?(projectNo: string, confirmProjectNo: string): Promise<StockPrepProjectPilotEnabled>
   /** S3 (R-37). Optional for the same reason; a double without them simply shows no fields / no refresh. */
   getProjectFields?(projectNo: string): Promise<StockPrepProjectFieldsState>
   updateProjectFields?(projectNo: string, patch: StockPrepProjectFieldsPatch): Promise<StockPrepProjectFieldsSaved>
@@ -654,6 +673,7 @@ async function readEnvelope<T>(response: Response | undefined, route: string, cl
     throw new StockPreparationProjectTargetCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
       field: refusalFieldOf(envelope?.error?.details),
+      failing: refusalFailingOf(envelope?.error?.details),
     })
   }
   const clamped = envelope && envelope.ok === true ? clamp(envelope.data) : null
@@ -707,6 +727,22 @@ export function createStockPreparationProjectTargetApi(scope: IntegrationScope):
         body: JSON.stringify({ confirmProjectNo }),
       })
       return readEnvelope(response, route, clampStockPrepProjectTargetLifecycle)
+    },
+    // PR B: the pilot read carries the scope query like the GET target; the enable, like every write here,
+    // carries NO query and the server's closed body `{ confirmProjectNo }`.
+    async getPilot(projectNo: string) {
+      const route = 'GET …/projects/:projectNo/target/pilot'
+      const response = await apiFetch(`${TARGET_BASE}/projects/${encodeURIComponent(projectNo)}/target/pilot${suffix}`)
+      return readEnvelope(response, route, clampStockPrepProjectPilotState)
+    },
+    async enablePilot(projectNo: string, confirmProjectNo: string) {
+      const route = 'POST …/projects/:projectNo/target/pilot'
+      const response = await apiFetch(`${TARGET_BASE}/projects/${encodeURIComponent(projectNo)}/target/pilot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmProjectNo }),
+      })
+      return readEnvelope(response, route, clampStockPrepProjectPilotEnabled)
     },
     // S3: the read carries the scope query like the GET target; the write, like every write here,
     // carries NO query and a body of the server's closed whitelist — ONLY the keys in `patch`.
@@ -934,6 +970,149 @@ export async function changeStockPreparationProjectTargetLifecycle(
     return { kind: 'refused', action, status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }
   }
   return { kind: 'done', action, state: await rereadCounts(api, projectNo) }
+}
+
+// ---------------------------------------------------------------------------
+// 备料分批拉取第一期 step 3 PR B — the pilot marker (register R-53 / R-54)
+// ---------------------------------------------------------------------------
+
+/** The marker as the server answers it: booleans, a clock, an actor handle, an integer — never a value. */
+export interface StockPrepProjectPilotMarker {
+  enabled: boolean
+  enabledAt: string | null
+  enabledBy: string | null
+  readinessVersion: number | null
+}
+
+/** One readiness check: a closed id and whether it passed. The ids are the server's closed list. */
+export interface StockPrepProjectPilotReadinessCheck {
+  id: string
+  ok: boolean
+}
+
+export interface StockPrepProjectPilotReadiness {
+  version: number
+  ready: boolean
+  checks: StockPrepProjectPilotReadinessCheck[]
+  failing: string[]
+}
+
+/** GET …/target/pilot (ADMIN): the state the board's pilot line renders. */
+export interface StockPrepProjectPilotState {
+  status: StockPrepProjectTargetStatus
+  /** Null while the project is absent. */
+  pilot: StockPrepProjectPilotMarker | null
+  /** Null while absent or archived (readiness is asked of an ACTIVE sheet only). */
+  readiness: StockPrepProjectPilotReadiness | null
+  /** Computed by the server (ADMIN tier): ready AND not yet enabled. Advisory — the route re-checks. */
+  may: { enable: boolean }
+}
+
+/** POST …/target/pilot (ADMIN): the enablement's outcome. */
+export interface StockPrepProjectPilotEnabled {
+  status: StockPrepProjectTargetStatus
+  pilot: StockPrepProjectPilotMarker
+  /** True when the marker landed NOW; false on a re-POST of an already-pilot project (no second audit row). */
+  enabled: boolean
+  alreadyEnabled: boolean
+  exportClosure: { closed: boolean; alreadyClosed: boolean }
+  readiness: StockPrepProjectPilotReadiness
+}
+
+export const STOCK_PREP_PILOT_NOT_READY_CODE = 'STOCK_PREP_PILOT_NOT_READY'
+
+const PILOT_CHECK_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/
+
+function clampPilotMarker(raw: unknown): StockPrepProjectPilotMarker | null {
+  if (!raw || typeof raw !== 'object') return null
+  const marker = raw as Record<string, unknown>
+  return {
+    enabled: marker.enabled === true,
+    enabledAt: typeof marker.enabledAt === 'string' ? marker.enabledAt : null,
+    enabledBy: typeof marker.enabledBy === 'string' ? marker.enabledBy : null,
+    readinessVersion: typeof marker.readinessVersion === 'number' && Number.isInteger(marker.readinessVersion) ? marker.readinessVersion : null,
+  }
+}
+
+function clampPilotReadiness(raw: unknown): StockPrepProjectPilotReadiness | null {
+  if (!raw || typeof raw !== 'object') return null
+  const readiness = raw as Record<string, unknown>
+  if (typeof readiness.version !== 'number' || !Array.isArray(readiness.checks) || !Array.isArray(readiness.failing)) return null
+  const checks = (readiness.checks as unknown[])
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'))
+    .filter((entry) => typeof entry.id === 'string' && PILOT_CHECK_ID_PATTERN.test(entry.id))
+    .map((entry) => ({ id: String(entry.id), ok: entry.ok === true }))
+  const failing = (readiness.failing as unknown[]).filter((id): id is string => typeof id === 'string' && PILOT_CHECK_ID_PATTERN.test(id))
+  return { version: readiness.version, ready: readiness.ready === true, checks, failing }
+}
+
+export function clampStockPrepProjectPilotState(raw: unknown): StockPrepProjectPilotState | null {
+  if (!raw || typeof raw !== 'object') return null
+  const data = raw as Record<string, unknown>
+  const status = statusOf(data.status)
+  if (!status) return null
+  const may = data.may && typeof data.may === 'object' ? (data.may as Record<string, unknown>) : {}
+  return {
+    status,
+    pilot: clampPilotMarker(data.pilot),
+    readiness: clampPilotReadiness(data.readiness),
+    may: { enable: may.enable === true },
+  }
+}
+
+export function clampStockPrepProjectPilotEnabled(raw: unknown): StockPrepProjectPilotEnabled | null {
+  if (!raw || typeof raw !== 'object') return null
+  const data = raw as Record<string, unknown>
+  const status = statusOf(data.status)
+  const pilot = clampPilotMarker(data.pilot)
+  const readiness = clampPilotReadiness(data.readiness)
+  if (!status || !pilot || !readiness) return null
+  const closure = data.exportClosure && typeof data.exportClosure === 'object' ? (data.exportClosure as Record<string, unknown>) : {}
+  return {
+    status,
+    pilot,
+    enabled: data.enabled === true,
+    alreadyEnabled: data.alreadyEnabled === true,
+    exportClosure: { closed: closure.closed === true, alreadyClosed: closure.alreadyClosed === true },
+    readiness,
+  }
+}
+
+export type StockPrepProjectPilotEnableOutcome =
+  /** The marker landed (or was already there — `result.alreadyEnabled`); `state` is the pilot as re-read afterwards. */
+  | { kind: 'done'; result: StockPrepProjectPilotEnabled; state: StockPrepProjectPilotState | null }
+  /** The typed number does not match the project: NOTHING was sent. */
+  | { kind: 'mismatch' }
+  /** This caller does not hold the ADMIN tier: nothing was sent. */
+  | { kind: 'not_permitted' }
+  /** The server refused (NOT_READY with its failing ids, ARCHIVED, WRITE_LOCKED, a gate…). */
+  | { kind: 'refused'; status: number; code: string | null; failing: string[] }
+
+/**
+ * Enable the pilot of ONE project. ADMIN only (`canEnable` is the client mirror; the server re-checks its
+ * gate and the whole readiness list). A mismatched confirmation is stopped HERE, before any request.
+ * There is NO disable counterpart (R-53 ②): a mistaken enable is an owner-approved runbook operation.
+ */
+export async function enableStockPreparationProjectPilot(
+  deps: { targetApi: StockPreparationProjectTargetApi | null; canEnable: boolean },
+  projectNo: string,
+  typedProjectNo: string,
+): Promise<StockPrepProjectPilotEnableOutcome> {
+  const api = deps.targetApi
+  if (!api || !deps.canEnable || typeof api.enablePilot !== 'function') return { kind: 'not_permitted' }
+  if (!stockPrepProjectNumbersMatch(projectNo, typedProjectNo)) return { kind: 'mismatch' }
+  let result: StockPrepProjectPilotEnabled
+  try {
+    result = await api.enablePilot(projectNo.trim(), typedProjectNo.trim())
+  } catch (error) {
+    const failing = error instanceof StockPreparationProjectTargetCallError && Array.isArray(error.detailFailing) ? error.detailFailing : []
+    return { kind: 'refused', status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error), failing }
+  }
+  let state: StockPrepProjectPilotState | null = null
+  if (typeof api.getPilot === 'function') {
+    try { state = await api.getPilot(projectNo.trim()) } catch { state = null }
+  }
+  return { kind: 'done', result, state }
 }
 
 // ---------------------------------------------------------------------------

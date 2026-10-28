@@ -810,7 +810,23 @@
                 class="meta-rule-editor__hint"
                 data-field="dingtalkDestinationEmpty"
               >
-                {{ automationLabel('dingtalk.noGroupsAvailable', isZh) }}
+                <div>{{ automationLabel('dingtalk.noGroupsAvailable', isZh) }}</div>
+                <div class="meta-rule-editor__inline-actions">
+                  <el-button
+                    v-if="props.canOpenDingTalkGroupSettings === true"
+                    size="small"
+                    class="meta-rule-editor__btn"
+                    data-field="dingtalkOpenGroupSettings"
+                    @click="emit('open-dingtalk-groups')"
+                  >{{ automationLabel('dingtalk.openGroupSettings', isZh) }}</el-button>
+                  <el-button
+                    size="small"
+                    class="meta-rule-editor__btn"
+                    data-field="dingtalkReloadGroups"
+                    :disabled="dingTalkDestinationsReloading"
+                    @click="void reloadDingTalkDestinations()"
+                  >{{ automationLabel('dingtalk.reloadGroups', isZh) }}</el-button>
+                </div>
               </div>
               <div
                 v-if="selectedGroupDestinations(action).length"
@@ -1067,7 +1083,10 @@
                   <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ automationLabel('dingtalk.inactiveUsersCannotBeAdded', isZh) }}</span>
                 </button>
               </div>
-              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">{{ automationLabel('dingtalk.noMatchingUsersOrGroups', isZh) }}</div>
+              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint" data-field="dingtalkPersonNoMatch">
+                <div>{{ automationLabel('dingtalk.noMatchingUsersOrGroups', isZh) }}</div>
+                <div data-field="dingtalkPersonSearchScopeHint">{{ automationLabel('dingtalk.recipientSearchScopeHint', isZh) }}</div>
+              </div>
               <div v-if="selectedPersonRecipients(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
                 <button
                   v-for="recipient in selectedPersonRecipients(action)"
@@ -1077,12 +1096,19 @@
                   :data-person-recipient="recipient.id"
                   @click="removePersonRecipient(action, recipient.id)"
                 >
-                  <strong>{{ recipient.label }}</strong>
+                  <strong v-if="recipient.named" data-field="dingtalkPersonRecipientName">{{ recipient.label }}</strong>
                   <span>{{ recipient.subtitle || recipient.id }}</span>
-                  <span v-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
+                  <span v-if="recipient.outsideMemberList" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonRecipientOutsideMemberList">{{ automationLabel('dingtalk.recipientOutsideMemberList', isZh) }}</span>
+                  <span v-if="recipient.stateLabel" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonRecipientState" :data-state="recipient.state">{{ recipient.stateLabel }}</span>
+                  <span v-else-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
                   <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
+              <div
+                v-if="selectedPersonNotLinkedSummary(action)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+                data-field="dingtalkPersonNotLinkedSummary"
+              >{{ selectedPersonNotLinkedSummary(action) }}</div>
               <div v-if="selectedPersonRecipientGroups(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
                 <button
                   v-for="group in selectedPersonRecipientGroups(action)"
@@ -1105,6 +1131,7 @@
                 :rows="3"
                 :placeholder="automationLabel('dingtalk.localUserIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserIds"
+                @blur="onPersonRecipientIdsBlur(action)"
               />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.memberGroupIds', isZh) }}</label>
               <el-input
@@ -1750,6 +1777,13 @@
 import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import {
+  forEachWithConcurrency,
+  RECIPIENT_NAME_LOOKUP_CONCURRENCY,
+  RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS,
+  useDingTalkPersonRecipientStatus,
+  type DingTalkPersonRecipientState,
+} from '../composables/useDingTalkPersonRecipientStatus'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { getTemplate } from '../../approvals/api'
@@ -1820,6 +1854,9 @@ import {
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
   automationDingTalkPersonStatusLabel,
+  automationDingTalkSaveNotice,
+  type AutomationLabelKey,
+  automationDingTalkSelectedNotLinkedSummary,
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
@@ -2010,19 +2047,22 @@ const props = defineProps<{
   sheetId: string
   rule?: AutomationRule
   testRunState?: {
-    status: 'running' | 'success' | 'failed' | 'skipped'
+    status: 'running' | 'success' | 'failed' | 'skipped' | 'warning'
     message: string
   }
   visible: boolean
   fields: AutomationRuleEditorField[]
   client?: MultitableApiClient
   views?: MetaView[]
+  /** 客户反馈 2026-10-21 (c): the host can open API & Webhooks > DingTalk Groups on request. */
+  canOpenDingTalkGroupSettings?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'save', payload: Partial<AutomationRule>): void
+  (e: 'save', payload: Partial<AutomationRule>, meta?: { dingtalkRecipientNotice?: string }): void
   (e: 'test', ruleId: string): void
+  (e: 'open-dingtalk-groups'): void
 }>()
 
 const error = ref('')
@@ -2062,6 +2102,22 @@ function cronPresetForDraft(d: Draft): string {
 }
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
+const dingTalkDestinationsReloading = ref(false)
+
+// 客户反馈 2026-10-21 (c): after adding a group in API & Webhooks > DingTalk Groups, pick it up without
+// closing the editor (and losing the unsaved draft).
+async function reloadDingTalkDestinations() {
+  if (!props.client || dingTalkDestinationsReloading.value) return
+  dingTalkDestinationsReloading.value = true
+  try {
+    dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
+    dingTalkDestinationsError.value = ''
+  } catch (err) {
+    dingTalkDestinationsError.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'
+  } finally {
+    dingTalkDestinationsReloading.value = false
+  }
+}
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
 // the config block degrades to a free-text template-id input; the select is never a hard dependency.
 const approvalTemplates = ref<Array<{ id: string; name?: string }>>([])
@@ -2123,6 +2179,13 @@ type PersonRecipientDirectoryEntry = {
 }
 
 const personRecipientDirectory = ref<Record<string, PersonRecipientDirectoryEntry>>({})
+// 客户反馈 2026-10-21 item 1 (review round 1): whether the SENDER would reach each local user id of a DingTalk
+// person action — from the server preflight (the sender's own query), not from the sheet roster, which only
+// lists users with a multitable role. Reset on every open so a binding fixed since then is re-checked.
+const personRecipientStatus = useDingTalkPersonRecipientStatus({
+  client: () => props.client,
+  sheetId: () => props.sheetId,
+})
 // send_notification recipient picker state, keyed by picker key (top-level: action.draftId;
 // branch rows: see notificationPickerKey). Search text lives here rather than in the draft so
 // typing a query never dirties the rule. Resolved names/emails are read from
@@ -2136,6 +2199,7 @@ const notificationRecipientErrors = ref<Record<string, string>>({})
 // a miss: it renders as a plain raw-id chip, still removable.
 const notificationRecipientMisses = ref<Record<string, boolean>>({})
 const notificationRecipientResolveInFlight = new Set<string>()
+const notificationRecipientLookupFailedAt = new Map<string, number>()
 let notificationRecipientSuggestionLoadId = 0
 const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
@@ -3575,6 +3639,13 @@ watch(
       // Resolve persisted notification recipient ids to names/emails so an existing rule opens with
       // readable chips; ids the roster does not know get the "unmatched" badge.
       void resolveNotificationRecipientIds(collectDraftNotificationRecipientIds())
+      // 客户反馈 2026-10-21 (a): a saved person-message recipient shows its DingTalk link status on open too —
+      // review round 1: from the sender-side preflight, forgetting what an earlier open learned.
+      personRecipientStatus.reset()
+      void personRecipientStatus.check(collectDraftPersonRecipientIds())
+      // Round 1b: names still come from the roster (exact-id lookup), as before — the preflight only answers
+      // link/active status. A saved recipient must reopen as a name, never as a bare id.
+      void resolveNotificationRecipientIds(collectDraftPersonRecipientIds())
       // FWB template source: load active version + form fields for the mapping editor.
       const triggerTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
         ? draft.value.triggerConfig.templateId
@@ -4238,18 +4309,78 @@ function rememberPersonRecipientSuggestions(items: MetaSheetPermissionCandidate[
   personRecipientDirectory.value = next
 }
 
+// 客户反馈 2026-10-21 item 1 follow-up (review round 1): every local user id — picked, typed or saved — gets the
+// sender-side preflight (on pick, on blur of the 本地用户 ID box, on open). A known answer wins over the roster:
+// 未找到该用户 / 已停用 / 未绑定钉钉 badges, and "linked" only when the sender would really reach the user.
+// Until the answer arrives (or if the lookup fails) the roster's own flags are shown as before.
+const PERSON_RECIPIENT_STATE_LABELS: Partial<Record<DingTalkPersonRecipientState, AutomationLabelKey>> = {
+  missing: 'dingtalk.recipientMissing',
+  inactive: 'dingtalk.recipientInactive',
+  unlinked: 'dingtalk.recipientNotLinked',
+  checking: 'dingtalk.recipientChecking',
+  failed: 'dingtalk.recipientCheckFailed',
+}
+
 function selectedPersonRecipients(action: DraftAction) {
-  return parseUserIdsText(action.config.userIdsText).map((id) => {
+  return Array.from(new Set(parseUserIdsText(action.config.userIdsText))).map((id) => {
     const directoryEntry = personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
+    const state = personRecipientStatus.stateOf(id)
+    const stateLabelKey = PERSON_RECIPIENT_STATE_LABELS[state]
+    const known = state === 'missing' || state === 'inactive' || state === 'unlinked' || state === 'ready'
     return {
       id,
+      // Round 1b: a name only when the roster knows the user; otherwise the chip shows the id in its usual
+      // place (the subtitle line) plus the status badge — never the bare id dressed up as a name.
+      // Round 2: the roster labels an unnamed user with its id — that is not a name either.
+      named: Boolean(directoryEntry?.label) && directoryEntry?.label !== id,
+      // Round 1c: the sender sees this user (status: exists) but the member search found no such member —
+      // a user with no multitable role. Say so; an unnamed chip alone would read like a mistyped id.
+      outsideMemberList: !directoryEntry && notificationRecipientMisses.value[id] === true && (state === 'ready' || state === 'unlinked' || state === 'inactive'),
       label: directoryEntry?.label ?? id,
       subtitle: directoryEntry?.subtitle,
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,
       dingtalkGrantEnabled: directoryEntry?.dingtalkGrantEnabled ?? null,
-      dingtalkPersonDeliveryAvailable: directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+      dingtalkPersonDeliveryAvailable: known ? state === 'ready' : directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+      state,
+      stateLabel: stateLabelKey ? automationLabel(stateLabelKey, isZh.value) : '',
     }
   })
+}
+
+// Round 1b: typed ids get their name from the roster and their link/active status from the preflight.
+function onPersonRecipientIdsBlur(action: DraftAction) {
+  const ids = parseUserIdsText(action.config.userIdsText)
+  void personRecipientStatus.check(ids)
+  void resolveNotificationRecipientIds(ids)
+}
+
+function selectedPersonRecipientCounts(action: DraftAction) {
+  const recipients = selectedPersonRecipients(action)
+  const counts = personRecipientStatus.counts(recipients.map((recipient) => recipient.id))
+  // Not answered by the preflight (no client method / lookup failed): the roster's own flag, as before.
+  counts.notLinked += recipients.filter((recipient) => recipient.state === 'unknown' && recipient.dingtalkPersonDeliveryAvailable === false).length
+  return counts
+}
+
+// 客户反馈 2026-10-21 (a): visible BEFORE saving — selected users the sender will skip, as counts.
+function selectedPersonNotLinkedSummary(action: DraftAction): string {
+  return automationDingTalkSelectedNotLinkedSummary(selectedPersonRecipientCounts(action), isZh.value)
+}
+
+// Review round 1 F7: saving is never blocked, but a rule saved while recipients are still being checked or
+// are known to be unreachable says so.
+function personRecipientSaveNotice(): string {
+  const total = { notLinked: 0, inactive: 0, notFound: 0, checking: 0, unchecked: 0 }
+  for (const action of draft.value.actions) {
+    if (action.type !== 'send_dingtalk_person_message') continue
+    const counts = selectedPersonRecipientCounts(action)
+    total.notLinked += counts.notLinked
+    total.inactive += counts.inactive
+    total.notFound += counts.notFound
+    total.checking += counts.checking
+    total.unchecked += counts.unchecked
+  }
+  return automationDingTalkSaveNotice(total, isZh.value)
 }
 
 function selectedPersonRecipientGroups(action: DraftAction) {
@@ -4321,6 +4452,7 @@ function addPersonRecipient(action: DraftAction, candidate: MetaSheetPermissionC
     const ids = new Set(parseUserIdsText(action.config.userIdsText))
     ids.add(candidate.subjectId)
     action.config.userIdsText = Array.from(ids).join(', ')
+    void personRecipientStatus.check([candidate.subjectId])
   }
   action.config.userIdsSearch = ''
   rememberPersonRecipientSuggestions([candidate])
@@ -4425,6 +4557,14 @@ function removeNotificationRecipient(holder: NotificationRecipientHolder, userId
     .join(', ')
 }
 
+function collectDraftPersonRecipientIds(): string[] {
+  const ids: string[] = []
+  for (const action of draft.value.actions) {
+    if (action.type === 'send_dingtalk_person_message') ids.push(...parseUserIdsText(action.config.userIdsText))
+  }
+  return Array.from(new Set(ids))
+}
+
 function collectDraftNotificationRecipientIds(): string[] {
   const ids: string[] = []
   for (const action of draft.value.actions) {
@@ -4451,13 +4591,16 @@ function collectDraftNotificationRecipientIds(): string[] {
 async function resolveNotificationRecipientIds(ids: string[]) {
   const client = props.client
   if (!client) return
+  const now = Date.now()
   const pending = Array.from(new Set(ids)).filter((id) =>
     !personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
     && notificationRecipientMisses.value[id] === undefined
-    && !notificationRecipientResolveInFlight.has(id),
+    && !notificationRecipientResolveInFlight.has(id)
+    && !(now - (notificationRecipientLookupFailedAt.get(id) ?? -Infinity) < RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS),
   )
-  await Promise.all(pending.map(async (id) => {
-    notificationRecipientResolveInFlight.add(id)
+  for (const id of pending) notificationRecipientResolveInFlight.add(id)
+  // Round 1b (F10): at most RECIPIENT_NAME_LOOKUP_CONCURRENCY lookups in flight; a failed one waits before a retry.
+  await forEachWithConcurrency(pending, RECIPIENT_NAME_LOOKUP_CONCURRENCY, async (id) => {
     try {
       const response = await client.listFormShareCandidates(props.sheetId, { q: id, limit: 50 })
       const matches = response.items.filter((item) => item.subjectType === 'user' && item.subjectId === id)
@@ -4466,12 +4609,14 @@ async function resolveNotificationRecipientIds(ids: string[]) {
       } else {
         notificationRecipientMisses.value = { ...notificationRecipientMisses.value, [id]: true }
       }
+      notificationRecipientLookupFailedAt.delete(id)
     } catch {
       // Lookup unavailable (no search permission, projection sheet, network): keep the raw id chip.
+      notificationRecipientLookupFailedAt.set(id, Date.now())
     } finally {
       notificationRecipientResolveInFlight.delete(id)
     }
-  }))
+  })
 }
 
 function groupDestinationScope(destination?: DingTalkGroupDestination): 'private' | 'sheet' | 'org' {
@@ -5665,7 +5810,11 @@ async function onSave() {
   saving.value = true
   error.value = ''
   try {
-    emit('save', buildPayload())
+    const payload = buildPayload()
+    // Review round 2: the DingTalk recipient notice travels WITH the save; the host shows it only after the
+    // save really succeeded (a refused save must never read 「已保存」).
+    const notice = personRecipientSaveNotice()
+    emit('save', payload, notice ? { dingtalkRecipientNotice: notice } : undefined)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : automationLabel('error.saveFailed', isZh.value)
   } finally {
@@ -5773,6 +5922,9 @@ async function onTestRun(): Promise<void> {
 .meta-rule-editor__test-run-status--success { color: var(--el-color-success-dark-2); }
 .meta-rule-editor__test-run-status--failed { color: var(--el-color-danger-dark-2); }
 .meta-rule-editor__test-run-status--skipped { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__test-run-status--warning { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__hint--warning { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__inline-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 .meta-rule-editor__test-run-status--running { color: var(--el-color-primary-dark-2); }
 
 .meta-rule-editor__input--sm,

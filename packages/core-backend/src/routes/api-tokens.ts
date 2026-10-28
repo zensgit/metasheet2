@@ -16,10 +16,13 @@ import { toDingTalkGroupDestinationResponse } from '../multitable/dingtalk-group
 import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
 import { loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
 import { sendSheetNotLive } from '../multitable/sheet-refusals'
-import { WebhookService } from '../multitable/webhook-service'
+import { isHiddenSystemSheet } from '../multitable/system-sheet-predicate'
+import { authorizeWebhookOwnerCurrentAccess, WEBHOOK_CHECK_FAILED } from '../multitable/webhook-delivery-authority'
+import { planWebhookUpdate, WebhookService } from '../multitable/webhook-service'
 import {
   CreateWebhookSchema,
   UpdateWebhookSchema,
+  type WebhookDelivery,
 } from '../multitable/webhooks'
 
 const logger = new Logger('ApiTokenRoutes')
@@ -143,15 +146,28 @@ function describeCheckErrorCode(err: unknown): string {
   return typeof code === 'string' && CHECK_ERROR_CODE_SHAPE.test(code) ? code : 'unknown'
 }
 
-async function requireSheetAutomationAccess(res: Response, userId: string, sheetId: string): Promise<boolean> {
+/**
+ * Sheet-bound outbound destination access (DingTalk group destinations and subscription webhooks): the
+ * caller must be able to manage automation on the sheet, then the sheet must be live. Subscription webhooks
+ * additionally require read access (checked with the capability) and refuse hidden system sheets (checked
+ * after liveness). Check failures answer a values-free 500.
+ */
+async function requireSheetOutboundDestinationAccess(
+  res: Response,
+  userId: string,
+  sheetId: string,
+  options: { requireRead: boolean; refuseHiddenSystemSheet: boolean },
+): Promise<boolean> {
   if (!sheetId) {
     res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     return false
   }
   let canManageAutomation: boolean
+  let canRead: boolean
   try {
     const { capabilities } = await resolveSheetCapabilitiesForUser(query, sheetId, userId)
     canManageAutomation = capabilities.canManageAutomation
+    canRead = capabilities.canRead
   } catch (err) {
     // FAIL CLOSED with a handled, values-free 500: previously a throw here was an unhandled
     // rejection on the read routes (request hung under Express 4) and echoed the raw driver
@@ -164,6 +180,10 @@ async function requireSheetAutomationAccess(res: Response, userId: string, sheet
     return false
   }
   if (!canManageAutomation) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+    return false
+  }
+  if (options.requireRead && !canRead) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
     return false
   }
@@ -190,7 +210,37 @@ async function requireSheetAutomationAccess(res: Response, userId: string, sheet
     sendSheetNotLive(res, liveness)
     return false
   }
+  if (options.refuseHiddenSystemSheet) {
+    let hidden: boolean
+    try {
+      const sheetRow = await query(
+        `SELECT to_jsonb(s) ->> 'system_kind' AS system_kind, s.description FROM meta_sheets s WHERE s.id = $1`,
+        [sheetId],
+      )
+      hidden = isHiddenSystemSheet(sheetRow.rows[0] as { system_kind?: unknown; description?: unknown } | undefined)
+    } catch (err) {
+      logger.error(`Outbound destination sheet kind lookup failed (code=${describeCheckErrorCode(err)})`)
+      res.status(500).json({
+        ok: false,
+        error: { code: 'SHEET_ACCESS_CHECK_FAILED', message: 'Failed to resolve sheet access' },
+      })
+      return false
+    }
+    if (hidden) {
+      res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+      return false
+    }
+  }
   return true
+}
+
+async function requireSheetAutomationAccess(res: Response, userId: string, sheetId: string): Promise<boolean> {
+  return requireSheetOutboundDestinationAccess(res, userId, sheetId, { requireRead: false, refuseHiddenSystemSheet: false })
+}
+
+/** Subscription webhooks: create/bind/enable/retarget need automation management AND read on a live, visible sheet. */
+async function requireWebhookSheetAccess(res: Response, userId: string, sheetId: string): Promise<boolean> {
+  return requireSheetOutboundDestinationAccess(res, userId, sheetId, { requireRead: true, refuseHiddenSystemSheet: true })
 }
 
 async function requireOrgMemberAccess(res: Response, userId: string, orgId: string): Promise<boolean> {
@@ -228,6 +278,21 @@ function requireOrgAdminAccess(req: Request, res: Response): boolean {
   return false
 }
 
+/** Delivery list item: status fields only (the stored request and response bodies are not returned). */
+function toDeliveryListItem(delivery: WebhookDelivery) {
+  return {
+    id: delivery.id,
+    webhookId: delivery.webhookId,
+    event: delivery.event,
+    status: delivery.status,
+    httpStatus: delivery.httpStatus,
+    attemptCount: delivery.attemptCount,
+    createdAt: delivery.createdAt,
+    deliveredAt: delivery.deliveredAt,
+    nextRetryAt: delivery.nextRetryAt,
+  }
+}
+
 function getUserId(req: Request): string {
   const user = req.user as Record<string, unknown> | undefined
   const id = user?.id ?? user?.userId ?? user?.sub
@@ -251,6 +316,9 @@ function serviceErrorResponse(res: Response, err: unknown, action: string): void
   } else if (message === 'Not authorized') {
     status = 403
     code = 'FORBIDDEN'
+  } else if (message === 'Webhook sheetId cannot be changed') {
+    status = 400
+    code = 'WEBHOOK_SHEET_IMMUTABLE'
   } else if (
     message.includes('required')
     || message.includes('valid URL')
@@ -372,11 +440,14 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = CreateWebhookSchema.parse(req.body)
+      const sheetId = getSheetId(input.sheetId)
+      if (!await requireWebhookSheetAccess(res, userId, sheetId)) return
       const webhook = await webhookService.createWebhook(userId, {
         name: input.name,
         url: input.url,
         secret: input.secret,
         events: input.events as import('../multitable/webhooks').WebhookEventType[],
+        sheetId,
         maxRetries: input.maxRetries,
         retryBaseDelayMs: input.retryBaseDelayMs,
         retryMaxDelayMs: input.retryMaxDelayMs,
@@ -400,12 +471,34 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = UpdateWebhookSchema.parse(req.body)
+      const existing = await webhookService.getWebhookById(req.params.id)
+      if (!existing) {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } })
+        return
+      }
+      if (existing.createdBy !== userId) {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+        return
+      }
+      const events = input.events as import('../multitable/webhooks').WebhookEventType[] | undefined
+      const plan = planWebhookUpdate(existing, { url: input.url, events, active: input.active, sheetId: input.sheetId })
+      if (plan.kind === 'refuse') {
+        res.status(400).json({
+          ok: false,
+          error: plan.reason === 'sheet_immutable'
+            ? { code: 'WEBHOOK_SHEET_IMMUTABLE', message: 'The bound sheet of a webhook cannot be changed' }
+            : { code: 'WEBHOOK_SHEET_REQUIRED', message: 'Bind the webhook to a sheet first' },
+        })
+        return
+      }
+      if (plan.recheckSheetId && !await requireWebhookSheetAccess(res, userId, plan.recheckSheetId)) return
       const webhook = await webhookService.updateWebhook(req.params.id, userId, {
         name: input.name,
         url: input.url,
         secret: input.secret,
-        events: input.events as import('../multitable/webhooks').WebhookEventType[] | undefined,
+        events,
         active: input.active,
+        sheetId: plan.bindSheetId ?? undefined,
         maxRetries: input.maxRetries,
         retryBaseDelayMs: input.retryBaseDelayMs,
         retryMaxDelayMs: input.retryMaxDelayMs,
@@ -451,9 +544,24 @@ export function apiTokensRouter(): Router {
       res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
       return
     }
+    // Not bound to a sheet: nothing to gate the history on, so none is returned.
+    if (webhook.sheetId === null) {
+      res.json({ ok: true, data: { deliveries: [] } })
+      return
+    }
+    // The owner must still pass request admission and read the bound, live sheet.
+    const access = await authorizeWebhookOwnerCurrentAccess(db, webhook)
+    if (access.ok === false) {
+      if (access.reason === WEBHOOK_CHECK_FAILED) {
+        res.status(500).json({ ok: false, error: { code: 'SHEET_ACCESS_CHECK_FAILED', message: 'Failed to resolve sheet access' } })
+      } else {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+      }
+      return
+    }
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
     const deliveries = await webhookService.listDeliveries(req.params.id, limit)
-    res.json({ ok: true, data: { deliveries } })
+    res.json({ ok: true, data: { deliveries: deliveries.map(toDeliveryListItem) } })
   })
 
   router.get('/api/multitable/dingtalk-groups', async (req: Request, res: Response) => {

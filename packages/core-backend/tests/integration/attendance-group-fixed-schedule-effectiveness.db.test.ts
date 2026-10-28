@@ -17,7 +17,7 @@ class FakeHttpError extends Error {
   }
 }
 
-const databaseUrl = process.env.DATABASE_URL
+const databaseUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = databaseUrl ? describe : describe.skip
 const producerType = 'attendance_group_fixed_schedule'
 
@@ -57,6 +57,8 @@ describeDb('attendance group fixed-schedule effectiveness (real DB)', () => {
     shiftId = randomUUID()
     await pool.query(`
       CREATE TABLE attendance_groups (id uuid PRIMARY KEY, org_id text NOT NULL);
+      CREATE TABLE attendance_shifts (id uuid PRIMARY KEY, org_id text NOT NULL);
+      CREATE TABLE attendance_shift_segments (id uuid PRIMARY KEY, org_id text NOT NULL, shift_id uuid NOT NULL);
       CREATE TABLE attendance_group_fixed_schedule_configs (
         org_id text NOT NULL, group_id uuid NOT NULL, shift_id uuid NOT NULL,
         start_date date NOT NULL, end_date date NOT NULL, revision integer NOT NULL,
@@ -252,5 +254,74 @@ describeDb('attendance group fixed-schedule effectiveness (real DB)', () => {
   it('18: group ownership is org-scoped before dependent reads', async () => {
     await expect(service.getEffectiveness(db(), { orgId: 'foreign-org', groupId })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(queryLog).toHaveLength(1)
+  })
+
+  async function readEditor(referenceSegments: boolean, selectedShiftId?: string) {
+    const { createAttendanceGroupFixedScheduleEditorService } = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-editor-service.cjs')
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const trx = { query: async (statement: string, params?: unknown[]) => (await client.query(statement, params)).rows }
+      const editor = createAttendanceGroupFixedScheduleEditorService({
+        HttpError: FakeHttpError,
+        getEffectiveness: service.getEffectiveness,
+        resolveReferenceSegments: async (actualTrx: unknown, actualOrgId: string) => {
+          expect(actualTrx).toBe(trx)
+          expect(actualOrgId).toBe(orgId)
+          return referenceSegments
+        },
+      })
+      const result = await editor.getEditor(trx, { orgId, groupId, shiftId: selectedShiftId })
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async function persistedShift(count: number, candidateId = shiftId, candidateOrg = orgId) {
+    await pool.query('INSERT INTO attendance_shifts (id, org_id) VALUES ($1, $2)', [candidateId, candidateOrg])
+    for (let index = 0; index < count; index += 1) {
+      await pool.query('INSERT INTO attendance_shift_segments (id, org_id, shift_id) VALUES ($1, $2, $3)', [randomUUID(), candidateOrg, candidateId])
+    }
+  }
+
+  it('editor uses persisted segment count and retains old managed sets in the denied projection', async () => {
+    await configure()
+    await persistedShift(2)
+    await members('member-a')
+    const oldShift = randomUUID()
+    await assignment({ shiftId: oldShift, startDate: '2026-07-01', endDate: '2026-07-31' })
+    const denied = await readEditor(false)
+    expect(denied.referenceEligibility).toEqual({ shiftId, allowed: false, reasonCode: 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED' })
+    expect(Object.keys(denied).sort()).toEqual(['desired', 'drift', 'groupId', 'reasonCodes', 'referenceEligibility', 'state'])
+    expect(denied.drift.managedSets).toHaveLength(1)
+    expect(denied.drift.managedSets[0]).toMatchObject({ shiftId: oldShift, startDate: '2026-07-01', endDate: '2026-07-31', rowCount: 1 })
+    expect((await readEditor(true)).referenceEligibility).toEqual({ shiftId, allowed: true, reasonCode: null })
+  })
+
+  it('editor reads a selected single-segment candidate independently from the saved multi-segment shift', async () => {
+    await configure()
+    await persistedShift(2)
+    const selected = randomUUID()
+    await persistedShift(1, selected)
+    const result = await readEditor(false, selected)
+    expect(result.desired.shiftId).toBe(shiftId)
+    expect(result.referenceEligibility).toEqual({ shiftId: selected, allowed: true, reasonCode: null })
+  })
+
+  it('editor does not read a shift belonging to another organization', async () => {
+    const selected = randomUUID()
+    await persistedShift(2, selected, 'other-org')
+    await expect(readEditor(true, selected)).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+  })
+
+  it('editor returns 503 when the persisted segment table is unavailable instead of authorizing zero segments', async () => {
+    await persistedShift(0)
+    await pool.query('DROP TABLE attendance_shift_segments')
+    await expect(readEditor(true, shiftId)).rejects.toMatchObject({ status: 503, code: 'ATTENDANCE_FIXED_SCHEDULE_EDITOR_UNAVAILABLE' })
   })
 })

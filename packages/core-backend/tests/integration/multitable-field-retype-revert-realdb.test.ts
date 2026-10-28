@@ -140,4 +140,23 @@ describeIfDatabase('multitable field retype revert — T9-W Tier 2 (real DB)', (
     const x = await execute(rev, token, FULL)
     expect(x.status).toBe(409)
   })
+
+  test('(f) 备料 option B: a type+property revert keeps the STORED human write lock (a pre-lock recorded property cannot unlock the column)', async () => {
+    process.env[FLAG] = 'true'
+    // The column is locked NOW (plugin provisioning marked it after the recorded change happened).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FIELD, SHEET, 'F', 'string', JSON.stringify({ humanWriteLock: 'plm_system' }), 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC, SHEET, JSON.stringify({ [FIELD]: '12' })])
+    // A revision recorded BEFORE the marking: its `before.property` has no lock.
+    const rev = await craftFieldRev(['type', 'property'], { type: 'number', property: {} }, { type: 'string', property: { humanWriteLock: 'plm_system' } })
+    const p = await preview(rev, FULL)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.preview?.driftConflict).toBe(false)
+    // Disclosed target == what will be stored: the lock rides along.
+    expect(p.body?.data?.preview?.target?.property).toEqual({ humanWriteLock: 'plm_system' })
+    const x = await execute(rev, p.body?.data?.previewToken, FULL)
+    expect(x.status, JSON.stringify(x.body)).toBe(200)
+    expect(await fieldType()).toBe('number') // the revert itself happened
+    const stored = ((await q('SELECT property FROM meta_fields WHERE id=$1', [FIELD])).rows[0] as { property: Record<string, unknown> }).property
+    expect(stored.humanWriteLock).toBe('plm_system') // ...and did NOT drop the lock
+  })
 })

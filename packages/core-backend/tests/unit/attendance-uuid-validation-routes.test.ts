@@ -1865,6 +1865,32 @@ describe('attendance UUID route validation', () => {
     expect(db.transaction).not.toHaveBeenCalled()
   })
 
+  it('registers POST /:id/update as the same handler as each attendance PUT /:id', async () => {
+    const { routes } = await createHarness()
+    const putIdRoutes = [...routes.keys()].filter((key) => key.startsWith('PUT ') && key.endsWith('/:id'))
+    expect(putIdRoutes).toContain('PUT /api/attendance/shifts/:id')
+    expect(putIdRoutes.length).toBeGreaterThan(10)
+    for (const key of putIdRoutes) {
+      const path = key.slice('PUT '.length)
+      const updateKey = `POST ${path}/update`
+      expect(routes.get(updateKey), updateKey).toBe(routes.get(key))
+    }
+    // Collection writes are a different path shape and stay PUT/POST without an /update alias.
+    expect(routes.has('POST /api/attendance/settings/update')).toBe(false)
+    expect(routes.has('POST /api/attendance/shifts/update')).toBe(false)
+    expect(routes.has('POST /api/attendance/rules/default/update')).toBe(false)
+  })
+
+  it('POST /api/attendance/shifts/:id/update answers the same validation failure as PUT', async () => {
+    const { routes } = await createHarness()
+    const input = { params: { id: 'not-a-uuid' }, body: { name: 'Day shift' } }
+    const put = await invokeRoute(routes, 'PUT /api/attendance/shifts/:id', input)
+    const post = await invokeRoute(routes, 'POST /api/attendance/shifts/:id/update', input)
+    expect(post.statusCode).toBe(put.statusCode)
+    expect(post.statusCode).toBeGreaterThanOrEqual(400)
+    expect(post.body).toEqual(put.body)
+  })
+
   it('rejects malformed attendance group manager ids before hitting the database', async () => {
     const { db, routes } = await createHarness()
     const groupId = '00000000-0000-4000-8000-000000000101'
@@ -5253,6 +5279,7 @@ describe('attendance UUID route validation', () => {
       { key: 'DELETE /api/attendance/rule-sets/:id' },
       { key: 'POST /api/attendance/shifts', body: { name: 'Day shift' } },
       { key: 'PUT /api/attendance/shifts/:id', body: { name: 'Day shift' } },
+      { key: 'POST /api/attendance/shifts/:id/update', body: { name: 'Day shift' } },
       { key: 'DELETE /api/attendance/shifts/:id' },
       { key: 'POST /api/attendance/assignments', body: { userId: 'worker-1', shiftId, startDate: '2026-06-01' } },
       { key: 'PUT /api/attendance/assignments/:id', body: { isActive: true } },
@@ -5372,6 +5399,7 @@ describe('attendance UUID route validation', () => {
       { key: 'DELETE /api/attendance/rule-sets/:id' },
       { key: 'POST /api/attendance/shifts', body: { name: 'Day shift' } },
       { key: 'PUT /api/attendance/shifts/:id', body: { name: 'Day shift' } },
+      { key: 'POST /api/attendance/shifts/:id/update', body: { name: 'Day shift' } },
       { key: 'DELETE /api/attendance/shifts/:id' },
       { key: 'POST /api/attendance/assignments', body: { userId: 'worker-1', shiftId, startDate: '2026-06-01' } },
       { key: 'PUT /api/attendance/assignments/:id', body: { isActive: true } },
@@ -6292,5 +6320,174 @@ describe('generic request fresh authority congruence', () => {
       .rejects.toMatchObject({ status: 409, code: 'W4C3B_REQUEST_IDENTITY_CHANGED' })
     expect(derive).toHaveBeenCalledTimes(1)
     expect(db.query).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('fixed-schedule editor and config save alias', () => {
+  it('registers config POST update with the identical validated and authorized PUT handler', async () => {
+    const { routes } = await createHarness('false')
+    expect(routes.get('POST /api/attendance/groups/:groupId/fixed-schedule/config/update'))
+      .toBe(routes.get('PUT /api/attendance/groups/:groupId/fixed-schedule/config'))
+  })
+
+  it.each([-1, 0.5, null, '1', Number.MAX_SAFE_INTEGER + 1])('rejects invalid save expectedConfigRevision %s before scoped SQL', async (expectedConfigRevision) => {
+    const { routes, db } = await createHarness('true')
+    db.query.mockClear()
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:groupId/fixed-schedule/config/update', {
+      params: { groupId: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30', expectedConfigRevision },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(db.query).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { headers: { 'x-org-id': 'foreign' } },
+    { query: { orgId: 'foreign' } },
+    { headers: { 'x-user-id': 'foreign' } },
+  ])('rejects forged editor selectors before any SQL or posture reads', async (selectors) => {
+    const posture = vi.fn()
+    const { routes, db } = await createHarness('true', undefined, { resolveOrgSegmentCalculationPosture: posture })
+    db.query.mockClear()
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/editor', {
+      params: { groupId: attendanceGroupId }, user: { id: 'admin-1', orgId: 'default' }, ...selectors,
+    })
+    expect(res.statusCode).toBe(403)
+    expect(db.query).not.toHaveBeenCalled()
+    expect(posture).not.toHaveBeenCalled()
+  })
+
+  it.each(['invalid', [shiftId], { value: shiftId }])('rejects malformed selected shift %s', async (selectedShift) => {
+    const { routes, db } = await createHarness('true')
+    db.query.mockClear()
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/editor', {
+      params: { groupId: attendanceGroupId }, query: { shiftId: selectedShift }, user: { id: 'admin-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(db.query).not.toHaveBeenCalled()
+  })
+
+  it('denies non-managers before any config, assignment or posture facts', async () => {
+    const posture = vi.fn()
+    const { routes, db } = await createHarness('false', undefined, { resolveOrgSegmentCalculationPosture: posture })
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('attendance_group_managers')) return []
+      throw new Error('Facts read before authorization')
+    })
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/editor', {
+      params: { groupId: attendanceGroupId }, user: { id: 'member-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(posture).not.toHaveBeenCalled()
+  })
+
+  it('proves same-org group existence before desired, assignment and posture reads', async () => {
+    const posture = vi.fn()
+    const { routes, db } = await createHarness('true', undefined, { resolveOrgSegmentCalculationPosture: posture })
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      expect(sql).toContain('SELECT id FROM attendance_groups')
+      expect(params).toEqual([attendanceGroupId, 'default'])
+      return []
+    })
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/editor', {
+      params: { groupId: attendanceGroupId }, query: { shiftId }, user: { id: 'admin-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(posture).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true, undefined, 'error'])('projects candidate eligibility from canonical transaction posture %s', async (referenceSegments) => {
+    const posture = vi.fn(async (trx: unknown, org: string) => {
+      expect(trx).toBe(db)
+      expect(org).toBe('default')
+      if (referenceSegments === 'error') throw new Error('unreadable')
+      return { referenceSegments }
+    })
+    const { routes, db } = await createHarness('true', undefined, { resolveOrgSegmentCalculationPosture: referenceSegments === undefined ? undefined : posture })
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+      if (sql.includes('attendance_group_fixed_schedule_configs')) return []
+      if (sql.includes('attendance_group_members')) return []
+      if (sql.includes('attendance_shift_assignments')) return []
+      if (sql.includes('SELECT id FROM attendance_shifts')) {
+        expect(params).toEqual([shiftId, 'default'])
+        return [{ id: shiftId }]
+      }
+      if (sql.includes('attendance_shift_segments')) return [{ total: 2 }]
+      throw new Error('Unexpected SQL')
+    })
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/editor', {
+      params: { groupId: attendanceGroupId }, query: { shiftId }, user: { id: 'admin-1', orgId: 'default' },
+    })
+    if (referenceSegments === 'error') {
+      expect(res.statusCode).toBe(503)
+      return
+    }
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: {
+      groupId: attendanceGroupId, state: 'not_configured', reasonCodes: ['NO_DESIRED_CONFIG'], desired: null,
+      drift: { managedSets: [] }, referenceEligibility: {
+        shiftId, allowed: referenceSegments === true,
+        reasonCode: referenceSegments === true ? null : 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED',
+      },
+    } })
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+describe('fixed-schedule editor manager positive controls', () => {
+  it.each(['owner-user-1', 'sub-owner-user-1'])('allows %s to read their same-org managed group with RBAC bypass disabled', async (userId) => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const manager = groupManagerProbeResult(sql, params, { userId, managed: true })
+      if (manager !== undefined) {
+        expect(sql).toContain("role IN ('owner', 'sub_owner')")
+        return manager
+      }
+      if (sql.includes('SELECT id FROM attendance_groups')) {
+        expect(params).toEqual([attendanceGroupId, 'default'])
+        return [{ id: attendanceGroupId }]
+      }
+      if (sql.includes('attendance_group_fixed_schedule_configs') || sql.includes('attendance_group_members') || sql.includes('attendance_shift_assignments')) {
+        expect(params).toEqual(['default', attendanceGroupId])
+        return []
+      }
+      throw new Error('Unexpected SQL')
+    })
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/editor', {
+      params: { groupId: attendanceGroupId }, user: { id: userId, orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: {
+      groupId: attendanceGroupId, state: 'not_configured', reasonCodes: ['NO_DESIRED_CONFIG'], desired: null,
+      drift: { managedSets: [] }, referenceEligibility: null,
+    } })
+    const queries = db.query.mock.calls.map(([statement]) => String(statement))
+    expect(queries.findIndex(sql => sql.includes('attendance_group_managers'))).toBeLessThan(queries.findIndex(sql => sql.includes('SELECT id FROM attendance_groups')))
+  })
+
+  it('denies a manager requesting another group before any configuration facts', async () => {
+    const otherGroup = '00000000-0000-4000-8000-000000000499'
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const manager = groupManagerProbeResult(sql, params, { userId: 'owner-user-1', groupId: otherGroup, managed: false })
+      if (manager !== undefined) return manager
+      throw new Error('Read facts outside managed group')
+    })
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:groupId/fixed-schedule/editor', {
+      params: { groupId: otherGroup }, user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(db.transaction).not.toHaveBeenCalled()
   })
 })

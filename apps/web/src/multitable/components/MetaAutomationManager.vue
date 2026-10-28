@@ -165,7 +165,21 @@
               class="meta-automation__hint"
               data-automation-field="dingtalkDestinationEmpty"
             >
-              {{ l('dingtalk.noGroupsAvailable') }}
+              <div>{{ l('dingtalk.noGroupsAvailable') }}</div>
+              <div class="meta-automation__inline-actions">
+                <el-button
+                  v-if="props.canOpenDingTalkGroupSettings === true"
+                  size="small"
+                  data-automation-field="dingtalkOpenGroupSettings"
+                  @click="emit('open-dingtalk-groups')"
+                >{{ l('dingtalk.openGroupSettings') }}</el-button>
+                <el-button
+                  size="small"
+                  data-automation-field="dingtalkReloadGroups"
+                  :disabled="dingTalkDestinationsReloading"
+                  @click="void reloadDingTalkDestinations()"
+                >{{ l('dingtalk.reloadGroups') }}</el-button>
+              </div>
             </div>
             <div
               v-if="selectedDingTalkGroupDestinations.length"
@@ -384,7 +398,10 @@
                 <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ l('dingtalk.inactiveUsersCannotBeAdded') }}</span>
               </button>
             </div>
-            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">{{ l('dingtalk.noMatchingUsersOrGroups') }}</div>
+            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint" data-automation-field="dingtalkPersonNoMatch">
+              <div>{{ l('dingtalk.noMatchingUsersOrGroups') }}</div>
+              <div data-automation-field="dingtalkPersonSearchScopeHint">{{ l('dingtalk.recipientSearchScopeHint') }}</div>
+            </div>
             <div v-if="selectedDingTalkPersonRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
               <button
                 v-for="recipient in selectedDingTalkPersonRecipients"
@@ -394,12 +411,19 @@
                 :data-automation-person-recipient="recipient.id"
                 @click="removeDingTalkPersonRecipient(recipient.id)"
               >
-                <strong>{{ recipient.label }}</strong>
+                <strong v-if="recipient.named" data-automation-field="dingtalkPersonRecipientName">{{ recipient.label }}</strong>
                 <span>{{ recipient.subtitle || recipient.id }}</span>
-                <span v-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
+                <span v-if="recipient.outsideMemberList" class="meta-automation__recipient-badge" data-automation-field="dingtalkPersonRecipientOutsideMemberList">{{ l('dingtalk.recipientOutsideMemberList') }}</span>
+                <span v-if="recipient.stateLabel" class="meta-automation__recipient-badge" data-automation-field="dingtalkPersonRecipientState" :data-state="recipient.state">{{ recipient.stateLabel }}</span>
+                <span v-else-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
                 <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
+            <div
+              v-if="selectedDingTalkPersonNotLinkedSummary"
+              class="meta-automation__hint meta-automation__hint--warning"
+              data-automation-field="dingtalkPersonNotLinkedSummary"
+            >{{ selectedDingTalkPersonNotLinkedSummary }}</div>
             <div v-if="selectedDingTalkPersonMemberGroups.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
               <button
                 v-for="group in selectedDingTalkPersonMemberGroups"
@@ -422,6 +446,7 @@
               :rows="3"
               :placeholder="l('dingtalk.localUserIdsPlaceholder')"
               data-automation-field="dingtalkPersonUserIds"
+              @blur="onDingTalkPersonUserIdsBlur"
             />
             <label class="meta-automation__label">{{ l('dingtalk.memberGroupIds') }}</label>
             <el-input
@@ -835,9 +860,11 @@
       :client="client"
       :views="views"
       :test-run-state="activeRuleTestRunState"
+      :can-open-ding-talk-group-settings="props.canOpenDingTalkGroupSettings === true"
       @close="showRuleEditor = false"
       @save="onRuleEditorSave"
       @test="onTestRule"
+      @open-dingtalk-groups="emit('open-dingtalk-groups')"
     />
     <MetaAutomationLogViewer
       :visible="showLogViewer"
@@ -845,12 +872,14 @@
       :rule-id="logViewerRuleId"
       :client="client"
       @close="showLogViewer = false"
+      @open-person-deliveries="openPersonDeliveryViewerFromLog"
     />
     <MetaAutomationPersonDeliveryViewer
       :visible="showPersonDeliveryViewer"
       :sheet-id="sheetId"
       :rule-id="personDeliveryViewerRuleId"
       :client="client"
+      :initial-status-filter="personDeliveryViewerInitialFilter"
       @close="showPersonDeliveryViewer = false"
     />
     <MetaAutomationGroupDeliveryViewer
@@ -866,7 +895,14 @@
 <script setup lang="ts">
 import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { ElButton, ElCheckbox, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElCheckbox, ElDrawer, ElInput, ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import {
+  forEachWithConcurrency,
+  RECIPIENT_NAME_LOOKUP_CONCURRENCY,
+  RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS,
+  useDingTalkPersonRecipientStatus,
+  type DingTalkPersonRecipientState,
+} from '../composables/useDingTalkPersonRecipientStatus'
 import { useRouter } from 'vue-router'
 import type {
   AutomationExecution,
@@ -927,10 +963,15 @@ import {
   automationDingTalkPresetLabel,
   automationLabel,
   automationLastRunChip,
+  automationDingTalkRecipientOutcomeText,
+  automationDingTalkSaveNotice,
+  automationDingTalkSelectedNotLinkedSummary,
+  automationTestRunDingTalkOutcome,
   automationTestRunFailed,
   automationTestRunRequestFailed,
   automationTestRunSkipped,
   automationTestRunSucceeded,
+  readDingTalkRecipientOutcome,
   automationTriggerTypeLabel,
   type AutomationLabelKey,
   type AutomationLastRunChip,
@@ -954,11 +995,14 @@ const props = defineProps<{
   }>
   client?: MultitableApiClient
   views?: MetaView[]
+  /** 客户反馈 2026-10-21 (c): the host can open API & Webhooks > DingTalk Groups (the workbench can). */
+  canOpenDingTalkGroupSettings?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'updated'): void
+  (e: 'open-dingtalk-groups'): void
 }>()
 
 const router = useRouter()
@@ -966,7 +1010,7 @@ const { isZh } = useLocale()
 const l = (key: AutomationLabelKey) => automationLabel(key, isZh.value)
 
 type AutomationTestRunState = {
-  status: 'running' | 'success' | 'failed' | 'skipped'
+  status: 'running' | 'success' | 'failed' | 'skipped' | 'warning'
   message: string
 }
 
@@ -1032,6 +1076,21 @@ function emptyDraft(): DraftState {
 
 const draft = ref<DraftState>(emptyDraft())
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
+const dingTalkDestinationsReloading = ref(false)
+
+// 客户反馈 2026-10-21 (c): after adding a group in API & Webhooks > DingTalk Groups, pick it up without
+// closing the form.
+async function reloadDingTalkDestinations() {
+  if (!props.client || !props.sheetId || dingTalkDestinationsReloading.value) return
+  dingTalkDestinationsReloading.value = true
+  try {
+    dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
+  } catch {
+    // keep what we had
+  } finally {
+    dingTalkDestinationsReloading.value = false
+  }
+}
 const dingtalkPersonUserSearch = ref('')
 const dingtalkPersonUserSearchLoading = ref(false)
 const dingtalkPersonUserSearchError = ref('')
@@ -1054,6 +1113,7 @@ const notifyRecipientSearchLoading = ref(false)
 const notifyRecipientSearchError = ref('')
 const notifyRecipientMisses = ref<Record<string, boolean>>({})
 const notifyRecipientResolveInFlight = new Set<string>()
+const notifyRecipientLookupFailedAt = new Map<string, number>()
 let notifyRecipientSuggestionLoadId = 0
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
@@ -1147,19 +1207,64 @@ function rememberDingTalkPersonSuggestions(items: MetaSheetPermissionCandidate[]
   dingtalkPersonUserDirectory.value = next
 }
 
+// 客户反馈 2026-10-21 item 1 (review round 1, F2): the quick legacy form gets the same sender-side preflight
+// as the rule editor — picked or typed local user ids are checked against the sender's own query (the roster
+// only lists users with a multitable role), with 未找到该用户 / 已停用 / 未绑定钉钉 badges and counts.
+const dingtalkPersonRecipientStatus = useDingTalkPersonRecipientStatus({
+  client: () => props.client,
+  sheetId: () => props.sheetId,
+})
+const DINGTALK_PERSON_STATE_LABELS: Partial<Record<DingTalkPersonRecipientState, AutomationLabelKey>> = {
+  missing: 'dingtalk.recipientMissing',
+  inactive: 'dingtalk.recipientInactive',
+  unlinked: 'dingtalk.recipientNotLinked',
+  checking: 'dingtalk.recipientChecking',
+  failed: 'dingtalk.recipientCheckFailed',
+}
+
 const selectedDingTalkPersonRecipients = computed(() =>
-  parseUserIdsText(draft.value.dingtalkPersonUserIds).map((id) => {
+  Array.from(new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))).map((id) => {
     const directoryEntry = dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]
+    const state = dingtalkPersonRecipientStatus.stateOf(id)
+    const stateLabelKey = DINGTALK_PERSON_STATE_LABELS[state]
+    const known = state === 'missing' || state === 'inactive' || state === 'unlinked' || state === 'ready'
     return {
       id,
+      // Round 1b: a name only when the roster knows the user (see the rule editor).
+      // Round 2: the roster labels an unnamed user with its id — that is not a name either.
+      named: Boolean(directoryEntry?.label) && directoryEntry?.label !== id,
+      // Round 1c: exists for the sender, but not a member the search can name (see the rule editor).
+      outsideMemberList: !directoryEntry && notifyRecipientMisses.value[id] === true && (state === 'ready' || state === 'unlinked' || state === 'inactive'),
       label: directoryEntry?.label ?? id,
       subtitle: directoryEntry?.subtitle,
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,
       dingtalkGrantEnabled: directoryEntry?.dingtalkGrantEnabled ?? null,
-      dingtalkPersonDeliveryAvailable: directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+      dingtalkPersonDeliveryAvailable: known ? state === 'ready' : directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+      state,
+      stateLabel: stateLabelKey ? l(stateLabelKey) : '',
     }
   }),
 )
+
+// Round 1b: typed ids get their name from the roster and their link/active status from the preflight.
+function onDingTalkPersonUserIdsBlur() {
+  const ids = parseUserIdsText(draft.value.dingtalkPersonUserIds)
+  void dingtalkPersonRecipientStatus.check(ids)
+  void resolveNotifyRecipientIds(ids)
+}
+
+const selectedDingTalkPersonCounts = computed(() => {
+  const recipients = selectedDingTalkPersonRecipients.value
+  const counts = dingtalkPersonRecipientStatus.counts(recipients.map((recipient) => recipient.id))
+  counts.notLinked += recipients.filter((recipient) => recipient.state === 'unknown' && recipient.dingtalkPersonDeliveryAvailable === false).length
+  return counts
+})
+
+// 客户反馈 2026-10-21 (a): visible BEFORE saving — selected users the sender will skip, as counts.
+const selectedDingTalkPersonNotLinkedSummary = computed(() => automationDingTalkSelectedNotLinkedSummary(
+  selectedDingTalkPersonCounts.value,
+  isZh.value,
+))
 
 const selectedDingTalkPersonMemberGroups = computed(() =>
   parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds).map((id) => {
@@ -1227,6 +1332,7 @@ function addDingTalkPersonRecipient(candidate: MetaSheetPermissionCandidate) {
     const ids = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
     ids.add(candidate.subjectId)
     draft.value.dingtalkPersonUserIds = Array.from(ids).join(', ')
+    void dingtalkPersonRecipientStatus.check([candidate.subjectId])
   }
   rememberDingTalkPersonSuggestions([candidate])
   dingtalkPersonUserSearch.value = ''
@@ -1335,13 +1441,16 @@ function removeNotifyRecipient(userId: string) {
 async function resolveNotifyRecipientIds(ids: string[]) {
   const client = props.client
   if (!client) return
+  const now = Date.now()
   const pending = Array.from(new Set(ids)).filter((id) =>
     !dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]
     && notifyRecipientMisses.value[id] === undefined
-    && !notifyRecipientResolveInFlight.has(id),
+    && !notifyRecipientResolveInFlight.has(id)
+    && !(now - (notifyRecipientLookupFailedAt.get(id) ?? -Infinity) < RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS),
   )
-  await Promise.all(pending.map(async (id) => {
-    notifyRecipientResolveInFlight.add(id)
+  for (const id of pending) notifyRecipientResolveInFlight.add(id)
+  // Round 1b (F10): bounded concurrency; a failed lookup waits before a retry.
+  await forEachWithConcurrency(pending, RECIPIENT_NAME_LOOKUP_CONCURRENCY, async (id) => {
     try {
       const response = await client.listFormShareCandidates(props.sheetId, { q: id, limit: 50 })
       const matches = response.items.filter((item) => item.subjectType === 'user' && item.subjectId === id)
@@ -1350,12 +1459,14 @@ async function resolveNotifyRecipientIds(ids: string[]) {
       } else {
         notifyRecipientMisses.value = { ...notifyRecipientMisses.value, [id]: true }
       }
+      notifyRecipientLookupFailedAt.delete(id)
     } catch {
       // Lookup unavailable (no search permission, projection sheet, network): keep the raw id chip.
+      notifyRecipientLookupFailedAt.set(id, Date.now())
     } finally {
       notifyRecipientResolveInFlight.delete(id)
     }
-  }))
+  })
 }
 
 function parseGroupDestinationIds(value: unknown): string[] {
@@ -1760,6 +1871,7 @@ const showGroupDeliveryViewer = ref(false)
 const groupDeliveryViewerRuleId = ref('')
 const showPersonDeliveryViewer = ref(false)
 const personDeliveryViewerRuleId = ref('')
+const personDeliveryViewerInitialFilter = ref('')
 const ruleStats = ref<Record<string, AutomationStats>>({})
 // G-B2-23: most-recent-first execution page (0 or 1 entries) per rule, feeding the card's
 // "last run" chip. Absent key = not fetched yet (component v-ifs the chip away); a rule
@@ -1792,15 +1904,30 @@ function openGroupDeliveryViewer(rule: AutomationRule) {
 
 function openPersonDeliveryViewer(rule: AutomationRule) {
   personDeliveryViewerRuleId.value = rule.id
+  personDeliveryViewerInitialFilter.value = ''
   showPersonDeliveryViewer.value = true
 }
 
-async function onRuleEditorSave(payload: Partial<AutomationRule>) {
+// 客户反馈 2026-10-21 item 1 (review round 1): a run log row that skipped DingTalk recipients names nobody; its
+// link opens this rule's person delivery records on 跳过（未绑定） (the log closes so the two overlays don't stack).
+function openPersonDeliveryViewerFromLog(ruleId: string) {
+  if (!ruleId) return
+  showLogViewer.value = false
+  personDeliveryViewerRuleId.value = ruleId
+  personDeliveryViewerInitialFilter.value = 'skipped'
+  showPersonDeliveryViewer.value = true
+}
+
+async function onRuleEditorSave(payload: Partial<AutomationRule>, meta?: { dingtalkRecipientNotice?: string }) {
   try {
     if (editingRule.value?.id) {
       await updateRule(props.sheetId, editingRule.value.id, payload)
     } else {
       await createRule(props.sheetId, payload as Omit<AutomationRule, 'id' | 'sheetId' | 'enabled' | 'createdAt' | 'updatedAt' | 'createdBy'>)
+    }
+    // Review round 2: 「已保存。…」 only once the save really succeeded (a 400 / 503 leaves the editor open, silent).
+    if (meta?.dingtalkRecipientNotice) {
+      ElMessage({ type: 'warning', message: meta.dingtalkRecipientNotice, duration: 8000, showClose: true })
     }
     showRuleEditor.value = false
     editingRule.value = null
@@ -1920,15 +2047,38 @@ function describeTestRunExecution(execution: AutomationExecution): AutomationTes
       message: automationTestRunFailed(execution.error || failedStep?.error || '', isZh.value),
     }
   }
+  // 客户反馈 2026-10-21 (a): a DingTalk person message that skipped recipients is never reported as a plain
+  // success (or a bare "skipped") — say how many received it and why the rest did not. Counts only.
+  for (const step of execution.steps ?? []) {
+    if (step.actionType !== 'send_dingtalk_person_message') continue
+    const outcome = readDingTalkRecipientOutcome(step.output)
+    if (!outcome) continue
+    return {
+      status: 'warning',
+      message: automationTestRunDingTalkOutcome(
+        duration,
+        automationDingTalkRecipientOutcomeText(outcome, isZh.value),
+        isZh.value,
+      ),
+    }
+  }
   if (execution.status === 'skipped') {
     return {
       status: 'skipped',
       message: automationTestRunSkipped(duration, isZh.value),
     }
   }
+  // A simulated person message resolved no recipients at all (the dry run reads no data), so its
+  // success says nothing about delivery — state that instead of letting it read as a delivery check.
+  const simulatedPersonMessage = (execution.steps ?? []).some(
+    (step) => step.actionType === 'send_dingtalk_person_message' && step.simulated === true,
+  )
+  const succeeded = automationTestRunSucceeded(duration, isZh.value)
   return {
     status: 'success',
-    message: automationTestRunSucceeded(duration, isZh.value),
+    message: simulatedPersonMessage
+      ? `${succeeded}${isZh.value ? '' : ' '}${l('manager.testRunDingTalkSimulatedNote')}`
+      : succeeded,
   }
 }
 
@@ -2053,6 +2203,7 @@ function openCreateForm() {
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
   dingtalkPersonUserSearchError.value = ''
+  dingtalkPersonRecipientStatus.reset()
   resetNotifyRecipientPicker()
   showForm.value = true
 }
@@ -2106,6 +2257,9 @@ function openEditForm(rule: AutomationRule) {
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
   dingtalkPersonUserSearchError.value = ''
+  dingtalkPersonRecipientStatus.reset()
+  void dingtalkPersonRecipientStatus.check(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+  void resolveNotifyRecipientIds(parseUserIdsText(draft.value.dingtalkPersonUserIds))
   resetNotifyRecipientPicker()
   void resolveNotifyRecipientIds(parseUserIdsText(draft.value.notifyUserIds))
   showForm.value = true
@@ -2190,12 +2344,17 @@ async function onSave() {
     actionType: draft.value.actionType,
     actionConfig: buildActionConfig(),
   }
+  // Review round 1 F7: never blocks the save; says so when recipients are unchecked or unreachable.
+  const dingtalkNotice = draft.value.actionType === 'send_dingtalk_person_message'
+    ? automationDingTalkSaveNotice(selectedDingTalkPersonCounts.value, isZh.value)
+    : ''
   try {
     if (editingRuleId.value) {
       await updateRule(props.sheetId, editingRuleId.value, payload)
     } else {
       await createRule(props.sheetId, payload)
     }
+    if (dingtalkNotice) ElMessage({ type: 'warning', message: dingtalkNotice, duration: 8000, showClose: true })
     cancelForm()
     emit('updated')
   } catch {
@@ -2741,5 +2900,8 @@ watch(
 .meta-automation__test-run-status--success { color: var(--el-color-success-dark-2); }
 .meta-automation__test-run-status--failed { color: var(--el-color-danger-dark-2); }
 .meta-automation__test-run-status--skipped { color: var(--el-color-warning-dark-2); }
+.meta-automation__test-run-status--warning { color: var(--el-color-warning-dark-2); }
+.meta-automation__hint--warning { color: var(--el-color-warning-dark-2); }
+.meta-automation__inline-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 .meta-automation__test-run-status--running { color: var(--el-color-primary-dark-2); }
 </style>

@@ -35,6 +35,7 @@
 // defect got wrong.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
 
@@ -62,6 +63,7 @@ const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-prepa
 const {
   __internals: { inspectCarryTargetBinding },
 } = require(path.join(LIB, 'stock-preparation-preflight.cjs'))
+const lockKit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
 
 const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const STAGING = 'tenant-a:integration-core'
@@ -369,12 +371,16 @@ function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, target
           routes.set(`${method.toUpperCase()} ${routePath}`, handler)
         },
       },
-      multitable: { provisioning: env.provisioning, records: env.records },
+      // PR-0: the carry runs under the sheet write lease and its patch is host-fenced — the fake host
+      // declares + enforces the fence (stripped before the substrate's records see the call).
+      multitable: { provisioning: env.provisioning, records: lockKit.withFakeHostWriteFence(env.records) },
     },
     storage: new Map(),
     config: configured ? { stockPreparationTableActions: [tableActionConfigFor(env.target)] } : {},
   }
   const services = {
+    // PR-0: the sheet write lease the carry route holds (501 without it).
+    stockPreparationProjectWriteLock: lockKit.createInMemoryProjectWriteLock({ timers: 'real' }).lock,
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem']),
       async getExternalSystem() { return null },
@@ -393,7 +399,7 @@ function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, target
     stockPreparationAuditStore: auditStore,
     tenantPrincipalDirectory: env.tenantPrincipalDirectory,
   }
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, auditDb, env, context }
 }
 

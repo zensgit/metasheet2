@@ -16,6 +16,9 @@ archive_type="unknown"
 # successful run; stays "SKIPPED" if that function's call site is ever removed from
 # the main flow below, so write_optional_report cannot report a check that never ran.
 loopback_status="SKIPPED"
+# The range-fill provenance check runs the probe that sits beside this verifier (shipped in the
+# package next to it, see multitable-onprem-package-build.sh REQUIRED_PATHS).
+VERIFY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 function die() {
   echo "[multitable-onprem-package-verify] ERROR: $*" >&2
@@ -320,6 +323,59 @@ function verify_build_provenance() {
     die "BUILD_PROVENANCE.json gitCommit must be a full 40-hex commit (got a missing/short/unknown value); the package cannot prove its source provenance"
   fi
   search_fixed_string '"builtAt"' "$prov" || die "BUILD_PROVENANCE.json must record builtAt"
+  verify_web_range_fill_provenance "$root"
+}
+
+function verify_web_range_fill_provenance() {
+  # multitable-onprem-package-build.sh (assert_packaged_web_range_fill) records the multitable
+  # range-fill switch it verified in BUILD_PROVENANCE.json webBuildFlags. Re-read the packaged web
+  # dist with the same probe and require the declared value, the recorded value and the dist bytes
+  # to agree. Packages built before that record existed carry no webBuildFlags at all; they are
+  # reported and skipped (the frozen S6-A package is one of them), so a package whose provenance
+  # omits the block is NOT range-fill verified by this check.
+  local root="$1"
+  local prov="${root}/BUILD_PROVENANCE.json"
+  local probe="${VERIFY_SCRIPT_DIR}/multitable-onprem-web-range-fill-probe.mjs"
+  local fields declared recorded expected observed
+
+  fields="$(node - "$prov" <<'NODE'
+const fs = require('node:fs')
+let doc
+try {
+  doc = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+} catch {
+  process.exit(3)
+}
+const flags = doc && doc.webBuildFlags
+if (flags === undefined) {
+  process.stdout.write('absent')
+  process.exit(0)
+}
+if (!flags || typeof flags !== 'object') process.exit(4)
+const declared = flags.VITE_MULTITABLE_RANGE_FILL_ENABLED
+const recorded = flags.rangeFillInPackagedDist
+process.stdout.write(`${typeof declared === 'string' ? declared : '<not-a-string>'}|${typeof recorded === 'string' ? recorded : '<not-a-string>'}`)
+NODE
+)" || die "BUILD_PROVENANCE.json webBuildFlags could not be read (invalid JSON or not an object)"
+
+  if [[ "$fields" == "absent" ]]; then
+    info "BUILD_PROVENANCE.json has no webBuildFlags (package predates the range-fill record); range-fill provenance check skipped"
+    return 0
+  fi
+  IFS='|' read -r declared recorded <<<"$fields"
+  [[ "$declared" == "true" || "$declared" == "false" ]] \
+    || die "BUILD_PROVENANCE.json webBuildFlags.VITE_MULTITABLE_RANGE_FILL_ENABLED must be literal true or false"
+  expected="off"
+  if [[ "$declared" == "true" ]]; then
+    expected="on"
+  fi
+  [[ "$recorded" == "$expected" ]] \
+    || die "BUILD_PROVENANCE.json webBuildFlags disagree: VITE_MULTITABLE_RANGE_FILL_ENABLED=${declared} but rangeFillInPackagedDist=${recorded}"
+  [[ -f "$probe" ]] || die "range-fill probe missing beside the verifier: scripts/ops/multitable-onprem-web-range-fill-probe.mjs"
+  observed="$(node "$probe" "${root}/apps/web/dist")" || die "range-fill probe could not read the packaged web dist"
+  [[ "$observed" == "$recorded" ]] \
+    || die "packaged web dist has range fill '${observed}' but BUILD_PROVENANCE.json records '${recorded}' (provenance and dist disagree)"
+  info "Range fill provenance OK: ${observed}"
 }
 
 function verify_integration_fix_markers() {
@@ -978,12 +1034,16 @@ required=(
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/data-adapters/MSSQLAdapter.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js"
+  "packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js"
   "packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260516113000_repair_onprem_multitable_record_create.js"
   "packages/core-backend/package.json"
+  "packages/core-backend/src/db/migrations/20250925_create_view_tables.sql"
+  "packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql"
   "packages/core-backend/scripts/smoke-sqlserver.ts"
   "packages/openapi/dist-sdk/package.json"
   "packages/openapi/dist-sdk/index.js"
@@ -1040,6 +1100,8 @@ required=(
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-deploy-easy.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.ps1"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
   "docker/app.env.example"

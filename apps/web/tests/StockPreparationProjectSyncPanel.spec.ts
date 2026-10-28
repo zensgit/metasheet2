@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h as vueH, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
 
 // 项目接入 — the PANEL. The DOM half of the entry the owner asked for:
 //   「PLM系统接通后,在页面哪里可点击项目号,然后该项目号里的bom就自动导入到我们的多维表中」
@@ -17,6 +17,9 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   P-04 the counts are a SENTENCE, and zero clauses are dropped.
 //   P-05 values-free: nothing from a response reaches the DOM except counts and closed tokens; the
 //        project number the OPERATOR TYPED is the one business string, and it is theirs.
+//   SYNC-STRADDLE (#6591 review, follow-up O2) a 同步 run's outcome belongs to the project, scope and
+//        session it was started for: after the board opens another project, the scope moves or the
+//        session changes, the run's writes still complete but nothing of it renders and no `synced`.
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -47,9 +50,12 @@ import StockPreparationProjectSyncPanel from '../src/components/integration/stoc
 import {
   BATCH_ARCHIVE_DISABLED_CODE,
   StockPreparationProjectSyncCallError,
+  type StockPreparationDryRunOptions,
   type StockPreparationProjectSyncApi,
 } from '../src/services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../src/services/integration/stockPreparation/largeBomPull'
+import type { StockPreparationProjectTargetApi } from '../src/services/integration/stockPreparation/projectTarget'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 const PROJECT_NO = 'P2026-001'
 const PLANTED_DRAWING = 'DWG-88472-A'
@@ -218,7 +224,8 @@ describe('StockPreparationProjectSyncPanel', () => {
     const root = mountPanel({ api: double, onOpenMultitable })
     await runSync(root)
 
-    expect(double.dryRun).toHaveBeenCalledWith(PROJECT_NO)
+    // R67 ④: the panel hands the dry run its progress / stop-polling options.
+    expect(double.dryRun).toHaveBeenCalledWith(PROJECT_NO, expect.objectContaining({ signal: expect.anything(), onProgress: expect.any(Function) }))
     expect(double.apply).toHaveBeenCalledWith(PROJECT_NO, 'tok_abc')
 
     const steps = root.querySelectorAll('[data-testid="stock-prep-project-sync-step"]')
@@ -250,13 +257,60 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(link.textContent).toContain('打开备料多维表')
   })
 
-  it('with NO handle it promises only the workbench — the destination the parent really has', async () => {
+  it('with NO handle it promises only the multitable home — the destination the parent really has', async () => {
     const root = mountPanel({ api: api() })
     await runSync(root)
     const link = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLButtonElement
     expect(link.getAttribute('data-fill-target')).toBe('none')
-    expect(link.textContent).toContain('打开多维表工作台')
+    // 客户反馈 2026-10-21 9a: `/multitable` is the HOME page (新建 Base + template cards), not a workbench.
+    expect(link.textContent).toContain('打开多维表首页')
+    expect(link.textContent).not.toContain('工作台')
     expect(link.textContent).not.toContain('打开备料多维表')
+  })
+
+  it('9a: with NO handle a sentence beside the button says where it lands and that no template is to be chosen', async () => {
+    const root = mountPanel({ api: api() })
+    await runSync(root)
+    const hint = root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(hint).not.toBeNull()
+    expect(hint.textContent).toContain('多维表首页')
+    expect(hint.textContent).toContain('由系统或管理员按固定模板建立')
+    expect(hint.textContent).toContain('不用在首页选模板')
+    expect(hint.textContent).toContain('不要在那里新建 Base')
+    // Default mount = 项目工作台: it points at 项目备料, and never promises a re-pull makes a link.
+    expect(hint.textContent).toContain('请在「项目备料」页打开这个项目')
+    expect(hint.textContent).not.toContain('再拉取一次')
+    expect(hint.textContent).not.toContain('自动建')
+    // It sits in the same next-step row as the button it explains.
+    const link = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLElement
+    expect(hint.parentElement).toBe(link.parentElement)
+
+    h.locale = 'en'
+    app?.unmount()
+    app = null
+    container!.innerHTML = ''
+    const en = mountPanel({ api: api() })
+    await runSync(en)
+    const enHint = en.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(enHint.textContent).toContain('multitable home')
+    expect(enHint.textContent).toContain('do not pick a template or create a Base')
+  })
+
+  it('round 1 (F1): mounted on 项目备料 the sentence points DOWN this page, not back to the page it is on', async () => {
+    const root = mountPanel({ api: api(), noLinkHintContext: 'board' })
+    await runSync(root)
+    const hint = root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(hint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(hint.textContent).not.toContain('「项目备料」页')
+    expect(hint.textContent).not.toContain('再拉取一次')
+    expect(hint.textContent).toContain('不用在首页选模板')
+  })
+
+  it('9a: WITH a handle there is no such sentence — the button lands on the sheet itself', async () => {
+    const root = mountPanel({ api: api(), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } })
+    await runSync(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]')).toBeNull()
   })
   // ---- P-04 --------------------------------------------------------------------------------
   it('P-04: the plan counts read as a sentence, with the zero clauses dropped', async () => {
@@ -325,6 +379,27 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(archive.textContent).toContain('存档没成功')
     // ...and it says, in the same breath, that the import itself is fine.
     expect(archive.textContent).toContain('导入本身不受影响')
+    // 客户反馈 2026-10-21 9b: and it no longer promises that a re-sync fixes what it cannot name.
+    expect(archive.textContent).not.toContain('通常就补上了')
+  })
+
+  it('9b: a code-less 404 on the archive names the missing PLM source, and 技术详情 carries the HTTP status', async () => {
+    const double = api({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(404, '/mvp-persist', {})),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const verdict = root.querySelector('[data-testid="stock-prep-project-sync-verdict"]') as HTMLElement
+    expect(verdict.getAttribute('data-verdict')).toBe('imported')
+    const archive = root.querySelector('[data-step="archive"]') as HTMLElement
+    expect(archive.getAttribute('data-status')).toBe('fail')
+    expect(archive.textContent).toContain('没找到这个项目的 PLM 数据源')
+    expect(archive.textContent).not.toContain('通常就补上了')
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND')
+    const details = Array.from(tech.querySelectorAll('[data-testid="stock-prep-project-sync-step-detail"]')).map((el) => el.textContent)
+    expect(details).toContain('status=404')
+    expect(details.some((text) => (text ?? '').startsWith('code='))).toBe(false)
   })
 
   it('P-03: the archive being off for this deployment renders as a setting, not a fault', async () => {
@@ -519,6 +594,24 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(onOpenMultitable).toHaveBeenCalledTimes(1)
   })
 
+  it('round 1 (F1): the background channel inherits the panel\'s mount context for its no-link sentence', async () => {
+    const double = api({
+      dryRun: vi.fn().mockResolvedValue({ status: 'large_bom_bounded', canApply: false, dryRunToken: null, counts: {} }),
+    })
+    const root = mountPanel({
+      api: double,
+      largeBomApi: largeBomJobApi(),
+      largeBomPollWait: vi.fn().mockResolvedValue(undefined),
+      noLinkHintContext: 'board',
+    })
+    await runSync(root)
+    await flushUi()
+    const hint = root.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]') as HTMLElement
+    expect(hint).not.toBeNull()
+    expect(hint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(hint.textContent).not.toContain('「项目备料」页')
+  })
+
   it('L-BOM: an ordinary (non-large-BOM) run never mounts the background channel', async () => {
     const root = mountPanel({ api: api(), largeBomApi: largeBomJobApi() })
     await runSync(root)
@@ -588,5 +681,431 @@ describe('StockPreparationProjectSyncPanel', () => {
     // The disclosure is a real <details> that is CLOSED by default: plain language first.
     expect(tech.tagName.toLowerCase()).toBe('details')
     expect(tech.getAttribute('data-open')).toBe('false')
+  })
+
+  // ---- R67 ④ — 试算 through the background job lane -------------------------------------------
+  //
+  // The run's dry-run step enqueues and polls (projectSync.ts; its wire half is pinned in
+  // StockPreparationProjectSync.spec.ts). What the PANEL owns: the progress line with the time taken,
+  // stopping the poll when it goes away (the job keeps running server-side), and showing a trial that
+  // is still running when it comes back — without ever starting one on its own.
+
+  it('R67-P1: while the background trial runs the panel says so with the elapsed time; the result then renders as before', async () => {
+    let finish: (plan: unknown) => void = () => {}
+    const double = api({
+      dryRun: vi.fn().mockImplementation((_projectNo: string, options?: StockPreparationDryRunOptions) => {
+        options?.onProgress?.({ elapsedMs: 83_000, attached: false })
+        return new Promise((resolve) => { finish = resolve })
+      }),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line).not.toBeNull()
+    expect(line.getAttribute('data-dry-run-progress')).toBe('run')
+    expect(line.textContent).toContain('1:23')
+    expect(line.textContent).toContain('后台试算')
+    finish({ status: 'ready', canApply: true, dryRunToken: 'tok_abc', counts: { add: 3, update: 2, skip: 7, inactive: 0, manual_confirm: 0 } })
+    await flushUi(12)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]')).toBeNull()
+    expect((root.querySelector('[data-testid="stock-prep-project-sync-verdict"]') as HTMLElement).dataset.verdict).toBe('imported')
+    expect(double.apply).toHaveBeenCalledWith(PROJECT_NO, 'tok_abc')
+  })
+
+  it('R67-P1 (en): the progress line is bilingual and says leaving does not stop it', async () => {
+    h.locale = 'en'
+    const double = api({
+      dryRun: vi.fn().mockImplementation((_projectNo: string, options?: StockPreparationDryRunOptions) => {
+        options?.onProgress?.({ elapsedMs: 5_000, attached: true })
+        return new Promise(() => {})
+      }),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line.getAttribute('data-dry-run-progress')).toBe('attached')
+    expect(line.textContent).toContain('0:05')
+    expect(line.textContent).toContain('leaving this page does not stop it')
+  })
+
+  it('R67-P2: unmounting stops the poll (the signal handed to the dry run is aborted); the job is left running', async () => {
+    let seen: AbortSignal | undefined
+    const double = api({
+      dryRun: vi.fn().mockImplementation((_projectNo: string, options?: StockPreparationDryRunOptions) => {
+        seen = options?.signal
+        return new Promise(() => {})
+      }),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    expect(seen).toBeDefined()
+    expect(seen!.aborted).toBe(false)
+    app!.unmount()
+    app = null
+    expect(seen!.aborted).toBe(true)
+  })
+
+  it('R67-P3: re-attach — mounted on a project whose trial is still running, it shows it, polls until it ends, and never starts a run', async () => {
+    const statuses = [
+      { status: 'running' as const, elapsedMs: 61_000 },
+      { status: 'running' as const, elapsedMs: 63_000 },
+      { status: 'succeeded' as const, elapsedMs: 64_000 },
+    ]
+    let release: () => void = () => {}
+    const waits: number[] = []
+    const dryRunPollWait = vi.fn((ms: number) => {
+      waits.push(ms)
+      return new Promise<void>((resolve) => { release = resolve })
+    })
+    const double = api({ dryRunJobStatus: vi.fn().mockImplementation(async () => statuses.shift() ?? null) })
+    const root = mountPanel({ api: double, projectNo: PROJECT_NO, dryRunPollWait })
+    await flushUi()
+    let line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line).not.toBeNull()
+    expect(line.getAttribute('data-dry-run-progress')).toBe('resumed')
+    expect(line.textContent).toContain('1:01')
+    expect(double.dryRunJobStatus).toHaveBeenCalledWith(PROJECT_NO)
+    release()
+    await flushUi()
+    line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line.textContent).toContain('1:03')
+    release()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]')).toBeNull()
+    expect(waits).toEqual([2000, 2000])
+    expect(double.dryRun).not.toHaveBeenCalled()
+    expect(double.apply).not.toHaveBeenCalled()
+  })
+
+  it('R67-P3b: unmounting while re-attached stops polling the status', async () => {
+    let release: () => void = () => {}
+    const dryRunPollWait = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    const double = api({ dryRunJobStatus: vi.fn().mockResolvedValue({ status: 'running', elapsedMs: 1_000 }) })
+    mountPanel({ api: double, projectNo: PROJECT_NO, dryRunPollWait })
+    await flushUi()
+    expect(double.dryRunJobStatus).toHaveBeenCalledTimes(1)
+    app!.unmount()
+    app = null
+    release()
+    await flushUi()
+    expect(double.dryRunJobStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('R67-P4: someone else\'s trial of the project is running — the step says to wait, not 「稍后再试」 for a broken source', async () => {
+    const root = mountPanel({
+      api: api({
+        dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/dry-run-jobs', { code: 'STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS' })),
+      }),
+    })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.textContent).toContain('另一位同事')
+    expect(plan.textContent).not.toContain('没能连上取数')
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_DRY_RUN_BUSY')
+  })
+
+  // ---- SYNC-STRADDLE (#6591 review, follow-up O2) ------------------------------------------
+  // The project board keeps this panel mounted across a project switch and only moves its `projectNo`
+  // prop, so a run started on project A can land while project B is open. Its writes are A's and stay
+  // (the double's apply/archive still run); what must not happen is A's verdict / steps rendering on
+  // B's board, or `synced(report-of-A)` driving B's 「下一步」 bar. Synthetic values only.
+  describe('SYNC-STRADDLE — a run renders only on the board it was started for', () => {
+    const PROJECT_A = 'SYN-PROJ-A'
+    const PROJECT_B = 'SYN-PROJ-B'
+    const SCOPE = { tenantId: 'tenant-syn', workspaceId: 'workspace-syn' }
+    const PLAN = { status: 'ready', canApply: true, dryRunToken: 'tok_syn', counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }
+    const APPLIED = { status: 'succeeded', apply: { counts: { created: 3, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 } } }
+
+    beforeEach(() => {
+      localStorage.setItem('auth_token', 'synthetic-session-a')
+    })
+    afterEach(() => {
+      localStorage.removeItem('auth_token')
+    })
+
+    function held<T>(value: T): { fn: ReturnType<typeof vi.fn>; release: () => void } {
+      const releases: Array<() => void> = []
+      const fn = vi.fn().mockImplementation(() => new Promise<T>((done) => { releases.push(() => done(value)) }))
+      return { fn, release: () => { for (const release of releases.splice(0)) release() } }
+    }
+
+    function mountOnBoard(props: Record<string, unknown>) {
+      const board = reactive({ projectNo: PROJECT_A, scope: { ...SCOPE } })
+      const onSynced = vi.fn()
+      const onProjectTargetChanged = vi.fn()
+      const Board = defineComponent({
+        setup: () => () => vueH(StockPreparationProjectSyncPanel as Component, {
+          ...props,
+          projectNo: board.projectNo,
+          scope: board.scope,
+          onSynced,
+          onProjectTargetChanged,
+        }),
+      })
+      app = createApp(Board)
+      app.mount(container!)
+      return { root: container!, board, onSynced, onProjectTargetChanged }
+    }
+
+    const verdictOf = (root: HTMLElement) => root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')?.getAttribute('data-verdict') ?? null
+    const stepStatuses = (root: HTMLElement) => Array.from(root.querySelectorAll('[data-testid="stock-prep-project-sync-step"]')).map((step) => step.getAttribute('data-status'))
+    const press = async (root: HTMLElement, id: string) => {
+      const button = root.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement | null
+      expect(button, `${id} must render`).not.toBeNull()
+      button!.click()
+      await flushUi(12)
+    }
+
+    /** Press 同步 on A; the plan lands (its step is painted), the write is held mid-flight. */
+    async function runOnAHeldAtApply() {
+      const apply = held(APPLIED)
+      const double = api({ dryRun: vi.fn().mockResolvedValue(PLAN), apply: apply.fn as never })
+      const mounted = mountOnBoard({ api: double })
+      await flushUi()
+      await press(mounted.root, 'stock-prep-project-sync-run')
+      expect(double.dryRun).toHaveBeenCalledTimes(1)
+      expect((double.dryRun as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(PROJECT_A)
+      expect(double.apply).toHaveBeenCalledTimes(1)
+      expect(stepStatuses(mounted.root)[0], 'the plan step of the run on A is painted').not.toBe('pending')
+      return { ...mounted, double, releaseApply: apply.release }
+    }
+
+    it('control: an undisturbed run renders its verdict and tells the board once', async () => {
+      const { root, onSynced, releaseApply, double } = await runOnAHeldAtApply()
+      releaseApply()
+      await flushUi(12)
+      expect(verdictOf(root)).toBe('imported')
+      expect(onSynced).toHaveBeenCalledTimes(1)
+      expect(onSynced.mock.calls[0][0]?.verdict).toBe('imported')
+      expect(double.archive).toHaveBeenCalledTimes(1)
+    })
+
+    it.each([
+      ['the board opened another project', true, (board: { projectNo: string }) => { board.projectNo = PROJECT_B }],
+      ['the scope moved', true, (board: { scope: { tenantId: string; workspaceId: string } }) => { board.scope = { ...SCOPE, workspaceId: 'workspace-syn-other' } }],
+      ['another principal took the session', true, () => {
+        localStorage.setItem('auth_token', 'synthetic-session-other')
+        notifyAuthPrincipalChange()
+      }],
+      ['another tab replaced the session (no notification)', false, () => { localStorage.setItem('auth_token', 'synthetic-session-other-tab') }],
+    ] as Array<[string, boolean, (board: any) => void]>)('a run that lands after %s writes, but renders nothing and tells the board nothing', async (_label, notified, change) => {
+      const { root, board, onSynced, onProjectTargetChanged, releaseApply, double } = await runOnAHeldAtApply()
+      change(board)
+      await flushUi()
+      if (notified) {
+        expect(stepStatuses(root), 'what the panel showed of the run on A is cleared on the switch').toEqual(['pending', 'pending', 'pending', 'pending'])
+      }
+      releaseApply()
+      await flushUi(12)
+      // The run itself completed: its write and its archive went through for A.
+      expect(double.apply).toHaveBeenCalledTimes(1)
+      expect(double.archive).toHaveBeenCalledTimes(1)
+      expect((double.archive as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(PROJECT_A)
+      // …and nothing of it renders on the board that is open now, or reaches that board.
+      expect(verdictOf(root)).toBeNull()
+      expect(stepStatuses(root)).toEqual(['pending', 'pending', 'pending', 'pending'])
+      expect(onSynced).not.toHaveBeenCalled()
+      expect(onProjectTargetChanged).not.toHaveBeenCalled()
+      expect((root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement).textContent).not.toContain('正在拉取')
+    })
+
+    it('a step of the run on A that lands while B is open is not painted there, even before the run ends', async () => {
+      const apply = held(APPLIED)
+      const archive = held({ status: 'created', persisted: true, created: { batch: 1, lines: 3, run: 1 } })
+      const double = api({ dryRun: vi.fn().mockResolvedValue(PLAN), apply: apply.fn as never, archive: archive.fn as never })
+      const { root, board, onSynced } = mountOnBoard({ api: double })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      board.projectNo = PROJECT_B
+      await flushUi()
+      apply.release()
+      await flushUi(12)
+      expect(double.archive).toHaveBeenCalledTimes(1)
+      expect(stepStatuses(root), 'A\'s apply step stays off B\'s board while A\'s archive is still running').toEqual(['pending', 'pending', 'pending', 'pending'])
+      archive.release()
+      await flushUi(12)
+      expect(stepStatuses(root)).toEqual(['pending', 'pending', 'pending', 'pending'])
+      expect(verdictOf(root)).toBeNull()
+      expect(onSynced).not.toHaveBeenCalled()
+    })
+
+    it('back on A after a dropped run: A pulls again normally and renders its own verdict', async () => {
+      const { root, board, onSynced, releaseApply, double } = await runOnAHeldAtApply()
+      board.projectNo = PROJECT_B
+      await flushUi()
+      releaseApply()
+      await flushUi(12)
+      board.projectNo = PROJECT_A
+      await flushUi()
+      expect(verdictOf(root)).toBeNull()
+      ;(double.apply as ReturnType<typeof vi.fn>).mockResolvedValue(APPLIED)
+      await press(root, 'stock-prep-project-sync-run')
+      expect(verdictOf(root)).toBe('imported')
+      expect(onSynced).toHaveBeenCalledTimes(1)
+      expect(onSynced.mock.calls[0][0]?.verdict).toBe('imported')
+    })
+
+    it('a FINISHED run on A does not leave its verdict on B\'s board', async () => {
+      const { root, board, onSynced, releaseApply } = await runOnAHeldAtApply()
+      releaseApply()
+      await flushUi(12)
+      expect(verdictOf(root)).toBe('imported')
+      board.projectNo = PROJECT_B
+      await flushUi()
+      expect(verdictOf(root)).toBeNull()
+      expect(stepStatuses(root)).toEqual(['pending', 'pending', 'pending', 'pending'])
+      expect(onSynced).toHaveBeenCalledTimes(1)
+    })
+
+    // The large-BOM background channel is ticked FROM THE PAGE (largeBomPull.ts): unmounting it would cut A's
+    // write short. A board switch therefore hides it and lets it finish; a session switch stops it.
+    const LARGE_PLAN = { status: 'large_bom_bounded', canApply: false, dryRunToken: null, counts: {} }
+    async function largeTrialOnAHeldAtChunk() {
+      const chunk = held({ jobId: 'large-bom-apply-panel-1', status: 'succeeded', counts: { created: 40, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 } })
+      const jobApi = largeBomJobApi({ runApplyChunk: chunk.fn as never })
+      const double = api({ dryRun: vi.fn().mockResolvedValue(LARGE_PLAN) })
+      const mounted = mountOnBoard({ api: double, largeBomApi: jobApi, largeBomPollWait: vi.fn().mockResolvedValue(undefined) })
+      await flushUi()
+      await press(mounted.root, 'stock-prep-project-sync-run')
+      const channel = mounted.root.querySelector('[data-testid="stock-prep-large-bom-pull"]') as HTMLElement
+      expect(channel, 'the trial on A mounted its background channel').not.toBeNull()
+      expect(jobApi.startExpansion).toHaveBeenCalledWith(PROJECT_A)
+      expect(jobApi.runApplyChunk).toHaveBeenCalledTimes(1)
+      expect(channel.getAttribute('data-phase')).toBe('applying')
+      expect(mounted.onSynced).toHaveBeenCalledTimes(1)
+      return { ...mounted, jobApi, channel, releaseChunk: chunk.release }
+    }
+
+    it('large BOM: after the board opens B, A\'s background write is hidden there but runs to done', async () => {
+      const { root, board, onSynced, jobApi, channel, releaseChunk } = await largeTrialOnAHeldAtChunk()
+      board.projectNo = PROJECT_B
+      await flushUi()
+      expect(verdictOf(root)).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]'), 'still mounted: unmounting would stop A\'s write').toBe(channel)
+      expect(channel.style.display, 'not shown on B\'s board').toBe('none')
+      releaseChunk()
+      await flushUi(12)
+      expect(channel.getAttribute('data-phase')).toBe('done')
+      expect(jobApi.runApplyChunk).toHaveBeenCalledTimes(1)
+      // The channel's own completion is `synced(null)` — "re-read your board", never A's report.
+      expect(onSynced.mock.calls.map((call) => call[0])).toEqual([expect.objectContaining({ verdict: expect.any(String) }), null])
+    })
+
+    it('large BOM: a session switch stops the page-driven write (it never continues under another principal)', async () => {
+      const { root, jobApi, releaseChunk } = await largeTrialOnAHeldAtChunk()
+      localStorage.setItem('auth_token', 'synthetic-session-other')
+      notifyAuthPrincipalChange()
+      await flushUi()
+      expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')).toBeNull()
+      releaseChunk()
+      await flushUi(12)
+      expect(jobApi.runApplyChunk).toHaveBeenCalledTimes(1)
+    })
+
+    it('large BOM: a trial of A that lands after the board opened B starts no background write there', async () => {
+      const plan = held(LARGE_PLAN)
+      const jobApi = largeBomJobApi()
+      const { root, board, onSynced } = mountOnBoard({ api: api({ dryRun: plan.fn as never }), largeBomApi: jobApi, largeBomPollWait: vi.fn().mockResolvedValue(undefined) })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      board.projectNo = PROJECT_B
+      await flushUi()
+      plan.release()
+      await flushUi(12)
+      expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')).toBeNull()
+      expect(jobApi.startExpansion).not.toHaveBeenCalled()
+      expect(onSynced).not.toHaveBeenCalled()
+    })
+
+    function activeTarget(log: string[], options: { restore?: () => Promise<unknown>; archived?: boolean } = {}): StockPreparationProjectTargetApi {
+      const state = (archived: boolean) => ({
+        status: archived ? 'archived' : 'active',
+        sheetId: 'sheet_syn_straddle',
+        viewId: 'view_syn_straddle',
+        todoViewId: 'view_syn_straddle_todo',
+        rowCount: 3,
+        activeRowCount: 3,
+        rowCountBounded: false,
+        lastPulledAt: null,
+        lastPullOutcome: null,
+        archivedAt: null,
+        may: { create: false, archive: !archived, restore: archived },
+      })
+      let archived = options.archived === true
+      return {
+        get: vi.fn(async () => { log.push('target.get'); return state(archived) }),
+        create: vi.fn(async () => { log.push('target.create'); return { status: 'active', created: false, sheetId: 'sheet_syn_straddle', viewId: 'view_syn_straddle', todoViewId: 'view_syn_straddle_todo' } }),
+        list: vi.fn(async () => ({ count: 0, limit: 200, items: [] })),
+        restore: vi.fn(async () => {
+          log.push('target.restore')
+          if (options.restore) await options.restore()
+          archived = false
+          return { status: 'active' }
+        }),
+      } as unknown as StockPreparationProjectTargetApi
+    }
+
+    it('the repair path: a repair of A that lands after the board opened B renders nothing there', async () => {
+      const log: string[] = []
+      const secondPlan = held(PLAN)
+      let dryRuns = 0
+      const double = api({
+        dryRun: vi.fn().mockImplementation((...args: unknown[]) => {
+          dryRuns += 1
+          log.push('dryRun')
+          if (dryRuns === 1) return Promise.reject(new StockPreparationProjectSyncCallError(422, 'dry-run', { code: 'TARGET_SCHEMA_INCOMPLETE' }))
+          return secondPlan.fn(...args)
+        }),
+      })
+      const { root, board, onSynced, onProjectTargetChanged } = mountOnBoard({ api: double, targetApi: activeTarget(log) })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      await press(root, 'stock-prep-project-sync-target-prompt-confirm')
+      expect(onSynced).toHaveBeenCalledTimes(1)
+      const targetChangesBefore = onProjectTargetChanged.mock.calls.length
+      await press(root, 'stock-prep-project-sync-repair-action')
+      expect(log).toContain('target.create')
+      expect(dryRuns).toBe(2)
+      board.projectNo = PROJECT_B
+      await flushUi()
+      secondPlan.release()
+      await flushUi(12)
+      expect(double.apply).toHaveBeenCalledTimes(1)
+      expect(verdictOf(root)).toBeNull()
+      expect(onSynced).toHaveBeenCalledTimes(1)
+      expect(onProjectTargetChanged).toHaveBeenCalledTimes(targetChangesBefore)
+    })
+
+    it('the restore path: a restore of A that lands after the board opened B starts no pull there', async () => {
+      const log: string[] = []
+      let releaseRestore: () => void = () => {}
+      const double = api({ dryRun: vi.fn().mockImplementation(async () => { log.push('dryRun'); return PLAN }) })
+      const { root, board, onSynced, onProjectTargetChanged } = mountOnBoard({
+        api: double,
+        targetApi: activeTarget(log, { archived: true, restore: () => new Promise<void>((done) => { releaseRestore = done }) }),
+      })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      await press(root, 'stock-prep-project-sync-restore')
+      const typed = root.querySelector('[data-testid="stock-prep-project-sync-restore-input"]') as HTMLInputElement
+      typed.value = PROJECT_A
+      typed.dispatchEvent(new Event('input'))
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-restore-confirm')
+      expect(log).toContain('target.restore')
+      board.projectNo = PROJECT_B
+      await flushUi()
+      releaseRestore()
+      await flushUi(12)
+      // The restore stands (the server did it); the pull it would have started for A is not started on B's board.
+      expect(log.filter((entry) => entry === 'dryRun')).toEqual([])
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-target-prompt"]'), 'no 「重新拉取」 question about A on B\'s board').toBeNull()
+      expect(double.apply).not.toHaveBeenCalled()
+      expect(onProjectTargetChanged).not.toHaveBeenCalled()
+      expect(onSynced).not.toHaveBeenCalled()
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-restore-prompt"]')).toBeNull()
+      expect(verdictOf(root)).toBeNull()
+    })
   })
 })

@@ -4,6 +4,7 @@ import { fieldTypeRegistry } from './field-type-registry'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from './field-visibility-rule'
 import { resolveDateTimeFieldTimeZone } from './business-timezone'
 import { parseDateTimeText } from './date-time-wall-clock'
+import { withHumanWriteLockKey } from './human-write-lock'
 
 export type MultitableFieldType =
   | 'string'
@@ -238,9 +239,16 @@ export function sanitizeFieldProperty(
   //
   // The layer-2 visibility keys (`hidden` / `visible`) belong to that SAME cross-cutting set and were
   // simply never added to it — see withLayer2VisibilityKeys. That omission is the bug it fixes.
-  return withLayer2VisibilityKeys(
-    withFieldRequiredWhenRule(
-      withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+  //
+  // The human write lock (`humanWriteLock`, human-write-lock.ts) is cross-cutting for the same reason: a
+  // closed-allowlist branch that dropped it would fail OPEN (the column turns writable for people), so it
+  // is applied here, outside the per-type switch, closed vocabulary only.
+  return withHumanWriteLockKey(
+    withLayer2VisibilityKeys(
+      withFieldRequiredWhenRule(
+        withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+        property,
+      ),
       property,
     ),
     property,

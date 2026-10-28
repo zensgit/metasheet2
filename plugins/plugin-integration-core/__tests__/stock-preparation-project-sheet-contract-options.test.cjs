@@ -148,7 +148,28 @@ function mount(options = {}) {
   const h = projectSheet.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn: true, ...rest })
   if (parts) h.source.adapter.read = partsSource(PROJECT, parts)
   installHostValidation(h, { refuseByComponentCode })
+  tagLockPatches(h)
   return h
+}
+
+/**
+ * B (awaiting owner): the create leg and the repair leg ALSO mark the template's plm_system columns read-only for
+ * people — one `patchObjectFieldProperty` per column whose body is exactly `{ humanWriteLock: 'plm_system' }`
+ * (stock-preparation-project-targets.cjs `markProjectSheetPlmSystemColumns`). Those calls are TAGGED here so the
+ * option-patch assertions below keep their exact meaning (`patchCalls` = the contract option writes) while the
+ * lock writes are asserted on their own (`lockPatchCalls`). The harness itself is untouched.
+ */
+function tagLockPatches(h) {
+  const real = h.provisioning.patchObjectFieldProperty
+  h.provisioning.patchObjectFieldProperty = async (input = {}) => {
+    const result = await real.call(h.provisioning, input)
+    const body = (input && input.propertyPatch) || {}
+    if (Object.keys(body).length === 1 && body.humanWriteLock === 'plm_system') {
+      const last = h.provisioning.calls[h.provisioning.calls.length - 1]
+      if (last && last[0] === 'patchObjectFieldProperty') last.push('humanWriteLock')
+    }
+    return result
+  }
 }
 
 const createTarget = (h, user = PULLER, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', CREATE_PATH, { user, params: { projectNo }, body: {} })
@@ -176,7 +197,9 @@ const decisionOptions = (object) => {
 }
 const registryRow = (h, projectNo = PROJECT) => h.registryRows().find((row) => row.project_no === projectNo && row.tenant_id === TENANT)
 const writtenRows = (h) => h.records.calls.filter((call) => call[0] === 'createRecord').length
-const patchCalls = (h) => h.provisioning.calls.filter((call) => call[0] === 'patchObjectFieldProperty')
+const patchCalls = (h) => h.provisioning.calls.filter((call) => call[0] === 'patchObjectFieldProperty' && call[3] !== 'humanWriteLock')
+const lockPatchCalls = (h) => h.provisioning.calls.filter((call) => call[0] === 'patchObjectFieldProperty' && call[3] === 'humanWriteLock')
+const PLM_SYSTEM_FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((field) => field.ownership === 'plm_system').map((field) => field.id)
 
 /** A sheet created BEFORE the fix: the ensure landed the columns, nothing wrote the contract set. */
 function stripDecisionOptions(object) {
@@ -201,6 +224,8 @@ test('G1-01 the field team\'s test: create → the decision column carries the 5
       assert.equal(object.fields.get(fieldId).property.options, undefined, `${fieldId}: a config_info select is never given options by this path`)
     }
     assert.deepEqual(patchCalls(h).map((call) => [call[1], call[2]]), [[deriveProjectSheetObjectId(TENANT, PROJECT), DECISION_FIELD]], 'ONE patch, the decision field of THIS project sheet')
+    assert.deepEqual(lockPatchCalls(h).map((call) => [call[1], call[2]]), PLM_SYSTEM_FIELD_IDS.map((id) => [deriveProjectSheetObjectId(TENANT, PROJECT), id]), 'B: every plm_system column of THIS sheet marked once, nothing else')
+    assert.deepEqual(created.body.data.plmColumnLock, { marked: PLM_SYSTEM_FIELD_IDS.length, alreadyMarked: 0, missing: 0 })
     assert.deepEqual(h.auditAppends.map((entry) => [entry.action, entry.mode]), [['project_target_create', 'sheet_created']], 'the create\'s own audit trail is unchanged')
 
     const { apply } = await dryRunThenApply(h)
@@ -351,13 +376,23 @@ test('G1-06 repair, registered: 200, the registry row\'s sheet in the verified t
     assert.equal(res.body.data.evidence.objectId, objectId)
     assert.deepEqual(res.body.data.evidence.fields.map((entry) => [entry.field, entry.optionCount]), [[DECISION_FIELD, 5]])
     assert.deepEqual(patchCalls(h).map((call) => [call[1], call[2]]), [[objectId, DECISION_FIELD]])
+    assert.deepEqual(lockPatchCalls(h).map((call) => [call[1], call[2]]), PLM_SYSTEM_FIELD_IDS.map((id) => [objectId, id]), 'B: the repair leg marks the registry row sheet')
+    assert.deepEqual(res.body.data.plmColumnLock, { marked: PLM_SYSTEM_FIELD_IDS.length, alreadyMarked: 0, missing: 0 })
     const object = h.provisioning.objects.get(`${STAGING}/${objectId}`)
     assert.deepEqual(decisionOptions(object), CONTRACT_VALUES)
     const appended = h.auditAppends.slice(auditBefore)
     assert.deepEqual(appended.map((entry) => [entry.action, entry.projectId, entry.subjectId, entry.mode, entry.actor]), [
       ['project_target_create', PROJECT, sheetId, 'contract_options_synced', ADMIN.id],
     ])
-    assert.deepEqual(appended[0].detail, { objectId, syncedFieldCount: 1, skippedFieldCount: 0, optionCount: 5 })
+    assert.deepEqual(appended[0].detail, {
+      objectId,
+      syncedFieldCount: 1,
+      skippedFieldCount: 0,
+      optionCount: 5,
+      plmLockMarkedFieldCount: PLM_SYSTEM_FIELD_IDS.length,
+      plmLockAlreadyMarkedFieldCount: 0,
+      plmLockMissingFieldCount: 0,
+    })
     // Idempotent: the same body again.
     const before = projectSheet.clone(object.fields.get(DECISION_FIELD).property)
     const again = await repair(h, { projectNo: PROJECT })

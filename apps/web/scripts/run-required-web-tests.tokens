@@ -142,12 +142,17 @@ asyncStateBlock
 attendance-admin-regressions
 attendance-approval-option-hint
 attendance-approval-option-wiring
+attendance-daily-calendar-copy
 attendance-date-only-format
 attendance-experience-entrypoints
+attendance-group-fixed-schedule
 attendance-import-preview-regression.spec.ts
 attendance-punch-outcome
 attendance-record-timeline
 attendance-records-route-redirect
+attendance-report-calendar-view.spec.ts
+attendance-report-date-range-view.spec.ts
+attendance-reports-analytics
 attendance-scheduled-feature-status-wiring
 attendance-scheduled-feature-status.spec.ts
 attendance-selfservice-dashboard
@@ -171,6 +176,7 @@ attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
 attendancePayrollHelp.spec.ts
 attendanceRecordRequestPrefill
+attendanceReportCalendar.spec.ts
 attendanceRequestReviewEntitlement
 attendanceRequestTimezoneIntegration
 AttendanceScheduledFeatureStatus
@@ -211,6 +217,7 @@ dataSourcesLoadFailedReseal
 dingtalk-internal-view-link-warnings
 dingtalk-public-form-link-warnings
 dingtalk-recipient-field-warnings
+directoryConfigPickers
 DirectoryDeprovisionEvidencePanel.spec.ts
 directoryManagementView
 featureFlags.plm.spec.ts
@@ -226,6 +233,7 @@ IntegrationRunDetail
 IntegrationStockPrepPanel
 IntegrationWorkbenchView
 lineDerivation
+LoginView.spec.ts
 meta-ai-bulk-labels
 meta-api-error-labels
 meta-api-token-labels
@@ -516,6 +524,8 @@ StockPreparationProjectSyncPanel.spec.ts
 StockPreparationProjectTarget
 StockPreparationProjectWorkspaceView
 StockPreparationRail
+StockPreparationRefreshQueue
+StockPreparationRefreshState
 StockPreparationRouteFailedPlain
 StockPreparationScenarioBAcceptance
 StockPreparationSnapshotDiffView
@@ -526,6 +536,9 @@ StockPreparationStageStepper
 StockPreparationUnconfirmableHold
 StockPreparationUnitConfirmView
 StockPreparationWorkspace
+StockPreparationYidaInitialization
+StockPreparationYidaOwnerSend
+StockPreparationYidaPreview
 stockPrepPermissionMatrix
 tasks-api-m3.spec.ts
 tasks-api-m4.spec.ts
@@ -609,6 +622,7 @@ useAttendanceAdminRailNavigation
 useAttendanceAdminUsers
 useAttendanceRequestTimezone
 useAutoSumTotal
+useDingTalkPersonRecipientStatus
 usePlmExportActions
 userManagementRoleMembership
 userManagementView

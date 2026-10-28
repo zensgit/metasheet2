@@ -32,6 +32,10 @@ export type WorkbenchLabelKey =
   | 'kbd.recordPrev' | 'kbd.recordNext'
   // §3.5 static (non-interpolated) toast subset
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
+  // R68 (#6454 judge note): status note + toast when /context reports `recordCreateBlockedByLock`
+  | 'notice.recordCreateBlockedByLock'
+  // 备料分批拉取第一期 step 3: reason on the disabled export buttons + toast when /context reports `gridExportClosure`
+  | 'notice.gridExportClosed'
   | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted' | 'toast.recordDuplicated'
   | 'toast.recordLocked' | 'toast.recordUnlocked' | 'toast.recordLockFailed'
   | 'toast.loadedLatest' | 'toast.changeReapplied' | 'toast.recordUpdated' | 'toast.viewInHistory'
@@ -83,6 +87,8 @@ export type WorkbenchLabelKey =
   | 'confirm.discardContextChanges' | 'confirm.discardRecordChanges'
   // #5813: the header Comments button ends an in-progress comment edit (see onToggleComments).
   | 'confirm.discardCommentEdit'
+  // Customer feedback 2026-10-27: the drawer's 复制 asks first; /context `recordDuplicateBlocked` reason.
+  | 'confirm.duplicateRecord' | 'notice.recordDuplicateBlocked'
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
   // B1-S1 D0-A: default confirm copy for a side-effecting button run (used when
   // the button's own confirm.message is blank).
@@ -159,6 +165,15 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'kbd.recordPrev': { en: 'Previous record (inspector open)', zh: '上一条记录（检查器打开时）' },
   'kbd.recordNext': { en: 'Next record (inspector open)', zh: '下一条记录（检查器打开时）' },
 
+  'notice.recordCreateBlockedByLock': {
+    en: 'Required columns on this sheet are maintained by PLM, so rows cannot be added by hand.',
+    zh: '此表的必填列由 PLM 维护，不能手工加行。',
+  },
+  // The zh text is the server's MULTITABLE_GRID_EXPORT_CLOSED copy verbatim (multitable/sheet-grid-export-closure.ts).
+  'notice.gridExportClosed': {
+    en: 'This is a pilot stock-preparation sheet: generic export (whole sheet, selected rows, CSV, Excel) is closed. Use the project material export for a formal hand-off; printing and copying a selection are not a hand-off basis.',
+    zh: '这是试点备料表，通用导出（整表、选中行、CSV、Excel）已关闭。正式交接请用「项目物料导出」；打印和复制选区不能作为交接依据。',
+  },
   'toast.recordCreateBlocked': {
     en: 'Record creation is not allowed in this view.',
     zh: '当前视图不允许创建记录。',
@@ -174,7 +189,18 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.datesUpdated': { en: 'Dates updated', zh: '日期已更新' },
   'toast.hierarchyUpdated': { en: 'Hierarchy updated', zh: '层级已更新' },
   'toast.recordDeleted': { en: 'Record deleted', zh: '记录已删除' },
-  'toast.recordDuplicated': { en: 'Record duplicated', zh: '记录已复制' },
+  // Customer feedback 2026-10-27: 「记录已复制」 read as "copied to the clipboard"; the record is already added.
+  'toast.recordDuplicated': { en: 'Added 1 duplicated record', zh: '已新增 1 条复制的记录' },
+  'confirm.duplicateRecord': {
+    en: 'Add a new record to this sheet with the same content as this row? (This does not copy to the clipboard.)',
+    zh: '将在本表新增一条与此行内容相同的记录（不是复制到剪贴板），确定吗？',
+  },
+  // The zh text is the server's RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET copy verbatim
+  // (core-backend multitable/record-duplicate-guard.ts).
+  'notice.recordDuplicateBlocked': {
+    en: 'Rows on this sheet are maintained by the stock-preparation plugin (PLM pull) and cannot be duplicated.',
+    zh: '这张表的行由备料插件（PLM 拉取）维护，不能复制为新行。',
+  },
   'toast.recordLocked': { en: 'Record locked', zh: '记录已锁定' },
   'toast.recordUnlocked': { en: 'Record unlocked', zh: '记录已解锁' },
   'toast.recordLockFailed': { en: 'Failed to update record lock', zh: '更新锁定状态失败' },

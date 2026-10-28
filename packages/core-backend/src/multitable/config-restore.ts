@@ -11,7 +11,26 @@
  */
 import { createHash } from 'node:crypto'
 
+import { carryHumanWriteLock, humanWriteLockKindOfProperty } from './human-write-lock'
+
 type QueryFn = (text: string, params: unknown[]) => Promise<{ rows: unknown[] }>
+
+/**
+ * Human write lock (human-write-lock.ts): a field-property revert restores a RECORDED property, and a property
+ * recorded before the plugin marked the column carries no lock — written raw, it would silently unlock a PLM-system
+ * column for people. So for a field whose property is being reverted, the CURRENTLY STORED lock wins over the
+ * revision (the same rule `PATCH /fields/:fieldId` follows): a revert can neither drop nor add the lock. Both
+ * the preview's `target` (what the actor is shown) and the write (`applyConfigRevert`) go through this, so the
+ * disclosed target and the stored result stay identical. An unlocked field on both sides is returned untouched
+ * (byte-identical to the pre-lock behaviour).
+ */
+export function fieldRevertPropertyKeepingLock(storedProperty: unknown, revertProperty: unknown): unknown {
+  if (!humanWriteLockKindOfProperty(storedProperty) && !humanWriteLockKindOfProperty(revertProperty)) return revertProperty
+  const base = revertProperty && typeof revertProperty === 'object' && !Array.isArray(revertProperty)
+    ? (revertProperty as Record<string, unknown>)
+    : {}
+  return carryHumanWriteLock(storedProperty, base)
+}
 
 export interface ConfigRevisionRow {
   id: string
@@ -234,13 +253,17 @@ export function computeRevertPreview(rev: ConfigRevisionRow, currentSnapshot: Re
   const current = pick(currentSnapshot, keys)
   const driftConflict = keys.some((k) => stable(current[k]) !== stable(after[k]))
   const { kind, reason } = classifyRevert(rev)
+  const target = pick(before, keys)
+  if (rev.entity_type === 'field' && keys.includes('property')) {
+    target.property = fieldRevertPropertyKeepingLock(currentSnapshot.property, target.property)
+  }
   return {
     revisionId: rev.id,
     entityType: rev.entity_type,
     entityId: rev.entity_id,
     changedKeys: keys,
     current,
-    target: pick(before, keys),
+    target,
     driftConflict,
     opKind: kind,
     ...(reason ? { gatedReason: reason } : {}),
@@ -316,12 +339,23 @@ export async function applyConfigRevert(query: QueryFn, rev: ConfigRevisionRow):
   const table = rev.entity_type === 'field' ? 'meta_fields' : rev.entity_type === 'view' ? 'meta_views' : rev.entity_type === 'sheet_config' ? 'meta_sheets' : null
   if (!map || !table) throw new Error(`config revert not supported for entity_type=${rev.entity_type}`)
   const before = rev.before ?? {}
+  // Human write lock: a field-property revert keeps the STORED lock (fieldRevertPropertyKeepingLock). Read inside
+  // the caller's (fenced) transaction, so it is the same row the preview's drift/baseline checks just compared.
+  let storedFieldProperty: unknown = null
+  const revertsFieldProperty = rev.entity_type === 'field' && rev.changed_keys.includes('property')
+  if (revertsFieldProperty) {
+    const stored = await query('SELECT property FROM meta_fields WHERE id = $1', [rev.entity_id])
+    storedFieldProperty = (stored.rows[0] as { property?: unknown } | undefined)?.property ?? null
+  }
   const sets: string[] = []
   const params: unknown[] = []
   for (const k of rev.changed_keys) {
     const m = map[k]
     if (!m) throw new Error(`config revert not supported for key=${k}`)
-    params.push(m.jsonb ? JSON.stringify(before[k] ?? null) : before[k])
+    const value = revertsFieldProperty && k === 'property'
+      ? fieldRevertPropertyKeepingLock(storedFieldProperty, before[k])
+      : before[k]
+    params.push(m.jsonb ? JSON.stringify(value ?? null) : value)
     sets.push(`${m.col} = $${params.length}${m.jsonb ? '::jsonb' : ''}`)
   }
   if (sets.length === 0) return

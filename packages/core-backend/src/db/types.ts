@@ -1556,6 +1556,8 @@ export interface MultitableWebhooksTable {
   max_retries: number
   retry_base_delay_ms: number | null
   retry_max_delay_ms: number | null
+  /** The sheet this subscription webhook is bound to; NULL = unbound (receives no events). */
+  sheet_id: string | null
 }
 
 export interface MultitableWebhookDeliveriesTable {

@@ -1186,3 +1186,6 @@ describe('H. gate 26 (frontend half): the window rule, one cell per clause ([fe-
     expect(badgeEl().getAttribute('data-count')).toBe('2')
   })
 })
+
+// Collect the real shell before timed cases enable fake timers.
+await import('../src/App.vue')

@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE THREE VALUE-BEARING STOCK-PREP READS, ON ONE SCOPE.
 //
 // ---------------------------------------------------------------------------
@@ -68,7 +70,11 @@
 // what it was asked to write).
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
+// Batch-refresh step 4 PR-5: the export brackets its read with the sheet's lock generation (required by name).
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 
@@ -440,10 +446,11 @@ function mount({ tenantPrincipalDirectory = hostDirectory(), exportBoundTo = 'A'
     },
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {
@@ -647,7 +654,7 @@ function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
         },
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: { stockPreparationTableActions: [pullActionConfig()] },
   }
   const services = baseServices()
@@ -693,7 +700,7 @@ function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
   services.stockPreparationAuditStore = { async append() { return { ok: true } } }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
 
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, adapterTenants, tenantPrincipalDirectory }
 }
 
@@ -970,7 +977,8 @@ async function main() {
     // `false` and "absent" must produce the SAME response — no key, no scope check, nothing moved.
     const explicitlyOff = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: false } })
     const strip = (response) => {
-      const data = JSON.parse(JSON.stringify(response.body.data))
+      // R67 ③: `withoutReadPhaseClock` is the JSON copy plus the read phase's wall-clock reading removed.
+      const data = withoutReadPhaseClock(response.body.data)
       delete data.dryRunToken // freshly minted per call, and deliberately not derived from the flag
       return data
     }

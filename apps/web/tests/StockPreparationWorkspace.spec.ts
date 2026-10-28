@@ -151,18 +151,18 @@ async function waitForSelector(container: HTMLElement, selector: string, cycles 
 }
 
 // O1' §附 narrowed this page to the CONFIRMATION-QUEUE workbench, so 'confirmation-queue' leads the
-// strip and is the landing tab. The seven below it are the legacy MVP tabs, which the same ruling
+// strip and is the landing tab. The keys below it are the legacy MVP tabs, which the same ruling
 // did not revive and which stay PLATFORM-ADMIN gated end to end — they render only for this spec's
-// default (admin) actor, never for a stock-prep operator.
+// default (admin) actor, never for a stock-prep operator. 旧「备料行」(prep-line) 与 旧「异常队列」
+// (exception-queue) were retired on 2026-10-27 (owner: 「不用就去掉」) — see RETIRED_LEGACY_VIEW_KEYS.
 const LEGACY_MVP_VIEW_KEYS = [
-  'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
   'material-mapping',
   'unit-conversion',
-  'prep-line',
-  'exception-queue',
 ] as const
+// 旧「仪表盘」(dashboard) went with them: it was the navigator of the pipeline those two tabs ended.
+const RETIRED_LEGACY_VIEW_KEYS = ['dashboard', 'prep-line', 'exception-queue'] as const
 const VIEW_KEYS = ['confirmation-queue', ...LEGACY_MVP_VIEW_KEYS] as const
 
 // Source-level drift pin (matching the repo idiom in approvalTemplateRouteGuard.spec.ts): importing
@@ -709,8 +709,10 @@ describe('StockPreparationWorkspace shell', () => {
     // `workbenchAccess.ts` now uses the server's own literal ladder over the auth SNAPSHOT, so this
     // principal is a platform admin here too and sees the whole rail. 14 -> 15 IS a new tab: P2-1's
     // 项目查询, in 【工作】 after 项目备料 — 4 【工作】 + 3 【部署与接入】 + 7 深度工具 (folded, still
-    // rendered) + 1 【帮助】.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
+    // rendered) + 1 【帮助】. 15 -> 16 is 备料分批拉取第一期 step 4 PR-7's 拉取待确认 (R-62 ①), the last item of
+    // 【工作】: PULL tier, which a platform admin satisfies through the ladder. 16 -> 13 is the owner's
+    // 2026-10-27 ruling 「不用就去掉」: 旧「仪表盘」, 旧「备料行」 and 旧「异常队列」 left 深度工具.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(13)
   })
 
   // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
@@ -765,8 +767,9 @@ describe('StockPreparationWorkspace shell', () => {
     // `stock-prep:admin` actor (already on the real ladder) always expected.
     // The seven legacy MVP tabs stay platform-admin and did NOT come along with this code.
     // 7 -> 8 is P2-1's 项目查询: same operate tier as 今天要处理 / 项目备料, which this code satisfies.
-    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
-    for (const key of ['home', 'project-board', 'project-query', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
+    // 8 -> 9 is PR-7's 拉取待确认 (R-62 ①): PULL tier, which `stock-prep:admin` satisfies on the server's ladder.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(9)
+    for (const key of ['home', 'project-board', 'project-query', 'refresh-queue', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
       expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be visible`).not.toBeNull()
     }
     for (const key of LEGACY_MVP_VIEW_KEYS) {
@@ -799,7 +802,9 @@ describe('StockPreparationWorkspace shell', () => {
     // 12 -> 14 (PR #5555): this actor holds `stock-prep:admin` AND a bare `integration:admin`, and
     // both satisfy operate on the server's ladder — the ladder the workbench now uses — so 今天要处理
     // and 项目备料 join the twelve. 14 -> 15 (P2-1): 项目查询 rides that same operate tier.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
+    // 15 -> 16 (PR-7, R-62 ①): 拉取待确认 rides the PULL tier, which both codes satisfy on the server's ladder.
+    // 16 -> 13 (owner 2026-10-27, 「不用就去掉」): 旧「仪表盘」, 旧「备料行」 and 旧「异常队列」 were retired from 深度工具.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(13)
     ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
     await flushUi()
 
@@ -827,7 +832,8 @@ describe('StockPreparationWorkspace shell', () => {
     expect(rail.textContent).toContain('项目工作台')
     // NAMING: snapshot uses 快照批次 / batch vocabulary (collision-avoidance requirement).
     expect(rail.textContent).toContain('BOM 快照批次与差异')
-    expect(rail.textContent).toContain('异常队列')
+    // 旧「异常队列」 was retired (owner 2026-10-27); its label must not come back into the rail.
+    expect(rail.textContent).not.toContain('异常队列')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toContain('只读')
     expect(boundary.textContent).toMatch(/K3 Save/)
@@ -840,7 +846,8 @@ describe('StockPreparationWorkspace shell', () => {
     const rail = root.querySelector('.sp-rail') as HTMLElement
     expect(rail.textContent).toContain('Project Workspace')
     expect(rail.textContent).toContain('BOM Snapshot Batch & Diff')
-    expect(rail.textContent).toContain('Exception Queue')
+    // 旧「异常队列」 was retired (owner 2026-10-27); its English label must not come back either.
+    expect(rail.textContent).not.toContain('Exception Queue')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toMatch(/readonly/i)
   })
@@ -877,37 +884,10 @@ describe('StockPreparationWorkspace shell', () => {
     expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
   })
 
-  it('still opens the dashboard tab for a platform admin, with no single-endpoint badge', async () => {
-    const root = await mountShell()
-    ;(root.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
-    await flushUi()
-    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
-    expect(panel.getAttribute('data-active')).toBe('dashboard')
-    // The dashboard aggregates MULTIPLE existing endpoints client-side — it has no single endpoint
-    // to badge, so that line is skipped for it only (see StockPreparationViewTab.noEndpointBadge).
-    expect(root.querySelector('[data-testid="stock-prep-panel-endpoint"]')).toBeNull()
-    expect(root.querySelector('[data-testid="stock-prep-dashboard"]')).not.toBeNull()
-  })
-
-  it('passes the default integration scope to the dashboard readonly request', async () => {
-    localStorage.setItem('tenantId', 'tenant-from-integration-scope')
-    localStorage.setItem('workspaceId', 'workspace-from-integration-scope')
-    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({
-      ok: true,
-      data: { projectCount: 0, statusCounts: {}, projects: [] },
-    }), { status: 200 }))
-
-    const shell = await mountShell()
-    ;(shell.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
-    await waitForSelector(container!, '[data-testid="stock-prep-dashboard-empty"]')
-
-    const call = h.apiFetch.mock.calls.find(([value]) => String(value).includes('/stock-preparation/projects'))
-    expect(call).toBeDefined()
-    const [url, options] = call as [string, unknown]
-    expect(url).toContain('tenantId=tenant-from-integration-scope')
-    expect(url).toContain('workspaceId=workspace-from-integration-scope')
-    expect(options).toBeUndefined()
-  })
+  // The two dashboard-tab cases that stood here (opens with no endpoint badge; passes the integration
+  // scope to its read) went with the tab: 旧「仪表盘」 was retired on 2026-10-27 (owner: 「不用就去掉」),
+  // and the retirement contract below now covers `?tab=dashboard`. StockPreparationDashboardView.spec.ts
+  // still covers the unwired component itself.
 
   it('shows a concrete view panel as a readonly GET placeholder and switches on tab click', async () => {
     const root = await mountShell()
@@ -920,12 +900,13 @@ describe('StockPreparationWorkspace shell', () => {
     expect(endpoint.textContent).toMatch(/GET/)
     expect(endpoint.textContent).toContain('/api/integration/stock-preparation/projects')
 
-    const exceptionTab = root.querySelector('[data-testid="stock-prep-tab-exception-queue"]') as HTMLButtonElement
-    exceptionTab.click()
+    // Retargeted from the retired 旧「异常队列」 (owner 2026-10-27) to the last legacy tab still in 深度工具.
+    const unitTab = root.querySelector('[data-testid="stock-prep-tab-unit-conversion"]') as HTMLButtonElement
+    unitTab.click()
     await flushUi()
     const panelAfter = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
-    expect(panelAfter.getAttribute('data-active')).toBe('exception-queue')
-    expect(panelAfter.querySelector('[data-testid="stock-prep-desc-exception-queue"]')).not.toBeNull()
+    expect(panelAfter.getAttribute('data-active')).toBe('unit-conversion')
+    expect(panelAfter.querySelector('[data-testid="stock-prep-desc-unit-conversion"]')).not.toBeNull()
   })
 
   // Shared project context (view 1 → view 2): values-free fixtures behind the REAL service modules
@@ -1161,7 +1142,7 @@ describe('StockPreparationWorkspace shell', () => {
     expect(asked[0]).toContain('includePullTargets=1')
 
     // ONCE PER MOUNT: leaving the tab and coming back must not re-run the scan.
-    ;(root.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
+    ;(root.querySelector('[data-testid="stock-prep-tab-unit-conversion"]') as HTMLButtonElement).click()
     await flushUi()
     ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
     await flushUi()
@@ -1197,14 +1178,23 @@ describe('StockPreparationWorkspace shell', () => {
           },
         }), { status: 200 })
       }
-      if (target.includes(`${SYNC_ACTION_BASE}/dry-run`)) {
+      // R67 ④: the dry run is enqueued (POST, no projectNo in the query) and polled (GET …?projectNo=).
+      if (target.includes(`${SYNC_ACTION_BASE}/dry-run-jobs`) && !target.includes('projectNo=')) {
+        return new Response(JSON.stringify({ ok: true, data: { jobId: 'job_ws', status: 'running', elapsedMs: 0 } }), { status: 202 })
+      }
+      if (target.includes(`${SYNC_ACTION_BASE}/dry-run-jobs`)) {
         return new Response(JSON.stringify({
           ok: true,
           data: {
-            status: 'ready',
-            canApply: true,
-            dryRunToken: 'tok_ws',
-            counts: { add: 1, update: 0, skip: 0, inactive: 0, manualConfirm: 0 },
+            jobId: 'job_ws',
+            status: 'succeeded',
+            elapsedMs: 0,
+            result: {
+              status: 'ready',
+              canApply: true,
+              dryRunToken: 'tok_ws',
+              counts: { add: 1, update: 0, skip: 0, inactive: 0, manualConfirm: 0 },
+            },
           },
         }), { status: 200 })
       }
@@ -1254,6 +1244,14 @@ describe('StockPreparationWorkspace shell', () => {
     // THE ASSERTION THIS PR IS ABOUT: the same route shape 项目备料页's board button produces.
     expect(h.router.push).toHaveBeenCalledWith({ path: '/multitable/sheet_x/view_x' })
     expect(h.router.push).not.toHaveBeenCalledWith({ path: '/multitable' })
+    // R67 ④: 项目工作台's 试算 went through the background job lane — enqueued once, polled — and
+    // never through the synchronous route a 60 s gateway timeout cuts off.
+    const dryRunCalls = h.apiFetch.mock.calls
+      .map((call: unknown[]) => ({ url: String(call[0]), method: (call[1] as RequestInit | undefined)?.method ?? 'GET' }))
+      .filter((call: { url: string }) => call.url.includes(`${SYNC_ACTION_BASE}/dry-run`))
+    expect(dryRunCalls.filter((call: { url: string; method: string }) => call.method === 'POST' && call.url.includes('/dry-run-jobs'))).toHaveLength(1)
+    expect(dryRunCalls.some((call: { url: string; method: string }) => call.method === 'GET' && call.url.includes('/dry-run-jobs?') && call.url.includes('projectNo=PRJ-WS-1'))).toBe(true)
+    expect(dryRunCalls.some((call: { url: string }) => /\/dry-run(\?|$)/.test(call.url))).toBe(false)
   })
 
   it('打开备料多维表: with NO handle 项目工作台 keeps the old destination, and the label says so', async () => {
@@ -1263,7 +1261,7 @@ describe('StockPreparationWorkspace shell', () => {
 
     const link = await openMultitableLinkOnProjectWorkspace(root)
     expect(link.getAttribute('data-fill-target')).toBe('none')
-    expect(link.textContent).toContain('打开多维表工作台')
+    expect(link.textContent).toContain('打开多维表首页')
 
     link.click()
     await flushUi()
@@ -1358,44 +1356,36 @@ describe('StockPreparationWorkspace shell', () => {
     expect(root.textContent || '').not.toContain('proj-alpha')
   })
 
-  it('shares the projectId with views 5 and 6 — prep-line and exception views open already scoped', async () => {
-    mockStockPrepReads()
-    const root = await mountShell()
+  // 旧「备料行」(view 5) and 旧「异常队列」(view 6) were retired on 2026-10-27 (owner: 「不用就去掉」), and
+  // 旧「仪表盘」 with them. The
+  // test that used to walk the shared projectId into them is replaced by the retirement contract: no
+  // tab, no panel, no read of either route — and a stale `?tab=` deep link folds back to the landing
+  // instead of opening a page that no longer exists.
+  it('retired legacy tabs (dashboard, prep-line, exception-queue): no rail item, and a stale ?tab= deep link folds to the landing', async () => {
+    // Nothing answers the preflight here, so this platform admin's landing is 开始使用 (D2, asserted in
+    // its own case above); read it from a plain mount rather than restating it.
+    const landingRoot = await mountShell()
+    const landing = landingRoot.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')
+    expect(landing).toBe('getting-started')
 
-    // The dashboard (H1) is now the default tab — switch to view 1 explicitly before its row mounts.
-    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
-    await flushUi()
-
-    // Pick a project in view 1 (REAL wire), then enter the two W5 tabs.
-    const selectButton = (await waitForSelector(
-      root,
-      '[data-testid="stock-prep-project-select"]',
-    )) as HTMLButtonElement
-    selectButton.click()
-    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
-
-    // View 5 (prep lines): opens scoped — no re-select, the list read carries the SAME handle.
-    ;(root.querySelector('[data-testid="stock-prep-tab-prep-line"]') as HTMLButtonElement).click()
-    await waitForSelector(root, '[data-testid="stock-prep-line-overview"]')
-    expect(root.querySelector('[data-testid="stock-prep-line-no-project"]')).toBeNull()
-    const prepLineCalls = h.apiFetch.mock.calls
-      .map((call) => String(call[0]))
-      .filter((url) => url.includes('/prep-lines'))
-    expect(prepLineCalls.length).toBe(1)
-    expect(prepLineCalls[0]).toContain('projectId=proj-alpha')
-
-    // View 6 (exception queue): same shared scope.
-    ;(root.querySelector('[data-testid="stock-prep-tab-exception-queue"]') as HTMLButtonElement).click()
-    await waitForSelector(root, '[data-testid="stock-prep-exception-overview"]')
-    expect(root.querySelector('[data-testid="stock-prep-exception-no-project"]')).toBeNull()
-    const exceptionCalls = h.apiFetch.mock.calls
-      .map((call) => String(call[0]))
-      .filter((url) => url.split('?')[0] === '/api/integration/stock-preparation/exceptions')
-    expect(exceptionCalls.length).toBe(1)
-    expect(exceptionCalls[0]).toContain('projectId=proj-alpha')
-
-    // The internal handle stays values-free in the DOM across all tabs.
-    expect(root.textContent || '').not.toContain('proj-alpha')
+    for (const key of RETIRED_LEGACY_VIEW_KEYS) {
+      app?.unmount()
+      app = null
+      h.apiFetch.mockClear()
+      h.route.query = { tab: key }
+      const root = await mountShell()
+      expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must not be in the rail`).toBeNull()
+      const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+      expect(panel.getAttribute('data-active'), `?tab=${key} folds to the landing`).not.toBe(key)
+      expect(panel.getAttribute('data-active')).toBe(landing)
+      expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+      expect(root.querySelector(`[data-testid="stock-prep-desc-${key}"]`)).toBeNull()
+      const retiredReads = h.apiFetch.mock.calls
+        .map((call) => String(call[0]).split('?')[0])
+        .filter((url) => url === '/api/integration/stock-preparation/prep-lines'
+          || url === '/api/integration/stock-preparation/exceptions')
+      expect(retiredReads, `?tab=${key} must not read a retired route`).toEqual([])
+    }
   })
 
   it('seeds the shared project context from the ?projectId= route query (deep link / reload)', async () => {
@@ -1849,3 +1839,6 @@ describe('Stock Preparation per-view service stubs (readonly GET, values-free)',
     }
   })
 })
+
+// Preload the compiler during collection; the guard keeps its dynamic import and assertions.
+await import('typescript')

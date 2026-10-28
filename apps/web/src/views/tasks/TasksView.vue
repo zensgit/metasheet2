@@ -452,7 +452,7 @@
                  option stays enabled (only `aria-pressed` marks it), so keyboard focus stays on it
                  after activation and screen-reader focus mode can reach it; `switchStatus` makes
                  pressing it again a no-op. -->
-            <nav class="tasks-view__switcher" :aria-label="t.statusFilterLabel" data-testid="tasks-status-switcher">
+            <nav ref="statusSwitcherRef" class="tasks-view__switcher" :aria-label="t.statusFilterLabel" data-testid="tasks-status-switcher">
               <button
                 v-for="statusOption in STATUS_FILTERS"
                 :key="statusOption.value"
@@ -514,6 +514,37 @@
             <p v-if="createErrorVisible" class="tasks-view__message" data-testid="tasks-create-error" role="alert">
               {{ createErrorInvalidTitle ? t.createInvalidTitle : createErrorCode ? codeMessage(createErrorCode, t) : t.createFailed }}
             </p>
+            <!-- A create the server took while 已完成 is on: the new task is not completed, so the
+                 reloaded list leaves it out. Say so inline, without switching the filter for the
+                 viewer (it is their remembered choice). The new task's page is always offered.
+                 The 未完成 switch is offered only in a view that lists the new task; in 关注中 /
+                 我委派的 the view leaves it out under any status, so the copy does not put it down
+                 to the filter alone. Cleared by the next create, a status or view switch, and a
+                 route change.
+                 The role="status" region is always mounted and only its content comes and goes: a
+                 polite live region that enters the page together with its text is not reliably
+                 announced, while a change inside an existing one is. Empty, it takes no space. -->
+            <div data-testid="tasks-create-hidden-live" role="status">
+              <div
+                v-if="createdHidden !== null"
+                class="tasks-view__created-hidden"
+                data-testid="tasks-create-hidden-notice"
+              >
+                <span data-testid="tasks-create-hidden-text">{{
+                  createdHidden.viewLists ? t.createdHiddenByFilter : t.createdHiddenByViewAndFilter
+                }}</span>
+                <button
+                  v-if="createdHidden.viewLists"
+                  type="button"
+                  data-testid="tasks-create-hidden-show-open"
+                  @click="onShowOpenFromNotice"
+                >{{ t.createdHiddenShowOpen }}</button>
+                <router-link
+                  :to="`/tasks/${encodeURIComponent(createdHidden.id)}`"
+                  data-testid="tasks-create-hidden-open-task"
+                >{{ t.createdHiddenOpenTask }}</router-link>
+              </div>
+            </div>
             <!-- Complete/reopen results other than ok/org_missing (forbidden / not_found / error) used
                  to be silently dropped — the click just did nothing, with no way to tell "it worked" from
                  "it failed". This surfaces the failure WITHOUT clearing the list, so the row the action
@@ -677,7 +708,12 @@ import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import { onListsChanged } from '../../tasks/tasksListsBus'
-import { readTaskStatusFilter, writeTaskStatusFilter } from '../../tasks/tasksStatusFilter'
+import {
+  readTaskStatusFilter,
+  statusFilterHidesNewTask,
+  viewListsNewTask,
+  writeTaskStatusFilter,
+} from '../../tasks/tasksStatusFilter'
 import { completeNoopReason, offersReopenAll, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
 import {
   buildCreateDue,
@@ -789,6 +825,13 @@ const createErrorInvalidTitle = ref(false)
 // looks up), so no form input reaches that code; the date codes can come back for a due date the
 // pre-check let through.
 const createErrorCode = ref<string | null>(null)
+// The task the last create made when the status filter it was made under leaves it out of the
+// list (`statusFilterHidesNewTask`), shown as an inline notice; `null` otherwise. `viewLists` is
+// whether the view it was made under lists it at all (`viewListsNewTask`), fixed at create time:
+// only then does switching the status filter reach it.
+const createdHidden = ref<{ id: string; viewLists: boolean } | null>(null)
+// The status switch's nav, for moving focus after the notice's action removes the notice.
+const statusSwitcherRef = ref<HTMLElement | null>(null)
 
 // ---------------------------------------------------------------------------------------------
 // M3 (backend contract §3.1, §3.3-§3.7): subtasks, membership, followers, comments, delete.
@@ -1063,6 +1106,7 @@ async function enterDetail(id: string): Promise<void> {
 function switchView(view: TaskView): void {
   if (view === currentView.value) return
   listPageToken += 1
+  createdHidden.value = null
   currentView.value = view
   void loadList()
 }
@@ -1072,9 +1116,18 @@ function switchView(view: TaskView): void {
 function switchStatus(status: TaskStatusFilter): void {
   if (status === currentStatus.value) return
   listPageToken += 1
+  createdHidden.value = null
   currentStatus.value = status
   writeTaskStatusFilter(status)
   void loadList()
+}
+
+/** The hidden-by-filter notice's action: the same switch as pressing 未完成. The notice (and the
+ *  button that was pressed) goes away, so focus moves to the 未完成 button it pressed for the
+ *  viewer instead of falling back to the page body. */
+function onShowOpenFromNotice(): void {
+  switchStatus('open')
+  void focusAfterSwap(() => statusSwitcherRef.value, 'tasks-status-switch-open')
 }
 
 /** After a create the server took: the title and the due fields are emptied (the mode stays). */
@@ -1087,6 +1140,7 @@ function clearCreateForm(): void {
 async function onCreate(): Promise<void> {
   const title = newTitle.value.trim()
   if (!title || creating.value) return
+  createdHidden.value = null
   createErrorVisible.value = false
   createErrorInvalidTitle.value = false
   createErrorCode.value = null
@@ -1117,6 +1171,10 @@ async function onCreate(): Promise<void> {
     if (result.kind === 'ok') {
       clearCreateForm()
       notifyTasksChanged()
+      // Decided from the filter alone (a new task is never completed), not from the reloaded rows.
+      if (statusFilterHidesNewTask(currentStatus.value)) {
+        createdHidden.value = { id: result.id, viewLists: viewListsNewTask(currentView.value) }
+      }
       await loadList()
     } else if (result.kind === 'org_missing') {
       orgMissingFromAction.value = true
@@ -1990,6 +2048,7 @@ watch(taskId, (id) => {
   // what's showing, so a list action still in flight from before this navigation must be treated
   // as stale too.
   listPageToken += 1
+  createdHidden.value = null
   // A list READ still in flight from before this navigation is stale too: bump the generation so
   // its late result (including a late org_missing) cannot paint over the page now showing.
   listGeneration += 1
@@ -2060,6 +2119,15 @@ onMounted(async () => {
   margin: 4px 0;
   font-size: 0.9em;
   color: var(--el-text-color-secondary, #666);
+}
+
+/* A confirmation, not a helper line: normal text size and colour, unlike .tasks-view__note. */
+.tasks-view__created-hidden {
+  margin: 4px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .tasks-view__create-due {

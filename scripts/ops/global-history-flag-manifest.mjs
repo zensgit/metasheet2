@@ -48,6 +48,17 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'INTEGRATION_YIDA_OWNER_SEND_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true enables the reviewed owner-only Yida single-target manual CREATE flow. Draft/preview/approval/submit refuse while off; local history and revoke remain owner/admin gated and perform no remote IO. Token HTTP and form HTTP also recheck this literal. This switch is not a grant: current owner plus live integration-admin, tenant-level null workspace, immutable plan/material/target evidence, one confirmed admission and the permanent CREATE fence are mandatory. No bulk, UPDATE, Automation sender or automatic retry. Turning off cannot recall admitted requests already in flight; unknown is never retried. Real customer access, token exchange, Yida sending and deployment require separate owner authorization.',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime; packages/core-backend/src/integration/yida-owner-runtime.ts; plugins/plugin-integration-core/lib/yida-owner-send-port.mjs',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',
@@ -808,7 +819,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'low',
     purpose:
-      'Opt-in UI gate for multitable rectangular copy and fill. Default OFF; enabled only by the exact build-time string true.',
+      'Opt-in UI gate for multitable rectangular copy and fill (range select, drag-fill, copy range, paste range; range writes cannot be undone, at most 1,000 cells). Enabled only by the exact build-time string true. Default OFF in Dockerfile.frontend and scripts/ops/build-dingtalk-staging-images.sh. The offline (on-prem) package builds it ON by default (owner decision 2026-10-18, #6079): scripts/ops/multitable-onprem-package-build.sh defaults it to true, accepts only the literal strings true and false, refuses to package a web dist whose baked value differs, and records the value in BUILD_PROVENANCE.json webBuildFlags.',
     source: 'apps/web/src/multitable/utils/grid-range-fill-flags.ts#isGridRangeFillEnabled',
   },
   {

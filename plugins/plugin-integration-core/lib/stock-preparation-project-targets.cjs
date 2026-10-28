@@ -34,6 +34,7 @@
 
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 const {
@@ -292,6 +293,10 @@ async function provisionProjectSheet({ context, projectId, tenantId, projectNo, 
     }
   }
   const options = await syncProjectSheetContractOptions({ provisioning, projectId, objectId: template.objectId })
+  // B (awaiting the owner's A/B/C ruling): the PLM columns are read-only for people from the first moment
+  // the sheet can be opened — this runs before the route registers or grants anything. Every call, like the
+  // option sync above (idempotent; a retry re-runs it).
+  const plmColumnLock = await markProjectSheetPlmSystemColumns({ provisioning, projectId, objectId: template.objectId })
   return {
     created: ensured.mode === 'canonical_create',
     mode: ensured.mode,
@@ -302,6 +307,129 @@ async function provisionProjectSheet({ context, projectId, tenantId, projectNo, 
     todoView,
     ownBaseSource: ensured.evidence ? ensured.evidence.ownBaseSource : null,
     options,
+    plmColumnLock,
+  }
+}
+
+// ── B (awaiting owner): the plm_system columns of a PROJECT sheet are read-only for people ────────────
+//
+// WHY. Field review on #6452: a project sheet is born with its PLM columns (项目号 / 唯一键 / PLM 物料ID /
+// BOM 路径 / 图号 / 名称 / 材料 / 用量 / 有效 / 刷新痕迹 …) editable, and the grid's range fill writes up to
+// 1,000 cells irreversibly. One fill over 唯一键 or 项目号 and the NEXT pull plans against corrupted keys.
+//
+// WHAT. Every `plm_system` column of the frozen main template gets `property.humanWriteLock = 'plm_system'`
+// through the host's own field-metadata port. The HOST does the refusing (core-backend
+// multitable/human-write-lock.ts): person writes — grid cell edit, range fill / paste, REST single and bulk
+// patch, REST create, xlsx import, the collab (Yjs) flush, form submit — are refused with
+// FIELD_READONLY_PLM_SYSTEM; the plugin's records SDK path (dry-run → apply, the background dry-run job, the
+// large-BOM lane, the repair/persist lanes) never consults the lock and keeps writing. `human_preserved`
+// columns are never marked. There is no administrator override.
+//
+// WHERE. Only a project's REGISTERED sheet: the create leg passes the derived `…_p_<digest>` object id, the
+// repair leg passes the REGISTRY ROW's object id (which may be an adopted older sandbox sheet — the runbook's
+// adopt path). Anything outside the stock-prep sandbox namespace, and the read-only overview, is refused
+// before any IO: the overview is already host-read-only for every person, and nothing else is a project
+// sheet. The deployment's env table is never passed by either caller (option B covers project sheets only).
+//
+// IDEMPOTENT. With the host's `getObjectField` read port (every current host) a column already carrying the
+// lock is not written again and a column the sheet does not have is skipped and COUNTED, never invented. On
+// a host without the read port every column is patched (the host merge is idempotent).
+const HUMAN_WRITE_LOCK_PROPERTY_KEY = 'humanWriteLock'
+const HUMAN_WRITE_LOCK_PLM_SYSTEM = 'plm_system'
+const PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS = Object.freeze(
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((field) => field.ownership === 'plm_system').map((field) => field.id),
+)
+
+// The stock-prep writable namespace every project sheet (derived or adopted) lives in. The overview's id
+// (`plm_stock_preparation_project_overview`) is outside it, and is named explicitly below as well.
+const STOCK_PREPARATION_SANDBOX_OBJECT_ID_PREFIX = 'plm_stock_preparation_sandbox_'
+const STOCK_PREPARATION_OVERVIEW_OBJECT_ID = STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE.objectId
+
+function isPlmLockTargetObjectId(objectId) {
+  return typeof objectId === 'string'
+    && objectId.startsWith(STOCK_PREPARATION_SANDBOX_OBJECT_ID_PREFIX)
+    && objectId.length > STOCK_PREPARATION_SANDBOX_OBJECT_ID_PREFIX.length
+    && objectId !== STOCK_PREPARATION_OVERVIEW_OBJECT_ID
+}
+
+function hasPlmSystemLock(property) {
+  return Boolean(property) && typeof property === 'object' && property[HUMAN_WRITE_LOCK_PROPERTY_KEY] === HUMAN_WRITE_LOCK_PLM_SYSTEM
+}
+
+/**
+ * Mark ONE project sheet's plm_system columns read-only for people. Returns a values-free summary:
+ * `{ fieldCount, marked, alreadyMarked, missing, readBeforeWrite, markedFieldIds }` (logical template ids).
+ * Any host failure is ONE typed code, `STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_FAILED`, naming the logical
+ * column it stopped at — the same request can be retried (columns already marked are skipped).
+ */
+/**
+ * PR B readiness: READ the PLM column lock of ONE project sheet — no write. `{ fieldCount, marked,
+ * missing, unmarked, readBeforeWrite }`; a host without `getObjectField` answers `readBeforeWrite: false`
+ * (nothing can be proven) and a host failure propagates to the caller (readiness reads it as not ok).
+ */
+async function readProjectSheetPlmSystemColumnLock({ provisioning, projectId, objectId } = {}) {
+  if (!isPlmLockTargetObjectId(objectId)) {
+    throw new StockPreparationProjectTargetError(500, 'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED', 'only a project\'s registered stock-preparation sheet carries the PLM column lock', { objectIdShape: 'not_project_sheet' })
+  }
+  const fieldCount = PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS.length
+  if (!provisioning || typeof provisioning.getObjectField !== 'function') {
+    return { fieldCount, marked: 0, missing: fieldCount, unmarked: 0, readBeforeWrite: false }
+  }
+  let marked = 0
+  let missing = 0
+  let unmarked = 0
+  for (const fieldId of PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS) {
+    const current = await provisioning.getObjectField({ projectId, objectId, fieldId })
+    if (!current) { missing += 1; continue }
+    if (hasPlmSystemLock(current.property)) marked += 1
+    else unmarked += 1
+  }
+  return { fieldCount, marked, missing, unmarked, readBeforeWrite: true }
+}
+
+async function markProjectSheetPlmSystemColumns({ provisioning, projectId, objectId } = {}) {
+  if (!isPlmLockTargetObjectId(objectId)) {
+    throw new StockPreparationProjectTargetError(500, 'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED', 'only a project\'s registered stock-preparation sheet carries the PLM column lock', { objectIdShape: 'not_project_sheet' })
+  }
+  if (!provisioning || typeof provisioning.patchObjectFieldProperty !== 'function') {
+    throw new StockPreparationProjectTargetError(503, 'STOCK_PREPARATION_PROJECT_TARGET_PROVISIONING_UNAVAILABLE', 'marking the PLM columns needs multitable.provisioning.patchObjectFieldProperty', { requiredMethods: ['patchObjectFieldProperty'] })
+  }
+  const readBeforeWrite = typeof provisioning.getObjectField === 'function'
+  const markedFieldIds = []
+  let alreadyMarked = 0
+  let missing = 0
+  for (const fieldId of PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS) {
+    try {
+      if (readBeforeWrite) {
+        const current = await provisioning.getObjectField({ projectId, objectId, fieldId })
+        if (!current) { missing += 1; continue }
+        if (hasPlmSystemLock(current.property)) { alreadyMarked += 1; continue }
+      }
+      await provisioning.patchObjectFieldProperty({
+        projectId,
+        objectId,
+        fieldId,
+        propertyPatch: { [HUMAN_WRITE_LOCK_PROPERTY_KEY]: HUMAN_WRITE_LOCK_PLM_SYSTEM },
+      })
+      markedFieldIds.push(fieldId)
+    } catch (error) {
+      const wrapped = new StockPreparationProjectTargetError(
+        error && Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500,
+        'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_FAILED',
+        'the project sheet\'s PLM columns could not all be marked read-only; the same request can be retried',
+        { objectId, fieldId },
+      )
+      wrapped.cause = error
+      throw wrapped
+    }
+  }
+  return {
+    fieldCount: PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS.length,
+    marked: markedFieldIds.length,
+    alreadyMarked,
+    missing,
+    readBeforeWrite,
+    markedFieldIds,
   }
 }
 
@@ -657,6 +785,11 @@ module.exports = {
   resolveProjectTargetForAction,
   provisionProjectSheet,
   syncProjectSheetContractOptions,
+  markProjectSheetPlmSystemColumns,
+  readProjectSheetPlmSystemColumnLock,
+  PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS,
+  HUMAN_WRITE_LOCK_PROPERTY_KEY,
+  HUMAN_WRITE_LOCK_PLM_SYSTEM,
   grantProjectSheetRoles,
   PROJECT_SHEET_TENANT_CLAIM_REQUIRED_CODE,
   planProjectSheetCustomerPacks,

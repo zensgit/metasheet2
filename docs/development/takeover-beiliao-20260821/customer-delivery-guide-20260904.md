@@ -84,6 +84,8 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 | `Invoke-RestMethod http://127.0.0.1/api/health` | 正常返回 |
 | 版本号 | `node -e "console.log(require('<部署根目录>/packages/core-backend/dist/src/version.js'))"` 对应这次打包的提交,不是升级前旧值(没变说明升级没真正生效) |
 
+**`/api/health` 里的 `build` 字段(addresses #6463)**:本地 Windows 起法不设 `METASHEET_BUILD_*` 环境变量时,`build.commit` / `build.imageTag` / `build.created` 现在取自部署根目录的 `BUILD_PROVENANCE.json`(`gitCommit` / `gitRef` / `builtAt`),此时 `build.source` 显示 `provenance-file`、`build.imageDigest` 仍为 null。只要设了任何一个 `METASHEET_BUILD_*` 变量,就只用环境变量、不读文件。文件从工作目录与后端模块目录向上最多找 6 层;要钉死路径就设 `METASHEET_BUILD_PROVENANCE_PATH`(绝对路径;设了就只认这一个路径,不再向上找,也就不会读到部署根目录上层意外放置的文件)。文件缺失、损坏或超过 1 MB(按文件大小判断,不读内容)时各字段保持 null,不影响健康检查。后端按文件的大小与修改时间判断是否变化,所以升级后按 ① 把新的 `BUILD_PROVENANCE.json` 拷到部署根目录,下一次健康检查(一个轮询周期内)就会显示新值,不需要再重启后端。
+
 **失败处理**:脚本第 4-7 步之间任何异常,会**自动**停 pm2、打印"RESTORE REQUIRED"框(备份路径 + 每个被替换路径的精确恢复命令),照抄执行即可,不用自己回忆回退步骤。若尚未开始执行就失败(如 SHA-256 校验不过),说明包传输损坏,重新传一次,不要跳过校验。
 
 **升级后必做**:①`BUILD_PROVENANCE.json` 不会被脚本自动刷新,需要手动从包根目录拷到部署根目录;②确认备料所在 base 能正常打开、四张受管表都能点开(零默认视图的表会拖累整个 base 打不开);③挑 1-2 张与备料无关的既有业务表(如考勤/审批)比对升级前后行数,必须一致,不一致立即停止并评估数据库级回滚。
@@ -649,9 +651,18 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 | 单次拉取翻页上限 | 100 页 | **每次读表内部**的分页数,每次调用归零,不是总量;222 已显式写入配置 `maxPages:100` |
 | 单次拉取总读次数上限 | **30000 次**(222 于 2026-09-05 写入) | 配置项 `maxReadCount`;**不设即无上限**——代码默认 undefined,预算检查直接跳过 |
 | 单次拉取总耗时上限 | **600000 毫秒**(222 于 2026-09-05 写入) | 配置项 `maxElapsedMs`;同上,不设即无上限 |
+| 单次拉取同时在途的 PLM 读 | **4 条**(R67 起的代码默认) | 动作配置 `readConcurrency`(与 `maxReadCount` 同一份 JSON);取值 1–8,**越界按边界执行而不是拒绝**(0→1、99→8),非数字按默认 4;**写 1 = R67 之前的逐条串行**。只改"同时发几条读",不改读什么、不改计划与 revision;见下方「读并发」 |
 | Excel 导出上限 | 20000 行 | 代码常量 |
 | 单次试算的**行级错误条目**上限 | **5000 条**(2026-09-06 起) | 代码常量 `ROW_ERROR_LIMIT`;可由动作配置 `rowErrorLimit` 覆盖,硬顶 20000(`ROW_ERROR_LIMIT_CEILING`),**写超过硬顶的值会被拒绝(422)而不是按硬顶执行**。此旋钮**仅对前台交互式试算通道生效**,大 BOM 后台展开通道恒用默认 5000 |
 | 超过 `maxRows` 时 | **不报错、不截断**,转入"大 BOM 分批"路径 | 界面有专门面板;后端按每批 100–1000 行写入 |
+
+**读并发(R67 起)**:试算 / 应用 / 内部持久化在展开 BOM 时,会按展开顺序提前读取后面要读的节点(子件、BOM 头、明细),最多 `readConcurrency` 条同时在途(默认 4)。展开结果、证据(evidence)、试算 revision 与逐条串行时**逐字节相同**——提前读到的结果仍按原顺序被消费。大 BOM **后台**展开作业不受影响,仍逐条串行。
+
+- **读次数的两个口径**:证据 / 审计里的 `readCount`(`evidence.expansion.readCount`)是**展开实际消费**的查询条数(与逐条串行时相同);试算响应里 `plmReadPhase.queriesIssued` 才是 **PLM 实际收到**的查询条数。正常完成时两者相等;提前中止时后者可能更大(见下)。
+- **客户 PLM 侧的变化**:同一次试算会同时占用最多 `readConcurrency` 条查询 / 连接(原来恒为 1 条)。数据源连接池上限是数据源自身的 `poolConfig.max`(未设为 20),它须 ≥ `readConcurrency` + 同时在用这条数据源的其它请求数;不够时多出的读在连接池里排队,排队超过取连接超时(30 秒:mssql 10 不设、连接池库 tarn 的默认值)的那条读失败,整次试算判为 `read_failed`,causeClass 为驱动给出的超时类名(tarn 的取连接超时没有设置类名,实际显示为通用的 `Error`)。
+- **提前中止的代价**:遇到循环、超上限、读失败而提前结束时,可能已经多发了一些最终没用上的读——单页读最多 16 × N 条(N = `readConcurrency`,默认 64 条);多页读会读完已开始那条读的剩余页,上限 16 × N + N × (`maxPages` − 1)。失败 / 中止的试算**不等待**仍在途的提前读:错误一确定就返回;那几条读在后台跑完后被丢弃(最长占用连接到单次读超时为止),返回之后不会再向 PLM 发任何新的查询(包括多页读的下一页)。
+- **行自检(所有宽度,包括 1)**:每次读回来的行必须满足这次读自己的等值条件(列名取自读计划的配置)。比较规则:按大小写不敏感、去尾空格比较,数值形态按数值比较('0010' = 10);不做全半角 / Unicode 折叠。有一行不满足,即视为传输串线(一次读拿到了另一次读的结果),整次试算判失败,错误码 `read_row_mismatch`(`canApply: false`,不发令牌,应用拒绝,不写任何行)。数据源**声明**未过滤(`filtersApplied: false`,桥接只读源可以合法地返回整表)的读,改为按同一规则在本地过滤后再使用:整表返回仍然合法,串线拿到的别的件的行会被滤掉,不会被悄悄展开成这个件的子件。
+- **怎么核对**:试算响应在 `evidence` 旁边新增 `plmReadPhase`(五个整数,不含任何业务值):`readConcurrency`(本次宽度)、`maxReadsInFlight`(实际最多同时在途)、`queriesIssued`(PLM 实际收到的查询数)、`queriesNotConsumed`(其中没用上的,正常完成时为 0)、`wallMs`(读阶段耗时,毫秒)——下次现场报告可直接对比。
 
 **行级错误条目封顶(2026-09-06 起)**:一个源数据很差的项目(零件库整块缺、数量列写成文字)以前会按 BOM 位置数一条一条累计行级错误,数万条撑爆响应、revision 哈希与确认账本。现在数组封到 5000 条,**但计数不封顶**:试算结果的 `summary` / evidence 会给出 `rowErrorsTotal`(真实总数)、`rowErrorsTruncated: true` 与按类型的真实计数,`errorTypes` 也照样列出"每一条都被丢掉"的那种类型;`missing_child_bom` 这类硬阻断类型即便条目全被丢掉,也照样挡住写入(fail-closed)。**5000 条以内的项目一切照旧**——条目内容与顺序、试算 revision、evidence、待确认项身份全部字节级不变,没有任何在飞的试算令牌或待确认项受影响。**只有真的超过 5000 条的项目**,其试算 revision 会变:在飞的 `dryRunToken` 会 409 MISMATCH、已发起的人工确认会 SUPERSEDED 重开,重跑一次试算即可。这可以接受——这类项目在封顶之前本来就跑不出可用结果。
 

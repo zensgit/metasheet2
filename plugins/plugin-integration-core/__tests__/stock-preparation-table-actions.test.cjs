@@ -6,19 +6,35 @@
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
-  applyStockPreparationAction,
+  applyStockPreparationAction: rawApplyStockPreparationAction,
   assertStockPrepApplySandboxAllowed,
   resolveStockPrepApplySandboxPolicy,
   createStockPreparationTableActionRegistry,
-  dryRunStockPreparationAction,
+  dryRunStockPreparationAction: rawDryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
   createTargetScopedRecordsApi,
   __internals: tableActionInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+// Batch-refresh phase 0 step 1: apply requires the project write guard (the route holds the lease) and an
+// applicable dry-run binds its token to the plan generation. This suite predates that, so it calls the lib
+// through the REAL lock module (in memory, support/stock-preparation-project-write-lock-kit.cjs) exactly the way
+// the routes do: the dry-run with the generation binder, the apply inside the lease with the guard.
+const projectWriteLockHarness = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs')).createLibWriteLockHarness()
+const applyStockPreparationAction = projectWriteLockHarness.wrapApply(rawApplyStockPreparationAction)
+const dryRunStockPreparationAction = projectWriteLockHarness.wrapDryRun(rawDryRunStockPreparationAction)
+
+// A hand-forged token must also carry a CURRENT plan-generation binding (bumped the way an applicable
+// preview would) to get past the binding check — so the forgery tests below still prove what they always
+// proved: the RECOMPUTE refuses, whatever the token says.
+async function currentWriteBindingFor(action, parameters) {
+  const generation = await projectWriteLockHarness.lock.bumpGeneration(projectWriteLockHarness.scopeOf({ action, parameters }), { reason: 'small_preview' })
+  return { writeScope: generation.scopeKey, writeGeneration: generation.generation, writeGenerationToken: generation.generationToken }
+}
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
@@ -73,6 +89,13 @@ function createMemoryStorage() {
     },
     async delete(key) {
       map.delete(key)
+    },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!map.has(key)) return null
+      const value = map.get(key)
+      map.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
     },
   }
 }
@@ -914,7 +937,8 @@ async function testLargeBomCapsDoNotMoveTheInteractiveDryRun() {
     largeBom: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
   })
   assert.equal(bounded.status, 'large_bom_bounded')
-  assert.deepEqual(boundedWithCaps, bounded, 'a background cap block does not move the bounded dry-run')
+  // R67 ③: the read phase's wall-clock reading is the one value two calls do not share.
+  assert.deepEqual(withoutReadPhaseClock(boundedWithCaps), withoutReadPhaseClock(bounded), 'a background cap block does not move the bounded dry-run')
 
   // And the same on the path that DOES issue a token: everything but the token
   // itself (a fresh random string each call) must match.
@@ -924,7 +948,7 @@ async function testLargeBomCapsDoNotMoveTheInteractiveDryRun() {
   assert.equal(typeof ready.dryRunToken, 'string')
   const { dryRunToken: _a, ...readyRest } = ready
   const { dryRunToken: _b, ...readyWithCapsRest } = readyWithCaps
-  assert.deepEqual(readyWithCapsRest, readyRest, 'a background cap block does not move the ready dry-run')
+  assert.deepEqual(withoutReadPhaseClock(readyWithCapsRest), withoutReadPhaseClock(readyRest), 'a background cap block does not move the ready dry-run')
   assert.equal(readyWithCaps.revision, ready.revision, 'and it does not move the revision an apply token binds')
 }
 
@@ -953,6 +977,7 @@ async function testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites() {
     parametersHash: tableActionInternals.hashJson(parameters),
     revision: dryRun.revision,
     conflictPolicyReview: null,
+    ...(await currentWriteBindingFor(action, parameters)),
   })
 
   await assert.rejects(
@@ -1010,6 +1035,7 @@ async function testMissingChildBomDryRunBlocksApplyTokenAndWrites() {
     parametersHash: tableActionInternals.hashJson(parameters),
     revision: dryRun.revision,
     conflictPolicyReview: null,
+    ...(await currentWriteBindingFor(action, parameters)),
   })
 
   await assert.rejects(

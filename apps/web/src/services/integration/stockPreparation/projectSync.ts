@@ -41,6 +41,13 @@
 // reports as SKIP. When it genuinely fails, the step reports FAIL — visibly, with its status — but
 // `report.imported` and the verdict are computed from step 3 alone, because the BOM is already in the
 // sheet by then and telling the operator otherwise would be a lie that costs them a re-run.
+// Being a separate consumer, it re-resolves the source on its own — WITHOUT the workspace hint steps 1
+// and 3 carry — so step 3's `sourceScopeDigest` rides along and the server refuses (409
+// STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT) rather than keep another source's rows as this batch.
+// It also re-READS that source, after the write: step 3's `sourceContentDigest` rides along too, and the
+// server refuses (409 STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH) when the source changed since step 3
+// or the sheet does not hold everything step 3 read (#6475 round 2). And a PARTIAL write is never
+// archived at all: step 4 is not attempted, because the batch would hold rows the sheet does not.
 //
 // VALUES-FREE. A step result carries a REASON CODE from the closed vocabulary below plus a detail map
 // of counts, HTTP statuses and clamped server tokens. No server message and no cell content is ever
@@ -90,6 +97,37 @@ export type StockPreparationProjectSyncReason =
   | 'PLAN_PROJECT_SHEET_ARCHIVED'
   | 'PLAN_TARGET_NOT_OURS'
   | 'PLAN_TARGET_SCHEMA_INCOMPLETE'
+  // R67 ④ — the background dry-run lane's own two outcomes. Each has a next step 「稍后再试」 alone
+  // would get wrong: someone else's trial of this project is still reading PLM (wait, do not start a
+  // second one), or the server restarted under a running trial (just press again).
+  | 'PLAN_DRY_RUN_BUSY'
+  | 'PLAN_DRY_RUN_INTERRUPTED'
+  // Batch-refresh phase 0 step 1 — the project write lock. WRITE_LOCKED: another run is writing this
+  // project right now (retry later); LOCK_UNAVAILABLE: the server's write-lock store cannot be reached
+  // (a platform-admin matter — retrying alone does not fix it).
+  | 'PLAN_PROJECT_WRITE_LOCKED'
+  | 'PLAN_WRITE_LOCK_UNAVAILABLE'
+  // Review round 1: lost a race for the lock with no writer holding it ("system busy", never "someone
+  // else is writing").
+  | 'PLAN_WRITE_LOCK_BUSY'
+  // 备料分批拉取第一期 step 3 PR B (plan §5.1 / §9.4 L03): a PILOT project's BOM exceeded a small-lane cap.
+  // The server refused the pull (409) instead of handing it to the large lane — a FAILURE, never a skip: the
+  // large lane is refused for pilot projects, so the panel must not auto-start it, and the owner decides.
+  // Its sibling: the server could not READ the pilot marker (503) — also a failure, fail closed.
+  | 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT'
+  | 'PLAN_PILOT_STATE_UNREADABLE'
+  // 备料分批拉取第一期 step 4 PR-7 (design §13, §23.8 F-19). SUSPENDED: a governed project's preview found holds only
+  // a 拉取人员 decides (on 「拉取待确认」) — the plan WAS produced, so the step is OK with the counts, and the write
+  // SKIPs. RECOVERY_PENDING: an earlier write did not finish ("awaiting recovery" — never the source-data sentence of
+  // PLAN_NOT_APPLYABLE). STATE_MOVED: 409, a write finished / a relationship was decided during this preview
+  // ("preview again", the reason shown — never 「没能连上取数」). REFRESH_STORE_UNAVAILABLE: the batch-refresh store
+  // answered 503/501 (not the transient source sentence). REFRESH_SCOPE_CHANGED: the records sit on another sheet /
+  // tenant / source binding (409, nothing read).
+  | 'PLAN_SUSPENDED'
+  | 'PLAN_RECOVERY_PENDING'
+  | 'PLAN_STATE_MOVED'
+  | 'PLAN_REFRESH_STORE_UNAVAILABLE'
+  | 'PLAN_REFRESH_SCOPE_CHANGED'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -103,6 +141,9 @@ export type StockPreparationProjectSyncReason =
   // is no later in which the SAME caller's 403 becomes a 200, and telling them to retry would be a
   // lie.
   | 'RECONCILE_NOT_PERMITTED'
+  // PR-7 (R-62 ⑦): a SUSPENDED pull skips the ledger reconcile — the holds are decided first, and a confirm re-keys
+  // the legacy ledger (design §6.2), so asking the floor now would be asked again.
+  | 'RECONCILE_DEFERRED_SUSPENDED'
   // 3. 写入
   | 'IMPORTED'
   | 'ALREADY_UP_TO_DATE'
@@ -110,9 +151,39 @@ export type StockPreparationProjectSyncReason =
   | 'WRITE_NO_PLAN'
   | 'WRITE_PARTIAL'
   | 'WRITE_FAILED'
+  // Batch-refresh phase 0 step 1 — the write was refused or stopped by the project write lock. Each has
+  // its own next step, and none of them may read 「数据没有变化,再点一次」 when that is not what happened:
+  // LOCKED (someone else is writing: retry later), SUPERSEDED (a newer preview exists: preview again),
+  // INTERRUPTED (this run lost its write turn part-way: some rows may have landed; preview again),
+  // LOCK_UNAVAILABLE (the write-lock store is down: ask the platform admin).
+  | 'WRITE_PROJECT_LOCKED'
+  | 'WRITE_PLAN_SUPERSEDED'
+  | 'WRITE_INTERRUPTED'
+  | 'WRITE_LOCK_UNAVAILABLE'
+  // Review round 1: the write-lock refusals split by what actually happened. BUSY: lost a race for the
+  // lock, no writer. TAKEN_OVER: the run lost its turn before writing anything. LOCK_FAILED_MIDWAY: the
+  // lock store failed after some rows landed (they may be on the sheet; never "nothing changed").
+  | 'WRITE_LOCK_BUSY'
+  | 'WRITE_TAKEN_OVER'
+  | 'WRITE_LOCK_FAILED_MIDWAY'
+  // Review round 2: the stop did not say whether a host write was attempted — neither "nothing was
+  // written" nor "rows landed" can be claimed (F1). And: the token was minted unbound (a preview by a
+  // caller without write rights, or one from before the lock existed) — not "a newer preview exists" (F6).
+  | 'WRITE_STOPPED_UNCONFIRMED'
+  | 'WRITE_TOKEN_UNBOUND'
   // S2 (R-36, Q4): the puller looked at the preview of a freshly created sheet and chose not to write.
   // Nothing was written; the new sheet stays (empty, 「还没拉过」) — there is no 「撤销新建」.
   | 'WRITE_NOT_CONFIRMED'
+  // PR-7 — the apply's batch-refresh refusals (plugin stock-preparation-refresh-lanes.cjs), each with its own next
+  // step: PULL_SUSPENDED (a SKIP — holds to decide, nothing written by construction), BINDING_STALE / STATE_MOVED
+  // (preview again), RECOVERY_PENDING (awaiting recovery), REFRESH_STORE_UNAVAILABLE (503/501; "may have landed"
+  // only on details.partial === true), REFRESH_SCOPE_CHANGED (the records sit elsewhere).
+  | 'WRITE_PULL_SUSPENDED'
+  | 'WRITE_BINDING_STALE'
+  | 'WRITE_RECOVERY_PENDING'
+  | 'WRITE_STATE_MOVED'
+  | 'WRITE_REFRESH_STORE_UNAVAILABLE'
+  | 'WRITE_REFRESH_SCOPE_CHANGED'
   // 4. 批次存档
   | 'BATCH_ARCHIVED'
   | 'BATCH_ALREADY_ARCHIVED'
@@ -121,6 +192,33 @@ export type StockPreparationProjectSyncReason =
   | 'BATCH_ARCHIVE_NOT_ATTEMPTED'
   | 'BATCH_ARCHIVE_NOT_PERMITTED'
   | 'BATCH_ARCHIVE_FAILED'
+  // #6475 — the archive's own refusals, each with its own next step (classifyArchiveFailure). Only
+  // the first is a SKIP (the snapshot tables were never built — a deployment state, like the flag
+  // being off); every other one means this sync's batch is missing from 批次与差异, and says so.
+  | 'BATCH_ARCHIVE_TABLES_NOT_PROVISIONED'
+  | 'BATCH_ARCHIVE_LEDGER_CONFLICT'
+  | 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE'
+  | 'BATCH_ARCHIVE_SCHEMA_INCOMPLETE'
+  | 'BATCH_ARCHIVE_SCHEMA_UNAVAILABLE'
+  | 'BATCH_ARCHIVE_SOURCE_NOT_ACTIVE'
+  | 'BATCH_ARCHIVE_TENANT_REQUIRED'
+  | 'BATCH_ARCHIVE_SOURCE_BINDING_SPLIT'
+  | 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND'
+  | 'BATCH_ARCHIVE_PLAN_NOT_READY'
+  // #6475 round 2 — the archive is not what this sync wrote: the source changed after step ③, or the
+  // sheet does not hold all of it. A FAIL, like the refusals above.
+  | 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH'
+  // 客户反馈 2026-10-21 9b — the archive refusals that still fell through to BATCH_ARCHIVE_FAILED and
+  // its re-sync promise. FAILs, like the refusals above (classifyArchiveFailure).
+  | 'BATCH_ARCHIVE_LARGE_BOM_BOUNDED'
+  | 'BATCH_ARCHIVE_POINTER_STALE'
+  | 'BATCH_ARCHIVE_VERSION_HISTORY'
+  | 'BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND'
+  | 'BATCH_ARCHIVE_SERVICE_UNAVAILABLE'
+  // #6475 round 2 — step ③ was partial, so step ④ is NOT attempted (a SKIP: nothing was asked of the
+  // archive). Its own reason because BATCH_ARCHIVE_NOT_ATTEMPTED says nothing was written, and here
+  // some rows were.
+  | 'BATCH_ARCHIVE_WRITE_INCOMPLETE'
 
 export interface StockPreparationProjectSyncStepDescriptor {
   id: StockPreparationProjectSyncStepId
@@ -178,6 +276,10 @@ export const STOCK_PREPARATION_DRY_RUN_STATUSES: readonly string[] = Object.free
   'not_found',
   'large_bom_bounded',
   'failed',
+  // 备料分批拉取第一期 step 4 PR-3a (server `dryRunStatus` / the preview's recovery answer) — learned by PR-7. Before,
+  // both clamped to `other` and read as PLAN_NOT_APPLYABLE's source-data sentence.
+  'suspended',
+  'recovery_pending',
 ])
 
 /** The apply status vocabulary (`applyStatus()` in stock-preparation-apply-writer.cjs). */
@@ -203,6 +305,17 @@ export function clampToken(value: unknown, vocabulary: readonly string[]): strin
  */
 export function clampErrorCode(value: unknown): string | null {
   return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : null
+}
+
+/**
+ * #6475 review round 1 — a server error's `details.target` / `details.reason`, clamped the same way:
+ * the persist layer's are closed lower_snake vocabularies (`project` / `duplicate_key`,
+ * `snapshot_batch` / `content_mismatch`, `run` / `missing`, …), and the same code covers states an
+ * administrator handles differently, so the pair is worth carrying to the step's technical detail.
+ * Anything that is not lower_snake-shaped is dropped, never carried.
+ */
+export function clampErrorDetailToken(value: unknown): string | null {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,47}$/.test(value) ? value : null
 }
 
 export interface StockPreparationProjectSyncStepResult {
@@ -395,6 +508,10 @@ export type StockPreparationProjectSyncVerdict =
   | 'held'
   // S2: the operator declined the write after the preview. Not `blocked` — nothing refused anything.
   | 'not_written'
+  // PR-7: a governed project's pull is suspended until a 拉取人员 decides its holds. Human work, not a fault.
+  | 'suspended'
+  // PR-7 (F-19): an earlier write of a governed project did not finish; the project waits for recovery.
+  | 'awaiting_recovery'
   | 'blocked'
   | 'not_run'
 
@@ -431,6 +548,12 @@ export interface StockPreparationProjectSyncReport {
   /** True when no step FAILed. A run of OK + SKIP passes — held is not broken. */
   pass: boolean
   failedStepId: StockPreparationProjectSyncStepId | null
+  /**
+   * PR-7: the batch-refresh counts this run saw (values-free integers): the preview's `refreshHold` stanza
+   * (`holdCount` / `confirmableCount`) or the apply refusal's `holdCount`, and the recovery stanza's
+   * `openExecutions`. `null` for every not-governed run (the server sends no stanza).
+   */
+  refresh: { holdCount: number | null; confirmableCount: number | null; openExecutions: number | null } | null
 }
 
 // ---------------------------------------------------------------------------
@@ -548,10 +671,104 @@ export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<stri
   TARGET_SCHEMA_INCOMPLETE: 'PLAN_TARGET_SCHEMA_INCOMPLETE',
 })
 
+/**
+ * Batch-refresh phase 0 step 1 — the server's project write lock codes
+ * (plugins/plugin-integration-core/lib/stock-preparation-project-write-lock.cjs PROJECT_WRITE_ERROR_CODES).
+ */
+export const STOCK_PREP_PROJECT_WRITE_LOCKED_CODE = 'STOCK_PREP_PROJECT_WRITE_LOCKED'
+export const STOCK_PREP_PROJECT_PLAN_SUPERSEDED_CODE = 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED'
+export const STOCK_PREP_PROJECT_WRITE_LEASE_LOST_CODE = 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST'
+export const STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED',
+  'STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE',
+])
+
+/** The server's `details.reason` on a WRITE_LOCKED that lost a lock race with no writer holding it. */
+export const STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON = 'contention'
+
+/**
+ * 备料分批拉取第一期 step 3 PR B — the server's pilot lane codes (plugin stock-preparation-pilot-gate.cjs
+ * PILOT_ERROR_CODES). The dry run meets the first two; the large-lane refusal belongs to the large lane's
+ * own copy (plainLanguage STOCK_PREP_LARGE_BOM_ERROR_PLAIN).
+ */
+export const STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED_CODE = 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED'
+export const STOCK_PREP_PILOT_STATE_UNREADABLE_CODE = 'STOCK_PREP_PILOT_STATE_UNREADABLE'
+
+/**
+ * 备料分批拉取第一期 step 4 — the batch-refresh codes a pull can meet (plugin stock-preparation-refresh-lanes.cjs
+ * REFRESH_LANE_ERROR_CODES, the continuation store and the governance reader). PR-7 gives each its own reason.
+ */
+export const STOCK_PREP_PULL_SUSPENDED_CODE = 'STOCK_PREP_PULL_SUSPENDED'
+export const STOCK_PREP_REFRESH_BINDING_STALE_CODE = 'STOCK_PREP_REFRESH_BINDING_STALE'
+export const STOCK_PREP_REFRESH_RECOVERY_PENDING_CODE = 'STOCK_PREP_REFRESH_RECOVERY_PENDING'
+export const STOCK_PREP_PULL_STATE_MOVED_CODE = 'STOCK_PREP_PULL_STATE_MOVED'
+export const STOCK_PREP_REFRESH_STORE_UNAVAILABLE_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_REFRESH_STORE_FAILED',
+  'STOCK_PREP_REFRESH_STORE_UNAVAILABLE',
+  'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED',
+])
+export const STOCK_PREP_REFRESH_SCOPE_CHANGED_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_REFRESH_TARGET_RETARGETED',
+  'STOCK_PREP_REFRESH_TENANT_MISMATCH',
+  'STOCK_PREP_REFRESH_SOURCE_BINDING_SPLIT',
+])
+
+/**
+ * PR-7: the apply step's batch-refresh refusals; `null` for every other failure. Checked AFTER the write-lock
+ * classifier (unchanged). PULL_SUSPENDED is a refusal before any write by construction (`details.partial: false`).
+ */
+export function classifyRefreshApplyFailure(errorCode: string | null): StockPreparationProjectSyncReason | null {
+  if (errorCode === STOCK_PREP_PULL_SUSPENDED_CODE) return 'WRITE_PULL_SUSPENDED'
+  if (errorCode === STOCK_PREP_REFRESH_BINDING_STALE_CODE) return 'WRITE_BINDING_STALE'
+  if (errorCode === STOCK_PREP_REFRESH_RECOVERY_PENDING_CODE) return 'WRITE_RECOVERY_PENDING'
+  if (errorCode === STOCK_PREP_PULL_STATE_MOVED_CODE) return 'WRITE_STATE_MOVED'
+  if (errorCode && STOCK_PREP_REFRESH_STORE_UNAVAILABLE_CODES.includes(errorCode)) return 'WRITE_REFRESH_STORE_UNAVAILABLE'
+  if (errorCode && STOCK_PREP_REFRESH_SCOPE_CHANGED_CODES.includes(errorCode)) return 'WRITE_REFRESH_SCOPE_CHANGED'
+  return null
+}
+
+/** The server's `details.reason` when a dry-run token was minted UNBOUND (review round 2, F6). */
+export const STOCK_PREP_PROJECT_TOKEN_UNBOUND_REASON = 'token_unbound'
+/** The lock-not-wired code: it is refused before any lock IO, so it never follows a write. */
+export const STOCK_PREP_PROJECT_WRITE_LOCK_NOT_WIRED_CODE = 'STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE'
+
+/**
+ * The apply step's write-lock refusals; `null` for every other failure (it stays WRITE_FAILED).
+ * `partial` is the server's TRI-STATE `details.partial` (`true` a host write was attempted, `false` none
+ * was, `null` not reported), `detailReason` its `details.reason`. "Rows may have landed" only on `true`;
+ * "nothing was written" only on a positive `false` (or a refusal that by construction precedes every
+ * write: a busy sheet, a lock that is not wired); an unreported stop gets the neutral sentence. A lost
+ * race never claims that someone else is writing.
+ */
+export function classifyWriteLockFailure(
+  errorCode: string | null,
+  context: { partial?: boolean | null; detailReason?: string | null } = {},
+): StockPreparationProjectSyncReason | null {
+  const partial = context.partial === true ? true : (context.partial === false ? false : null)
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCKED_CODE) {
+    return context.detailReason === STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON ? 'WRITE_LOCK_BUSY' : 'WRITE_PROJECT_LOCKED'
+  }
+  if (errorCode === STOCK_PREP_PROJECT_PLAN_SUPERSEDED_CODE) {
+    if (partial === true) return 'WRITE_INTERRUPTED'
+    if (context.detailReason === STOCK_PREP_PROJECT_TOKEN_UNBOUND_REASON) return 'WRITE_TOKEN_UNBOUND'
+    return partial === false ? 'WRITE_PLAN_SUPERSEDED' : 'WRITE_STOPPED_UNCONFIRMED'
+  }
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LEASE_LOST_CODE) {
+    if (partial === null) return 'WRITE_STOPPED_UNCONFIRMED'
+    return partial ? 'WRITE_INTERRUPTED' : 'WRITE_TAKEN_OVER'
+  }
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCK_NOT_WIRED_CODE) return 'WRITE_LOCK_UNAVAILABLE'
+  if (errorCode && STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES.includes(errorCode)) {
+    if (partial === null) return 'WRITE_STOPPED_UNCONFIRMED'
+    return partial ? 'WRITE_LOCK_FAILED_MIDWAY' : 'WRITE_LOCK_UNAVAILABLE'
+  }
+  return null
+}
+
 export function classifyPlanReadFailureReason(
   status: number,
   errorCode: string | null,
-  context: { projectSheet?: boolean } = {},
+  context: { projectSheet?: boolean; detailReason?: string | null } = {},
 ): StockPreparationProjectSyncReason {
   if (errorCode && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS, errorCode)) {
     return STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS[errorCode]
@@ -561,6 +778,26 @@ export function classifyPlanReadFailureReason(
     return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
   }
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  // PR B: BY CODE, ahead of the status rules, and a FAILURE on both (classifyPlanStep marks every reason of a
+  // refused dry run `fail`): the panel never auto-starts the large lane on a pilot project's over-cap refusal
+  // (that happens only on the `large_bom_bounded` SKIP), and an unreadable marker never reads as transient.
+  if (errorCode === STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED_CODE) return 'PLAN_PILOT_OVER_SMALL_LANE_LIMIT'
+  if (errorCode === STOCK_PREP_PILOT_STATE_UNREADABLE_CODE) return 'PLAN_PILOT_STATE_UNREADABLE'
+  // Batch-refresh phase 0 step 1: BY CODE, ahead of the status rules — the 503 store failure must not
+  // read as the transient PLAN_READ_FAILED, and the 409 must not read as an unknown refusal.
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCKED_CODE) {
+    return context.detailReason === STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON ? 'PLAN_WRITE_LOCK_BUSY' : 'PLAN_PROJECT_WRITE_LOCKED'
+  }
+  if (errorCode && STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES.includes(errorCode)) return 'PLAN_WRITE_LOCK_UNAVAILABLE'
+  // PR-7 (F-19): the batch-refresh refusals BY CODE, ahead of the status rules — a 409 STATE_MOVED is "preview
+  // again" (never PLAN_READ_FAILED_UNKNOWN's 「截图发给管理员」), a 503 store failure is not the transient source
+  // sentence, a retargeted record is "nothing was read".
+  if (errorCode === STOCK_PREP_PULL_STATE_MOVED_CODE) return 'PLAN_STATE_MOVED'
+  if (errorCode === STOCK_PREP_REFRESH_RECOVERY_PENDING_CODE) return 'PLAN_RECOVERY_PENDING'
+  if (errorCode && STOCK_PREP_REFRESH_STORE_UNAVAILABLE_CODES.includes(errorCode)) return 'PLAN_REFRESH_STORE_UNAVAILABLE'
+  if (errorCode && STOCK_PREP_REFRESH_SCOPE_CHANGED_CODES.includes(errorCode)) return 'PLAN_REFRESH_SCOPE_CHANGED'
+  if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE) return 'PLAN_DRY_RUN_BUSY'
+  if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE) return 'PLAN_DRY_RUN_INTERRUPTED'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
   if (errorCode === 'SOURCE_UNAVAILABLE' || status === 0 || status >= 500) return 'PLAN_READ_FAILED'
   if (status === 401) return 'PLAN_READ_UNAUTHENTICATED'
@@ -578,8 +815,8 @@ export function classifyPlanReadFailureReason(
  */
 export function classifyPlanStep(
   index: number,
-  plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number> } | null,
-  options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean } = {},
+  plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number>; refreshHold?: unknown; refreshRecovery?: unknown } | null,
+  options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean; detailReason?: string | null } = {},
 ): StockPreparationProjectSyncStepResult {
   if (options.malformed) {
     return result(index, 'dry-run', 'fail', 'PLAN_MALFORMED_RESPONSE', { status: options.status ?? 0 })
@@ -588,7 +825,9 @@ export function classifyPlanStep(
     const status = options.status ?? 0
     const detail: Record<string, string | number> = { status }
     if (options.errorCode) detail.code = options.errorCode
-    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true })
+    // PR-7 (F-19 "show the reason"): the server's clamped `details.reason` token rides to the step detail.
+    if (options.detailReason) detail.reason = options.detailReason
+    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true, detailReason: options.detailReason ?? null })
     return result(index, 'dry-run', 'fail', reason, detail)
   }
   const status = clampToken(plan.status, STOCK_PREPARATION_DRY_RUN_STATUSES)
@@ -602,11 +841,27 @@ export function classifyPlanStep(
     manualConfirm: planned.manualConfirm,
   }
 
+  // PR-7 (F-19): AWAITING RECOVERY — first, in the server's own precedence (the preview answers `recovery_pending`
+  // over not_found / large_bom_bounded, table-actions.cjs). A FAIL, with its own sentence: not the source-data one.
+  if (status === 'recovery_pending') {
+    const recovery = refreshRecoveryOf(plan)
+    const detail = { ...base }
+    if (recovery && recovery.openExecutions !== null) detail.openExecutions = recovery.openExecutions
+    return result(index, 'dry-run', 'fail', 'PLAN_RECOVERY_PENDING', detail)
+  }
   // A project number the source does not know. Almost always a typo, occasionally a project that has
   // not reached PLM yet — either way it is something for a person to check, not a broken system.
   if (status === 'not_found') return result(index, 'dry-run', 'skip', 'PLAN_PROJECT_NOT_FOUND', base)
   // The BOM is too large for an interactive expansion; the background channel owns it.
   if (status === 'large_bom_bounded') return result(index, 'dry-run', 'skip', 'PLAN_LARGE_BOM_BOUNDED', base)
+  // PR-7 (design §13 "step ① SUSPENDED with counts"): the plan WAS produced — the step is OK, the write SKIPs.
+  if (status === 'suspended') {
+    const hold = refreshHoldOf(plan)
+    const detail = { ...base }
+    if (hold && hold.holdCount !== null) detail.holdCount = hold.holdCount
+    if (hold && hold.confirmableCount !== null) detail.confirmableCount = hold.confirmableCount
+    return result(index, 'dry-run', 'ok', 'PLAN_SUSPENDED', detail)
+  }
   if (plan.canApply !== true) return result(index, 'dry-run', 'fail', 'PLAN_NOT_APPLYABLE', base)
   if (planned.manualConfirm > 0 || status === 'manual_confirm_required') {
     return result(index, 'dry-run', 'ok', 'PLAN_HELD_FOR_CONFIRMATION', base)
@@ -624,10 +879,13 @@ export function summarizeProjectSync(
     written: StockPreparationProjectSyncReport['written']
     missingComponents: StockPreparationProjectSyncReport['missingComponents']
     missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason']
+    /** PR-7: the batch-refresh counts the run saw; absent = none (every not-governed run). */
+    refresh?: StockPreparationProjectSyncReport['refresh']
   },
 ): StockPreparationProjectSyncReport {
   const failed = steps.find((step) => step.status === 'fail') ?? null
   const write = steps.find((step) => step.id === 'apply') ?? null
+  const plan = steps.find((step) => step.id === 'dry-run') ?? null
   const imported = write?.status === 'ok' && write.reason === 'IMPORTED'
   const upToDate = write?.status === 'ok' && write.reason === 'ALREADY_UP_TO_DATE'
 
@@ -639,6 +897,10 @@ export function summarizeProjectSync(
   else if (write?.reason === 'WRITE_PARTIAL') verdict = 'partial'
   else if (write?.reason === 'WRITE_HELD_FOR_CONFIRMATION') verdict = 'held'
   else if (write?.reason === 'WRITE_NOT_CONFIRMED') verdict = 'not_written'
+  // PR-7: a suspended pull (at the preview, or refused at the apply) is human work for a puller, not a fault;
+  // an awaiting-recovery project says so instead of 「这次没有导入成功」.
+  else if (plan?.reason === 'PLAN_SUSPENDED' || write?.reason === 'WRITE_PULL_SUSPENDED') verdict = 'suspended'
+  else if (plan?.reason === 'PLAN_RECOVERY_PENDING' || write?.reason === 'WRITE_RECOVERY_PENDING') verdict = 'awaiting_recovery'
   else if (steps.length > 0) verdict = 'blocked'
 
   return {
@@ -657,6 +919,7 @@ export function summarizeProjectSync(
     missingComponentsUnavailableReason: context.missingComponentsUnavailableReason,
     pass: failed === null,
     failedStepId: failed ? failed.id : null,
+    refresh: context.refresh ?? null,
   }
 }
 
@@ -683,11 +946,72 @@ export interface StockPreparationProjectSyncPlan {
    * exercise the report's handling of it without going through the retry.
    */
   missingComponentsUnavailableReason?: StockPreparationMissingComponentsUnavailableReason
+  /**
+   * PR-7: the values-free hold stanza a GOVERNED preview answers beside `evidence` (server refresh-lanes.cjs
+   * `refreshHoldStanza`: `{ held, holdCount, confirmableCount, kinds, holdSetFingerprint }`); absent for every
+   * not-governed preview. Untyped at the boundary: read through `refreshHoldOf`, which keeps two integers only.
+   */
+  refreshHold?: unknown
+  /** PR-7: the recovery stanza (`{ pending, openExecutions }`) of a preview answering `recovery_pending`. */
+  refreshRecovery?: unknown
+}
+
+function nonNegativeIntegerOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/** PR-7: the preview's hold stanza, as two integers (never `kinds`, never the digest), or null when absent. */
+export function refreshHoldOf(plan: { refreshHold?: unknown } | null | undefined): { holdCount: number | null; confirmableCount: number | null } | null {
+  const raw = plan?.refreshHold
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const stanza = raw as { holdCount?: unknown; confirmableCount?: unknown }
+  return { holdCount: nonNegativeIntegerOrNull(stanza.holdCount), confirmableCount: nonNegativeIntegerOrNull(stanza.confirmableCount) }
+}
+
+/** PR-7: the preview's recovery stanza, as one integer, or null when absent. */
+export function refreshRecoveryOf(plan: { refreshRecovery?: unknown } | null | undefined): { openExecutions: number | null } | null {
+  const raw = plan?.refreshRecovery
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  return { openExecutions: nonNegativeIntegerOrNull((raw as { openExecutions?: unknown }).openExecutions) }
 }
 
 export interface StockPreparationProjectSyncApplyResult {
   status?: string
   apply?: { counts?: Record<string, number>; written?: number }
+  /**
+   * #6475 — the values-free digest of the (tenant, action, source) this apply read
+   * (http-routes.cjs `stockPreparationSourceScopeDigest`). Handed back to step ④ verbatim, which
+   * refuses rather than archive a source other than this one. Untyped at the boundary: read through
+   * `sourceScopeDigestOf`.
+   */
+  sourceScopeDigest?: unknown
+  /**
+   * #6475 round 2 — the values-free digest of WHAT this apply read (stock-preparation-table-actions.cjs
+   * `stockPreparationSourceContentDigest`). Handed back to step ④ verbatim, which refuses rather than
+   * archive content the source no longer has or the sheet does not hold. Read through
+   * `sourceContentDigestOf`.
+   */
+  sourceContentDigest?: unknown
+}
+
+/** The digest's one wire shape; anything else is treated as absent, never forwarded. */
+export const STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN = /^[0-9a-f]{32}$/
+
+export function sourceScopeDigestOf(value: unknown): string | null {
+  return typeof value === 'string' && STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN.test(value) ? value : null
+}
+
+/** The content digest has the same one wire shape (32 lowercase hex); anything else is absent. */
+export function sourceContentDigestOf(value: unknown): string | null {
+  return typeof value === 'string' && STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN.test(value) ? value : null
+}
+
+/** What step ④ hands the archive call besides the project number. */
+export interface StockPreparationProjectSyncArchiveOptions {
+  /** Step ③'s `sourceScopeDigest`, when it answered one. */
+  sourceScopeDigest?: string
+  /** Step ③'s `sourceContentDigest`, when it answered one. */
+  sourceContentDigest?: string
 }
 
 export interface StockPreparationProjectSyncArchiveResult {
@@ -696,11 +1020,76 @@ export interface StockPreparationProjectSyncArchiveResult {
   created?: Record<string, number>
 }
 
+// ---------------------------------------------------------------------------
+// R67 ④ — 试算 through the background job lane
+// ---------------------------------------------------------------------------
+//
+// WHY. A dry run for one project is ~1,400 serial PLM reads; on a slow customer PLM the synchronous
+// request outlives nginx's 60 s proxy timeout, the browser gets a 504 while the server finishes the
+// work anyway, the result is lost, and the operator's retry doubles the PLM load. So the default
+// client ENQUEUES (`POST …/dry-run-jobs`, 202) and POLLS the caller's job for the project
+// (`GET …/dry-run-jobs?projectNo=`) at the large-BOM lane's interval. What `dryRun` resolves to is
+// unchanged: the server stores the synchronous route's exact payload (dry-run token included), and a
+// failed job carries the synchronous route's exact status + code — so `classifyPlanStep`, the
+// rendering and the apply handoff below do not know which lane answered.
+//
+// LEAVING DOES NOT CANCEL. `signal` only stops THIS page polling; the job runs to completion on the
+// server. A press while this caller's own trial of the project is still running ATTACHES to it (the
+// enqueue answers 409 `ownJob: true`) instead of starting a second PLM read.
+
+/** The large-BOM lane's poll interval (largeBomPull.ts). */
+export const STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS = 2000
+/** 30 minutes of polls — the server keeps a finished job exactly as long as its dry-run token lives. */
+export const STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLLS = 900
+/** Consecutive transport failures a poll tolerates before the run reports a read failure. */
+export const STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLL_ERRORS = 3
+export const STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE = 'STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS'
+export const STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE = 'STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED'
+/** The one answer on which the client falls back to the synchronous route: no durable job store. */
+export const STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE_CODE = 'STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE'
+export const STOCK_PREPARATION_DRY_RUN_POLL_STOPPED_CODE = 'STOCK_PREPARATION_DRY_RUN_POLL_STOPPED'
+export const STOCK_PREPARATION_DRY_RUN_POLL_BUDGET_EXCEEDED_CODE = 'STOCK_PREPARATION_DRY_RUN_POLL_BUDGET_EXCEEDED'
+
+/** Values-free progress, fired once per poll while the job runs. */
+export interface StockPreparationDryRunProgress {
+  /** Server-measured time since the job started. */
+  elapsedMs: number
+  /** True when this call picked up a job that was already running for the project. */
+  attached: boolean
+}
+
+export interface StockPreparationDryRunOptions {
+  onProgress?: (progress: StockPreparationDryRunProgress) => void
+  /** Stops polling (the job keeps running server-side). */
+  signal?: AbortSignal
+  /** Real `setTimeout` in production; an instant resolver in tests. */
+  wait?: (ms: number) => Promise<void>
+  pollIntervalMs?: number
+  maxPolls?: number
+}
+
+/** The caller's background dry run for one project, as a re-attach probe sees it. */
+export interface StockPreparationDryRunJobSnapshot {
+  status: 'running' | 'succeeded' | 'failed'
+  elapsedMs: number
+}
+
 export interface StockPreparationProjectSyncApi {
-  dryRun(projectNo: string): Promise<StockPreparationProjectSyncPlan>
+  /** Options are R67 ④'s progress / stop-polling seam; a double may ignore them. */
+  dryRun(projectNo: string, options?: StockPreparationDryRunOptions): Promise<StockPreparationProjectSyncPlan>
+  /**
+   * R67 ④: the caller's background dry run for this project, or null when there is none — what a
+   * remounted page uses to show that a trial it started earlier is still reading PLM. Optional, so an
+   * injected double need not implement it (and a mount with one makes no extra request).
+   */
+  dryRunJobStatus?(projectNo: string): Promise<StockPreparationDryRunJobSnapshot | null>
   reconcile(projectNo: string): Promise<{ counts?: Record<string, number> }>
   apply(projectNo: string, dryRunToken: string): Promise<StockPreparationProjectSyncApplyResult>
-  archive(projectNo: string): Promise<StockPreparationProjectSyncArchiveResult>
+  /**
+   * `options` is passed ONLY when step ③ answered a digest, so a double written against the old
+   * one-argument shape sees exactly the call it always did.
+   */
+  archive(projectNo: string, options?: StockPreparationProjectSyncArchiveOptions): Promise<StockPreparationProjectSyncArchiveResult>
 }
 
 /** HTTP status + clamped error code of a failed call. Never carries a server message. */
@@ -710,14 +1099,42 @@ export class StockPreparationProjectSyncCallError extends Error {
   /** The server's own error code, when it is identifier-shaped. Null otherwise. */
   code: string | null
 
+  /** The server's `details.target` / `details.reason`, when lower_snake-shaped (`clampErrorDetailToken`). */
+  detailTarget: string | null
+
+  detailReason: string | null
+
+  /**
+   * The server's `details.partial`, TRI-STATE (review round 2): `true` = a host write was attempted, so
+   * rows may have landed; `false` = the server positively reports that no host write was issued; `null`
+   * = not reported (unknown). Only the literal booleans count; anything else is `null`.
+   */
+  detailPartial: boolean | null
+
+  /**
+   * PR-7: the server's `details.holdCount` on a batch-refresh refusal (STOCK_PREP_PULL_SUSPENDED) — a non-negative
+   * integer, else null. Never the `kinds` map beside it.
+   */
+  detailHoldCount: number | null
+
   /** True when the transport succeeded and the payload was not this API's envelope. */
   malformed: boolean
 
-  constructor(status: number, route: string, options: { code?: string | null; malformed?: boolean } = {}) {
+  constructor(
+    status: number,
+    route: string,
+    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null; detailPartial?: unknown; detailHoldCount?: unknown } = {},
+  ) {
     super(`stock-preparation project sync call failed (${route} -> ${status})`)
     this.name = 'StockPreparationProjectSyncCallError'
     this.status = status
     this.code = options.code ?? null
+    this.detailTarget = clampErrorDetailToken(options.detailTarget)
+    this.detailReason = clampErrorDetailToken(options.detailReason)
+    this.detailPartial = options.detailPartial === true ? true : (options.detailPartial === false ? false : null)
+    this.detailHoldCount = typeof options.detailHoldCount === 'number' && Number.isInteger(options.detailHoldCount) && options.detailHoldCount >= 0
+      ? options.detailHoldCount
+      : null
     this.malformed = options.malformed === true
   }
 }
@@ -736,6 +1153,139 @@ function isMalformed(error: unknown): boolean {
 
 /** The flag-off answer from mvp-persist. A correct deployment state, not a fault. */
 export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED'
+
+/**
+ * #6475 — THE ARCHIVE'S OWN REFUSALS, BY SERVER CODE. Before this every one of them rendered as the
+ * same 「存档没成功,再同步一次通常就补上了」, which is false for most of them: re-syncing builds no
+ * snapshot table, adds no missing column, re-activates no source, gives an account no tenant, rewrites
+ * no kept record and completes no half-written one. The server codes are unchanged except the one
+ * #6475 added (SOURCE_BINDING_SPLIT); what changes is the step's status and the sentence it points at.
+ *
+ * ONE SKIP, AND ONLY ONE. A SKIP says "nothing is wrong, this sync just has no batch". That is true of
+ * exactly one refusal here; every other one leaves this sync's batch missing from 批次与差异 for a
+ * reason somebody has to act on, so it is a FAIL — non-fatal, the import still reads as done.
+ *
+ *   PERSIST_TARGET_NOT_PROVISIONED (409)      the four snapshot tables were never built for this
+ *       tenant (only `POST …/stock-preparation/mvp/ensure` builds them; a customer-pack install and
+ *       a project-sheet create do not). SKIP — a deployment state, like the flag being off.
+ *   PERSIST_IDEMPOTENCY_CONFLICT (409)        the snapshot ledger already holds rows that do not match
+ *       this persist. FAIL. The code alone covers states that are NOT "a copy was kept": a project
+ *       ledger with two rows for one project (`project`/`duplicate_key` — checked on EVERY persist,
+ *       permanent, no repair path), and, under the opt-in creation-hour batch rule, a batch id that is
+ *       already kept with DIFFERENT lines (`snapshot_batch`/`content_mismatch`): a corrected BOM that
+ *       adds no newer material, or a BOM that went back to an older batch's hour while a newer batch
+ *       is kept. The batch id is the newest material's CREATION hour, not the wall clock, so "the next
+ *       hour" never comes. #6475 round 2: a sheet edit (备注 and the other columns people own) or a
+ *       sync that only rewrote sheet cells no longer lands here — the archive recognises the batch it
+ *       already kept and answers BATCH_ALREADY_ARCHIVED. Nothing was stored in either case above; the
+ *       details ride to the step detail.
+ *   PERSIST_EXISTING_BATCH_INCOMPLETE (409)   a copy under this batch identity was left half-written
+ *       (a pre-P4 crash or an external delete). FAIL. The server never patches it on its own, and an
+ *       unchanged BOM keeps the same batch id, so it repeats until an administrator runs the one-shot,
+ *       owner-controlled repair (stock-preparation-sync-run-repair-once.cjs — not an HTTP route).
+ *   TARGET_SCHEMA_INCOMPLETE (422)            a snapshot table lacks template columns → mvp/repair.
+ *   TARGET_SCHEMA_UNAVAILABLE (503)           the column read itself failed → retry / check the host.
+ *   TABLE_ACTION_SOURCE_NOT_ACTIVE (409)      the archive requires the bound source to be active (the
+ *       trial and the write do not). Since #6475 round 1 the split check below runs FIRST, so this
+ *       now names the source step ③ itself read — and whether to re-enable it or rebind away from it
+ *       is an administrator's call, which is what the copy says.
+ *   TENANT_REQUIRED (400)                     the request reached the archive with no tenant at all.
+ *       The archive's tenant is the principal's `user.tenantId` (http-routes.cjs
+ *       `resolveAuthUserTenantId`): the verified claim when the token carries one, and — while the
+ *       tenant-claim door (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED) is off, which is the default —
+ *       the `x-tenant-id` header `apiFetch` attaches when it does not (utils/api.ts `authHeaders`: the
+ *       session org, the page's stored tenant hint, or the URL's `?tenantId=`). So it is NOT "the
+ *       signed-in account only, never the page": this answer means neither was present.
+ *   STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT (409)  the archive would have read a different source
+ *       than the one step ③ wrote from (the action is bound differently per workspace) — or would have
+ *       been credited to a different tenant than ③'s write — so it read and stored nothing. FAIL →
+ *       make the bindings agree; if they already do, the tenant is the administrator's to look at.
+ *   STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND (404)  the archive's re-read of the SAME source no
+ *       longer finds the project. FAIL → sync again; if step ① agrees, the source no longer has it.
+ *   STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY (409)  the archive's own recomputed plan still
+ *       holds rows (it does not reuse the trial's confirmed decisions or stored rules — see
+ *       stock-preparation-mvp-persist-duplicate-hold-gate.test.cjs). FAIL.
+ *   STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH (409)  #6475 round 2: what the archive would keep is
+ *       not what step ③ wrote — `source_changed_since_write` (the source changed after the write) or
+ *       `sheet_not_settled` (the sheet does not hold everything step ③ read: rows ③ could not write,
+ *       or a PLM cell edited by hand since). Nothing was stored. FAIL → sync again; a row ③ keeps
+ *       failing is fixed first.
+ *
+ * 客户反馈 2026-10-21 9b — the refusals that still fell through to BATCH_ARCHIVE_FAILED, whose copy
+ * promised 「再同步一次通常就补上了」 (each verified against plugin-integration-core/lib on the base):
+ *   STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED (409)  stock-preparation-table-actions.cjs: the
+ *       archive's own re-expansion reached the large-BOM bounds. The archive keeps only a BOM it can
+ *       expand on the spot; re-syncing the same BOM meets the same bound. FAIL.
+ *   PERSIST_PROJECT_POINTER_STALE (409)       stock-preparation-sync-run-persist.cjs: the project's
+ *       live pointer does not cover this batch (`stale_pointer` / `pointer_unresolvable`). The persist
+ *       fails closed and never moves the pointer on its own; the owner-controlled one-shot repair
+ *       (stock-preparation-sync-run-repair-once.cjs) is what advances a provably stale one. FAIL.
+ *   PERSIST_VERSION_NOT_MONOTONIC (422)       same file: the project's batch-version history could not
+ *       be proven (`history_unprovable`) or does not increase (`not_monotonic`). Fail closed; an
+ *       administrator reads the snapshot ledger. FAIL.
+ * and two classified by HTTP status, AFTER the code table (a coded answer always wins):
+ *   503 with no mapped code                   the server (or a host capability the archive needs, e.g.
+ *       STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE) answered "unavailable". FAIL →
+ *       BATCH_ARCHIVE_SERVICE_UNAVAILABLE. Review round 1: a CODE-LESS 502 or 504 (a gateway in front
+ *       of the server) lands there too. A 504 may still have kept the batch server-side, which is why
+ *       that copy says "not confirmed" and that the next sync reports an already-kept batch as such.
+ *   404 with NO usable code                   in practice `ExternalSystemNotFoundError`, whose class
+ *       name is the wire code and so fails `clampErrorCode`. The archive does not carry the page's
+ *       workspace hint (http-routes.cjs `tableActionMvpPersist` → `loadTableActionSourceAdapter`): it
+ *       uses the action's own workspace, or the binding's single matched workspace when exactly one
+ *       binding applies, and otherwise the tenant-wide row only (external-systems.cjs
+ *       `selectScopedRow` never widens a null workspace). So a source the trial found under the page's
+ *       workspace CAN be invisible to it — the copy says "most common cause", not "the cause". FAIL →
+ *       BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND. A 404 WITH a code (SOURCE_PROJECT_NOT_FOUND) is not this.
+ *
+ * Every other refusal keeps BATCH_ARCHIVE_FAILED, whose copy no longer promises a re-sync fixes it.
+ * The flag-off code and 401/403 are classified by the caller before this table is consulted, exactly
+ * as before.
+ */
+export const STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES: Readonly<Record<string, {
+  status: Exclude<StockPreparationProjectSyncStepStatus, 'pending' | 'ok'>
+  reason: StockPreparationProjectSyncReason
+}>> = Object.freeze({
+  PERSIST_TARGET_NOT_PROVISIONED: Object.freeze({ status: 'skip' as const, reason: 'BATCH_ARCHIVE_TABLES_NOT_PROVISIONED' as const }),
+  PERSIST_IDEMPOTENCY_CONFLICT: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_LEDGER_CONFLICT' as const }),
+  PERSIST_EXISTING_BATCH_INCOMPLETE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE' as const }),
+  TARGET_SCHEMA_INCOMPLETE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SCHEMA_INCOMPLETE' as const }),
+  TARGET_SCHEMA_UNAVAILABLE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SCHEMA_UNAVAILABLE' as const }),
+  TABLE_ACTION_SOURCE_NOT_ACTIVE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_NOT_ACTIVE' as const }),
+  TENANT_REQUIRED: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_TENANT_REQUIRED' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_BINDING_SPLIT' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_PLAN_NOT_READY' as const }),
+  STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_LARGE_BOM_BOUNDED' as const }),
+  PERSIST_PROJECT_POINTER_STALE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_POINTER_STALE' as const }),
+  PERSIST_VERSION_NOT_MONOTONIC: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_VERSION_HISTORY' as const }),
+})
+
+/**
+ * Step ④'s outcome for a refused archive call. Same precedence the run always had — the flag-off code
+ * first, then 401/403 — and only then the per-code table above; then (9b) a 503 the table did not
+ * name, then a 404 that carried no usable code; anything else is the generic FAIL.
+ * Own-property lookup only, so a code that happens to name an Object.prototype key falls through.
+ */
+export function classifyArchiveFailure(
+  status: number,
+  code: string | null,
+): { status: Exclude<StockPreparationProjectSyncStepStatus, 'pending' | 'ok'>; reason: StockPreparationProjectSyncReason } {
+  if (code === BATCH_ARCHIVE_DISABLED_CODE) return { status: 'skip', reason: 'BATCH_ARCHIVE_DISABLED' }
+  if (status === 401 || status === 403) return { status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' }
+  if (code && Object.prototype.hasOwnProperty.call(STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES, code)) {
+    const outcome = STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES[code]
+    return { status: outcome.status, reason: outcome.reason }
+  }
+  // Review round 1: a gateway answer (502 / 504) with no code is the same "not answered normally" as
+  // a 503 — the plan-read classifier above already groups every 5xx as the transient bucket.
+  if (status === 503 || (!code && (status === 502 || status === 504))) {
+    return { status: 'fail', reason: 'BATCH_ARCHIVE_SERVICE_UNAVAILABLE' }
+  }
+  if (status === 404 && !code) return { status: 'fail', reason: 'BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND' }
+  return { status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' }
+}
 
 /** The exact 400 code `normalizeTableActionBody` answers for an unrecognized dry-run body key (http-routes.cjs:1743-1753). */
 export const MISSING_COMPONENTS_UNSUPPORTED_CODE = 'TABLE_ACTION_REQUEST_INVALID'
@@ -779,6 +1329,8 @@ export interface StockPreparationProjectSyncHooks {
    * project-sheet wording; see `STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS`.
    */
   projectSheet?: boolean
+  /** R67 ④: forwarded to `api.dryRun` — progress and the stop-polling signal. Absent = the old call. */
+  dryRun?: StockPreparationDryRunOptions
 }
 
 /**
@@ -801,6 +1353,8 @@ export async function runStockPreparationProjectSync(
   let written: StockPreparationProjectSyncReport['written'] = null
   let missingComponents: StockPreparationProjectSyncReport['missingComponents'] = null
   let missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason'] = null
+  // PR-7: the batch-refresh counts this run saw (null for every not-governed run).
+  let refresh: StockPreparationProjectSyncReport['refresh'] = null
 
   function record(step: StockPreparationProjectSyncStepResult): StockPreparationProjectSyncStepResult {
     steps.push(step)
@@ -816,6 +1370,7 @@ export async function runStockPreparationProjectSync(
       written,
       missingComponents,
       missingComponentsUnavailableReason,
+      refresh,
     })
   }
 
@@ -823,7 +1378,7 @@ export async function runStockPreparationProjectSync(
   let plan: StockPreparationProjectSyncPlan | null = null
   let planStep: StockPreparationProjectSyncStepResult
   try {
-    plan = await api.dryRun(projectNo)
+    plan = await (hooks.dryRun ? api.dryRun(projectNo, hooks.dryRun) : api.dryRun(projectNo))
     planned = plannedCountsOf(plan?.counts)
     pendingConfirmCount = planned.manualConfirm
     // Read straight off the plan, NOT off `classifyPlanStep`'s result — see the type's doc comment.
@@ -832,6 +1387,15 @@ export async function runStockPreparationProjectSync(
     // use it. `missingComponents` is `null` in that branch by construction (the retried request never
     // asked for the key), so this reason is the ONLY signal the panel has for WHY.
     missingComponentsUnavailableReason = missingComponentsUnavailableReasonOf(plan?.missingComponentsUnavailableReason)
+    const hold = refreshHoldOf(plan)
+    const recovery = refreshRecoveryOf(plan)
+    if (hold || recovery) {
+      refresh = {
+        holdCount: hold ? hold.holdCount : null,
+        confirmableCount: hold ? hold.confirmableCount : null,
+        openExecutions: recovery ? recovery.openExecutions : null,
+      }
+    }
     planStep = record(classifyPlanStep(1, plan))
   } catch (error) {
     planStep = record(classifyPlanStep(1, null, {
@@ -839,9 +1403,21 @@ export async function runStockPreparationProjectSync(
       malformed: isMalformed(error),
       errorCode: codeOf(error),
       projectSheet: hooks.projectSheet === true,
+      detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
     }))
   }
   if (planStep.status !== 'ok') return done()
+
+  // PR-7 (design §13; R-62 ⑦): a SUSPENDED pull stops here. The holds are a puller's decision on 「拉取待确认」 first;
+  // the ledger reconcile is deferred (a confirm re-keys it, design §6.2) and the write is NEVER attempted — not with
+  // the absent token, and never with `acceptManualConfirmHold` (the module header's rule extends to holds).
+  if (planStep.reason === 'PLAN_SUSPENDED') {
+    const holdCount = refresh && refresh.holdCount !== null ? refresh.holdCount : 0
+    record(result(2, 'confirm-queue', 'skip', 'RECONCILE_DEFERRED_SUSPENDED', { holdCount }))
+    record(result(3, 'apply', 'skip', 'WRITE_PULL_SUSPENDED', { holdCount }))
+    record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
+    return done()
+  }
 
   // ---- 2. 确认 -------------------------------------------------------------
   const held = planStep.reason === 'PLAN_HELD_FOR_CONFIRMATION'
@@ -907,8 +1483,17 @@ export async function runStockPreparationProjectSync(
   }
 
   let writeOk = false
+  // #6475 round 2: a partial write is an import, but not one the archive may keep (see step ④).
+  let writePartial = false
+  // #6475: which source ③ read, as the server's values-free digest — handed to ④ untouched so the
+  // archive refuses rather than keep a different source's rows as this sync's batch.
+  let sourceScopeDigest: string | null = null
+  // #6475 round 2: and WHAT it read, likewise handed to ④ untouched.
+  let sourceContentDigest: string | null = null
   try {
     const applied = await api.apply(projectNo, token)
+    sourceScopeDigest = sourceScopeDigestOf(applied?.sourceScopeDigest)
+    sourceContentDigest = sourceContentDigestOf(applied?.sourceContentDigest)
     written = writtenCountsOf(applied?.apply?.counts)
     const applyStatus = clampToken(applied?.status, STOCK_PREPARATION_APPLY_STATUSES)
     const detail: Record<string, string | number> = {
@@ -934,6 +1519,7 @@ export async function runStockPreparationProjectSync(
       // Some rows landed and some did not. It IS an import, and it is also unfinished work.
       record(result(3, 'apply', 'skip', 'WRITE_PARTIAL', detail))
       writeOk = true
+      writePartial = true
     } else {
       record(result(3, 'apply', 'fail', 'WRITE_FAILED', detail))
     }
@@ -941,7 +1527,26 @@ export async function runStockPreparationProjectSync(
     const detail: Record<string, string | number> = { status: statusOf(error) }
     const code = codeOf(error)
     if (code) detail.code = code
-    record(result(3, 'apply', 'fail', 'WRITE_FAILED', detail))
+    const lockReason = classifyWriteLockFailure(code, {
+      partial: error instanceof StockPreparationProjectSyncCallError ? error.detailPartial : null,
+      detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
+    })
+    // PR-7: the batch-refresh refusals, after the lock's (unchanged). A suspended pull is a SKIP (nothing was
+    // written by construction); the rest FAIL with their own next step. The tri-state `partial` and the reason
+    // token ride to the detail so "may have landed" is said only on `true`.
+    const refreshReason = lockReason ? null : classifyRefreshApplyFailure(code)
+    if (refreshReason && error instanceof StockPreparationProjectSyncCallError) {
+      if (error.detailReason) detail.reason = error.detailReason
+      if (error.detailPartial !== null) detail.partial = error.detailPartial ? 1 : 0
+    }
+    if (refreshReason === 'WRITE_PULL_SUSPENDED') {
+      const holdCount = error instanceof StockPreparationProjectSyncCallError ? error.detailHoldCount : null
+      if (holdCount !== null) detail.holdCount = holdCount
+      refresh = { holdCount, confirmableCount: null, openExecutions: refresh?.openExecutions ?? null }
+      record(result(3, 'apply', 'skip', 'WRITE_PULL_SUSPENDED', detail))
+    } else {
+      record(result(3, 'apply', 'fail', lockReason ?? refreshReason ?? 'WRITE_FAILED', detail))
+    }
   }
 
   // ---- 4. 批次存档 ---------------------------------------------------------
@@ -949,8 +1554,19 @@ export async function runStockPreparationProjectSync(
     record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
     return done()
   }
+  // #6475 round 2: the archive keeps the WHOLE source as this sync's batch; after a partial write the
+  // sheet holds only part of it, so keeping it would put rows in 批次与差异 that are not in the sheet.
+  // Not attempted (the server refuses it too, with the content digest). The next sync that writes the
+  // rest archives as usual.
+  if (writePartial) {
+    record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_WRITE_INCOMPLETE', { failed: written ? written.failed : 0 }))
+    return done()
+  }
+  const archiveOptions: StockPreparationProjectSyncArchiveOptions = {}
+  if (sourceScopeDigest) archiveOptions.sourceScopeDigest = sourceScopeDigest
+  if (sourceContentDigest) archiveOptions.sourceContentDigest = sourceContentDigest
   try {
-    const archived = await api.archive(projectNo)
+    const archived = await (Object.keys(archiveOptions).length > 0 ? api.archive(projectNo, archiveOptions) : api.archive(projectNo))
     const created = archived?.created && typeof archived.created === 'object' ? archived.created : {}
     const detail: Record<string, string | number> = {
       batch: intOf(created.batch),
@@ -970,24 +1586,81 @@ export async function runStockPreparationProjectSync(
     const code = codeOf(error)
     const detail: Record<string, string | number> = { status: statusOf(error) }
     if (code) detail.code = code
-    // The flag being off is the deployment saying "this deployment does not keep snapshot batches",
-    // which is a setting, not a fault.
-    if (code === BATCH_ARCHIVE_DISABLED_CODE) {
-      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_DISABLED', detail))
-    } else if (statusOf(error) === 401 || statusOf(error) === 403) {
-      // 一线自己拉数据: this step stayed platform-admin, so for a stock-prep operator a refusal here
-      // is the deployment working as ruled — the rows they came for are already in the sheet
-      // (`report.imported` is true and stays true) and what is missing is a housekeeping copy
-      // somebody else keeps. A red FAIL on the last line of an otherwise successful import would
-      // read as "the import broke", which is the opposite of what happened. SKIP, with the reason.
-      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_PERMITTED', detail))
-    } else {
-      // VISIBLE, and NON-FATAL. `report.imported` is already true and stays true: the rows are in the
-      // sheet. What is missing is this run's entry in 批次与差异, and that is what the step says.
-      record(result(4, 'archive', 'fail', 'BATCH_ARCHIVE_FAILED', detail))
+    // The server's closed `details.target` / `details.reason` pair, when it sent one: one code covers
+    // states an administrator handles differently (a duplicated project ledger row vs. a batch id
+    // already kept), and the technical detail is where they read which.
+    if (error instanceof StockPreparationProjectSyncCallError) {
+      if (error.detailTarget) detail.target = error.detailTarget
+      if (error.detailReason) detail.reason = error.detailReason
     }
+    // `classifyArchiveFailure` keeps the two rules this step always had, in the same order:
+    //   * the flag being off is the deployment saying "this deployment does not keep snapshot
+    //     batches", which is a setting, not a fault (SKIP, BATCH_ARCHIVE_DISABLED);
+    //   * 一线自己拉数据: this step stayed platform-admin, so for a stock-prep operator a 401/403 here
+    //     is the deployment working as ruled — the rows they came for are already in the sheet and
+    //     what is missing is a housekeeping copy somebody else keeps (SKIP, BATCH_ARCHIVE_NOT_PERMITTED).
+    // and then (#6475) names the archive's own refusals by code, each with its own next step.
+    // Whatever it decides is NON-FATAL: `report.imported` is already true and stays true, because the
+    // rows are in the sheet. A FAIL is still visible — it is this run's entry in 批次与差异 missing.
+    const outcome = classifyArchiveFailure(statusOf(error), code)
+    record(result(4, 'archive', outcome.status, outcome.reason, detail))
   }
   return done()
+}
+
+// ---------------------------------------------------------------------------
+// 「核对」 — PR-7 (design §9.2, §13; R-62 ⑦)
+// ---------------------------------------------------------------------------
+
+export type StockPreparationSettlementCheckOutcome = 'settled' | 'changes_pending' | 'suspended' | 'awaiting_recovery' | 'failed'
+
+export interface StockPreparationSettlementCheckResult {
+  /**
+   * What the ONE preview answered. `settled` means only "the preview was clean and planned nothing to write" — the
+   * server writes the settled columns itself in that preview's reconcile; the CLIENT never claims 「核对通过」 from
+   * this: the authority is the board's re-read stanza (`settled`), which the panel waits for.
+   */
+  outcome: StockPreparationSettlementCheckOutcome
+  /** The plan's counts (null when the preview failed). */
+  planned: NonNullable<StockPreparationProjectSyncReport['planned']> | null
+  /** The step-① reason the preview classified as (the same vocabulary the panel's step list renders). */
+  reason: StockPreparationProjectSyncReason
+  detail: Record<string, string | number>
+}
+
+/**
+ * 「核对」: ONE dry run (the same hooks, so the background lane), and NOTHING else — no reconcile, no apply, no
+ * archive. Not a fifth sync step: STOCK_PREPARATION_PROJECT_SYNC_STEPS is unchanged. After an execution that wrote
+ * something the project is `executed_pending_settlement`; a clean computation after it settles it (design §9.2) —
+ * this is that computation, on demand.
+ */
+export async function runStockPreparationSettlementCheck(
+  api: Pick<StockPreparationProjectSyncApi, 'dryRun'>,
+  projectNo: string,
+  hooks: Pick<StockPreparationProjectSyncHooks, 'dryRun' | 'projectSheet'> = {},
+): Promise<StockPreparationSettlementCheckResult> {
+  let plan: StockPreparationProjectSyncPlan | null = null
+  try {
+    plan = await (hooks.dryRun ? api.dryRun(projectNo, hooks.dryRun) : api.dryRun(projectNo))
+  } catch (error) {
+    const step = classifyPlanStep(1, null, {
+      status: statusOf(error),
+      malformed: isMalformed(error),
+      errorCode: codeOf(error),
+      projectSheet: hooks.projectSheet === true,
+      detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
+    })
+    return { outcome: 'failed', planned: null, reason: step.reason, detail: step.detail }
+  }
+  const step = classifyPlanStep(1, plan)
+  const planned = plannedCountsOf(plan?.counts)
+  if (step.reason === 'PLAN_SUSPENDED') return { outcome: 'suspended', planned, reason: step.reason, detail: step.detail }
+  if (step.reason === 'PLAN_RECOVERY_PENDING') return { outcome: 'awaiting_recovery', planned, reason: step.reason, detail: step.detail }
+  if (step.reason === 'PLAN_READY') {
+    const writes = planned.add + planned.update + planned.inactive
+    return { outcome: writes === 0 ? 'settled' : 'changes_pending', planned, reason: step.reason, detail: step.detail }
+  }
+  return { outcome: 'failed', planned, reason: step.reason, detail: step.detail }
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,14 +1684,39 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
     ? payload as IntegrationApiEnvelope<T>
     : null
   if (!response?.ok || envelope?.ok === false) {
+    const details = envelope?.error && typeof envelope.error === 'object'
+      ? (envelope.error as { details?: unknown }).details
+      : undefined
+    const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
+      ? details as { target?: unknown; reason?: unknown; partial?: unknown; holdCount?: unknown }
+      : {}
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
+      // Clamped to lower_snake tokens inside the constructor; anything else is dropped.
+      detailTarget: typeof detailRecord.target === 'string' ? detailRecord.target : null,
+      detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
+      detailPartial: detailRecord.partial,
+      // PR-7: an integer or nothing (clamped in the constructor).
+      detailHoldCount: detailRecord.holdCount,
     })
   }
   if (!envelope || envelope.ok !== true) {
     throw new StockPreparationProjectSyncCallError(status, route, { malformed: true })
   }
   return (envelope.data ?? {}) as T
+}
+
+/** What `GET …/dry-run-jobs` answers — untyped at the boundary, read field by field. */
+interface StockPreparationDryRunJobRecord {
+  jobId?: string
+  status?: string
+  elapsedMs?: number
+  result?: unknown
+  error?: { httpStatus?: unknown; code?: unknown; details?: { reason?: unknown; partial?: unknown } }
+}
+
+function defaultDryRunWait(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
 export function createStockPreparationProjectSyncApi(
@@ -1029,37 +1727,176 @@ export function createStockPreparationProjectSyncApi(
   const suffix = query ? `?${query}` : ''
   const base = `/api/integration/table-actions/${encodeURIComponent(actionId)}`
   const json = { 'Content-Type': 'application/json' }
+  const jobsRoute = `${base}/dry-run-jobs`
+
+  /** The synchronous dry run — kept for the one deployment shape that has no durable job store. */
+  async function syncDryRun(projectNo: string): Promise<StockPreparationProjectSyncPlan> {
+    const route = `${base}/dry-run`
+    // `includeMissingComponents` is a REQUEST FLAG, not an action parameter — it sits alongside
+    // `parameters` rather than inside it (W3a §4.1/§4.2: the server's own opt-in gate reads it
+    // off the body root and, only when it is `true`, does the extra operator-scope check that
+    // lets the response's `missingComponents` key carry real part numbers).
+    try {
+      const response = await apiFetch(`${route}${suffix}`, {
+        method: 'POST',
+        headers: json,
+        body: JSON.stringify({ parameters: { projectNo }, includeMissingComponents: true }),
+      })
+      return await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+    } catch (error) {
+      // B1 — SINGLE, AUTOMATIC FALLBACK. Merging this PR before the server-side W3a PR (#5500 as
+      // of writing) must not 400 every dry run on main: if the flagged request was refused for
+      // exactly one of the two reasons that mean "the flag itself is the problem" (not "the plan
+      // failed"), retry ONCE, plainly, without it. A genuine dry-run failure (bad project number,
+      // transport error, …) is NOT one of those two reasons and re-throws unchanged below.
+      const reason = missingComponentsFallbackReason(error)
+      if (!reason) throw error
+      const response = await apiFetch(`${route}${suffix}`, {
+        method: 'POST',
+        headers: json,
+        body: JSON.stringify({ parameters: { projectNo } }),
+      })
+      const plan = await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+      return { ...plan, missingComponentsUnavailableReason: reason }
+    }
+  }
+
+  function jobQuery(projectNo: string, includeMissingComponents: boolean): string {
+    const query = buildQueryString({
+      tenantId: scope.tenantId,
+      workspaceId: scope.workspaceId,
+      projectNo,
+      includeMissingComponents: includeMissingComponents ? 'true' : 'false',
+    })
+    return `${jobsRoute}?${query}`
+  }
+
+  async function readJob(projectNo: string, includeMissingComponents: boolean): Promise<StockPreparationDryRunJobRecord> {
+    const response = await apiFetch(jobQuery(projectNo, includeMissingComponents))
+    return readEnvelope<StockPreparationDryRunJobRecord>(response, jobsRoute)
+  }
+
+  /** POST the job. Resolves `attach` on this caller's OWN 409 (its earlier trial is still running). */
+  async function enqueue(projectNo: string, includeMissingComponents: boolean): Promise<'started' | 'attach'> {
+    const response = await apiFetch(`${jobsRoute}${suffix}`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify(includeMissingComponents
+        ? { parameters: { projectNo }, includeMissingComponents: true }
+        : { parameters: { projectNo } }),
+    })
+    if (response?.status === 409) {
+      let payload: unknown = null
+      try { payload = await response.clone().json() } catch { payload = null }
+      const error = (payload && typeof payload === 'object') ? (payload as { error?: { code?: unknown; details?: { ownJob?: unknown } } }).error : undefined
+      if (error?.code === STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE && error.details?.ownJob === true) return 'attach'
+    }
+    await readEnvelope<StockPreparationDryRunJobRecord>(response, jobsRoute)
+    return 'started'
+  }
+
+  /** Poll the caller's job for the project until it ends; the plan, or the synchronous route's error. */
+  async function pollJob(
+    projectNo: string,
+    includeMissingComponents: boolean,
+    attached: boolean,
+    options: StockPreparationDryRunOptions,
+  ): Promise<StockPreparationProjectSyncPlan> {
+    const wait = options.wait ?? defaultDryRunWait
+    const intervalMs = options.pollIntervalMs ?? STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS
+    const maxPolls = options.maxPolls ?? STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLLS
+    let transportErrors = 0
+    for (let poll = 0; poll < maxPolls; poll += 1) {
+      if (options.signal?.aborted) {
+        throw new StockPreparationProjectSyncCallError(0, jobsRoute, { code: STOCK_PREPARATION_DRY_RUN_POLL_STOPPED_CODE })
+      }
+      let job: StockPreparationDryRunJobRecord
+      try {
+        job = await readJob(projectNo, includeMissingComponents)
+        transportErrors = 0
+      } catch (error) {
+        // A dropped poll is not a failed dry run — the job is still running server-side. Tolerate a
+        // few in a row (a gateway blip); anything with an envelope code is a real answer.
+        const transient = error instanceof StockPreparationProjectSyncCallError
+          && error.code === null && !error.malformed && (error.status === 0 || error.status >= 502)
+        transportErrors += 1
+        if (!transient || transportErrors >= STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLL_ERRORS) throw error
+        await wait(intervalMs)
+        continue
+      }
+      if (job.status === 'succeeded') return (job.result ?? {}) as StockPreparationProjectSyncPlan
+      if (job.status === 'failed') {
+        const status = typeof job.error?.httpStatus === 'number' ? job.error.httpStatus : 0
+        throw new StockPreparationProjectSyncCallError(status, jobsRoute, {
+          code: clampErrorCode(job.error?.code),
+          detailReason: typeof job.error?.details?.reason === 'string' ? job.error.details.reason : null,
+          detailPartial: job.error?.details?.partial,
+        })
+      }
+      if (job.status !== 'running') throw new StockPreparationProjectSyncCallError(200, jobsRoute, { malformed: true })
+      if (options.onProgress) options.onProgress({ elapsedMs: intOf(job.elapsedMs), attached })
+      await wait(intervalMs)
+    }
+    throw new StockPreparationProjectSyncCallError(0, jobsRoute, { code: STOCK_PREPARATION_DRY_RUN_POLL_BUDGET_EXCEEDED_CODE })
+  }
+
+  /** One flag value: enqueue (or attach) and poll. */
+  async function jobDryRun(projectNo: string, includeMissingComponents: boolean, options: StockPreparationDryRunOptions): Promise<StockPreparationProjectSyncPlan> {
+    const outcome = await enqueue(projectNo, includeMissingComponents)
+    if (outcome === 'started') return pollJob(projectNo, includeMissingComponents, false, options)
+    // ATTACH. The running job may have been enqueued with the other flag value (they share the
+    // project's one slot but are separate records); the flagged record first, as this client sends.
+    try {
+      return await pollJob(projectNo, true, true, options)
+    } catch (error) {
+      if (error instanceof StockPreparationProjectSyncCallError && (error.status === 404 || missingComponentsFallbackReason(error))) {
+        return pollJob(projectNo, false, true, options)
+      }
+      throw error
+    }
+  }
 
   return {
-    async dryRun(projectNo: string) {
-      const route = `${base}/dry-run`
+    async dryRun(projectNo: string, options: StockPreparationDryRunOptions = {}) {
       // `includeMissingComponents` is a REQUEST FLAG, not an action parameter — it sits alongside
-      // `parameters` rather than inside it (W3a §4.1/§4.2: the server's own opt-in gate reads it
-      // off the body root and, only when it is `true`, does the extra operator-scope check that
-      // lets the response's `missingComponents` key carry real part numbers).
+      // `parameters` rather than inside it (W3a §4.1/§4.2). B1's single, automatic fallback is kept
+      // exactly as on the synchronous route: a flagged ENQUEUE refused for one of the two "the flag
+      // itself is the problem" reasons is retried ONCE without it; anything else surfaces.
       try {
-        const response = await apiFetch(`${route}${suffix}`, {
-          method: 'POST',
-          headers: json,
-          body: JSON.stringify({ parameters: { projectNo }, includeMissingComponents: true }),
-        })
-        return await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+        try {
+          return await jobDryRun(projectNo, true, options)
+        } catch (error) {
+          const reason = missingComponentsFallbackReason(error)
+          if (!reason) throw error
+          const plan = await jobDryRun(projectNo, false, options)
+          return { ...plan, missingComponentsUnavailableReason: reason }
+        }
       } catch (error) {
-        // B1 — SINGLE, AUTOMATIC FALLBACK. Merging this PR before the server-side W3a PR (#5500 as
-        // of writing) must not 400 every dry run on main: if the flagged request was refused for
-        // exactly one of the two reasons that mean "the flag itself is the problem" (not "the plan
-        // failed"), retry ONCE, plainly, without it. A genuine dry-run failure (bad project number,
-        // transport error, …) is NOT one of those two reasons and re-throws unchanged below.
-        const reason = missingComponentsFallbackReason(error)
-        if (!reason) throw error
-        const response = await apiFetch(`${route}${suffix}`, {
-          method: 'POST',
-          headers: json,
-          body: JSON.stringify({ parameters: { projectNo } }),
-        })
-        const plan = await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
-        return { ...plan, missingComponentsUnavailableReason: reason }
+        // No durable job store on this deployment: the synchronous route, which needs none.
+        if (error instanceof StockPreparationProjectSyncCallError && error.code === STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE_CODE) {
+          return syncDryRun(projectNo)
+        }
+        throw error
       }
+    },
+
+    async dryRunJobStatus(projectNo: string) {
+      for (const includeMissingComponents of [true, false]) {
+        try {
+          const job = await readJob(projectNo, includeMissingComponents)
+          if (job.status === 'running' || job.status === 'succeeded' || job.status === 'failed') {
+            return { status: job.status, elapsedMs: intOf(job.elapsedMs) }
+          }
+          return null
+        } catch (error) {
+          // Nothing under this flag (404), or the flagged read is not this caller's to make: try the
+          // values-free record. Anything else — and both misses — means "nothing to re-attach to".
+          const next = error instanceof StockPreparationProjectSyncCallError
+            && (error.status === 404 || missingComponentsFallbackReason(error) !== null)
+          if (!next) return null
+        }
+      }
+      return null
     },
 
     async reconcile(projectNo: string) {
@@ -1084,16 +1921,26 @@ export function createStockPreparationProjectSyncApi(
       return readEnvelope<StockPreparationProjectSyncApplyResult>(response, route)
     },
 
-    async archive(projectNo: string) {
+    async archive(projectNo: string, options: StockPreparationProjectSyncArchiveOptions = {}) {
       const route = `${base}/mvp-persist`
       // NO QUERY STRING. mvp-persist refuses a request carrying any query at all
       // (assertStockPreparationTableActionMvpPersistNoSteering): with auto-persist on, the route
       // gains a write side-effect, so an explicit tenant/workspace on any carrier is a steering
-      // vector and is rejected fail-closed. The tenant comes from the authenticated principal.
+      // vector and is rejected fail-closed. Its tenant is the principal's (`user.tenantId` — the
+      // verified claim, or on a claimless token the `x-tenant-id` header apiFetch attaches; see
+      // STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES' TENANT_REQUIRED line), and it resolves the source with
+      // NO workspace hint — which is why this run hands back step ③'s `sourceScopeDigest`: it names
+      // the source ③ read without selecting anything, so mvp-persist can only refuse a mismatch. Same
+      // for `sourceContentDigest` (#6475 round 2): it names what ③ read, and can only make ④ refuse.
+      const body: Record<string, unknown> = { parameters: { projectNo } }
+      const scopeDigest = sourceScopeDigestOf(options.sourceScopeDigest)
+      if (scopeDigest) body.sourceScopeDigest = scopeDigest
+      const contentDigest = sourceContentDigestOf(options.sourceContentDigest)
+      if (contentDigest) body.sourceContentDigest = contentDigest
       const response = await apiFetch(route, {
         method: 'POST',
         headers: json,
-        body: JSON.stringify({ parameters: { projectNo } }),
+        body: JSON.stringify(body),
       })
       return readEnvelope<StockPreparationProjectSyncArchiveResult>(response, route)
     },

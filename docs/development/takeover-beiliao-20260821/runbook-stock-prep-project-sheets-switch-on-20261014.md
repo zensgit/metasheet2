@@ -404,6 +404,19 @@ SELECT count(*) AS old_sheet_registered FROM integration_stock_prep_project_targ
 - **清单保持只有 A，直到 B 登记**；之后按 D13 改回多项目。脚本绝不建表。
 - 定时任务的令牌必须是绑定租户的服务账号（`stock-preparation-scheduled-pull.mjs:32`）。登记行按租户查，建表的拉取人员与这个服务账号必须在同一租户；A 建表后的第一次 06:00 试拉若仍是 `skipped_project_sheet_absent`，就是租户或项目号不一致，停下报开发机（本手册没有在演示机上核对过这一点）。
 
+### 4.1 大 BOM 项目的超时：`MS_TIMEOUT_MS` 建议值（R67 前的临时口径）
+
+试拉脚本对每个项目发一次 dry-run，单次 HTTP 超时由 `MS_TIMEOUT_MS` 决定（默认 `120000`，`scripts/ops/stock-preparation-scheduled-pull.mjs` 的 `readConfig`），整轮预算由 `MS_TOTAL_TIMEOUT_MS` 决定（默认 `1800000`，超过后不再开始下一个项目）。
+
+- **为什么会超时**：dry-run 对客户 PLM **逐次串行**读（演示机实测：项目 A 每次 1,414 次读、项目 B 460 次），每次往返随客户 PLM 负载在约 15–130 ms 之间变化。同一个已有 652 行的项目，PLM 快时 18 s、慢时超过 120 s；与目标表已有行数无关（`g1-switch-on-record-20261016.md` §4）。
+- **怎么取值**：单次超时 ≥ 读次数 × 130 ms 再留一倍余量。读次数看该项目任一次 dry-run 响应的 `evidence.expansion.readCount`，或试拉日志里 `durationMs` 的历史最大值。
+  - 读次数 ≤ 500：保持默认 `120000`。
+  - 读次数 500–2,000（演示机项目 A 属此档）：`600000`（10 分钟）。演示机 2026-10-16 起即用此值。
+  - 读次数 > 2,000：`900000`，并同时检查 `MS_TOTAL_TIMEOUT_MS` ≥ 各项目单次超时之和；大于此规模的项目应走大 BOM 后台车道。
+- **怎么改**：只在试拉任务的 env 文件里增加或修改 `MS_TIMEOUT_MS=<毫秒>` 这一行（先备份；不要回显同文件里的令牌），然后手动触发一次任务，核对日志里每个项目 `dryRunHttpStatus 200` 且 summary `failed 0`。
+- **界面不受此值影响**：界面 dry-run 经 nginx，60 s 即 504。PLM 慢的时段里，大 BOM 项目在界面上重新拉取仍可能 504，待 R67 的「PLM 读批量 / 并发」与「界面 dry-run 走后台任务」两项上机后解决。
+
+
 ## 5. 回退
 
 1. 改 `app.env`。两种做法任选其一：
@@ -608,3 +621,62 @@ END $$;
 1. **不要**对 A 点「新建备料表」、也不要对 A 再 POST 建表路由（422 / 500，见上「后果」）。界面上 A 是 active，正常只给「直接打开 / 覆盖拉取」，覆盖拉取走 dry-run / apply，不经建表路由。
 2. **不要**在「成员与权限」页把 A 加给自定义角色（422）。要给某个角色旧表的权限，由管理员在多维表「权限」里手工授（G2）。
 3. **保留**旧表上现有的手工授权（1.5 的那些行）与自动化——这时它们就是项目 A 工作表的授权和自动化（D9 不适用）。
+
+## 附录 B　试点启用：启用前的旧大作业处置、启用答 500 时重新提交（备料分批拉取第一期，2026-10-24）
+
+> **不是 G1 开关的步骤**，基线也不是上文的 `ec8d97cc4`：本附录随「启用前加固」PR（步骤 4 设计 §23.4 F-3 / F-4 / F-5）进入 main，只引路由、函数名与检查 id，不引行号。启用试点是 owner 动作（R-54）；在步骤 4 的 PR-2 / PR-3 / PR-6 与第 6 步上线之前，真实部署上的就绪清单必然不通过（D-22），本附录先写好，届时照做。
+> **values-free**：项目号写 `<项目号>`，表写 `<项目表 sheetId>`，作业写 `<作业键>`；替换后的值只记在私有记录里。
+
+### B.1 先看就绪（GET `/api/integration/stock-preparation/projects/<项目号>/target/pilot`）
+
+- 回答只有检查 id 和真假；`readiness.version` 现为 **2**（18 项：版本 1 的 15 项不变，新增下表三项，只会多拒、不会少拒）。`may.enable` 为真才去 B.3。
+- 版本 2 新增的三项：
+
+| 检查 id | 不通过的意思 | 处置 |
+|---|---|---|
+| `no_two_copy_component` | 同一组件在这张表上**既是有效顶层行**（父件为空）**又是有效子行**（历史留下的双份）。「有效」按沿用关系核心的读法：`active` 不等于 `false` 都算（空格子、文字格子也算） | 不在启用流程里修：走第 6 步修复（O-6）后再看 |
+| `no_open_large_job` | 有指向这张表、还没结束的大 BOM 检查点作业，或作业库读不出来 | 见 B.2 |
+| `pack_columns_installed` | 动作配置里声明的 `ext_` 列没有全部装到这张项目表上（安装台账里没有、或台账有而表上没有）；或者什么都没声明、也没有声明「不适用」 | 装客户包 / 补列；部署确实没有客户包时，插件配置写 `stockPreparationPilot.customerPack: 'not_applicable'`——只有在动作不声明 `ext_` 列、台账里这张表也没有任何已装包列时才算通过。改配置由 owner 定 |
+
+### B.2 旧作业处置（`no_open_large_job` 为假时）
+
+**为什么拦**：启用后大车道对试点项目一律 409 `STOCK_PREP_PILOT_LARGE_LANE_REFUSED`（启用前已批准的作业也一样，每块在租约内再查一次），而检查点应用作业**没有取消接口**。一个跨过启用、只落了一半的大作业既不能续跑、也不能关闭。所以这张表上还有没结束的作业时不许启用；启用路由在自己的租约里会再扫一次（扫描与 bump 之间刚跑过一块的作业也拦得住）。
+
+**「没结束」**：状态不是 `succeeded` / `partial` / `cancelled` / `expired`——`queued`、`paused`、`failed`（围栏中断，可续跑）、`running`（跑到一半进程没了）以及任何不认识的状态都算；按作业里存的目标表认，不分租户与工作区。作业库列不出键、读不出值，或某个作业值读不出目标表，都算不通过。
+
+**处置顺序**（全部在启用**之前**做）：
+
+1. 在大 BOM 面板把这张表上每个 `queued` / `paused` / `failed` 的作业**续跑到结束**（反复「运行下一块」直到 `succeeded` 或 `partial`）。`failed` 的从断点续跑。**存的状态是 `running` 的作业不要续跑**：分块执行函数 `runLargeBomCheckpointApplyJobChunk` 对存为 `running` 的作业一律拒 409 `LARGE_BOM_APPLY_RUN_IN_PROGRESS`，进程没了之后永远续不上——直接走第 2 步里 owner 批准的 `cancelled` 改状态（模板的状态条件已含 `running`），不必先跑新作业。
+2. 续跑被拒 409 `PLAN_SUPERSEDED`（`newer_plan` / `job_unbound`）的旧作业已经不能再跑：先对同一项目**重新展开 → 规划 → 批准 → 跑完**一个新作业（旧作业已落的行按幂等键重新规划为更新 / 跳过，不会重复新增）。之后旧作业仍是未结束状态，就绪依然不过——这一步只能由 **owner 批准一次手册数据库操作**，把那一个旧作业的状态改为 `cancelled`：
+   - 先只读找出作业（确认没有在途租约：GET 的 `write_lock_free` 为真）：
+     ```sql
+     SELECT key, value->>'status' AS status
+       FROM plugin_kv
+      WHERE plugin = 'plugin-integration-core'
+        AND key LIKE 'stock-preparation:large-bom:apply:%'
+        AND value->'target'->>'sheetId' = '<项目表 sheetId>'
+        AND value->>'status' NOT IN ('succeeded', 'partial', 'cancelled', 'expired');
+     ```
+   - 再逐个改（只改这一个键的 `status`，不删键、不动其它字段；改动行数必须是 1）：
+     ```sql
+     UPDATE plugin_kv
+        SET value = jsonb_set(value, '{status}', '"cancelled"'), updated_at = now()
+      WHERE plugin = 'plugin-integration-core'
+        AND key = '<作业键>'
+        AND value->'target'->>'sheetId' = '<项目表 sheetId>'
+        AND value->>'status' IN ('queued', 'paused', 'failed', 'running');
+     ```
+   - 私有记录里记：执行时间、执行人、`<作业键>`、改前状态；#6079 上只贴 values-free 摘要（几个作业、改前各是什么状态）。
+3. 读不出目标表的作业值（查询里 `value->'target'` 为空，或值不是对象），以及上面 SELECT 查到、但状态不在 `queued` / `paused` / `failed` / `running` 之内的作业（不认识的状态，UPDATE 不会改它）：**不要**手工改，报开发机。
+4. 处置完 GET 再看一次，`no_open_large_job` 为真再去 B.3。
+
+### B.3 启用（POST 同一路径，请求体 `{"confirmProjectNo": "<项目号>"}`）与「答 500 ⇒ 重新 POST」
+
+- 顺序：就绪全过 → 推进计划代次（`pilot_enable`）→ 在写入租约里再扫一次未结束的大作业 → **宿主盖章**（这张表的通用网格导出关闭）→ **一个事务**里写登记行的试点标记**和**审计行 `project_pilot_enable`。
+- **答 500**：盖章之后、标记事务提交之前出了错（进程崩溃、审计写失败、数据库断开）。这时表**已关闭网格导出、但还不是试点**：登记行的三列为空、**没有**审计行（标记和审计行同生共死，不会出现「是试点却没有审计行」）。这个中间态下通用网格导出被拒（403 `MULTITABLE_GRID_EXPORT_CLOSED`），大车道照常（还不是试点）。
+- **唯一例外：500 的信息是 `the pilot mark landed without its in-transaction audit row`（码 `AUDIT_STORE_UNAVAILABLE`，试点启用路由 `stockPreparationProjectPilotEnable` 在标记之后发现审计钩子没被调用时抛出）**。这时试点**已经启用**、审计行为 **0 条**；再 POST 只会回答 `alreadyEnabled: true`，永远补不上审计行。这只在接线缺陷时出现（登记表的 store 与路由不是同一构建）。**不要再 POST**：停下，报开发机。
+- **处置：原样再 POST 一次**。先 GET 确认 `pilot.enabled` 为假、就绪全过；再 POST。回答 200、`enabled: true`、`exportClosure.alreadyClosed: true`；审计里**恰好一条** `project_pilot_enable`（`detail.exportClosureAlreadyClosed` 为真）。
+- 已经是试点时再 POST：回答 `alreadyEnabled: true`，只补宿主盖章，不写第二条审计。
+- 再 POST 被就绪拒（409 `STOCK_PREP_PILOT_NOT_READY`）：按 `failing` 里的 id 处置后再 POST；这期间表保持「关导出、非试点」。
+- 每次 POST 都推进计划代次：之前做的小车道预览要重做（`PLAN_SUPERSEDED`）。在租约里因 `no_open_large_job` 被拒（409 `STOCK_PREP_PILOT_NOT_READY`）的那次 POST 也已推进代次，拉取人员手上未执行的预览同样要重跑；只有在推进之前就被就绪清单拒掉的 POST 不推进。
+- **不要**：手工改登记表的试点三列来「补完」启用（那样没有审计行）；不要重开网格导出（R-53 ②）。

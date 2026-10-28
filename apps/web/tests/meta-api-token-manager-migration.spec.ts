@@ -40,7 +40,7 @@ function fakeToken(overrides: Partial<ApiToken> = {}): ApiToken {
   return { id: 'tok_1', name: 'Test token', prefix: 'mst_abc', scopes: [], createdAt: '2026-04-01T00:00:00Z', lastUsedAt: null, expiresAt: null, ...overrides }
 }
 function fakeWebhook(overrides: Partial<Webhook> = {}): Webhook {
-  return { id: 'wh_1', name: 'Test webhook', url: 'https://example.com/hook', events: ['record.created'], active: true, secret: null, failureCount: 0, createdAt: '2026-04-01T00:00:00Z', updatedAt: '2026-04-01T00:00:00Z', ...overrides }
+  return { id: 'wh_1', name: 'Test webhook', url: 'https://example.com/hook', events: ['record.created'], active: true, secret: null, failureCount: 0, sheetId: 'sheet_1', createdAt: '2026-04-01T00:00:00Z', updatedAt: '2026-04-01T00:00:00Z', ...overrides }
 }
 function fakeGroup(overrides: Partial<DingTalkGroupDestination> = {}): DingTalkGroupDestination {
   return {

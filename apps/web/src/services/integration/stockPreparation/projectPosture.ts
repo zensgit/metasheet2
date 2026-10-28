@@ -34,6 +34,7 @@ export type StockPrepPostureKey =
   | 'unknown' // ? 看不到 — 这一屏拿不到判断依据(§4.4 第三态,G4)
   | 'not_yours' // ⊘ 不归您做 — stepper 第④步(存档),对一线恒为此
   | 'archived' // 已归档 — 项目表的登记行已归档(ADR adr-stock-prep-project-sheets-20261008 §5 「状态」,S3)
+  | 'blocked_pull_state' // 批量刷新第 4 步 PR-5:刷新状态未完成或读不到(待确认 / 已确认待执行 / 正在写入 / 上次写入未完成 / 已执行待核对 / 变更待复核 / 状态读取失败),正式导出被服务端拒绝,永远不是「可以导出」
 
 export type StockPrepPostureTone = 'warning' | 'danger' | 'primary' | 'success' | 'neutral' | 'info'
 
@@ -73,6 +74,47 @@ export interface StockPrepPostureInput {
    * branch that would have to guess.
    */
   progressUnknown?: boolean
+  /**
+   * Batch-refresh step 4 PR-5 (design §11; plan §5.3 U01): the project's derived REFRESH STATE token as
+   * the server's board `refresh.status` / overview row carries it (`not_governed`, `complete`,
+   * `pending_confirmation`, `confirmed_pending_execution`, `executing`, `failed_pending_recovery`,
+   * `executed_pending_settlement`, `change_pending_review`, `unreadable`). Any token other than
+   * `not_governed` or a SETTLED `complete` is `blocked_pull_state` — checked before 「可以导出」 / 「还没拉过」
+   * and after the two count badges, exactly as the server mirror `projectOverviewPosture` ranks it
+   * (plugins/plugin-integration-core/lib/stock-preparation-project-overview.cjs; the PO-MIRROR spec drives
+   * both). Absent: the pre-PR-5 posture (a caller that has no state to show).
+   */
+  refreshStatus?: string
+  /** PR-5: the derived state's `settled`. A `complete` that is not settled is 「待核对」, never 「可以导出」 (fail closed). */
+  refreshSettled?: boolean
+  /** PR-5: the derived counts.pendingConfirm, folded into 「待确认 N 件」. */
+  refreshPendingConfirmCount?: number
+}
+
+// PR-5: the words of every blocked refresh state — WORD FOR WORD the server's REFRESH_BLOCKED_TEXT.
+type BlockedRefreshText = { zh: (n: number) => string; en: (n: number) => string; tone: StockPrepPostureTone }
+const REFRESH_BLOCKED_TEXT: Readonly<Record<string, BlockedRefreshText>> = Object.freeze({
+  pending_confirmation: { zh: (n) => (n > 0 ? `待确认 ${n} 件` : '待确认'), en: (n) => (n > 0 ? `Awaiting confirmation (${n})` : 'Awaiting confirmation'), tone: 'warning' },
+  confirmed_pending_execution: { zh: () => '已确认待执行', en: () => 'Confirmed, awaiting execution', tone: 'warning' },
+  executing: { zh: () => '正在写入', en: () => 'Writing now', tone: 'primary' },
+  failed_pending_recovery: { zh: () => '上次写入未完成', en: () => 'Last write unfinished', tone: 'danger' },
+  executed_pending_settlement: { zh: () => '已执行待核对', en: () => 'Executed, awaiting check', tone: 'warning' },
+  change_pending_review: { zh: () => '变更待复核', en: () => 'Change awaiting review', tone: 'warning' },
+  unreadable: { zh: () => '状态读取失败', en: () => 'Refresh state unreadable', tone: 'danger' },
+  unsettled: { zh: () => '待核对', en: () => 'Awaiting check', tone: 'warning' },
+  unknown: { zh: () => '刷新未完成', en: () => 'Refresh unfinished', tone: 'warning' },
+})
+
+function refreshBlockedPosture(input: StockPrepPostureInput): StockPrepPosture | null {
+  const status = input.refreshStatus
+  if (status === undefined || status === null) return null
+  if (status === 'not_governed') return null
+  if (status === 'complete' && input.refreshSettled === true) return null
+  const token = status === 'complete' ? 'unsettled' : (Object.prototype.hasOwnProperty.call(REFRESH_BLOCKED_TEXT, status) ? status : 'unknown')
+  const text = REFRESH_BLOCKED_TEXT[token]
+  const raw = input.refreshPendingConfirmCount
+  const n = Number.isInteger(raw) && (raw as number) >= 0 ? (raw as number) : 0
+  return { key: 'blocked_pull_state', zh: text.zh(n), en: text.en(n), tone: text.tone }
 }
 
 const NOT_YOURS: StockPrepPosture = Object.freeze({
@@ -154,6 +196,10 @@ export function stockPrepPosture(input: StockPrepPostureInput): StockPrepPosture
       tone: 'danger',
     }
   }
+  // PR-5: an unfinished / unreadable refresh state is never 「可以导出」 (and outranks 「看不到进度」: a state
+  // that IS known says more than "this screen cannot see the pull").
+  const blockedPull = refreshBlockedPosture(input)
+  if (blockedPull) return blockedPull
   if (input.progressUnknown) return UNKNOWN
   const pulled = input.pulledRowCount ?? 0
   if (pulled > 0) return READY

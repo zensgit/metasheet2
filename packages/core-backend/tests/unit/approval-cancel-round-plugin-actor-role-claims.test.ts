@@ -4,12 +4,13 @@ import { fileURLToPath } from 'node:url'
 import type { Request } from 'express'
 import { describe, expect, it } from 'vitest'
 
-import { resolveApprovalActorRoles } from '../../src/services/approval-actor-roles'
+import { resolveApprovalActorRoleClaims } from '../../src/services/approval-actor-roles'
 import { resolveApprovalActorPermissions } from '../../src/routes/approvals'
 
 /**
  * Cancel-round product entry (phase C gate r2, NIT) — the plugin's `getActorRoleClaims` against
- * core's `resolveApprovalActorRoles`.
+ * core's `resolveApprovalActorRoleClaims` (the claims half of `resolveApprovalActorRoles`; the
+ * stored-role half is added core-side by the cancel-round entry port, not by the plugin).
  *
  * The plugin (CJS, no import of the TS side) keeps its own copy of the resolver for the entry's
  * count push. The real-DB suite reaches it only with the `role` claim set, so the `roles` array arm
@@ -47,10 +48,10 @@ const cases: Array<{ name: string; user: unknown; expected: string[] }> = [
   { name: 'no user', user: undefined, expected: [] },
 ]
 
-describe('plugin getActorRoleClaims matches core resolveApprovalActorRoles', () => {
+describe('plugin getActorRoleClaims matches core resolveApprovalActorRoleClaims', () => {
   it.each(cases)('$name', ({ user, expected }) => {
     const req = { user } as unknown as Request
-    expect(resolveApprovalActorRoles(req)).toEqual(expected)
+    expect(resolveApprovalActorRoleClaims(req)).toEqual(expected)
     expect(pluginGetActorRoleClaims(req)).toEqual(expected)
   })
 })

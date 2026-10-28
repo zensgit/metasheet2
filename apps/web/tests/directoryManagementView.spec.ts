@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
+import AttendanceDingTalkMicroappHelpView from '../src/views/AttendanceDingTalkMicroappHelpView.vue'
 
 const apiFetchMock = vi.fn()
 
@@ -82,7 +83,14 @@ function createIntegration(overrides: Record<string, unknown> = {}) {
 }
 
 function createAccount(overrides: Record<string, unknown> = {}) {
+  // Stand-in for the server's grantOpenIdAvailable when a fixture does not set it: what the server
+  // answers for an account with no linked DingTalk-login openId on file (corp member ⇒ needs its
+  // own openId). Tests about the linked-openId path set grantOpenIdAvailable explicitly.
+  const corpId = 'corpId' in overrides ? overrides.corpId as string | null : 'dingcorp'
+  const openId = 'openId' in overrides ? overrides.openId as string | null : 'open-1'
+  const grantOpenIdAvailable = !(corpId && corpId.trim()) || Boolean(openId && openId.trim())
   return {
+    grantOpenIdAvailable,
     id: 'account-1',
     integrationId: 'dir-1',
     provider: 'dingtalk',
@@ -258,6 +266,122 @@ describe('DirectoryManagementView', () => {
     window.history.replaceState({}, '', '/')
     app = null
     container = null
+  })
+
+  it('offers server OAuth configuration guidance before a directory integration exists', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const hint = container!.querySelector('[data-testid="dingtalk-login-config-hint"]')
+    expect(hint?.textContent).toContain('不会配置钉钉登录')
+    expect(hint?.textContent).toContain('服务端环境变量')
+    expect(hint?.querySelector('a')?.getAttribute('href')).toBe('/help/attendance/dingtalk-microapp#server-login')
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations')
+  })
+
+  it('#6467 names the separate OAuth env variables in the directory credential note', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const hint = container!.querySelector('[data-testid="dingtalk-login-config-hint"]')!
+    const text = hint.textContent!.replace(/\s+/g, ' ')
+    expect(text).toContain('目录集成（通讯录拉取）的凭据')
+    expect(text).toContain('DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET / DINGTALK_REDIRECT_URI')
+    expect(text).toContain('两者互不相通')
+    expect(hint.querySelector('[data-testid="dingtalk-login-probe-status"]')).toBeNull()
+    // Opening the page does not probe; only the integrations list is fetched.
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    [
+      'available',
+      { success: true, data: { available: true, unavailableReason: null, missingEnv: [] } },
+      '当前钉钉登录：可用。',
+    ],
+    [
+      'several missing',
+      {
+        success: true,
+        data: {
+          available: false,
+          unavailableReason: 'missing_client_id',
+          missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'private-secret-value', 'DINGTALK_REDIRECT_URI'],
+        },
+      },
+      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY）、DINGTALK_REDIRECT_URI；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。',
+    ],
+    [
+      'older backend without missingEnv',
+      { success: true, data: { available: false, unavailableReason: 'missing_client_secret' } },
+      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET）。',
+    ],
+    [
+      'corp not allowed',
+      { success: true, data: { available: false, unavailableReason: 'corp_not_allowed', missingEnv: [], corpId: 'private-corp-value' } },
+      '当前钉钉登录：不可用，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
+    ],
+    [
+      'unknown reason',
+      { success: true, data: { available: false, unavailableReason: 'unexpected-private-value' } },
+      '当前钉钉登录：不可用。',
+    ],
+    [
+      'probe failure',
+      { success: false, error: 'private-error-value' },
+      '当前钉钉登录：无法获取状态，请稍后重试。',
+    ],
+  ])('#6467 login probe button reports %s', async (_label, probePayload, expected) => {
+    apiFetchMock.mockImplementation(async (url: string) => (
+      url === '/api/auth/dingtalk/launch?probe=1'
+        ? createJsonResponse(probePayload)
+        : createJsonResponse({ ok: true, data: { items: [] } })
+    ))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-testid="dingtalk-login-probe-button"]')!.click()
+    await flushUi()
+
+    const statusNode = container!.querySelector('[data-testid="dingtalk-login-probe-status"]')
+    expect(statusNode?.textContent).toBe(expected)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/launch?probe=1',
+      expect.objectContaining({ method: 'GET' }),
+    )
+    for (const value of ['private-secret-value', 'private-corp-value', 'private-error-value', 'unexpected-private-value']) {
+      expect(container!.textContent).not.toContain(value)
+    }
+  })
+
+  it('renders the linked OAuth help without fetching or editing credentials', async () => {
+    app = createApp(AttendanceDingTalkMicroappHelpView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const section = container!.querySelector('#server-login')
+    expect(section).not.toBeNull()
+    expect(Array.from(section!.querySelectorAll('code'), (node) => node.textContent)).toEqual([
+      'docker/app.env',
+      'DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY',
+      'DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET',
+      'DINGTALK_REDIRECT_URI', '/login/dingtalk/callback',
+      'DINGTALK_CORP_ID', 'DINGTALK_ALLOWED_CORP_IDS',
+    ])
+    expect(section!.textContent).toContain('保存目录集成不会同步这些变量')
+    expect(section!.textContent).toContain('不要通过清空白名单绕过限制')
+    expect(section!.querySelector('input, textarea, form')).toBeNull()
+    expect(apiFetchMock).not.toHaveBeenCalled()
   })
 
   it('loads integrations and recent runs on mount', async () => {
@@ -554,7 +678,7 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('部门 ID 2')
     expect(container?.textContent).toContain('当前可见 1 个部门')
     const visibleDepartmentPreview = container!.querySelector('.directory-admin__visible-department-preview') as HTMLTextAreaElement | null
-    expect(visibleDepartmentPreview?.value).toBe('2')
+    expect(visibleDepartmentPreview?.value).toBe('项目组 · 信息化团队 / 项目组')
 
     const copyVisibleDepartmentIdsButton = Array.from(container!.querySelectorAll('button'))
       .find((button) => button.textContent?.includes('复制当前可见部门 ID'))
@@ -1037,8 +1161,14 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container?.textContent).toContain('openId 缺失，当前无法同时开通钉钉登录')
-    expect(container?.textContent).toContain('修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员')
+    expect(container?.textContent).toContain('暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐）')
+    expect(container?.textContent).toContain('修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。')
+    // field item 3: a bound member who logged in before the upgrade rescans once; the admin refreshes
+    // and grants on this page (user management is not equivalent for these members)
+    const rescanHints = Array.from(container!.querySelectorAll('p.directory-admin__hint'))
+      .filter((hint) => hint.textContent?.includes('已绑定、升级前用钉钉登录过的成员：升级后请让成员再用钉钉扫码登录一次，点「刷新当前成员」后在本页开通（这类成员不要到用户管理开通）。'))
+    expect(rescanHints.length).toBeGreaterThanOrEqual(2)
+    expect(container?.textContent).not.toContain('检查钉钉目录同步返回值')
     const refreshButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('刷新当前成员'))
     expect(refreshButtons.length).toBeGreaterThanOrEqual(2)
     const userLinks = Array.from(container!.querySelectorAll('a')).filter((link) => link.textContent?.includes('前往用户管理'))
@@ -1052,6 +1182,95 @@ describe('DirectoryManagementView', () => {
       expect(input?.disabled).toBe(true)
       expect(input?.checked).toBe(false)
     }
+  })
+
+  it('follows the server verdict: a member whose openId is known only from their DingTalk login can be bound WITH the grant', async () => {
+    // directory row has no openId (通讯录 never returns one) but the member already scanned in, so
+    // the server's grant predicate says the grant is available — the page must not block it.
+    const scannedInAccount = createAccount({ openId: null, grantOpenIdAvailable: true })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([scannedInAccount])))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            openId: null,
+            grantOpenIdAvailable: true,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount({
+        openId: null,
+        grantOpenIdAvailable: true,
+        linkStatus: 'linked',
+        matchStrategy: 'manual_admin',
+        localUser: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' },
+      })])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    expect(accountsSection.textContent).not.toContain('暂时拿不到该成员的 openId')
+    const grantInput = Array.from(accountsSection.querySelectorAll('label.directory-admin__toggle'))
+      .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
+      ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    expect(grantInput?.disabled).toBe(false)
+    expect(grantInput?.checked).toBe(true)
+
+    const bindInput = accountsSection.querySelector('input[placeholder="例如 user-123 或 alpha@example.com"]') as HTMLInputElement | null
+    bindInput!.value = 'alpha@example.com'
+    bindInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    Array.from(accountsSection.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('绑定用户'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(10)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-1/bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ localUserRef: 'alpha@example.com', enableDingTalkGrant: true }),
+      }),
+    )
+  })
+
+  it('a server verdict of false blocks the grant even when the row carries an openId', async () => {
+    const blockedAccount = createAccount({ grantOpenIdAvailable: false })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([blockedAccount])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    const grantInput = Array.from(accountsSection.querySelectorAll('label.directory-admin__toggle'))
+      .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
+      ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    expect(grantInput?.disabled).toBe(true)
+    expect(accountsSection.textContent).toContain('暂时拿不到该成员的 openId')
+    // the field-item-3 rescan hint is for members who are already bound; this account is not
+    expect(accountsSection.textContent).not.toContain('已绑定、升级前用钉钉登录过的成员')
   })
 
   it('binds an openId-missing account without enabling DingTalk grant', async () => {

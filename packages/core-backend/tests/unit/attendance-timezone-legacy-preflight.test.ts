@@ -45,12 +45,13 @@ function withCompanion(row = record()): Row {
 function database() {
   const sql: string[] = []
   const db = { records: [] as Row[], requests: [] as Row[], defaults: [{ timezone: 'Asia/Shanghai' }] as Row[],
-    rollout: [] as Row[], actorAllowed: true, sql,
+    rollout: [] as Row[], policy: [] as Row[], actorAllowed: true, sql,
     pool: { async connect() { return { release() {}, async query(query: string, args: unknown[] = []) {
       sql.push(query)
       if (query.includes('JOIN user_roles')) return { rows: db.actorAllowed ? [{ id: 'admin' }] : [] }
       if (query.includes('FROM attendance_rules')) return { rows: db.defaults }
       if (query.includes('FROM attendance_calculation_rollout_state')) return { rows: db.rollout }
+      if (query.includes('FROM attendance_timezone_policies')) return { rows: db.policy }
       const rows = query.includes('FROM attendance_records r') ? db.records : query.includes('FROM attendance_requests req') ? db.requests : []
       return { rows: rows.filter(row => args[1] === null || row.scan_id > args[1]).slice(0, Number(args[2])) }
     } } } } }
@@ -65,7 +66,7 @@ describe('org-wide historical timezone upgrade preflight', () => {
     expect(result).toEqual({ code: 'ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_READY', scanComplete: true, counts: {
       defaultRules: 1, missingDefaultRules: 0, multipleDefaultRules: 0, invalidDefaultTimezones: 0,
       recordsScanned: 0, ordinaryLegacyRecordsWithoutCompanion: 0, openOrdinaryLegacyRecordsWithoutCompanion: 0,
-      unsupportedLegacyRecordsWithoutCompanion: 0, v2CandidatesRequireValidation: 0, invalidCompanions: 0, companionCandidatesRequireValidation: 0,
+      unsupportedLegacyRecordsWithoutCompanion: 0, writableNowLegacyRecordsWithoutCompanion: 0, v2CandidatesRequireValidation: 0, invalidCompanions: 0, companionCandidatesRequireValidation: 0,
       legacyRepairPostureBlocked: 0, pendingRelatedRequestsScanned: 0, pendingRequestsWithoutUsableContext: 0,
       pendingRequestsRequireValidation: 0,
       tokenCandidatesRequireValidation: 0, overtimeCandidatesRequireValidation: 0,
@@ -84,13 +85,75 @@ describe('org-wide historical timezone upgrade preflight', () => {
     expect((await inspect(db)).code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
   })
 
-  it('counts unbound ordinary open records and their pending related requests as blockers', async () => {
-    const db = database(); db.records = [record()]; db.requests = [{ ...record(), metadata: {} }]
+  it('counts unbound other-zone ordinary open records and their pending related requests as blockers', async () => {
+    const db = database(); db.records = [{ ...record(), timezone: 'UTC' }]; db.requests = [{ ...record(), metadata: {} }]
     const result = await inspect(db)
     expect(result.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
     expect(result.counts.ordinaryLegacyRecordsWithoutCompanion).toBe(1)
     expect(result.counts.openOrdinaryLegacyRecordsWithoutCompanion).toBe(1)
     expect(result.counts.pendingRequestsWithoutUsableContext).toBe(1)
+  })
+
+  describe('same-zone untracked records are writable now, not blockers (compatibility amendment 2)', () => {
+    const recordIn = (timezone: string, id = '00000000-0000-4000-8000-000000000001'): Row => ({ ...record(id), timezone })
+    it('splits a same-zone untracked record out of BLOCKED and reports the exact counts', async () => {
+      const db = database(); db.records = [recordIn('Asia/Shanghai')]
+      const result = await inspect(db)
+      expect(result.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_READY')
+      expect(result.counts).toMatchObject({
+        recordsScanned: 1, ordinaryLegacyRecordsWithoutCompanion: 1, openOrdinaryLegacyRecordsWithoutCompanion: 1,
+        unsupportedLegacyRecordsWithoutCompanion: 0, writableNowLegacyRecordsWithoutCompanion: 1,
+      })
+    })
+    it('counts an unsupported-shape untracked same-zone record as writable now too (admission looks only at tracking and zone)', async () => {
+      const db = database(); db.records = [{ ...recordIn('Asia/Shanghai'), projection_owner: 'something_else' }]
+      const result = await inspect(db)
+      expect(result.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_READY')
+      expect(result.counts).toMatchObject({
+        ordinaryLegacyRecordsWithoutCompanion: 0, unsupportedLegacyRecordsWithoutCompanion: 1, writableNowLegacyRecordsWithoutCompanion: 1,
+      })
+    })
+    it('keeps a different-zone record blocked while still counting the same-zone one as writable', async () => {
+      const db = database()
+      db.records = [recordIn('Asia/Shanghai', '00000000-0000-4000-8000-000000000001'), recordIn('UTC', '00000000-0000-4000-8000-000000000002')]
+      const result = await inspect(db)
+      expect(result.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
+      expect(result.counts).toMatchObject({ ordinaryLegacyRecordsWithoutCompanion: 2, writableNowLegacyRecordsWithoutCompanion: 1 })
+    })
+    it.each([
+      ['multi-timezone on', (db: ReturnType<typeof database>) => { db.policy = [{ enabled: true }] }],
+      ['an ambiguous policy read', (db: ReturnType<typeof database>) => { db.policy = [{ enabled: false }, { enabled: false }] }],
+      ['shadow posture', (db: ReturnType<typeof database>) => { db.rollout = [{ state: 'shadow', scope: 'synthetic_staging' }] }],
+      ['authoritative posture', (db: ReturnType<typeof database>) => { db.rollout = [{ state: 'authoritative', scope: 'synthetic_staging' }] }],
+      ['multiple default rules', (db: ReturnType<typeof database>) => { db.defaults = [{ timezone: 'Asia/Shanghai' }, { timezone: 'Asia/Shanghai' }] }],
+      ['an invalid default zone', (db: ReturnType<typeof database>) => { db.defaults = [{ timezone: 'bad/timezone' }]; db.records = [recordIn('bad/timezone')] }],
+      ['a missing default rule', (db: ReturnType<typeof database>) => { db.defaults = [] }],
+    ])('keeps the record blocked under %s', async (_label, mutate) => {
+      const db = database(); db.records = [recordIn('Asia/Shanghai')]; mutate(db)
+      const result = await inspect(db)
+      expect(result.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
+      expect(result.counts.writableNowLegacyRecordsWithoutCompanion).toBe(0)
+      expect(result.counts.ordinaryLegacyRecordsWithoutCompanion).toBe(1)
+    })
+    it('never counts a calculation-tracked record or a record with a companion', async () => {
+      const db = database()
+      db.records = [{ ...recordIn('Asia/Shanghai', '00000000-0000-4000-8000-000000000001'), current_calculation_id: 'calc', calculation_attribution_posture: 'other' },
+        withCompanion(recordIn('Asia/Shanghai', '00000000-0000-4000-8000-000000000002'))]
+      const result = await inspect(db)
+      expect(result.counts.writableNowLegacyRecordsWithoutCompanion).toBe(0)
+      expect(result.counts.unsupportedLegacyRecordsWithoutCompanion).toBe(1)
+      expect(result.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
+    })
+    it('treats an explicit multi-timezone-off policy row like no policy row', async () => {
+      const db = database(); db.records = [recordIn('Asia/Shanghai')]; db.policy = [{ enabled: false }]
+      expect((await inspect(db)).counts.writableNowLegacyRecordsWithoutCompanion).toBe(1)
+    })
+    it('still blocks on pending requests for such a date (unchanged)', async () => {
+      const db = database(); db.records = [recordIn('Asia/Shanghai')]; db.requests = [{ ...recordIn('Asia/Shanghai'), metadata: {} }]
+      const result = await inspect(db)
+      expect(result.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
+      expect(result.counts.pendingRequestsWithoutUsableContext).toBe(1)
+    })
   })
 
   it('never treats an unresolved V2 SQL label or existing request token as validated', async () => {

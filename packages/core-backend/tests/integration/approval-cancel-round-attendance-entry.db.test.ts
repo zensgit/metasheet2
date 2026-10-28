@@ -2460,6 +2460,71 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         }
       })
 
+      it('T6 (affected user, user_roles role arm): a seat holder whose role comes ONLY from a non-admin user_roles row is pushed, when the REQUESTER launches and withdraws, the same count their own GET /api/todo/count answers — the user_roles-seated item included', async () => {
+        const rowRole = `g4dc_t6_urole_${TS}`
+        const rowItemId = await seedRoleArmItem('user-roles-row', rowRole)
+        const readGrant = await pool().query(
+          `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+          [approverId],
+        )
+        const roleRow = await pool().query(
+          `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [approverId, rowRole],
+        )
+        const recorder = recordPushes()
+        try {
+          invalidateUserPerms(approverId)
+          const approverToken = await loginToken(approverId)
+          const countOf = async (): Promise<number> => {
+            const response = await http('GET', '/api/todo/count', approverToken)
+            expect(response.status, response.text).toBe(200)
+            return response.json.count as number
+          }
+          // Precondition: the holder's own read includes the user_roles-seated item, and the role is
+          // not their users.role column (so only the user_roles row can carry it).
+          const column = (await pool().query<{ role: string }>('SELECT role FROM users WHERE id = $1', [approverId])).rows[0].role
+          expect(column).not.toBe(rowRole)
+          const items = await http('GET', '/api/todo/items', approverToken)
+          expect(items.status, items.text).toBe(200)
+          expect(items.json.items.some((entry: { id: string }) => entry.id === rowItemId)).toBe(true)
+          const before = await countOf()
+
+          const employee = `g4dc-t6-urole-${TS}`
+          await seedLoginUser(employee, { roles: ['attendance_employee'] })
+          const employeeToken = await loginToken(employee)
+          const { requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+
+          recorder.pushes.length = 0
+          const launch = await http('POST', entryPath(requestId), employeeToken, {})
+          expect(launch.status, launch.text).toBe(201)
+          const afterLaunch = await countOf()
+          expect(afterLaunch).toBe(before + 1)
+          expect(todoPushesFor(recorder.pushes, approverId)).toHaveLength(1)
+          expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count).toBe(afterLaunch)
+
+          recorder.pushes.length = 0
+          const withdrawn = await http('POST', withdrawPath(requestId), employeeToken, {})
+          expect(withdrawn.status, withdrawn.text).toBe(200)
+          const afterWithdraw = await countOf()
+          expect(afterWithdraw).toBe(before)
+          expect(todoPushesFor(recorder.pushes, approverId)).toHaveLength(1)
+          expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count).toBe(afterWithdraw)
+        } finally {
+          recorder.stop()
+          await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1', [rowItemId])
+          if ((roleRow.rowCount ?? 0) > 0) {
+            await pool().query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [approverId, rowRole])
+          }
+          if ((readGrant.rowCount ?? 0) > 0) {
+            await pool().query(
+              `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:read'`,
+              [approverId],
+            )
+          }
+          invalidateUserPerms(approverId)
+        }
+      })
+
       it('P-11 (c), lock §14.1 fence: every seat a launch writes is a person arm (user / role, never source_queue); a creation that would seat any other arm is refused with the registered code before ANY write', async () => {
         const fixture = await launchedRound('fence')
         const arms = await pool().query<{ assignment_type: string }>(

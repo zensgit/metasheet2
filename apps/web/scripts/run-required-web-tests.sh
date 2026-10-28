@@ -607,7 +607,7 @@ npx vitest run \
 # Attendance group list-detail closeout (#4354): these existing specs carry the
 # four-stage interaction and focused admin-rail behavior. Run them in an isolated
 # single fork because attendance-admin-regressions is intentionally a large mounted suite.
-NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressions useAttendanceAdminRailNavigation attendance-experience-entrypoints --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
+NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressions attendance-group-fixed-schedule useAttendanceAdminRailNavigation attendance-experience-entrypoints --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 # Employee overview 常用 icons (PR #5146 P1-3): these four specs must run in the required
 # web-tests lane, not only locally. Tokens are exact basenames; none is a substring of
 # another token already in this script (verified against useAttendanceAdmin*).
@@ -943,6 +943,19 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # sentence. Substring collision checked in BOTH directions: no existing token is a substring of
 # `StockPreparationRouteFailedPlain` (its neighbour `StockPreparationRail` diverges right after
 # `StockPreparationR`), it is not a substring of any token, and it matches exactly one file on disk.
+#
+# 备料分批拉取第一期 step 4 PR-7 (batch-refresh, register R-62, 2026-10-27): TWO tokens added,
+# `StockPreparationRefreshQueue` — the NEW spec (apps/web/tests/StockPreparationRefreshQueue.spec.ts) for the
+# puller's 「拉取待确认」 page (renderings, read receipt, allow-listed bodies parsed out of the plugin source,
+# end / keep / re-confirm, hold-id churn, values staying in the page), RQ-ALIGN through the real shell for the
+# six refresh controls the permission matrix defers to, and the board / sync-panel consumers of the refresh
+# stanza — and `StockPreparationRefreshState` — the NEW spec (apps/web/tests/StockPreparationRefreshState.spec.ts)
+# for the pure stanza module mirrored against the plugin's real derivation, the cross-side error-copy
+# tripwire, projectSync's `suspended` / 「核对」, rule 3b and the home memory fold. Substring collision checked
+# in BOTH directions: no existing token is a substring of either (their neighbours `StockPreparationRail` /
+# `StockPreparationRouteFailedPlain` diverge right after `StockPreparationR`), neither is a substring of any
+# token or of the other (they diverge right after `StockPreparationRefresh`), and each matches exactly one
+# file on disk. Case-insensitive order: …Rail < …RefreshQueue < …RefreshState < …RouteFailedPlain.
 #
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
@@ -1608,7 +1621,11 @@ exec npx vitest run \
   asyncStateBlock \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
+  attendance-daily-calendar-copy \
   attendance-record-timeline \
+  attendance-report-calendar-view.spec.ts \
+  attendance-report-date-range-view.spec.ts \
+  attendance-reports-analytics \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
@@ -1632,6 +1649,7 @@ exec npx vitest run \
   attendanceOverviewRequestReveal \
   attendancePayrollHelp.spec.ts \
   attendanceRecordRequestPrefill \
+  attendanceReportCalendar.spec.ts \
   attendanceRequestReviewEntitlement \
   attendanceRequestTimezoneIntegration \
   AttendanceScheduledFeatureStatus \
@@ -1672,6 +1690,7 @@ exec npx vitest run \
   dingtalk-internal-view-link-warnings \
   dingtalk-public-form-link-warnings \
   dingtalk-recipient-field-warnings \
+  directoryConfigPickers \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
@@ -1683,6 +1702,7 @@ exec npx vitest run \
   IntegrationStockPrepPanel \
   IntegrationWorkbenchView \
   lineDerivation \
+  LoginView.spec.ts \
   meta-ai-bulk-labels \
   meta-api-error-labels \
   meta-api-token-labels \
@@ -1963,6 +1983,8 @@ exec npx vitest run \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationRail \
+  StockPreparationRefreshQueue \
+  StockPreparationRefreshState \
   StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \
@@ -1973,6 +1995,9 @@ exec npx vitest run \
   StockPreparationUnconfirmableHold \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
+  StockPreparationYidaInitialization \
+  StockPreparationYidaOwnerSend \
+  StockPreparationYidaPreview \
   stockPrepPermissionMatrix \
   tasks-api-m3.spec.ts \
   tasks-api-m4.spec.ts \
@@ -2015,6 +2040,7 @@ exec npx vitest run \
   useAttendanceAdminUsers \
   useAttendanceRequestTimezone \
   useAutoSumTotal \
+  useDingTalkPersonRecipientStatus \
   usePlmExportActions \
   userManagementRoleMembership \
   userManagementView \

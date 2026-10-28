@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // 目标表字段存在性探针 — THROUGH THE REAL ROUTE TABLE.
 //
 // The unit suite (stock-preparation-target-field-existence-probe.test.cjs) proves the probe inside
@@ -38,7 +42,9 @@
 //      silent skip of the probe.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
@@ -179,6 +185,8 @@ function inertService(methods) {
 
 function baseServices(sourceAdapter) {
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
@@ -250,10 +258,10 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [], derived
       },
       multitable: {
         provisioning: host.provisioning,
-        records: records.api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records.api),
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig()],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [OBJECT_ID] },
@@ -262,7 +270,7 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [], derived
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: { ...baseServices(source.adapter), ...(extraServices || {}) },
+    services: withRefreshGovernance({ ...baseServices(source.adapter), ...(extraServices || {}) }),
     logger: {
       info(message, detail) { logLines.push(['info', message, detail]) },
       warn(message, detail) { logLines.push(['warn', message, detail]) },
@@ -314,7 +322,8 @@ async function apply(routes, dryRunToken) {
 /** Response data minus the random token. */
 function comparable(data) {
   const { dryRunToken, ...rest } = data
-  return { ...clone(rest), dryRunTokenShape: typeof dryRunToken }
+  // R67 ③: minus the read phase's wall-clock reading too — see support/dry-run-read-phase-clock.cjs.
+  return { ...withoutReadPhaseClock(rest), dryRunTokenShape: typeof dryRunToken }
 }
 
 // ── R1 ────────────────────────────────────────────────────────────────────────────────────────
@@ -363,7 +372,7 @@ async function r2CompleteHostAndOldHostAnswerIdentically() {
 
 async function r3ApplyIsRefusedWhenColumnsVanishAfterTheDryRun() {
   const harness = mount()
-  const planned = await dryRun(harness.routes)
+  const planned = await dryRun(harness.routes, { user: ADMIN_USER }) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
   assert.ok(planned.body.data.dryRunToken)
   for (const id of MISSING_FIVE) harness.host.missing.add(id)

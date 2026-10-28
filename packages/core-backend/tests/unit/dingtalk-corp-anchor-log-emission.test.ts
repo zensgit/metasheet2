@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import winston from 'winston'
 
 const ANCHOR_MSG = 'DingTalk interactive-card callback corp anchor'
+const COMPLETION_MSG = 'DingTalk interactive-card callback completed evidence'
 
 describe('UAT §0-a: the corp-anchor record survives the winston level gate', () => {
   const originalLevel = process.env.LOG_LEVEL
@@ -43,7 +44,7 @@ describe('UAT §0-a: the corp-anchor record survives the winston level gate', ()
     vi.resetModules()
   })
 
-  const emitAnchor = async (level: string): Promise<Array<Record<string, unknown>>> => {
+  const emitEvidence = async (level: string): Promise<Array<Record<string, unknown>>> => {
     process.env.LOG_LEVEL = level
     vi.resetModules()
     const { Logger } = await import('../../src/core/logger')
@@ -53,22 +54,37 @@ describe('UAT §0-a: the corp-anchor record survives the winston level gate', ()
       headerEventCorpIdPresent: true,
       bodyCorpIdPresent: false,
     })
+    logger.info(COMPLETION_MSG, {
+      deliveryId: 'd-0a',
+      headerEventCorpIdPresent: true,
+      bodyCorpIdPresent: false,
+      corpGateResult: 'matched',
+      callbackOutcome: 'executed',
+    })
     return transportLog.mock.calls.map((c) => c[0] as Record<string, unknown>)
   }
 
-  it('POSITIVE CONTROL — at LOG_LEVEL=info the record REACHES the transport, with the presence booleans and no corp value', async () => {
-    const emitted = await emitAnchor('info')
+  it('POSITIVE CONTROL — at LOG_LEVEL=info both evidence records REACH the transport with no corp value', async () => {
+    const emitted = await emitEvidence('info')
     const anchor = emitted.find((i) => i.message === ANCHOR_MSG)
+    const completion = emitted.find((i) => i.message === COMPLETION_MSG)
 
     expect(anchor).toBeDefined()
     expect(anchor).toMatchObject({ headerEventCorpIdPresent: true, bodyCorpIdPresent: false })
+    expect(completion).toMatchObject({
+      headerEventCorpIdPresent: true,
+      bodyCorpIdPresent: false,
+      corpGateResult: 'matched',
+      callbackOutcome: 'executed',
+    })
     // The instrument must never become an exfiltration channel for the identifier it exists to count.
-    expect(JSON.stringify(anchor)).not.toMatch(/corp_[A-Za-z0-9]/)
+    expect(JSON.stringify([anchor, completion])).not.toMatch(/corp_[A-Za-z0-9]/)
   })
 
-  it('THE TRAP — at LOG_LEVEL=warn the SAME record never reaches the transport: silence does NOT mean "no anchor"', async () => {
-    const emitted = await emitAnchor('warn')
+  it('THE TRAP — at LOG_LEVEL=warn neither evidence record reaches the transport', async () => {
+    const emitted = await emitEvidence('warn')
     expect(emitted.find((i) => i.message === ANCHOR_MSG)).toBeUndefined()
+    expect(emitted.find((i) => i.message === COMPLETION_MSG)).toBeUndefined()
     // ⇒ §0-a MUST self-check that the probe is live (see the UAT checklist) before reading silence as
     // "the real frame carries no corp field". Otherwise the flag gets closed for the wrong reason.
   })

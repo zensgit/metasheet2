@@ -1,4 +1,9 @@
 const crypto = require('crypto')
+const { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
+const {
+  previousCalendarDates, createDailyCalendarScheduler,
+  loadDailyCalendarDefaultRule, loadDailyCalendarOrgPlans,
+} = require('./lib/attendance-daily-calendar.cjs')
 const {
   isCanonicalImportUserId,
   importUserIdentifierLookupKey,
@@ -14,6 +19,22 @@ const { Transform, Readable } = require('stream')
 const { pipeline } = require('stream/promises')
 const { StringDecoder } = require('string_decoder')
 const { z } = require('zod')
+
+/**
+ * PUT on an `/:id` attendance resource, plus the same handler at `POST <path>/update`.
+ *
+ * Browsers on one client path cannot update `/api/attendance/shifts/:id`: PUT is reset
+ * before Node, and POST to that same path comes back as a fabricated "Sorry, Page Not
+ * Found" (not Express). A distinct `/update` suffix stays off that pattern. Raw PUT
+ * remains for clients that can send it. This does not touch the DELETE method-override.
+ */
+function addAttendanceIdUpdateRoute(context, method, path, handler) {
+  context.api.http.addRoute(method, path, handler)
+  if (method === 'PUT' && typeof path === 'string' && path.endsWith('/:id')) {
+    context.api.http.addRoute('POST', path + '/update', handler)
+  }
+}
+
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
 const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
@@ -23,6 +44,7 @@ const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+const { createAttendanceGroupFixedScheduleEditorService } = require('./lib/attendance-group-fixed-schedule-editor-service.cjs')
 const {
   buildAttendanceReportManagedContentPlan,
 } = require('./lib/attendance-report-managed-content-drift.cjs')
@@ -605,11 +627,9 @@ const DEFAULT_SETTINGS = {
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
 let rbacDegraded = false
-let autoAbsenceTimeout = null
-let autoAbsenceInterval = null
+let autoAbsenceSchedule = null
 let lastAutoAbsenceKey = ''
-let autoHolidaySyncTimeout = null
-let autoHolidaySyncInterval = null
+let autoHolidaySyncSchedule = null
 let importUploadCleanupInterval = null
 // Owner-review P2 follow-up on #5064/#5073: periodic metrics logging for the org-resolution
 // shadow recorder (attempted/written/abandoned/dropped/failed — see
@@ -7003,6 +7023,8 @@ function parseImportedDateTime(value, workDate, timeZone) {
   if (value instanceof Date) return value
   const text = String(value).trim()
   if (!text) return null
+  const absolute = parseImportAbsoluteDate(text)
+  if (absolute) return absolute
   const dateMatch = text.match(/\d{4}-\d{2}-\d{2}/)
   const timeMatch = text.match(/\d{2}:\d{2}(:\d{2})?/)
   if (dateMatch && timeMatch) {
@@ -7177,7 +7199,7 @@ function buildRowsFromDingTalk({ columns, data, userId }) {
     for (const entry of values) {
       const dateRaw = entry?.date
       if (!dateRaw) continue
-      const dateKey = String(dateRaw).slice(0, 10)
+      const dateKey = String(dateRaw)
       if (!rowsByDate.has(dateKey)) {
         rowsByDate.set(dateKey, {
           workDate: dateKey,
@@ -7202,7 +7224,7 @@ function buildRowsFromEntries({ entries }) {
   const rowsByKey = new Map()
   for (const entry of entries) {
     const meta = entry?.meta ?? {}
-    const workDate = entry?.workDate ?? meta.workDate ?? (entry?.occurredAt ? String(entry.occurredAt).slice(0, 10) : null)
+    const workDate = entry?.workDate ?? meta.workDate ?? (entry?.occurredAt ? String(entry.occurredAt) : null)
     if (!workDate) continue
     const userId = entry?.userId ?? meta.userId
     const rowKey = `${userId ?? meta.sourceUserKey ?? 'unknown'}|${workDate}`
@@ -7668,15 +7690,7 @@ function normalizeCsvWorkDate(value) {
   if (value === undefined || value === null) return null
   const text = String(value).trim()
   if (!text) return null
-  const numeric = text.replace(/[^0-9]/g, '')
-  if (/^\d{13}$/.test(numeric)) {
-    const date = new Date(Number(numeric))
-    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
-  }
-  if (/^\d{10}$/.test(numeric)) {
-    const date = new Date(Number(numeric) * 1000)
-    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
-  }
+  if (parseImportAbsoluteDate(text)) return text
   const cleaned = text.split(' ')[0].trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned
   if (/^\d{2}-\d{2}-\d{2}$/.test(cleaned)) {
@@ -8562,7 +8576,7 @@ function normalizeRuleOverride(value) {
   const workingDays = Array.isArray(override.workingDays)
     ? override.workingDays.map(day => Number(day)).filter(day => Number.isFinite(day) && day >= 0 && day <= 6)
     : undefined
-  return {
+  const normalized = {
     timezone: typeof override.timezone === 'string' && override.timezone.trim().length > 0
       ? override.timezone.trim()
       : undefined,
@@ -8590,6 +8604,8 @@ function normalizeRuleOverride(value) {
       : undefined,
     workingDays: workingDays && workingDays.length > 0 ? workingDays : undefined,
   }
+  // Missing override fields must preserve the complete base rule.
+  return Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== undefined))
 }
 
 function normalizeWorkingDays(value) {
@@ -13170,39 +13186,6 @@ function zonedTimeToUtc(parts, timeZone) {
   return utcGuess - offset * 60000
 }
 
-function computeNextRunTime({ now, timeZone, hour, minute }) {
-  const nowDate = now || new Date()
-  const nowParts = getZonedParts(nowDate, timeZone)
-  let targetUtc = zonedTimeToUtc(
-    {
-      year: nowParts.year,
-      month: nowParts.month,
-      day: nowParts.day,
-      hour,
-      minute,
-      second: 0,
-    },
-    timeZone
-  )
-  if (targetUtc <= nowDate.getTime()) {
-    const middayUtc = Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 12, 0, 0)
-    const nextDay = new Date(middayUtc + 24 * 60 * 60 * 1000)
-    const nextParts = getZonedParts(nextDay, timeZone)
-    targetUtc = zonedTimeToUtc(
-      {
-        year: nextParts.year,
-        month: nextParts.month,
-        day: nextParts.day,
-        hour,
-        minute,
-        second: 0,
-      },
-      timeZone
-    )
-  }
-  return targetUtc
-}
-
 async function performHolidaySync({ db, logger, orgId, settings, payload, actorId }) {
   const syncConfig = resolveHolidaySyncConfig(settings, payload)
   const years = resolveHolidaySyncYears(settings, payload)
@@ -13970,10 +13953,9 @@ function normalizeSettings(raw) {
   const holidaySyncAutoRunAt = typeof holidaySyncAuto.runAt === 'string' && holidaySyncAuto.runAt.trim().length > 0
     ? holidaySyncAuto.runAt
     : DEFAULT_SETTINGS.holidaySync.auto.runAt
-  const holidaySyncAutoTimezone = resolveTimeZone(
-    holidaySyncAuto.timezone,
-    DEFAULT_SETTINGS.holidaySync.auto.timezone
-  )
+  const holidaySyncAutoTimezone = parseBoolean(holidaySyncAuto.enabled, DEFAULT_SETTINGS.holidaySync.auto.enabled)
+    ? holidaySyncAuto.timezone
+    : resolveTimeZone(holidaySyncAuto.timezone, DEFAULT_SETTINGS.holidaySync.auto.timezone)
   const holidaySyncLastRunNormalized = holidaySyncLastRun && typeof holidaySyncLastRun === 'object'
     ? {
         ranAt: typeof holidaySyncLastRun.ranAt === 'string' ? holidaySyncLastRun.ranAt : null,
@@ -23822,25 +23804,13 @@ async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
 }
 
 function clearAutoAbsenceSchedule() {
-  if (autoAbsenceTimeout) {
-    clearTimeout(autoAbsenceTimeout)
-    autoAbsenceTimeout = null
-  }
-  if (autoAbsenceInterval) {
-    clearInterval(autoAbsenceInterval)
-    autoAbsenceInterval = null
-  }
+  autoAbsenceSchedule?.stop()
+  autoAbsenceSchedule = null
 }
 
 function clearHolidaySyncSchedule() {
-  if (autoHolidaySyncTimeout) {
-    clearTimeout(autoHolidaySyncTimeout)
-    autoHolidaySyncTimeout = null
-  }
-  if (autoHolidaySyncInterval) {
-    clearInterval(autoHolidaySyncInterval)
-    autoHolidaySyncInterval = null
-  }
+  autoHolidaySyncSchedule?.stop()
+  autoHolidaySyncSchedule = null
 }
 
 // Step 5 (Codex review Blocking #1): extracted from the scheduler's run
@@ -24081,146 +24051,86 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
 }
 
-function scheduleAutoAbsence({ db, logger, emit, w4Boundary }) {
+function scheduleAutoAbsence({ db, logger, emit, w4Boundary, strictTime }) {
   clearAutoAbsenceSchedule()
   const settings = settingsCache.value
   if (!settings.autoAbsence?.enabled) return
-
-  const [hourStr, minuteStr] = settings.autoAbsence.runAt.split(':')
-  const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
-  const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
-  const now = new Date()
-  const next = new Date(now)
-  next.setHours(hours, minutes, 0, 0)
-  if (next <= now) {
-    next.setDate(next.getDate() + 1)
+  // The cron initiator never bypasses the canonical W4 writer.
+  if (!w4Boundary) {
+    logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
+    return
   }
-  const delay = next.getTime() - now.getTime()
-
-  const run = async () => {
-    // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
-    // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
-    if (!w4Boundary) {
-      logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
-      return
-    }
-    // P1-1 fix, item 3 (#4612 verdict second gate round): the org-list query itself is a
-    // single legitimate whole-tick failure (nothing per-org to isolate before org ids exist).
-    // Everything AFTER this point is isolated PER (org, offset) below — a prior revision wrapped
-    // the entire double loop in ONE try, so a single org's `AttendanceW4ScheduledRunIdentityError`
-    // (e.g. the target-set-drift fail-closed remediation, amendment section 1.7 step 3) or the
-    // new `W4C2_SCHEDULED_RUN_TARGET_CONTENDED` retry-exhaustion outcome (P1-2 fix) aborted the
-    // REST of that tick's orgs and lookback days too, repeating every day the stuck workDate
-    // stayed inside the lookback window.
-    let orgIds
-    try {
-      const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
-      orgIds = orgRows.length > 0
-        ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
-        : [DEFAULT_ORG_ID]
-    } catch (error) {
-      logger.error('Auto absence job failed (org list)', error)
-      return
-    }
-    const lookbackDays = settings.autoAbsence.lookbackDays || 1
-    for (const orgId of orgIds) {
-      let rule
-      try {
-        rule = await loadDefaultRule(db, orgId)
-      } catch (error) {
-        logger.error('Auto absence job failed for org (rule load)', { orgId, error })
-        continue
-      }
-      for (let offset = 1; offset <= lookbackDays; offset += 1) {
-        const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
-        const workDate = toWorkDate(targetDate, rule.timezone)
+  const warn = code => logger.warn('Attendance daily calendar skipped', { code })
+  autoAbsenceSchedule = createDailyCalendarScheduler({
+    strictTime, warn,
+    loadPlans: () => loadDailyCalendarOrgPlans(db, warn),
+    refreshPlan: async plan => {
+      const rule = await loadDailyCalendarDefaultRule(db, plan.orgId, strictTime, mapRuleRow)
+      return { ...plan, rule, timeZone: rule.timezone, runAt: settings.autoAbsence.runAt }
+    },
+    runPlan: async (plan, isCurrent) => {
+      const lookbackDays = settings.autoAbsence.lookbackDays || 1
+      const workDates = previousCalendarDates(Date.now(), plan.timeZone, lookbackDays)
+      for (const workDate of workDates) {
+        if (!isCurrent()) return
         try {
           await runAutoAbsenceForOrgDate(db, {
-            orgId,
+            orgId: plan.orgId,
             workDate,
-            rule,
+            rule: plan.rule,
             logger,
             emit,
             w4Boundary,
             initiator: 'cron',
           })
-        } catch (error) {
-          // Values-free: orgId/workDate are already-logged identifiers elsewhere in this
-          // module (e.g. "Auto absence generated for ${workDate}" a few lines below), never
-          // the offending business value. One org/date's failure (drift wedge, target-set
-          // contention exhaustion, or any other error) must not skip the remaining orgs/dates
-          // in this tick.
-          logger.error('Auto absence job failed for org/date', { orgId, workDate, error })
+        } catch {
+          // One failed org/date must not skip another date or organization's timer.
+          warn('DAILY_CALENDAR_ORG_DATE_FAILED')
         }
       }
-    }
-  }
-
-  autoAbsenceTimeout = setTimeout(async () => {
-    await run()
-    autoAbsenceInterval = setInterval(run, 24 * 60 * 60 * 1000)
-  }, delay)
+    },
+  })
+  void autoAbsenceSchedule.start()
 }
 
-function scheduleHolidaySync({ db, logger, emit }) {
+function scheduleHolidaySync({ db, logger, emit, strictTime }) {
   clearHolidaySyncSchedule()
   const settings = settingsCache.value
   const auto = settings.holidaySync?.auto
   if (!auto?.enabled) return
-
-  const [hourStr, minuteStr] = String(auto.runAt || '').split(':')
-  const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
-  const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
-  const timeZone = resolveTimeZone(auto.timezone, DEFAULT_SETTINGS.holidaySync.auto.timezone)
-  const now = new Date()
-  const nextTimestamp = computeNextRunTime({
-    now,
-    timeZone,
-    hour: hours,
-    minute: minutes,
-  })
-  const delay = Math.max(0, nextTimestamp - now.getTime())
-
-  const run = async () => {
-    try {
-      const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
-      const orgIds = orgRows.length > 0
-        ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
-        : [DEFAULT_ORG_ID]
-      for (const orgId of orgIds) {
-        const result = await performHolidaySync({
-          db,
-          logger,
-          orgId,
-          settings,
-          payload: {},
-        })
-        emit('attendance.holiday.sync', {
-          orgId,
-          years: result.years,
-          totalFetched: result.totalFetched,
-          totalApplied: result.totalApplied,
-          totalSkipped: result.totalSkipped,
-          totalIgnored: result.totalIgnored,
-        })
-        logger.info('Auto holiday sync completed', {
-          orgId,
-          years: result.years,
-          totalFetched: result.totalFetched,
-          totalApplied: result.totalApplied,
-          totalSkipped: result.totalSkipped,
-          totalIgnored: result.totalIgnored,
-        })
+  const warn = code => logger.warn('Attendance daily calendar skipped', { code })
+  autoHolidaySyncSchedule = createDailyCalendarScheduler({
+    strictTime, warn,
+    loadPlans: async () => [{}],
+    refreshPlan: async plan => ({ ...plan, timeZone: auto.timezone, runAt: auto.runAt }),
+    runPlan: async (_plan, isCurrent) => {
+      const orgPlans = await loadDailyCalendarOrgPlans(db, warn)
+      for (const { orgId } of orgPlans) {
+        if (!isCurrent()) return
+        try {
+          // Keep the existing provider calls serial across organizations.
+          const result = await performHolidaySync({ db, logger, orgId, settings, payload: {} })
+          emit('attendance.holiday.sync', {
+            orgId,
+            years: result.years,
+            totalFetched: result.totalFetched,
+            totalApplied: result.totalApplied,
+            totalSkipped: result.totalSkipped,
+            totalIgnored: result.totalIgnored,
+          })
+          logger.info('Auto holiday sync completed', {
+            totalFetched: result.totalFetched,
+            totalApplied: result.totalApplied,
+            totalSkipped: result.totalSkipped,
+            totalIgnored: result.totalIgnored,
+          })
+        } catch {
+          warn('DAILY_CALENDAR_ORG_FAILED')
+        }
       }
-    } catch (error) {
-      logger.error('Auto holiday sync failed', error)
-    }
-  }
-
-  autoHolidaySyncTimeout = setTimeout(async () => {
-    await run()
-    autoHolidaySyncInterval = setInterval(run, 24 * 60 * 60 * 1000)
-  }, delay)
+    },
+  })
+  void autoHolidaySyncSchedule.start()
 }
 
 function createRbacHelpers(db, logger) {
@@ -28326,7 +28236,24 @@ module.exports = {
 		      importUploadCleanupInterval = null
 		    }
 
-	    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
+    const resolveImportCalendarRows = async (rows, payload, orgId, coalesce = false, fallbackUserId = payload.userId, deferCalendarErrors = false) => {
+      const result = await normalizeImportCalendarRows({ db, orgId, payload, rows, coalesce, fallbackUserId }, {
+        loadDefaultRule, loadAttendanceGroupRuleSetMap, loadRuleSetConfigById,
+        resolveAttendanceGroupKey, normalizeRuleOverride, toWorkDate, normalizeDateOnly,
+        resolveRowUserId, resolveImportRowUserReference, loadAttendanceImportUserIdentifierIndex,
+        loadRotationAssignment, loadShiftAssignment, addDaysToDateKey, HttpError,
+      })
+      if (deferCalendarErrors) return result
+      if (result.calendarError) throw result.calendarError
+      return result.rows
+    }
+
+	    const resolveImportRows = async ({ payload, orgId, fallbackUserId, deferCalendarErrors = false }) => {
+      const calendar = async (rows, coalesce = false) => {
+        const result = await resolveImportCalendarRows(rows, payload, orgId, coalesce, fallbackUserId, true)
+        if (!deferCalendarErrors && result.calendarError) throw result.calendarError
+        return { ...result, csvWarnings: [], csvFileId: null }
+      }
 	      let csvWarnings = []
 	      let csvFileId = null
 		      const resolvedCsvFileId = resolveImportUploadFileId(payload)
@@ -28336,25 +28263,21 @@ module.exports = {
 		        const result = buildRowsFromCsv({ csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
 		        csvWarnings = result.warnings
-		        return { rows: result.rows, csvWarnings, csvFileId }
+		        return { ...await calendar(result.rows), csvWarnings, csvFileId }
 		      }
-		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
+		      if (Array.isArray(payload.rows)) return calendar(payload.rows)
 		      if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
 		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
 		        csvWarnings = result.warnings
-		        return { rows: result.rows, csvWarnings, csvFileId }
+		        return { ...await calendar(result.rows), csvWarnings, csvFileId }
 		      }
-		      if (Array.isArray(payload.entries)) return { rows: buildRowsFromEntries({ entries: payload.entries }), csvWarnings, csvFileId }
-	      return {
-	        rows: buildRowsFromDingTalk({
-	          columns: payload.columns,
-		          data: payload.data,
-		          userId: payload.userId ?? fallbackUserId,
-		        }),
-		        csvWarnings,
-	        csvFileId,
-	      }
+		      if (Array.isArray(payload.entries)) return calendar(buildRowsFromEntries({ entries: payload.entries }), true)
+      return calendar(buildRowsFromDingTalk({
+        columns: payload.columns,
+        data: payload.data,
+        userId: payload.userId ?? fallbackUserId,
+      }), true)
 	    }
 
 	    const createMaterializedImportRowSource = ({ rows, csvWarnings, csvFileId }) => ({
@@ -28386,11 +28309,15 @@ module.exports = {
 	        return {
 	          csvFileId,
 	          iterateRows: async (onRow) => {
-	            const result = await iterateImportRowsFromCsvFileAsync({
-	              csvPath,
-	              csvOptions: payload.csvOptions,
-	              onRow,
-	            })
+	            const result = await iterateImportCalendarRows({
+              iterateRows: (consume) => iterateImportRowsFromCsvFileAsync({
+                csvPath,
+                csvOptions: payload.csvOptions,
+                onRow: consume,
+              }),
+              normalizeRows: (rows) => resolveImportCalendarRows(rows, payload, orgId, false, fallbackUserId),
+              onRow,
+            })
 	            ensureCsvRowsWithinLimit(result)
 	            return result
 	          },
@@ -39246,7 +39173,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/requests/:id',
       withPermission('attendance:write', async (req, res) => {
@@ -40557,7 +40484,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/leave-types/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -40833,7 +40760,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/overtime-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -41105,7 +41032,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -41366,7 +41293,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -41756,7 +41683,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
@@ -42120,7 +42047,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
@@ -42495,6 +42422,7 @@ module.exports = {
           })
 
           const mapped = mapRuleRow(rule)
+          void autoAbsenceSchedule?.rearm({ orgId })
           emitEvent('attendance.rule.updated', {
             orgId,
             ruleId: mapped.id,
@@ -42911,7 +42839,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -43478,7 +43406,8 @@ module.exports = {
             },
           })
 
-	          const { rows, csvWarnings: rawCsvWarnings } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings, calendarError, scopeRows } = await resolveImportRows({
+	            deferCalendarErrors: true,
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? userId,
@@ -43504,12 +43433,13 @@ module.exports = {
 	          }
           const scopedAccess = await assertAttendanceImportPreviewAllowed(req, res, {
             orgId,
-            rows,
+            rows: scopeRows ?? rows,
             payload: parsed.data,
             fallbackUserId: parsed.data.userId ?? userId,
             actorAccess: importAccess,
           })
           if (!scopedAccess) return
+          if (calendarError) throw calendarError
 	        if (requireImportCommitToken) {
             if (!requesterId) {
               res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -44083,7 +44013,8 @@ module.exports = {
             },
           })
 
-	          const { rows, csvWarnings: rawCsvWarnings, csvFileId } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings, csvFileId, calendarError, scopeRows } = await resolveImportRows({
+	            deferCalendarErrors: true,
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? requesterId,
@@ -44109,12 +44040,13 @@ module.exports = {
 	          }
           const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
             orgId,
-            rows,
+            rows: scopeRows ?? rows,
             payload: parsed.data,
             fallbackUserId: parsed.data.userId ?? requesterId,
             actorAccess: importAccess,
 	          })
 	          if (!scopedAccess) return
+          if (calendarError) throw calendarError
 	        if (!importAccess.fullImport && idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey, { createdBy: requesterId })
 	          if (existing) {
@@ -44836,7 +44768,8 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-	          const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	          const { rows, csvWarnings, csvFileId, calendarError, scopeRows } = await resolveImportRows({
+	            deferCalendarErrors: true,
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? userId,
@@ -44848,12 +44781,13 @@ module.exports = {
 	          }
           const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
             orgId,
-            rows,
+            rows: scopeRows ?? rows,
             payload: parsed.data,
             fallbackUserId: parsed.data.userId ?? userId,
             actorAccess: importAccess,
           })
           if (!scopedAccess) return
+          if (calendarError) throw calendarError
 	        if (requireImportCommitToken) {
           let tokenOk = false
           try {
@@ -45087,7 +45021,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/integrations/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -45325,9 +45259,11 @@ module.exports = {
               userMapSourceFields: config.userMapSourceFields,
               mappingProfileId: config.mappingProfileId ?? 'dingtalk_api_columns',
             }
+            const normalizedRows = await resolveImportCalendarRows(allRows, payload, orgId, true, requesterId)
+            payload.rows = normalizedRows
 	        const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
 	          orgId,
-	          rows: allRows,
+	          rows: normalizedRows,
 	          payload,
 	          fallbackUserId: requesterId,
 	          actorAccess: importAccess,
@@ -45994,7 +45930,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/payroll-templates/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -46446,7 +46382,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/payroll-cycles/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -46723,6 +46659,74 @@ module.exports = {
         }
       })
     )
+
+    async function saveAttendanceGroupFixedScheduleConfig(req, res) {
+      const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+      if (!actorAccess) return
+      const schema = z.object({
+        shiftId: z.string().min(1),
+        startDate: z.string().min(1),
+        endDate: z.string().min(1),
+        orgId: z.string().optional(),
+        expectedConfigRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+      }).strict()
+      const parsed = schema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        return
+      }
+
+      const groupId = normalizeUuidString(req.params.groupId)
+      if (!groupId) {
+        respondInvalidUuid(res, 'groupId')
+        return
+      }
+      const shiftId = normalizeUuidString(parsed.data.shiftId)
+      if (!shiftId) {
+        respondInvalidUuid(res, 'shiftId')
+        return
+      }
+      const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+      const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+      if (!startDate || !endDate || startDate > endDate) {
+        res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'A valid startDate on or before endDate is required.' },
+        })
+        return
+      }
+
+      try {
+        const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+          groupId,
+          orgId: actorAccess.orgId,
+        })
+        if (!groupExists) return
+        const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
+        if (!access) return
+        const config = await db.transaction(trx => getAttendanceGroupFixedScheduleConfigService().upsertConfig(trx, {
+          orgId: access.orgId,
+          groupId,
+          shiftId,
+          startDate,
+          endDate,
+          updatedBy: access.userId,
+          expectedConfigRevision: parsed.data.expectedConfigRevision,
+        }))
+        res.json({ ok: true, data: config })
+      } catch (error) {
+        if (error instanceof HttpError) {
+          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          return
+        }
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+          return
+        }
+        logger.error('Attendance group fixed schedule config save failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save fixed schedule config' } })
+      }
+    }
 
     const handlePayrollCycleSummaryExport = async (req, res) => {
         const schema = z.object({
@@ -47074,7 +47078,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -47640,74 +47644,62 @@ module.exports = {
     )
 
     context.api.http.addRoute(
-      'PUT',
-      '/api/attendance/groups/:groupId/fixed-schedule/config',
+      'GET',
+      '/api/attendance/groups/:groupId/fixed-schedule/editor',
       async (req, res) => {
         const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
-        const schema = z.object({
-          shiftId: z.string().min(1),
-          startDate: z.string().min(1),
-          endDate: z.string().min(1),
-          orgId: z.string().optional(),
-        }).strict()
-        const parsed = schema.safeParse(req.body ?? {})
-        if (!parsed.success) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
-          return
-        }
-
         const groupId = normalizeUuidString(req.params.groupId)
         if (!groupId) {
           respondInvalidUuid(res, 'groupId')
           return
         }
-        const shiftId = normalizeUuidString(parsed.data.shiftId)
-        if (!shiftId) {
+        if (process.env.RBAC_BYPASS !== 'true' && !actorAccess.fullAdmin) {
+          try {
+            if (!await canManageAttendanceGroup(actorAccess.orgId, actorAccess.userId, groupId, 'fixed_schedule_preview')) {
+              res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' } })
+              return
+            }
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              respondAttendanceGroupManagerTableMissing(res)
+              return
+            }
+            logger.error('Attendance fixed schedule editor authorization failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+            return
+          }
+        }
+        const shiftId = req.query?.shiftId === undefined ? undefined : normalizeUuidString(req.query.shiftId)
+        if (shiftId === null) {
           respondInvalidUuid(res, 'shiftId')
           return
         }
-        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
-        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
-        if (!startDate || !endDate || startDate > endDate) {
-          res.status(400).json({
-            ok: false,
-            error: { code: 'VALIDATION_ERROR', message: 'A valid startDate on or before endDate is required.' },
-          })
-          return
-        }
-
         try {
-          const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
-            groupId,
-            orgId: actorAccess.orgId,
+          const service = createAttendanceGroupFixedScheduleEditorService({
+            HttpError,
+            getEffectiveness: (trx, input) => getAttendanceGroupFixedScheduleEffectivenessService().getEffectiveness(trx, input),
+            resolveReferenceSegments: resolveReferenceSegmentsPostureForWrite,
           })
-          if (!groupExists) return
-          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
-          if (!access) return
-          const config = await db.transaction(trx => getAttendanceGroupFixedScheduleConfigService().upsertConfig(trx, {
-            orgId: access.orgId,
-            groupId,
-            shiftId,
-            startDate,
-            endDate,
-            updatedBy: access.userId,
-          }))
-          res.json({ ok: true, data: config })
+          const editor = await db.transaction(trx => service.getEditor(trx, { orgId: actorAccess.orgId, groupId, shiftId }))
+          res.json({ ok: true, data: editor })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
           if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance fixed schedule tables missing' } })
             return
           }
-          logger.error('Attendance group fixed schedule config save failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save fixed schedule config' } })
+          logger.error('Attendance fixed schedule editor read failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule editor' } })
         }
       }
     )
+
+    context.api.http.addRoute('PUT', '/api/attendance/groups/:groupId/fixed-schedule/config', saveAttendanceGroupFixedScheduleConfig)
+    context.api.http.addRoute('POST', '/api/attendance/groups/:groupId/fixed-schedule/config/update', saveAttendanceGroupFixedScheduleConfig)
 
     context.api.http.addRoute(
       'POST',
@@ -48242,7 +48234,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
@@ -48791,7 +48783,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/scheduler-scopes/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -49264,7 +49256,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -49828,7 +49820,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/schedule-drafts/assignments/:id',
       async (req, res) => {
@@ -50240,7 +50232,7 @@ module.exports = {
       }
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/assignments/:id',
       async (req, res) => {
@@ -51701,7 +51693,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
+    addAttendanceIdUpdateRoute(context,
       'PUT',
       '/api/attendance/holidays/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -52747,8 +52739,8 @@ module.exports = {
         if (!actorAccess) return
         try {
           const saved = await updateAttendanceSettings(db, parsed.data, {orgId:actorAccess.orgId,actorId:actorAccess.userId})
-          scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
-          scheduleHolidaySync({ db, logger, emit: emitEvent })
+          scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary, strictTime: attendanceW4SegmentCalculationPort })
+          scheduleHolidaySync({ db, logger, emit: emitEvent, strictTime: attendanceW4SegmentCalculationPort })
           emitEvent('attendance.settings.updated', {
             settings: saved,
           })
@@ -52930,8 +52922,8 @@ module.exports = {
 
 	    try {
 	      await getSettings(db)
-	      scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
-	      scheduleHolidaySync({ db, logger, emit: emitEvent })
+	      scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary, strictTime: attendanceW4SegmentCalculationPort })
+	      scheduleHolidaySync({ db, logger, emit: emitEvent, strictTime: attendanceW4SegmentCalculationPort })
 	      scheduleImportUploadCleanup()
 	      if (autoShiftAutoWriteSchedulerUnregister) {
 	        autoShiftAutoWriteSchedulerUnregister()

@@ -9,6 +9,12 @@
 // live multitable runtime.
 // ---------------------------------------------------------------------------
 
+const {
+  GOVERNED_SHEET_WRITE_CODES,
+  StockPreparationGovernedSheetWriteError,
+  assertProbeWiredFor,
+} = require('./stock-preparation-governed-sheet-probe.cjs')
+
 const DEFAULT_FIELD_MAP = Object.freeze({
   status: 'erpSyncStatus',
   externalId: 'erpExternalId',
@@ -353,7 +359,31 @@ async function findRecordByKey(recordsApi, sheetId, physicalKeyField, key) {
   return null
 }
 
-function createMultitableFeedbackWriter({ context } = {}) {
+// Batch-refresh step 4 PR-6 (design §7.1 row 18, D-21; F-6): the feedback writer writes whatever sheet the
+// provisioning resolves for the configured (projectId, objectId) — a stock-prep project sheet included. A sheet
+// GOVERNED by the stock-preparation batch refresh is refused here, AFTER the sheet is resolved and BEFORE the field
+// resolve and any records IO (one probe per writeBack). `governedSheetProbe` is injected by index.cjs, never
+// request-supplied. Built WITHOUT a probe: an object id in the stock-prep namespace is refused 501 (the not-wired
+// backstop), every other object writes exactly as before. No resolved sheet: nothing can be governed and the host
+// refuses a write to no sheet on its own, so the probe is not asked (byte-identical to before PR-6).
+async function assertFeedbackSheetWritable({ governedSheetProbe, sheetId, tenantId, objectId }) {
+  if (!assertProbeWiredFor({ governedSheetProbe, surface: 'erp_feedback', objectId })) return
+  if (sheetId === undefined || sheetId === null || sheetId === '') return
+  await governedSheetProbe.assertSheetWritable({ sheetId: String(sheetId), tenantId, surface: 'erp_feedback', objectId })
+}
+
+// The feedback result's reason for a governance refusal (409 governed / 501 not wired) or a governance read that
+// failed (503 / 501 store unavailable / 422); null for every other error (reported as before).
+function governanceFeedbackReasonOf(error) {
+  const typed = error instanceof StockPreparationGovernedSheetWriteError || (error && error.name === 'StockPreparationGovernedSheetWriteError')
+  if (!typed || typeof error.code !== 'string') return null
+  if (error.code === GOVERNED_SHEET_WRITE_CODES.REFUSED || error.code === GOVERNED_SHEET_WRITE_CODES.PROBE_UNWIRED) {
+    return { reason: 'ERP_FEEDBACK_GOVERNED_SHEET_REFUSED', code: error.code }
+  }
+  return { reason: 'ERP_FEEDBACK_GOVERNANCE_UNREADABLE', code: error.code }
+}
+
+function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
   const multitable = context && context.api && context.api.multitable
   const provisioning = multitable && multitable.provisioning
   const recordsApi = multitable && multitable.records
@@ -381,6 +411,8 @@ function createMultitableFeedbackWriter({ context } = {}) {
       }
 
       const sheetId = await resolveObjectSheetId(provisioning, projectId, objectId)
+      // PR-6: a governed stock-prep sheet is refused before the field resolve and before any records IO.
+      await assertFeedbackSheetWritable({ governedSheetProbe, sheetId, tenantId: normalizeString(input.tenantId), objectId })
       const fieldIds = Array.from(new Set([
         keyField,
         ...updates.flatMap((update) => Object.keys(update.fields || {})),
@@ -426,8 +458,8 @@ function createMultitableFeedbackWriter({ context } = {}) {
   }
 }
 
-function createErpFeedbackWriter({ stagingWriter, context, logger, clock } = {}) {
-  const resolvedWriter = stagingWriter || createMultitableFeedbackWriter({ context, logger })
+function createErpFeedbackWriter({ stagingWriter, context, logger, clock, governedSheetProbe } = {}) {
+  const resolvedWriter = stagingWriter || createMultitableFeedbackWriter({ context, logger, governedSheetProbe })
 
   async function writeBack(input = {}) {
     const pipeline = input.pipeline || {}
@@ -506,10 +538,14 @@ function createErpFeedbackWriter({ stagingWriter, context, logger, clock } = {})
         logger.warn(`[plugin-integration-core] ERP feedback writeback failed: ${error && error.message ? error.message : error}`)
       }
       if (failOnError) throw error
+      // PR-6: a governance refusal / unreadable governance is reported by its own reason token and code (the
+      // runner's run details carry `reason`); nothing was written. Every other failure is reported as before.
+      const governance = governanceFeedbackReasonOf(error)
       return {
         ok: false,
         skipped: false,
-        reason: 'ERP_FEEDBACK_WRITE_FAILED',
+        reason: governance ? governance.reason : 'ERP_FEEDBACK_WRITE_FAILED',
+        ...(governance ? { code: governance.code } : {}),
         projectId,
         objectId,
         keyField,

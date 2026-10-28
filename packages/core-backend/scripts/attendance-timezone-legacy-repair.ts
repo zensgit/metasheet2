@@ -16,6 +16,13 @@
  * per SQL statement and 30 seconds overall. V2, other companion types and all
  * pending related requests require strict runtime validation; the preflight
  * does not infer validity from JSON labels or a repaired parent record.
+ * Counts: ordinary/unsupportedLegacyRecordsWithoutCompanion list every record
+ * without a companion. writableNowLegacyRecordsWithoutCompanion is the subset that
+ * is untracked, in the single valid default zone, with multi-timezone off and
+ * legacy posture: it is writable without repair and is NOT counted as BLOCKED
+ * (blocked = ordinary + unsupported - writableNow + the other blocker counts).
+ * Records in another zone, any record while multi-timezone is on, and any record
+ * under shadow/authoritative posture stay blocked.
  *
  * Required JSON keys (nulls are explicit historical facts, not omitted fields):
  * {

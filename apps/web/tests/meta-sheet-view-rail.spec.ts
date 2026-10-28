@@ -29,7 +29,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import MetaSheetViewRail from '../src/multitable/components/MetaSheetViewRail.vue'
 import type { MetaSheet, MetaView } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
@@ -395,7 +395,7 @@ describe('MetaSheetViewRail — T5: tree roles + ARIA state', () => {
     expect(document.activeElement).toBe(v1)
   })
 
-  it('ArrowLeft on a view leaf moves focus back to its parent (active) sheet node; on a sheet node is a no-op', async () => {
+  it('ArrowLeft on a view leaf moves focus back to its parent (active) sheet node; on that sheet node it folds the views', async () => {
     const root = mountComponent(baseProps())
     const v2 = viewNodes(root)[1]
     v2.focus()
@@ -406,7 +406,15 @@ describe('MetaSheetViewRail — T5: tree roles + ARIA state', () => {
 
     s1.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }))
     await flushPromises()
-    expect(document.activeElement).toBe(s1) // no-op: collapse is derived state, not arrow-cancellable
+    expect(document.activeElement).toBe(s1) // focus stays on the sheet node
+    expect(viewNodes(root)).toHaveLength(0) // customer field report 2026-10-21 (#6): the views fold
+    expect(s1.getAttribute('aria-expanded')).toBe('false')
+
+    s1.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(document.activeElement).toBe(s1) // ArrowRight on a folded sheet unfolds it, focus stays
+    expect(viewNodes(root)).toHaveLength(3)
+    expect(s1.getAttribute('aria-expanded')).toBe('true')
   })
 
   it('Home/End move focus to the first/last node in the flattened sequence', async () => {
@@ -638,5 +646,106 @@ describe('MetaSheetViewRail — T8: sheet delete affordance (selected sheet only
     useLocale().setLocale('zh')
     await flushPromises()
     expect(deleteButtons(root)[0].getAttribute('title')).toBe('删除数据表')
+  })
+})
+
+// Customer field report 2026-10-21 (#6): after a sheet's views were expanded, clicking that sheet's arrow
+// again did not fold them — expansion was derived from "is active" alone, so the active sheet could
+// never be collapsed. The arrow of the ACTIVE sheet now toggles a local fold; activation auto-expands.
+describe('MetaSheetViewRail — active-sheet chevron folds and unfolds the view list', () => {
+  function chevron(root: HTMLElement, index: number): HTMLElement {
+    const el = sheetNodes(root)[index]?.querySelector<HTMLElement>('[data-testid="rail-sheet-chevron"]')
+    expect(el).toBeTruthy()
+    return el!
+  }
+
+  it('expand -> collapse -> expand on the active sheet, emitting only the same-id select-sheet', async () => {
+    const onSelectSheet = vi.fn()
+    const onSelectView = vi.fn()
+    const root = mountComponent(baseProps({ onSelectSheet, onSelectView }))
+    const s1 = sheetNodes(root)[0]
+    expect(viewNodes(root)).toHaveLength(3) // auto-expanded: the active sheet shows its views
+    expect(s1.getAttribute('aria-expanded')).toBe('true')
+
+    chevron(root, 0).click()
+    await nextTick()
+    expect(viewNodes(root)).toHaveLength(0)
+    expect(s1.getAttribute('aria-expanded')).toBe('false')
+    expect(s1.getAttribute('aria-selected')).toBe('true') // still the active sheet
+
+    chevron(root, 0).click()
+    await nextTick()
+    expect(viewNodes(root)).toHaveLength(3)
+    expect(s1.getAttribute('aria-expanded')).toBe('true')
+
+    // The fold is local UI state; the chevron still emits the same-id select-sheet the button would have
+    // emitted (the workbench uses it to leave the dashboard — for the active sheet it never switches).
+    expect(onSelectSheet).toHaveBeenCalledTimes(2)
+    expect(onSelectSheet.mock.calls).toEqual([['s1'], ['s1']])
+    expect(onSelectView).not.toHaveBeenCalled()
+  })
+
+  it('a folded active sheet also unfolds when its name is clicked (and still emits select-sheet as before)', async () => {
+    const onSelectSheet = vi.fn()
+    const root = mountComponent(baseProps({ onSelectSheet }))
+    chevron(root, 0).click()
+    await nextTick()
+    expect(viewNodes(root)).toHaveLength(0)
+
+    onSelectSheet.mockClear()
+    sheetNodes(root)[0].click()
+    await nextTick()
+    expect(viewNodes(root)).toHaveLength(3)
+    expect(onSelectSheet).toHaveBeenCalledTimes(1)
+    expect(onSelectSheet).toHaveBeenCalledWith('s1')
+  })
+
+  it('the chevron of a non-active sheet activates it (falls through to select-sheet)', () => {
+    const onSelectSheet = vi.fn()
+    const root = mountComponent(baseProps({ onSelectSheet }))
+    chevron(root, 1).click()
+    expect(onSelectSheet).toHaveBeenCalledTimes(1)
+    expect(onSelectSheet).toHaveBeenCalledWith('s2')
+    expect(viewNodes(root)).toHaveLength(3) // s1 is still active and expanded until the parent switches
+  })
+
+  it('a fold does not survive a sheet switch: the next activation auto-expands again', async () => {
+    const activeSheetId = ref('s1')
+    const views = ref<MetaView[]>(VIEWS)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      setup: () => () => h(MetaSheetViewRail, baseProps({ activeSheetId: activeSheetId.value, views: views.value })),
+    })
+    app.mount(container)
+    mounted.push({ app, container })
+
+    chevron(container, 0).click()
+    await nextTick()
+    expect(viewNodes(container)).toHaveLength(0)
+
+    activeSheetId.value = 's2'
+    views.value = [{ id: 'v9', sheetId: 's2', name: 'Stock grid', type: 'grid' }]
+    await nextTick()
+    expect(viewNodes(container)).toHaveLength(1)
+
+    activeSheetId.value = 's1'
+    views.value = VIEWS
+    await nextTick()
+    expect(viewNodes(container)).toHaveLength(3)
+    expect(sheetNodes(container)[0].getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('a folded sheet takes its views out of the keyboard sequence (ArrowDown goes to the next sheet)', async () => {
+    const root = mountComponent(baseProps())
+    chevron(root, 0).click()
+    await nextTick()
+    const [s1, s2] = sheetNodes(root)
+    const tabbable = Array.from(root.querySelectorAll('[role="treeitem"]')).filter((el) => el.getAttribute('tabindex') === '0')
+    expect(tabbable).toEqual([s1])
+    s1.focus()
+    s1.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(document.activeElement).toBe(s2)
   })
 })

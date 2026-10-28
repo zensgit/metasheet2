@@ -192,6 +192,22 @@ async function resetSeededForAccessOverride(
   )
 }
 
+// Self-service positives require an enabled, self-managed account. A directory-owned
+// identity or an explicit deny grant must now reject before changing access evidence.
+async function resetSeededForSelfManagedOAuth(seeded: SeededEvidence): Promise<void> {
+  await resetSeededForAccessOverride(seeded)
+  await query(
+    `UPDATE directory_account_links SET link_status = 'unlinked'
+      WHERE directory_account_id = $1::uuid`,
+    [seeded.accountId],
+  )
+  await query(
+    `UPDATE user_external_auth_grants SET enabled = TRUE
+      WHERE provider = 'dingtalk' AND local_user_id = $1`,
+    [seeded.userId],
+  )
+}
+
 async function reopenEvidence(eventId: string): Promise<void> {
   await query(
     `UPDATE directory_deprovision_effects
@@ -598,7 +614,7 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
 
   it('OAuth bind supersedes only a real canonical identity or grant change', async () => {
     const seeded = await seedAppliedEvidence()
-    await resetSeededForAccessOverride(seeded)
+    await resetSeededForSelfManagedOAuth(seeded)
     configureDingTalkOAuth(seeded.corpId)
     const profile = {
       openId: seeded.openId,
@@ -634,7 +650,7 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
 
   it('self-managed OAuth unbind supersedes evidence in the same transaction', async () => {
     const seeded = await seedAppliedEvidence()
-    await resetSeededForAccessOverride(seeded)
+    await resetSeededForSelfManagedOAuth(seeded)
     configureDingTalkOAuth(seeded.corpId)
     await bindDingTalkIdentityToUser({
       localUserId: seeded.userId,
@@ -646,12 +662,6 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
       boundBy: 'admin:d5c-oauth',
       enableGrant: false,
     })
-    await query(
-      `UPDATE directory_account_links
-          SET link_status = 'unlinked'
-        WHERE directory_account_id = $1::uuid`,
-      [seeded.accountId],
-    )
     await reopenEvidence(seeded.eventId)
     const before = await readEvidence(seeded.userId)
 

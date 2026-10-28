@@ -576,6 +576,23 @@ export async function getDingTalkDepartmentDetail(
   return { deptManagerUserIdList }
 }
 
+/**
+ * DingTalk directory members can carry a personal `email` and/or an
+ * enterprise-issued `org_email`. Owner call (2026-10-15): take the member's
+ * email when DingTalk has one; fall back to the enterprise email when the
+ * personal one is absent; otherwise leave it unset (never persist an empty
+ * string as "the email").
+ */
+export function pickDingTalkUserEmail(result: Record<string, unknown>): string | undefined {
+  const email = typeof result.email === 'string' ? result.email.trim() : ''
+  if (email.length > 0) {
+    return email
+  }
+  const orgEmailRaw = result.org_email ?? result.orgEmail
+  const orgEmail = typeof orgEmailRaw === 'string' ? orgEmailRaw.trim() : ''
+  return orgEmail.length > 0 ? orgEmail : undefined
+}
+
 export async function listDingTalkDepartmentUsers(
   accessToken: string,
   departmentId: string,
@@ -616,7 +633,7 @@ export async function listDingTalkDepartmentUsers(
         name: String(entry.name ?? '').trim(),
         unionId: typeof entry.unionid === 'string' ? entry.unionid : typeof entry.unionId === 'string' ? entry.unionId : undefined,
         mobile: typeof entry.mobile === 'string' ? entry.mobile : undefined,
-        email: typeof entry.email === 'string' ? entry.email : undefined,
+        email: pickDingTalkUserEmail(entry),
         title: typeof entry.title === 'string' ? entry.title : undefined,
         avatarUrl:
           typeof entry.avatar === 'string'
@@ -675,7 +692,7 @@ export async function getDingTalkUserDetail(
     unionId: typeof result.unionid === 'string' ? result.unionid : typeof result.unionId === 'string' ? result.unionId : undefined,
     openId: typeof result.openId === 'string' ? result.openId : typeof result.open_id === 'string' ? result.open_id : undefined,
     mobile: typeof result.mobile === 'string' ? result.mobile : undefined,
-    email: typeof result.email === 'string' ? result.email : undefined,
+    email: pickDingTalkUserEmail(result),
     jobNumber: typeof result.job_number === 'string' ? result.job_number : typeof result.jobNumber === 'string' ? result.jobNumber : undefined,
     title: typeof result.title === 'string' ? result.title : undefined,
     avatarUrl:

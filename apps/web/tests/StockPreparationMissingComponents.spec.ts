@@ -741,17 +741,33 @@ describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', 
     return JSON.parse(String(init?.body ?? '{}'))
   }
 
-  /** Wires apiFetch: dry-run answers come from `dryRunResponses` in order; apply/mvp-persist succeed trivially. */
+  /** R67 ④: the client ENQUEUES the dry run (`POST …/dry-run-jobs`) and polls it; these are the enqueues. */
+  function isDryRunEnqueue(call: unknown[]): boolean {
+    return String(call[0]).includes('/dry-run-jobs') && (call[1] as RequestInit | undefined)?.method === 'POST'
+  }
+
+  /**
+   * Wires apiFetch. `dryRunResponses` answer the successive dry-run ENQUEUES in order (R67 ④): an error
+   * answer is the enqueue's own refusal — exactly what the synchronous route used to answer — and a
+   * success answer is the plan the job then finishes with, read back by the poll. apply/mvp-persist
+   * succeed trivially.
+   */
   function wireApi(dryRunResponses: Response[]): unknown[][] {
     const calls: unknown[][] = []
     let dryRunCallIndex = 0
+    let finishedPlan: unknown = null
     h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       calls.push([url, init])
       const route = String(url)
-      if (route.includes('/dry-run')) {
+      if (isDryRunEnqueue([url, init])) {
         const response = dryRunResponses[Math.min(dryRunCallIndex, dryRunResponses.length - 1)]
         dryRunCallIndex += 1
-        return response
+        if (!response.ok) return response
+        finishedPlan = ((await response.json()) as { data?: unknown }).data
+        return new Response(JSON.stringify({ ok: true, data: { jobId: 'job_b1', status: 'running', elapsedMs: 0 } }), { status: 202 })
+      }
+      if (route.includes('/dry-run-jobs')) {
+        return new Response(JSON.stringify({ ok: true, data: { jobId: 'job_b1', status: 'succeeded', elapsedMs: 0, result: finishedPlan } }), { status: 200 })
       }
       if (route.includes('/apply')) {
         return new Response(JSON.stringify({
@@ -778,7 +794,7 @@ describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', 
     const apiClient = createStockPreparationProjectSyncApi({})
     const report = await runStockPreparationProjectSync(apiClient, 'P1')
 
-    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    const dryRunCalls = calls.filter(isDryRunEnqueue)
     expect(dryRunCalls.length).toBe(2)
     expect(bodyOf(dryRunCalls[0]).includeMissingComponents).toBe(true)
     // The SECOND request body carries NO flag at all.
@@ -800,7 +816,7 @@ describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', 
     const apiClient = createStockPreparationProjectSyncApi({})
     const report = await runStockPreparationProjectSync(apiClient, 'P1')
 
-    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    const dryRunCalls = calls.filter(isDryRunEnqueue)
     expect(dryRunCalls.length).toBe(2)
     expect(bodyOf(dryRunCalls[1]).includeMissingComponents).toBeUndefined()
 
@@ -817,7 +833,7 @@ describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', 
     const apiClient = createStockPreparationProjectSyncApi({})
     const report = await runStockPreparationProjectSync(apiClient, 'P1')
 
-    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    const dryRunCalls = calls.filter(isDryRunEnqueue)
     expect(dryRunCalls.length, 'no silent retry for a REAL failure').toBe(1)
     expect(report.pass).toBe(false)
     expect(report.missingComponentsUnavailableReason).toBeNull()
@@ -835,7 +851,7 @@ describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', 
     const apiClient = createStockPreparationProjectSyncApi({})
     const report = await runStockPreparationProjectSync(apiClient, 'P1')
 
-    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    const dryRunCalls = calls.filter(isDryRunEnqueue)
     expect(dryRunCalls.length, 'exactly one retry, never a third call').toBe(2)
     // The retry's OWN failure surfaces as a real failure — it does not silently succeed by falling
     // through to whatever the (never-reached) third mock response would have said.
@@ -851,7 +867,7 @@ describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', 
     const apiClient = createStockPreparationProjectSyncApi({})
     const report = await runStockPreparationProjectSync(apiClient, 'P1')
 
-    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    const dryRunCalls = calls.filter(isDryRunEnqueue)
     expect(dryRunCalls.length, 'no retry for a 403 outside the OPERATOR_SCOPE_* vocabulary').toBe(1)
     expect(report.pass).toBe(false)
     expect(report.missingComponentsUnavailableReason).toBeNull()

@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // MVP 快照表字段存在性探针 — THROUGH THE REAL ROUTE TABLE.
 //
 // The unit suite (stock-preparation-sync-run-persist.test.cjs, cases (i-*)) proves the probe inside
@@ -31,6 +33,7 @@
 // carry a sheet id => R1 red; M4 host failure rethrown raw => R5 red.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -274,7 +277,7 @@ function mount(hostOptions = {}) {
         records: records.api,
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig()],
     },
@@ -282,7 +285,7 @@ function mount(hostOptions = {}) {
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(source.adapter),
+    services: withRefreshGovernance(baseServices(source.adapter)),
     logger: {
       info(message, detail) { logLines.push(['info', message, detail]) },
       warn(message, detail) { logLines.push(['warn', message, detail]) },

@@ -102,6 +102,22 @@ export const STOCK_PREP_OPERATOR_PULL_STEPS: readonly { step: string; method: st
     path: '/api/integration/table-actions/:actionId/dry-run',
     legacyGate: 'read',
   }),
+  // R67 ④ — THE SAME DRY-RUN, ENQUEUED AND POLLED. The enqueue runs the dry-run handler itself (same
+  // gate, same lines), so it takes the dry-run's tier and legacy gate; the poll reads back only the
+  // caller's own job, at the same tier. Leaving them out of the split would admit a puller to the
+  // synchronous dry-run and refuse the one the page actually calls.
+  Object.freeze({
+    step: 'dry-run-job-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/dry-run-jobs',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'dry-run-job-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/dry-run-jobs',
+    legacyGate: 'read',
+  }),
   Object.freeze({
     step: 'apply',
     method: 'POST',
@@ -354,6 +370,71 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/project-overview/ensure',
     control: 'stock-prep-project-overview-ensure',
   }),
+  // 备料分批拉取第一期 step 3 PR B (R-53 / R-54) — byte-equal to the plugin manifest's two PILOT rows. Both
+  // ADMIN. Their controls live on 项目备料页's sheet-state line (the pilot status line and the typed-
+  // confirmation enable button), rendered only once the server's pilot read answered — never on the
+  // confirmation-queue view; StockPreparationProjectArchive.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.pilotRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pilotEnable',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-enable',
+  }),
+  // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
+  // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
+  // PULL tier. PR-7 (R-62) assigned their control ids: they live on 「拉取待确认」
+  // (StockPreparationRefreshQueueView.vue), never on the confirmation-queue view, so the matrix lists them in
+  // CONTROLS_NOT_ON_THE_QUEUE_VIEW and StockPreparationRefreshQueue.spec.ts (RQ-ALIGN) asserts their alignment.
+  Object.freeze({
+    capability: 'refresh.holds',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds',
+    control: 'stock-prep-refresh-holds',
+  }),
+  Object.freeze({
+    capability: 'refresh.evidence',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/evidence',
+    control: 'stock-prep-refresh-evidence',
+  }),
+  Object.freeze({
+    capability: 'refresh.keep',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/keep',
+    control: 'stock-prep-refresh-keep',
+  }),
+  Object.freeze({
+    capability: 'refresh.confirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/confirm',
+    control: 'stock-prep-refresh-confirm',
+  }),
+  Object.freeze({
+    capability: 'refresh.continuation',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id',
+    control: 'stock-prep-refresh-continuation',
+  }),
+  Object.freeze({
+    capability: 'refresh.end',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
+    control: 'stock-prep-refresh-end',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
@@ -511,6 +592,24 @@ export function visibleStockPrepControls(snapshot: StockPrepAccessSnapshot): str
  * every control 403s, which is precisely the "visible but not actionable" half of R-11.
  */
 export function canUseLegacyMvpTabs(snapshot: StockPrepAccessSnapshot): boolean {
+  return holdsPlatformAdmin(snapshot)
+}
+
+/**
+ * 项目备料页's TWO 宜搭 ENTRIES (local preparation + static preview). Every server action behind them
+ * (initialization, drafts, preview, approval, sending) runs the core live gate
+ * (`automation-live-authority.ts`: the admin role, `role:admin`, or the literal `integration:admin`
+ * code — wildcards and `users:write` never qualify), so they render only for that same literal
+ * platform admin. Everyone else keeps main's disabled 「推送宜搭(暂未接入)」 placeholder: a
+ * stock-prep operator's page is unchanged. The client cannot see the server's namespace admission,
+ * tenant membership or anchor, so this mirror is WIDER than the server: it also shows the entries to a
+ * bare `integration:admin` holder without the admission, to an admin without active membership in the
+ * token tenant and to any admin who is not the anchored owner (they get the server's refusal code). It
+ * re-reads only on storage, focus or session events. The 单行 CREATE entry inside additionally waits for
+ * the server's own send-switch bit.
+ * Deliberately NOT in STOCK_PREP_WORKBENCH_CAPABILITIES, for the same reason as the install tab below.
+ */
+export function canOpenStockPrepYidaEntries(snapshot: StockPrepAccessSnapshot): boolean {
   return holdsPlatformAdmin(snapshot)
 }
 
@@ -678,12 +777,18 @@ export const STOCK_PREP_RAIL_GATE_OPERATOR_BOARD = 'operator-board'
 export const STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN = 'workbench-admin'
 /** Platform admin — the legacy MVP tabs, folded into 深度工具 but NOT re-tiered. */
 export const STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN = 'platform-admin'
+/**
+ * 备料分批拉取第一期 step 4 PR-7 (R-62 ①): the PULL tier exactly — 「拉取待确认」, whose six routes gate on
+ * `stock-prep:pull`. Resolved by `canOpenStockPrepRefreshQueue`; mirrored by the plugin's `STOCK_PREP_RAIL_GATE_PULL`.
+ */
+export const STOCK_PREP_RAIL_GATE_PULL = 'pull'
 
 export type StockPrepRailGate =
   | typeof STOCK_PREP_RAIL_GATE_ROUTE
   | typeof STOCK_PREP_RAIL_GATE_OPERATOR_BOARD
   | typeof STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN
   | typeof STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN
+  | typeof STOCK_PREP_RAIL_GATE_PULL
 
 export interface StockPrepRailItem {
   /** The view key — unchanged from the horizontal strip, so `stock-prep-tab-${key}` keeps its name. */
@@ -718,6 +823,9 @@ export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.free
       // may not would be handed a panel of project numbers their tier is not entitled to.
       Object.freeze({ key: 'project-query', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
       Object.freeze({ key: 'confirmation-queue', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
+      // 拉取待确认 (PR-7, R-62 ①): the puller's holds of a governed project — PULL tier only, appended LAST so the
+      // existing items keep their order (the P1-08 keyboard lane walks home → … → confirmation-queue unchanged).
+      Object.freeze({ key: 'refresh-queue', gate: STOCK_PREP_RAIL_GATE_PULL }),
     ]),
   }),
   Object.freeze({
@@ -732,13 +840,10 @@ export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.free
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([
-      'dashboard',
       'project-workspace',
       'bom-snapshot-diff',
       'material-mapping',
       'unit-conversion',
-      'prep-line',
-      'exception-queue',
     ]),
   }),
   Object.freeze({
@@ -839,6 +944,22 @@ export function canReachStockPrepWorkbench(snapshot: StockPrepAccessSnapshot): b
   return satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)
 }
 
+/**
+ * 拉取待确认 (备料分批拉取第一期 step 4 PR-7, R-62 ①) — who may OPEN the puller's holds page.
+ *
+ * EXACTLY the tier its six routes gate on: `requireAccess(req, STOCK_PREP_PULL)` (plugin http-routes.cjs), so
+ * `satisfiesStockPrepAccess(·, STOCK_PREP_PULL)` — the puller (pull ∧ operate ∧ read), `stock-prep:admin` and a
+ * platform admin through the ladder. NOT "pull or legacy integration:write" (design §13's wording): the server's
+ * `hasPermission` never grants a stock-prep code to an `integration:write` holder, so that holder would get 403
+ * on every control — the "visible but not actionable" half of R-11. NOT `canRunStockPrepProjectSync` either:
+ * its `holdsPlatformAdmin ||` arm belongs to the table-action routes. A TENANTLESS platform admin passes here and
+ * is refused by the server's operator scope (403 OPERATOR_SCOPE_TENANT_REQUIRED) — the inherited posture
+ * `canOpenStockPrepProjectBoard` documents; the page renders that refusal in words.
+ */
+export function canOpenStockPrepRefreshQueue(snapshot: StockPrepAccessSnapshot): boolean {
+  return satisfiesStockPrepAccess(snapshot, STOCK_PREP_PULL)
+}
+
 /** Resolve one rail item's gate token. The ONLY place a token becomes a permission decision. */
 export function canOpenStockPrepRailItem(
   gate: StockPrepRailGate,
@@ -848,6 +969,7 @@ export function canOpenStockPrepRailItem(
   if (gate === STOCK_PREP_RAIL_GATE_OPERATOR_BOARD) return canOpenStockPrepHome(snapshot)
   if (gate === STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN) return canOpenStockPrepGettingStarted(snapshot)
   if (gate === STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN) return canUseLegacyMvpTabs(snapshot)
+  if (gate === STOCK_PREP_RAIL_GATE_PULL) return canOpenStockPrepRefreshQueue(snapshot)
   // An unknown token is a refusal, never a looser default — the same posture the server's
   // `satisfiesStockPrepAccess` takes for a mistyped code.
   return false

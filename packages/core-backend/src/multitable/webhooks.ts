@@ -22,6 +22,9 @@ export interface Webhook {
   // → fall back to the module defaults so legacy webhooks keep today's behavior.
   retryBaseDelayMs?: number // first-retry delay; exponential 2^n from here
   retryMaxDelayMs?: number  // cap on the computed backoff (undefined = uncapped)
+  // The sheet this webhook is bound to. It receives events for this sheet only, limited to what its
+  // owner can read there. null = not bound yet (receives no events until bound once).
+  sheetId: string | null
 }
 
 // ─── Retry-policy bounds (shared by route schema + service) ────────────────
@@ -68,6 +71,8 @@ export interface WebhookCreateInput {
   url: string
   secret?: string
   events: WebhookEventType[]
+  /** Required: the sheet the webhook is bound to (fixed once set). */
+  sheetId: string
   maxRetries?: number
   retryBaseDelayMs?: number
   retryMaxDelayMs?: number
@@ -79,6 +84,8 @@ export interface WebhookUpdateInput {
   secret?: string
   events?: WebhookEventType[]
   active?: boolean
+  /** Binds a webhook that has no sheet yet; the same value again is a no-op; another value is refused. */
+  sheetId?: string
   maxRetries?: number
   retryBaseDelayMs?: number
   retryMaxDelayMs?: number
@@ -109,6 +116,7 @@ const retryMaxDelayMsSchema = z
 export const CreateWebhookSchema = z.object({
   name: z.string().min(1).max(100),
   url: z.string().url(),
+  sheetId: z.string().trim().min(1),
   secret: z.string().optional(),
   events: z
     .array(z.enum(ALL_WEBHOOK_EVENT_TYPES as [string, ...string[]]))
@@ -127,6 +135,7 @@ export const UpdateWebhookSchema = z.object({
     .min(1)
     .optional(),
   active: z.boolean().optional(),
+  sheetId: z.string().trim().min(1).optional(),
   maxRetries: maxRetriesSchema.optional(),
   retryBaseDelayMs: retryBaseDelayMsSchema.optional(),
   retryMaxDelayMs: retryMaxDelayMsSchema.optional(),

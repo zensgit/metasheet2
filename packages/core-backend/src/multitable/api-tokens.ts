@@ -27,7 +27,6 @@ export type ApiTokenScope =
   | 'fields:read'
   | 'comments:read'
   | 'comments:write'
-  | 'webhooks:manage'
 
 export const ALL_API_TOKEN_SCOPES: ApiTokenScope[] = [
   'records:read',
@@ -35,7 +34,6 @@ export const ALL_API_TOKEN_SCOPES: ApiTokenScope[] = [
   'fields:read',
   'comments:read',
   'comments:write',
-  'webhooks:manage',
 ]
 
 export interface ApiTokenCreateInput {

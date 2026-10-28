@@ -816,10 +816,10 @@
               最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__warning">
-              当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。
+              当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__hint">
-              修复建议：先回到目录同步查看该成员是否已补齐 openId；如果目录仍未返回，请让用户先完成一次钉钉 OAuth 绑定；确认 openId 已补齐后刷新本页，再开通钉钉扫码。
+              修复建议：确认账号已激活并已绑定钉钉身份 → 让成员用钉钉扫码登录一次（登录会补齐 openId）→ 刷新本页后再开通钉钉扫码。
             </p>
             <p v-if="dingtalkAccess?.grant.updatedAt" class="user-admin__hint">
               开通状态更新时间：{{ formatDate(dingtalkAccess.grant.updatedAt) }}
@@ -1698,7 +1698,7 @@ function exportGovernanceValidationResultTemplate(): void {
     '- [ ] 缺 OpenID 成员清单与预期一致',
     '  - 实际结果：',
     `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
-    '- [ ] 目录同步可补齐 openId / 或确认仍缺失原因',
+    '- [ ] 成员用钉钉扫码登录一次后已补齐 openId（目录同步本身不返回 openId）/ 或确认仍缺失原因',
     '  - 实际结果：',
     `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
     '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口数量正确变化',
@@ -1814,7 +1814,7 @@ function exportGovernanceFullValidationPackage(): void {
     '## 联调检查单',
     '- [ ] 缺 OpenID 成员清单与预期一致',
     `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
-    '- [ ] 目录同步页可用于补齐 openId 或确认仍缺失原因',
+    '- [ ] 成员用钉钉扫码登录一次后，目录同步页刷新可见 openId 已补齐 / 或确认仍缺失原因',
     `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
     '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口和已收口统计变化正确',
     '- [ ] 最近 7 天收口审计可看到动作、处理时间和处理人',
@@ -2758,7 +2758,7 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
   if (!access.value) return
   if (enabled && !canEnableDingTalkGrant(dingtalkAccess.value)) {
-    setStatus('当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。', 'error')
+    setStatus('当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。', 'error')
     return
   }
   busy.value = true
@@ -3557,9 +3557,16 @@ onUnmounted(() => {
 
 .user-admin__layout {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  /* minmax(0, ...) on both tracks (customer field report 2026-10-21): a plain `1fr` track is
+     minmax(auto, 1fr) and grows to its content's min-content, so one long unbreakable string could
+     push the right column (and the page) wider than the viewport. */
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
   gap: 16px;
   min-height: 520px;
+}
+
+.user-admin__layout > * {
+  min-width: 0;
 }
 
 .user-admin__panel--create {
@@ -3594,6 +3601,13 @@ onUnmounted(() => {
   border-radius: 12px;
   padding: 16px;
   display: grid;
+  /* Explicit single track capped at the card width (customer field report 2026-10-21). The implicit
+     track was `auto`, which grows to the widest child's min-content (e.g. a long unbreakable account
+     identifier in a user row): every block in the left card was then laid out wider than the card,
+     the export buttons were clipped at its edge and the bulk-action buttons were drawn over the
+     right panel. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 12px;
   align-content: start;
 }
@@ -3612,6 +3626,36 @@ onUnmounted(() => {
 
 .user-admin__section-head--workbench {
   margin-top: 4px;
+  /* In the 320px left card the export buttons do not fit beside the heading: wrap them onto their
+     own line instead of squeezing the heading into a one-word-per-line column. */
+  flex-wrap: wrap;
+}
+
+.user-admin__section-head--workbench > * {
+  min-width: 0;
+}
+
+/* Long button labels wrap inside the card instead of overflowing it. */
+.user-admin__role-actions > .user-admin__button {
+  max-width: 100%;
+  height: auto;
+  min-height: 38px;
+  white-space: normal;
+}
+
+/* Account identifiers (e.g. directory-synced ids) are one unbreakable token; let them break. */
+.user-admin__user-body > strong,
+.user-admin__user-body > span,
+.user-admin__detail-head h2,
+.user-admin__detail-head p {
+  overflow-wrap: anywhere;
+}
+
+/* The missing-OpenID hint carries the whole corpId (one unbreakable token): full row, may break. */
+.user-admin__user > .user-admin__hint {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .user-admin__panel--detail {
@@ -3721,10 +3765,15 @@ onUnmounted(() => {
 
 .user-admin__user {
   display: flex;
+  /* The missing-OpenID governance hint (a <p> after the user-body button) takes its own line instead
+     of squeezing the button and running past the card. */
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 10px;
   text-align: left;
   width: 100%;
+  /* width: 100% plus padding/border must still fit the card. */
+  box-sizing: border-box;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   background: #fff;

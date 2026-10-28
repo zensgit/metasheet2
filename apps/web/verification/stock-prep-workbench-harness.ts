@@ -36,6 +36,8 @@ const ACTORS = {
   stockadmin: { roles: [] as string[], permissions: ['stock-prep:admin'] },
   // 平台管理员:role:admin。
   platform: { roles: ['admin'], permissions: [] as string[] },
+  // 拉取人员(R-33):pull ∧ operate ∧ read —— 备料分批拉取第一期 step 4 PR-7 的「拉取待确认」只对这一档及以上开放。
+  puller: { roles: [] as string[], permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'] },
 } as const
 
 type ActorKey = keyof typeof ACTORS

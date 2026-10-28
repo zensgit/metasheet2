@@ -81,7 +81,8 @@ import {
 } from '../core/attendance-cancellation-execution-port'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { Logger } from '../core/logger'
-import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { listUserPermissions } from '../rbac/service'
+import { resolveApprovalPushRecipientRoles } from '../services/approval-actor-roles'
 
 const logger = new Logger('ApprovalCancelRoundEntryPort')
 
@@ -166,30 +167,23 @@ async function resolveAffectedUserPermissions(userId: string): Promise<string[]>
 }
 
 /**
- * The role claim of the same touched-but-not-acting user. Their own `GET /api/todo/count` reads the
- * one role the authentication layer puts on `req.user.role` when token claims are not trusted (the
- * production setting): `AuthService.resolveRbacProfile` takes the `users.role` column and upgrades it
- * to `'admin'` when `user_roles` holds `admin` (`isAdmin`, the same lookup). The same two reads here
- * give the push that role, so a pending item seated on that role arm is counted in the push as it is
- * in the read. A failed admin lookup keeps the column value (as `resolveRbacProfile` does); a failed
- * column read gives no role claims (the count the approval side pushes); neither fails the push.
+ * The role set of the same touched-but-not-acting user, as their own `GET /api/todo/count` resolves
+ * it — the SAME shared helper the approval-side push uses for every recipient it is handed without
+ * roles (`resolveApprovalPushRecipientRoles`: `users.role` ∪ `user_roles` role ids). Returns `null`
+ * when that read fails: the caller then skips THAT recipient (logged as an error) rather than
+ * pushing them a narrower number.
  */
-async function resolveAffectedUserRoles(userId: string): Promise<string[]> {
-  let role = ''
+async function resolveAffectedUserRoles(userId: string): Promise<string[] | null> {
   try {
-    if (!pool) return []
-    const result = await pool.query('SELECT role FROM users WHERE id = $1', [userId])
-    const stored = (result.rows[0] as { role?: unknown } | undefined)?.role
-    role = typeof stored === 'string' ? stored.trim() : ''
-  } catch {
-    return []
+    return await resolveApprovalPushRecipientRoles(userId)
+  } catch (error) {
+    try {
+      logger.error('cancel-round todo count push skipped for one recipient: role read failed', error instanceof Error ? error : undefined)
+    } catch {
+      // logging is diagnostic only
+    }
+    return null
   }
-  try {
-    if (await isRbacAdmin(userId)) role = 'admin'
-  } catch {
-    // keep the column value, as the authentication layer does
-  }
-  return role ? [role] : []
 }
 
 /**
@@ -218,18 +212,19 @@ async function publishCancelRoundCounts(
     const others = [
       ...new Set(otherUserIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
     ].filter((id) => id !== actorId)
-    const otherEntries = await Promise.all(
-      others.map(async (userId) => ({
-        userId,
-        roles: await resolveAffectedUserRoles(userId),
-        permissions: await resolveAffectedUserPermissions(userId),
-      })),
-    )
+    const otherEntries = (await Promise.all(
+      others.map(async (userId) => {
+        const roles = await resolveAffectedUserRoles(userId)
+        return roles === null ? null : { userId, roles, permissions: await resolveAffectedUserPermissions(userId) }
+      }),
+    )).filter((entry): entry is { userId: string; roles: string[]; permissions: string[] } => entry !== null)
+    // The actor's claims ∪ their stored role ids — the same set their own count read resolves.
+    const actorStoredRoles = actorId ? await resolveAffectedUserRoles(actorId) : null
     const users: Array<{ userId: string; roles?: string[]; permissions?: string[] }> = [
-      ...(actorId
+      ...(actorId && actorStoredRoles !== null
         ? [{
             userId: actorId,
-            roles: normalizeActorRoleClaims(actor.roles),
+            roles: [...new Set([...normalizeActorRoleClaims(actor.roles), ...actorStoredRoles])],
             permissions: normalizeActorPermissionClaims(actor.permissions),
           }]
         : []),

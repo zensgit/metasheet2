@@ -889,8 +889,7 @@ describe('business timezone — UI surfaces (TZ-independent)', () => {
 
   it('grid paste (S1): Ctrl+V of a wall clock patches the business-zone instant; unreadable text is passed through for the server to refuse', async () => {
     setBusinessTimezone('Asia/Kathmandu')
-    const readText = vi.fn().mockResolvedValue('2026-09-24 06:45')
-    Object.defineProperty(navigator, 'clipboard', { value: { readText }, configurable: true })
+    // Keyboard paste reads the native paste event (no async Clipboard API needed: plain-HTTP deployments).
     const dtField = { id: 'fld_dt', name: 'When', type: 'dateTime', property: { timezone: 'UTC' } } as MetaField
     const patchSpy = vi.fn()
     const view = mount(() => h(MetaGridTable, {
@@ -909,14 +908,18 @@ describe('business timezone — UI surfaces (TZ-independent)', () => {
     await flushUi()
     const cell = view.container.querySelector('tbody tr.meta-grid__row .meta-grid__cell') as HTMLElement
     cell.click() // focus without opening the editor
+    ;(view.container.querySelector('.meta-grid') as HTMLElement).focus() // a real click focuses the grid root
     await flushUi()
-    const paste = () => (view.container.querySelector('.meta-grid') as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }))
-    paste()
+    const paste = (text: string) => {
+      const event = new Event('paste', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'clipboardData', { value: { getData: (type: string) => (type === 'text/plain' ? text : '') } })
+      ;(view.container.querySelector('.meta-grid') as HTMLElement).dispatchEvent(event)
+    }
+    paste('2026-09-24 06:45')
     await flushUi()
     expect(patchSpy).toHaveBeenCalledWith('r1', 'fld_dt', STORED, 3) // 06:45 Kathmandu = 01:00Z, never the browser's 06:45
 
-    readText.mockResolvedValue('next tuesday')
-    paste()
+    paste('next tuesday')
     await flushUi()
     expect(patchSpy).toHaveBeenLastCalledWith('r1', 'fld_dt', 'next tuesday', 3) // server grammar refuses → 400 → toast, not a silent drop
     view.unmount()

@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
 import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
@@ -901,7 +903,8 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('Union ID：user-2-union')
     expect(container?.textContent).toContain('Open ID：未记录')
     expect(container?.textContent).toContain('最近目录同步：')
-    expect(container?.textContent).toContain('修复建议：先回到目录同步查看该成员是否已补齐 openId')
+    expect(container?.textContent).toContain('修复建议：确认账号已激活并已绑定钉钉身份 → 让成员用钉钉扫码登录一次（登录会补齐 openId）→ 刷新本页后再开通钉钉扫码。')
+    expect(container?.textContent).not.toContain('重新同步目录')
     const enableButton = findButtonByText(container!, '开通钉钉扫码')
     expect(enableButton.disabled).toBe(true)
     const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
@@ -1067,7 +1070,7 @@ describe('UserManagementView', () => {
       expect(exportedText).toContain('- 已收口：1')
       expect(exportedText).toContain('## 结果回填')
       expect(exportedText).toContain('缺 OpenID 成员清单与预期一致')
-      expect(exportedText).toContain('目录同步可补齐 openId / 或确认仍缺失原因')
+      expect(exportedText).toContain('成员用钉钉扫码登录一次后已补齐 openId（目录同步本身不返回 openId）/ 或确认仍缺失原因')
       expect(exportedText).toContain('最近 7 天收口审计可看到时间、处理人和动作')
       expect(exportedText).toContain('## 执行后结论')
       expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
@@ -3166,5 +3169,72 @@ describe('UserManagementView', () => {
       expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
       expect(sessionHint()?.textContent).toContain('现有会话失效')
     })
+  })
+
+  // Customer field report 2026-10-21 (#4): at ~1270px the left card's export buttons were clipped and
+  // the bulk-action buttons were drawn over the right panel. jsdom cannot lay out, so this pins the
+  // DOM structure the fix relies on plus the CSS contract in the SFC's style block; the real-browser
+  // measurement was done against a lab harness (see the PR body).
+  it('keeps the left-card buttons in wrapping containers and caps the card track at the card width', async () => {
+    const originalInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1270 })
+    onTestFinished(() => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
+    })
+    // A listed user whose DingTalk identity has a corpId but no openId renders the governance hint (with
+    // the whole corpId, one unbreakable token) as a third child of the user row.
+    const state = createApiState()
+    state[1].hasOpenId = false
+    state[1].dingtalkCorpId = 'ding' + '0'.repeat(32)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app = createApp(UserManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi(20)
+
+    const layout = container!.querySelector('.user-admin__layout')
+    const aside = layout?.querySelector(':scope > aside.user-admin__panel')
+    const detail = layout?.querySelector(':scope > section.user-admin__panel')
+    expect(aside).toBeInstanceOf(HTMLElement)
+    expect(detail).toBeInstanceOf(HTMLElement)
+    const exportButtons = Array.from(aside!.querySelectorAll('.user-admin__section-head--workbench > .user-admin__role-actions > button'))
+    expect(exportButtons.map((button) => button.textContent?.trim())).toEqual([
+      '导出治理日报摘要',
+      '导出联调检查单',
+      '导出联调结果模板',
+      '导出联调执行包索引',
+      '导出完整联调包',
+    ])
+    const bulkButtons = aside!.querySelectorAll('.user-admin__bulkbar > .user-admin__role-actions > .user-admin__button')
+    expect(bulkButtons.length).toBeGreaterThanOrEqual(9)
+    const rowHints = Array.from(aside!.querySelectorAll('.user-admin__user > p.user-admin__hint'))
+    expect(rowHints).toHaveLength(1)
+    expect(rowHints[0].textContent).toContain('ding' + '0'.repeat(32))
+
+    const source = readFileSync(resolve(process.cwd(), 'src/views/UserManagementView.vue'), 'utf8').replace(/\r\n/g, '\n')
+    const style = source.slice(source.indexOf('<style scoped>'))
+    const rule = (selector: string) => {
+      const start = style.indexOf(`\n${selector} {`)
+      expect(start, selector).toBeGreaterThan(-1)
+      return style.slice(start, style.indexOf('}', start)).replace(/\/\*[\s\S]*?\*\//g, '')
+    }
+    expect(rule('.user-admin__layout')).toContain('grid-template-columns: minmax(0, 320px) minmax(0, 1fr);')
+    expect(rule('.user-admin__layout > *')).toContain('min-width: 0;')
+    expect(rule('.user-admin__panel')).toContain('grid-template-columns: minmax(0, 1fr);')
+    expect(rule('.user-admin__panel')).toContain('min-width: 0;')
+    expect(rule('.user-admin__section-head--workbench')).toContain('flex-wrap: wrap;')
+    expect(rule('.user-admin__role-actions > .user-admin__button')).toContain('max-width: 100%;')
+    expect(rule('.user-admin__role-actions > .user-admin__button')).toContain('white-space: normal;')
+    expect(rule('.user-admin__user')).toContain('box-sizing: border-box;')
+    expect(rule('.user-admin__user')).toContain('flex-wrap: wrap;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('flex-basis: 100%;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('min-width: 0;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('overflow-wrap: anywhere;')
+    expect(style).toMatch(/\.user-admin__user-body > span,\n\.user-admin__detail-head h2,\n\.user-admin__detail-head p \{\n  overflow-wrap: anywhere;/)
+    // The shared flex-wrap rule for every action row is still in place.
+    expect(style).toMatch(/\.user-admin__role-actions,\n\.user-admin__role-list \{\n  display: flex;\n  flex-wrap: wrap;/)
   })
 })

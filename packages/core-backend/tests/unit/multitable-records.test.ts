@@ -602,6 +602,40 @@ describe('multitable records helper', () => {
     })
   })
 
+  // 备料 option B (human-write-lock.ts): a column carrying `property.humanWriteLock = 'plm_system'` is
+  // read-only for PEOPLE only. This helper IS the plugin records SDK (the PLM apply's write path), and it must
+  // keep writing such a column. If either case goes red, someone folded the lock into `isFieldAlwaysReadOnly`
+  // (or otherwise onto the plugin path) and the PLM pull can no longer refresh its own columns.
+  it('B tripwire: the plugin records path still PATCHES a human-write-locked column', async () => {
+    const { query, records, fields } = createQuery()
+    const ticketNo = fields.find((field) => field.id === 'ticketNo')!
+    ticketNo.property = { humanWriteLock: 'plm_system' }
+    records.push({ id: 'rec_locked', sheet_id: 'sheet_service_ticket', data: { ticketNo: 'TK-1', title: 't' }, version: 1 })
+
+    const patched = await patchRecord({ query, sheetId: 'sheet_service_ticket', recordId: 'rec_locked', changes: { ticketNo: 'TK-2' } })
+    expect(patched.data.ticketNo).toBe('TK-2')
+    expect(patched.version).toBe(2)
+  })
+
+  it('B tripwire: the plugin records path still CREATES a row carrying a human-write-locked column', async () => {
+    const { query, fields } = createQuery()
+    const ticketNo = fields.find((field) => field.id === 'ticketNo')!
+    ticketNo.property = { humanWriteLock: 'plm_system' }
+
+    const created = await createRecord({ query, sheetId: 'sheet_service_ticket', data: { ticketNo: 'TK-9', title: 'x' } })
+    expect(created.data.ticketNo).toBe('TK-9')
+  })
+
+  it('B control: the same column with a legacy readOnly flag is refused on the plugin path (the lock is NOT that flag)', async () => {
+    const { query, records, fields } = createQuery()
+    const ticketNo = fields.find((field) => field.id === 'ticketNo')!
+    ticketNo.property = { readOnly: true }
+    records.push({ id: 'rec_ro', sheet_id: 'sheet_service_ticket', data: { ticketNo: 'TK-1' }, version: 1 })
+
+    await expect(patchRecord({ query, sheetId: 'sheet_service_ticket', recordId: 'rec_ro', changes: { ticketNo: 'TK-2' } }))
+      .rejects.toBeInstanceOf(MultitableRecordValidationError)
+  })
+
   it('patches when the optional expected version matches', async () => {
     const { query, records } = createQuery()
     records.push({

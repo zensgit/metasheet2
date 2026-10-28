@@ -167,6 +167,9 @@ const PRE_GATE_CALLS: Record<string, string> = {
   getCommentAddress: 'WHICH sheet a comment-id route must gate on (#5831; comments.ts resolveCommentIdContext only) — '
     + 'CommentService.getCommentAddress reads the two addressing columns of one meta_comments row by id, no content, no '
     + 'author and no sheet data (both asserted in "COMMENT-ID ROUTES")',
+  getWebhookById: 'WHICH sheet a subscription-webhook PATCH must gate on (api-tokens.ts PATCH /api/multitable/webhooks/:id) — '
+    + 'WebhookService.getWebhookById reads the caller’s own webhook row by id (owner-checked before the gate), no sheet '
+    + 'data; the gate then runs on the webhook’s bound (or newly bound) sheet',
 }
 
 function resolveImport(fromFile: string, specifier: string): string | null {
@@ -1100,8 +1103,8 @@ const COVERED: Record<string, CoveredFile> = {
     },
   },
   'routes/automation.ts': {
-    minHandlers: 9,
-    minInScope: 5,
+    minHandlers: 10,
+    minInScope: 6,
     exempt: {
       'GET /automation-executions': {
         reason: 'PLATFORM-ADMIN GOVERNANCE READ and the post-mortem path for deleted rules and sheets '

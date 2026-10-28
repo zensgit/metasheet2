@@ -1,4 +1,99 @@
 paths:
+  /api/attendance/groups/{groupId}/fixed-schedule/editor:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read fixed schedule editor configuration and candidate reference eligibility
+      description: >-
+        Uses the existing fixed schedule preview actor, organization and group-manager authorization.
+        The authenticated organization is authoritative. Eligibility is advisory and does not grant write
+        permission; apply and rebuild recheck their existing authorization and canonical posture.
+        An absent shiftId selects the saved desired shift, or returns null eligibility when unconfigured.
+        No coverage counts or raw member identifiers are returned. Unreadable segment or posture state fails closed.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: shiftId, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Desired configuration, old managed sets and candidate reference eligibility
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean, enum: [true] }
+                  data: { $ref: '#/components/schemas/AttendanceFixedScheduleEditor' }
+        '400': { description: Invalid group or candidate shift identifier }
+        '401': { description: Authentication required }
+        '403': { description: Actor, organization selector or group preview authority rejected }
+        '404': { description: Group or selected shift not found in authenticated organization }
+        '503': { description: Fixed schedule, persisted segment or canonical posture state unavailable }
+  /api/attendance/groups/{groupId}/fixed-schedule/config:
+    x-plugin: plugin-attendance
+    put:
+      summary: Save fixed schedule desired configuration
+      description: >-
+        Requires existing fixed schedule dispatch authorization. This saves configuration only and does
+        not create assignments. expectedConfigRevision=0 requires absence; a positive value requires
+        that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED
+        with no configuration or assignment change. Omission retains legacy unconditional save behavior.
+        A no-op save retains revision and timestamps.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceFixedScheduleConfigSave' }
+      responses:
+        '200':
+          description: Saved desired configuration and authoritative revision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean, enum: [true] }
+                  data: { $ref: '#/components/schemas/AttendanceFixedScheduleSavedConfig' }
+        '400': { description: Invalid date window, identifier or revision }
+        '401': { description: Authentication required }
+        '403': { description: Actor, organization or dispatch authority rejected }
+        '404': { description: Group or shift not found in authenticated organization }
+        '409': { description: ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry }
+        '503': { description: Attendance tables unavailable }
+  /api/attendance/groups/{groupId}/fixed-schedule/config/update:
+    x-plugin: plugin-attendance
+    post:
+      summary: Save fixed schedule desired configuration through the POST update alias
+      description: Uses the identical handler, authorization, validation, revision checks and response as PUT config.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceFixedScheduleConfigSave' }
+      responses:
+        '200':
+          description: Saved desired configuration and authoritative revision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean, enum: [true] }
+                  data: { $ref: '#/components/schemas/AttendanceFixedScheduleSavedConfig' }
+        '400': { description: Invalid date window, identifier or revision }
+        '401': { description: Authentication required }
+        '403': { description: Actor, organization or dispatch authority rejected }
+        '404': { description: Group or shift not found in authenticated organization }
+        '409': { description: ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry }
+        '503': { description: Attendance tables unavailable }
   /api/attendance/effective-calendar:
     x-plugin: plugin-attendance
     get:

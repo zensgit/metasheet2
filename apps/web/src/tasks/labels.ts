@@ -40,6 +40,12 @@ export const TASKS_ZH = {
   create: '创建',
   createInvalidTitle: '标题为空或包含无法保存的字符',
   createFailed: '创建任务失败，请稍后重试',
+  // after a create while 已完成 is on: the new task is not completed, so this filter hides it
+  createdHiddenByFilter: '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。',
+  // the same, in a view that leaves the new task out under any status (关注中 / 我委派的)
+  createdHiddenByViewAndFilter: '任务已创建。当前视图和筛选下，列表中不显示它。',
+  createdHiddenShowOpen: '查看未完成任务',
+  createdHiddenOpenTask: '打开新任务',
   listEmpty: '暂无任务',
   // G2-core: the empty line names the status filter it was read under.
   listEmptyOpen: '暂无未完成任务',
@@ -388,6 +394,10 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   create: 'Create',
   createInvalidTitle: 'The title is empty or contains characters that cannot be saved',
   createFailed: 'Could not create the task. Please try again later.',
+  createdHiddenByFilter: 'Task created. It is not completed yet, so the current "Completed" filter does not show it.',
+  createdHiddenByViewAndFilter: 'Task created. The current view and filter do not show it.',
+  createdHiddenShowOpen: 'Show tasks not completed',
+  createdHiddenOpenTask: 'Open the new task',
   listEmpty: 'No tasks yet',
   listEmptyOpen: 'No incomplete tasks',
   listEmptyDone: 'No completed tasks',

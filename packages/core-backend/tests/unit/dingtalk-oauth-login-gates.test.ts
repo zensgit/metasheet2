@@ -48,11 +48,12 @@ import {
   exchangeCodeForUser,
   exchangeEnterpriseAuthCodeForUser,
   getDingTalkRuntimeStatus,
+  listMissingDingTalkLoginEnv,
 } from '../../src/auth/dingtalk-oauth'
 
 const defaultTransactionStatements: string[] = []
 
-function createDefaultTransactionQuery() {
+function createDefaultTransactionQuery(options: { grant?: boolean | null; identity?: Record<string, unknown> } = {}) {
   const aliasOwners = new Map<string, string>()
   return vi.fn(async (sql: string, params: unknown[] = []) => {
     const statement = String(sql)
@@ -90,6 +91,15 @@ function createDefaultTransactionQuery() {
           access_generation: 0,
         }],
       }
+    }
+    if (/SELECT COALESCE\(role[\s\S]*FROM users/i.test(statement)) {
+      return { rows: [{ role: 'user', is_active: true, activation_status: 'activated' }] }
+    }
+    if (/SELECT enabled[\s\S]*FROM user_external_auth_grants/i.test(statement)) {
+      return { rows: options.grant === null ? [] : [{ enabled: options.grant ?? true }] }
+    }
+    if (/SELECT id,[\s\S]*FROM user_external_identities/i.test(statement)) {
+      return { rows: options.identity ? [options.identity] : [] }
     }
     if (/INSERT INTO user_external_identities/i.test(statement)) {
       return { rows: [{ id: 'identity-new' }] }
@@ -187,7 +197,10 @@ describe('dingtalk oauth login gates', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     const txCalls: Array<{ sql: string; params: unknown[] }> = []
     pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
-      const fallback = createDefaultTransactionQuery()
+      const fallback = createDefaultTransactionQuery({ identity: {
+        id: 'identity-1', external_key: 'ding-corp:union-1',
+        provider_union_id: 'union-1', provider_open_id: null, corp_id: 'ding-corp',
+      } })
       const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
         txCalls.push({ sql: String(sql), params })
         if (String(sql).includes('SELECT local_user_id')) return { rows: [] }
@@ -235,7 +248,10 @@ describe('dingtalk oauth login gates', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     const txCalls: Array<{ sql: string; params: unknown[] }> = []
     pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
-      const fallback = createDefaultTransactionQuery()
+      const fallback = createDefaultTransactionQuery({ identity: {
+        id: 'identity-1', external_key: 'ding-corp:union-1',
+        provider_union_id: 'union-1', provider_open_id: null, corp_id: 'ding-corp',
+      } })
       const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
         txCalls.push({ sql: String(sql), params })
         if (String(sql).includes('SELECT local_user_id')) {
@@ -318,9 +334,12 @@ describe('dingtalk oauth login gates', () => {
       }) // findUserByEmail
       .mockResolvedValueOnce({ rows: [] }) // grant read → ABSENT (must NOT be treated as denial)
 
+    pgMocks.transaction.mockImplementation(async callback => callback({
+      query: createDefaultTransactionQuery({ grant: null }),
+    }))
     const result = await exchangeCodeForUser('code-grant-absent')
     expect(result).toMatchObject({ localUserId: 'user-1', isNewUser: false })
-    // Absent under non-strict mode auto-grants (ensureGrant runs in the transaction).
+    // Absent under non-strict mode creates the grant in the identity transaction.
     expect(defaultTransactionStatements.some((sql) =>
       /INSERT INTO user_external_auth_grants/i.test(sql))).toBe(true)
   })
@@ -623,6 +642,7 @@ describe('dingtalk oauth login gates', () => {
       autoLinkEmail: false,
       autoProvision: false,
       unavailableReason: null,
+      missingEnv: [],
     })
   })
 
@@ -639,6 +659,69 @@ describe('dingtalk oauth login gates', () => {
       corpId: 'ding-corp-blocked',
       allowedCorpIds: ['ding-corp-allowed'],
       unavailableReason: 'corp_not_allowed',
+      missingEnv: [],
+    })
+  })
+
+  describe('#6467 missingEnv lists every missing login env NAME, never a value', () => {
+    const CLIENT_ID = 'DINGTALK_CLIENT_ID|DINGTALK_APP_KEY'
+    const CLIENT_SECRET = 'DINGTALK_CLIENT_SECRET|DINGTALK_APP_SECRET'
+    const REDIRECT_URI = 'DINGTALK_REDIRECT_URI'
+    const VALUES = {
+      clientId: 'value-client-id-6467',
+      clientSecret: 'value-client-secret-6467',
+      redirectUri: 'https://value-host-6467.example.com/login/dingtalk/callback',
+    }
+
+    function stubLoginEnv(present: { clientId: boolean; clientSecret: boolean; redirectUri: boolean }) {
+      // Blank counts as unset (readStringEnv trims); stub every name so the host env cannot leak in.
+      for (const key of [
+        'DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY',
+        'DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET',
+        'DINGTALK_REDIRECT_URI', 'DINGTALK_CORP_ID', 'DINGTALK_ALLOWED_CORP_IDS',
+      ]) vi.stubEnv(key, '')
+      if (present.clientId) vi.stubEnv('DINGTALK_CLIENT_ID', VALUES.clientId)
+      if (present.clientSecret) vi.stubEnv('DINGTALK_CLIENT_SECRET', VALUES.clientSecret)
+      if (present.redirectUri) vi.stubEnv('DINGTALK_REDIRECT_URI', VALUES.redirectUri)
+    }
+
+    it.each([
+      [{ clientId: false, clientSecret: false, redirectUri: false }, 'missing_client_id', [CLIENT_ID, CLIENT_SECRET, REDIRECT_URI]],
+      [{ clientId: false, clientSecret: true, redirectUri: true }, 'missing_client_id', [CLIENT_ID]],
+      [{ clientId: true, clientSecret: false, redirectUri: true }, 'missing_client_secret', [CLIENT_SECRET]],
+      [{ clientId: true, clientSecret: true, redirectUri: false }, 'missing_redirect_uri', [REDIRECT_URI]],
+      [{ clientId: false, clientSecret: false, redirectUri: true }, 'missing_client_id', [CLIENT_ID, CLIENT_SECRET]],
+      [{ clientId: false, clientSecret: true, redirectUri: false }, 'missing_client_id', [CLIENT_ID, REDIRECT_URI]],
+      [{ clientId: true, clientSecret: false, redirectUri: false }, 'missing_client_secret', [CLIENT_SECRET, REDIRECT_URI]],
+      [{ clientId: true, clientSecret: true, redirectUri: true }, null, []],
+    ] as const)('present=%j -> reason %s, missingEnv %j', (present, reason, missingEnv) => {
+      stubLoginEnv(present)
+      const status = getDingTalkRuntimeStatus()
+      expect(status.unavailableReason).toBe(reason)
+      expect(status.missingEnv).toEqual(missingEnv)
+      expect(status.configured).toBe(missingEnv.length === 0)
+      expect(listMissingDingTalkLoginEnv(present)).toEqual(missingEnv)
+      const serialized = JSON.stringify(status.missingEnv)
+      for (const value of Object.values(VALUES)) expect(serialized).not.toContain(value)
+    })
+
+    it('accepts the alias names and treats whitespace-only values as missing', () => {
+      stubLoginEnv({ clientId: false, clientSecret: false, redirectUri: false })
+      vi.stubEnv('DINGTALK_APP_KEY', 'value-alias-key-6467')
+      vi.stubEnv('DINGTALK_APP_SECRET', 'value-alias-secret-6467')
+      vi.stubEnv('DINGTALK_REDIRECT_URI', '   ')
+      const status = getDingTalkRuntimeStatus()
+      expect(status.unavailableReason).toBe('missing_redirect_uri')
+      expect(status.missingEnv).toEqual([REDIRECT_URI])
+    })
+
+    it('corp_not_allowed reports an empty missingEnv (all three names are set)', () => {
+      stubLoginEnv({ clientId: true, clientSecret: true, redirectUri: true })
+      vi.stubEnv('DINGTALK_CORP_ID', 'value-corp-blocked-6467')
+      vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'value-corp-allowed-6467')
+      const status = getDingTalkRuntimeStatus()
+      expect(status.unavailableReason).toBe('corp_not_allowed')
+      expect(status.missingEnv).toEqual([])
     })
   })
 
@@ -794,6 +877,12 @@ describe('dingtalk oauth login gates', () => {
         })
         .mockResolvedValueOnce({ rows: [{ enabled: true }] })
 
+      pgMocks.transaction.mockImplementation(async callback => callback({
+        query: createDefaultTransactionQuery({ identity: {
+          id: 'identity-9', external_key: 'ding-corp:union-9',
+          provider_union_id: 'union-9', provider_open_id: null, corp_id: 'ding-corp',
+        } }),
+      }))
       const result = await exchangeEnterpriseAuthCodeForUser('auth-code-3')
       expect(result.dingtalkUser.unionId).toBe('union-9')
       expect(result.dingtalkUser.nick).toBe('dingtalk-emp-2')

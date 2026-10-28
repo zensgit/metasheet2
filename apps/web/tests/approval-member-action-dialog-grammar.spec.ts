@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
 
 /**
  * P5-C-1 — member-action dialog grammar (chrome-only unification).
@@ -274,7 +275,6 @@ describe('P5-C-1 — member-action dialog grammar', () => {
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of [
@@ -547,7 +547,6 @@ describe('O-8 / F8-1 — ApprovalDetailView English render scan with the five me
 
   async function mountForScan() {
     const { surfacingElementStubs } = await import('./helpers/approvalLocaleScan')
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     app = createApp(defineComponent({ setup() { return () => h(ApprovalDetailView as any) } }))
     for (const [name, component] of Object.entries(surfacingElementStubs())) app.component(name, component)
     app.component('ElButton', ElButton)
@@ -685,7 +684,6 @@ describe('O-8 / F8-1 — quick-phrase chips write the preset text unchanged in b
 
   async function mountWithSurfacingStubs() {
     const { surfacingElementStubs } = await import('./helpers/approvalLocaleScan')
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     app = createApp(defineComponent({ setup() { return () => h(ApprovalDetailView as any) } }))
     for (const [name, component] of Object.entries(surfacingElementStubs())) app.component(name, component)
     app.component('ElButton', ElButton)

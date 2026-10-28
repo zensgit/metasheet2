@@ -46,6 +46,7 @@ export type MetaCopySheetLabelKey =
   | 'copySheet.error.sourceChanged'
   | 'copySheet.error.tooLarge'
   | 'copySheet.error.systemSheet'
+  | 'copySheet.error.gridExportClosed'
   | 'copySheet.error.tooManyFields'
   | 'copySheet.error.linkTargetNotLive'
   | 'copySheet.error.unsupportedFieldType'
@@ -124,6 +125,11 @@ const META_COPY_SHEET_LABELS: Record<MetaCopySheetLabelKey, LocaleText> = {
     zh: '这张数据表超出单次复制上限（行数或列数过多）。',
   },
   'copySheet.error.systemSheet': { en: 'System tables can\'t be copied.', zh: '系统数据表不能复制。' },
+  // 备料分批拉取第一期 step 3: a data-only refusal — the dialog then offers the structure-only copy.
+  'copySheet.error.gridExportClosed': {
+    en: 'This is a pilot stock-preparation table: its data cannot be copied. Untick “Include data” to copy the structure only.',
+    zh: '这是试点备料表，数据不能复制。可取消勾选「包含数据」只复制结构。',
+  },
   'copySheet.error.tooManyFields': {
     en: 'This table has more columns than a single copy allows.',
     zh: '这张数据表的列数超出单次复制上限。',
@@ -345,6 +351,8 @@ export function copySheetErrorMessage(error: unknown, isZh: boolean, ctx: CopySh
       return copySheetRowFailureText(error.rowIndex, error.fieldId, isZh, ctx)
     case 'COPY_SOURCE_SYSTEM_SHEET':
       return copySheetLabel('copySheet.error.systemSheet', isZh)
+    case 'COPY_SOURCE_GRID_EXPORT_CLOSED':
+      return copySheetLabel('copySheet.error.gridExportClosed', isZh)
     case 'COPY_TEMPORARILY_UNAVAILABLE':
       return copySheetLabel('copySheet.error.temporarilyUnavailable', isZh)
     case 'NAME_INVALID_CHARACTERS':

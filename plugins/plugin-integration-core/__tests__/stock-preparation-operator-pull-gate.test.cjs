@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 // 拉取人员拉数据 — THE PULL GATE SPLIT (was 一线自己拉数据), across the routes it touches.
 //
 // THE RULING, AND ITS REVERSAL. The owner first ruled that a floor operator may self-serve the PLM
@@ -152,6 +154,8 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
     config: {},
   }
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -439,6 +443,8 @@ function mountWithSource({
     }
   }
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: registry,
     // RECORDS the principal each adapter is built for, then refuses the read — this suite is about
     // WHOSE identity the read runs as, not about what the source returns.
@@ -478,7 +484,10 @@ function mountWithSource({
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    // Batch-refresh step 4 PR-3b: the large expansion start / run / plan / approve consult the REAL refresh governance
+    // (support/stock-preparation-refresh-governance-wiring.cjs) right after their pilot gate — a not-governed project
+    // pays one consult and is served exactly as before; an unwired deployment would be 501 by name.
+    services: require('./support/stock-preparation-refresh-governance-wiring.cjs').withRefreshGovernance(services),
     logger: { info(message, detail) { logLines.push({ message, detail }) }, warn() {}, error() {} },
   })
   return {
@@ -644,7 +653,10 @@ async function theOperatorPullReadsAsTheBindingOwner() {
   // 2. …and so does APPLY, which re-expands the source in its own right.
   {
     const { routes, adapterPrincipals } = mountWithSource()
-    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull })
+    // Batch-refresh phase 0 step 1: apply validates the project number FIRST (it names the write scope
+    // whose lease is held around the source load), so this call carries a well-formed synthetic one to
+    // reach the adapter load it is about. An empty body now refuses 400 before any IO.
+    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull, body: { parameters: { projectNo: 'SYN-SWL-0003' } } })
     assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-09: apply too')
   }
 
@@ -739,7 +751,8 @@ async function theDelegationReachesTheConnectionResolution() {
   // 3. APPLY re-expands the source in its own right, so it takes the same path.
   {
     const { routes, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
-    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull })
+    // A well-formed synthetic project number, for the reason P-09 gives (apply validates it first).
+    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull, body: { parameters: { projectNo: 'SYN-SWL-0003' } } })
     assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: apply too')
   }
 
@@ -1133,6 +1146,9 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
     STOCK_PREP_OPERATOR_PULL_STEPS.map((step) => step.step),
     [
       'dry-run',
+      // R67 ④: the same dry-run, enqueued and polled.
+      'dry-run-job-start',
+      'dry-run-job-get',
       'apply',
       // The bounded background channel — the same pull, taken in pieces because the BOM is too big
       // to expand in one request. See P-07.
@@ -1187,14 +1203,15 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
 //
 // Every case before this block ran its admissions as PULLER, so none of them can show that the
 // OPERATOR is refused — a suite that renamed its actor would stay green with the gate still on
-// OPERATE. This block is the one that reddens on that: route by route, all eleven members of the
+// OPERATE. This block is the one that reddens on that: route by route, all thirteen members of the
 // split, the operate-only actor is refused and the pull actor is admitted. Then the complement: the
 // manifest routes the owner kept for the floor (confirm, value read-back, export, handoff, board,
 // directory) still admit the operate-only actor, so the reversal narrowed the pull and nothing else.
 async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
   const routes = mount()
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
-  assert.equal(ALL_MOVED_ROUTES.length, 11, 'P-14: the split has exactly eleven members')
+  // Thirteen since R67 ④ added the background dry-run's enqueue and poll.
+  assert.equal(ALL_MOVED_ROUTES.length, 13, 'P-14: the split has exactly thirteen members')
 
   for (const route of ALL_MOVED_ROUTES) {
     routes.resetHostCalls()
@@ -1293,8 +1310,13 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
     pullTier.map((entry) => entry.capability).sort(),
     // S3 fix round 1 (R6): + the overview ENSURE — creating the read-only overview is provisioning, the
     // PULL tier's (R-35), so the OPERATE refresh no longer creates it.
-    ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore'],
-    'P-14: exactly four PULL-tier manifest capabilities — create, archive, restore, overview ensure',
+    [
+      'projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore',
+      // Batch-refresh step 4 PR-4 (R-59, D-14): the puller confirms — the six refresh routes (the private hold page,
+      // the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end) are PULL members.
+      'refresh.confirm', 'refresh.continuation', 'refresh.end', 'refresh.evidence', 'refresh.holds', 'refresh.keep',
+    ],
+    'P-14: exactly ten PULL-tier manifest capabilities — create, archive, restore, overview ensure and the six refresh routes',
   )
   for (const entry of pullTier) {
     for (const [user, expected, who] of [

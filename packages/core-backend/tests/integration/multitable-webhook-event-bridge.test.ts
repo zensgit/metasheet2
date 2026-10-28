@@ -18,6 +18,9 @@
  * the row lands. A NEGATIVE control (a webhook subscribed only to comment.created)
  * proves the event filter — it must get no delivery.
  *
+ * The webhooks are bound to the test sheet and their owner can read it (subscription webhooks deliver
+ * only for their bound sheet and only what the owner can read).
+ *
  * No real external calls: WebhookService is injected with a loopback fetch that
  * records the request (URL + headers + body) instead of hitting the network.
  *
@@ -103,17 +106,24 @@ describeIfDatabase('webhook event bridge real chain (real DB)', () => {
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'Webhook Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_VALUE, SHEET_ID, 'Value', 'number', '{}', 1])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC_ID, SHEET_ID, JSON.stringify({ [FLD_VALUE]: 1 })])
+    // Webhook owner: an active account that can read the sheet and manage its automation.
+    // workflow:write is not in the permissions catalogue; the legacy users.permissions list carries it.
+    await q(
+      `INSERT INTO users (id, name, password_hash, role, permissions) VALUES ($1, $1, 'x', 'user', '["workflow:write"]'::jsonb) ON CONFLICT (id) DO NOTHING`,
+      [USER_ID],
+    )
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'multitable:read') ON CONFLICT DO NOTHING`, [USER_ID])
 
     const now = new Date().toISOString()
     // Subscribed webhook: record.updated, with a secret (so the HMAC header is computed).
     await q(
-      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10)',
-      [WH_SUBSCRIBED, 'Subscribed', 'https://sink.test/subscribed', WH_SECRET, JSON.stringify(['record.updated']), true, USER_ID, now, 0, 3],
+      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries, sheet_id) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)',
+      [WH_SUBSCRIBED, 'Subscribed', 'https://sink.test/subscribed', WH_SECRET, JSON.stringify(['record.updated']), true, USER_ID, now, 0, 3, SHEET_ID],
     )
     // Unsubscribed webhook (negative control): only comment.created.
     await q(
-      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10)',
-      [WH_UNSUBSCRIBED, 'Unsubscribed', 'https://sink.test/unsubscribed', null, JSON.stringify(['comment.created']), true, USER_ID, now, 0, 3],
+      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries, sheet_id) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)',
+      [WH_UNSUBSCRIBED, 'Unsubscribed', 'https://sink.test/unsubscribed', null, JSON.stringify(['comment.created']), true, USER_ID, now, 0, 3, SHEET_ID],
     )
 
     // Wire the bridge onto the SAME integration bus the PATCH route emits on, with a
@@ -133,6 +143,8 @@ describeIfDatabase('webhook event bridge real chain (real DB)', () => {
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = $1', [USER_ID]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [USER_ID]).catch(() => {})
   })
 
   beforeEach(() => {
