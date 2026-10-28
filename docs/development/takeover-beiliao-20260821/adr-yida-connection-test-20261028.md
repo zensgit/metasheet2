@@ -59,7 +59,7 @@
 ⑦ **次序（反驳评审阻断项的修订）**：
    捕获输入（同步；起始窗口从这里计时）→ 运行时是否在役 → 开关原文判定（任何 DB 工作之前）→ **一个 RC 授权事务**（实时集成管理员、槽位咨询锁、锚点存在、锚点 owner/租户 = JWT 主体、`commandId` = 锚点命令号、该槽既无初始化行也无已批准目标）→ **COMMIT** → **准入**（每进程同时最多 1 次在途换令牌，否则 409 CONFLICT；冷却 5 秒，否则 429 THROTTLED；冷却只在真正开始换令牌时盖章）→ 开关再判一次 → **起始窗口**（紧接在盖冷却章、占在途名额之前：自 `execute()` 入口起已超过 `YIDA_CONNECTION_TEST_START_WINDOW_MS = 2000` 即 503 UNAVAILABLE，零 fetch、**不盖冷却章**）→ 盖章、占名额 → 探针换令牌。
    **时钟**：冷却与起始窗口要么用单调时钟，要么在用墙钟时把负的经过时间当作「未限流、未超窗」——墙钟回拨永远不会锁死冷却。实现所选的方式写在运行时注释里。
-   被拒绝的调用者（DISABLED / DENIED / CONFLICT / UNAVAILABLE）**永远碰不到限流器**：任何持有带租户声明 JWT 的人都到得了这个路由，但只有锚点 owner 才能占用在途名额或盖冷却章。限流器是进程内的、只数已授权调用者。
+   在 COMMIT 之前被拒绝的调用者（DISABLED / DENIED / 命令号或槽位 CONFLICT / UNAVAILABLE）**永远碰不到在途名额与冷却章**：任何持有带租户声明 JWT 的人都到得了这个路由，但只有锚点 owner 才能占用在途名额或盖冷却章。限流器是进程内的、只数已授权调用者。
    **已接受、沿用的性质**：每进程运行上限 `MAX_RUNS = 32` 在开关判定之后、**授权事务之前**检查，与两个既有运行时同形（`yida-initialization-runtime.ts:160`、`yida-owner-runtime.ts:210`）。所以 32 个并发的、注定 DENIED 的调用者在各自短暂的只读授权事务期间占满运行名额时，owner 那一次点击会短暂得到 503 UNAVAILABLE（零出网、不涉及秘密，owner 重试即可）。在途名额与冷却只在 COMMIT 之后才会碰到，不受此影响。记为已接受、沿用。
 
 ⑧ **时限（反驳评审修订）**：整次探测的预算是模块常量 12 秒（`YIDA_CONNECTION_TEST_BUDGET_MS`）——低于前端 15 秒的保护（`apps/web/src/services/integration/yidaInitialization.ts:137`），高于 undici 默认 10 秒的连接超时，所以「连不上」稳定落在 unreachable，只有「连上了但没应答」才是 timeout。加上 ⑦ 的 2 秒起始窗口，服务器最坏约 2 + 12 = 14 秒，仍低于前端 15 秒的中止；前端的 15 秒从发出 fetch 起算、2 秒窗口从 execute() 入口起算，所以只要到达 execute() 之前的中间件与网络往返合计不超过约 1 秒，浏览器就不会在服务器仍在换令牌时显示 CANCELLED；超出时面板的 CANCELLED 提示说明结果未知（忽略 signal 的 fetch 除外，见本条末）。到点时中止探针的 signal；**视图只在 fetch 依赖真正结束后才给出**（沿用两个既有运行时的骨架：每个依赖都记在本次运行上，运行的 finally 等它们全部结束，`yida-initialization-runtime.ts:169-173,266-275`）。不提前返回，所以不存在无人订阅的迟到 rejection；core-backend 主进程没有 `unhandledRejection` 处理器（`packages/core-backend/src/core/PluginIsolationManager.ts:292` 里的只在 worker 模板字符串中），提前返回会让 Node 20 默认行为杀掉后端。忽略 signal 的 fetch 会让本次运行、在途名额与 stop()/drain 一直等到它自己结束——这是有意的，与 owner 运行时相同（`yida-owner-runtime.ts:266-276`）。
@@ -81,7 +81,7 @@
 | L0 | 合并休眠代码：开关未设 ⇒ 路由 403 `YIDA_CONNECTION_TEST_DISABLED`、显示位 false、按钮不渲染 | owner 点名合并 |
 | L1 | cherry-pick 上测试机，开关仍不设 | O ④ 部署 |
 | L1.5 | 引导锚点：owner 点名锚点身份（哪个管理员账号 + 租户）→ 全库备份 → 操作员执行 `bootstrap-yida-initialization-owner --apply`（永久固定 owner_id/tenant_id）→ owner 手动 GET 得 200 `ready`。锚点按请求读取、不缓存，所以这一级可在 L2 之前或之后做，不需要重启，但必须在 L2.5 之前 | O（R-50 ② 的真实 owner/租户登记另批） |
-| L2 | 在测试机把开关设为原文 `true`（该路径第一次从测试机向钉钉出网；产品里已有其它钉钉出网路径，是否是本机第一次取决于那些开关）；每次切换 = 一次后端重启 / 重建，见 §8 | O ④ 对外发送 |
+| L2 | 在测试机把开关设为原文 `true`（该路径第一次从测试机向钉钉出网；产品里已有其它钉钉出网路径，是否是本机第一次取决于那些开关）；每次切换 = 一次后端重启 / 重建，见 §8。开关打开后，owner 先强制刷新页面（或清缓存）再打开初始化面板（旧缓存前端包见 §6 排障） | O ④ 对外发送 |
 | L2.5 | 先用合成/测试应用凭据点一次（预期 upstream_rejected，读法见 §6 合成点击结果表；验证接线、出网与 values-free） | O ④ |
 | L3 | 用客户真实 appKey/appSecret 点（真实客户数据 + R-50 列明的「真实 token 交换」；§3 前置条件 ③） | O ① + R-50 |
 | L4 | 用验证过的凭据做那一次不可逆的本地初始化（R75 既有流程）。**ok 是必要条件、不是充分条件**：探针只走 oauth2 accessToken；发送还要 POST `yida/forms/instances`（`yida-form-transport.cjs:6`，发送侧时限 10 秒，`yida-owner-send-port.mjs:88`@88cdeb059），HTTP 路径过滤的检查代理可能放行前者、拦下后者；systemToken / userId / appType / formUuid 要到首次真实新建才第一次被验证，那次新建的防重占位是永久的（§0） | owner |
@@ -109,7 +109,7 @@
 - 入口链不变：宜搭入口只对平台/集成管理员显示，服务器逐次再授权。
 - 按钮只在 `state.status === 'ready' && state.connectionTestEnabled === true` 时渲染；appKey/appSecret 非空才可点（systemToken、userId、人工确认不需要）。
 - 探测不清空已输入的秘密、不进入「状态未确认」、不消耗 ready（之后仍可用同一命令号初始化）。
-- **已测试的那一对（前端，不落盘）**：得到 ok 时，在组件内存里保留一份**非响应式**的 appKey/appSecret 副本（不进模板、不进 Vue 响应式状态，只有一个版本计数是响应式的）；之后输入与它不同即显示「已测试的凭据与当前输入不一致，请重新测试」，并禁用初始化，直到重新测试或 owner 勾选明确的「不重新测试，仍按当前输入初始化」。副本在初始化、卸载、重新 GET、会话变化时清除；非 ok 的结果也清除它。不用 `crypto.subtle` 做摘要：测试机按 IP 走明文 HTTP，那里没有 `crypto.subtle`。
+- **已测试的那一对（前端，不落盘）**：得到 ok 时，在组件内存里保留一份**非响应式**的 appKey/appSecret 副本（不进模板、不进 Vue 响应式状态，只有一个版本计数是响应式的）；之后输入与它不同即显示「已测试的凭据与当前输入不一致，请重新测试」，并禁用初始化，直到重新测试或 owner 勾选明确的「不重新测试，仍按当前输入初始化」。副本在初始化、卸载、重新 GET、会话变化时清除；非 ok 的结果也清除它。结果文案只在当前输入仍等于发出的那一对时显示，改动输入即隐藏。不用 `crypto.subtle` 做摘要：测试机按 IP 走明文 HTTP，那里没有 `crypto.subtle`。
 - 固定说明：ok 只证明 appKey/appSecret 是有效应用对；测试通过不等于可以发送。
 
 ## 6. 失败模式与分类的诚实边界
@@ -131,14 +131,14 @@
 | unreachable | DNS / 防火墙 / TLS / 重定向之一，系统区分不了 | 停；在后端进程所在环境里用 values-free 的解析与连通检查定位，不靠再点 |
 | timeout | 已连上但不应答 | 停，同上 |
 | ok | 合成凭据不可能拿到令牌（`yida-token-exchange.cjs:126-131`） | 视为被拦截或伪造的应答：停止、报 owner，不进 L3 |
-| 任何 4xx / 5xx 错误码 | 不是结果类；除 400 输入、409 在途、429 冷却与 503 起始窗口（后端过载）外，说明梯子上前一级没满足 | 按下方排障回到对应级 |
+| 任何 4xx / 5xx 错误码 | 不是结果类。对应梯子的只有这几种：403 `YIDA_CONNECTION_TEST_DISABLED` → L2 未满足；403 `YIDA_CONNECTION_TEST_DENIED` 与无锚点的 503 `YIDA_CONNECTION_TEST_UNAVAILABLE` → L1.5；503 `YIDA_CONNECTION_TEST_INACTIVE` → L1 的包不完整。其余都不是梯子问题：400 输入；409 在途、取消、命令号陈旧（重新 GET）或槽已初始化；429 冷却；503 起始窗口或回执不合法；401 与 403 `YIDA_OWNER_HTTP_DENIED`（会话） | 按下方排障或面板提示处理 |
 
 **排障速查**
 
-- 按钮可见，但点击得到 503 `YIDA_CONNECTION_TEST_INACTIVE`：探针能力未在役——插件第三个激活块失败（§8 软化，日志 `YIDA_CONNECTION_TEST_RUNTIME_INACTIVE`），或包里缺 `lib/yida-connection-probe.cjs`。按 sha256 核对包内文件。开关本身只读环境变量，没有别的运行时切换面；面板对 INACTIVE 的中文提示写明这两种原因。
+- 按钮可见，但点击得到 503 `YIDA_CONNECTION_TEST_INACTIVE`：探针能力未在役——插件第三个激活块失败（§8 软化，日志 `YIDA_CONNECTION_TEST_RUNTIME_INACTIVE`），或包里缺 `lib/yida-connection-probe.cjs`。按 sha256 核对包内文件。开关本身只读环境变量，没有别的运行时切换面；面板对 INACTIVE 的中文提示指向这两个方向。插件重载或关停期间到达的点击也会得到 INACTIVE（运行时已停止），稍后重试即可。
 - 403 `YIDA_CONNECTION_TEST_DISABLED`：运行中的进程里开关不是原文 `true`，常见是改了 `docker/app.env` 却没重启 / 重建后端（§8）。
 - 503 `YIDA_CONNECTION_TEST_UNAVAILABLE`：没有锚点（L1.5 未做）、超过 2 秒起始窗口（后端过载）或回执不合法；重试一次仍如此就停。
-- 开关开着、浏览器用的是旧缓存前端包：状态视图多了 `connectionTestEnabled` 键，旧包的严格键集校验给出 RESPONSE_INVALID，重新加载页面即可（开关关时旧包不受影响，§2 ⑥）。
+- 开关开着、浏览器用的是旧缓存前端包：状态视图多了 `connectionTestEnabled` 键，旧包的严格键集校验给出 RESPONSE_INVALID。出现 RESPONSE_INVALID 时先强制刷新页面（或清缓存）再排查；开关关时旧包不受影响（§2 ⑥）。
 - 代理设置在本版不改变结果：宿主注入裸 `globalThis.fetch`，Node 20 的 fetch 不读 `HTTP(S)_PROXY`，设代理环境变量不会让 unreachable / timeout 变好（代理出网另立 ADR，§9）。
 
 ## 7. 可观测与 values-free
