@@ -788,7 +788,7 @@ type ApprovedAttendanceFactV1 =
         | {
             kind: 'minutes_only_unbounded'
             minutes: number
-            source: 'explicit_minutes' | 'policy_default'
+            source: 'explicit_minutes' | 'policy_default' | 'request_snapshot_unattributed'
           }
     }
   | {
@@ -3149,3 +3149,5 @@ multi-segment authoritative calculation remains off.
 > Rewritten sites in this document: the `W4C-R42` row, the `Prefix 01` clause, the exact-gate
 > mutation list, and the test-seam clause. **No other operative requirement changes**; the
 > `OD-W4C-40` decision row receives only a provenance pointer, and no runtime behaviour changes.
+
+DG-OT-01 named Draft revision (human approved 2026-10-28): request_snapshot_unattributed is overtime-only, exact trusted frozen request minutes with original provenance unknown. Mandatory review/no actual worked minutes/no attribution expansion; no historical snapshot rewrite. See attendance-dg-ot-01-unattributed-source-design-lock-20261028.md. Leave enum and all owner/financial/permission/flag gates unchanged.
