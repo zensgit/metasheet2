@@ -753,6 +753,7 @@ const filteredRows = computed(() => props.rows)
 const tableWrap = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
+const measuredFootHeight = ref(0)
 const measuredRowHeight = ref(0)
 const measuredGroupHeaderHeight = ref(0)
 const measuredGroupSubtotalHeight = ref(0)
@@ -913,6 +914,8 @@ function onRowJumpSubmit() {
   }
   const target = Math.min(Math.max(typed, 1), total)
   rowJumpHint.value = target === typed ? null : total
+  // The box shows the row that is actually focused (12.7 -> 12, 2001 -> 2000 next to the 共 M 行 hint).
+  rowJumpInput.value = target
   pendingRowJump.value = null
   if (focusLoadedRow(target)) return
   // Not loaded: ask for its page. The flat grid then holds that page and shows the pager until page 1 (the
@@ -938,16 +941,80 @@ function focusLoadedRow(rowNumber: number): boolean {
   return true
 }
 
+// The jump has to leave row N on screen, not merely mounted. The sticky header cells (and frozen top rows) cover
+// the top of the scrollport and the sticky aggregation footer covers its bottom, so "on screen" is the band between
+// them. Windowed, a pre-scroll by row arithmetic (header and footer included) makes the row mount; with windowing
+// off, the mounted row is scrolled to the nearest edge. Then the real geometry corrects the rest: the band edges,
+// and rows that are taller than the uniform window height (a 4-digit row number wraps its cell). A correction can
+// mount other rows or let content-visibility rows take their real height, so it is re-checked for a few frames.
+let rowJumpSettleToken = 0
+const ROW_JUMP_SETTLE_FRAMES = 3
+
 function scrollJumpedRowIntoView() {
-  if (flatWindowEnabled.value || groupedWindowEnabled.value) {
-    scrollFocusedRowIntoWindow()
-    return
-  }
-  // Windowing off (60 rows or fewer, an expanded row, printing): every row is mounted, so scroll the row itself.
+  const windowed = flatWindowEnabled.value || groupedWindowEnabled.value
+  if (windowed) scrollFocusedRowIntoWindow({ stickyBands: true })
+  const token = ++rowJumpSettleToken
+  const target = focusRow.value
   nextTick(() => {
-    const el = tableWrap.value?.querySelector<HTMLElement>('tbody tr.meta-grid__row--focused')
-    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
+    if (token !== rowJumpSettleToken || focusRow.value !== target) return
+    if (!windowed) {
+      // Windowing off (60 rows or fewer, an expanded row, printing): every row is mounted, so scroll the row itself.
+      const el = tableWrap.value?.querySelector<HTMLElement>('tbody tr.meta-grid__row--focused')
+      if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
+    }
+    correctJumpedRowIntoBand()
+    settleJumpedRow(token, target, ROW_JUMP_SETTLE_FRAMES)
   })
+}
+
+function settleJumpedRow(token: number, target: number, framesLeft: number) {
+  if (framesLeft <= 0) return
+  const nextFrame = typeof window.requestAnimationFrame === 'function'
+    ? (cb: () => void) => window.requestAnimationFrame(() => cb())
+    : (cb: () => void) => window.setTimeout(cb, 16)
+  nextFrame(() => {
+    if (token !== rowJumpSettleToken || focusRow.value !== target) return
+    correctJumpedRowIntoBand()
+    settleJumpedRow(token, target, framesLeft - 1)
+  })
+}
+
+// Viewport y-range not covered by sticky bands: below the last header row's cells and the frozen top rows, above
+// the aggregation footer.
+function visibleRowBand(wrap: HTMLElement): { top: number; bottom: number } {
+  const wr = wrap.getBoundingClientRect()
+  let top = wr.top + wrap.clientTop
+  let bottom = top + wrap.clientHeight
+  const headerRows = wrap.querySelectorAll<HTMLElement>('thead tr')
+  const headerCell = headerRows.length > 0 ? headerRows[headerRows.length - 1].querySelector<HTMLElement>('th') : null
+  if (headerCell) top = Math.max(top, headerCell.getBoundingClientRect().bottom)
+  const frozenRows = wrap.querySelectorAll<HTMLElement>('tbody tr.meta-grid__row--frozen-top')
+  const frozenCell = frozenRows.length > 0 ? frozenRows[frozenRows.length - 1].querySelector<HTMLElement>('td.meta-grid__row-num') : null
+  if (frozenCell) top = Math.max(top, frozenCell.getBoundingClientRect().bottom)
+  wrap.querySelectorAll<HTMLElement>('tfoot.meta-grid__foot tr > td:first-child').forEach((cell) => {
+    bottom = Math.min(bottom, cell.getBoundingClientRect().top)
+  })
+  return { top, bottom }
+}
+
+// Scrolls the wrap so the focused row lies inside visibleRowBand. Returns whether it scrolled. No-op without layout
+// (jsdom) and for a frozen row (it is pinned on screen by its own sticky cells).
+function correctJumpedRowIntoBand(): boolean {
+  const wrap = tableWrap.value
+  if (!wrap || focusRow.value < 0) return false
+  const el = wrap.querySelector<HTMLElement>('tbody tr.meta-grid__row--focused')
+  if (!el || el.classList.contains('meta-grid__row--frozen-top')) return false
+  const rect = el.getBoundingClientRect()
+  if (rect.height <= 0) return false
+  const band = visibleRowBand(wrap)
+  let delta = 0
+  if (rect.top < band.top - 0.5) delta = Math.floor(rect.top - band.top)
+  else if (rect.bottom > band.bottom + 0.5) delta = Math.ceil(Math.min(rect.bottom - band.bottom, rect.top - band.top))
+  if (delta === 0) return false
+  const before = wrap.scrollTop
+  wrap.scrollTop = Math.max(0, before + delta)
+  scrollTop.value = wrap.scrollTop
+  return wrap.scrollTop !== before
 }
 
 const infiniteScrollEnabled = computed(() =>
@@ -988,6 +1055,8 @@ function measureViewport() {
   const headerRow = tableWrap.value.querySelector<HTMLElement>('thead tr')
   const hh = headerRow?.offsetHeight ?? 0
   if (hh > 0) measuredHeaderHeight.value = hh
+  // The sticky aggregation footer covers the bottom of the scrollport (0 without one). Used by the row jump.
+  measuredFootHeight.value = tableWrap.value.querySelector<HTMLElement>('tfoot.meta-grid__foot')?.offsetHeight ?? 0
   maybeKickWhenNotScrollable()
 }
 
@@ -1005,7 +1074,10 @@ function maybeKickWhenNotScrollable() {
 }
 // Keep the focused row inside the mounted window during keyboard navigation so arrow-keys never land on
 // an un-rendered row. No-op when windowing is off or no row is focused.
-function scrollFocusedRowIntoWindow() {
+// stickyBands (the footer row jump): row offsets start below the in-flow header, and the sticky aggregation footer
+// covers the bottom, so a row below the view is scrolled until its bottom clears both. Keyboard navigation keeps
+// the plain arithmetic.
+function scrollFocusedRowIntoWindow(opts: { stickyBands?: boolean } = {}) {
   if (!tableWrap.value || focusRow.value < 0) return
   let rowTop = 0
   let rowBottom = 0
@@ -1023,9 +1095,10 @@ function scrollFocusedRowIntoWindow() {
   }
   const viewTop = tableWrap.value.scrollTop
   const viewBottom = viewTop + effectiveViewportHeight.value
+  const bottomPad = opts.stickyBands ? headerHeightPx.value + measuredFootHeight.value : 0
   let next = viewTop
   if (rowTop < viewTop) next = rowTop
-  else if (rowBottom > viewBottom) next = rowBottom - effectiveViewportHeight.value
+  else if (rowBottom + bottomPad > viewBottom) next = rowBottom + bottomPad - effectiveViewportHeight.value
   if (next !== viewTop) {
     tableWrap.value.scrollTop = next
     scrollTop.value = next

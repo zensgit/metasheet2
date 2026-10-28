@@ -482,8 +482,11 @@ describe('MetaGridTable infinite-scroll load-more trigger (A1)', () => {
 
 /**
  * 客户反馈 2026-10-27 (R74): the footer 「跳转到第 [ ] 行」 on a loaded row scrolls it into view. Windowed (more than
- * 60 rows) it goes through the same arithmetic as keyboard navigation (jsdom has no layout, so the assertion is the
- * scrollTop that arithmetic produces); with windowing off, the mounted row is scrolled into view.
+ * 60 rows) a pre-scroll by row arithmetic mounts it (jsdom has no layout, so the assertion is the scrollTop that
+ * arithmetic produces); with windowing off, the mounted row is scrolled into view. Then the real geometry corrects
+ * the scroll so the row sits in the band between the sticky header and the (optional) aggregation footer. jsdom
+ * cannot see sticky geometry, so the correction is checked here with stubbed rects only; the real-browser witness
+ * is verification/grid-row-jump-visibility.spec.ts (Multitable browser verify lane).
  */
 describe('MetaGridTable footer row jump scrolls the row into view', () => {
   function jumpTo(root: HTMLDivElement, value: string): void {
@@ -502,8 +505,10 @@ describe('MetaGridTable footer row jump scrolls the row into view', () => {
 
     jumpTo(root, '1500')
     await nextTick()
-    // Row 1500 is index 1499: its bottom is 1500 × 36px; it lands at the viewport's bottom edge.
-    expect(wrap.scrollTop).toBe(1500 * 36 - 600)
+    // Row 1500 is index 1499: its bottom is 1500 × 36px below the in-flow header (37px, the jsdom fallback). The
+    // pre-scroll clears the header too, so the row bottom lands at the viewport's bottom edge. jsdom cannot see the
+    // sticky header, so this is the arithmetic only; the browser lane is the visibility witness.
+    expect(wrap.scrollTop).toBe(1500 * 36 + 37 - 600)
     expect(onGoToPage).not.toHaveBeenCalled()
     const focused = root.querySelector('tbody tr.meta-grid__row--focused') as HTMLElement | null
     expect(focused?.querySelector('.meta-grid__row-num span')?.textContent?.trim()).toBe('1500')
@@ -542,6 +547,72 @@ describe('MetaGridTable footer row jump scrolls the row into view', () => {
       const target = scrolledInto[0] as HTMLElement
       expect(target.classList.contains('meta-grid__row--focused')).toBe(true)
       expect(target.querySelector('.meta-grid__row-num span')?.textContent?.trim()).toBe('25')
+    } finally {
+      ;(Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView = original
+    }
+  })
+
+  // Stubbed geometry (jsdom has none): the wrap spans y 100..536, the sticky header cell ends at 136, the sticky
+  // aggregation footer starts at 500. scrollIntoView({ block: 'nearest' }) alone would leave an upward target at the
+  // scrollport top, under the header.
+  function stubRect(el: Element, top: number, height: number, scrolledBy?: () => number): void {
+    Object.defineProperty(el, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        const y = top - (scrolledBy ? scrolledBy() : 0)
+        return { top: y, bottom: y + height, height, left: 0, right: 800, width: 800, x: 0, y, toJSON: () => ({}) }
+      },
+    })
+  }
+
+  async function settle(): Promise<void> {
+    await nextTick()
+    await nextTick()
+    for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+
+  it('the row is corrected out from under the sticky header (upward jump) and above the aggregation footer (downward)', async () => {
+    const original = (Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView
+    ;(Element.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = function () { /* geometry stubbed below */ }
+    try {
+      const root = mountGrid(makeRows(30), {
+        totalRows: 30,
+        pageSize: 50,
+        aggregationConfig: { title: 'count' },
+        aggregates: { title: { fn: 'count', value: 30 } },
+      })
+      const wrap = setViewport(root, 436)
+      window.dispatchEvent(new Event('resize'))
+      await nextTick()
+      stubRect(wrap, 100, 436)
+      stubRect(root.querySelector('thead tr th') as Element, 100, 36)
+      const footCell = root.querySelector('tfoot.meta-grid__foot tr > td:first-child') as Element
+      expect(footCell).not.toBeNull()
+      stubRect(footCell, 500, 36)
+      wrap.scrollTop = 300
+      // A body row moves with the scroll: its stubbed top is where it sits while scrollTop is 300.
+      const moved = () => wrap.scrollTop - 300
+
+      // Upward: after scrollIntoView the row's top is at the scrollport top (100), 36px under the header.
+      const rows = root.querySelectorAll('tbody tr.meta-grid__row')
+      stubRect(rows[4], 100, 36, moved)
+      jumpTo(root, '5')
+      await settle()
+      expect(wrap.scrollTop).toBe(300 - 36)
+
+      // Downward: the row's bottom is at the scrollport bottom (536), 36px under the footer.
+      wrap.scrollTop = 300
+      stubRect(rows[20], 500, 36, moved)
+      jumpTo(root, '21')
+      await settle()
+      expect(wrap.scrollTop).toBe(300 + 36)
+
+      // Already inside the band: nothing moves.
+      wrap.scrollTop = 300
+      stubRect(rows[10], 200, 36, moved)
+      jumpTo(root, '11')
+      await settle()
+      expect(wrap.scrollTop).toBe(300)
     } finally {
       ;(Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView = original
     }

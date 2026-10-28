@@ -792,10 +792,14 @@ describe('MetaGridTable footer row jump (客户反馈 2026-10-27)', () => {
     const root = mountGrid({ rows: makeRows(0, 10), infiniteScroll: true, totalPages: 4, totalRows: 200, pageSize: 50, onGoToPage, onSelectRecord })
     await nextTick()
 
+    // The box is rewritten to the row that was focused (the clamped / truncated value).
+    const box = () => (root.querySelector('[data-testid="grid-row-jump-input"]') as HTMLInputElement).value
+
     jumpTo(root, '0')
     await nextTick()
     expect(onSelectRecord).toHaveBeenLastCalledWith('r0')
     expect(root.querySelector('[data-testid="grid-row-jump-hint"]')?.textContent?.trim()).toBe('200 rows in total')
+    expect(box()).toBe('1')
 
     jumpTo(root, '-7')
     await nextTick()
@@ -805,6 +809,7 @@ describe('MetaGridTable footer row jump (客户反馈 2026-10-27)', () => {
     await nextTick()
     expect(onSelectRecord).toHaveBeenLastCalledWith('r2')
     expect(root.querySelector('[data-testid="grid-row-jump-hint"]')).toBeNull()
+    expect(box()).toBe('3')
 
     onSelectRecord.mockClear()
     jumpTo(root, 'abc')
@@ -818,6 +823,7 @@ describe('MetaGridTable footer row jump (客户反馈 2026-10-27)', () => {
     await nextTick()
     expect(onGoToPage).toHaveBeenCalledWith(4)
     expect(root.querySelector('[data-testid="grid-row-jump-hint"]')?.textContent?.trim()).toBe('200 rows in total')
+    expect(box()).toBe('200')
   })
 
   it('a row that is not loaded asks for its page and is focused when that page lands; a sheet/view change in between cancels', async () => {
