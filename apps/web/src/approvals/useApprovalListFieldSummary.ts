@@ -5,23 +5,53 @@ import { getTemplate } from './api'
 import { collectFormUserIds, formatSummaryLine, summaryFields } from './detailField'
 import { ensureUserNamesResolved, getResolvedUserName } from './directoryResolve'
 
+/** The row fields the summary line reads (list rows and the pane's detail row both fit). */
+export type SummaryRow = Pick<UnifiedApprovalDTO, 'templateId'>
+  & Partial<Pick<UnifiedApprovalDTO, 'formSnapshot' | 'summarySchema' | 'formSchema'>>
+
 /**
- * B2-01 (待办列表关键字段摘要) — row-level glue: resolve `row.templateId` against a templateId ->
- * FormSchema cache, then build the summary line via `summaryFields`/`formatSummaryLine`. Exported
- * standalone (not only reachable via the composable below) so `ApprovalMobileList.vue` — which
- * receives the cache as a plain `templateSchemas` prop, not the composable instance — shares the
- * exact same glue instead of re-deriving it. Returns `''` whenever there is no templateId, no
- * cached schema yet (not fetched / still in flight / fetch failed), or no eligible field, so a
- * caller can gate rendering with a plain truthy `v-if`.
+ * The schema a row's summary line is built from, in order:
+ *   1. `row.summarySchema` — the list DTO's per-row schema taken from the instance's OWN pinned
+ *      template version (labels, options and the summary-field config of that version, trimmed by
+ *      the server to the fields present in this row's snapshot). Old instances keep their version's
+ *      labels and config after the template is renamed or reconfigured.
+ *   2. `row.formSchema` — the frozen schema a DETAIL DTO carries (the master-detail pane can render
+ *      the single-fetch detail when the row is not on the loaded page). Same version semantics.
+ *   3. The LIVE template schema from the `templateId` cache — ONLY for rows that carry neither
+ *      (bridged / external rows, or rows with no pinned version). This is the legacy path and keeps
+ *      its live-label drift caveat (see the composable doc below).
+ */
+export function rowSummarySchema(
+  schemas: Map<string, FormSchema> | undefined,
+  row: SummaryRow | null | undefined,
+): FormSchema | undefined {
+  if (!row) return undefined
+  if (row.summarySchema) return row.summarySchema
+  if (row.formSchema) return row.formSchema
+  return row.templateId ? schemas?.get(row.templateId) : undefined
+}
+
+/** True when the row already carries a version-pinned schema, so no live template fetch is needed. */
+function rowCarriesPinnedSchema(row: SummaryRow): boolean {
+  return Boolean(row.summarySchema || row.formSchema)
+}
+
+/**
+ * B2-01 (待办列表关键字段摘要) — row-level glue: resolve the row's schema (`rowSummarySchema`), then
+ * build the summary line via `summaryFields`/`formatSummaryLine`. Exported standalone (not only
+ * reachable via the composable below) so `ApprovalMobileList.vue` — which receives the cache as a
+ * plain `templateSchemas` prop, not the composable instance — shares the exact same glue instead of
+ * re-deriving it. Returns `''` whenever there is no schema (no pinned version and no cached live
+ * template: not fetched / still in flight / fetch failed), or no eligible field, so a caller can gate
+ * rendering with a plain truthy `v-if`.
  */
 export function resolveRowSummaryLine(
   schemas: Map<string, FormSchema> | undefined,
-  row: Pick<UnifiedApprovalDTO, 'templateId' | 'formSnapshot'>,
+  row: SummaryRow,
   isZh: boolean,
   limit = 3,
 ): string {
-  const templateId = row.templateId
-  const schema = templateId ? schemas?.get(templateId) : undefined
+  const schema = rowSummarySchema(schemas, row)
   if (!schema) return ''
   // Test report 2026-10-08 T4b: a `user` (人员) field in the summary renders the directory-resolved
   // name (ensured by `ensureLoadedForRows` below), never the stored id.
@@ -34,21 +64,16 @@ export function resolveRowSummaryLine(
  * `ApprovalMobileList`'s card list so the fetch + cache lives in exactly one place per view
  * session.
  *
- * WHY THE LIVE TEMPLATE, NOT THE FROZEN ONE: `UnifiedApprovalDTO` (the list DTO) never carries the
- * instance's frozen per-version `formSchema` — only the single-instance detail read does a second
- * DB round trip for that (`ApprovalBridgeService.getApproval`'s `template_version_id` follow-up
- * query; `listApprovals`/`toUnifiedDTO` never sets it). Fetching per-ROW would defeat the point of
- * a list (N calls instead of a handful keyed by distinct templateId), so this substitutes the LIVE
- * template schema via `getTemplate(id)` — the SAME `approvals:read` permission every list viewer
- * already needs (`GET /api/approval-templates/:id` and the list route `GET /api/approvals` both
- * resolve to the identical `rbacGuard` permission code).
+ * VERSION SEMANTICS: platform rows carry `summarySchema` from the list endpoint itself, read from
+ * each instance's pinned template version in ONE batched query per page (no per-row and no
+ * per-template fetch). Those rows never touch this cache, so a template rename or a changed summary
+ * config does not re-interpret instances started on an earlier version.
  *
- * LIVE-LABEL DRIFT CAVEAT: if a template's labels/options are edited after an instance was
- * created, this summary can show today's label for yesterday's stored value (e.g. a renamed select
- * option, or a since-reordered field). That is an accepted, DISPLAY-ONLY tradeoff — this line
- * exists purely so an approver can decide whether an item is worth opening, never to be the
- * authoritative rendering. The detail view keeps rendering from the instance's own FROZEN
- * `formSchema` via `buildDisplayFields`, which stays the single source of truth.
+ * LIVE FALLBACK (legacy rows only): a row with a `templateId` but no pinned schema still gets the
+ * LIVE template via `getTemplate(id)` — the SAME `approvals:read` permission every list viewer
+ * already needs. For those rows the old caveat remains: if the template's labels/options were edited
+ * after the instance was created, the line can show today's label for yesterday's value. It is a
+ * DISPLAY-ONLY line; the detail view always renders from the instance's FROZEN `formSchema`.
  *
  * A templateId is fetched AT MOST ONCE per view session regardless of outcome — `attempted` tracks
  * both successes and failures, so a deleted/broken template is not re-hit on every list reload or
@@ -87,11 +112,11 @@ export function useApprovalListFieldSummary() {
    * ids are skipped, and concurrent calls sharing a not-yet-settled id share the same in-flight
    * fetch instead of double-firing.
    */
-  async function ensureLoadedForRows(
-    rows: Array<Pick<UnifiedApprovalDTO, 'templateId'> & Partial<Pick<UnifiedApprovalDTO, 'formSnapshot'>>>,
-  ): Promise<void> {
+  async function ensureLoadedForRows(rows: SummaryRow[]): Promise<void> {
+    // Only rows WITHOUT a version-pinned schema need the live template (legacy fallback).
     const distinctIds = new Set(
       rows
+        .filter((row) => !rowCarriesPinnedSchema(row))
         .map((row) => row.templateId)
         .filter((id): id is string => !!id && !attempted.has(id)),
     )
@@ -104,17 +129,17 @@ export function useApprovalListFieldSummary() {
 
   /**
    * T4b — the member ids a row's summary line names: its top-level `user` values, read against the
-   * CACHED schema only (this never fetches a template). It reads the reactive cache, so a caller's
-   * watch over it re-fires once the schema lands (gate r1 P3-4: the master-detail pane's row).
+   * same schema the line uses (`rowSummarySchema`: the row's pinned version first, the CACHED live
+   * template only as the legacy fallback; this never fetches a template). It reads the reactive
+   * cache, so a caller's watch over it re-fires once a fallback schema lands (gate r1 P3-4: the
+   * master-detail pane's row).
    */
-  function summaryUserIdsFor(
-    row: (Pick<UnifiedApprovalDTO, 'templateId'> & Partial<Pick<UnifiedApprovalDTO, 'formSnapshot'>>) | null | undefined,
-  ): string[] {
-    const schema = row?.templateId ? schemas.get(row.templateId) : undefined
+  function summaryUserIdsFor(row: SummaryRow | null | undefined): string[] {
+    const schema = rowSummarySchema(schemas, row)
     return row && schema ? collectFormUserIds(schema, row.formSnapshot ?? null, { includeDetailColumns: false }) : []
   }
 
-  function summaryLineFor(row: Pick<UnifiedApprovalDTO, 'templateId' | 'formSnapshot'>): string {
+  function summaryLineFor(row: SummaryRow): string {
     return resolveRowSummaryLine(schemas, row, isZh.value)
   }
 

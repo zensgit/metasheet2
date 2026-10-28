@@ -277,6 +277,30 @@
               允许发起人撤回
             </el-checkbox>
           </el-form-item>
+          <el-form-item label="列表摘要字段" class="template-authoring__wide">
+            <!-- 列表 / 审批中心每行摘要显示哪些字段（formSchema.summaryFieldIds）。留空保持默认的前 3 个字段；
+                 单据当前所在节点隐藏的字段不会出现在摘要里。摘要按单据发起时的模板版本解释：
+                 发布后对新发起的单据生效，已发起的单据仍按原版本的字段与配置显示。 -->
+            <el-select
+              v-model="summaryFieldIdsModel"
+              :disabled="readOnly"
+              multiple
+              :multiple-limit="FORM_SCHEMA_SUMMARY_FIELD_MAX"
+              clearable
+              placeholder="留空：显示前 3 个字段"
+              data-testid="approval-template-summary-fields"
+            >
+              <el-option
+                v-for="field in summaryFieldOptions"
+                :key="field.value"
+                :label="field.label"
+                :value="field.value"
+              />
+            </el-select>
+            <div class="template-authoring__hint" data-testid="approval-template-summary-fields-hint">
+              最多选 {{ FORM_SCHEMA_SUMMARY_FIELD_MAX }} 个，按选择顺序显示。附件、明细、说明不能选。发布后对新发起的单据生效，已发起的单据仍按原版本显示。
+            </div>
+          </el-form-item>
         </el-form>
       </el-card>
 
@@ -1720,6 +1744,7 @@ import {
   stepSamePersonControlState,
   withEmptyAssigneeFallbackIds,
   conditionValueFieldFromDraft,
+  summaryEligibleDraftFields,
 } from '../../approvals/templateAuthoring'
 import {
   addConditionBranch,
@@ -1798,7 +1823,7 @@ import type {
   ParallelNodeConfig,
   SupportedNodeTimeoutEffect,
 } from '../../types/approval'
-import { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../../types/approval'
+import { FORM_SCHEMA_SUMMARY_FIELD_MAX, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 import {
@@ -2087,6 +2112,28 @@ const commonTemplatePresets = COMMON_APPROVAL_TEMPLATE_PRESETS
 const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates.value)
 // Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
 const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupportedReason.value))
+
+// 列表摘要字段：候选 = 当前可用的顶层字段；已选但字段已删 / 改为不可用类型的 id 不显示在选择框里，
+// 保存时由 buildFormSchema 裁掉。
+const summaryFieldOptions = computed(() =>
+  summaryEligibleDraftFields(draft.value).map((field) => ({
+    value: field.id.trim(),
+    label: field.label.trim() || field.id.trim(),
+  })),
+)
+const summaryFieldIdsModel = computed<string[]>({
+  get: () => {
+    const eligible = new Set(summaryFieldOptions.value.map((option) => option.value))
+    return (draft.value.summaryFieldIds ?? []).filter((id) => eligible.has(id))
+  },
+  set: (ids) => {
+    if (ids.length > 0) {
+      draft.value.summaryFieldIds = ids.slice(0, FORM_SCHEMA_SUMMARY_FIELD_MAX)
+    } else {
+      delete draft.value.summaryFieldIds
+    }
+  },
+})
 // A draft enters graph authoring when it carries preservedGraph. Linear drafts are promoted when
 // the author inserts their first condition or parallel gateway.
 const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
