@@ -1,7 +1,8 @@
 import type {
   ApprovalAssigneeSourceKind,
   ApprovalNodeType,
-  RenderedNodeOperationPolicyKey,
+  NodeCommentRequired,
+  RenderedNodeOperationPolicySwitchKey,
 } from '../types/approval'
 import { HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval'
 
@@ -122,10 +123,12 @@ export interface ApprovalAssigneeSourceCapability {
  *  `policyKeys` is what makes the tab MECHANICALLY honest (master M7/M8, Lock-5 gate E-2): a
  *  control renders only because a registry entry names the `nodeOperationPolicy` key(s) it writes,
  *  and only keys whose server enforcement has landed appear in
- *  `RENDERED_NODE_OPERATION_POLICY_KEYS`. `returnReviewMode` and `commentRequired` are part of the
- *  persisted schema (publish validates them) but are NOT enforced yet, so no entry names them and
- *  no control can render for them — §1.2 ("no `returnReviewMode` control renders before OD-L4-10 is
- *  implemented or disclosed in copy") and §1.3 respectively.
+ *  `RENDERED_NODE_OPERATION_POLICY_KEYS`. This interface carries the boolean switches only; the
+ *  three-valued `commentRequired` (§1.3, enforced at the approve / reject decision) has its own
+ *  select capability below (`ApprovalCommentRequiredCapability`). `returnReviewMode` is part of the
+ *  persisted schema (publish validates it) but is NOT enforced, so no entry names it and no control
+ *  can render for it — §1.2 ("no `returnReviewMode` control renders before OD-L4-10 is implemented
+ *  or disclosed in copy").
  *
  *  A single entry may write MORE THAN ONE key: OD-L5-2(a) ratifies ONE 允许加/减签 checkbox writing
  *  BOTH `allowAddSign` and `allowReduceSign` (corpus C-2's single admin switch). */
@@ -133,12 +136,31 @@ export interface ApprovalOperationPolicyCapability {
   id: string
   label: string
   /** The `nodeOperationPolicy` keys this one control authors. Non-empty. */
-  policyKeys: readonly RenderedNodeOperationPolicyKey[]
+  policyKeys: readonly RenderedNodeOperationPolicySwitchKey[]
+}
+
+/** One option of the 审批意见 select: a `commentRequired` value and its business label. */
+export interface ApprovalCommentRequiredOption {
+  value: NodeCommentRequired
+  label: string
+}
+
+/** Lock-5 §1.3 L5-C/L5-D — the per-node comment requirement, authored as ONE three-way select that
+ *  writes `nodeOperationPolicy.commentRequired`. Rendered in the `操作权限` tab only for node types
+ *  this registry names, and only with the values listed in `options` (each one enforced by the
+ *  server at the approve / reject decision). */
+export interface ApprovalCommentRequiredCapability {
+  id: 'comment_required'
+  label: string
+  options: readonly ApprovalCommentRequiredOption[]
 }
 
 export interface ApprovalCapabilityRegistry {
   assigneeSourcesByNodeType: Partial<Record<ApprovalNodeType, ApprovalAssigneeSourceCapability[]>>
   operationPoliciesByNodeType: Partial<Record<ApprovalNodeType, ApprovalOperationPolicyCapability[]>>
+  /** Lock-5 §1.3 — optional so a registry fixture that predates the select keeps its exact shape;
+   *  absent ≡ no 审批意见 control for any node type. */
+  commentRequiredByNodeType?: Partial<Record<ApprovalNodeType, ApprovalCommentRequiredCapability>>
 }
 
 /** Lock-5 §1.1 L5-A — the ratified, server-enforced `approval`-node operation policies, in the
@@ -151,13 +173,30 @@ const APPROVAL_OPERATION_POLICY_CAPABILITIES: ApprovalOperationPolicyCapability[
   { id: 'return', label: '允许回退', policyKeys: ['allowReturn'] },
 ]
 
-/** Lock-5 §1.6 L5-F / OD-L5-11(a) — a handler node admits `allowTransfer` only among the RENDERED
- *  keys (its other admitted key, `commentRequired`, has no landed enforcement so it renders
- *  nothing). Lock-3 §2.2 already 409s add_sign/reduce_sign/return at a handler node, so a switch
- *  over those verbs would be M8 theater; the backend rejects them at the authoring choke. */
+/** Lock-5 §1.6 L5-F / OD-L5-11(a) — a handler node admits `allowTransfer` and `commentRequired`;
+ *  only `allowTransfer` renders here. A handler completes by SUBMITTING (办理), never by approve /
+ *  reject, and the comment check runs on approve / reject only, so a `commentRequired` value on a
+ *  handler would change nothing a member can do — a select for it would be M8 theater. The handler's
+ *  own comment rule is 办理意见 (`opinionRequired`), which the handler section already renders.
+ *  Lock-3 §2.2 already 409s add_sign/reduce_sign/return at a handler node, so a switch over those
+ *  verbs would be M8 theater too; the backend rejects them at the authoring choke. */
 const HANDLER_OPERATION_POLICY_CAPABILITIES: ApprovalOperationPolicyCapability[] = [
   { id: 'transfer', label: '允许转交', policyKeys: ['allowTransfer'] },
 ]
+
+/** Lock-5 §1.3 / OD-L5-7(a) — the approval node's 审批意见 select. Absent ≡ 驳回时必填 for every
+ *  instance created after a publish (the instance snapshot no longer carries a literal, and the
+ *  server's fallback for an absent value is `'reject_only'`), so that option is the default and
+ *  choosing it removes the key. Order is strictness order. */
+const APPROVAL_COMMENT_REQUIRED_CAPABILITY: ApprovalCommentRequiredCapability = {
+  id: 'comment_required',
+  label: '审批意见',
+  options: [
+    { value: 'never', label: '不必填' },
+    { value: 'reject_only', label: '驳回时必填（默认）' },
+    { value: 'always', label: '同意和驳回都必填' },
+  ],
+}
 
 /** The shipped registry. `approval` and `handler` nodes have an assignee-source roster and an
  *  operation-policy roster; `cc` has the single Lock-1 "`user_group` (cc)" row (see below) and no
@@ -191,6 +230,18 @@ export const DEFAULT_APPROVAL_CAPABILITY_REGISTRY: ApprovalCapabilityRegistry = 
     approval: APPROVAL_OPERATION_POLICY_CAPABILITIES,
     handler: HANDLER_OPERATION_POLICY_CAPABILITIES,
   },
+  // Approval nodes only — see HANDLER_OPERATION_POLICY_CAPABILITIES for why a handler has none.
+  commentRequiredByNodeType: {
+    approval: APPROVAL_COMMENT_REQUIRED_CAPABILITY,
+  },
+}
+
+/** The 审批意见 select capability for a node type, or `undefined` when none renders. */
+export function commentRequiredCapabilityFor(
+  registry: ApprovalCapabilityRegistry,
+  nodeType: ApprovalNodeType,
+): ApprovalCommentRequiredCapability | undefined {
+  return registry.commentRequiredByNodeType?.[nodeType]
 }
 
 /** The complete shipped `ApprovalAssigneeSourceKind` set, as a lookup — used to detect a persisted
@@ -215,11 +266,13 @@ export function isRegisteredAssigneeSourceKind(
  *  registry declares ≥1 ratified operation policy for the node type — mechanically, not by a
  *  hand-maintained flag. Since Lock-5 §1.1 landed, this is TRUE for `approval` and `handler` and
  *  false for every other node type; a test fixture with an empty
- *  `operationPoliciesByNodeType` still renders no third tab, which is the positive control both
- *  Lock-0 A-2 and Lock-5 E-1 require. */
+ *  `operationPoliciesByNodeType` (and no `commentRequiredByNodeType`) still renders no third tab,
+ *  which is the positive control both Lock-0 A-2 and Lock-5 E-1 require. A 审批意见 select counts
+ *  as a ratified operation policy too (§1.3), so it can never be declared without a tab to live in. */
 export function hasRatifiedOperationPolicy(
   registry: ApprovalCapabilityRegistry,
   nodeType: ApprovalNodeType,
 ): boolean {
   return (registry.operationPoliciesByNodeType[nodeType]?.length ?? 0) > 0
+    || commentRequiredCapabilityFor(registry, nodeType) !== undefined
 }

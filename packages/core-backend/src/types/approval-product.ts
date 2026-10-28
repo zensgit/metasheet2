@@ -394,8 +394,10 @@ export interface ApprovalNodeConfig {
  *     behavior) in v1 and defers `'jump_back_to_current'`; §1.2 states flatly that no
  *     `returnReviewMode` control renders. Declared here so an out-of-enum value FAILS publish
  *     (gate A-6) rather than round-tripping as an unknown key.
- *   - `commentRequired`: schema-validated only in this slice. Its enforcement moves BOTH shipped
- *     hardcodings at once (§1.3) and lands in its own slice; until then it renders no control.
+ *   - `commentRequired`: ENFORCED at the approve / reject decision (§1.3, `effectiveCommentRequired`:
+ *     node value first, instance snapshot as fallback); rendered as the 审批意见 select in the
+ *     `操作权限` tab of APPROVAL nodes. A handler node admits the key but completes by 办理, which
+ *     this check does not cover, so no control renders for it there (its rule is `opinionRequired`).
  */
 export interface NodeOperationPolicy {
   /** C-1 允许转交. Absent ≡ true. */
@@ -408,7 +410,7 @@ export interface NodeOperationPolicy {
   allowReturn?: boolean
   /** §1.2 / OD-L5-6(a). Absent ≡ 'resume_forward' (today's behavior). Declared-inert this slice. */
   returnReviewMode?: 'resume_forward' | 'jump_back_to_current'
-  /** §1.3 / OD-L5-7(a). Absent ≡ the instance snapshot (≡ 'reject_only' today). Declared-inert this slice. */
+  /** §1.3 / OD-L5-7(a). Absent ≡ the instance snapshot (≡ 'reject_only' today). Enforced at approve / reject. */
   commentRequired?: 'never' | 'reject_only' | 'always'
 }
 

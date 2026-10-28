@@ -6,6 +6,7 @@ import type {
   EmptyAssigneeFallback,
   NodeOperationPolicy,
 } from '../src/types/approval'
+import { NODE_COMMENT_REQUIRED_VALUES, RENDERED_NODE_OPERATION_POLICY_KEYS } from '../src/types/approval'
 import {
   buildApprovalGraph,
   draftFromTemplate,
@@ -30,14 +31,21 @@ import {
   withEmptyAssigneeFallbackIds,
 } from '../src/approvals/approvalNodeEdit'
 import {
+  COMMENT_REQUIRED_ALWAYS_HINT,
+  COMMENT_REQUIRED_DEFAULT,
   OPERATION_POLICY_MIXED_HINT,
   OPERATION_POLICY_SCOPE_HINT,
+  applyCommentRequiredChoice,
   applyOperationPolicyControl,
+  commentRequiredControlState,
+  isNodeCommentRequired,
   operationPolicyControlState,
 } from '../src/approvals/nodeOperationPolicyEdit'
 import {
   DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+  commentRequiredCapabilityFor,
   hasRatifiedOperationPolicy,
+  type ApprovalCapabilityRegistry,
 } from '../src/approvals/approvalCapabilityRegistry'
 
 /**
@@ -368,6 +376,122 @@ describe('Lock-5 gate E-1 — the tab is registry-driven, per node type', () => 
       .toEqual(['transfer'])
     expect(DEFAULT_APPROVAL_CAPABILITY_REGISTRY.operationPoliciesByNodeType.approval!.map((c) => c.id))
       .toEqual(['transfer', 'add_reduce_sign', 'return'])
+  })
+
+  it('§1.3 — the rendered-key list is EXACTLY the checkbox keys plus commentRequired (no key renders without a control, no control without a listed key)', () => {
+    const checkboxKeys = Object.values(DEFAULT_APPROVAL_CAPABILITY_REGISTRY.operationPoliciesByNodeType)
+      .flat()
+      .flatMap((entry) => [...entry!.policyKeys])
+    const withSelect = new Set<string>([...checkboxKeys, 'commentRequired'])
+    expect([...withSelect].sort()).toEqual([...RENDERED_NODE_OPERATION_POLICY_KEYS].sort())
+    // `returnReviewMode` stays unrendered (§1.2).
+    expect(RENDERED_NODE_OPERATION_POLICY_KEYS as readonly string[]).not.toContain('returnReviewMode')
+  })
+})
+
+// ── Lock-5 §1.3 — the 审批意见 select (`commentRequired`) ────────────────────────────────────
+describe('Lock-5 §1.3 — commentRequired registry row: approval nodes only, the three enforced values', () => {
+  it('approval nodes get ONE select offering never / reject_only / always in strictness order, default labelled', () => {
+    const capability = commentRequiredCapabilityFor(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')
+    expect(capability).toBeDefined()
+    expect(capability!.label).toBe('审批意见')
+    expect(capability!.options.map((o) => o.value)).toEqual([...NODE_COMMENT_REQUIRED_VALUES])
+    expect(capability!.options.map((o) => o.label)).toEqual(['不必填', '驳回时必填（默认）', '同意和驳回都必填'])
+  })
+
+  it('handler and every other node type get NO select (a handler completes by 办理; its rule is 办理意见)', () => {
+    for (const nodeType of ['handler', 'start', 'end', 'cc', 'condition', 'parallel'] as const) {
+      expect(commentRequiredCapabilityFor(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, nodeType)).toBeUndefined()
+    }
+  })
+
+  it('a registry fixture WITHOUT the row (the pre-existing fixture shape) declares no select and, with no checkboxes, no tab', () => {
+    const bare: ApprovalCapabilityRegistry = { assigneeSourcesByNodeType: {}, operationPoliciesByNodeType: {} }
+    expect(commentRequiredCapabilityFor(bare, 'approval')).toBeUndefined()
+    expect(hasRatifiedOperationPolicy(bare, 'approval')).toBe(false)
+  })
+
+  it('POSITIVE CONTROL — a fixture carrying ONLY the select row still gets the 操作权限 tab (the select is never declared without a tab to live in)', () => {
+    const selectOnly: ApprovalCapabilityRegistry = {
+      assigneeSourcesByNodeType: {},
+      operationPoliciesByNodeType: {},
+      commentRequiredByNodeType: {
+        approval: DEFAULT_APPROVAL_CAPABILITY_REGISTRY.commentRequiredByNodeType!.approval!,
+      },
+    }
+    expect(hasRatifiedOperationPolicy(selectOnly, 'approval')).toBe(true)
+    expect(hasRatifiedOperationPolicy(selectOnly, 'handler')).toBe(false)
+  })
+})
+
+describe('Lock-5 §1.3 — commentRequiredControlState projects what the server resolves', () => {
+  it('ABSENT projects onto the default (驳回时必填), marked not explicit', () => {
+    expect(COMMENT_REQUIRED_DEFAULT).toBe('reject_only')
+    expect(commentRequiredControlState(undefined)).toEqual({ kind: 'editable', value: 'reject_only', explicit: false })
+    expect(commentRequiredControlState({ allowTransfer: false })).toEqual({ kind: 'editable', value: 'reject_only', explicit: false })
+  })
+
+  it('each known persisted value projects onto itself, marked explicit', () => {
+    for (const value of NODE_COMMENT_REQUIRED_VALUES) {
+      expect(commentRequiredControlState({ commentRequired: value })).toEqual({ kind: 'editable', value, explicit: true })
+    }
+  })
+
+  it('an OFF-ENUM persisted value is `unknown` — never projected onto a known value', () => {
+    const policy = { commentRequired: 'sometimes' } as unknown as NodeOperationPolicy
+    expect(commentRequiredControlState(policy)).toEqual({ kind: 'unknown' })
+    expect(isNodeCommentRequired('sometimes')).toBe(false)
+    expect(isNodeCommentRequired('always')).toBe(true)
+  })
+})
+
+describe('Lock-5 §1.3 — applyCommentRequiredChoice: default removes the key, siblings survive', () => {
+  it("'always' / 'never' are written explicitly on an absent policy", () => {
+    expect(applyCommentRequiredChoice(undefined, 'always')).toEqual({ commentRequired: 'always' })
+    expect(applyCommentRequiredChoice(undefined, 'never')).toEqual({ commentRequired: 'never' })
+  })
+
+  it('gate A-6 — going back to the default yields `undefined` (the caller removes nodeOperationPolicy entirely)', () => {
+    expect(applyCommentRequiredChoice({ commentRequired: 'always' }, 'reject_only')).toBeUndefined()
+    expect(applyCommentRequiredChoice({ commentRequired: 'never' }, 'reject_only')).toBeUndefined()
+  })
+
+  it('POSITIVE CONTROL — choosing a non-default value DOES change the bytes', () => {
+    const before: NodeOperationPolicy | undefined = undefined
+    expect(applyCommentRequiredChoice(before, 'always')).not.toEqual(before)
+  })
+
+  it('A-7 third clause — every sibling field survives every choice, including back to the default', () => {
+    const policy: NodeOperationPolicy = { allowTransfer: false, allowReturn: false, returnReviewMode: 'resume_forward' }
+    const always = applyCommentRequiredChoice(policy, 'always')
+    expect(always).toEqual({ allowTransfer: false, allowReturn: false, returnReviewMode: 'resume_forward', commentRequired: 'always' })
+    expect(applyCommentRequiredChoice(always, 'reject_only')).toEqual(policy)
+    // Never mutates its input.
+    expect(policy).toEqual({ allowTransfer: false, allowReturn: false, returnReviewMode: 'resume_forward' })
+  })
+
+  it('re-picking the value already shown is a no-op: an API-written explicit reject_only keeps its exact bytes', () => {
+    const explicit: NodeOperationPolicy = { commentRequired: 'reject_only' }
+    expect(applyCommentRequiredChoice(explicit, 'reject_only')).toBe(explicit)
+    expect(applyCommentRequiredChoice(undefined, 'reject_only')).toBeUndefined()
+  })
+
+  it('an explicit reject_only changed and changed back normalizes to absent (absent and reject_only resolve the same)', () => {
+    const toAlways = applyCommentRequiredChoice({ commentRequired: 'reject_only', allowTransfer: false }, 'always')
+    expect(toAlways).toEqual({ commentRequired: 'always', allowTransfer: false })
+    expect(applyCommentRequiredChoice(toAlways, 'reject_only')).toEqual({ allowTransfer: false })
+  })
+
+  it('an OFF-ENUM persisted value is never overwritten (fail-closed: the same reference comes back)', () => {
+    const policy = { commentRequired: 'sometimes', allowTransfer: false } as unknown as NodeOperationPolicy
+    expect(applyCommentRequiredChoice(policy, 'always')).toBe(policy)
+    expect(applyCommentRequiredChoice(policy, 'reject_only')).toBe(policy)
+  })
+
+  it('the 同意和驳回都必填 hint names the approval-center paths that send no comment', () => {
+    expect(COMMENT_REQUIRED_ALWAYS_HINT).toContain('快捷同意')
+    expect(COMMENT_REQUIRED_ALWAYS_HINT).toContain('批量同意')
+    expect(COMMENT_REQUIRED_ALWAYS_HINT).toContain('审批详情')
   })
 })
 
