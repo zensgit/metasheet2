@@ -169,10 +169,13 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
   }, 30000)
   afterAll(async () => { try { logSpy?.mockRestore(); admin?.release(); await pool?.end() } catch { /* best effort */ } }, 30000)
 
-  it('switch OFF: the GET bit is false and the probe is 403 DISABLED before any transaction', async () => {
+  it('switch OFF: the GET carries no connectionTestEnabled key and the probe is 403 DISABLED before any transaction', async () => {
     const anchor = await provisionYidaInitializationAnchor({ database }, { ownerId: owner.actorId, tenantId: owner.tenantId })
     await start()
-    expect(data(await http('GET', '/initialization'), 200)).toMatchObject({ commandId: anchor.commandId, status: 'ready', connectionTestEnabled: false })
+    const off = data(await http('GET', '/initialization'), 200)
+    expect(off).toMatchObject({ commandId: anchor.commandId, status: 'ready' })
+    // Absent, not false: an older cached bundle with the closed pre-test key set keeps working.
+    expect(Object.keys(off).sort()).toEqual(['canSend', 'commandId', 'draft', 'externalWriteAttempted', 'sendEnabled', 'status', 'tokenIssued'])
     const before = await counts(); sql.length = 0
     for (const value of ['false', 'TRUE', ' true', '1']) { enablement = value; denied(await probe(anchor.commandId), 403, 'YIDA_CONNECTION_TEST_DISABLED') }
     expect(sql).toEqual([]); expect(tokenBodies).toEqual([]); expect(await counts()).toEqual(before)

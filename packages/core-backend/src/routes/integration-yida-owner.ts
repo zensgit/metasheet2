@@ -211,7 +211,9 @@ function initialization(value: unknown, sendEnabled: boolean, connectionTestEnab
     || (row.status === 'ready') !== (row.draft === null)) fail()
   return { commandId: id(row.commandId), status: row.status,
     draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
-    connectionTestEnabled }
+    // Present only while the switch reads exact 'true'. While OFF the key is absent, so a page still
+    // running an older bundle (closed key set without it) keeps working on this backend.
+    ...(connectionTestEnabled ? { connectionTestEnabled: true as const } : {}) }
 }
 function dto(project: () => unknown) { try { return project() } catch { fail('YIDA_OWNER_HTTP_UNAVAILABLE') } }
 function sendError(res: Response, error: unknown) {

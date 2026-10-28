@@ -208,7 +208,7 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     const response = ui!.waitApi('GET', '/initialization')
     await ui!.page.getByTestId('sp-yida-init-refresh').click()
     expect(await realBrowserData(await response, 200)).toEqual({ commandId, status: 'ready', draft: null,
-      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled, connectionTestEnabled: false })
+      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled })
     if (!sendEnabled) expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
     await ui!.page.getByTestId('sp-yida-init-ready').waitFor()
     await ui!.settled()
@@ -230,7 +230,7 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     await ui!.page.getByTestId('sp-yida-init-refresh').click()
     const recovered = await realBrowserData(await response, 200)
     expect(recovered).toMatchObject({ commandId, status: 'initialized', draft: { rowCount: 3, reused: true },
-      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled, connectionTestEnabled: false })
+      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled })
     await ui!.page.getByTestId('sp-yida-init-initialized').waitFor()
     // Switch off means not visible: only an owner-authorized ON reply renders the CREATE entry.
     if (sendEnabled) await ui!.page.getByTestId('sp-yida-owner-open').waitFor()
@@ -249,7 +249,7 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
     const result = await realBrowserData(await response, 201)
     expect(result).toMatchObject({ commandId, status: 'initialized', draft: { rowCount: 3, reused: false },
-      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: false, connectionTestEnabled: false })
+      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: false })
     await ui!.page.getByTestId('sp-yida-init-initialized').waitFor()
     expect((await host.initializationProof()).counts).toEqual(initializedCounts)
     const stored = (await host.rows('integration_yida_initializations'))[0], persisted = result.draft as Data

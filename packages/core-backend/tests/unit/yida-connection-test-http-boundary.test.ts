@@ -14,6 +14,7 @@ import { YidaInitializationError } from '../../src/integration/yida-initializati
 import { YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../../src/integration/yida-owner-http-observation'
 import { correlationIdMiddleware } from '../../src/middleware/correlation'
 import { Logger } from '../../src/core/logger'
+import { draftInput, syntheticMaterial } from '../utils/stock-preparation-yida-owner-http-fixture'
 
 const commandId = '11111111-1111-4111-8111-111111111111'
 const otherCommand = '22222222-2222-4222-8222-222222222222'
@@ -111,13 +112,33 @@ describe('YiDa connection-test HTTP contract — fake host port, no IO', () => {
       expect(JSON.stringify(result)).not.toContain('PRIVATE_TOKEN_CANARY')
     }
   })
-  it('GET/POST /initialization carry connectionTestEnabled: exact boolean true only, read only after the authorized status', async () => {
-    for (const [value, expected] of [[true, true], [false, false], ['true', false], [1, false], [new Error('PRIVATE_SWITCH_CANARY'), false]] as const) {
-      expect(await dispatch('GET', '/initialization', undefined, probePort(view(), value).value))
-        .toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false, connectionTestEnabled: expected } } })
+  it('GET/POST /initialization carry connectionTestEnabled: true only on exact boolean true, otherwise the key is absent', async () => {
+    const bit = (result: { result: unknown }) => {
+      const data = (result.result as { data: Record<string, unknown> }).data
+      return Object.hasOwn(data, 'connectionTestEnabled') ? data.connectionTestEnabled : 'ABSENT'
     }
-    expect(await dispatch('GET', '/initialization', undefined, undefined))
-      .toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false, connectionTestEnabled: false } } })
+    const on = await dispatch('GET', '/initialization', undefined, probePort(view(), true).value)
+    expect(on).toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false, connectionTestEnabled: true } } })
+    expect(bit(on)).toBe(true)
+    for (const value of [false, 'true', 1, new Error('PRIVATE_SWITCH_CANARY')]) {
+      const off = await dispatch('GET', '/initialization', undefined, probePort(view(), value).value)
+      expect(off).toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false } } })
+      expect(bit(off)).toBe('ABSENT')
+    }
+    const unwired = await dispatch('GET', '/initialization', undefined, undefined)
+    expect(unwired).toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false } } })
+    expect(bit(unwired)).toBe('ABSENT')
+    // POST 201 (the initialize reply) follows the same rule.
+    const initialized = { ...ready(), status: 'initialized', draft: { targetRef: commandId, operationId: otherCommand, status: 'unverified',
+      identityKind: 'local-unverified', canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false, rowCount: 1,
+      rows: [{ rowKey: commandId, index: 0 }], reused: false } }
+    const sealing = (enabled: unknown) => dispatch('POST', '/initialization', { commandId, material: syntheticMaterial(), draft: draftInput(),
+      attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-http-review', organizationId: 'synthetic-http-organization',
+        executionIdentity: syntheticMaterial().userId } }, probePort(view(), enabled).value, { init: { ...initPort, async initialize() { return initialized } } })
+    const sealedOn = await sealing(true), sealedOff = await sealing(false)
+    expect(sealedOn).toEqual({ status: 201, result: { ok: true, data: { ...initialized, sendEnabled: false, connectionTestEnabled: true } } })
+    expect(sealedOff).toEqual({ status: 201, result: { ok: true, data: { ...initialized, sendEnabled: false } } })
+    expect([bit(sealedOn), bit(sealedOff)]).toEqual([true, 'ABSENT'])
     const f = probePort(view(), true)
     const denied: YidaInitializationHttpPort = { ...initPort, async status() { throw new YidaInitializationError('DENIED') } }
     expect(await dispatch('GET', '/initialization', undefined, f.value, { init: denied })).toEqual(refusal('YIDA_INITIALIZATION_DENIED', 403))

@@ -50,8 +50,19 @@ export function yidaConnectionTestErrorCode(error: unknown): string | undefined 
 /** Whole-probe budget: under the web client's 15 s guard, above undici's 10 s connect timeout, so a
  * dropped connect classifies as 'unreachable' and only a silent answer becomes 'timeout'. */
 export const YIDA_CONNECTION_TEST_BUDGET_MS = 12000
+/** Longest time from test() entry to the moment the exchange would start (the RC authorization
+ * transaction sits in between). Past it the run is UNAVAILABLE with zero fetch and no cooldown stamp,
+ * so the server's worst case (about this window + the 12 s budget) stays under the web client's 15 s
+ * abort: the browser never reports CANCELLED while the server is still exchanging. */
+export const YIDA_CONNECTION_TEST_START_WINDOW_MS = 2000
 /** Per-process cooldown between two started exchanges, counted for authorized callers only. */
 export const YIDA_CONNECTION_TEST_COOLDOWN_MS = 5000
+// Both the start window and the cooldown read the wall clock (Date.now), which the tests drive with
+// a fake Date. A backward wall-clock step gives a negative elapsed time, which counts as "not
+// throttled" and "inside the window", so it never locks the limiter; at most it can cost one extra
+// cooldown later, once the wall clock passes the old stamp again. A forward step can only refuse
+// (UNAVAILABLE before the exchange, nothing stamped), which is fail-closed and can be retried at once.
+function elapsedSince(start: number): number { return Date.now() - start }
 const MAX_RUNS = 32
 const RECEIPT_OUTCOMES = new Set<unknown>(['ok', 'upstream_rejected', 'unreachable'])
 const abortGetter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!
@@ -132,8 +143,8 @@ type Registration = { closed: boolean; createProbe: YidaConnectionTestRuntimeBin
 
 /** Owner-only, token-only connection test. Order: capture -> enabled() -> one RC authorization
  * transaction (live ACL, anchor owner/tenant, commandId, not yet initialized) -> COMMIT -> per-process
- * admission (in flight <= 1, cooldown stamped only when an exchange starts) -> enabled() again -> one
- * probe. A refused caller never touches the admission limiter. */
+ * admission (in flight <= 1, cooldown stamped only when an exchange starts) -> enabled() again ->
+ * start window -> one probe. A refused caller never touches the admission limiter. */
 export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTestRuntimeDependencies) {
   if (!dependencies?.database || typeof dependencies.database.transaction !== 'function'
     || typeof dependencies.fetch !== 'function') fail('UNAVAILABLE')
@@ -158,6 +169,7 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
     try {
       // Capture immutable caller data synchronously, before any await/dependency.
       const actor = captureActor(actorInput), input = captureInput(supplied), caller = signal(options), state = active
+      const enteredAt = Date.now()
       if (terminal || !state || state.closed) fail('INACTIVE')
       if (caller && abortGetter.call(caller)) fail('CANCELLED')
       // Fail closed before any DB work while the switch is not the exact literal.
@@ -207,13 +219,17 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
           // COMMITTED. No network happened above. Only now does the caller meet the limiter.
           checkpoint()
           if (exchangeInFlight) fail('CONFLICT')
-          if (Date.now() - lastExchangeStartedAt < YIDA_CONNECTION_TEST_COOLDOWN_MS) fail('THROTTLED')
+          const sinceLast = elapsedSince(lastExchangeStartedAt)
+          if (sinceLast >= 0 && sinceLast < YIDA_CONNECTION_TEST_COOLDOWN_MS) fail('THROTTLED')
           enabled()
           const probe = record(state.createProbe(Object.freeze({
             // Charged to this run until the request actually settles, and aborted with it.
             fetch: ((request, init) => checked(() => fetcher(request, init))) as typeof fetch,
           })), ['probe'])
           if (typeof probe.probe !== 'function' || types.isProxy(probe.probe)) fail('UNAVAILABLE')
+          // Last refusal before the exchange: a slow authorization phase never starts a late exchange.
+          if (elapsedSince(enteredAt) > YIDA_CONNECTION_TEST_START_WINDOW_MS) fail('UNAVAILABLE')
+          // Nothing below refuses before the exchange starts; the cooldown is stamped together with it.
           const deadline = new AbortController()
           let timedOut = false
           const abortProbe = () => deadline.abort()

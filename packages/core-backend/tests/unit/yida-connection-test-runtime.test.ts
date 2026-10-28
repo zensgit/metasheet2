@@ -3,7 +3,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createYidaConnectionTestRuntime, yidaConnectionTestErrorCode, YidaConnectionTestError,
-  YIDA_CONNECTION_TEST_BUDGET_MS, YIDA_CONNECTION_TEST_COOLDOWN_MS,
+  YIDA_CONNECTION_TEST_BUDGET_MS, YIDA_CONNECTION_TEST_COOLDOWN_MS, YIDA_CONNECTION_TEST_START_WINDOW_MS,
   type YidaConnectionTestInput, type YidaConnectionTestRuntimeBinding,
 } from '../../src/integration/yida-connection-test-runtime'
 import type { YidaInitializationDatabase } from '../../src/integration/yida-initialization-bootstrap'
@@ -157,11 +157,20 @@ describe('YiDa connection test host runtime — order, authority and limiter', (
   it('CONFLICT for another commandId and once the slot is initialized or targeted, with zero fetch', async () => {
     const mismatch = await active()
     await rejected(mismatch.f.runtime.test(actor, input({ commandId: otherCommand })), 'CONFLICT')
-    const initialized = await active({ initialized: true, target: true })
-    await rejected(initialized.f.runtime.test(actor, input()), 'CONFLICT')
-    const targeted = await active({ target: true })
-    await rejected(targeted.f.runtime.test(actor, input()), 'CONFLICT')
-    expect([mismatch.f.fetchCalls.length, initialized.f.fetchCalls.length, targeted.f.fetchCalls.length]).toEqual([0, 0, 0])
+    const both = await active({ initialized: true, target: true })
+    await rejected(both.f.runtime.test(actor, input()), 'CONFLICT')
+    expect([mismatch.f.fetchCalls.length, both.f.fetchCalls.length]).toEqual([0, 0])
+  })
+  // Each half of the "already sealed" check on its own. On real PostgreSQL a lone initialization row
+  // cannot exist (migration 096: target_ref REFERENCES integration_yida_approved_target), so only this
+  // synthetic query model can pin the initialization half by itself.
+  it.each([
+    ['an initialization row alone', { initialized: true, target: false }],
+    ['an approved target row alone', { initialized: false, target: true }],
+  ])('CONFLICT for %s, with zero fetch', async (_name, rows) => {
+    const { f } = await active(rows)
+    await rejected(f.runtime.test(actor, input()), 'CONFLICT')
+    expect(f.fetchCalls).toHaveLength(0)
   })
   it('a DENIED caller immediately followed by the owner: the owner is admitted with exactly one fetch', async () => {
     const { f } = await active()
@@ -210,6 +219,67 @@ describe('YiDa connection test host runtime — order, authority and limiter', (
     await rejected(f.runtime.test(secondAdmin, input()), 'DENIED')
     await rejected(f.runtime.test(actor, input({ commandId: otherCommand })), 'CONFLICT')
     expect(await f.runtime.test(actor, input())).toEqual(okView())
+  })
+  // The stamp sits with the exchange start, not with admission: a caller that passed the THROTTLED
+  // check but was refused before the exchange leaves no stamp, so the next authorized call at the
+  // very same instant reaches the probe.
+  it('a refusal after admission but before the exchange (switch re-check OFF) leaves no cooldown stamp', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_800_000_000_000)
+    let f!: ReturnType<typeof fixture>, flips = 0
+    ;({ f } = await active({ beforeCommit: () => { if (flips++ === 0) f.setEnablement('false') } }))
+    await rejected(f.runtime.test(actor, input()), 'DISABLED')
+    f.setEnablement('true')
+    expect(await f.runtime.test(actor, input())).toEqual(okView())
+    expect(f.fetchCalls).toHaveLength(1)
+  })
+  it('a refusal after admission but before the exchange (invalid probe from the binding) leaves no cooldown stamp', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_800_000_000_000)
+    const real = createYidaConnectionProbeBinding()
+    let created = 0
+    const binding: YidaConnectionTestRuntimeBinding = { createConnectionProbe: options =>
+      created++ === 0 ? Object.freeze({ probe: 'synthetic-not-a-function' }) as never : real.createConnectionProbe(options) }
+    const { f } = await active({ binding })
+    await rejected(f.runtime.test(actor, input()), 'UNAVAILABLE')
+    expect(f.fetchCalls).toHaveLength(0)
+    expect(await f.runtime.test(actor, input())).toEqual(okView())
+    expect(f.fetchCalls).toHaveLength(1)
+  })
+  it('start window: the exchange must start within 2 s of entry; a slower authorization is UNAVAILABLE with zero fetch and no stamp', async () => {
+    expect(YIDA_CONNECTION_TEST_START_WINDOW_MS).toBe(2000)
+    // Worst case on the server (window + budget) stays under the web client's 15 s abort.
+    expect(YIDA_CONNECTION_TEST_START_WINDOW_MS + YIDA_CONNECTION_TEST_BUDGET_MS).toBeLessThan(15000)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const base = 1_800_000_000_000
+    vi.setSystemTime(base)
+    let delay = YIDA_CONNECTION_TEST_START_WINDOW_MS + 1
+    const { f } = await active({ beforeQuery: text => {
+      if (text.includes('FROM integration_yida_initialization_anchor')) vi.setSystemTime(Date.now() + delay)
+    } })
+    await rejected(f.runtime.test(actor, input()), 'UNAVAILABLE')
+    expect(f.commits).toBe(1); expect(f.fetchCalls).toHaveLength(0)
+    // Nothing was stamped: the next call right after is admitted (exactly at the window edge).
+    delay = YIDA_CONNECTION_TEST_START_WINDOW_MS
+    expect(await f.runtime.test(actor, input())).toEqual(okView())
+    expect(f.fetchCalls).toHaveLength(1)
+  })
+  it('a backward wall-clock step never throttles or fails the start window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const base = 1_800_000_000_000
+    vi.setSystemTime(base)
+    let step = 0
+    const { f } = await active({ beforeQuery: text => {
+      if (step !== 0 && text.includes('FROM integration_yida_initialization_anchor')) vi.setSystemTime(Date.now() - step)
+    } })
+    expect(await f.runtime.test(actor, input())).toEqual(okView())
+    // The clock steps back a minute right after a started exchange: the next click is not THROTTLED.
+    vi.setSystemTime(base - 60_000)
+    expect(await f.runtime.test(actor, input())).toEqual(okView())
+    // A backward step during the authorization phase (negative elapsed) is inside the window.
+    vi.setSystemTime(base + 10 * YIDA_CONNECTION_TEST_COOLDOWN_MS); step = 30_000
+    expect(await f.runtime.test(actor, input())).toEqual(okView())
+    expect(f.fetchCalls).toHaveLength(3)
   })
 })
 
