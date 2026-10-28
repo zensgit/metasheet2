@@ -62,7 +62,7 @@
    被拒绝的调用者（DISABLED / DENIED / CONFLICT / UNAVAILABLE）**永远碰不到限流器**：任何持有带租户声明 JWT 的人都到得了这个路由，但只有锚点 owner 才能占用在途名额或盖冷却章。限流器是进程内的、只数已授权调用者。
    **已接受、沿用的性质**：每进程运行上限 `MAX_RUNS = 32` 在开关判定之后、**授权事务之前**检查，与两个既有运行时同形（`yida-initialization-runtime.ts:160`、`yida-owner-runtime.ts:210`）。所以 32 个并发的、注定 DENIED 的调用者在各自短暂的只读授权事务期间占满运行名额时，owner 那一次点击会短暂得到 503 UNAVAILABLE（零出网、不涉及秘密，owner 重试即可）。在途名额与冷却只在 COMMIT 之后才会碰到，不受此影响。记为已接受、沿用。
 
-⑧ **时限（反驳评审修订）**：整次探测的预算是模块常量 12 秒（`YIDA_CONNECTION_TEST_BUDGET_MS`）——低于前端 15 秒的保护（`apps/web/src/services/integration/yidaInitialization.ts:137`），高于 undici 默认 10 秒的连接超时，所以「连不上」稳定落在 unreachable，只有「连上了但没应答」才是 timeout。加上 ⑦ 的 2 秒起始窗口，服务器最坏约 2 + 12 = 14 秒，仍低于前端 15 秒的中止，所以浏览器不会在服务器仍在换令牌时显示 CANCELLED（忽略 signal 的 fetch 除外，见本条末）。到点时中止探针的 signal；**视图只在 fetch 依赖真正结束后才给出**（沿用两个既有运行时的骨架：每个依赖都记在本次运行上，运行的 finally 等它们全部结束，`yida-initialization-runtime.ts:169-173,266-275`）。不提前返回，所以不存在无人订阅的迟到 rejection；core-backend 主进程没有 `unhandledRejection` 处理器（`packages/core-backend/src/core/PluginIsolationManager.ts:292` 里的只在 worker 模板字符串中），提前返回会让 Node 20 默认行为杀掉后端。忽略 signal 的 fetch 会让本次运行、在途名额与 stop()/drain 一直等到它自己结束——这是有意的，与 owner 运行时相同（`yida-owner-runtime.ts:266-276`）。
+⑧ **时限（反驳评审修订）**：整次探测的预算是模块常量 12 秒（`YIDA_CONNECTION_TEST_BUDGET_MS`）——低于前端 15 秒的保护（`apps/web/src/services/integration/yidaInitialization.ts:137`），高于 undici 默认 10 秒的连接超时，所以「连不上」稳定落在 unreachable，只有「连上了但没应答」才是 timeout。加上 ⑦ 的 2 秒起始窗口，服务器最坏约 2 + 12 = 14 秒，仍低于前端 15 秒的中止；前端的 15 秒从发出 fetch 起算、2 秒窗口从 execute() 入口起算，所以只要到达 execute() 之前的中间件与网络往返合计不超过约 1 秒，浏览器就不会在服务器仍在换令牌时显示 CANCELLED；超出时面板的 CANCELLED 提示说明结果未知（忽略 signal 的 fetch 除外，见本条末）。到点时中止探针的 signal；**视图只在 fetch 依赖真正结束后才给出**（沿用两个既有运行时的骨架：每个依赖都记在本次运行上，运行的 finally 等它们全部结束，`yida-initialization-runtime.ts:169-173,266-275`）。不提前返回，所以不存在无人订阅的迟到 rejection；core-backend 主进程没有 `unhandledRejection` 处理器（`packages/core-backend/src/core/PluginIsolationManager.ts:292` 里的只在 worker 模板字符串中），提前返回会让 Node 20 默认行为杀掉后端。忽略 signal 的 fetch 会让本次运行、在途名额与 stop()/drain 一直等到它自己结束——这是有意的，与 owner 运行时相同（`yida-owner-runtime.ts:266-276`）。
 
 ## 3. 授权边界与梯子
 
@@ -121,7 +121,7 @@
 | unreachable | DNS / TLS / 连接 / 重定向失败，包括静默丢包（约 10 秒处 undici 连接超时） | 与凭据无关 |
 | timeout | TCP/TLS 已连上，但 12 秒内没有 HTTP 应答 | 与凭据无关 |
 
-**timeout 与 unreachable 都指向出网 / DNS / TLS / 代理，二者都不说明凭据对错。** 静默丢包的防火墙（SYN 或 TLS 握手没有回应）先撞上 undici 默认 10 秒的连接超时，fetch 拒绝 ⇒ 换令牌 UNAVAILABLE ⇒ unreachable（与 §2 ⑧ 一致）；只有连上之后不应答才是 timeout。Node 20 的 fetch 不读 `HTTP(S)_PROXY`，需要代理的测试机会一律 unreachable 或 timeout。界面文案（timeout）：「已连上但 12 秒内无应答：可能是中间设备不转发或钉钉慢；与凭据无关」。
+**timeout 与 unreachable 都指向出网 / DNS / TLS / 代理，二者都不说明凭据对错。** 静默丢包的防火墙（SYN 或 TLS 握手没有回应）先撞上 undici 默认 10 秒的连接超时，fetch 拒绝 ⇒ 换令牌 UNAVAILABLE ⇒ unreachable（与 §2 ⑧ 一致）；只有连上之后不应答才是 timeout。Node 20 的 fetch 不读 `HTTP(S)_PROXY`，需要代理的测试机会一律 unreachable 或 timeout。界面文案（timeout）：「已连上但 12 秒内钉钉没有应答：可能是钉钉或中间网络慢；与凭据无关。」
 
 **L2.5 合成凭据点击的预期结果**
 
@@ -131,7 +131,7 @@
 | unreachable | DNS / 防火墙 / TLS / 重定向之一，系统区分不了 | 停；在后端进程所在环境里用 values-free 的解析与连通检查定位，不靠再点 |
 | timeout | 已连上但不应答 | 停，同上 |
 | ok | 合成凭据不可能拿到令牌（`yida-token-exchange.cjs:126-131`） | 视为被拦截或伪造的应答：停止、报 owner，不进 L3 |
-| 任何 4xx / 5xx 错误码 | 不是结果类，说明梯子上前一级没满足 | 按下方排障回到对应级 |
+| 任何 4xx / 5xx 错误码 | 不是结果类；除 400 输入、409 在途、429 冷却与 503 起始窗口（后端过载）外，说明梯子上前一级没满足 | 按下方排障回到对应级 |
 
 **排障速查**
 
@@ -169,7 +169,7 @@
 ## 10. 切片、测试与变异见证
 
 - **PR 0**：本 ADR + 登记册 R-64。
-- **PR A**（候选模式）：插件探针 `lib/yida-connection-probe.cjs` 与其测试（登记进 `test-chain.txt`）；宿主运行时与单元测试；路由与 HTTP 边界单元测试（含经真实关联中间件与真实 Logger 的 values-free 用例）；`index.ts` 接线（构造、第三个参数、能力注入、三处排空、停止与 shutdownTasks）；插件第三个激活块（软失败）与 s6a `pluginIndex` 重 pin；开关清单登记；guarded-paths 与 `integration-guard.yml` 两处同步；EXPECT_DB 车道新增两份真库文件（`plugin-tests.yml`、`yida-host-capability-injection.test.ts`、`yida-delivery-store.test.cjs` 三处镜像 + `vitest.config.ts` 排除）；前端服务与面板与 jsdom spec；两份 owner 真库测试只改断言。
+- **PR A**（候选模式）：插件探针 `lib/yida-connection-probe.cjs` 与其测试（登记进 `test-chain.txt`）；宿主运行时与单元测试；路由与 HTTP 边界单元测试（含经真实关联中间件与真实 Logger 的 values-free 用例）；`index.ts` 接线（构造、第三个参数、能力注入、三处排空、停止与 shutdownTasks）；插件第三个激活块（软失败）与 s6a `pluginIndex` 重 pin；开关清单登记；guarded-paths 与 `integration-guard.yml` 两处同步；EXPECT_DB 车道新增两份真库文件（`plugin-tests.yml`、`yida-host-capability-injection.test.ts`、`yida-delivery-store.test.cjs` 三处镜像 + `vitest.config.ts` 排除）；前端服务与面板与 jsdom spec；两份 owner 真库测试不动（评审头 88cdeb059 曾加的 `connectionTestEnabled: false` 断言已按 §2 ⑥ 撤回，仍以既有逐键 toEqual 钉住该键不出现）。
 - **PR B**（已存模式，后续）：在已初始化的槽上测试封存的第 1 代 appKey/appSecret（与发送路径同一把锁序与绑定校验）；合并与上机同 PR A。
 - **每条守卫先见红再报绿**：变异见证覆盖开关再判、令牌泄露、端点钉死（测试里写死字面量、在临时副本里改换令牌模块的 ENDPOINT 必红）、owner 绑定、准入次序（被拒调用者紧接着 owner ⇒ owner 准入且恰好 1 次 fetch）、并发与冷却、初始化后候选、事务后才 fetch、时限中止、未处理 rejection（M16）、前端可见性与秘密保留、日志（对新路径去掉私有观测面标记必红）、显示位、持久化、分类、治理接线。
 - **CI 陷阱清单**：test-chain 完整性、s6a 重 pin、EXPECT_DB 文件清单三处镜像、guarded-paths 与工作流集合相等、开关清单源码推导、web spec 变异锚点唯一性、两份 owner 真库 DTO 断言。
