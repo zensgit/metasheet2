@@ -62,7 +62,6 @@ import {
 } from '../src/services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../src/services/integration/stockPreparation/largeBomPull'
 import type { StockPrepProjectTargetState, StockPreparationProjectTargetApi } from '../src/services/integration/stockPreparation/projectTarget'
-import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 const PROJECT_NO = 'P2026-001'
 const PLANTED_DRAWING = 'DWG-88472-A'
