@@ -25,3 +25,17 @@ Offline install reused934/downloaded0 once. An owned UTF8 template with ledger45
 Historical receipts retain the initial9-vs7 census typo and two failure-message matching postcheck assumptions. Main independently audited the actual matching assertions and source restoration without rerunning passing suites or matching negatives. These are not natural production root-cause claims.
 
 Own delta adds no dependency/lock/schema/OpenAPI/flag. No merge/deploy/R71/tag/release/config/provider writes. R77 organization package is independent; this concern is not inserted there. FullEP01/families, general recovery/financial breadth, owner4556/4844/6512/human/manual/frozen/live acceptance remain OPEN.
+
+## Current CI inherited review-history clock fixture repair
+
+Head 8d147bd1a395e6b375d21426b3b57d985bd08648 failed backend job 122582170397 in the pre-existing native review-history case: today's 09:00 seeded event was later than the real CI punch (03:04 UTC), so the unchanged minimum-interval guard returned PUNCH_TOO_SOON. Full original log is retained (11065650 bytes, SHA256 b57b607af67340e1e711f889a6c38f7e75b579eed33289b165bf2d198fa0d1cb). This diagnoses this fixture's time precondition; it is not a production minute-source change or a claim about other historical CI failures.
+
+Only that case now uses 2026-02-04 (inside its original assignment) and the existing test-only server clock at 10:00 after the 09:00 seed. Its real HTTP request remains timestamp-free. Every original assertion and the 120000 ms budget is retained; production future-time/interval guards, source, and ownership are unchanged.
+
+- Original affected case: 1 matching failure / 30 filtered, PUNCH_TOO_SOON.
+- Fixed affected case: 1 passed / 30 filtered.
+- Counterfactual identical 09:00 clock: 1 matching failure / 30 filtered, PUNCH_TOO_SOON.
+- Exact restoration: 1 passed / 30 filtered. These are phases of one unique case, not whole31 passes.
+- Same-path/config explicit ESLint baseline and candidate: one existing any warning each, introduced diagnostics zero. Exact inverse of import/date/clock changes restores the entire prior test file, proving original assertions/budgets preserved.
+- Existing production quality and other local suites remain qualified by identical production source, not represented as fresh reruns. Owned PG cloned ledger452 without migration replay and stopped in finally; data retained.
+- Independent bounded source review: no confirmed P1/P2, source review does not replace execution. New commit requires its own current-head CI and actual target evidence.

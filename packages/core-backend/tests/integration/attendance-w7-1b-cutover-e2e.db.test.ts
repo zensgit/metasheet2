@@ -52,6 +52,7 @@ import {
 } from '../../src/attendance/w4c3b-request-snapshots'
 import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import { createLegacyLivePunchBoundaryDriver } from '../utils/attendance-legacy-live-punch-boundary-driver'
+import { withOnlinePunchFixtureTime } from '../utils/attendance-online-punch-fixture'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -2139,7 +2140,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     )
     await withEnv({ ...BOTH_MACHINES_ENV(), [W4_ENV]: BOTH_MACHINES_ENV()[W4_ENV] + ',' + orgId }, async () => {
       const headers = { Authorization: `Bearer ${await mintToken(userId, orgId)}`, 'Content-Type': 'application/json' }
-      const workDate = new Date().toISOString().slice(0, 10)
+      const workDate = '2026-02-04'
       const parentRows = async () => (await pool.query(
         'SELECT to_jsonb(r) AS value FROM attendance_records r WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date',
         [orgId, userId, workDate],
@@ -2163,7 +2164,10 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
          VALUES ($1, $2, $3, $4::date, $5::timestamptz, 'check_in', 'manual', 'UTC', '{}'::jsonb, '{}'::jsonb)`,
         [seededEventId, userId, orgId, workDate, workDate + 'T09:00:00.000Z'],
       )
-      const punched = await punch(userId, orgId, 'check_in')
+      const punched = await withOnlinePunchFixtureTime(
+        { occurredAt: workDate + 'T10:00:00.000Z' },
+        () => punch(userId, orgId, 'check_in'),
+      )
       expect(punched.status, 'native review punch; code=' + String(punched.body?.error?.code ?? 'none')).toBe(200)
       const priorHistory = await historyRows()
       expect(priorHistory).toHaveLength(1)
