@@ -58,7 +58,6 @@
               :class="{ 'meta-grid__row--selected': item.row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === item.navIndex }"
               :style="rowStyle(item.row.id)"
               @click="emit('select-record', item.row.id)"
-              @contextmenu="onRowContextMenu($event, item.row.id)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(item.row.id)" :disabled="!rowAllowsAnyBulkAction(item.row.id)" @change="toggleSelectRow(item.row.id)" />
@@ -205,7 +204,6 @@
               :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri, 'meta-grid__row--frozen-top': isFrozenRow(ri) }"
               :style="rowStyle(row.id)"
               @click="emit('select-record', row.id)"
-              @contextmenu="onRowContextMenu($event, row.id, ri)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="isFrozenRow(ri) ? { position: 'sticky', top: `${frozenRowTop(ri)}px`, zIndex: '3' } : undefined" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
@@ -625,8 +623,9 @@ const emit = defineEmits<{
   (e: 'bulk-delete', recordIds: string[]): void
   (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
   (e: 'bulk-restore', recordIds: string[]): void
-  // Duplicate / clone record (design 2026-06-16): right-click a row → request a duplicate. The native
-  // context menu is suppressed so the row affordance is the menu; the workbench owns the create + clone-open.
+  // Duplicate / clone record (design 2026-06-16). Customer feedback 2026-10-27: NO gesture emits this any
+  // more — a right-click used to emit it instantly, creating a row that people read as "copied to the
+  // clipboard". Kept declared (the workbench still listens) for an explicit, labelled row-menu entry.
   (e: 'duplicate-record', recordId: string): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
@@ -1212,19 +1211,12 @@ function resolveRowActions(recordId: string): MetaRowActions {
   }
 }
 
-// Duplicate / clone record (design 2026-06-16): right-click a row → emit a duplicate request. Net-new grid
-// context affordance — no floating menu component, just the native contextmenu suppressed when actionable.
-// Gated on `canCreate` (a duplicate is a create; the server re-enforces it). NOT active while a cell is being
-// edited, so the native menu (copy/paste) still works inside the cell editor.
-// `ri` (row index, flat path only) is unused today — accepted so callers can pass it without a
-// signature mismatch; the row-freeze pin (#5863c) is its own dedicated button, not merged into this
-// gesture (this remains a single instant action, not an actual multi-item context menu).
-function onRowContextMenu(e: MouseEvent, recordId: string, ri?: number): void {
-  void ri
-  if (!props.canCreate || editCell.value) return
-  e.preventDefault()
-  emit('duplicate-record', recordId)
-}
+// Right-click on a row (customer feedback 2026-10-27): the grid binds NO contextmenu handler, so the
+// browser's own menu shows and nothing is created. It used to emit `duplicate-record` instantly (design
+// 2026-06-16), which POSTed a new record on every right-click — including on sheets whose rows a plugin
+// maintains, where the copy cloned the row's idempotency key and held the next pull. Duplicating is the
+// record drawer's explicit「复制」action now, behind a confirm. Tripwire:
+// tests/multitable-grid-duplicate-context.spec.ts.
 // Record-locking (design #2278 follow-up): index rows so the lock indicator + lock/unlock action +
 // read-only-while-locked visual can resolve a row's lock state by id without scanning.
 const recordById = computed(() => {
@@ -1378,7 +1370,7 @@ function onToggleFreeze(i: number) {
 // collapse) has no stable "first N rendered data rows" concept independent of collapse state, so
 // row-freezing is intentionally a no-op there (isFrozenRow always false when groupedRows is truthy).
 // The row-number context menu disables the freeze-rows action while grouping is active for the
-// same reason (see onRowContextMenu / the freeze-rows menu entry below).
+// same reason (see the freeze-rows menu entry below).
 const frozenTopRowsCountEffective = computed(() => {
   if (groupedRows.value) return 0
   return Math.max(0, Math.min(props.frozenTopRowCount ?? 0, filteredRows.value.length))

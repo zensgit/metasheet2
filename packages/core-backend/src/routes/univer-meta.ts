@@ -155,6 +155,11 @@ import {
   resolvePeopleSheetReadBound,
 } from '../multitable/people-sheet-read-bound'
 import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
+import {
+  isPluginMaintainedRowSheet,
+  RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_BODY,
+  RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_STATUS,
+} from '../multitable/record-duplicate-guard'
 import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
   isElearningProjectionBaseIdCandidate,
@@ -9509,6 +9514,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           canCopySheet = false
         }
       }
+      // Customer feedback 2026-10-27: the duplicate route refuses a sheet whose rows the stock-preparation
+      // plugin maintains (multitable/record-duplicate-guard.ts); tell the web so the drawer's duplicate entry is
+      // shown disabled with the reason. Only for an actor who could otherwise create. The namespace half runs
+      // in memory over `activeFields`, so an ordinary sheet issues no statement and its capabilities stay
+      // byte-identical. A thrown registry probe fails CLOSED to true (display only — the route decides).
+      let recordDuplicateBlocked = false
+      if (capabilities.canCreateRecord === true && effectiveSheetId) {
+        try {
+          recordDuplicateBlocked = await isPluginMaintainedRowSheet(pool.query.bind(pool), effectiveSheetId, activeFields)
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: plugin-maintained-rows probe failed for recordDuplicateBlocked; failing closed to true',
+            { reason: 'plugin_maintained_rows_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          recordDuplicateBlocked = true
+        }
+      }
       // Copy-sheet provenance on the SELECTED sheet: the source id is disclosed only to an actor who can read
       // that source sheet (ADR §6 — `sheetId` 只对能读源表者透出); the badge fields (kind, at) need no gate.
       let selectedCopiedFrom: ReturnType<typeof serializeCopiedFrom> = null
@@ -9586,6 +9608,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             canDeleteSheet,
             // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
             canCopySheet,
+            // Customer feedback 2026-10-27: sent ONLY when true (see `recordDuplicateBlocked` above); the
+            // duplicate route answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET on its own.
+            ...(recordDuplicateBlocked ? { recordDuplicateBlocked: true } : {}),
             // R68 (#6454 judge note): a sheet with a human-write-locked column that is ALSO required by its own
             // validation rule (the 备料 project sheet's PLM columns) can never take a person-created record:
             // empty fails the rule, filled is a locked write. Sent ONLY when true and only to an actor who could
@@ -20397,6 +20422,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
+
+      // Customer feedback 2026-10-27: no generic copy on a sheet whose rows the stock-preparation plugin
+      // maintains — the copy would clone the row's idempotency key / PLM identity and hold every later pull
+      // (multitable/record-duplicate-guard.ts). After the read gate, so a non-reader learns nothing; before
+      // any write. An ordinary sheet issues no extra statement here.
+      if (await isPluginMaintainedRowSheet(pool.query.bind(pool), sheetId, fields)) {
+        return res.status(RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_STATUS).json(RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_BODY)
+      }
 
       // Overlay forward-link values from meta_links onto a working copy of the source data (mirror/derived
       // link fields are isFieldAlwaysReadOnly → stripped below regardless, so only forward links matter).
