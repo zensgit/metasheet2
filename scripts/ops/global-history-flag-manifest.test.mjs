@@ -321,6 +321,10 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_RELABEL_SCOPE_FORBIDDEN', // object not bound to the caller's project in the registry (403), not a flag
   'MULTITABLE_RELABEL_APPLY_DISABLED', // write leg refused because the operator switch is off (409), not a flag
   'MULTITABLE_RELABEL_PLAN_CHANGED', // write leg refused because the plan differs from the preview (409), not a flag
+  // R76 line: named only in a doc comment of multitable/record-duplicate-guard.ts (#6598) as the
+  // precedent for showing a server refusal message as-is. Not a flag — nothing reads it from
+  // process.env. Main carries the same entry from #6507.
+  'MULTITABLE_GRID_EXPORT_CLOSED',
   // DingTalk todo-mirror (plan B, #5772/#5768): the CHECK-constraint status vocabulary constant
   // (migration zzzz20260916120000), not an env var — nobody reads it from process.env. The two real
   // flags, DINGTALK_TODO_MIRROR_ENABLED and DINGTALK_TODO_MIRROR_INTERVAL_MS, are registered in the
