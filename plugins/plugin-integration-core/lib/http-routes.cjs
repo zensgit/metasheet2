@@ -1213,6 +1213,41 @@ const ROUTE_FAILURE_LOGGABLE_CODES = Object.freeze([
   'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED',
   'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED',
   'SOURCE_UNAVAILABLE',
+  // The configured stock-prep source preflight (S1b part 5). It answers every resolver refusal that is not a
+  // table-action error (those log their own code) with 503 SOURCE_PREFLIGHT_BINDING_UNAVAILABLE and one warn line
+  // whose reason goes through this list, so each READ_PLAN_* code its execution resolver can surface is listed:
+  // the canonical-binding assert, stock-preparation-read-plan-runtime.cjs (pointer read, resolver), the store's
+  // getActiveForRuntime with the validation ledger it consults, and the approved-plan composition
+  // (stock-preparation-read-plan-execution.cjs). Fixed literals only. The response is unchanged (still the 503).
+  // __tests__/route-failure-log-closed-code.test.cjs scans those throw sites and fails if one is missing here.
+  'READ_PLAN_SOURCE_BINDING_SPLIT',
+  'READ_PLAN_SOURCE_BINDING_UNAVAILABLE',
+  'READ_PLAN_BINDING_SCOPE_INVALID',
+  'READ_PLAN_RUNTIME_UNAVAILABLE',
+  'READ_PLAN_EXECUTION_TENANT_MISMATCH',
+  'READ_PLAN_EXECUTION_SCOPE_MISMATCH',
+  'READ_PLAN_VALIDATION_SOURCE_UNAVAILABLE',
+  'READ_PLAN_ACTIVATION_MISSING',
+  'READ_PLAN_SCOPE_INVALID',
+  'READ_PLAN_ACTIVATION_INVALID',
+  'READ_PLAN_ACTIVATION_DISABLED',
+  'READ_PLAN_ACTIVATION_SOURCE_MISMATCH',
+  'READ_PLAN_CONTENT_INVALID',
+  'READ_PLAN_NOT_APPROVED',
+  'READ_PLAN_VALIDATION_REQUIRED',
+  'READ_PLAN_TRANSACTION_UNAVAILABLE',
+  'READ_PLAN_GENERATION_CONFLICT',
+  'READ_PLAN_VALIDATION_UNAVAILABLE',
+  'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE',
+  'READ_PLAN_VALIDATION_INVALID',
+  'READ_PLAN_VALIDATION_COUNTS_INVALID',
+  'READ_PLAN_VALIDATION_ACTOR_MISMATCH',
+  'READ_PLAN_VALIDATION_SOURCE_CHANGED',
+  'READ_PLAN_EXECUTION_IDENTITY_INVALID',
+  'READ_PLAN_EXECUTION_NOT_ACTIVE',
+  'READ_PLAN_EXECUTION_CONTENT_INVALID',
+  'READ_PLAN_DEPLOYMENT_INCOMPATIBLE',
+  'READ_PLAN_EXECUTION_BINDING_MISMATCH',
   // `inferErrorCode` falls back to the error's class name when it carries no code.
   'ExternalSystemValidationError',
   'ExternalSystemNotFoundError',

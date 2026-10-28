@@ -136,7 +136,7 @@ const inert = (methods) => Object.fromEntries(methods.map((name) => [name, async
 
 async function mount({ active = true, storeMissing = false, sourceWorkspaceId = null, matchedWorkspaceId = null, register = registerIntegrationRoutes, unconfigured = false, projectSheets = false, deployReadPlan,
   readPlanExtra, sourceProject, sourceCaseInsensitive = false, projectRegistry, routeTransform, routeDependencies, governanceMissing = false,
-  refreshOptions = {}, deploySystemId = SYSTEM } = {}) {
+  refreshOptions = {}, deploySystemId = SYSTEM, logger = { warn() {}, info() {} } } = {}) {
   const { db, state } = memoryDb()
   let sequence = 0
   const ledger = createStockPreparationReadPlanStore({ db, idGenerator: () => `synthetic-${++sequence}` })
@@ -268,7 +268,7 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
   }
   // The host side of the lease: the fake declares and enforces the write fence the apply paths hand it.
   context.api.multitable.records = lockKit.withFakeHostWriteFence(context.api.multitable.records)
-  register({ services, context, logger: { warn() {}, info() {} } })
+  register({ services, context, logger })
   async function call(route, { body = {}, params = {}, query = {}, claimed = true, method = 'POST' } = {}) {
     const response = { statusCode: 200, status(code) { this.statusCode = code; return this }, json(value) { this.body = value; return this } }
     const handler = routes.get(`${method} ${route}`)
@@ -2103,6 +2103,29 @@ test('PAR-R5 (S1b) an unlistable, incomplete or failing binding listing refuses 
     }
     assert.deepEqual(ioCounts(f), before, `${label}: nothing read or written`)
     assert.deepEqual([...f.storage], storageBefore, label)
+  }
+})
+
+// S1b part 5: the configured source preflight answers every resolver refusal that is not a table-action error with
+// 503 SOURCE_PREFLIGHT_BINDING_UNAVAILABLE (response unchanged: no details, no reason in the body). Its one warn line
+// names the read-plan cause, because READ_PLAN_* codes are now on the route-failure closed list (before: UNLISTED).
+test('PAR-PFLOG (S1b) the configured source preflight still answers 503 SOURCE_PREFLIGHT_BINDING_UNAVAILABLE on a split, unreadable or mismatched read-plan resolution, and its one warn line names the READ_PLAN code, never UNLISTED and never a value', async () => {
+  const PREFLIGHT_WARN = '[plugin-integration-core] stock-prep source preflight could not resolve its source binding'
+  for (const [label, prepare, reason, pointerReads] of [
+    ['R4-diff binding set', (f) => useRealBindings(f, [[null, SYSTEM], [S1B_WS, S1B_OTHER]]), 'READ_PLAN_SOURCE_BINDING_SPLIT', 0],
+    ['binding listing throws', (f) => { f.services.stockPreparationSourceBindingStore.listForAction = async () => { throw new Error('SYN-private-binding') } }, 'READ_PLAN_SOURCE_BINDING_UNAVAILABLE', 0],
+    ['tenant pointer names another system', (f) => useRealBindings(f, [[null, S1B_OTHER]]), 'READ_PLAN_ACTIVATION_SOURCE_MISMATCH', 1],
+  ]) {
+    const warns = []
+    const f = await mount({ logger: { warn(...args) { warns.push(clone(args)) }, info() {} } })
+    prepare(f)
+    const result = await f.call(PREFLIGHT, { method: 'GET' })
+    assertRefused(result, 503, 'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE', label)
+    assert.deepEqual(Object.keys(result.body.error.details || {}), [], `${label}: no details, as before`)
+    assert.deepEqual(warns, [[PREFLIGHT_WARN, { reason }]], `${label}: exactly one warn, naming the read-plan code`)
+    assert.ok(!JSON.stringify([warns, result.body]).includes('SYN-private-binding'), `${label}: the store text never leaves`)
+    assert.equal(f.calls.ledger.length, pointerReads, `${label}: pointer reads`)
+    assert.deepEqual([f.calls.adapter.length, f.calls.created.length, f.calls.read.length], [0, 0, 0], `${label}: nothing loaded or read`)
   }
 })
 
