@@ -34,3 +34,11 @@ Existing manager/head behavior comes from independent Draft #6589 and #6592; the
 ![Relationship summary narrow viewport](../../artifacts/user-approval-relations-summary-20261028/approval-relations-390.png)
 
 Rollback for this slice: remove this source patch/rebuild; no migration or relationship data write. The separate head migration in #6589 has its own data-preserving rollback prerequisites. No merge/deploy/R71/tag/release/config/provider write authorized.
+
+## Current CI transport adaptation
+
+Parent1147b8a backend core failed only the existing zero-app-mode tripwire: this new fixture introduced13 request(app/control) sites. Its ten business/assertion cases actually passed in that CI. Later PG cleanup failed because preceding DB startup steps were not reached; no cleanup guard was weakened.
+
+The fixture now uses the existing per-suite usePinnedServer with sequential setApp controls and URL transport. Reversing only these transport substitutions recovers the exact prior source, including every original assertion and budget. All ten transport-affected cases passed locally; reintroducing one app-mode request caused the unchanged tripwire to fail with the exact one-site diagnosis (two others filtered); restoring the fixture yielded one pass/two filtered. Explicit fixture lint0. All product/runtime/frontend/build inputs remain byte-identical; existing green frontend18, browser, type/build/validateall evidence is source-qualified, not rerun on this test-only repair. New-head required CI remains pending.
+
+Complete parent failed log is retained remotely:8713935bytes/SHA256 a6492d9def4865d6cdfd57474541b5a6fa0514fea5e9518d10968efbdbcc8c69. No blind rerun or claim that parent CI was green.

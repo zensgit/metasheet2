@@ -4,6 +4,7 @@ import { hasLegacyAdminClaim as userClaim } from '../../src/rbac/platform-admin'
 import { jsonError } from '../../src/util/response'
 import express from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), resolve: vi.fn(), admin: true, gate: vi.fn(), transaction: vi.fn() }))
@@ -31,6 +32,7 @@ const testGate = async (req: express.Request, res: express.Response) => {
   if (mocks.admin) return 'admin'
   res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin access required' } }); return null
 }
+const pinned = usePinnedServer()
 const app = express(); app.get('/users/:userId/approval-relations', userApprovalRelationsHandler(testGate))
 function rows(sql: string) {
   if (sql.startsWith('SET TRANSACTION')) return { rows: [] }
@@ -40,6 +42,7 @@ function rows(sql: string) {
   throw new Error('unexpected SQL')
 }
 beforeEach(() => {
+  pinned.setApp(app)
   mocks.gate.mockReset().mockImplementation(async (_req: express.Request, res: express.Response) => {
     if (mocks.admin) return 'admin'
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin access required' } }); return null
@@ -49,7 +52,7 @@ beforeEach(() => {
 })
 describe('admin user approval relations read', () => {
   it('returns exact existing relations under READ ONLY before any read', async () => {
-    const response = await request(app).get('/users/subject/approval-relations')
+    const response = await request(pinned.url()).get('/users/subject/approval-relations')
     expect(response.status).toBe(200)
     expect(response.body.data).toEqual({ userId: 'subject', source: { mode: 'policy', provider: 'local' }, primaryDepartment: '演示部门', manager: { id: 'manager', name: '主管甲' }, departmentHead: { id: 'head', name: '负责人乙' } })
     expect(mocks.query.mock.calls[0]).toEqual(['SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'])
@@ -57,36 +60,36 @@ describe('admin user approval relations read', () => {
     expect(mocks.query.mock.calls.every(([sql]) => /^(SET TRANSACTION|SELECT)/.test(sql))).toBe(true)
   })
   it('refuses non-admin before transaction or resolver', async () => {
-    mocks.admin = false; const response = await request(app).get('/users/subject/approval-relations')
+    mocks.admin = false; const response = await request(pinned.url()).get('/users/subject/approval-relations')
     expect(response.status).toBe(403); expect(mocks.transaction).not.toHaveBeenCalled(); expect(mocks.resolve).not.toHaveBeenCalled()
   })
   it('rejects query-selected org/provider/preview without reading', async () => {
-    const response = await request(app).get('/users/subject/approval-relations?orgId=foreign')
+    const response = await request(pinned.url()).get('/users/subject/approval-relations?orgId=foreign')
     expect(response.status).toBe(400); expect(mocks.transaction).not.toHaveBeenCalled()
   })
   it('returns404 for absent subject without invoking resolver', async () => {
     mocks.query.mockImplementation(sql => sql === 'SELECT id FROM users WHERE id = $1' ? { rows: [] } : rows(sql))
-    const response = await request(app).get('/users/missing/approval-relations')
+    const response = await request(pinned.url()).get('/users/missing/approval-relations')
     expect(response.status).toBe(404); expect(mocks.resolve).not.toHaveBeenCalled()
   })
   it('preserves missing relation state instead of guessing manager from position', async () => {
-    mocks.resolve.mockResolvedValue({}); const response = await request(app).get('/users/subject/approval-relations')
+    mocks.resolve.mockResolvedValue({}); const response = await request(pinned.url()).get('/users/subject/approval-relations')
     expect(response.body.data).toEqual({ userId: 'subject', source: { mode: 'unresolved', provider: null }, primaryDepartment: null, manager: null, departmentHead: null })
   })
   it('reports misconfigured or ambiguous policy without leaking exception values', async () => {
     mocks.resolve.mockRejectedValue(new ApprovalRoutingPolicyError('private-detail'))
-    const response = await request(app).get('/users/subject/approval-relations')
+    const response = await request(pinned.url()).get('/users/subject/approval-relations')
     expect(response.status).toBe(409); expect(response.body.error.code).toBe('APPROVAL_RELATIONS_UNRESOLVED')
     expect(JSON.stringify(response.body)).not.toContain('private-detail')
   })
   it('fails closed when read-only setup fails, without querying subject', async () => {
-    mocks.query.mockRejectedValue(new Error('private-detail')); const response = await request(app).get('/users/subject/approval-relations')
+    mocks.query.mockRejectedValue(new Error('private-detail')); const response = await request(pinned.url()).get('/users/subject/approval-relations')
     expect(response.status).toBe(500); expect(mocks.query).toHaveBeenCalledTimes(1); expect(mocks.resolve).not.toHaveBeenCalled()
     expect(JSON.stringify(response.body)).not.toContain('private-detail')
   })
   it('labels implicit DingTalk selection without altering it', async () => {
     mocks.query.mockImplementation(sql => sql.includes('SELECT i.provider') ? { rows: [{ provider: 'dingtalk', policy: false }] } : rows(sql))
-    const response = await request(app).get('/users/subject/approval-relations')
+    const response = await request(pinned.url()).get('/users/subject/approval-relations')
     expect(response.body.data.source).toEqual({ mode: 'legacy-default', provider: 'dingtalk' })
     expect(mocks.resolve.mock.calls[0][2]).not.toHaveProperty('overrideCanonicalIntegrationId')
   })
@@ -96,15 +99,18 @@ describe('admin user approval relations read', () => {
     const directoryGate = actualGate('admin-directory.ts', true)
     const directoryControl = express(); directoryControl.use((req, _res, next) => { Object.assign(req, { user: actor }); next() })
     directoryControl.get('/control', async (req, res) => { if (await directoryGate(req, res)) res.json({ allowed: true }) })
-    expect((await request(directoryControl).get('/control')).status).toBe(200)
+    pinned.setApp(directoryControl)
+    expect((await request(pinned.url()).get('/control')).status).toBe(200)
     const control = express(); control.use((req, _res, next) => { Object.assign(req, { user: actor }); next() })
     control.get('/control', async (req, res) => { if (await userGate(req, res)) res.json({ allowed: true }) })
-    expect((await request(control).get('/control')).status).toBe(403)
+    pinned.setApp(control)
+    expect((await request(pinned.url()).get('/control')).status).toBe(403)
     mocks.gate.mockImplementation(userGate)
     const selected = express(); selected.use((req, _res, next) => { Object.assign(req, { user: actor }); next() })
     selected.get('/users/:userId/approval-relations', userApprovalRelationsHandler(testGate))
     expect(readFileSync(new URL('../../src/routes/admin-users.ts', import.meta.url), 'utf8')).toContain("authenticate, userApprovalRelationsHandler(ensurePlatformAdmin))")
-    const response = await request(selected).get('/users/subject/approval-relations')
+    pinned.setApp(selected)
+    const response = await request(pinned.url()).get('/users/subject/approval-relations')
     expect(response.status).toBe(403)
     expect(mocks.transaction).not.toHaveBeenCalled()
   })
@@ -112,9 +118,10 @@ describe('admin user approval relations read', () => {
     mocks.gate.mockImplementation(actualGate('admin-users.ts', false))
     const selected = express(); selected.use((req, _res, next) => { if (req.headers['x-control-admin']) Object.assign(req, { user: { id: 'admin', role: 'admin' } }); next() })
     selected.get('/users/:userId/approval-relations', userApprovalRelationsHandler(testGate))
-    expect((await request(selected).get('/users/subject/approval-relations').set('x-control-admin', 'yes')).status).toBe(200)
+    pinned.setApp(selected)
+    expect((await request(pinned.url()).get('/users/subject/approval-relations').set('x-control-admin', 'yes')).status).toBe(200)
     mocks.transaction.mockClear()
-    expect((await request(selected).get('/users/subject/approval-relations')).status).toBe(401)
+    expect((await request(pinned.url()).get('/users/subject/approval-relations')).status).toBe(401)
     expect(mocks.transaction).not.toHaveBeenCalled()
   })
 
