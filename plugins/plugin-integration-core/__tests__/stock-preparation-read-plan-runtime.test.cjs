@@ -2063,6 +2063,27 @@ test('PAR-R4b (S1b) C6 with the deployment default != the bound system: the hint
   assert.equal(f.calls.listed.length - listedBefore, 2, 'each lane listed the binding set once')
 })
 
+// The multi-system C6 (no tenant row, two workspace rows naming DIFFERENT systems) is ambiguous AND disagreeing at
+// once; the assert reports bindings_ambiguous first on every lane. PAR-R4 and PAR-R4b bind one system, so an ambiguous
+// check narrowed to single-system sets, or a disagree check moved ahead of it, survives both; this case pins the cell.
+test('PAR-R4c (S1b) multi-system C6 (no tenant row, two workspace rows naming different systems): the hint-less and the ws-1-hinted lanes both refuse bindings_ambiguous, never hint_unbound or bindings_disagree, before any pointer or source read', async () => {
+  const f = await mount({ deploySystemId: 'system-deploy-default' })
+  useRealBindings(f, [['ws-1', SYSTEM], ['ws-2', S1B_OTHER]])
+  const store = f.services.stockPreparationSourceBindingStore
+  assert.equal(await store.get({ tenantId: TENANT, actionId: ACTION, workspaceId: null }), null, 'calibration: multi-system C6 hint-less resolves no row, so the lane resolves the deployment default')
+  const hinted = await store.get({ tenantId: TENANT, actionId: ACTION, workspaceId: 'ws-1' })
+  assert.equal(hinted && hinted.externalSystemId, SYSTEM, 'calibration: the ws-1 hint resolves its own row, which the ws-2 row disagrees with')
+  for (const bound of [SYSTEM, S1B_OTHER]) assert.notEqual(f.action.source.externalSystemId, bound, 'calibration: the deployment default is neither bound system')
+  const before = ioCounts(f)
+  const listedBefore = f.calls.listed.length
+  assertSplit(await dryRun(f), 'bindings_ambiguous', 'hint-less')
+  assertSplit(await dryRun(f, 'ws-1'), 'bindings_ambiguous', 'hint ws-1')
+  assert.deepEqual(ioCounts(f), before, 'no pointer, adapter, source or target read, no write')
+  assert.equal(f.calls.ledger.length, before.ledger, '0 pointer reads')
+  assert.equal(f.calls.read.length, before.read, '0 source reads')
+  assert.equal(f.calls.listed.length - listedBefore, 2, 'each lane listed the binding set once')
+})
+
 test('PAR-R5 (S1b) an unlistable, incomplete or failing binding listing refuses every lane before any pointer or source read; the store text never leaves', async () => {
   for (const [label, prepare, status, code, reason] of [
     ['no listForAction', (store) => { delete store.listForAction }, 409, SPLIT, 'bindings_unverifiable'],
