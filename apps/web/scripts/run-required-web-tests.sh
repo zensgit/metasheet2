@@ -1549,6 +1549,7 @@ exec npx vitest run \
   approval-detail-record-table \
   approval-e2e-lifecycle \
   approval-e2e-permissions \
+  approval-permissions \
   approval-field-visibility \
   approval-form-draft \
   approval-graph-layout \

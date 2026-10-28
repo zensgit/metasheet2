@@ -548,8 +548,8 @@ describe('ApprovalCenterView — platform-row affordances follow approvals:act (
     await flushUi()
   }
 
-  it('a reader (approvals:read, no approvals:act) keeps the row but gets no inline 通过/驳回 and cannot batch-decide it', async () => {
-    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read']))
+  it.each(['approvals:read', 'approvals:write', 'approvals:admin'])('a non-actor (%s) keeps the row but gets no inline 通过/驳回 and cannot batch-decide it', async (permission) => {
+    localStorage.setItem('user_permissions', JSON.stringify([permission]))
     mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' })]
     await mountView()
     expect(container!.querySelector('[data-el-row="apv_plain"]')).not.toBeNull()
@@ -563,8 +563,8 @@ describe('ApprovalCenterView — platform-row affordances follow approvals:act (
     expect(attendanceCalls()).toHaveLength(0)
   })
 
-  it('an actor (approvals:read + approvals:act) gets the inline 通过/驳回 and batch-decides the row (positive control)', async () => {
-    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+  it.each(['approvals:act', 'approvals:*', '*:*'])('an actor (%s) gets the inline 通过/驳回 and batch-decides the row (positive control)', async (permission) => {
+    localStorage.setItem('user_permissions', JSON.stringify([permission]))
     mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' })]
     await mountView()
     expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).not.toBeNull()
@@ -601,8 +601,8 @@ describe('ApprovalCenterView — platform-row affordances follow approvals:act (
     expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
   })
 
-  it('an actor still gets no inline 通过/驳回 on a row whose canDecideCurrentNode is false', async () => {
-    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+  it.each(['approvals:act', 'approvals:*'])('an actor (%s) still gets no inline 通过/驳回 on a row whose canDecideCurrentNode is false', async (permission) => {
+    localStorage.setItem('user_permissions', JSON.stringify([permission]))
     mockPendingApprovals.value = [pendingRow({ id: 'apv_noseat', canDecideCurrentNode: false }), pendingRow({ id: 'apv_plain' })]
     await mountView()
     expect(container!.querySelector('[data-testid="approval-row-approve-apv_noseat"]')).toBeNull()
