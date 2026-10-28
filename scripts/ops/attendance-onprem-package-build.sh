@@ -55,6 +55,7 @@ REQUIRED_PATHS=(
   "package.json"
   "pnpm-lock.yaml"
   "pnpm-workspace.yaml"
+  "vendor/xlsx-0.20.3.tgz"
   "docs/deployment/attendance-windows-onprem-easy-start-20260306.md"
   "docs/deployment/attendance-onprem-package-layout-20260306.md"
   "docs/deployment/attendance-windows-onprem-no-docker-20260306.md"
