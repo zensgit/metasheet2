@@ -1525,6 +1525,12 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # them. Each token matches exactly one file under apps/web/tests (checked by listing the directory),
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
+# Approval remind notifications (2026-10-27): ONE token added, `approval-center-remind-notify-summary`,
+# for apps/web/tests/approval-center-remind-notify-summary.spec.ts (the toast summary shown after a
+# remind), paired with the same token on approval-web-guard.yml's targeted run line. It matches exactly
+# that one spec file. Bidirectional substring scan against every manifest token: it contains none of
+# them except the bare `approval-center`, which already incidentally collects every `approval-center-*`
+# spec, and no token contains it. Listed explicitly all the same, per this file's own discipline.
 exec npx vitest run \
   adminPageContentSearch.spec.ts \
   amountAutoSum \
@@ -1539,6 +1545,7 @@ exec npx vitest run \
   approval-center-detail-pane-controller \
   approval-center-master-detail \
   approval-center-notify-badges \
+  approval-center-remind-notify-summary \
   approval-civil-date-tz-probe \
   approval-comments-client \
   approval-comments-panel \
