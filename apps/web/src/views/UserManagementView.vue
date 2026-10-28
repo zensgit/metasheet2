@@ -3114,7 +3114,7 @@ async function resetPassword(): Promise<void> {
     const payload = await readJson(response)
     if (selectedUserId.value !== requestedUserId) return
     if (!response.ok || payload.ok !== true) {
-      const errorPayload = payload.error as { code?: unknown; message?: unknown } | undefined
+      const errorPayload = payload.error as { code?: unknown; message?: unknown; details?: unknown } | undefined
       const inlineError = describeAdminResetPasswordInlineError(errorPayload)
       if (inlineError) {
         passwordResetInlineError.value = inlineError

@@ -4232,6 +4232,115 @@ describe('admin-users routes', () => {
     expect(auditMocks.auditLog).toHaveBeenCalled()
   })
 
+  // Customer report 2026-10-27: a typed temporary password used to pass on length alone, then
+  // failed the full policy at the forced first-login change. Reset now applies the create-user policy.
+  const resetTargetProfileRow = {
+    id: 'user-1',
+    email: 'alpha@example.com',
+    name: 'Alpha',
+    role: 'user',
+    is_active: true,
+    is_admin: false,
+    last_login_at: null,
+    created_at: '2026-03-12T00:00:00.000Z',
+    updated_at: '2026-03-12T00:00:00.000Z',
+  }
+
+  function resetWroteAnything(): boolean {
+    return pgMocks.query.mock.calls.some(([sql]) => /UPDATE\s+users/i.test(String(sql)))
+  }
+
+  it('rejects a typed temporary password that only meets the length rule with PASSWORD_POLICY_FAILED and reason codes', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [resetTargetProfileRow] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/reset-password', {
+      params: { userId: 'user-1' },
+      body: { password: '12312300' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toEqual({
+      code: 'PASSWORD_POLICY_FAILED',
+      message: 'Password does not meet requirements',
+      details: {
+        details: [
+          'Password must contain at least one lowercase letter',
+          'Password must contain at least one uppercase letter',
+        ],
+        reasons: ['no_lowercase', 'no_uppercase'],
+      },
+    })
+    expect(bcryptMocks.hash).not.toHaveBeenCalled()
+    expect(resetWroteAnything()).toBe(false)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('reports too_short through the same policy code for a short typed temporary password (trimmed first)', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [resetTargetProfileRow] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/reset-password', {
+      params: { userId: 'user-1' },
+      body: { password: '  Ab1  ' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    const error = (response.body as Record<string, any>).error
+    expect(error.code).toBe('PASSWORD_POLICY_FAILED')
+    expect(error.details.reasons).toEqual(['too_short'])
+    expect(bcryptMocks.hash).not.toHaveBeenCalled()
+    expect(resetWroteAnything()).toBe(false)
+  })
+
+  it('rejects a typed temporary password containing a common fragment with only the weak_pattern reason', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [resetTargetProfileRow] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/reset-password', {
+      params: { userId: 'user-1' },
+      body: { password: '123456Asd' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.details).toEqual({
+      details: ['Password contains a common weak pattern'],
+      reasons: ['weak_pattern'],
+    })
+    expect(resetWroteAnything()).toBe(false)
+  })
+
+  it('keeps 404 ahead of the password policy for an unknown user', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/reset-password', {
+      params: { userId: 'missing-user' },
+      body: { password: 'weak' },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect((response.body as Record<string, any>).error.code).toBe('NOT_FOUND')
+    expect(bcryptMocks.hash).not.toHaveBeenCalled()
+  })
+
+  it('still generates and saves a Tmp-…9A temporary password when none is typed (generated values skip the typed-value policy check)', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    bcryptMocks.hash.mockResolvedValue('hashed-temp-password')
+    pgMocks.query.mockResolvedValueOnce({ rows: [resetTargetProfileRow] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/reset-password', {
+      params: { userId: 'user-1' },
+      body: { password: '   ' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const issued = (response.body as Record<string, any>).data.temporaryPassword
+    expect(typeof issued).toBe('string')
+    expect(issued).toMatch(/^Tmp-.+9A$/)
+    expect(bcryptMocks.hash).toHaveBeenCalledWith(issued, 10)
+    expect(resetWroteAnything()).toBe(true)
+  })
+
   it('revokes all sessions for a user', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query

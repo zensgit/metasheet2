@@ -113,6 +113,21 @@ export function describePasswordPolicyReasons(
   return fragments
 }
 
+/**
+ * One sentence for a password-policy failure: the shared prefix plus every mapped fragment, or
+ * `null` when nothing could be mapped (the caller then keeps its own fallback). Used by the
+ * create-user banner and the forced first-login password change page.
+ */
+export function describePasswordPolicyFailure(
+  reasons: readonly unknown[],
+  locale: PasswordRequirementLocale,
+  serverDetails: readonly unknown[] = [],
+): string | null {
+  const fragments = describePasswordPolicyReasons(reasons, locale, serverDetails)
+  if (fragments.length === 0) return null
+  return PASSWORD_FAILED_PREFIX[locale] + fragments.join(LIST_SEPARATOR[locale])
+}
+
 /** Localised banner text for a create-user API error, or `null` when there is no mapping. */
 export function describeCreateUserError(
   error: CreateUserErrorPayload | null | undefined,
@@ -123,9 +138,7 @@ export function describeCreateUserError(
   if (error.code === 'PASSWORD_POLICY_FAILED') {
     const reasons = Array.isArray(details?.reasons) ? details.reasons as unknown[] : []
     const serverDetails = Array.isArray(details?.details) ? details.details as unknown[] : []
-    const fragments = describePasswordPolicyReasons(reasons, locale, serverDetails)
-    if (fragments.length === 0) return null
-    return PASSWORD_FAILED_PREFIX[locale] + fragments.join(LIST_SEPARATOR[locale])
+    return describePasswordPolicyFailure(reasons, locale, serverDetails)
   }
   if (error.code === 'INVALID_USERNAME' && details?.rule === 'login_name_ascii') {
     return LOGIN_NAME_RULE_COPY[locale]

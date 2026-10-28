@@ -5213,10 +5213,20 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      const temporaryPassword = requestedPassword || generateTemporaryPassword()
-      if (temporaryPassword.length < 8) {
-        return jsonError(res, 400, 'PASSWORD_TOO_SHORT', 'Password must be at least 8 characters long')
+      // A typed temporary password follows the same policy as create-user and the forced
+      // first-login change, so the value an admin hands out is never weaker than what the
+      // user must then choose. The generated value is unchanged: it carries an upper-case
+      // letter, lower-case letters and a digit by construction.
+      if (requestedPassword) {
+        const passwordValidation = validatePassword(requestedPassword)
+        if (!passwordValidation.valid) {
+          return jsonError(res, 400, 'PASSWORD_POLICY_FAILED', 'Password does not meet requirements', {
+            details: passwordValidation.errors,
+            reasons: passwordValidation.reasons,
+          })
+        }
       }
+      const temporaryPassword = requestedPassword || generateTemporaryPassword()
 
       const passwordHash = await bcrypt.hash(temporaryPassword, getBcryptSaltRounds())
       await query(
