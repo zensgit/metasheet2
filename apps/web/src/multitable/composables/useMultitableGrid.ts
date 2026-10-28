@@ -1319,7 +1319,9 @@ export function useMultitableGrid(opts: {
     return rowActions.value
   }
 
-  async function createRecord(data?: Record<string, unknown>) {
+  // Returns the NEW record id on success (客户反馈 2026-10-27: the workbench opens it, so a person does not have to
+  // scroll to the bottom to find the empty row), or null with `error` set. Callers that ignore it are unchanged.
+  async function createRecord(data?: Record<string, unknown>): Promise<string | null> {
     error.value = null
     const context = resolveCreateRecordContext({
       sheetId: opts.sheetId.value,
@@ -1327,19 +1329,21 @@ export function useMultitableGrid(opts: {
     })
     if (!context.sheetId && !context.viewId) {
       error.value = fallback('grid.errorContextRequired')
-      return
+      return null
     }
     if (!opts.sheetId.value && context.sheetId) opts.sheetId.value = context.sheetId
     if (!opts.viewId.value && context.viewId) opts.viewId.value = context.viewId
     try {
-      await client.createRecord({
+      const { record } = await client.createRecord({
         sheetId: context.sheetId,
         viewId: context.viewId,
         data,
       })
       await loadViewData(page.value.offset)
+      return record?.id ?? null
     } catch (e: any) {
       error.value = e.message ?? fallback('grid.errorCreateRecord')
+      return null
     }
   }
 

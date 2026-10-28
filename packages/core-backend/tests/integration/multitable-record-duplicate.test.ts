@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -210,5 +211,150 @@ describeIfDatabase('duplicate / clone record route (real DB)', () => {
     const res = await dupReq(SOURCE_REC)
     expect(res.status).toBe(401)
     currentUser = { id: USER_OK, roles: ['member'], perms: ['multitable:write'] }
+  })
+})
+
+// ── Customer feedback 2026-10-27: refusal on sheets whose rows the stock-preparation plugin maintains ─────────
+//
+// multitable/record-duplicate-guard.ts: a sheet with a `stockPreparation*` field namespace AND a
+// `plugin_multitable_object_registry` row refuses the generic duplicate with a values-free 409 before any write,
+// and /context tells a creating actor (`capabilities.recordDuplicateBlocked`). A tagged sheet WITHOUT a registry
+// row (a user's「复制数据表」copy) and an ordinary sheet keep the duplicate exactly as before. Real DB: the
+// property is stored as jsonb and read back through the route's own serializer, the registry row is a real FK
+// row. Own pinned listener (new supertest cases go through usePinnedServer only).
+const describeRefusalIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+describeRefusalIfDatabase('duplicate refusal on plugin-maintained sheets (real DB, customer feedback 2026-10-27)', () => {
+  const RC = `rc_${TS}`
+  const RC_BASE = `base_${RC}`
+  const SHEET_PM = `sheet_${RC}_pm` // registered ∧ tagged (project / env sheet)
+  const SHEET_LEDGER = `sheet_${RC}_ledger` // registered, only the confirmation-ledger namespace (prefix pin)
+  const SHEET_TAGCOPY = `sheet_${RC}_tagcopy` // tagged, NOT registered (a user's 复制数据表 copy)
+  const SHEET_PLAIN = `sheet_${RC}_plain` // ordinary
+  const ALL_SHEETS = [SHEET_PM, SHEET_LEDGER, SHEET_TAGCOPY, SHEET_PLAIN]
+  const keyField = (sheetId: string) => `fld_${sheetId}_key`
+  const noteField = (sheetId: string) => `fld_${sheetId}_note`
+  const sourceRec = (sheetId: string) => `rec_${sheetId}_src`
+  const WRITER = { id: `u_${RC}_writer`, roles: ['member'], perms: ['multitable:write'] }
+  const READER = { id: `u_${RC}_reader`, roles: ['member'], perms: ['multitable:read'] }
+  const OUTSIDER = { id: `u_${RC}_outsider`, roles: ['member'], perms: ['files:read'] }
+  let actor: { id: string; roles: string[]; perms: string[] } = WRITER
+
+  const pinned = usePinnedServer()
+  const countRows = async (sheetId: string) =>
+    Number((await q('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0]?.c ?? -1)
+  const dup = (sheetId: string) =>
+    request(pinned.url()).post(`/api/multitable/records/${sourceRec(sheetId)}/duplicate`).send({ sheetId })
+  const context = (sheetId: string) => request(pinned.url()).get('/api/multitable/context').query({ sheetId })
+
+  beforeAll(async () => {
+    const refusalApp = express()
+    refusalApp.use(express.json())
+    refusalApp.use((req, _res, next) => { ;(req as any).user = actor; next() })
+    refusalApp.use('/api/multitable', univerMetaRouter())
+    pinned.setApp(refusalApp)
+
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [RC_BASE, 'RC Base'])
+    const keyProperty: Record<string, Record<string, unknown>> = {
+      [SHEET_PM]: { validation: [{ type: 'required' }], stockPreparation: { ownership: 'plm_system', preserveOnRefresh: false, required: true, key: true } },
+      [SHEET_LEDGER]: { stockPreparationConfirmationDecision: { role: 'decision' } },
+      [SHEET_TAGCOPY]: { validation: [{ type: 'required' }], stockPreparation: { ownership: 'plm_system', preserveOnRefresh: false, required: true, key: true } },
+      [SHEET_PLAIN]: {},
+    }
+    for (const sheetId of ALL_SHEETS) {
+      await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheetId, RC_BASE, `RC ${sheetId.slice(-6)}`])
+      await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+        [keyField(sheetId), sheetId, 'Key', 'string', JSON.stringify(keyProperty[sheetId]), 1])
+      await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+        [noteField(sheetId), sheetId, 'Note', 'string', '{}', 2])
+      await q('INSERT INTO meta_records (id, sheet_id, version, data) VALUES ($1,$2,$3,$4::jsonb)',
+        [sourceRec(sheetId), sheetId, 1, JSON.stringify({ [keyField(sheetId)]: 'KEY-1', [noteField(sheetId)]: 'note-1' })])
+    }
+    for (const sheetId of [SHEET_PM, SHEET_LEDGER]) {
+      await q('INSERT INTO plugin_multitable_object_registry (sheet_id, project_id, object_id, plugin_name) VALUES ($1,$2,$3,$4)',
+        [sheetId, `project_${RC}`, `object_${sheetId}`, 'plugin-integration-core'])
+    }
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [RC_BASE]).catch(() => {})
+  })
+
+  test('registered ∧ stockPreparation-tagged: 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET, values-free, no row written', async () => {
+    actor = WRITER
+    const before = await countRows(SHEET_PM)
+    const res = await dup(SHEET_PM)
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET', message: '这张表的行由备料插件（PLM 拉取）维护，不能复制为新行。' },
+    })
+    for (const value of [SHEET_PM, sourceRec(SHEET_PM), keyField(SHEET_PM), 'KEY-1', 'plugin-integration-core']) {
+      expect(res.text).not.toContain(value)
+    }
+    expect(await countRows(SHEET_PM)).toBe(before)
+  })
+
+  test('prefix rule: a registered sheet whose only namespace is stockPreparationConfirmationDecision is refused too', async () => {
+    actor = WRITER
+    const before = await countRows(SHEET_LEDGER)
+    const res = await dup(SHEET_LEDGER)
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET')
+    expect(await countRows(SHEET_LEDGER)).toBe(before)
+  })
+
+  test('a non-reader is refused by the read gate first and learns nothing about the sheet', async () => {
+    actor = OUTSIDER
+    const res = await dup(SHEET_PM)
+    expect([403, 404]).toContain(res.status)
+    expect(res.body?.error?.code).not.toBe('RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET')
+    actor = WRITER
+  })
+
+  test('tagged but NOT registered (a user’s 复制数据表 copy): duplicates exactly as before', async () => {
+    actor = WRITER
+    const before = await countRows(SHEET_TAGCOPY)
+    const res = await dup(SHEET_TAGCOPY)
+    expect(res.status).toBe(200)
+    const stored = await dbData(res.body.data.record.id)
+    expect(stored[keyField(SHEET_TAGCOPY)]).toBe('KEY-1')
+    expect(stored[noteField(SHEET_TAGCOPY)]).toBe('note-1')
+    expect(await countRows(SHEET_TAGCOPY)).toBe(before + 1)
+  })
+
+  test('ordinary sheet: duplicates exactly as before', async () => {
+    actor = WRITER
+    const before = await countRows(SHEET_PLAIN)
+    const res = await dup(SHEET_PLAIN)
+    expect(res.status).toBe(200)
+    const stored = await dbData(res.body.data.record.id)
+    expect(stored[keyField(SHEET_PLAIN)]).toBe('KEY-1')
+    expect(await countRows(SHEET_PLAIN)).toBe(before + 1)
+  })
+
+  test('/context: recordDuplicateBlocked only on the registered ∧ tagged sheets, and only for an actor who can create', async () => {
+    actor = WRITER
+    for (const sheetId of [SHEET_PM, SHEET_LEDGER]) {
+      const res = await context(sheetId)
+      expect(res.status, sheetId).toBe(200)
+      expect(res.body.data.capabilities.canCreateRecord, sheetId).toBe(true)
+      expect(res.body.data.capabilities.recordDuplicateBlocked, sheetId).toBe(true)
+    }
+    for (const sheetId of [SHEET_TAGCOPY, SHEET_PLAIN]) {
+      const res = await context(sheetId)
+      expect(res.status, sheetId).toBe(200)
+      expect('recordDuplicateBlocked' in res.body.data.capabilities, sheetId).toBe(false)
+    }
+    actor = READER
+    const readerRes = await context(SHEET_PM)
+    expect(readerRes.status).toBe(200)
+    expect(readerRes.body.data.capabilities.canCreateRecord).not.toBe(true)
+    expect('recordDuplicateBlocked' in readerRes.body.data.capabilities).toBe(false)
+    actor = WRITER
   })
 })
