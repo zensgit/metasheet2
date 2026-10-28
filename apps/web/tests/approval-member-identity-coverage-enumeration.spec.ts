@@ -532,6 +532,14 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/ApprovalBatchTransferView.vue', 'batch-transfer-outcome-${row.id}'],
     ['src/views/approval/ApprovalBatchTransferView.vue', '{{ outcomeText(outcomeFor(row.id)!) }}'],
   ]),
+  // 按人查单 (2026-10-27) — the admin lookup page. Same class as the 批量转交 entries above: an
+  // APPROVAL INSTANCE id (not a person identity) in a data-testid test hook only. The visible row
+  // label is the values-free title / request number / per-list ordinal (`rowLabel`).
+  ...group('OUT-OF-SCOPE', 'an APPROVAL INSTANCE id (not a person id) on the admin 按人查单 page -- a data-testid test hook only; the visible row label is the values-free title / request number / ordinal', [
+    ['src/views/approval/ApprovalUserLookupView.vue', 'user-lookup-row-${row.id}'],
+    ['src/views/approval/ApprovalUserLookupView.vue', 'user-lookup-open-${row.id}'],
+    ['src/views/approval/ApprovalUserLookupView.vue', 'user-lookup-status-${row.id}'],
+  ]),
   ...group('OUT-OF-SCOPE', 'a COUNT of the rows the operator selected, in the confirm copy -- the pattern fires on the local variable NAME (`submittedIds`), never on a rendered identifier', [
     ['src/views/approval/ApprovalBatchTransferView.vue', '${submittedIds.length} 条待办转交给所选用户'],
     ['src/views/approval/ApprovalBatchTransferView.vue', '${submittedIds.length} selected item(s) will be transferred'],

@@ -459,6 +459,16 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Batch Transfer', titleZh: '批量转交', requiresAuth: true, requiresAdmin: true }
   },
   {
+    // 按人查单（管理员）: a person's pending / decided / involved approvals. Same gate as 批量转交
+    // above (`requiresAdmin`, no extra `permissions`); its backend route is likewise
+    // `rbacGuard('approvals:admin')`, and the page itself waits for the server's
+    // approval-administrator capability before it lists anything.
+    path: '/approvals/user-lookup',
+    name: 'approval-user-lookup',
+    component: () => import('../views/approval/ApprovalUserLookupView.vue'),
+    meta: { title: 'Look Up by Person', titleZh: '按人查单', requiresAuth: true, requiresAdmin: true }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,

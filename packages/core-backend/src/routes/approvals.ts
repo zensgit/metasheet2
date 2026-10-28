@@ -44,6 +44,7 @@ import {
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
 import { isApprovalAdministrator } from '../services/approval-admin-capability'
+import { parseApprovalByUserQuery, toApprovalByUserRow } from '../services/approval-by-user-predicate'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
 import {
   canReadApprovalInstance,
@@ -4102,6 +4103,74 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_BULK_REASSIGN_FAILED',
         'Failed to bulk reassign approvals',
       )
+    }
+  })
+
+  // 按人查单（管理员）: the instances that involve ONE user, in one of three senses — 当前待审批
+  // (`pending`), 已审批 (`decided`), 参与过 (`involved`); see `approval-by-user-predicate.ts`.
+  //
+  // SAME PERMISSION AS 批量转交: `rbacGuard('approvals:admin')`, no new permission code. The read
+  // is the ordinary list (`listApprovals`) with the by-user FILTER added and NO tab; access
+  // checks stay consistent with the existing approval read permission and the detail / history
+  // endpoints.
+  //
+  // Registered before `/api/approvals/:id`; two path segments after `/api/approvals/`, so no
+  // single-segment `:id` route can capture it.
+  r.get('/api/approvals/admin/by-user', authenticate, rbacGuard('approvals:admin'), async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+      const parsed = parseApprovalByUserQuery(req.query as Record<string, unknown>)
+      // `=== false`: this package compiles without `strict` (see the CSV option branch above).
+      if (parsed.ok === false) {
+        return res.status(400).json(approvalErrorResponse(parsed.code, parsed.message))
+      }
+      const { userId, kind, page, pageSize } = parsed.value
+      const result = await getBridgeService(options).listApprovals({
+        byUser: { userId, kind },
+        actorId,
+        actorRoles: await resolveApprovalActorRoles(req),
+        actorPermissions: resolveApprovalActorPermissions(req),
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+      })
+      return res.json({
+        ok: true,
+        data: {
+          kind,
+          items: result.data.map(toApprovalByUserRow),
+          total: result.total,
+          page,
+          pageSize,
+        },
+      })
+    } catch (error) {
+      // No degraded empty answer here: an administrator page must never read "this person has no
+      // approvals" off a read that did not happen.
+      handleApprovalsError(res, error, 'APPROVAL_BY_USER_LOOKUP_FAILED', 'Failed to look up approvals by user')
+    }
+  })
+
+  // 按人查单 / 批量转交 user picker: the participant directory's search, plus deactivated accounts
+  // (each row carries `isActive`). Administrator-only (`approvals:admin`, as above); the
+  // participant and template-authoring directories stay active-only with their minimal shape.
+  r.get('/api/approvals/admin/directory/users', authenticate, rbacGuard('approvals:admin'), async (req: Request, res: Response) => {
+    try {
+      const q = String(req.query.q || '').trim()
+      const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
+      const users = await searchDirectoryUsers(q, Number.isFinite(limit) ? limit : 20, { includeInactive: true })
+      res.json({ users })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_ADMIN_DIRECTORY_USERS_FAILED', 'Failed to search directory users')
     }
   })
 

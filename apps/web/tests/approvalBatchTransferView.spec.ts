@@ -472,6 +472,16 @@ describe('ApprovalBatchTransferView', () => {
     await flushUi()
   }
 
+  // 按人查单 slice (2026-10-27): the SOURCE may be a deactivated account (a departed approver), so
+  // only the source picker searches the administrator directory; the reassign endpoint refuses a
+  // deactivated target, so the target picker stays on the participant directory.
+  it('the source picker includes deactivated accounts; the target picker does not', async () => {
+    const root = await mountView()
+    expect(q(root, 'batch-transfer-source-picker').getAttribute('include-inactive')).toBe('true')
+    expect(q(root, 'batch-transfer-target-picker').hasAttribute('include-inactive')).toBe(false)
+    expect(q(root, 'batch-transfer-open-user-lookup')).toBeTruthy()
+  })
+
   it('lists the SELECTED approver’s pending items through the existing projection', async () => {
     const root = await mountView()
     await loadTwoRows(root)

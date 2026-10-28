@@ -37,12 +37,28 @@
     />
 
     <template v-else>
+      <p class="batch-transfer__lookup">
+        <el-button
+          link
+          type="primary"
+          data-testid="batch-transfer-open-user-lookup"
+          @click="openUserLookup"
+        >
+          {{ t.openUserLookup }}
+        </el-button>
+      </p>
+
       <section class="batch-transfer__form" :aria-label="t.formRegion">
         <div class="batch-transfer__field">
           <span class="batch-transfer__label">{{ t.sourceApprover }}</span>
+          <!-- The SOURCE may be a deactivated account (a departed approver whose pending items still
+               need handing on), so this picker searches the administrator directory. The TARGET
+               picker below stays on the participant directory: the reassign endpoint refuses a
+               deactivated target. -->
           <ApprovalUserPicker
             :model-value="fromUserId || null"
             :placeholder="t.userPickerPlaceholder"
+            :include-inactive="true"
             data-testid="batch-transfer-source-picker"
             @update:model-value="onSourceChange"
           />
@@ -224,6 +240,7 @@
 // queue with it — an answer resolved for one principal is not a statement about the next, and
 // neither is a queue listed under one principal's scope.
 import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
@@ -284,6 +301,7 @@ const ZH = {
   submitSuccess: '批量转交已处理，请查看逐条结果',
   submitFailed: '批量转交请求未成功，请重试',
   confirmTitle: '确认批量转交',
+  openUserLookup: '按人查单：查看某人的待审批、已审批与参与过的审批',
 } as const
 
 const EN: Record<keyof typeof ZH, string> = {
@@ -318,9 +336,16 @@ const EN: Record<keyof typeof ZH, string> = {
   submitSuccess: 'Batch transfer processed; see the per-row results',
   submitFailed: 'The batch transfer request did not succeed; please retry',
   confirmTitle: 'Confirm batch transfer',
+  openUserLookup: 'Look up by person: pending, decided and involved approvals',
 }
 
 const t = computed(() => (isZh.value ? ZH : EN))
+const router = useRouter()
+
+// 按人查单 lives on its own page (same administrator gate); this is its entry from 批量转交.
+function openUserLookup(): void {
+  void router.push('/approvals/user-lookup')
+}
 
 const fromUserId = ref('')
 const toUserId = ref('')
@@ -740,6 +765,10 @@ async function submit(): Promise<void> {
 </script>
 
 <style scoped>
+.batch-transfer__lookup {
+  margin: 0 0 var(--ms-space-3);
+}
+
 .batch-transfer__form {
   display: flex;
   flex-direction: column;

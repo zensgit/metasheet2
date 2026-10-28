@@ -137,6 +137,7 @@ approvalTemplateGroupsClient
 ApprovalTemplateGroupsPanel
 approvalTemplateRouteGuard
 approvalTemplateVersionHistory
+approvalUserLookupView
 approvalUserPicker
 asyncStateBlock
 attendance-admin-regressions

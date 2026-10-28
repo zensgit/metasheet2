@@ -44,7 +44,11 @@
 // full { id, name, email } option — the latter lets a caller that manages its OWN list (e.g. the
 // add-sign "repeated pick" chips) show a friendly label without a second lookup.
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { searchApprovalDirectoryUsers, type ApprovalDirectoryUser } from '../api'
+import {
+  searchApprovalAdminDirectoryUsers,
+  searchApprovalDirectoryUsers,
+  type ApprovalDirectoryUser,
+} from '../api'
 import { useLocale } from '../../composables/useLocale'
 import { USER_PICKER_EN, USER_PICKER_ZH } from './approvalPickerLabels'
 
@@ -61,6 +65,12 @@ const props = withDefaults(defineProps<{
   initialOption?: ApprovalUserPickerOption | null
   /** Multi-select counterpart of initialOption; selected ids stay values-free before batch resolution completes. */
   initialOptions?: readonly ApprovalUserPickerOption[]
+  /**
+   * 按人查单 / 批量转交 (administrator pages only): search the approval-administrator directory,
+   * which also returns deactivated accounts; those stay selectable and are labelled 「已停用」.
+   * Off by default — every member surface keeps the participant directory (active users only).
+   */
+  includeInactive?: boolean
 }>(), {
   modelValue: null,
   placeholder: undefined,
@@ -70,11 +80,13 @@ const props = withDefaults(defineProps<{
   excludedUserIds: () => [],
   initialOption: null,
   initialOptions: () => [],
+  includeInactive: false,
 })
 
 // O-8 / F8-1: picker chrome follows the shell locale; a host-supplied placeholder still wins.
 const { isZh } = useLocale()
-const effectivePlaceholder = computed(() => props.placeholder ?? (isZh.value ? USER_PICKER_ZH : USER_PICKER_EN).defaultPlaceholder)
+const labels = computed(() => (isZh.value ? USER_PICKER_ZH : USER_PICKER_EN))
+const effectivePlaceholder = computed(() => props.placeholder ?? labels.value.defaultPlaceholder)
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string | null): void
@@ -115,7 +127,10 @@ const displayOptions = computed<ApprovalUserPickerOption[]>(() => {
 function optionLabel(option: ApprovalUserPickerOption, index: number): string {
   const primary = option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)
   const email = option.email?.trim()
-  return email ? `${primary} · ${email}` : primary
+  const base = email ? `${primary} · ${email}` : primary
+  // Only the administrator directory sets `isActive`; an explicit `false` is a deactivated account.
+  // The tag rides in the label so it shows in the list AND on the selected value.
+  return option.isActive === false ? `${base}${labels.value.deactivatedSuffix}` : base
 }
 
 // member-display-identity (2026-08-19) — owner directive: this picker backs 4+ FLOW-CHANGING
@@ -139,7 +154,9 @@ function isUnidentifiable(option: ApprovalUserPickerOption): boolean {
 async function runSearch(query: string): Promise<void> {
   loading.value = true
   try {
-    fetchedOptions.value = await searchApprovalDirectoryUsers(query)
+    fetchedOptions.value = props.includeInactive
+      ? await searchApprovalAdminDirectoryUsers(query)
+      : await searchApprovalDirectoryUsers(query)
   } catch {
     // Defensive belt-and-suspenders: searchApprovalDirectoryUsers already never throws (it
     // resolves to [] on any failure internally) — this catch only guards a misbehaving mock/DI

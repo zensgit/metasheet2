@@ -28,6 +28,8 @@ const TARGET_FILES = [
   // introducing slice, born token-only (var(--ms-*)/--el-* exclusively) — same precedent as the
   // F2/F3/UI-7 components above.
   'src/views/approval/ApprovalBatchTransferView.vue',
+  // 按人查单 (2026-10-27): the administrator lookup page, a sibling of 批量转交, born token-only.
+  'src/views/approval/ApprovalUserLookupView.vue',
   'src/approvals/components/ApprovalTodoBadge.vue',
   // Round 2 (same slice): the server-gated nav entry and the app-shell error boundary that keeps
   // either nav component from taking the shell down. Both are born token-only as well.
