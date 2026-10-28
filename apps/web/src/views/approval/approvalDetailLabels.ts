@@ -120,6 +120,25 @@ export const DETAIL_ZH = {
   summaryCreatedAt: '发起时间：',
   summaryProgress: '进度：',
   summaryLink: '链接：',
+  // 流程进度 (approvalProgress.ts): one row per step, above the timeline / table toggle.
+  progressTitle: '流程进度',
+  progressHint: '「预计」按模板推算，实际以流转为准；条件节点之后的步骤在分支确定后显示。',
+  progressStartNode: '发起',
+  progressUnnamedNode: '审批节点',
+  progressStateStarted: '已提交',
+  progressStateDone: '已完成',
+  progressStateCurrent: '进行中',
+  progressStateExpected: '预计',
+  progressStateBranch: '按条件分支',
+  progressStateParallel: '并行分支',
+  progressStateEnded: '已结束',
+  progressEndNode: '结束',
+  progressRequester: '发起人：',
+  progressHandledBy: '处理人：',
+  progressCurrentHandler: '当前处理人：',
+  progressExpectedHandler: '预计处理人：',
+  progressParallelNext: '各并行分支完成后继续',
+  progressListSeparator: '、',
 }
 
 export const DETAIL_EN: Record<keyof typeof DETAIL_ZH, string> = {
@@ -233,6 +252,24 @@ export const DETAIL_EN: Record<keyof typeof DETAIL_ZH, string> = {
   summaryCreatedAt: 'Submitted: ',
   summaryProgress: 'Progress: ',
   summaryLink: 'Link: ',
+  progressTitle: 'Progress',
+  progressHint: '"Expected" steps are read from the template; the actual route may differ. Steps after a condition appear once the branch is known.',
+  progressStartNode: 'Start',
+  progressUnnamedNode: 'Step',
+  progressStateStarted: 'Submitted',
+  progressStateDone: 'Done',
+  progressStateCurrent: 'In progress',
+  progressStateExpected: 'Expected',
+  progressStateBranch: 'By condition',
+  progressStateParallel: 'Parallel branches',
+  progressStateEnded: 'Ended',
+  progressEndNode: 'End',
+  progressRequester: 'Requester: ',
+  progressHandledBy: 'By: ',
+  progressCurrentHandler: 'Waiting on: ',
+  progressExpectedHandler: 'Expected: ',
+  progressParallelNext: 'Continues after the parallel branches',
+  progressListSeparator: ', ',
 }
 
 /** History action verbs (timeline / record table) — keyed by the history `action` value. */
@@ -249,6 +286,8 @@ export const HISTORY_ACTION_ZH = {
   reduce_sign: '减签',
   cc: '抄送',
   handle: '办理',
+  // Customer issue 2026-10-27: a 催一下 writes a `remind` history row (routes/approvals.ts).
+  remind: '催办',
 }
 
 export const HISTORY_ACTION_EN: Record<keyof typeof HISTORY_ACTION_ZH, string> = {
@@ -264,6 +303,7 @@ export const HISTORY_ACTION_EN: Record<keyof typeof HISTORY_ACTION_ZH, string> =
   reduce_sign: 'Approver removed',
   cc: 'CC',
   handle: 'Handled',
+  remind: 'Reminded',
 }
 
 /** Approval modes (node aggregation) — keyed by `metadata.approvalMode`. */
