@@ -8,7 +8,7 @@ import {
 import {
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   calculateAttendanceSegmentsV1,
-  validateFrozenContextShape,
+  routeFrozenAttendanceContextV1,
 } from './w4c1-segment-calculator'
 import {
   canonicalAttendanceJsonV1,
@@ -56,6 +56,7 @@ const PREIMAGE_FINGERPRINT_DOMAIN =
   'metasheet2:attendance:w4c3a:rollback-preimage-fingerprint:v1'
 
 type QueryRow = Record<string, unknown>
+type SupportedImportContextV1 = Exclude<ReturnType<typeof routeFrozenAttendanceContextV1>, { kind: 'invalid' }>['context']
 
 export type AttendanceCanonicalImportRegistryClaimV1 = Readonly<{
   batchIdentity: VerifiedAttendanceOperationIdentityV1
@@ -79,7 +80,7 @@ type CanonicalImportPolicyOutputV1 = Readonly<{
 type CanonicalImportFrozenSourceV1 = Readonly<{
   sourceOrdinal: number
   attribution: AttendanceAttributionSnapshotV1
-  context: FrozenAttendanceContextV1 | null
+  context: SupportedImportContextV1 | null
   sourceFingerprint: string
   sourceDefinition: AttendanceImportPolicySourceProjectionV1
   ruleVersion: string
@@ -90,7 +91,7 @@ type CanonicalImportFrozenSourceV1 = Readonly<{
 type CanonicalImportFrozenTargetV1 = Readonly<{
   sources: readonly CanonicalImportFrozenSourceV1[]
   attribution: AttendanceAttributionSnapshotV1
-  context: FrozenAttendanceContextV1 | null
+  context: SupportedImportContextV1 | null
   sourceDefinitionFingerprint: string | null
   freezeConflict: boolean
 }>
@@ -153,12 +154,13 @@ function parseImportPolicyOutput(value: unknown): CanonicalImportPolicyOutputV1 
   })
 }
 
-function parseImportContext(value: unknown, punchDetail = false): FrozenAttendanceContextV1 | null {
+function parseImportContext(value: unknown, punchDetail = false): SupportedImportContextV1 | null {
   if (value === null) return null
   if (punchDetail) {
-    // Match the named preparation domain; retain optional policy fields intact.
-    if (!validateFrozenContextShape(value)) throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
-    return value
+    // Match the supported preparation domain; preserve V1 optional policy and V2 group identity.
+    const routed = routeFrozenAttendanceContextV1(value)
+    if (routed.kind === 'invalid') throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
+    return routed.context
   }
   const root = exactRecord(value, [
     'schemaVersion',

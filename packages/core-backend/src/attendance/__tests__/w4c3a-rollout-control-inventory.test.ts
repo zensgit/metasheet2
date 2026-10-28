@@ -49,6 +49,9 @@ const ALLOWED_RELATIVE_FILES = new Set([
   // Shared fixture registered only by attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts.
   // Seeds synthetic legacy/shadow posture; no production caller or writer is admitted.
   'packages/core-backend/tests/utils/attendance-canonical-http-contract-cases.ts',
+  // Shared synthetic posture/current-authorization fixture registered only by the request-operation DB spec.
+  // This exact test helper is admitted; production and other tests/utils writers remain scanned.
+  'packages/core-backend/tests/utils/attendance-punch-preview-durability-native.ts',
   // P1-1 inertness harness, used only by real-DB integration specs. Its one match is a
   // trace-assertion regex (the boundary's own INSERT must sit inside its own transaction).
   // The harness is not a direct or competing rollout writer: it calls the authorized boundary

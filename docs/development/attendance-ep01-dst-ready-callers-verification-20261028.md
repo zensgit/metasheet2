@@ -6,7 +6,7 @@ Refs #4556. Contract: [design-lock](attendance-ep01-dst-ready-callers-design-loc
 
 The approved `inputKind: "punch_events_v1"` path accepts ordered physical punches without collapsing multiple segments into one daily first/last pair. Synchronous/asynchronous preview and commit preserve all event ordinals. Durable preview records and commit plans retain frozen identity, current authorization, restart/replay and transaction boundaries. The daily V1 parser remains unchanged; the named format has explicit dispatch and cannot silently fall through to it.
 
-The complete finite local delivery audit covers 111 implementation/test/contract/document paths. This verification note is the only additional publication path. Local evidence was executed on base `929315933ecef4c815d3d98ce38db2719a204611`, with source-hash applicability across focused phases. Publication preflight fetched main `66a45e9a3b4817940fcaf91956efc1de3368b580`: its 23 changed frontend paths do not overlap this candidate, and it has no named punch implementation. No upstream changes were overlaid. Current-head CI remains a separate post-publication gate.
+The initial finite local delivery audit covered 111 implementation/test/contract/document paths plus this verification note. Subsequent CI repairs add the precisely listed guard and regression sources; the current publication manifest is authoritative for the final path count. Local evidence was executed on base `929315933ecef4c815d3d98ce38db2719a204611`, with source-hash applicability across focused phases. Publication preflight fetched main `66a45e9a3b4817940fcaf91956efc1de3368b580`: its 23 changed frontend paths do not overlap this candidate, and it has no named punch implementation. No upstream changes were overlaid. Current-head CI remains a separate post-publication gate.
 
 ## Gate table
 
@@ -25,7 +25,7 @@ The complete finite local delivery audit covers 111 implementation/test/contract
 | Counterfactuals | Fold/evidence, command, preview, authorization, queue, token and typed-review guards have matching failures followed by exact restore | Harness/setup failures excluded |
 | OpenAPI | All four request/response variants, generated artifacts, 20 distinct contract cases across phases; build/SDK/guard/security checks passed | Runtime validates formats/order/timezones |
 | Quality/review | Affected types and validate:all passed; later test-only changes have exact source applicability; lint introduced0; independent finite audit found no remaining local implementation gate | Existing diagnostics retained; not a fresh whole-suite run |
-| Draft/current-head CI | Draft #6630 published; initial backend inventory failure repaired locally; new-head CI remains pending | Local green is not CI green |
+| Draft/current-head CI | Draft #6630 published; inventory and subsequent core-guard/context failures repaired locally; repaired-head CI remains required | Local green is not CI green |
 
 ## Latest review-family phases
 
@@ -85,3 +85,22 @@ node --test --test-reporter=tap --test-name-pattern='^(exact-head HEAD scan:|the
 ```
 
 Evidence receipts: ci-inventory-reviewed-validation-state.json, ci-inventory-quality-state.json, ci-inventory-generated-bundle-relocation.json and the bounded independent inventory review. New-head required CI and actual full target execution remain separate final gates.
+
+
+## Core CI guards and supported group-context repair
+
+The inventory-repaired parent failed core tests in six guard files (13 failing assertions); its later native/request targets did not execute. The complete failed job log is retained: 8,891,706 bytes, SHA-256 `2a9ccd7e3d704794e7a25a860c8ba2f050c229a0b560bb0cf9d6717fa0e31592`. The later PostgreSQL cleanup failure followed skipped database startup; its cleanup guard is unchanged.
+
+The repair registers fourteen actual connection providers, fifteen calculation-path files under both existing W6 bans, three holders that do not write meta_records.data, one hour-free IANA validity probe and one exact native test fixture. Walkers, closed-set checks, runtime scope, original assertions and case budgets remain. The release guard includes one test with seven parsed-source counterexamples; each removes only that provider\'s error forwarding and observes exactly one violation. These are seven variants inside one executed test, not seven production mutation runs.
+
+Source review rejected the initial proposed HOLDS_BY_POLARITY exemption. The shared issuer can return a legitimate V2/group_effective context, but preparation and stored named-plan validation rejected it. A new focused regression first produced three matching failures with eight passing controls. Both gates now use the existing supported V1/V2 router, and both ledger entries remain MUST_WIDEN. The ordinary daily-parser body is byte-identical. Existing identity, organization, timezone, shift, schema and selector/group-id checks remain. The calculator change is a single input-type member; compiled JavaScript is byte-identical (SHA-256 `fcf25868eccf278d4a481b2cac0bc2b5f588fa5e9deadd8740c4b9dc2a686800`).
+
+Actual phases:
+
+- Six guard files: 116 passed, zero skipped. This precedes the semantic correction; the four unchanged guard adaptations retain source applicability.
+- Fixed affected set: 85 passed, zero skipped: new group regression11, preparation12, preview-record39, W7 shape10 and W6-R5 preservation13. Repeated assertions across phases are not additional unique cases.
+- The persisted group probe reaches the unchanged registry identity gate without SQL; it does not establish full worker/native execution. The preview and preparation probes preserve four physical events, exact165 minutes, V1 optional policy and reject seven invalid contexts.
+- Explicit lint on all ten changed source files: zero diagnostics, introduced0. Initial validate:all completed plugin validation and root lint, then exposed three type assignments. After the type-only fix, only the previously incomplete workspace type-check and the changed type-file lint were run; both passed. This closes all validation phases, not a claimed fresh whole validate:all invocation.
+- Independent bounded source review has no remaining confirmed finding. No native/business suite was repeated for unchanged source.
+
+Commands: `pnpm --filter @metasheet/core-backend exec vitest run <affected files> --retry=0 --maxWorkers=1 --minWorkers=1`, explicit same-path/config ESLint, then `pnpm -r type-check`. Actual per-file assertions, source pins, raw report hashes and phase limitations are recorded in `ci-core-guard-main-independent-final-audit.json`. Current-head required CI and actual target execution remain mandatory before final evidence closure; no parent success substitutes for them.

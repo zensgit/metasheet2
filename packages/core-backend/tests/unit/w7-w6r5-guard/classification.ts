@@ -138,6 +138,36 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-reservation-host.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-worker.ts',
+  // Binds the named command, event ordinals and target to the digest-covered import plan
+  // before canonical registry claims and effects.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-command.ts',
+  // Expands each physical event into a raw source ordinal consumed by prepared-plan
+  // calculation and canonical import execution.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-evidence.ts',
+  // Parses the target, date, timezone and ordered physical punches used to resolve and
+  // freeze the import calculation context.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-input.ts',
+  // Revalidates current admission, the durable command and plan, and the completed summary
+  // before returning a canonical import job.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-job-replay-host.ts',
+  // Locks timezone and rollout state, rechecks identity, resolves the server-frozen target
+  // and builds its prepared calculation plan.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-preparation-host.ts',
+  // Validates the supported frozen context and attribution, calculates all events and embeds
+  // frozen inputs and outputs in the import plan.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-prepare.ts',
+  // Resolves and stores frozen preview targets, or revalidates their saved calculations on
+  // replay, under current admission.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-preview-host.ts',
+  // Rechecks current admission and verifies the frozen preview through its recalculating
+  // codec before job reads or completion.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-preview-job-host.ts',
+  // Builds and verifies digest-bound frozen targets and deterministic previews through the
+  // prepared-plan calculator.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-preview-record.ts',
+  // Gates committed-batch, job and preview replay with current canonical posture, identity
+  // and import reservation locks.
+  'packages/core-backend/src/attendance/w4c3a-punch-detail-replay-host.ts',
   'packages/core-backend/src/attendance/w4c3a-rollout-control.ts',
   'packages/core-backend/src/attendance/w4c3a-sync-import-host.ts',
   'packages/core-backend/src/attendance/w4c3a-sync-import-kernel.ts',
@@ -201,6 +231,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-editor-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+  // Consumes scoped persisted import-token authority before producer preparation or
+  // preview reservation; it gates calculation admission.
+  'plugins/plugin-attendance/lib/attendance-import-token-consumer.cjs',
   // Import identity resolution selects the employee whose frozen context is built.
   // Both W6 aggregate bans apply; this is not an exclusion.
   'plugins/plugin-attendance/lib/attendance-import-user-identity.cjs',
@@ -214,6 +247,18 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   // calculation path also depends on, so both ban legs apply to it even though it never
   // WRITES a calculation itself (only an out-of-band audit row).
   'plugins/plugin-attendance/lib/attendance-org-resolution-shadow.cjs',
+  // Dispatches closed physical-event requests to the named producer before the legacy
+  // daily-row parser can accept them.
+  'plugins/plugin-attendance/lib/attendance-punch-detail-import.cjs',
+  // Resolves the published target, freezes attribution and policy proof, and issues
+  // calculation context on the locked host client.
+  'plugins/plugin-attendance/lib/attendance-punch-detail-prepare.cjs',
+  // Authorizes the target using current import access or scheduler-scope facts before
+  // preview freezing or reconstruction.
+  'plugins/plugin-attendance/lib/attendance-punch-detail-preview-authorizer.cjs',
+  // Carries accepted events through frozen-target preparation to previews, synchronous
+  // commit, durable reservation and replay.
+  'plugins/plugin-attendance/lib/attendance-punch-detail-producer.cjs',
   'plugins/plugin-attendance/lib/attendance-punch-org-resolution.cjs',
   // Records/calendar pre-read identity boundary, not a calculation engine.
   // Keep the stricter partition: both W6 aggregate bans apply, with no carve-out.

@@ -1,6 +1,7 @@
 import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
 import type { FrozenAttendanceContextV1 } from './w4c0-write-boundary-types'
-import { calculateAttendanceSegmentsV1, validateFrozenContextShape } from './w4c1-segment-calculator'
+import type { FrozenAttendanceContextV2 } from './w7-resolver/w7-group-effective-context-issuance'
+import { calculateAttendanceSegmentsV1, isSupportedFrozenAttendanceContextV1 } from './w4c1-segment-calculator'
 import {
   verifyAttendanceImportAttributionSnapshotV1,
   verifyAttendanceImportPolicySourceFingerprintV1,
@@ -23,7 +24,7 @@ export type AttendancePunchDetailPreparationInputV1 = Readonly<{
   batchId: string
   envelope: AttendancePunchDetailJobEnvelopeV1
   attribution: Extract<AttendanceImportAttributionFreezeBuildResultV1, { kind: 'resolved_v2' }>
-  context: FrozenAttendanceContextV1
+  context: FrozenAttendanceContextV1 | FrozenAttendanceContextV2
   policySourceProof: AttendanceImportPolicySourceProofV1
   chunkConfig: unknown
 }>
@@ -57,7 +58,7 @@ export function buildAttendancePunchDetailPreparedPlanV1(input: AttendancePunchD
     expectedIdentity: identity,
   })
   const context = input.context
-  if (attribution.posture !== 'resolved_v2' || !validateFrozenContextShape(context)
+  if (attribution.posture !== 'resolved_v2' || !isSupportedFrozenAttendanceContextV1(context)
     || context.orgId !== identity.orgId || context.userId !== identity.userId
     || context.workDate !== identity.workDate || context.timezone !== command.timezone
     || context.shiftId !== attribution.value.shiftId
