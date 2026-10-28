@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { claimAttendanceCanonicalImportRegistryV1 } from '../w4c3a-canonical-import-kernel'
-import { buildAttendancePunchDetailPreparedPlanV1 } from '../w4c3a-punch-detail-prepare'
-import { buildAttendancePunchDetailPreviewRecordV1, verifyAttendancePunchDetailPreviewRecordV1 } from '../w4c3a-punch-detail-preview-record'
-import { isSupportedFrozenAttendanceContextV1 } from '../w4c1-segment-calculator'
-import type { AttendanceLegacyPlanWorkerJobV1, VerifiedAttendanceLegacyPlanV1 } from '../w4c3a-legacy-plan-worker'
-import type { FrozenAttendanceContextV2 } from '../w7-resolver/w7-group-effective-context-issuance'
-import { punchDetailPreparationFixture } from './helpers/punch-detail-plan-fixture'
+import { claimAttendanceCanonicalImportRegistryV1 } from '../../src/attendance/w4c3a-canonical-import-kernel'
+import { buildAttendancePunchDetailPreparedPlanV1 } from '../../src/attendance/w4c3a-punch-detail-prepare'
+import { buildAttendancePunchDetailPreviewRecordV1, verifyAttendancePunchDetailPreviewRecordV1 } from '../../src/attendance/w4c3a-punch-detail-preview-record'
+import { isSupportedFrozenAttendanceContextV1 } from '../../src/attendance/w4c1-segment-calculator'
+import type { AttendanceLegacyPlanWorkerJobV1, VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
+import type { FrozenAttendanceContextV2 } from '../../src/attendance/w7-resolver/w7-group-effective-context-issuance'
+import { punchDetailPreparationFixture } from '../../src/attendance/__tests__/helpers/punch-detail-plan-fixture'
 
 function groupContext(): FrozenAttendanceContextV2 {
   return { ...punchDetailPreparationFixture().context, schemaVersion: 2,

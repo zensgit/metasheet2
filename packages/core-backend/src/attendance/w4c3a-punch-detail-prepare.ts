@@ -1,6 +1,5 @@
 import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
-import type { FrozenAttendanceContextV1 } from './w4c0-write-boundary-types'
-import type { FrozenAttendanceContextV2 } from './w7-resolver/w7-group-effective-context-issuance'
+import type { RoutedFrozenAttendanceContextV1 } from './w7-frozen-context-router'
 import { calculateAttendanceSegmentsV1, isSupportedFrozenAttendanceContextV1 } from './w4c1-segment-calculator'
 import {
   verifyAttendanceImportAttributionSnapshotV1,
@@ -24,7 +23,7 @@ export type AttendancePunchDetailPreparationInputV1 = Readonly<{
   batchId: string
   envelope: AttendancePunchDetailJobEnvelopeV1
   attribution: Extract<AttendanceImportAttributionFreezeBuildResultV1, { kind: 'resolved_v2' }>
-  context: FrozenAttendanceContextV1 | FrozenAttendanceContextV2
+  context: Exclude<RoutedFrozenAttendanceContextV1, { kind: 'invalid' }>['context']
   policySourceProof: AttendanceImportPolicySourceProofV1
   chunkConfig: unknown
 }>

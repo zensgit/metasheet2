@@ -104,3 +104,18 @@ Actual phases:
 - Independent bounded source review has no remaining confirmed finding. No native/business suite was repeated for unchanged source.
 
 Commands: `pnpm --filter @metasheet/core-backend exec vitest run <affected files> --retry=0 --maxWorkers=1 --minWorkers=1`, explicit same-path/config ESLint, then `pnpm -r type-check`. Actual per-file assertions, source pins, raw report hashes and phase limitations are recorded in `ci-core-guard-main-independent-final-audit.json`. Current-head required CI and actual target execution remain mandatory before final evidence closure; no parent success substitutes for them.
+
+## CI closure-boundary follow-up after 7178
+
+The next exact-head backend run failed four assertions in three structural guard files: the production resolver-importer census, issuance op(i) importer census, and two context-shape checks. Repeated retry/reporting lines are not extra unique failures. Full failed-job log: 8,858,176 bytes, SHA-256 96c4dbabb9dc4259de58c2e72338ef5688b000c6777d8dfa7153102046e8edb5. Later native/request52 targets did not execute. PostgreSQL cleanup failed after startup was skipped; its guard is unchanged.
+
+The preparation input now derives its existing V1/V2 union from RoutedFrozenAttendanceContextV1, excluding the explicit invalid/null arm. This removes the direct private-issuer type import without changing accepted types or runtime JavaScript. The new group regression moves from the production-source census tree to the existing tests/unit/attendance-w4c3a-punch-detail-group-context.test.ts location. Seven relative imports change; all helper/test bodies and eleven expanded cases remain byte-identical. Existing default core CI discovers this standard unit-test path. No scanner root/exclusion, allowlist, assertion, budget or workflow changes.
+
+Actual focused validation, with the final candidate paths staged so index-based scanners see them:
+
+- Four affected files: 55 passed, zero skipped/filtered/TODO: moved group-context11, inertness25, context-shape10 and issuance-seam9. These are executed assertion statuses, not reporter header counts.
+- Explicit lint on the preparation and moved regression paths: baseline/current both zero diagnostics.
+- Backend type-check completed successfully. Preparation compiled JavaScript is byte-identical: SHA-256 5b263fffab689529722eae9775e0c8d865e8f3890495a2dfff97b8803715e7bd.
+- Independent bounded source review found no confirmed finding; the main audit checked source pins, retained test bodies, unchanged guards, actual assertions and the prior validation phases. This is not a fresh whole validate:all, full native execution or current-head CI pass.
+
+Commands: pnpm --filter @metasheet/core-backend exec vitest run <the four affected files> --retry=0 --maxWorkers=1 --minWorkers=1; explicit baseline/current ESLint; pnpm --filter @metasheet/core-backend type-check. Evidence: ci-7178-boundary-repair-validation-state.json, ci-7178-boundary-repair-independent-source-review.json and ci-7178-boundary-repair-main-independent-final-audit.json. No previously green unchanged business/native suite was rerun. New-head required CI and actual target execution remain mandatory; the parent's other twelve successful checks are historical only.
