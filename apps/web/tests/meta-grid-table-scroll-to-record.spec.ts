@@ -110,7 +110,7 @@ describe('MetaGridTable scrollToRecord (customer issue 2026-10-27 4b)', () => {
   })
 
   it('does not move the grid when the row is already fully visible', async () => {
-    // 门审 F3：不能拿最顶上的行测——去掉「整行可见就不动」的判断后，居中公式算出的负值也会被夹到 0。
+    // 钉住「整行已可见就不滚动」。不能拿最顶上的行测——去掉这条判断后，居中公式算出的负值也会被夹到 0。
     // 先滚到 r1000（居中），再定位同屏的 r995：整行可见，scrollTop 应保持不变；
     // 去掉可见判断时会把 r995 重新居中（scrollTop 变成 centeredScrollTop(995, 600)），这条用例变红。
     const { root, grid } = mountGrid(makeRows(2000), { selectedRecordId: 'r995' })

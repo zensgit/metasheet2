@@ -104,7 +104,7 @@ vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
 }))
 
-// S4/N1 (2026-09-25 review): onCreateSheet/onInstallTemplate gate on canCreateBasesAndSheets, which
+// onCreateSheet/onInstallTemplate gate on canCreateBasesAndSheets, which
 // reads auth.getAccessSnapshot() directly (not through any of the composables already mocked above).
 // Grant isAdmin so the toolbar's template-library button and the rail's create-sheet path are live.
 vi.mock('../src/composables/useAuth', () => ({
@@ -212,7 +212,8 @@ function createWorkbenchMock() {
   const views = ref([
     { id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid' },
     // A second GRID-typed view (not e.g. gallery) so switching to it still renders MetaGridTable —
-    // this spec is about the dashboard-exit wiring, not the per-view-type render chain.
+    // these workbench stubs reuse the dashboard-exit spec's setup; this spec does not test the
+    // per-view-type render chain.
     { id: 'view_grid_2', sheetId: 'sheet_orders', name: 'Grid 2', type: 'grid' },
     // 跨表用例的目标表的视图。
     { id: 'view_other', sheetId: 'sheet_other', name: 'Other grid', type: 'grid' },
@@ -235,11 +236,11 @@ function createWorkbenchMock() {
       updateField: vi.fn(),
       deleteField: vi.fn(),
       createView: vi.fn().mockResolvedValue({ view: { id: 'view_new', sheetId: 'sheet_orders', name: 'New View', type: 'grid' } }),
-      // S3 (2026-09-25 review): actually removes the view, the same shape as the real server call, so
-      // the loadSheetMeta mock below can faithfully reproduce the bug this fixes (activeViewId already
-      // reset to the fallback by the time onDeleteView's OWN check used to run).
+      // Actually removes the view, the same shape as the real server call, so the loadSheetMeta mock
+      // below stays consistent with a real deleteView -> loadSheetMeta round trip (stub reused from the
+      // dashboard-exit spec's setup).
       deleteView: vi.fn(async (viewId: string) => { views.value = views.value.filter((view) => view.id !== viewId) }),
-      // S4 (2026-09-25 review): onInstallTemplate/loadTemplateLibrary.
+      // onInstallTemplate/loadTemplateLibrary.
       listTemplates: vi.fn().mockResolvedValue({ templates: [{ id: 'tpl_1', name: 'Tpl', sheets: [], fields: [], views: [] }] }),
       installTemplate: vi.fn().mockResolvedValue({
         base: { id: 'base_tpl', name: 'Templated Base' },
@@ -273,7 +274,7 @@ function createWorkbenchMock() {
       canManageViews: true,
       canComment: true,
       canManageAutomation: false, canExport: true,
-      // S4 (2026-09-25 review): onDeleteSheet's own capability gate.
+      // onDeleteSheet's own capability gate.
       canDeleteSheet: true,
     }),
     capabilityOrigin: ref(null),
@@ -286,11 +287,10 @@ function createWorkbenchMock() {
     error: ref<string | null>(null),
     loadSheets: vi.fn().mockResolvedValue(true),
     loadBaseContext: vi.fn().mockResolvedValue(true),
-    // S3 (2026-09-25 review): the real useMultitableWorkbench.loadSheetMeta falls activeViewId back
-    // to views[0] once the requested/active view is no longer in the reloaded list — reproduce that
-    // one fallback bit here (nothing else this spec needs) so onDeleteView's "was it active" check
-    // sees the SAME already-moved-on activeViewId a real deleteView -> loadSheetMeta round trip would
-    // leave behind.
+    // The real useMultitableWorkbench.loadSheetMeta falls activeViewId back to views[0] once the
+    // requested/active view is no longer in the reloaded list — reproduce that one fallback bit here
+    // (nothing else this spec needs) so activeViewId ends up where a real loadSheetMeta reload would
+    // leave it.
     loadSheetMeta: vi.fn(async () => {
       if (!views.value.some((view) => view.id === activeViewId.value)) {
         activeViewId.value = views.value[0]?.id ?? ''
@@ -536,7 +536,7 @@ describe('MultitableWorkbench locate-in-grid after notification / deep link (cus
     expect(workbenchMock.client.getRecord).not.toHaveBeenCalled()
   })
 
-  // 门审 F1：跨表点通知。selectSheet 清空 activeViewId，表格先不带视图取一次行；新表的 /context 回来以后才设好
+  // 钉住跨表点通知时的等待时机。selectSheet 清空 activeViewId，表格先不带视图取一次行；新表的 /context 回来以后才设好
   // 视图，表格再按视图重新取行。定位必须等到按视图取的行回来，不能用不带视图的那批行。
   // 判别力：不带视图的那批行里有目标记录（第 1 页就能「找到」），按视图的行里它在第 163 行。
   //   - isGridBusy 不看 capabilitiesStale：不带视图的那批行一回来就放行，按那批行滚动 → 第一个「未调用」断言变红；
@@ -608,7 +608,7 @@ describe('MultitableWorkbench locate-in-grid after notification / deep link (cus
     expect(gridMock.loadMore).not.toHaveBeenCalled()
   })
 
-  // 门审 F4：历史中心的 open-record 也要定位（去掉 onHistoryOpenRecord 里的 locate: true 这条会变红）。
+  // 钉住历史中心的 open-record 也走同一条定位路径（去掉 onHistoryOpenRecord 里的 locate: true 这条会变红）。
   it('locates a History Center open-record through the same path', async () => {
     installPagedGrid({ totalRows: 618 })
     const root = await mountWorkbench()
@@ -621,7 +621,7 @@ describe('MultitableWorkbench locate-in-grid after notification / deep link (cus
     expect(workbenchMock.client.getRecord).not.toHaveBeenCalled()
   })
 
-  // 门审 F4：评论深链（props.recordId + commentId）在挂载时定位。
+  // 钉住评论深链（props.recordId + commentId）在挂载时定位，并标记评论已读。
   it('locates a comment deep link (props.recordId + commentId) on mount', async () => {
     installPagedGrid({ totalRows: 618 })
 
@@ -633,7 +633,7 @@ describe('MultitableWorkbench locate-in-grid after notification / deep link (cus
     await vi.waitFor(() => expect(workbenchMock.client.markCommentRead).toHaveBeenCalledWith('cmt_1'))
   })
 
-  // 门审 F4：只刷新已选记录的调用方（这里是冲突重载）不传 locate：不追加、不滚动、不出提示。
+  // 钉住只刷新已选记录的调用方（这里是冲突重载）不传 locate：不追加、不滚动、不出提示。
   it('a refresh-only caller (conflict reload) re-resolves the selected record without appending or scrolling', async () => {
     installPagedGrid({ totalRows: 618 })
     const root = await mountWorkbench()
