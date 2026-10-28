@@ -186,6 +186,8 @@ describe('MultitableWorkbench hand-create gate on a sheet with locked + required
   const note = () => container!.querySelector('[data-testid="record-create-locked-note"]')
 
   it('flag absent: every hand-create entry follows canCreateRecord, no note, duplicate and "+ row" go through', async () => {
+    // Customer feedback 2026-10-27: a duplicate asks first; confirming lets it through.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     await mount('grid', { ...WRITER_CAPS })
     expect(captured.MetaToolbar!['can-create-record']).toBe(true)
     expect(captured.MetaGridTable!['can-create']).toBe(true)
@@ -194,6 +196,8 @@ describe('MultitableWorkbench hand-create gate on a sheet with locked + required
 
     await (captured.MetaGridTable!.onDuplicateRecord as (id: string) => Promise<void>)('rec_1')
     await (captured.MetaGridTable!.onCreateRecord as () => Promise<void>)()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    confirmSpy.mockRestore()
     expect(gridMock.duplicateRecord).toHaveBeenCalledWith('rec_1')
     expect(gridMock.createRecord).toHaveBeenCalledTimes(1)
     expect(showErrorSpy).not.toHaveBeenCalled()

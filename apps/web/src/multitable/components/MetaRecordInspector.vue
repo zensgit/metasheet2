@@ -237,7 +237,20 @@
             :title="l('record.dispatchTaskTitle')"
             @select="showTaskDispatch = true"
           >{{ l('record.dispatchTask') }}</MtMenuItem>
-          <MtMenuItem v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @select="emit('duplicate')">{{ l('record.duplicate') }}</MtMenuItem>
+          <!-- Customer feedback 2026-10-27: on a sheet whose rows a plugin maintains, /context marks duplicate
+               blocked; the entry stays visible but DISABLED with the reason shown inline (a disabled
+               button's tooltip is unreliable). The workbench asks for confirmation before it duplicates. -->
+          <MtMenuItem
+            v-if="record && canCreate"
+            class="meta-record-drawer__btn meta-record-drawer__btn--duplicate"
+            :disabled="!!duplicateBlockedReason"
+            :title="duplicateBlockedReason || l('record.duplicateTitle')"
+            @select="emit('duplicate')"
+          >{{ l('record.duplicate') }}<span
+            v-if="duplicateBlockedReason"
+            class="meta-record-drawer__menu-reason"
+            data-testid="record-inspector-duplicate-blocked-reason"
+          >{{ duplicateBlockedReason }}</span></MtMenuItem>
           <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
                though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
                host — see this class's own style rule below for the current (menu-row) styling. -->
@@ -628,6 +641,9 @@ const props = withDefaults(defineProps<{
   // Duplicate / clone record (design 2026-06-16): sheet-level canCreateRecord (a duplicate is a create).
   // Gates the drawer's Duplicate button; the server re-enforces it (no FE permission mirror).
   canCreate?: boolean
+  /** Customer feedback 2026-10-27: set when /context reports `recordDuplicateBlocked` — the duplicate entry is
+   *  rendered disabled with this text as its reason. null/absent ⇒ unchanged. */
+  duplicateBlockedReason?: string | null
   canManageAutomation?: boolean
   /** 记录级送审 (阶段二 §5): server-derived `multitable:submit-approval`. Default false — an older
    *  backend, the deprecated MetaRecordDrawer shell's own caller, or any harness that omits it gets NO
@@ -1789,6 +1805,11 @@ function formatCommentTimestamp(iso: string): string {
 }
 .meta-record-drawer__title-input:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -1px; }
 .meta-record-drawer__menu-separator { margin: var(--ms-space-1, 4px) 0; border: none; border-top: 1px solid var(--ms-border, #e5e7eb); }
+/* Customer feedback 2026-10-27: the reason under a disabled duplicate entry — wraps inside the menu. */
+.meta-record-drawer__menu-reason {
+  display: block; max-width: 240px; padding-bottom: var(--ms-space-1, 4px);
+  font-size: 12px; line-height: 1.4; white-space: normal; color: var(--ms-text-3);
+}
 /* Resizable panel (2026-09-05): the drag/keyboard splitter on the panel's left edge (see the
    component's `onSplitterPointerDown`/`onSplitterKeydown`). Absolutely positioned against
    `.meta-record-drawer`'s own `position: relative` (added above) so it never participates in the
