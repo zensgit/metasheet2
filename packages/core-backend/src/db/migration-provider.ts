@@ -39,24 +39,22 @@ interface CreateCoreBackendMigrationProviderOptions {
 //      order cannot yet satisfy a migration's FK/constraint assumptions.
 //   3. migration-replay.yml's OWN MIGRATION_EXCLUDE subset — a different, narrower list for
 //      a different job (run db:migrate twice against a fresh db, assert idempotency), which
-//      has independently dropped some entries (e.g. 20250925_create_view_tables.sql, fixed by
-//      #3627/#3632) that the CI per-PR gate lists above have not yet re-verified and dropped.
+//      independently dropped 20250925_create_view_tables.sql after #3627/#3632; #4162 later
+//      re-verified that fix and aligned the per-PR gate lists.
 //      See the comments on that env var in each workflow file for the per-item and
 //      per-occurrence detail.
 //
-// Known, deliberate overlap between this list and mechanism #2: 042a_core_model_views,
-// 048_create_event_bus_tables, and 049_create_bpmn_workflow_tables appear in BOTH — no-op
-// AND CI-excluded is redundant but harmless (belt-and-suspenders), confirmed as the full
-// overlap (no others) by the 2026-07-10 audit above.
+// Known, deliberate overlap between this list and mechanism #2:
+// 048_create_event_bus_tables and 049_create_bpmn_workflow_tables appear in BOTH — no-op AND
+// CI-excluded is redundant but harmless (belt-and-suspenders). 042a_core_model_views was the
+// third overlap until #4162 removed its stale CI exclusion; it remains an audited no-op marker.
 //
 // Known asymmetry that this list does NOT close (tracked, not a bug in this file): production
-// and on-prem `db:migrate` runs use NEITHER this list NOR MIGRATION_EXCLUDE — they run every
-// migration including the modern view_states/gantt/snapshot/protection-rule/change-management
-// migrations that CI's MIGRATION_EXCLUDE (mechanism #2) skips. That means those modern
-// migrations' up() bodies have never had a per-PR green CI run; untangling that gap so the
-// full snapshot-protection integration suite can run in CI is gated planning work — see #4162.
-// Do not "fix" that gap by deleting entries from this list; the two mechanisms serve different
-// failure modes and this file is not the one that needs to change for it.
+// and on-prem `db:migrate` runs use no MIGRATION_EXCLUDE. #4162 closed the modern migration
+// coverage gap for views/view_states, gantt, 20250925, and the snapshot/protection/change-
+// management cluster. The remaining CI exclusions are 008/048/049 plus user_orgs outside
+// plugin-tests; do not "fix" those by deleting entries from this list because the mechanisms
+// serve different failure modes.
 //
 // Per-item disposition below (grouped; full object-level mapping is in the 2026-07-10 audit
 // doc's §1/§2 tables). Everything is a verified zombie (no live reader depends on the legacy
