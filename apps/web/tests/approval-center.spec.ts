@@ -501,6 +501,10 @@ describe('ApprovalCenterView', () => {
     exportApprovalsCsvSpy.mockReset()
     mockRoute.name = 'approval-list'
     mockRoute.query = {}
+    // The center's 通过/驳回 affordances (inline, pane, batch) follow `approvals:act`, as the detail
+    // view's do. This suite exercises them as an actor, so grant it; the reader cases live in
+    // cancelRoundEntryCenterRoute.spec.ts and approval-center-master-detail.spec.ts.
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:act']))
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -512,6 +516,7 @@ describe('ApprovalCenterView', () => {
     app = null
     container = null
     vi.clearAllMocks()
+    localStorage.removeItem('user_permissions')
   })
 
   async function mountView() {

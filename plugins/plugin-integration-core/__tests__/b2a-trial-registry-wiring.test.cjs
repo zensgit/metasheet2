@@ -28,6 +28,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // literals are schema ids, frozen reason tokens, synthetic scope refs and synthetic cell text.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
@@ -311,6 +312,8 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
   return {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
     stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
@@ -472,7 +475,7 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: {
+    services: withRefreshGovernance({
       ...baseServices({
         sourceAdapter: (source || createRecordingSourceAdapter()).adapter,
         spies,
@@ -489,7 +492,7 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
       // unreachable. Applied AFTER the baseServices spread so the mount-level parameter stays the
       // authority on the claim, exactly as the W-3 suite's M78 cases require.
       b2aOperationClaim: operationClaim === null ? null : (operationClaim || claimForStorage(context.storage)),
-    },
+    }),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context, spies }
@@ -1362,7 +1365,7 @@ async function R06_schemaDriftRefusesBeforeAnyBusinessArtifact() {
 //
 // The check is `done === false`, not falsy, because the ordinary single-page shape
 // (`{ records: [...] }`) leaves `done` UNDEFINED and must keep terminating normally — an assertion
-// the dormant leg below would catch if it were widened.
+// the ordinary-termination leg below would catch if it were widened.
 async function E3_02_brokenCursorRefusesAndNoPlanIsProduced() {
   const brokenCursor = (input) => (input.object === PLM_STOCK_PREPARATION_BOM_READ_PLAN.pathExAttr.object
     ? { records: sourceData()[input.object].map(clone), done: false, nextCursor: null }
@@ -1376,12 +1379,15 @@ async function E3_02_brokenCursorRefusesAndNoPlanIsProduced() {
   }, records, 'E3-02 broken cursor')
   assert.equal(res.body.error.details.fullBatch, false, 'the refusal states the property it failed')
 
-  // DORMANT: byte-identically the old behaviour, truncation included. The guard is armed-only, and
-  // this leg is what proves it rather than asserting it.
+  // SA01D: a dormant deployment still returns its normal dry-run envelope, but an explicitly
+  // incomplete read is failed and cannot mint an apply token. Armed B2a keeps its C6 refusal above.
   const dormantSource = createRecordingSourceAdapter(sourceData(), { onRead: brokenCursor })
   const dormant = await routeDryRun(mount({ source: dormantSource }).routes)
-  assert.equal(dormant.statusCode, 200, 'a dormant deployment keeps the loop it had')
-  assert.equal(dormant.body.data.evidence.expansion.errorTypes.includes('read_cursor_broken'), false)
+  assert.equal(dormant.statusCode, 200, 'a dormant deployment retains the dry-run response contract')
+  assert.equal(dormant.body.data.status, 'failed')
+  assert.equal(dormant.body.data.canApply, false)
+  assert.equal(dormant.body.data.dryRunToken, null)
+  assert.equal(dormant.body.data.evidence.expansion.errorTypes.includes('read_cursor_broken'), true)
 
   // AND THE ORDINARY TERMINATION IS UNTOUCHED WHEN ARMED: `done: true` with no cursor is a complete
   // batch, and `done` absent is the common fixture shape. Neither may be read as a broken cursor.

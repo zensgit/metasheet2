@@ -4,11 +4,12 @@
 // 「防止漏传」), in the form of stock-preparation-tenant-scoped-write-guard.test.cjs: a SOURCE scan of
 // http-routes.cjs, because a route-level behaviour test can only see the lookups it drives.
 //
-// WHAT IT PINS. While the switch is on, `getTableAction` resolves the SHEET from the project
+// WHAT IT PINS. Both direct `getTableAction` and reviewed `resolveTableActionExecution` lookups
+// resolve the SHEET from the project
 // registry, keyed by `projectNo`. A lookup that forgets the number would either be refused 400 by
 // the overlay (harmless but a broken route) or — if it also declared a purpose the overlay skips —
 // silently read the OLD mixed sheet. So:
-//   C-01 every `tableActions.getTableAction(` call in the route source carries EITHER a `projectNo`
+//   C-01 every direct or execution lookup in the route source carries EITHER a `projectNo`
 //        key OR an explicit `targetPurpose: 'source'` / `targetPurpose: 'readiness'`;
 //   C-02 the SOURCE-only lookups are exactly the four the ADR names (overview list, source
 //        preflight, source-binding picker, source-binding set) — pinned by handler, so a fifth
@@ -24,9 +25,9 @@
 //        apply-run — look the registry up by the job's own projectNo and run
 //        `assertLargeBomJobTargetMatchesProjectTarget(` on the stored target BEFORE any IO on it
 //        (apply-run on both the expansion snapshot and the apply job's target, before the gate);
-//   C-07 (R2) the OTHER lib caller of `getTableAction` — the preflight's env-binding probe — declares
-//        `targetPurpose: 'readiness'`, and http-routes.cjs + stock-preparation-preflight.cjs are the
-//        ONLY lib files that call it (a new caller must be argued here);
+//   C-07 (R2) preflight's env-binding probe declares `targetPurpose: 'readiness'`. The only third
+//        caller is the validation reader's private deployment-template registry — C-13 pins that
+//        exact no-binding/no-project-resolver constructor and its owner/B2A-before-read chain.
 //   C-08 (E2b) `projectSheetGateFor` reads the switch live and the registry objectId from the
 //        RESOLVED target, never a literal and never the deployment objectId.
 //   C-09 (S2, R-36; fix round 1) the project-sheet CREATE reads the deployment's env binding (a
@@ -46,6 +47,10 @@
 //   C-12 (S4 fix round 1) the create REPLAY heals only inside `store.withActiveRowLocked`: the grant
 //        heal, the pack plan and the pack install all sit inside that callback (on the row the lock
 //        re-read), and no replay heal call remains outside it.
+//   C-14 (F2) the executor hand-off: the store's one identity guard calls the resolver with
+//        `{ executor: trx }` (its only resolver call), the route's resolver closure accepts `{ executor }`
+//        and forwards it as the registration comparison's last argument, and the unlocked pre-read is the
+//        handler's only argument-free resolver call (it stays on the pool). Self-mutation pairs below.
 //
 // Mutation: delete `projectNo` from any one lookup, or change a `'source'` to `'write'`, or drop a
 // wall call, and the corresponding check reds naming the handler.
@@ -60,6 +65,82 @@ const stripComments = (source) => source.replace(/\/\*[\s\S]*?\*\//g, '').replac
 const SRC = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
 const CODE = stripComments(SRC)
 const PREFLIGHT_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-preflight.cjs'), 'utf8'))
+const VALIDATION_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-read-plan-validation-runtime.cjs'), 'utf8'))
+const STORE_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-project-target-store.cjs'), 'utf8').replace(/\r\n/g, '\n'))
+
+function assertDeferredRegistration(body) {
+  const comparisonAt = body.indexOf('const comparison = await resolveSourceProjectComparison()')
+  const modeAt = body.indexOf("const strictRegistration = comparison === 'case-insensitive'")
+  assert.ok(comparisonAt !== -1 && modeAt > comparisonAt && modeAt < body.indexOf('if (registered) {'),
+    'the trusted comparison selects strict mode before either replay or create')
+  const prepareAt = body.indexOf('const prepareTarget = async () => {')
+  const prepareEnd = body.indexOf('\n        }\n        if (strictRegistration) {', prepareAt)
+  assert.ok(prepareAt !== -1 && prepareEnd > prepareAt, 'the named preparation callback precedes the strict/default branch')
+  const prepare = body.slice(prepareAt, prepareEnd)
+  assert.ok(!(body.slice(0, prepareAt) + body.slice(prepareEnd)).includes('provisionProjectSheet('), 'all provisioning belongs to the preparation callback')
+  const provision = prepare.indexOf('provisionProjectSheet(')
+  const install = prepare.indexOf('installPacks(createPlan, provisioned.objectId)')
+  const handles = prepare.indexOf('return { sheetId: provisioned.sheetId, objectId: provisioned.objectId }')
+  assert.ok(provision !== -1 && install > provision && handles > install, 'provision then install then return handles, inside the callback')
+
+  const strictAt = body.indexOf('if (strictRegistration) {', prepareEnd)
+  const defaultAt = body.indexOf('\n        } else {', strictAt)
+  const branchEnd = body.indexOf('\n        }\n', defaultAt + 1)
+  assert.ok(strictAt > prepareEnd && defaultAt > strictAt && branchEnd > defaultAt, 'strict and default registration branches are bounded')
+  const compact = (source) => source.replace(/\s/g, '')
+  assert.equal(compact(body.slice(strictAt, defaultAt)), compact(`if (strictRegistration) {
+    registered = await store.create({
+      tenantId, projectNo, createdBy: actor,
+      maxPerTenant: MAX_PROJECT_TARGETS_PER_TENANT,
+      resolveSourceProjectComparison,
+    }, prepareTarget)`), 'only strict registration passes the resolver and deferred preparation to store.create')
+  assert.equal(compact(body.slice(defaultAt, branchEnd)), compact(`} else {
+    const target = await prepareTarget()
+    registered = await store.create({
+      tenantId, projectNo, sheetId: target.sheetId, objectId: target.objectId,
+      createdBy: actor, maxPerTenant: MAX_PROJECT_TARGETS_PER_TENANT,
+      resolveSourceProjectComparison,
+    })`), 'default/case-sensitive prepares outside the store lock, then registers direct handles with the resolver (re-checked under the blocking lock) and no callback')
+  assert.equal((body.match(/await prepareTarget\(\)/g) || []).length, 1, 'only the default branch invokes preparation directly')
+  assert.equal((body.match(/registered = await store\.create\(/g) || []).length, 2, 'exactly the reviewed strict and default registrations exist')
+  const start = STORE_CODE.indexOf('async function create(input = {}, prepareTarget) {')
+  assert.notEqual(start, -1, 'the store accepts the preparation callback')
+  const fn = STORE_CODE.slice(start, STORE_CODE.indexOf('async function transition(', start))
+  const lock = fn.indexOf("await lockRegistration(trx, tenantId, deferred ? 'try' : (resolveSourceProjectComparison ? 'pinned' : 'blocking'))")
+  const guard = fn.indexOf('await assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison })')
+  const callback = fn.indexOf('await prepareTarget()')
+  const insert = fn.indexOf('await trx.insertOne(')
+  assert.ok(lock !== -1 && guard > lock && callback > guard && insert > callback,
+    'same transaction: lock, identity guard, full preparation, then registry insert')
+}
+
+// F2 (C-14): the transaction that holds the tenant lock is what the comparison reads on.
+function assertExecutorHandOff(code = CODE, storeCode = STORE_CODE) {
+  const guardStart = storeCode.indexOf('async function assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison }) {')
+  assert.notEqual(guardStart, -1, 'the shared identity guard exists')
+  const guard = storeCode.slice(guardStart, storeCode.indexOf('\n  }\n', guardStart))
+  assert.ok(guard.includes('const mode = await resolveSourceProjectComparison({ executor: trx })'), 'the guard hands the resolver the transaction that holds the tenant lock')
+  assert.equal((storeCode.match(/\bresolveSourceProjectComparison\(/g) || []).length, 1, 'the guard is the store\'s only resolver call')
+  const createStart = code.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
+  assert.notEqual(createStart, -1, 'the create handler exists')
+  const body = code.slice(createStart, code.indexOf('\n    },', createStart))
+  const closureAt = body.indexOf('const resolveSourceProjectComparison = async ({ executor } = {}) => {')
+  assert.notEqual(closureAt, -1, 'the route resolver accepts the handed executor')
+  const closureEnd = body.indexOf('\n      }\n', closureAt)
+  assert.ok(closureEnd > closureAt, 'the route resolver closes')
+  const closure = body.slice(closureAt, closureEnd)
+  const comparisonAt = closure.indexOf('return resolveStockPreparationProjectRegistrationComparison({')
+  assert.notEqual(comparisonAt, -1, 'the closure returns the registration comparison')
+  assert.match(closure.slice(comparisonAt), /\n {10}executor,\n {8}\}\)$/, 'the closure forwards the executor as the comparison\'s last argument')
+  assert.equal((body.match(/\bresolveSourceProjectComparison\(\)/g) || []).length, 1, 'one argument-free resolver call: the unlocked pre-read, on the pool')
+}
+
+function assertReplayLockInput(body) {
+  const inputAt = body.indexOf('const lockInput = strictRegistration ? { tenantId, projectNo, resolveSourceProjectComparison } : { tenantId, projectNo }')
+  const lockAt = body.indexOf('await store.withActiveRowLocked(lockInput, async (locked) => {')
+  assert.ok(inputAt !== -1 && lockAt > inputAt, 'replay passes the trusted resolver only in strict mode, retaining the default legacy lock input')
+  return lockAt
+}
 
 /** The handler (`    async NAME(req, res) {`) a source offset sits in, or null outside any handler. */
 function handlerAt(offset, code = CODE) {
@@ -73,16 +154,18 @@ function handlerAt(offset, code = CODE) {
   return current
 }
 
-/** Every `getTableAction(` call with its balanced argument text. */
+/** Only the two reviewed lookup spellings, with their balanced argument text. */
 function getTableActionCalls(code = CODE) {
   const calls = []
-  const needle = 'getTableAction('
-  let from = 0
-  for (;;) {
-    const at = code.indexOf(needle, from)
-    if (at < 0) break
+  const pattern = /\b(getTableAction|resolveTableActionExecution)\(/g
+  let match
+  while ((match = pattern.exec(code))) {
+    const at = match.index
+    // A helper declaration is not its own invocation.
+    if (/\bfunction\s*$/.test(code.slice(0, at))) continue
+    const needle = match[0]
     let depth = 0
-    let end = at + needle.length - 1
+    let end = -1
     for (let i = at + needle.length - 1; i < code.length; i += 1) {
       const ch = code[i]
       if (ch === '(') depth += 1
@@ -91,9 +174,10 @@ function getTableActionCalls(code = CODE) {
         if (depth === 0) { end = i; break }
       }
     }
+    assert.notEqual(end, -1, `${match[1]} arguments must be balanced`)
     const args = code.slice(at + needle.length, end)
-    calls.push({ offset: at, handler: handlerAt(at, code), args })
-    from = end
+    calls.push({ method: match[1], offset: at, handler: handlerAt(at, code), args })
+    pattern.lastIndex = end + 1
   }
   return calls
 }
@@ -106,7 +190,9 @@ function check(name, fn) {
 
 const calls = getTableActionCalls().filter((call) => call.handler)
 check('the scan finds the route lookups (derivation is not vacuous)', () => {
-  assert.ok(calls.length >= 20, `expected at least 20 getTableAction lookups inside handlers, found ${calls.length}`)
+  assert.ok(calls.length >= 20, `expected at least 20 direct/execution lookups inside handlers, found ${calls.length}`)
+  assert.ok(calls.some((call) => call.method === 'getTableAction'), 'direct lookups are actually scanned')
+  assert.ok(calls.some((call) => call.method === 'resolveTableActionExecution'), 'execution lookups are actually scanned')
 })
 
 const purposeOf = (args) => {
@@ -129,11 +215,15 @@ check('C-01 self-check (E2e): the projectNo predicate takes a shorthand or a val
   assert.ok(!carriesProjectNo("{ actionId, targetPurpose: 'write' }"))
 })
 
-check('C-01 every lookup carries projectNo or an explicit source / readiness purpose', () => {
-  const offenders = calls
+function assertProjectLookupArguments(code = CODE) {
+  const offenders = getTableActionCalls(code).filter((call) => call.handler)
     .filter((call) => !(carriesProjectNo(call.args) || purposeOf(call.args) === 'source' || purposeOf(call.args) === 'readiness'))
     .map((call) => call.handler)
   assert.deepEqual(offenders, [], 'these handlers look up the table action without a projectNo and without declaring a source/readiness purpose')
+}
+
+check('C-01 every lookup carries projectNo or an explicit source / readiness purpose', () => {
+  assertProjectLookupArguments()
 })
 
 check('C-02 the SOURCE-only lookups are exactly the four the ADR names', () => {
@@ -168,7 +258,7 @@ check('C-03 the READINESS lookups are exactly the five large-BOM job routes and 
   ].sort())
 })
 
-check('C-04 every ADR write route runs the resolved-target tenant wall after its lookup', () => {
+function assertWalledProjectLookups(code = CODE) {
   const WALLED = [
     'tableActionDryRun',
     'tableActionApply',
@@ -180,16 +270,26 @@ check('C-04 every ADR write route runs the resolved-target tenant wall after its
     'tableActionConflictPoliciesDelete',
   ]
   for (const handler of WALLED) {
-    const start = CODE.indexOf(`    async ${handler}(req, res) {`)
+    const start = code.indexOf(`    async ${handler}(req, res) {`)
     assert.notEqual(start, -1, `${handler} exists`)
-    const end = CODE.indexOf('\n    },', start)
-    const body = CODE.slice(start, end)
-    const lookupAt = body.indexOf('getTableAction(')
+    const end = code.indexOf('\n    },', start)
+    const body = code.slice(start, end)
+    const lookups = getTableActionCalls(body)
+    const lookupAt = lookups.length ? lookups[0].offset : -1
     const wallAt = body.indexOf('assertResolvedProjectTargetTenancy(')
     assert.notEqual(lookupAt, -1, `${handler}: has a lookup`)
     assert.notEqual(wallAt, -1, `${handler}: runs assertResolvedProjectTargetTenancy`)
     assert.ok(wallAt > lookupAt, `${handler}: the wall runs AFTER the lookup`)
+    for (const lookup of lookups) {
+      assert.ok(carriesProjectNo(lookup.args), `${handler}: each direct/execution lookup names the project`)
+      assert.equal(purposeOf(lookup.args), handler === 'tableActionConflictPoliciesList' ? 'read' : 'write', `${handler}: each lookup keeps its reviewed purpose`)
+      assert.ok(wallAt > lookup.offset, `${handler}: the wall follows every lookup`)
+    }
   }
+}
+
+check('C-04 every ADR write route runs the resolved-target tenant wall after its lookup', () => {
+  assertWalledProjectLookups()
   // The large-BOM apply-run re-reads the registry per chunk (a WRITE lookup) and feeds the gate.
   const runStart = CODE.indexOf('    async tableActionLargeBomApplyJobRun(req, res) {')
   assert.notEqual(runStart, -1, 'the large-BOM apply-run handler exists')
@@ -250,7 +350,7 @@ check('C-06 (R1) the three snapshot-driven large-BOM routes refuse a stale job t
   assert.match(helper, /409,\s*'STOCK_PREPARATION_JOB_TARGET_STALE'/)
 })
 
-check('C-07 (R2) the preflight env-binding probe is a readiness lookup, and the lib callers of getTableAction are exactly two', () => {
+check('C-07 (R2) preflight is readiness; the only added lib caller is the separately pinned validation template reader', () => {
   const probes = getTableActionCalls(PREFLIGHT_CODE)
   assert.ok(probes.length >= 1, 'the preflight looks the action up')
   for (const probe of probes) {
@@ -259,9 +359,73 @@ check('C-07 (R2) the preflight env-binding probe is a readiness lookup, and the 
   }
   const callers = fs.readdirSync(LIB)
     .filter((name) => name.endsWith('.cjs'))
-    .filter((name) => /\.getTableAction\(/.test(stripComments(fs.readFileSync(path.join(LIB, name), 'utf8'))))
+    .filter((name) => /\.getTableAction\(|\bresolveTableActionExecution\(/.test(stripComments(fs.readFileSync(path.join(LIB, name), 'utf8'))))
     .sort()
-  assert.deepEqual(callers, ['http-routes.cjs', 'stock-preparation-preflight.cjs'])
+  assert.deepEqual(callers, ['http-routes.cjs', 'stock-preparation-preflight.cjs', 'stock-preparation-read-plan-validation-runtime.cjs'])
+})
+
+function assertValidationTemplateReader(code = VALIDATION_CODE) {
+  const probes = getTableActionCalls(code)
+  assert.equal(probes.length, 1, 'the immutable draft reader has exactly one template lookup')
+  assert.equal(probes[0].method, 'getTableAction')
+  assert.equal(probes[0].args.trim(), '{ actionId: version.actionId }')
+  assert.match(code, /const templates = createStockPreparationTableActionRegistry\(\{ actions: configuredTableActions \}\)/, 'only deployment actions: no active binding or project resolver')
+  assert.equal((code.match(/createStockPreparationTableActionRegistry\(/g) || []).length, 1)
+  assert.match(code, /identity\.workspaceId !== null \|\| version\.workspaceId !== null \|\| version\.tenantId !== identity\.tenantId/, 'draft scope is checked before the template lookup')
+  assert.match(code, /if \(template\.source\.kind !== 'data-source:sql-readonly'\) unavailable\(\)/)
+  assert.match(code, /source: \{ \.\.\.template\.source, workspaceId: null,\s*externalSystemId: version\.systemId, readPlan: version\.config\.readPlan \}/, 'the selected immutable draft, not the active plan, determines the read')
+  const scopeAt = code.indexOf('if (identity.workspaceId !== null')
+  const lookupAt = code.indexOf('const template = await templates.getTableAction(')
+  const authAt = code.indexOf('const authorization = await assertB2aReadAuthorization(')
+  const ownerAt = code.indexOf("principal: identity.actor, runAs: 'user'")
+  const adapterAt = code.indexOf('const sourceAdapter = adapterRegistry.createAdapter(')
+  const readAt = code.indexOf('return validateStockPreparationReadPlanSample(')
+  assert.ok(scopeAt !== -1 && scopeAt < lookupAt && lookupAt < authAt && authAt < ownerAt && ownerAt < adapterAt && adapterAt < readAt, 'scope → template → B2A → authenticated owner → adapter → sample read')
+  assert.match(code, /purpose: B2A_PURPOSE_STOCK_PREPARATION_PLAN_VALIDATION/)
+  assert.match(code, /adapterRegistry\.createAdapter\(system, \{ principal: identity\.actor,/)
+  assert.match(code, /system\.tenantId !== identity\.tenantId\s*\|\| system\.workspaceId !== null/)
+  assert.match(code, /b2aTrialRegistration: authorization,\s*b2aClaimStore: storage,/)
+  for (const forbidden of ['resolveTableActionExecution(', 'resolveProjectTarget:', 'getMultitableRecordsApi(', 'createRecord(', 'patchRecord(']) {
+    assert.ok(!code.includes(forbidden), `template validation must not reach ${forbidden}`)
+  }
+}
+
+check('C-13 validation lookup is a deployment template only; exact draft scope and owner/B2A precede the source read', () => {
+  assertValidationTemplateReader()
+})
+
+check('C-13 finite mutations: execution project/purpose/wall and validation scope/authorization remain observable', () => {
+  const dryStart = CODE.indexOf('    async tableActionDryRun(req, res) {')
+  const dryEnd = CODE.indexOf('\n    },', dryStart)
+  const dry = CODE.slice(dryStart, dryEnd)
+  const project = 'projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),'
+  // The dry-run route spells that project line twice (the execution lookup and a pilot input), so both
+  // mutations below are scoped to the arguments of the ONE actual resolveTableActionExecution call.
+  const executions = getTableActionCalls(dry).filter((call) => call.method === 'resolveTableActionExecution')
+  assert.equal(executions.length, 1, 'the dry-run route has exactly one execution lookup')
+  const execution = executions[0]
+  const argsStart = execution.offset + execution.method.length + 1
+  const argsEnd = argsStart + execution.args.length
+  assert.equal(dry.slice(argsStart, argsEnd), execution.args, 'the located span is the execution lookup arguments')
+  const purpose = "targetPurpose: 'write'"
+  assert.equal(execution.args.split(project).length - 1, 1, 'the real execution project needle exists exactly once inside the execution lookup')
+  assert.equal(execution.args.split(purpose).length - 1, 1, 'the execution lookup declares its write purpose exactly once')
+  const replaceDry = (next) => CODE.slice(0, dryStart) + next + CODE.slice(dryEnd)
+  const mutateExecutionArgs = (mutate) => replaceDry(dry.slice(0, argsStart) + mutate(execution.args) + dry.slice(argsEnd))
+  // Project line only (purpose kept), then purpose only (project kept).
+  assert.throws(() => assertProjectLookupArguments(mutateExecutionArgs((args) => args.replace(project, ''))), assert.AssertionError)
+  assert.throws(() => assertWalledProjectLookups(mutateExecutionArgs((args) => args.replace(purpose, "targetPurpose: 'read'"))), assert.AssertionError)
+  assert.throws(() => assertWalledProjectLookups(replaceDry(dry.replace('resolveTableActionExecution(', 'unreviewedExecutionLookup('))), assert.AssertionError)
+  assert.throws(() => assertWalledProjectLookups(replaceDry(dry.replace('assertResolvedProjectTargetTenancy(', 'unreviewedTenantWall('))), assert.AssertionError)
+  for (const [before, after] of [
+    ['version.tenantId !== identity.tenantId', 'false'],
+    ['const authorization = await assertB2aReadAuthorization(', 'const authorization = await unreviewedAuthorization('],
+    ["principal: identity.actor, runAs: 'user'", "principal: version.createdBy, runAs: 'user'"],
+    ['createStockPreparationTableActionRegistry({ actions: configuredTableActions })', 'createStockPreparationTableActionRegistry({ actions: configuredTableActions, resolveProjectTarget })'],
+  ]) {
+    assert.equal(VALIDATION_CODE.split(before).length - 1, 1, `one actual validation needle: ${before}`)
+    assert.throws(() => assertValidationTemplateReader(VALIDATION_CODE.replace(before, after)), assert.AssertionError)
+  }
 })
 
 check('C-08 (E2b) projectSheetGateFor reads the switch per call and the registry objectId from the resolved target', () => {
@@ -293,7 +457,7 @@ check('the five project-sheet routes check the switch BEFORE any IO and the crea
   assert.match(createBody, /normalizeStockPreparationConfirmBody\(requestBody\(req\), VALID_EMPTY_REQUEST_KEYS/, 'an EMPTY closed body')
   assert.match(createBody, /store\.count\(\{ tenantId \}\)[\s\S]*?MAX_PROJECT_TARGETS_PER_TENANT/, 'the cap is checked before provisioning')
   assert.ok(createBody.indexOf('store.count(') < createBody.indexOf('provisionProjectSheet('), 'cap before provision')
-  assert.ok(createBody.indexOf('provisionProjectSheet(') < createBody.indexOf('store.create('), 'provision before register')
+  assertDeferredRegistration(createBody)
   // S2 fix round 1: the grant moved into one `healGrant` closure the replay leg calls FIRST; on the
   // create leg it still runs only after the registry row exists.
   assert.ok(createBody.indexOf('store.create(') < createBody.indexOf('if (!grant) grant = await healGrant(registered)'), 'register before the create leg\'s grant')
@@ -355,8 +519,7 @@ check('C-11 (S4) confirm: the archived-project hook is wired only with the switc
 check('C-12 (S4 fix round 1) the create replay heals only inside the locked re-check of its registry row', () => {
   const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
   const body = CODE.slice(createStart, CODE.indexOf('\n    },', createStart))
-  const lockAt = body.indexOf('await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {')
-  assert.notEqual(lockAt, -1, 'the replay goes through withActiveRowLocked, keyed by the scope tenant and the path number')
+  const lockAt = assertReplayLockInput(body)
   const lockEnd = body.indexOf('\n        })\n', lockAt)
   assert.notEqual(lockEnd, -1, 'the locked callback closes')
   const inside = body.slice(lockAt, lockEnd)
@@ -370,11 +533,42 @@ check('C-12 (S4 fix round 1) the create replay heals only inside the locked re-c
   const fnStart = STORE_CODE.indexOf('async function withActiveRowLocked(')
   assert.notEqual(fnStart, -1, 'the store exposes the locked re-check')
   const fn = STORE_CODE.slice(fnStart, STORE_CODE.indexOf('\n  }\n', fnStart))
-  const lockCall = fn.indexOf('await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)')
+  const lockCall = fn.indexOf("await lockRegistration(trx, tenantId, resolveSourceProjectComparison ? 'try' : 'blocking')")
+  const identityCheck = fn.indexOf('await assertSourceProjectIdentity(trx, { tenantId, projectNo, resolveSourceProjectComparison })')
   const readCall = fn.indexOf('trx.selectOneForUpdate(')
   const statusCheck = fn.indexOf("if (current.status !== 'active') {")
   const callback = fn.indexOf('return fn(rowToPublicTarget(current))')
-  assert.ok(lockCall !== -1 && lockCall < readCall && readCall < statusCheck && statusCheck < callback, 'lock → FOR UPDATE read → active check → callback, in that order, on the transaction handle')
+  assert.ok(lockCall !== -1 && lockCall < identityCheck && identityCheck < readCall && readCall < statusCheck && statusCheck < callback, 'lock → identity check → FOR UPDATE read → active check → callback, in that order, on the transaction handle')
+  for (const [before, after] of [
+    ['strictRegistration ? { tenantId, projectNo, resolveSourceProjectComparison } : { tenantId, projectNo }', 'strictRegistration ? { tenantId, projectNo } : { tenantId, projectNo, resolveSourceProjectComparison }'],
+    ['store.withActiveRowLocked(lockInput,', 'store.withActiveRowLocked({ tenantId, projectNo },'],
+  ]) {
+    assert.equal(body.split(before).length - 1, 1, `one actual replay lock needle: ${before}`)
+    assert.throws(() => assertReplayLockInput(body.replace(before, after)), assert.AssertionError)
+  }
+})
+
+check('C-14 (F2) the identity guard hands the resolver its locked transaction and the route forwards it; the unlocked pre-read stays on the pool', () => {
+  assertExecutorHandOff()
+  for (const [before, after] of [
+    ['resolveSourceProjectComparison({ executor: trx })', 'resolveSourceProjectComparison()'],
+    ['resolveSourceProjectComparison({ executor: trx })', 'resolveSourceProjectComparison({ executor: undefined })'],
+  ]) {
+    assert.equal(STORE_CODE.split(before).length - 1, 1, `one actual store hand-off needle: ${before}`)
+    assert.throws(() => assertExecutorHandOff(CODE, STORE_CODE.replace(before, after)), assert.AssertionError)
+  }
+  const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
+  const createEnd = CODE.indexOf('\n    },', createStart)
+  const body = CODE.slice(createStart, createEnd)
+  const withBody = (next) => CODE.slice(0, createStart) + next + CODE.slice(createEnd)
+  for (const [before, after] of [
+    ['onlineReadPlansEnabled: onlineReadPlansEnabled(),\n          executor,\n', 'onlineReadPlansEnabled: onlineReadPlansEnabled(),\n'],
+    ['async ({ executor } = {}) => {', 'async () => {'],
+    ['const comparison = await resolveSourceProjectComparison()', 'const comparison = await resolveSourceProjectComparison({ executor: store })'],
+  ]) {
+    assert.equal(body.split(before).length - 1, 1, `one actual route hand-off needle: ${before}`)
+    assert.throws(() => assertExecutorHandOff(withBody(body.replace(before, after)), STORE_CODE), assert.AssertionError)
+  }
 })
 
 check('C-09 (S2) create: plan + pre-flight before provisioning, install before register; replay: grant heal before the pack heal', () => {
@@ -388,7 +582,6 @@ check('C-09 (S2) create: plan + pre-flight before provisioning, install before r
   const capAt = body.indexOf('await store.count({ tenantId })')
   const provisionAt = body.indexOf('provisionProjectSheet(')
   const installAt = body.indexOf('installPacks(createPlan, provisioned.objectId)')
-  const registerAt = body.indexOf('store.create(')
   // REPLAY leg (S4 fix round 1: inside the locked re-check — C-12 pins the enclosure).
   const replayGrantAt = body.indexOf('const lockedGrant = await healGrant(locked)')
   const replayPlanAt = body.indexOf('const replayPlan = await planPacks()')
@@ -398,7 +591,17 @@ check('C-09 (S2) create: plan + pre-flight before provisioning, install before r
   assert.ok(capAt !== -1 && preflightAt < capAt, 'create: every sheet-independent refusal precedes the cap read')
   assert.ok(provisionAt !== -1 && capAt < provisionAt, 'create: the cap precedes provisioning')
   assert.ok(installAt !== -1 && provisionAt < installAt, 'create: the packs are installed onto the sheet that was just provisioned')
-  assert.ok(registerAt !== -1 && installAt < registerAt, 'create: INSTALL BEFORE REGISTER — a failed install leaves no registered row')
+  assertDeferredRegistration(body)
+  for (const [before, after] of [
+    ["comparison === 'case-insensitive'", "comparison === 'case-sensitive'"],
+    ['}, prepareTarget)', '})'],
+    ['const target = await prepareTarget()', 'const target = prepareTarget()'],
+    ['resolveSourceProjectComparison,\n          })', '\n          })'],
+    ['packs = await installPacks(createPlan, provisioned.objectId)', 'packs = null'],
+  ]) {
+    assert.equal(body.split(before).length - 1, 1, `one actual registration needle: ${before}`)
+    assert.throws(() => assertDeferredRegistration(body.replace(before, after)), assert.AssertionError)
+  }
   assert.ok(replayGrantAt !== -1 && replayPlanAt !== -1 && replayGrantAt < replayPlanAt, 'replay: the G1 grant heal precedes the pack plan')
   assert.ok(healAt !== -1 && replayPlanAt < healAt, 'replay: the pack heal runs through the same install')
   assert.match(body, /getTableAction\(\{\s*actionId: PLM_STOCK_PREPARATION_ACTION_ID,\s*tenantId,\s*targetPurpose: 'readiness',\s*\}\)/, 'the env binding probe is a tenant-scoped readiness lookup')

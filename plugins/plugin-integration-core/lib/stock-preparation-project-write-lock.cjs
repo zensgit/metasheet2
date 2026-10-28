@@ -79,7 +79,10 @@
 //
 // Every operation is ONE statement through the scoped db helper (lib/db.cjs) — no transaction is held
 // open across host writes (that would pin one of the host pool's connections for a whole apply and a
-// killed backend would take the server down, see the design notes).
+// killed backend would take the server down, see the design notes). The ONE exception is the caller's
+// own transaction: a continuation decision (batch-refresh step 4 PR-4) bumps the generation INSIDE the
+// plugin-db transaction that writes its rows (`bumpGenerationWithin`, below `bumpGeneration`) — a few
+// plugin-SQL statements, no host write inside it, the abandoned-lease clear bounded like the others.
 //
 // BOUNDED ROW-LOCK WAIT (review round 6, S1). Four of those statements can QUEUE behind a fenced host
 // write still in flight: the takeover (acquire), the abandoned-lease clear (bump and observe) and the
@@ -143,8 +146,13 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //     generation (every plan made before the pilot is superseded) and then holds the lease while the host
 //     stamps the sheet closed for grid export and the registry row is marked — so no apply or chunk writes
 //     the sheet in between, and no writer can be mid-write when the marker lands.
+//   * `continuation_confirm` / `continuation_end` (batch-refresh step 4 PR-4, design §8.1 / §9.4): a 沿用关系
+//     confirmed, re-confirmed or ended bumps INSIDE its own plugin-db transaction (`bumpGenerationWithin`
+//     below), so every token / approved job planned before the decision is superseded exactly when the
+//     decision commits (E03 / E04). Reasons only: no decision ever holds the lease (it writes plugin tables,
+//     never the sheet; I2 keeps it off a live holder).
 const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
@@ -712,6 +720,163 @@ function createStockPreparationProjectWriteLock({
     throw contentionRefusal()
   }
 
+  // THE IN-TRANSACTION BUMP (batch-refresh step 4 PR-4; design §8.1, O-17, F-2). The continuation confirm /
+  // re-confirm / end transactions (stock-preparation-continuation-store.cjs `runBump`) bump the generation on
+  // THEIR plugin-db transaction handle, so the decision rows and the bump commit — or roll back — together:
+  // a token or approved job planned before the decision is superseded exactly when the decision becomes
+  // visible, never earlier (PR-0's carry had a release -> bump window) and never later (E03 / E04). It
+  // mirrors every branch of `bumpGeneration` on the handle, with ONE attempt: inside a transaction a failed
+  // statement aborts the whole transaction, so there is nothing to retry, and every refusal below is a
+  // throw that rolls the caller's decision back (the store re-raises it untouched).
+  //   1. `trx.setLocalLockTimeout(rowLockWait)` FIRST (module header, BOUNDED ROW-LOCK WAIT): the abandoned
+  //      clear may queue behind a stalled holder's fenced write; 55P03 -> 409 WRITE_LOCKED holder_in_write.
+  //      SET LOCAL is transaction-wide, so the caller's LATER statements are bounded too — a decision row
+  //      insert that waits behind a concurrent transaction past the bound answers 55P03 (the store's 503
+  //      STORE_FAILED), never a pool-wide statement_timeout.
+  //   2. `trx.selectOne` the row: absent -> `trx.insertOne` generation 1 / epoch 0 (23505 -> 409 contention:
+  //      another session created the row meanwhile); a LIVE lease (grace included) -> 409 WRITE_LOCKED (I2,
+  //      nothing confirmed; the holder is mid-write and the puller retries after it finishes); an ABANDONED
+  //      lease -> the same pinned clear-and-bump CAS `bumpGeneration` uses (lease_* NULL, epoch + 1,
+  //      last_interrupted_*, generation + 1, a fresh token; WHERE scope_key AND lease_id AND fencing_epoch AND
+  //      lease_seq AND generation_token); a free row -> the free-row CAS (WHERE lease_id IS NULL AND
+  //      generation_token = observed), which never queues behind a fenced write (a fence's FOR SHARE is only
+  //      ever held on a row whose committed lease_id is non-NULL). Zero rows from either CAS -> the row is
+  //      re-read on the handle: a live holder is named (WRITE_LOCKED), anything else is contention.
+  //   3. Answers { scopeKey, generation, generationToken, fencingEpoch } from the statement that WROTE the
+  //      row (integers, the RETURNING row — never the read before it).
+  // `bumpGeneration` itself is untouched; the handle must be the scoped helper's transaction handle
+  // (setLocalLockTimeout / selectOne / insertOne / updateRow), refused 500 UNAVAILABLE otherwise.
+  function assertTransactionHandle(trx) {
+    if (!trx || typeof trx.setLocalLockTimeout !== 'function' || typeof trx.selectOne !== 'function'
+      || typeof trx.insertOne !== 'function' || typeof trx.updateRow !== 'function') {
+      throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the in-transaction generation bump needs the scoped db transaction handle', { reason: 'transaction_handle' })
+    }
+    return trx
+  }
+
+  async function bumpGenerationWithin(trx, scopeKey, { reason, tenantId } = {}) {
+    assertReason(reason)
+    assertTransactionHandle(trx)
+    if (!nonEmptyString(scopeKey)) {
+      throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the in-transaction generation bump needs a write scope', { reason: 'scope_incomplete' })
+    }
+    try {
+      await trx.setLocalLockTimeout(rowLockWait)
+    } catch (error) {
+      throw storeFailed('bump', error)
+    }
+    async function readWithin() {
+      try {
+        return await trx.selectOne(PROJECT_WRITE_LOCK_TABLE, { scope_key: scopeKey })
+      } catch (error) {
+        throw storeFailed('bump', error)
+      }
+    }
+    // Zero rows from a CAS: decide from the row as it is NOW, exactly as `bumpGeneration` does after its
+    // last attempt — a live holder is a writer, anything else is contention; the caller rolls back either way.
+    async function refuseAfterLostCas() {
+      const again = await readWithin()
+      const againAtMs = nowMs()
+      if (leaseIsLive(again, againAtMs)) throw writeLocked(again, againAtMs)
+      throw contentionRefusal()
+    }
+    const row = await readWithin()
+    const atMs = nowMs()
+    const at = new Date(atMs).toISOString()
+    const token = newId()
+    if (!row) {
+      let inserted
+      try {
+        inserted = rowsOf(await trx.insertOne(PROJECT_WRITE_LOCK_TABLE, {
+          scope_key: scopeKey,
+          tenant_id: nonEmptyString(tenantId),
+          generation: 1,
+          generation_token: token,
+          generation_reason: reason,
+          generation_bumped_at: at,
+          fencing_epoch: 0,
+          lease_id: null,
+          lease_seq: 0,
+          lease_purpose: null,
+          lease_run_id: null,
+          lease_acquired_at: null,
+          lease_expires_at: null,
+          lease_heartbeat_at: null,
+          created_at: at,
+          updated_at: at,
+        }))
+      } catch (error) {
+        // Another session inserted the row between the read and the INSERT; the transaction is aborted by
+        // that failure, so it is contention for the caller to retry — never busy on a writer that is not there.
+        if (isUniqueViolation(error)) throw contentionRefusal()
+        throw storeFailed('bump', error)
+      }
+      if (inserted.length !== 1) throw storeFailed('bump', null, { extra: { reason: 'insert_returned_nothing' } })
+      return generationFromRow(scopeKey, inserted[0])
+    }
+    const generation = integerOf(row.generation) || 0
+    const bumped = {
+      generation: generation + 1,
+      generation_token: token,
+      generation_reason: reason,
+      generation_bumped_at: at,
+      tenant_id: nonEmptyString(tenantId),
+      updated_at: at,
+    }
+    let updated
+    if (row.lease_id) {
+      // I2: never while a live holder holds the lease (grace included).
+      if (leaseIsLive(row, atMs)) throw writeLocked(row, atMs)
+      // The abandoned-lease clear, pinned to everything observed; bounded by the lock_timeout set above.
+      const epoch = integerOf(row.fencing_epoch) || 0
+      try {
+        updated = rowsOf(await trx.updateRow(PROJECT_WRITE_LOCK_TABLE, {
+          ...bumped,
+          lease_id: null,
+          lease_purpose: null,
+          lease_run_id: null,
+          lease_acquired_at: null,
+          lease_expires_at: null,
+          lease_heartbeat_at: null,
+          fencing_epoch: epoch + 1,
+          last_interrupted_run_id: row.lease_run_id || null,
+          last_interrupted_purpose: row.lease_purpose || null,
+          last_interrupted_at: at,
+        }, {
+          scope_key: scopeKey,
+          lease_id: row.lease_id,
+          fencing_epoch: epoch,
+          lease_seq: integerOf(row.lease_seq) || 0,
+          generation_token: row.generation_token,
+        }))
+      } catch (error) {
+        if (isLockNotAvailable(error)) throw holderInWrite(row, atMs)
+        throw storeFailed('bump', error)
+      }
+    } else {
+      try {
+        updated = rowsOf(await trx.updateRow(PROJECT_WRITE_LOCK_TABLE, bumped, {
+          scope_key: scopeKey,
+          lease_id: null,
+          generation_token: row.generation_token,
+        }))
+      } catch (error) {
+        throw storeFailed('bump', error)
+      }
+    }
+    if (updated.length !== 1) return refuseAfterLostCas()
+    return generationFromRow(scopeKey, updated[0])
+  }
+
+  function generationFromRow(scopeKey, row) {
+    return Object.freeze({
+      scopeKey,
+      generation: integerOf(row.generation),
+      generationToken: row.generation_token,
+      fencingEpoch: integerOf(row.fencing_epoch),
+    })
+  }
+
   async function readState(scopeKey) {
     const row = await readRow(scopeKey, 'read')
     if (!row) return Object.freeze({ present: false, generation: 0, fencingEpoch: 0, leaseHeld: false })
@@ -1031,6 +1196,7 @@ function createStockPreparationProjectWriteLock({
     readState,
     assertNoLiveWriter,
     bumpGeneration,
+    bumpGenerationWithin,
     observeGeneration,
     readGeneration,
     acquire,

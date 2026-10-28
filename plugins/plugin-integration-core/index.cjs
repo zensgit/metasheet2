@@ -23,10 +23,16 @@ const { createConnectionResolver } = require('./lib/connection-resolver.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
+const { createStockPreparationReadPlanStore } = require('./lib/stock-preparation-read-plan-store.cjs')
+const { createStockPreparationReadPlanManagement } = require('./lib/stock-preparation-read-plan-management.cjs')
+const { createStockPreparationTableActionRegistry } = require('./lib/stock-preparation-table-actions.cjs')
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
 const { createStockPreparationProjectWriteLock } = require('./lib/stock-preparation-project-write-lock.cjs')
+const { createStockPreparationContinuationStore } = require('./lib/stock-preparation-continuation-store.cjs')
+const { createStockPreparationRefreshGovernance } = require('./lib/stock-preparation-refresh-governance.cjs')
+const { createStockPreparationGovernedSheetProbe } = require('./lib/stock-preparation-governed-sheet-probe.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -87,11 +93,16 @@ let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
 let stockPreparationSourceBindingStore = null
+let stockPreparationReadPlanStore = null
+let stockPreparationReadPlanManagement = null
 let stockPreparationHandoffStore = null
 let stockPreparationProjectTargetStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
 let stockPreparationProjectWriteLock = null
+let stockPreparationContinuationStore = null
+let stockPreparationRefreshGovernance = null
+let stockPreparationGovernedSheetProbe = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -119,6 +130,7 @@ function buildCapabilityStatus() {
     deadLetters: Boolean(deadLetterStore),
     deadLetterReplay: Boolean(pipelineRunner && typeof pipelineRunner.replayDeadLetter === 'function'),
     staging: Boolean(stagingInstaller),
+    governedSheetProbe: Boolean(stockPreparationGovernedSheetProbe),
     stockPreparationSqlServerSealedSnapshot:
       Boolean(stockPreparationSqlServerRuntime),
   }
@@ -341,6 +353,28 @@ module.exports = {
     // the whole mechanism by which changing the source stops needing a backend restart. Absent (no
     // SQL db) → no resolver is wired → the action resolves the env default exactly as before.
     stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
+    // Always wire the real ledger: an unavailable migration must fail closed.
+    stockPreparationReadPlanStore = createStockPreparationReadPlanStore({ db })
+    // FP-7: read-plan activation must see the DEPLOY action, from the same server
+    // config the routes read. A separate registry with NO source-binding or
+    // project-target resolver: no request fields, no I/O. A config it cannot
+    // normalize leaves plan activation fail-closed (501) without hiding the gate.
+    const tableActionConfig = context.config || {}
+    let deploymentActionRegistry = null
+    try {
+      deploymentActionRegistry = createStockPreparationTableActionRegistry({
+        actions: tableActionConfig.stockPreparationTableActions || tableActionConfig.tableActions,
+      })
+    } catch (_error) {
+      deploymentActionRegistry = null
+    }
+    stockPreparationReadPlanManagement = createStockPreparationReadPlanManagement({
+      store: stockPreparationReadPlanStore, externalSystemRegistry, connectionRegistration: dataSourceFacade,
+      async resolveDeploymentAction(actionId) {
+        if (!deploymentActionRegistry) throw new Error('READ_PLAN_DEPLOYMENT_UNAVAILABLE')
+        return deploymentActionRegistry.getTableAction({ actionId })
+      },
+    })
     // 通知下一步 (migration 084): the per-(tenant,projectNo) cursor saying whose turn it is
     // on a 备料 project. Built here so both handoff routes can compare-and-set it in one transaction —
     // which is what makes a double click a detectable replay instead of a second advance. Absent (no
@@ -363,6 +397,25 @@ module.exports = {
     // generation, one row per target sheet (R-52). Every small apply and large chunk takes it and
     // fails closed (501) without it; a lock table that cannot be read or written refuses 503.
     stockPreparationProjectWriteLock = createStockPreparationProjectWriteLock({ db, logger })
+    // Batch-refresh step 4 PR-2 (migrations 102 / 103): the persisted 沿用关系 (continuations + members), the
+    // per-project refresh state, the hold ledger and the execution ledger, and the ONE governance consult every
+    // lane will make (PR-3 wires it; nothing consults it yet). Both fail closed: a read that fails is 503, never
+    // "no continuation"; a reader whose registry lacks PR B's pilot reads answers 501 by name at consult time.
+    stockPreparationContinuationStore = createStockPreparationContinuationStore({ db })
+    stockPreparationRefreshGovernance = createStockPreparationRefreshGovernance({
+      continuationStore: stockPreparationContinuationStore,
+      projectTargetStore: stockPreparationProjectTargetStore,
+      projectWriteLock: stockPreparationProjectWriteLock,
+    })
+    // Batch-refresh step 4 PR-6 (design §7.1 rows 17-18, D-21): the GOVERNED-SHEET PROBE for the generic configured
+    // writers — the pipelines target adapter and the ERP feedback writer below, and the C6 write-source the routes
+    // build (services). Built from the SAME continuation store and registry store the governance reads, so
+    // "governed" means one thing in the codebase; it answers by SHEET (a generic writer holds nothing else). A read
+    // that fails refuses the write (503), never "not governed".
+    stockPreparationGovernedSheetProbe = createStockPreparationGovernedSheetProbe({
+      continuationStore: stockPreparationContinuationStore,
+      projectTargetStore: stockPreparationProjectTargetStore,
+    })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -381,7 +434,7 @@ module.exports = {
       .registerAdapter('erp:k3-wise-sqlserver', createK3WiseSqlServerChannelFactory({ queryExecutor: sqlServerQueryExecutor }), { metadata: K3_WISE_SQLSERVER_ADAPTER_METADATA })
       .registerAdapter('bridge:legacy-sql-readonly', createBridgeAgentReadonlyAdapterFactory(), { metadata: BRIDGE_READONLY_ADAPTER_METADATA })
       .registerAdapter('metasheet:staging', createMetaSheetStagingSourceAdapterFactory({ context }), { metadata: METASHEET_STAGING_ADAPTER_METADATA })
-      .registerAdapter('metasheet:multitable', createMetaSheetMultitableTargetAdapterFactory({ context }), { metadata: METASHEET_MULTITABLE_ADAPTER_METADATA })
+      .registerAdapter('metasheet:multitable', createMetaSheetMultitableTargetAdapterFactory({ context, governedSheetProbe: stockPreparationGovernedSheetProbe }), { metadata: METASHEET_MULTITABLE_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-readonly', createDataSourceSqlReadonlySourceAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-write-gated', createDataSourceSqlWriteGatedTargetAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA })
     pipelineRegistry = createPipelineRegistry({ db })
@@ -394,6 +447,8 @@ module.exports = {
     erpFeedbackWriter = createErpFeedbackWriter({
       context,
       logger,
+      // PR-6: a governed stock-prep sheet is refused before any feedback write.
+      governedSheetProbe: stockPreparationGovernedSheetProbe,
     })
     stagingInstaller = {
       listStagingDescriptors,
@@ -546,11 +601,16 @@ module.exports = {
         readSourceConfigStore,
         stockPreparationAuditStore,
         stockPreparationSourceBindingStore,
+        stockPreparationReadPlanStore,
+        stockPreparationReadPlanManagement,
         stockPreparationHandoffStore,
         stockPreparationProjectTargetStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
         stockPreparationProjectWriteLock,
+        stockPreparationContinuationStore,
+        stockPreparationRefreshGovernance,
+        stockPreparationGovernedSheetProbe,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -655,6 +715,8 @@ module.exports = {
     credentialStore = null
     externalSystemRegistry = null
     readSourceConfigStore = null
+    stockPreparationReadPlanStore = null
+    stockPreparationReadPlanManagement = null
     readSourceCompositionConfigStore = null
     bridgeAgentChecklistStore = null
     adapterRegistry = null
@@ -666,6 +728,7 @@ module.exports = {
     erpFeedbackWriter = null
     pipelineRunner = null
     stagingInstaller = null
+    stockPreparationGovernedSheetProbe = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null
     activeContext = null

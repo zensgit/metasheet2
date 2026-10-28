@@ -275,6 +275,20 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
   }
 
   /**
+   * The handle `listForAction` reads ON (F2). Absent => this store's own db, exactly as before. A handle
+   * that cannot `select` is refused (a throw is the caller's unreadable), never silently swapped for the
+   * pool — the same rule as the project registry's `pilotReadHandle`.
+   */
+  function listReadHandle(options) {
+    const executor = options && typeof options === 'object' ? options.executor : undefined
+    if (executor === undefined || executor === null) return db
+    if (typeof executor.select !== 'function') {
+      throw new Error('createStockPreparationSourceBindingStore: a list executor must expose select')
+    }
+    return executor
+  }
+
+  /**
    * EVERY binding row of one (tenant, action), across ALL of its workspaces — the null row included.
    *
    * #6475 fix round 1. `get()` answers "what does THIS hint resolve to"; mvp-persist (step ④ of the
@@ -289,11 +303,15 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
    * for `LIST_FOR_ACTION_LIMIT + 1` rows so the caller can tell "this is all of them" (`complete`)
    * from "there were more than we read" — and a caller that cannot see all of them must refuse, not
    * decide on a prefix.
+   *
+   * F2: `options.executor` (optional) is a scoped-db TRANSACTION handle of the caller's. The project
+   * registry hands the registration comparison the one that holds its tenant lock, so this read rides
+   * that connection instead of waiting for another pooled one (`listReadHandle` below).
    */
-  async function listForAction(input = {}) {
+  async function listForAction(input = {}, options = {}) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     const actionId = requiredString(input.actionId, 'actionId')
-    const raw = allRows(await db.select(BINDING_TABLE, {
+    const raw = allRows(await listReadHandle(options).select(BINDING_TABLE, {
       where: { tenant_id: tenantId, action_id: actionId },
       limit: LIST_FOR_ACTION_LIMIT + 1,
     })).filter(Boolean)

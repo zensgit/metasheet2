@@ -112,6 +112,9 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
   // Never stored (operatorHomeMemory.ts admits no `archived` — it is a live registry fact), handled
   // so a hand-written value cannot reach an undefined branch.
   if (key === 'archived') return stockPrepPosture({ archived: true })
+  // PR-5: a remembered blocked refresh state keeps its key; the state token itself is not stored, so the
+  // generic wording (「刷新未完成」) renders until the live board says which state it is.
+  if (key === 'blocked_pull_state') return stockPrepPosture({ refreshStatus: 'unknown' })
   return stockPrepPosture({})
 }
 
@@ -168,16 +171,25 @@ export function buildOperatorHomeCards(
     if (hiddenSet && hiddenSet.has(no) && !live) continue
     const memoryKey = remembered.get(no) ?? null
     // S3: a registry row speaks for itself when its counts can (see `registryPosture`).
-    const fromRegistry = registryPosture(project, pending)
+    const registry = registryPosture(project, pending)
+    // PR-7 (R-62 ⑥) — FAIL-CLOSED FOLD: a registry row derives 「可以导出」 from `pulledRowCount` alone, but the
+    // directory row carries no refresh state; when THIS browser last saw the live board say the refresh is
+    // unfinished (`blocked_pull_state`), that outranks a registry-derived 「可以导出」. Dormant for every
+    // not-governed project (memory never holds the key for one). Never the other way: a remembered 「可以导出」 does
+    // not override a registry 「刷新未完成」 (the registry never produces it).
+    const foldBlocked = registry !== null && registry.key === 'ready' && memoryKey === 'blocked_pull_state'
+    const fromRegistry = foldBlocked ? null : registry
     cards.push({
       projectNo: no,
       projectName: project.projectName,
       source: 'directory',
       posture: fromRegistry
-        ?? (live
-          ? stockPrepPosture({ pendingDecisionCount: pending })
-          : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true }))),
-      postureFromMemory: !fromRegistry && !live && memoryKey !== null,
+        ?? (foldBlocked
+          ? memoryPosture('blocked_pull_state')
+          : (live
+            ? stockPrepPosture({ pendingDecisionCount: pending })
+            : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true })))),
+      postureFromMemory: foldBlocked || (!fromRegistry && !live && memoryKey !== null),
       pendingDecisionCount: pending,
       archived,
     })
@@ -219,12 +231,14 @@ export function partitionOperatorHomeCards(cards: readonly StockPrepHomeCard[]):
 const CARD_RANK: Record<StockPrepPostureKey, number> = {
   pending_decision: 0,
   blocked: 1,
-  running: 2,
-  ready: 3,
-  unknown: 4,
-  not_pulled: 5,
-  not_yours: 6,
-  archived: 7,
+  // PR-5: an unfinished refresh state sits with the two action-needing badges, above 正在跑 / 可以导出.
+  blocked_pull_state: 2,
+  running: 3,
+  ready: 4,
+  unknown: 5,
+  not_pulled: 6,
+  not_yours: 7,
+  archived: 8,
 }
 
 export function sortOperatorHomeCards(cards: readonly StockPrepHomeCard[]): StockPrepHomeCard[] {

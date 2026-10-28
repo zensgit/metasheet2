@@ -1157,6 +1157,29 @@ describe('卡片上的导出 — 租户墙拒绝有自己的话,不是「稍后�
     }
   })
 
+  // 备料分批拉取第一期 step 4 PR-7 (W6): the formal-export gate's refusals say WHICH state it is — for `not_settled`
+  // (and `state`) 「稍后再点一次」 is the one instruction that never works; `lease_in_flight` names the puller's preview.
+  it('PR-7 OH-EXPORT: a 409 STOCK_PREP_EXPORT_BLOCKED reads by its reason, never 「稍后再点一次」', async () => {
+    const answer = (reason: string) => async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'STOCK_PREP_EXPORT_BLOCKED', message: 'blocked', details: { reason, status: 'complete', partial: false } } }),
+      { status: 409 },
+    )
+    for (const [reason, expected] of [['not_settled', '还没有核对过'], ['lease_in_flight', '占着写入'], ['state', '未完成的状态']] as const) {
+      h.apiFetch.mockImplementation(answer(reason))
+      const { root, unmount } = readyCard()
+      try {
+        ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+        await flushTurns()
+        const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+        expect(notice, reason).not.toBeNull()
+        expect(notice.textContent, reason).toContain(expected)
+        expect(notice.textContent, reason).not.toContain('稍后再点一次')
+      } finally {
+        unmount()
+      }
+    }
+  })
+
   // The envelopes below are what the route's sendError actually writes for each wall refusal
   // (plugin-integration-core http-routes.cjs: HttpRouteError -> { ok:false, error:{ code, message,
   // details } }, JSON), status and values-free details included — not a hand-trimmed stand-in.

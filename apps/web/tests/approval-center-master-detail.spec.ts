@@ -438,6 +438,12 @@ function deferred<T>() {
 // their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
 beforeEach(() => {
   useLocale().setLocale('zh-CN')
+  // The pane's (and rows') 通过/驳回 follow `approvals:act`, as the detail view's do. Every case here
+  // runs as an actor unless it narrows the grant itself (see the reader cases below).
+  localStorage.setItem('user_permissions', JSON.stringify(['approvals:act']))
+})
+afterEach(() => {
+  localStorage.removeItem('user_permissions')
 })
 
 describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
@@ -749,6 +755,56 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     const dialog = container!.querySelector('[data-testid="approval-row-reject-dialog"]')
     expect(dialog).toBeTruthy()
     expect(dialog!.textContent).toContain('出差报销')
+  })
+
+  it('a reader (approvals:read, no approvals:act) still opens the pane and its full-detail link, but the pane offers no 通过/驳回 and the row none either', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read']))
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_1"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-reject-apv_1"]')).toBeNull()
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-detail-pane-approve"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeNull()
+    const fullLink = container!.querySelector('[data-testid="approval-detail-pane-full-link"]') as HTMLButtonElement
+    expect(fullLink).toBeTruthy()
+    fullLink.click()
+    await flushUi()
+    expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apv_1' } })
+    expect(dispatchActionSpy).not.toHaveBeenCalled()
+  })
+
+  it('an actor (approvals:read + approvals:act) gets the pane 通过/驳回 (positive control for the reader case)', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-detail-pane-approve"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeTruthy()
+  })
+
+  it('an actor gets no pane 通过/驳回 when the detail fetch says canDecideCurrentNode is false (list rows never carry the flag)', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销', { canDecideCurrentNode: false }))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    expect(getApprovalSpy).toHaveBeenCalledWith('apv_1')
+    expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-detail-pane-approve"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeNull()
   })
 
   it('打开完整详情 navigates to the exact same approval-detail route the narrow-width click uses', async () => {

@@ -406,6 +406,93 @@ describe('PT-FLOW — runStockPreparationProjectPull', () => {
     expect(declined.sync.dryRun).not.toHaveBeenCalled()
   })
 
+  it('BUSY: re-read only the requested project once; active continues without another create/repull confirmation', async () => {
+    const log: string[] = []
+    const race = deps(log, [ABSENT(), targetState(), targetState()], { write: false }, true, async () => {
+      throw new StockPreparationProjectTargetCallError(409, 'POST', { code: 'STOCK_PREPARATION_PROJECT_TARGET_BUSY' })
+    })
+    const outcome = await runStockPreparationProjectPull(race.deps, PROJECT)
+    expect(outcome.kind === 'synced' && outcome.createdSheet).toBe(false)
+    expect(outcome.kind === 'synced' && outcome.report.verdict).toBe('not_written')
+    expect(log).toEqual(['target.get', 'confirm:create', 'target.create', 'target.get', 'dryRun', 'confirm:write', 'target.get'])
+    expect(race.asked.map((request) => request.kind)).toEqual(['create', 'write'])
+    expect(race.deps.targetApi.create).toHaveBeenCalledTimes(1)
+    expect(race.deps.targetApi.get).toHaveBeenNthCalledWith(2, PROJECT)
+    expect(race.sync.apply).not.toHaveBeenCalled()
+    expect(race.sync.archive).not.toHaveBeenCalled()
+  })
+
+  it('BUSY: an absent current project is refused even if a different project finished; no create retry or pull', async () => {
+    let gets = 0
+    h.apiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return refused(409, 'STOCK_PREPARATION_PROJECT_TARGET_BUSY')
+      gets += 1
+      // A different project's success must never be queried or used as proof for this one.
+      return ok(path.includes('/PRJ-SYN-OTHER/target') ? targetState() : ABSENT())
+    })
+    const log: string[] = []
+    const race = deps(log, [])
+    race.deps.targetApi = createStockPreparationProjectTargetApi(SCOPE)
+    expect(await runStockPreparationProjectPull(race.deps, PROJECT)).toEqual({
+      kind: 'create_refused', status: 409, code: 'STOCK_PREPARATION_PROJECT_TARGET_BUSY',
+    })
+    expect(gets).toBe(2)
+    expect(h.apiFetch.mock.calls.map(([path, init]) => [String(path).split('?')[0], (init as RequestInit | undefined)?.method ?? 'GET']))
+      .toEqual(['GET', 'POST', 'GET'].map((method) => [`/api/integration/stock-preparation/projects/${PROJECT}/target`, method]))
+    expect(log).toEqual(['confirm:create'])
+  })
+
+  it('BUSY: archived returns the original archived branch without running a pull', async () => {
+    const archived = targetState({ status: 'archived', may: { create: false, archive: false, restore: true } })
+    const log: string[] = []
+    const race = deps(log, [ABSENT(), archived], {}, true, async () => {
+      throw new StockPreparationProjectTargetCallError(409, 'POST', { code: 'STOCK_PREPARATION_PROJECT_TARGET_BUSY' })
+    })
+    expect(await runStockPreparationProjectPull(race.deps, PROJECT)).toEqual({ kind: 'archived', mayRestore: true, state: archived })
+    expect(log).toEqual(['target.get', 'confirm:create', 'target.create', 'target.get'])
+  })
+
+  it('BUSY: failed, malformed or disabled re-reads never fall through to a pull or another create', async () => {
+    for (const answer of [
+      new Error('SYNTHETIC_PRIVATE_SERVER_VALUE'),
+      new StockPreparationProjectTargetCallError(503, 'GET', { code: 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE' }),
+      new StockPreparationProjectTargetCallError(200, 'GET', { malformed: true }),
+      disabledError(),
+    ]) {
+      const log: string[] = []
+      const race = deps(log, [ABSENT(), answer], {}, true, async () => {
+        throw new StockPreparationProjectTargetCallError(409, 'POST', { code: 'STOCK_PREPARATION_PROJECT_TARGET_BUSY' })
+      })
+      const outcome = await runStockPreparationProjectPull(race.deps, PROJECT)
+      expect(outcome.kind).toBe(isStockPrepProjectSheetsDisabled(answer) ? 'create_refused' : 'probe_failed')
+      expect(JSON.stringify(outcome)).not.toContain('SYNTHETIC_PRIVATE_SERVER_VALUE')
+      expect(log).toEqual(['target.get', 'confirm:create', 'target.create', 'target.get'])
+    }
+  })
+
+  it('identity/deployment refusals and unknown codes stop before pulling, without retries or server values', async () => {
+    for (const code of [
+      'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT',
+      'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE',
+      'STOCK_PREPARATION_PROJECT_TARGET_PREPARE_INVALID',
+      'STOCK_PREPARATION_PROJECT_TARGET_LOCK_UNAVAILABLE',
+      'SYNTHETIC_UNKNOWN_REFUSAL',
+    ]) {
+      const log: string[] = []
+      const race = deps(log, [])
+      h.apiFetch.mockReset()
+      h.apiFetch.mockImplementation(async (_path: string, init?: RequestInit) => init?.method === 'POST'
+        ? new Response(JSON.stringify({ ok: false, error: { code, message: 'SYNTHETIC_PRIVATE_SERVER_VALUE', details: { projectNo: 'PRJ-SYN-PRIVATE', sheetId: 'sheet_syn_private' } } }), { status: 409 })
+        : ok(ABSENT()))
+      race.deps.targetApi = createStockPreparationProjectTargetApi(SCOPE)
+      const outcome = await runStockPreparationProjectPull(race.deps, PROJECT)
+      expect(outcome).toEqual({ kind: 'create_refused', status: 409, code })
+      expect(h.apiFetch).toHaveBeenCalledTimes(2)
+      expect(log).toEqual(['confirm:create'])
+      expect(JSON.stringify(outcome)).not.toMatch(/SYNTHETIC_PRIVATE_SERVER_VALUE|PRJ-SYN-PRIVATE|sheet_syn_private/)
+    }
+  })
+
   it('ARCHIVED: stop, read-only, no question, no plan', async () => {
     const log: string[] = []
     const archived = targetState({ status: 'archived', may: { create: false, archive: false, restore: true } })
@@ -497,6 +584,20 @@ describe('PT-HOOK — the optional write confirmation inside the four-step run',
 // ---------------------------------------------------------------------------
 
 describe('PT-CODES — every project-sheet refusal says who acts next', () => {
+  it('identity conflict asks for the registered letter case or administrator review, without suggesting a retry', () => {
+    const entry = STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT
+    expect(entry.zhNext).toContain('原已登记项目号的大小写')
+    expect(entry.enNext).toContain('registered spelling and letter case')
+    expect(`${entry.zhNext} ${entry.enNext}`).not.toMatch(/稍后|再试|retry|try again/i)
+    for (const code of [
+      'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT',
+      'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE',
+      'STOCK_PREPARATION_PROJECT_TARGET_BUSY',
+      'STOCK_PREPARATION_PROJECT_TARGET_PREPARE_INVALID',
+      'STOCK_PREPARATION_PROJECT_TARGET_LOCK_UNAVAILABLE',
+    ]) expect(STOCK_PREP_PROJECT_TARGET_ERROR_CODES).toContain(code)
+  })
+
   it('each refusal code has its own two-line sentence (never the generic one)', () => {
     expect(STOCK_PREP_PROJECT_TARGET_ERROR_CODES.length).toBeGreaterThanOrEqual(11)
     for (const code of STOCK_PREP_PROJECT_TARGET_ERROR_CODES) {

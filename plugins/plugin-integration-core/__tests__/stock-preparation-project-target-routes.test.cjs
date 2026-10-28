@@ -53,6 +53,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //        to 'read' on any of them resolves the archived sheet instead and reds here.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -65,8 +66,10 @@ const {
   PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
   MAX_PROJECT_TARGETS_PER_TENANT,
   deriveProjectSheetObjectId,
+  resolveProjectTargetForAction,
 } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
-const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const { ONLINE_READ_PLANS_ENABLED_ENV } = require(path.join(LIB, 'stock-preparation-read-plan-switch.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID, createStockPreparationTableActionRegistry } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const PLM_SYSTEM_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((field) => field.ownership === 'plm_system').map((field) => field.id)
 const { STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
@@ -103,16 +106,53 @@ const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT, permissi
 
 // ── substrate ────────────────────────────────────────────────────────────────────────────────────
 
-function makeMemoryDb() {
+function makeMemoryDb({ serializeTenantTransactions = false } = {}) {
   const rows = []
   const calls = []
+  const lockTails = new Map()
+  const heldLocks = new Set()
   const matches = (row, where) => Object.entries(where).every(([c, v]) => (row[c] === undefined ? null : row[c]) === (v === undefined ? null : v))
   const api = {
     rows,
     calls,
+    heldLocks,
     // E1: the store's create runs lock → count → insert on a transaction handle; this fake runs the
     // callback inline (no isolation) and records the lock so a suite can see it was taken.
-    async transaction(fn) { calls.push('transaction'); return fn({ ...api, async advisoryXactLock(key) { calls.push(`advisoryXactLock:${key}`) } }) },
+    async transaction(fn) {
+      calls.push('transaction')
+      const releases = []
+      try {
+        return await fn({
+          ...api,
+          async setTransactionIsolationLevel(level) { calls.push(`setTransactionIsolationLevel:${level}`) },
+          async tryAdvisoryXactLock(key) {
+            calls.push(`tryAdvisoryXactLock:${key}`)
+            if (serializeTenantTransactions && heldLocks.has(key)) return false
+            if (serializeTenantTransactions) {
+              heldLocks.add(key)
+              releases.push(() => { heldLocks.delete(key) })
+            }
+            return true
+          },
+          async advisoryXactLock(key) {
+            if (serializeTenantTransactions) {
+              const prior = lockTails.get(key) || Promise.resolve()
+              let release
+              const tail = new Promise((resolve) => { release = resolve })
+              lockTails.set(key, tail)
+              await prior
+              heldLocks.add(key)
+              releases.push(() => {
+                heldLocks.delete(key)
+                release()
+                if (lockTails.get(key) === tail) lockTails.delete(key)
+              })
+            }
+            calls.push(`advisoryXactLock:${key}`)
+          },
+        })
+      } finally { for (const release of releases.reverse()) release() }
+    },
     async selectOne(_t, where) { calls.push('selectOne'); return rows.find((r) => matches(r, where)) || null },
     async select(_t, { where } = {}) { calls.push('select'); return rows.filter((r) => matches(r, where || {})) },
     async insertOne(_t, row) {
@@ -222,6 +262,8 @@ function baseServices() {
     readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
+    // Explicitly no activation pointer on this synthetic scope; an absent runtime is not legacy.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null }, async getActivation() { return null } },
   }
 }
 
@@ -261,14 +303,17 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
   services.stockPreparationProjectTargetStore = store
   services.tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } }
   const previousEnv = {}
-  for (const key of [PROJECT_SHEETS_ENABLED_ENV, PROJECT_SHEET_GRANT_ROLE_IDS_ENV, 'MULTITABLE_STOCK_PREP_OWN_BASE']) {
+  for (const key of [PROJECT_SHEETS_ENABLED_ENV, PROJECT_SHEET_GRANT_ROLE_IDS_ENV, 'MULTITABLE_STOCK_PREP_OWN_BASE', 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED', ONLINE_READ_PLANS_ENABLED_ENV]) {
     previousEnv[key] = process.env[key]
     if (env[key] === undefined) delete process.env[key]
     else process.env[key] = env[key]
   }
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  // PR-3a: the real refresh governance, unless the case names its own service (even null: the unwired leg).
+  const wired = Object.prototype.hasOwnProperty.call(serviceExtras, 'stockPreparationRefreshGovernance') ? services : withRefreshGovernance(services)
+  httpRoutes.registerIntegrationRoutes({ context, services: wired, logger: { info() {}, warn() {}, error() {} } })
   return {
     routes, auditAppends, provisioning, records, db, store, context,
+    refresh: services.refreshGovernanceEnv || null,
     projectWriteLock: services.stockPreparationProjectWriteLock || null,
     restore() { for (const [key, value] of Object.entries(previousEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value } },
   }
@@ -308,10 +353,9 @@ function registerActive(harness, projectNo = PROJECT, { archived = false, tenant
 }
 
 /**
- * A completed, authoritative, already-planned large-BOM expansion job written straight into the
- * route's own durable storage — the state a job is in once a puller has expanded and planned it —
- * with its snapshot bound to `target`. Rows and decisions are empty: these cases are about WHICH
- * sheet the job addresses, not what it writes.
+ * Resolve the actual deployment/project action, then run the real enqueue → expansion → plan
+ * producers over a synthetic empty source. They alone mint evaluation identity and artifact/plan
+ * revisions. Empty decisions keep these cases about WHICH sheet the job addresses, not its rows.
  */
 const swlLockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 
@@ -324,29 +368,60 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
   const writeObservation = seedLock && target && typeof target.sheetId === 'string'
     ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
     : null
-  const job = {
-    jobId, ...JOB_SCOPE, actionId,
-    status: 'completed', authoritative: true, projectNoPresent: true,
+  const registry = createStockPreparationTableActionRegistry({
+    actions: h.context.config.stockPreparationTableActions,
+    resolveProjectTarget: (input) => resolveProjectTargetForAction({
+      ...input, store: h.store, provisioning: h.provisioning, projectId: PROJECT_ID, env: process.env,
+    }),
+  })
+  const action = await registry.getTableAction({ ...JOB_SCOPE, actionId, projectNo, targetPurpose: 'write' })
+  assert.equal(action.target.sheetId, target.sheetId, 'producer uses the actual resolved sheet')
+  assert.equal(action.target.objectId, target.objectId, 'producer uses the actual resolved object')
+  await largeBomJobs.createLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, action,
     parameters: { projectNo },
-    principal: 'u_pull',
-    actionSnapshot: {
-      actionId,
-      source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
-      target,
+    principal: PULLER.id, actor: PULLER.id, createJobId: () => jobId, now: () => at,
+  })
+  let reads = 0
+  const expanded = await largeBomJobs.runLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId, jobId, now: () => at,
+    sourceAdapter: {
+      async read(input) {
+        reads += 1
+        assert.equal(input.object, 'DN_PDM_PathExAttrInfo')
+        assert.deepEqual(input.filters, { FileCode: projectNo })
+        return { records: [], done: true, nextCursor: null, metadata: { filtersApplied: true } }
+      },
     },
-    sourceKind: 'data-source:sql-readonly',
-    artifactRevision: 'artifact-1',
-    artifact: { revision: 'artifact-1', status: 'expanded', rows: [], summary: {}, sealedAt: at },
-    planRevision: 'plan-1',
-    planArtifact: { revision: 'plan-1', artifactRevision: 'artifact-1', plan: { revision: 'plan-1', decisions: [], plannedAt: at }, existingRowCount: 0, plannedAt: at },
-    progress: { rowsExpanded: 0, readCount: 0, frontierRemaining: 0, completedChunks: 1 },
-    budgets: {},
-    evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
-    createdAt: at, updatedAt: at,
-    ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
+  })
+  assert.equal(reads, 1, 'the real expander read the synthetic source')
+  assert.equal(expanded.status, 'completed')
+  largeBomJobs.assertAuthoritativeLargeBomExpansion(expanded)
+  assert.deepEqual(expanded.artifact.rows, [])
+  // Independent negative controls: neither producer identity may be omitted, even when the
+  // other identity and the computed revision are intact. Never backfill a fixture stamp.
+  const noJobIdentity = { ...expanded }
+  delete noJobIdentity.bomEvaluationVersion
+  const noArtifactIdentity = { ...expanded, artifact: { ...expanded.artifact } }
+  delete noArtifactIdentity.artifact.bomEvaluationVersion
+  for (const stale of [noJobIdentity, noArtifactIdentity]) {
+    assert.throws(() => largeBomJobs.assertAuthoritativeLargeBomExpansion(stale),
+      (error) => error.code === 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
   }
-  await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId, jobId }), job)
-  return job
+  const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId, jobId, existingRows: [], plannedAt: at,
+  })
+  largeBomJobs.assertAuthoritativeLargeBomPlan(planned)
+  assert.deepEqual(planned.planArtifact.plan.decisions, [])
+  if (!writeObservation) return planned
+  // The producers ran outside the routes, so the write generation the routes would have recorded is stamped
+  // onto the stored job — only that; the producer-minted identity and revisions stay exactly as minted.
+  const jobKey = largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId, jobId })
+  const stored = await h.context.storage.get(jobKey)
+  assert.equal(stored && stored.jobId, jobId, 'the planned job is stored under its background-job key')
+  const observed = { ...stored, writeObservation, planWriteObservation: writeObservation }
+  await h.context.storage.set(jobKey, observed)
+  return observed
 }
 
 const jobParams = (jobId, applyJobId) => ({ actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, ...(applyJobId ? { applyJobId } : {}) })
@@ -357,6 +432,506 @@ const ENV_TARGET = Object.freeze({ sheetId: ENV_SHEET, objectId: ENV_OBJECT, fie
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+
+// P2 registration regressions: actual route, registry and registration metadata resolver.
+// Persisted approved versions are synthetic status fixtures; these tests do not mint execution
+// capability, source validation, or claim requirements from the read-only metadata.
+function registrationAction(comparison) {
+  return {
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly',
+      ...(comparison === undefined ? {} : { readPlan: activeRegistrationPlan(comparison).version.config.readPlan }) },
+    target: { sheetId: ENV_SHEET, objectId: ENV_OBJECT, fieldIdMap: {} },
+  }
+}
+
+function activeRegistrationPlan(comparison) {
+  const { validateStockPreparationReadPlanConfig } = require('../lib/stock-preparation-read-plan-config.cjs')
+  const config = validateStockPreparationReadPlanConfig({
+    schemaVersion: 1, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: 'plm_sql_source',
+    readPlan: {
+      id: 'plm.stock-preparation.bom-read.user-draft.v1', sourceKind: 'data-source:sql-readonly', matchField: 'project', maxReadCount: 100,
+      pathExAttr: { object: 'SYN_PathLink', matchField: 'project', pathIdField: 'path' },
+      pathInfo: { object: 'SYN_Path', idField: 'id' },
+      orderHead: { object: 'SYN_Order', idField: 'id', pathIdField: 'path' },
+      orderDetail: { object: 'SYN_OrderLine', orderIdField: 'order', componentIdField: 'part', quantityField: 'qty' },
+      part: { object: 'SYN_Part', idField: 'id', codeField: 'code', nameField: 'name' },
+      bomHead: { object: 'SYN_Bom', parentPartField: 'part', bomIdField: 'id' },
+      bomDetail: { object: 'SYN_BomLine', bomParentField: 'bom', componentIdField: 'part', quantityField: 'qty' },
+      ...(comparison === undefined ? {} : { sourceProjectComparison: comparison }),
+    },
+  })
+  const stable = (value) => value === null || typeof value !== 'object' ? JSON.stringify(value)
+    : Array.isArray(value) ? `[${value.map(stable).join(',')}]`
+      : `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`
+  const contentKey = require('node:crypto').createHash('sha256').update(stable(config)).digest('hex')
+  const scope = { tenantId: TENANT, workspaceId: null }
+  return {
+    activation: { ...scope, id: 'synthetic-registration-pointer', status: 'active', actionId: config.actionId, systemId: config.systemId, versionId: 'synthetic-registration-version', contentKey, generation: 1 },
+    version: { ...scope, id: 'synthetic-registration-version', status: 'approved', schemaVersion: 1, version: 1, actionId: config.actionId, systemId: config.systemId, contentKey, config },
+    sourceValidation: { connectionId: 'synthetic-registration-connection', connectionRevision: '11111111-1111-4111-8111-111111111111', bindingRevision: '22222222-2222-4222-8222-222222222222' },
+  }
+}
+
+function registrationMount({ comparison = 'case-insensitive', active, ...options } = {}) {
+  const planCalls = []
+  const executionCalls = []
+  const h = mount({
+    ...options,
+    // Online read plans ON for these registration cases; P2-R14 turns the switch off explicitly.
+    env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true', [PROJECT_SHEET_GRANT_ROLE_IDS_ENV]: JSON.stringify([ROLE_A, ROLE_B]), [ONLINE_READ_PLANS_ENABLED_ENV]: 'true', ...options.env },
+    configExtras: { stockPreparationTableActions: [registrationAction(comparison)], ...options.configExtras },
+    serviceExtras: {
+      stockPreparationReadPlanStore: {
+        async getActiveForRuntime(input) { executionCalls.push(input); return active ? structuredClone(active) : null },
+        async getActivation(input) { planCalls.push(['activation', input]); return active && input.workspaceId === active.activation.workspaceId ? structuredClone(active.activation) : null },
+        async getForRuntime(input) { planCalls.push(['version', input]); assert.ok(active, 'an active metadata version is required'); return structuredClone(active.version) },
+      },
+      ...options.serviceExtras,
+    },
+  })
+  h.planCalls = planCalls
+  h.executionCalls = executionCalls
+  return h
+}
+
+function registrationBindings(scopes = [null, 'workspace-synthetic']) {
+  const { createStockPreparationSourceBindingStore, BINDING_TABLE } = require('../lib/stock-preparation-source-binding-store.cjs')
+  const rows = scopes.map((workspaceId) => ({ tenant_id: TENANT, workspace_id: workspaceId,
+    action_id: PLM_STOCK_PREPARATION_ACTION_ID, external_system_id: 'plm_sql_source' }))
+  const calls = []
+  const matches = (row, where) => Object.entries(where).every(([key, value]) => row[key] === value)
+  const db = {
+    async selectOne(table, where) { assert.equal(table, BINDING_TABLE); calls.push(['get', where]); return rows.find((row) => matches(row, where)) || null },
+    async select(table, { where, limit } = {}) { assert.equal(table, BINDING_TABLE); calls.push(['list', where]); return rows.filter((row) => matches(row, where)).slice(0, limit) },
+    async insertOne() { throw new Error('unexpected synthetic binding write') },
+    async updateRow() { throw new Error('unexpected synthetic binding write') },
+    async transaction(fn) { return fn(db) },
+    async selectOneForKeyShare() { throw new Error('unexpected synthetic binding write') },
+  }
+  // F2: under the registry lock the comparison lists the bindings on the REGISTRY's transaction handle. One database:
+  // `servedBy(trx)` is that handle reading this table too (recorded 'trx-list'); every other table stays the registry's.
+  const servedBy = (trx) => ({
+    ...trx,
+    async select(table, options = {}) {
+      if (table !== BINDING_TABLE) return trx.select(table, options)
+      calls.push(['trx-list', options.where])
+      return rows.filter((row) => matches(row, options.where)).slice(0, options.limit)
+    },
+  })
+  return { store: createStockPreparationSourceBindingStore({ db }), calls, servedBy }
+}
+
+const registerProject = (h, projectNo, { user = PULLER, body = {}, query = {}, claim = true } = {}) => call(h.routes, 'POST', CREATE_PATH, {
+  user, authenticatedTenantId: claim ? user.tenantId : undefined, params: { projectNo }, body, query,
+})
+const assertRegistrationRefusedWithoutWrites = (h, response, before, code, status = 409) => {
+  assert.equal(response.statusCode, status, JSON.stringify(response.body))
+  assert.equal(response.body.error.code, code)
+  assert.equal(h.db.rows.length, before.rows, 'no registry insert')
+  assert.equal(h.provisioning.calls.length, before.host, 'no provisioning, field, view, pack or grant host call')
+  assert.equal(h.auditAppends.length, before.audit, 'no success audit')
+  assert.doesNotMatch(JSON.stringify(response.body), /synthetic-private|Abc|abc/, 'refusal does not echo project identity or private driver text')
+}
+const registrationSnapshot = (h) => ({ rows: h.db.rows.length, host: h.provisioning.calls.length, audit: h.auditAppends.length })
+
+test('P2-R01 case-insensitive registration refuses active and archived variants before host writes; exact replay remains unchanged', async () => {
+  for (const archived of [false, true]) {
+    const h = registrationMount()
+    try {
+      registerActive(h, 'Abc', { archived })
+      const before = registrationSnapshot(h)
+      const result = await registerProject(h, 'abc')
+      assertRegistrationRefusedWithoutWrites(h, result, before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+      assert.deepEqual({ ...result.body.error.details }, { field: 'projectNo' })
+      if (!archived) {
+        const replay = await registerProject(h, 'Abc')
+        assert.equal(replay.statusCode, 200, JSON.stringify(replay.body))
+        assert.equal(replay.body.data.created, false)
+        assert.equal(h.db.rows.length, 1)
+        assert.ok(h.provisioning.calls.some((entry) => entry[0] === 'grantSheetRoleWrite'), 'unchanged exact replay heals its grant')
+        assert.equal(h.provisioning.calls.filter((entry) => entry[0] === 'ensureObject').length, 0, 'replay provisions no second project sheet')
+      } else {
+        assertRegistrationRefusedWithoutWrites(h, await registerProject(h, 'Abc'), before, 'STOCK_PREPARATION_PROJECT_ARCHIVED')
+      }
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R02 absent and case-sensitive comparison allow variants; another tenant does not conflict', async () => {
+  for (const comparison of [null, 'case-sensitive', 'case-insensitive']) {
+    const h = registrationMount({ comparison: comparison === null ? undefined : comparison,
+      ...(comparison === null ? { configExtras: { stockPreparationTableActions: [registrationAction(undefined)] } } : {}) })
+    try {
+      registerActive(h, 'Abc', { tenantId: comparison === 'case-insensitive' ? OTHER_TENANT : TENANT })
+      const result = await registerProject(h, 'abc')
+      assert.equal(result.statusCode, 201, JSON.stringify(result.body))
+      assert.equal(h.db.rows.length, 2)
+      assert.equal(h.db.rows[1].project_no, 'abc', 'case is preserved rather than normalized')
+      assert.equal(h.db.rows[1].tenant_id, TENANT)
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R03 online CI tightens deployment CS while deployment CI cannot be weakened by online CS or default', async () => {
+  for (const [deployment, online, status] of [
+    ['case-sensitive', 'case-insensitive', 409],
+    ['case-insensitive', 'case-sensitive', 409],
+    ['case-insensitive', undefined, 409],
+  ]) {
+    const h = registrationMount({ comparison: deployment, active: activeRegistrationPlan(online) })
+    try {
+      registerActive(h, 'Abc')
+      const before = registrationSnapshot(h)
+      const result = await registerProject(h, 'abc')
+      if (status === 409) assertRegistrationRefusedWithoutWrites(h, result, before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+      else assert.equal(result.statusCode, 201, JSON.stringify(result.body))
+      if (deployment !== 'case-insensitive') {
+        assert.ok(h.planCalls.some(([method]) => method === 'version'), 'the approved metadata version is resolved')
+        assert.deepEqual(h.planCalls[0], ['activation', { tenantId: TENANT, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID }])
+      }
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R04 request body cannot override registration comparison', async () => {
+  const h = registrationMount()
+  try {
+    registerActive(h, 'Abc')
+    for (const body of [{ sourceProjectComparison: 'case-sensitive' }, { source: { readPlan: { sourceProjectComparison: 'case-sensitive' } } }]) {
+      const before = registrationSnapshot(h)
+      const result = await registerProject(h, 'abc', { body })
+      assert.equal(result.statusCode, 400, JSON.stringify(result.body))
+      assert.equal(h.provisioning.calls.length, before.host)
+      assert.equal(h.db.rows.length, before.rows)
+    }
+    const before = registrationSnapshot(h)
+    assertRegistrationRefusedWithoutWrites(h, await registerProject(h, 'abc'), before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+  } finally { h.restore() }
+})
+
+test('P2-R05 malformed, truncated and unavailable transaction registry reads fail closed before provisioning', async () => {
+  const cases = [
+    ['malformed row', (trx) => ({ ...trx, async select() { return [{ tenant_id: TENANT, project_no: 7, status: 'active' }] } })],
+    ['truncated rows', (trx) => ({ ...trx, async select() { return [] } })],
+    ['unavailable rows', (trx) => ({ ...trx, async select() { throw new Error('synthetic-private-registry') } })],
+    ['invalid count', (trx) => ({ ...trx, async countRows() { return '1' } })],
+    ['invalid empty result', (trx) => ({ ...trx, async countRows() { return 0 }, async select() { return {} } })],
+    ['missing tenant', (trx) => ({ ...trx, async select() { return [{ project_no: 'Other', sheet_id: 's', object_id: 'o', status: 'active' }] } })],
+    ['noncanonical project', (trx) => ({ ...trx, async select() { return [{ tenant_id: TENANT, project_no: ' Other ', sheet_id: 's', object_id: 'o', status: 'active' }] } })],
+  ]
+  for (const [label, alter] of cases) {
+    const db = makeMemoryDb()
+    const original = db.transaction
+    db.transaction = (fn) => original((trx) => fn(alter(trx)))
+    const h = registrationMount({ db })
+    try {
+      registerActive(h, 'Other')
+      const before = registrationSnapshot(h)
+      const result = await registerProject(h, 'abc')
+      assert.equal(result.statusCode, 503, `${label}: ${JSON.stringify(result.body)}`)
+      assert.equal(result.body.error.code, 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE', label)
+      assert.equal(h.provisioning.calls.length, before.host, `${label}: no host work`)
+      assert.equal(h.db.rows.length, before.rows, `${label}: no row`)
+      assert.doesNotMatch(JSON.stringify(result.body), /synthetic-private/)
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R06 unavailable or invalid registration metadata refuses instead of deployment fallback', async () => {
+  const invalid = activeRegistrationPlan('case-insensitive')
+  invalid.version.contentKey = '0'.repeat(64)
+  for (const [service, status, code] of [
+    [undefined, 503, 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE'],
+    [{ async getActivation() { throw new Error('synthetic-private-plan') } }, 503, 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE'],
+    [{ async getActivation() { return invalid.activation }, async getForRuntime() { return invalid.version } }, 503, 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE'],
+  ]) {
+    const h = registrationMount({ comparison: 'case-sensitive', serviceExtras: { stockPreparationReadPlanStore: service } })
+    try {
+      assertRegistrationRefusedWithoutWrites(h, await registerProject(h, 'abc'), { rows: 0, host: 0, audit: 0 }, code, status)
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R07 concurrent case variants return BUSY before provisioning; retry rejects the committed case variant', async () => {
+  // This deterministic in-memory mutex models transaction-scoped advisory locking. It is NOT
+  // PostgreSQL isolation proof. The two real route handlers, store and resolver still run.
+  const db = makeMemoryDb({ serializeTenantTransactions: true })
+  const provisioning = makeProvisioning()
+  const ensureObject = provisioning.ensureObject
+  const projectIds = new Set(['Abc', 'abc'].map((projectNo) => deriveProjectSheetObjectId(TENANT, projectNo)))
+  let projectHostWrites = 0
+  provisioning.ensureObject = async (input) => {
+    if (projectIds.has(input.descriptor.id)) {
+      projectHostWrites += 1
+      assert.ok(db.heldLocks.has(`stock-prep-project-target:${TENANT}`), 'tenant lock is held before first project host write')
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    return ensureObject(input)
+  }
+  const h = registrationMount({ db, provisioning })
+  try {
+    const results = await Promise.all([registerProject(h, 'Abc'), registerProject(h, 'abc')])
+    assert.deepEqual(results.map((result) => result.statusCode).sort(), [201, 409])
+    const loserIndex = results.findIndex((result) => result.statusCode === 409)
+    assert.equal(results[loserIndex].body.error.code, 'STOCK_PREPARATION_PROJECT_TARGET_BUSY')
+    assert.equal(projectHostWrites, 1, 'one project sheet is provisioned; overview sheets are separate')
+    assert.equal(h.db.rows.length, 1)
+    assert.equal(db.heldLocks.size, 0, 'the transaction releases its lock after completion')
+    const before = registrationSnapshot(h)
+    const retry = await registerProject(h, ['Abc', 'abc'][loserIndex])
+    assertRegistrationRefusedWithoutWrites(h, retry, before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+  } finally { h.restore() }
+})
+
+test('P2-R08 legacy ambiguity refuses exact replay before grant or pack healing through the real route', async () => {
+  for (const archived of [false, true]) {
+    const h = registrationMount({ comparison: 'case-sensitive', active: activeRegistrationPlan('case-insensitive') })
+    try {
+      registerActive(h, 'Abc')
+      registerActive(h, 'abc', { archived })
+      const before = registrationSnapshot(h)
+      const result = await registerProject(h, 'Abc')
+      assertRegistrationRefusedWithoutWrites(h, result, before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+      assert.deepEqual({ ...result.body.error.details }, { field: 'projectNo' })
+      assert.ok(h.planCalls.length > 0, 'exact replay uses its effective online comparison under the store lock')
+      assert.equal(h.db.rows[1].status, archived ? 'archived' : 'active')
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R09 real binding enumeration finds CI in tenant-null and sibling workspace scopes', async () => {
+  for (const workspaceId of [null, 'workspace-synthetic']) {
+    const binding = registrationBindings()
+    const active = activeRegistrationPlan('case-insensitive')
+    active.activation.workspaceId = workspaceId
+    active.version.workspaceId = workspaceId
+    delete active.sourceValidation
+    // One database (F2): the registry transaction the comparison reads on under the lock serves the binding table too.
+    const db = makeMemoryDb()
+    const original = db.transaction
+    db.transaction = (fn) => original((trx) => fn(binding.servedBy(trx)))
+    const h = registrationMount({ comparison: 'case-sensitive', active, db,
+      serviceExtras: { stockPreparationSourceBindingStore: binding.store } })
+    try {
+      registerActive(h, 'Abc')
+      const before = registrationSnapshot(h)
+      assertRegistrationRefusedWithoutWrites(h, await registerProject(h, 'abc'), before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+      const probed = h.planCalls.filter(([method]) => method === 'activation').map(([, input]) => input.workspaceId)
+      assert.ok(probed.includes(null), 'tenant-null pointer is never hidden by a workspace binding')
+      assert.ok(probed.includes('workspace-synthetic'), 'all real binding scopes are checked')
+      assert.ok(binding.calls.some(([method]) => method === 'list'), 'actual listForAction participates')
+      assert.ok(binding.calls.some(([method]) => method === 'trx-list'), 'under the registry lock the bindings are listed on its transaction (F2)')
+      assert.equal(h.executionCalls.length, 0, 'registration metadata does not consult execution validation')
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R10 create query selectors are refused before registry, metadata, binding or host IO', async () => {
+  const binding = registrationBindings()
+  const h = registrationMount({ comparison: 'case-sensitive', serviceExtras: { stockPreparationSourceBindingStore: binding.store } })
+  try {
+    for (const query of [{ workspaceId: 'workspace-synthetic' }, { tenantId: TENANT }, { sourceProjectComparison: 'case-sensitive' }]) {
+      const before = registrationSnapshot(h)
+      const result = await registerProject(h, 'abc', { query })
+      assert.equal(result.statusCode, 400, JSON.stringify(result.body))
+      assert.equal(h.db.calls.length, 0)
+      assert.equal(h.planCalls.length, 0)
+      assert.equal(binding.calls.length, 0)
+      assert.equal(h.provisioning.calls.length, before.host)
+      assert.equal(h.auditAppends.length, before.audit)
+    }
+  } finally { h.restore() }
+})
+
+test('P2-R11 registration and repair use directory membership without execution claim or source validation', async () => {
+  for (const comparison of ['case-sensitive', 'case-insensitive']) {
+    const active = activeRegistrationPlan(comparison)
+    delete active.sourceValidation
+    const h = registrationMount({ comparison, active, env: { MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED: 'true' } })
+    try {
+      const created = await registerProject(h, 'Abc', { claim: false })
+      assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+      const repaired = await registerProject(h, 'Abc', { claim: false })
+      assert.equal(repaired.statusCode, 200, JSON.stringify(repaired.body))
+      assert.equal(repaired.body.data.created, false)
+      assert.equal(h.db.rows.length, 1)
+      assert.equal(h.executionCalls.length, 0, 'no full runtime getter or source validation is consulted')
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R12 default and CS create retain legacy concurrency and provision outside the registry transaction lock', async () => {
+  for (const comparison of [undefined, 'case-sensitive']) {
+    for (const projects of [['Abc', 'Other'], ['Abc', 'Abc']]) {
+      const db = makeMemoryDb({ serializeTenantTransactions: true })
+      const provisioning = makeProvisioning()
+      const ensureObject = provisioning.ensureObject
+      const projectIds = new Set(projects.map((projectNo) => deriveProjectSheetObjectId(TENANT, projectNo)))
+      let prepared = 0
+      provisioning.ensureObject = async (input) => {
+        if (projectIds.has(input.descriptor.id)) {
+          assert.equal(db.heldLocks.size, 0, 'legacy project provisioning is outside a registry transaction lock')
+          prepared += 1
+          await new Promise((resolve) => setImmediate(resolve))
+        }
+        return ensureObject(input)
+      }
+      const h = registrationMount({ comparison, db, provisioning,
+        ...(comparison === undefined ? { configExtras: { stockPreparationTableActions: [registrationAction(undefined)] } } : {}) })
+      try {
+        const results = await Promise.all(projects.map((projectNo) => registerProject(h, projectNo)))
+        const sameProject = projects[0] === projects[1]
+        assert.deepEqual(results.map((result) => result.statusCode).sort(), sameProject ? [201, 409] : [201, 201])
+        if (sameProject) assert.equal(results.find((result) => result.statusCode === 409).body.error.code, 'STOCK_PREPARATION_PROJECT_TARGET_EXISTS')
+        assert.equal(prepared, 2)
+        assert.equal(h.db.rows.length, sameProject ? 1 : 2)
+        assert.ok(!db.calls.some((value) => value.startsWith('tryAdvisoryXactLock:')), 'default / case-sensitive create never takes the non-blocking lock (no BUSY)')
+        const pinAt = db.calls.indexOf('setTransactionIsolationLevel:read committed')
+        const lockAt = db.calls.indexOf(`advisoryXactLock:stock-prep-project-target:${TENANT}`)
+        assert.ok(pinAt !== -1 && lockAt > pinAt, 'it pins READ COMMITTED, then takes the BLOCKING tenant lock to re-resolve the comparison')
+      } finally { h.restore() }
+    }
+  }
+})
+
+test('P2-R13 default/CS create re-resolves the comparison under the blocking lock: a case-insensitive activation committed during provisioning refuses the variant', async () => {
+  const db = makeMemoryDb({ serializeTenantTransactions: true })
+  const provisioning = makeProvisioning()
+  const ensureObject = provisioning.ensureObject
+  const variantObjectId = deriveProjectSheetObjectId(TENANT, 'abc')
+  let activated = false
+  provisioning.ensureObject = async (input) => {
+    // The case-insensitive activation commits after the route's pre-read, while the variant's sheet is provisioned.
+    if (input.descriptor.id === variantObjectId) activated = true
+    return ensureObject(input)
+  }
+  const online = activeRegistrationPlan('case-insensitive')
+  const h = registrationMount({ comparison: 'case-sensitive', db, provisioning, serviceExtras: {
+    stockPreparationReadPlanStore: {
+      async getActiveForRuntime() { return null },
+      async getActivation(input) { return activated && input.workspaceId === null ? structuredClone(online.activation) : null },
+      async getForRuntime() { return structuredClone(online.version) },
+    },
+  } })
+  try {
+    registerActive(h, 'Abc')
+    const before = registrationSnapshot(h)
+    const result = await registerProject(h, 'abc')
+    assert.equal(result.statusCode, 409, JSON.stringify(result.body))
+    assert.equal(result.body.error.code, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+    assert.ok(activated, 'the pre-read saw case-sensitive; the activation landed during provisioning')
+    assert.equal(h.db.rows.length, before.rows, 'the variant is not registered')
+    assert.equal(h.auditAppends.length, before.audit, 'no success audit')
+    assert.ok(h.provisioning.calls.length > before.host, 'documented race residue: the default leg provisioned outside the lock before the re-check')
+    assert.ok(!db.calls.some((value) => value.startsWith('tryAdvisoryXactLock:')), 'still the blocking lock, never BUSY')
+    assert.doesNotMatch(JSON.stringify(result.body), /Abc|abc/, 'the refusal echoes no project identity')
+    // A retry of the same spelling now pre-reads case-insensitive and is refused before any host write.
+    const retryBefore = registrationSnapshot(h)
+    assertRegistrationRefusedWithoutWrites(h, await registerProject(h, 'abc'), retryBefore, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+  } finally { h.restore() }
+})
+
+test('P2-R14 online read plans switched OFF: registration uses the deployment comparison only and reads no online pointer', async () => {
+  for (const [deployment, expected] of [['case-sensitive', 201], ['case-insensitive', 409]]) {
+    const h = registrationMount({ comparison: deployment, active: activeRegistrationPlan('case-insensitive'),
+      env: { [ONLINE_READ_PLANS_ENABLED_ENV]: undefined } })
+    try {
+      registerActive(h, 'Abc')
+      const before = registrationSnapshot(h)
+      const result = await registerProject(h, 'abc')
+      if (expected === 201) {
+        assert.equal(result.statusCode, 201, `${deployment}: an online case-insensitive plan cannot execute while the switch is off`)
+        assert.equal(h.db.rows.length, before.rows + 1)
+      } else {
+        assertRegistrationRefusedWithoutWrites(h, result, before, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+      }
+      assert.deepEqual(h.planCalls, [], `${deployment}: no activation pointer or version is read while the switch is off`)
+    } finally { h.restore() }
+  }
+})
+
+test('P2-R15 (F2) the pool is exhausted while the registry lock is held: strict create, pinned default / case-sensitive create and strict replay still register — every comparison read under the lock rides the registry transaction', async () => {
+  // A connection-starved pool, modelled: while a registry transaction holds the tenant lock, a comparison read that is
+  // NOT handed that transaction finds no free connection and fails (the host pool's connect timeout, without its 10 s
+  // wait: blocking takers of the same lock each hold a pooled connection while they wait). A read handed the
+  // transaction runs on its connection. Without F2 each leg below answered 503 STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE.
+  const online = activeRegistrationPlan('case-insensitive')
+  for (const [leg, status, lockedKinds] of [
+    ['strict-create', 201, ['activation', 'bindings', 'version', 'bindings', 'activation']],
+    ['pinned-create', 201, ['activation', 'bindings', 'bindings', 'activation']],
+    ['strict-replay', 200, ['activation', 'bindings', 'version', 'bindings', 'activation']],
+  ]) {
+    const db = makeMemoryDb({ serializeTenantTransactions: true })
+    const transactions = new Set()
+    const original = db.transaction
+    db.transaction = (fn) => original((trx) => { transactions.add(trx); return fn(trx) })
+    const strict = leg !== 'pinned-create'
+    const reads = []
+    const read = (kind, options) => {
+      const executor = options && options.executor
+      const locked = db.heldLocks.size > 0
+      reads.push({ kind, on: executor ? (transactions.has(executor) ? 'registry-transaction' : 'foreign-handle') : 'pool', locked })
+      if (!executor && locked) throw new Error('synthetic-private-pool-exhausted')
+    }
+    const h = registrationMount({ comparison: 'case-sensitive', db, serviceExtras: {
+      stockPreparationReadPlanStore: {
+        async getActiveForRuntime() { return null },
+        // strict legs: an online case-insensitive plan is active at the tenant-null scope; pinned: no pointer anywhere.
+        async getActivation(input, options) { read('activation', options); return strict && input.workspaceId === null ? structuredClone(online.activation) : null },
+        async getForRuntime(_input, options) { read('version', options); return structuredClone(online.version) },
+      },
+      stockPreparationSourceBindingStore: {
+        async get() { return null },
+        async set() { throw new Error('unexpected synthetic binding write') },
+        async listForAction(_input, options) { read('bindings', options); return { bindings: [], complete: true } },
+      },
+    } })
+    try {
+      if (leg === 'strict-replay') registerActive(h, 'Abc')
+      const result = await registerProject(h, 'Abc')
+      assert.equal(result.statusCode, status, `${leg}: ${JSON.stringify(result.body)}`)
+      const underLock = reads.filter((entry) => entry.locked)
+      assert.deepEqual(underLock.map((entry) => entry.kind), lockedKinds, `${leg}: the whole comparison, stability round included, re-read under the lock`)
+      assert.ok(underLock.every((entry) => entry.on === 'registry-transaction'), `${leg}: every read under the lock rode the registry's own transaction: ${JSON.stringify(underLock)}`)
+      const unlocked = reads.filter((entry) => !entry.locked)
+      assert.ok(unlocked.length > 0 && unlocked.every((entry) => entry.on === 'pool'), `${leg}: the unlocked pre-read stays on the pool`)
+      assert.equal(h.db.rows.length, 1, `${leg}: one registry row`)
+      assert.equal(db.heldLocks.size, 0, `${leg}: the lock is released`)
+    } finally { h.restore() }
+  }
+})
+
+test('R-19 read-plan runtime absent or unavailable never falls back to legacy source IO', async () => {
+  for (const [store, status, code] of [
+    [undefined, 501, 'READ_PLAN_RUNTIME_UNAVAILABLE'],
+    [{ async getActiveForRuntime() { throw new Error('synthetic runtime unavailable') } }, 503, 'READ_PLAN_RUNTIME_UNAVAILABLE'],
+  ]) {
+    const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true', [ONLINE_READ_PLANS_ENABLED_ENV]: 'true' }, serviceExtras: { stockPreparationReadPlanStore: store } })
+    try {
+      registerActive(h)
+      const res = await dryRun(h.routes, PULLER)
+      assert.equal(res.statusCode, status, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, code)
+      assert.deepEqual(h.records.queries, [], 'no target-row read through a legacy fallback')
+      assert.deepEqual(h.records.writes, [], 'no write')
+    } finally { h.restore() }
+  }
+})
+
+test('R-19b online read plans switched OFF: the dry-run never touches the read-plan store (a missing or failing one cannot refuse it)', async () => {
+  for (const store of [undefined, { async getActiveForRuntime() { throw new Error('synthetic runtime unavailable') } }]) {
+    const calls = []
+    const watched = store && { async getActiveForRuntime(input) { calls.push(input); return store.getActiveForRuntime(input) } }
+    const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, serviceExtras: { stockPreparationReadPlanStore: watched } })
+    try {
+      registerActive(h)
+      const res = await dryRun(h.routes, PULLER)
+      assert.notEqual(res.body && res.body.error && res.body.error.code, 'READ_PLAN_RUNTIME_UNAVAILABLE', JSON.stringify(res.body))
+      assert.deepEqual(calls, [], 'no activation pointer is read while the switch is off')
+    } finally { h.restore() }
+  }
+})
 
 test('R-14 (R1) a large-BOM job planned against the env sheet BEFORE the flip is refused 409 JOB_TARGET_STALE by plan, apply-start and apply-run once the switch is on', async () => {
   const h = mount({ env: {} })
@@ -945,6 +1520,75 @@ test('R6 large lane: approval bumps + binds; the chunk route takes the project l
     assert.equal(stored.status, 'queued', 'nothing ran')
     assert.equal(Object.prototype.hasOwnProperty.call(stored, 'writeScope'), false)
   } finally { bare.restore() }
+})
+
+test('R6g (batch-refresh step 4 PR-3a: RW-G2 / RW-G6r / CG chunk legs) the chunk route consults INSIDE its lease: an unwired governance service is 501 governance_service; a project governed by a hold on its sheet 409 LARGE_LANE_REFUSED hold; a project governed by rows on ANOTHER sheet 409 RETARGETED sheet — each before the job turns running (the job byte-identical), no record write; a not-governed project runs', async () => {
+  const kit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const storedJob = (h, applyJobId) => h.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, applyJobId }))
+  const hold = () => {
+    const value = { kind: 'content_change', confirmable: false, notConfirmableReason: 'needs_step5', subject: { keyDigest: 'd'.repeat(64) }, detail: { recordId: null, recordVersion: null, key: 'k_r6g', reason: 'plm_system_refresh', fields: {}, inContinuation: null, humanColumnsPresent: {} } }
+    value.fingerprint = pairing.holdFingerprint(value)
+    return value
+  }
+  const legs = [
+    { name: 'unwired', serviceExtras: { stockPreparationRefreshGovernance: null }, seed: async () => {}, status: 501, code: 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', reason: 'governance_service' },
+    { name: 'governed', serviceExtras: {}, seed: async (h, sheetId) => h.refresh.seedHolds({ tenantId: TENANT, sheetId, projectNo: PROJECT }, [hold()]), status: 409, code: 'STOCK_PREP_REFRESH_LARGE_LANE_REFUSED', reason: 'hold' },
+    { name: 'retargeted', serviceExtras: {}, seed: async (h) => h.refresh.seedHolds({ tenantId: TENANT, sheetId: 'sheet_r6g_previous', projectNo: PROJECT }, [hold()]), status: 409, code: 'STOCK_PREP_REFRESH_TARGET_RETARGETED', reason: 'sheet' },
+    { name: 'not governed', serviceExtras: {}, seed: async () => {}, status: 200 },
+  ]
+  const lockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+  for (const leg of legs) {
+    const env = kit.createInMemoryProjectWriteLock({ timers: 'real' })
+    const records = makeRecordsApi()
+    const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, records, serviceExtras: { stockPreparationProjectWriteLock: env.lock, ...leg.serviceExtras } })
+    try {
+      const { sheetId, objectId } = registerActive(h)
+      const jobId = `job-r6g-${leg.name.replace(/\s+/g, '-')}`
+      await seedPlannedExpansionJob(h, { jobId, target: { sheetId, objectId, fieldIdMap: {} } })
+      // Batch-refresh step 4 PR-3b: the plan and approval ROUTES consult governance too, so the job is approved while
+      // the project is NOT governed and becomes governed only AFTERWARDS (a job approved before its project became
+      // governed — exactly what the chunk's in-lease gate exists for). An unwired deployment cannot plan through
+      // the route at all any more (501 at the plan); its job is planned and approved through the lib, with the
+      // route-shaped not-governed verdict, so the chunk's own unwired refusal is still what this leg proves.
+      let applyJobId
+      if (leg.name === 'unwired') {
+        const unwiredPlan = await plan(h.routes, jobId)
+        assert.equal(unwiredPlan.statusCode, 501, `unwired plan route: ${JSON.stringify(unwiredPlan.body)}`)
+        assert.equal(unwiredPlan.body.error.details.reason, 'governance_service')
+        const scope = lockLib.sheetWriteScopeKey(sheetId)
+        await largeBomJobs.planLargeBomBackgroundExpansionJob({
+          storage: h.context.storage, ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, existingRows: [],
+          governanceVerdict: { consulted: true, verdict: 'not_governed', generationToken: (await env.lock.readGeneration(scope)).generationToken },
+          writeGenerationReader: (observed) => env.lock.readGeneration(observed),
+        })
+        const libApproved = await largeBomJobs.createLargeBomCheckpointApplyJob({
+          storage: h.context.storage, ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, principal: PLATFORM_ADMIN.id, permission: 'write', acceptManualConfirmHold: true,
+          writeGenerationBinder: async (expect) => lockLib.writeBindingFromGeneration(await env.lock.bumpGeneration(scope, { reason: 'large_approval', tenantId: TENANT, expect })),
+        })
+        applyJobId = libApproved.jobId
+      } else {
+        assert.equal((await plan(h.routes, jobId)).statusCode, 200, leg.name)
+        const approved = await applyStart(h.routes, jobId)
+        assert.equal(approved.statusCode, 202, `${leg.name}: ${JSON.stringify(approved.body)}`)
+        applyJobId = approved.body.data.jobId
+      }
+      await leg.seed(h, sheetId)
+      const before = await storedJob(h, applyJobId)
+      const ran = await applyRun(h.routes, jobId, applyJobId)
+      assert.equal(ran.statusCode, leg.status, `${leg.name}: ${JSON.stringify(ran.body)}`)
+      if (leg.status === 200) {
+        assert.notEqual((await storedJob(h, applyJobId)).status, 'queued', `${leg.name}: the chunk ran`)
+        continue
+      }
+      assert.equal(ran.body.error.code, leg.code, leg.name)
+      assert.equal(ran.body.error.details.reason, leg.reason, leg.name)
+      const after = await storedJob(h, applyJobId)
+      assert.equal(after.status, 'queued', `${leg.name}: never turned running`)
+      assert.deepEqual(after, before, `${leg.name}: the job is byte-identical`)
+      assert.equal(records.writes.length, 0, `${leg.name}: no record write`)
+    } finally { h.restore() }
+  }
 })
 
 // S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — the same per-test loop

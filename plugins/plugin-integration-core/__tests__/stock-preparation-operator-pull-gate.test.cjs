@@ -156,6 +156,8 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
   const services = {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
     stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -445,6 +447,7 @@ function mountWithSource({
   const services = {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
     stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: registry,
     // RECORDS the principal each adapter is built for, then refuses the read — this suite is about
     // WHOSE identity the read runs as, not about what the source returns.
@@ -484,7 +487,10 @@ function mountWithSource({
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    // Batch-refresh step 4 PR-3b: the large expansion start / run / plan / approve consult the REAL refresh governance
+    // (support/stock-preparation-refresh-governance-wiring.cjs) right after their pilot gate — a not-governed project
+    // pays one consult and is served exactly as before; an unwired deployment would be 501 by name.
+    services: require('./support/stock-preparation-refresh-governance-wiring.cjs').withRefreshGovernance(services),
     logger: { info(message, detail) { logLines.push({ message, detail }) }, warn() {}, error() {} },
   })
   return {
@@ -1307,8 +1313,13 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
     pullTier.map((entry) => entry.capability).sort(),
     // S3 fix round 1 (R6): + the overview ENSURE — creating the read-only overview is provisioning, the
     // PULL tier's (R-35), so the OPERATE refresh no longer creates it.
-    ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore'],
-    'P-14: exactly four PULL-tier manifest capabilities — create, archive, restore, overview ensure',
+    [
+      'projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore',
+      // Batch-refresh step 4 PR-4 (R-59, D-14): the puller confirms — the six refresh routes (the private hold page,
+      // the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end) are PULL members.
+      'refresh.confirm', 'refresh.continuation', 'refresh.end', 'refresh.evidence', 'refresh.holds', 'refresh.keep',
+    ],
+    'P-14: exactly ten PULL-tier manifest capabilities — create, archive, restore, overview ensure and the six refresh routes',
   )
   for (const entry of pullTier) {
     for (const [user, expected, who] of [

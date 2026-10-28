@@ -167,6 +167,10 @@ const BASE_DROP_RULES = Object.freeze(['dash_descendant', 'main_drawing_not_chos
 const ATTRIBUTABLE_EXCLUSIONS = Object.freeze(['quantity_invalid', 'part_missing', 'part_ambiguous', 'part_not_read'])
 
 // The continuation input's closed key set (design §6.1, with the deviations stated in the PR body).
+// `persistedHolds` (batch-refresh step 4 PR-3a, AMB-1 / TD-10): the consult's OPEN holds, field-picked by
+// the lane to PERSISTED_HOLD_KEYS. REQUIRED (an array, possibly empty): a lane that forgot it would silently
+// lose the pilot-exit protection those holds carry (detection runs only on pilot input, and a reconcile
+// supersedes every open hold absent from the new set).
 const CONTINUATION_INPUT_KEYS = Object.freeze([
   'storeState',
   'pilot',
@@ -176,8 +180,38 @@ const CONTINUATION_INPUT_KEYS = Object.freeze([
   'demandEvidence',
   'sourceIdentity',
   'specSlotDeclared',
+  'persistedHolds',
   'changePlan',
 ])
+
+// The persisted-hold key set (PHK, defined once; the lane's `pickPersistedHold` and this validation both
+// use it): the eleven hold-body fields the refresh store answers (`rowToHold`), `runbookOnly`, and
+// `continuationRoots` — the root keys of the continuation the hold names (every status, ended included),
+// attached by the lane so a runbook-only hold of an ENDED relationship can still protect its subtrees.
+const PERSISTED_HOLD_KEYS = Object.freeze([
+  'kind',
+  'fingerprint',
+  'confirmable',
+  'notConfirmableReason',
+  'shapeToken',
+  'continuationId',
+  'subject',
+  'detail',
+  'evidenceFingerprint',
+  'comparisonFingerprint',
+  'pairingFingerprint',
+  'runbookOnly',
+  'continuationRoots',
+])
+
+// Re-emission (AMB-1 / TD-10): the kinds only pilot DETECTION produces. After the pilot marker is cleared
+// detection stops, so a persisted hold of one of these kinds is re-emitted VERBATIM (stored fingerprint)
+// instead of being superseded by the next non-pilot computation.
+function isPilotDetectionHoldKind(kind, detail) {
+  if (kind === 'continuation_candidate' || kind === 'dropped_order_head_unresolved') return true
+  if (typeof kind === 'string' && kind.startsWith('candidate_')) return true
+  return kind === 'content_change' && isPlainObject(detail) && detail.reason === 'plm_system_refresh'
+}
 
 class StockPreparationContinuationError extends Error {
   constructor(status, code, message, details = {}) {
@@ -231,6 +265,15 @@ function subjectDigest(value) {
 
 function keyOf(row) {
   return isPlainObject(row) && nonBlankString(row.idempotencyKey) ? row.idempotencyKey : null
+}
+
+// TD-14 (O-4): a resolved duplicate group's key is `<base>::duplicate:<kind>:<hash>` (the conflict planner's
+// `duplicateResolvedKey`). Every claim map here — the projection's two sets and the three candidate maps — is
+// keyed by BASE keys (members and detection read raw expansion keys), so every lookup and the post-condition
+// strip the suffix first; otherwise a resolved group at a continued or candidate position escapes suppression.
+// ONE definition of the strip, owned by the module that mints the suffix (review round 1).
+function baseKeyOf(key) {
+  return planner.baseIdempotencyKeyOf(key)
 }
 
 function isActiveRow(row) {
@@ -787,8 +830,11 @@ function buildContinuationProjection(continuations, members) {
     }
     if (!Number.isInteger(member.position) || member.position < 0) throw projectionInconsistent('a member has no position')
     const ref = Object.freeze({ continuationId, position: member.position })
-    suppressAddKeys.set(newKey, ref)
-    protectInactiveKeys.set(oldKey, ref)
+    // BASE keys (TD-14; the lookups `continuedRefFor` strip the same way). A member key is a raw key by
+    // construction (pairing recomputes every key from its tokens), so the strip is a no-op there — it is the
+    // stated invariant made true for a stored key that somehow carries the suffix (PR-4 F-15b).
+    suppressAddKeys.set(baseKeyOf(newKey), ref)
+    protectInactiveKeys.set(baseKeyOf(oldKey), ref)
     byOldRecordId.set(oldRecordId, ref)
     if (!byContinuation.has(continuationId)) byContinuation.set(continuationId, [])
     byContinuation.get(continuationId).push(member)
@@ -815,21 +861,26 @@ function buildContinuationProjection(continuations, members) {
 
 /**
  * Design §6.1 invariant (iii), over the EMITTED decisions, fail closed: no ADD / UPDATE / INACTIVE on a
- * key a continuation claims (either end), no ADD of a candidate's new subtree, no INACTIVE of a
- * candidate's old subtree. Separate from the consumers on purpose, so removing a consumer cannot also
- * remove the check.
+ * key a continuation claims (either end), no ADD and no UPDATE (revive) of a candidate's new subtree —
+ * free or already occupied (TD-15(i), O-5) — no INACTIVE of a candidate's old subtree. Every key is
+ * compared as its BASE key (TD-14, O-4). Separate from the consumers on purpose, so removing a consumer
+ * cannot also remove the check.
  */
-function assertContinuationPostCondition(decisions, { projection, candidateSuppressAddKeys = new Map(), candidateProtectKeys = new Map() }) {
+function assertContinuationPostCondition(decisions, { projection, candidateSuppressAddKeys = new Map(), candidateOccupiedKeys = new Map(), candidateProtectKeys = new Map() }) {
   const writes = new Set([DECISIONS.ADD, DECISIONS.UPDATE, DECISIONS.INACTIVE])
   for (const decision of Array.isArray(decisions) ? decisions : []) {
     if (!isPlainObject(decision) || !nonBlankString(decision.idempotencyKey)) continue
-    const key = decision.idempotencyKey
+    const key = baseKeyOf(decision.idempotencyKey)
     const continued = projection && (projection.suppressAddKeys.has(key) || projection.protectInactiveKeys.has(key))
     if (continued && writes.has(decision.decision)) {
       throw new StockPreparationContinuationError(500, CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED, 'a continued key received a write decision', { decision: decision.decision })
     }
-    if (decision.decision === DECISIONS.ADD && candidateSuppressAddKeys.has(key)) {
+    const candidatePosition = candidateSuppressAddKeys.has(key) || candidateOccupiedKeys.has(key)
+    if (decision.decision === DECISIONS.ADD && candidatePosition) {
       throw new StockPreparationContinuationError(500, CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED, 'a suspended candidate position received an ADD', { decision: decision.decision })
+    }
+    if (decision.decision === DECISIONS.UPDATE && candidatePosition) {
+      throw new StockPreparationContinuationError(500, CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED, 'a suspended candidate position received an UPDATE', { decision: decision.decision })
     }
     if (decision.decision === DECISIONS.INACTIVE && candidateProtectKeys.has(key)) {
       throw new StockPreparationContinuationError(500, CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED, 'a suspended candidate old row received an INACTIVE', { decision: decision.decision })
@@ -896,6 +947,7 @@ function normalizeContinuationInput(input) {
     throw inputInvalid('continuation.sourceIdentity needs externalSystemId, sourceScopeDigest and readPlanDigest', 'continuation.sourceIdentity')
   }
   if (typeof input.specSlotDeclared !== 'boolean') throw inputInvalid('continuation.specSlotDeclared must be a boolean', 'continuation.specSlotDeclared')
+  const persistedHolds = normalizePersistedHolds(input.persistedHolds)
   if (input.changePlan !== undefined && input.changePlan !== null) throw inputInvalid('continuation.changePlan is step 5 and not supported yet', 'continuation.changePlan')
   return Object.freeze({
     storeState: 'ok',
@@ -910,7 +962,66 @@ function normalizeContinuationInput(input) {
       readPlanDigest: sourceIdentity.readPlanDigest,
     }),
     specSlotDeclared: input.specSlotDeclared,
+    persistedHolds,
   })
+}
+
+/**
+ * The consult's open holds as the lane field-picked them (PERSISTED_HOLD_KEYS, AMB-1). REQUIRED: absent is a
+ * lane defect (500), never "no holds". Each entry is closed to the thirteen keys and re-validated exactly
+ * like a hold the store would accept, so a re-emitted hold can never 500 at the store on its shape.
+ */
+function normalizePersistedHolds(input) {
+  if (input === undefined) throw inputInvalid('continuation.persistedHolds is required (the consult\'s open holds; [] when none)', 'continuation.persistedHolds')
+  if (!Array.isArray(input)) throw inputInvalid('continuation.persistedHolds must be an array', 'continuation.persistedHolds')
+  const seen = new Set()
+  const out = input.map((entry, index) => {
+    const field = `continuation.persistedHolds[${index}]`
+    if (!isPlainObject(entry)) throw inputInvalid('a persisted hold must be an object', field)
+    for (const entryKey of Object.keys(entry)) {
+      if (!PERSISTED_HOLD_KEYS.includes(entryKey)) throw inputInvalid(`${field}.${entryKey} is not a recognized key`, `${field}.${entryKey}`)
+    }
+    for (const entryKey of PERSISTED_HOLD_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(entry, entryKey)) throw inputInvalid(`${field}.${entryKey} is required`, `${field}.${entryKey}`)
+    }
+    if (!HOLD_KINDS.includes(entry.kind)) throw inputInvalid('persisted hold kind is not a hold kind', `${field}.kind`)
+    if (!nonBlankString(entry.fingerprint)) throw inputInvalid('persisted hold fingerprint is required', `${field}.fingerprint`)
+    if (seen.has(entry.fingerprint)) throw inputInvalid('two persisted holds share a fingerprint', `${field}.fingerprint`)
+    seen.add(entry.fingerprint)
+    if (typeof entry.confirmable !== 'boolean') throw inputInvalid('persisted hold confirmable must be a boolean', `${field}.confirmable`)
+    if (entry.confirmable === true && entry.notConfirmableReason !== null) throw inputInvalid('a confirmable persisted hold carries no notConfirmableReason', `${field}.notConfirmableReason`)
+    if (entry.confirmable === false && !NOT_CONFIRMABLE_REASONS.includes(entry.notConfirmableReason)) throw inputInvalid('a non-confirmable persisted hold needs a notConfirmableReason token', `${field}.notConfirmableReason`)
+    if (entry.shapeToken !== null && !SHAPE_TOKENS.includes(entry.shapeToken)) throw inputInvalid('persisted hold shapeToken is not a shape token', `${field}.shapeToken`)
+    for (const name of ['continuationId', 'evidenceFingerprint', 'comparisonFingerprint', 'pairingFingerprint']) {
+      if (entry[name] !== null && !nonBlankString(entry[name])) throw inputInvalid(`persisted hold ${name} must be a string or null`, `${field}.${name}`)
+    }
+    if (!isPlainObject(entry.subject)) throw inputInvalid('persisted hold subject must be an object', `${field}.subject`)
+    if (!isPlainObject(entry.detail)) throw inputInvalid('persisted hold detail must be an object', `${field}.detail`)
+    if (typeof entry.runbookOnly !== 'boolean') throw inputInvalid('persisted hold runbookOnly must be a boolean', `${field}.runbookOnly`)
+    const roots = entry.continuationRoots
+    if (roots !== null) {
+      const rootKeys = isPlainObject(roots) ? Object.keys(roots).sort() : []
+      if (!isPlainObject(roots) || rootKeys.join(',') !== 'newRootKey,oldRootKey' || !nonBlankString(roots.oldRootKey) || !nonBlankString(roots.newRootKey)) {
+        throw inputInvalid('persisted hold continuationRoots must be null or { oldRootKey, newRootKey }', `${field}.continuationRoots`)
+      }
+    }
+    return Object.freeze({
+      kind: entry.kind,
+      fingerprint: entry.fingerprint,
+      confirmable: entry.confirmable,
+      notConfirmableReason: entry.confirmable ? null : entry.notConfirmableReason,
+      shapeToken: entry.shapeToken,
+      continuationId: entry.continuationId,
+      subject: entry.subject,
+      detail: entry.detail,
+      evidenceFingerprint: entry.evidenceFingerprint,
+      comparisonFingerprint: entry.comparisonFingerprint,
+      pairingFingerprint: entry.pairingFingerprint,
+      runbookOnly: entry.runbookOnly,
+      continuationRoots: roots === null ? null : Object.freeze({ oldRootKey: roots.oldRootKey, newRootKey: roots.newRootKey }),
+    })
+  })
+  return Object.freeze(out)
 }
 
 // ── holds ─────────────────────────────────────────────────────────────────────────────────────────
@@ -1007,11 +1118,29 @@ function verifyContinuation(context, continuation, members) {
 
   const oldRootTokens = keyPathTokens(continuation.oldRootKey)
   const newRootTokens = keyPathTokens(continuation.newRootKey)
+  // PR-4 (design §8.4, O-17): N(c) of the OLD ROOT's component in THIS read — every raw expansion position of
+  // that component other than the old root's own key (its subtree rows carry other components). Recorded on
+  // the reconfirm hold as a values-free count, so the end route can decide `release_to_normal_refresh` from
+  // the latest computation's recorded facts: zero means the normal refresh afterwards can only SKIP / UPDATE
+  // the old rows (back in the expansion) or mark them missing — no copy exists to be ADDed. `null` when the
+  // old root key cannot be parsed (the end route then refuses: facts missing).
+  let componentNewPositionCount = null
+  if (oldRootTokens) {
+    const oldRootComponent = oldRootTokens[oldRootTokens.length - 1]
+    componentNewPositionCount = 0
+    for (const [entryKey, rows] of rawExpandedKeyed.entries()) {
+      if (entryKey === continuation.oldRootKey) continue
+      if (rows[0] && rows[0].componentSourceId === oldRootComponent) componentNewPositionCount += 1
+    }
+  }
   let pairing = null
   let comparison = null
   let demandFacts = null
   let fingerprints = null
   if (!oldRootTokens || !newRootTokens) {
+    // F-15 (design §23.8): a root key the parser refuses — the planner's `::duplicate:` suffix included — is
+    // structure, deliberately and by construction (TD-14's claim maps are base-keyed, so a stripped root would
+    // protect / suppress BOTH duplicate twins); the detector never emits a confirmable candidate on such a root.
     steps.pairing = 'structure_changed'
   } else {
     const oldClosure = subtreeRows(existingRows, oldRootTokens, (row) => keyOf(row) !== null && isActiveRow(row))
@@ -1070,7 +1199,7 @@ function verifyContinuation(context, continuation, members) {
   if (verdict === 'source_scope_changed') reconfirmable = othersValid
   else if (verdict === 'evidence_changed') reconfirmable = true
   else if (verdict === 'valid' && continuation.status === 'needs_reconfirmation') reconfirmable = RECONFIRMABLE_REASONS.includes(continuation.statusReason)
-  return { verdict, steps, reconfirmable, pairing, comparison, demandFacts, fingerprints }
+  return { verdict, steps, reconfirmable, pairing, comparison, demandFacts, fingerprints, componentNewPositionCount }
 }
 
 function verificationHold(continuation, result) {
@@ -1088,6 +1217,8 @@ function verificationHold(continuation, result) {
     pairingProblems: result.pairing ? result.pairing.problems.map((problem) => problem.reason) : null,
     comparison: result.comparison ? { outcome: result.comparison.outcome, items: result.comparison.items, parentEdgeUsage: result.comparison.parentEdgeUsage } : null,
     demand: result.demandFacts,
+    // PR-4 (§8.4 end admissibility): N(c) of the old root's component in this read — see verifyContinuation.
+    componentNewPositionCount: result.componentNewPositionCount === undefined ? null : result.componentNewPositionCount,
   }
   const fingerprints = result.fingerprints || {}
   if (verdict === 'content_changed' && continuation.status === 'active') {
@@ -1173,11 +1304,14 @@ function detectCandidates(context) {
     if (!newPositions.has(row.componentSourceId)) newPositions.set(row.componentSourceId, [])
     newPositions.get(row.componentSourceId).push({ key: entryKey, tokens: pathTokensOf(row), rows, activeOccupied: activeKeys.has(entryKey) })
   }
+  // O-6 (PR-3a, T-ratified 2026-10-23, D-10 fail closed): a component held BOTH as an active root that is
+  // still ordered AND as an active nested copy is never filtered out ("both demands live, leave the copy
+  // alone" read the doubled sheet as healthy). It raises `candidate_shape_unresolved` / `old_root_still_ordered`
+  // instead; the step-6 repair (or PR B readiness) is the way out of a two-copy sheet.
+  const twoCopyComponents = new Set()
   for (const [component, positions] of Array.from(newPositions.entries())) {
     const everyOldRootKept = oldRoots.get(component).every((root) => rawExpandedKeyed.has(root.key))
-    const live = everyOldRootKept ? positions.filter((position) => !position.activeOccupied) : positions
-    if (live.length === 0) newPositions.delete(component)
-    else newPositions.set(component, live)
+    if (everyOldRootKept && positions.some((position) => position.activeOccupied)) twoCopyComponents.add(component)
   }
   const components = Array.from(newPositions.keys()).sort(compareStrings)
 
@@ -1213,6 +1347,7 @@ function detectCandidates(context) {
 
   const holds = []
   const candidateSuppressAddKeys = new Map()
+  const candidateOccupiedKeys = new Map()
   const candidateProtectKeys = new Map()
   for (const entry of prepared) {
     const { component, positions, roots, newSubtree, oldSubtree } = entry
@@ -1232,9 +1367,20 @@ function detectCandidates(context) {
       || newSubtree.some((row) => keyOf(row) && existingKeyed.has(keyOf(row)))
     const overlaps = newSubtree.some((row) => keyOf(row) && claims.new.get(keyOf(row)).size > 1)
       || oldSubtree.some((row) => claims.old.get(keyOf(row)).size > 1)
+    // F-15 (PR-4; design §23.8): an OLD root whose key is duplicate-resolved (`<base>::duplicate:<kind>:<hash>`,
+    // the row of one of ≥ 2 identical positions an earlier pull ADDed) is ambiguous by construction — the claim
+    // maps are base-keyed (TD-14), so a continuation on it would protect / suppress BOTH twins, and the key
+    // parsers refuse the suffix (verification: structure_changed; the store: new_root_key_unparsable). Never a
+    // confirmable candidate. Raw expansion keys never carry the suffix (the planner mints it on decisions).
+    const duplicateResolvedRoot = roots.some((root) => baseKeyOf(root.key) !== root.key) || positions.some((position) => baseKeyOf(position.key) !== position.key)
+    if (duplicateResolvedRoot) detail.duplicateResolvedRootKey = true
     const unreadablePath = positions.some((position) => !position.tokens) || roots.some((root) => !root.tokens)
-    if (occupied) kind = 'candidate_target_occupied'
-    else if (roots.length > 1 || positions.length > 1 || overlaps) kind = 'candidate_ambiguous'
+    if (twoCopyComponents.has(component)) {
+      kind = 'candidate_shape_unresolved'
+      shapeToken = 'old_root_still_ordered'
+      detail.shapeSubTokens = ['active_nested_copy']
+    } else if (occupied) kind = 'candidate_target_occupied'
+    else if (roots.length > 1 || positions.length > 1 || overlaps || duplicateResolvedRoot) kind = 'candidate_ambiguous'
     else if (oldSubtree.some((row) => duplicateExistingKeys.has(keyOf(row))) || roots.some((root) => root.rows.length > 1)) kind = 'candidate_old_duplicate'
     else if (existingMissing.some((row) => isActiveRow(row) && (row.componentSourceId === component
       || roots.some((root) => root.tokens && tokensStartWith(pathTokensOf(row) || [], root.tokens))))) kind = 'candidate_keyless_rows'
@@ -1291,14 +1437,19 @@ function detectCandidates(context) {
     })
     holds.push(hold)
     // Whatever the hold, the displayed plan shows what it protects: no ADD of the candidate's new
-    // subtree, no INACTIVE of its old one (design §6.6 last paragraph).
+    // subtree, no INACTIVE of its old one (design §6.6 last paragraph). An OCCUPIED new-subtree key (an
+    // inactive tombstone or an active copy already at the position) is kept in its own map so the planner
+    // SKIPs it too instead of reviving / patching it inside a suspended plan (TD-15(i), O-5).
     for (const row of newSubtree) {
       const entryKey = keyOf(row)
-      if (entryKey && !existingKeyed.has(entryKey)) candidateSuppressAddKeys.set(entryKey, hold.fingerprint)
+      if (!entryKey) continue
+      if (existingKeyed.has(entryKey)) candidateOccupiedKeys.set(entryKey, hold.fingerprint)
+      else candidateSuppressAddKeys.set(entryKey, hold.fingerprint)
     }
-    for (const row of oldSubtree) candidateProtectKeys.set(keyOf(row), hold.fingerprint)
+    // BASE keys (TD-14; see claimOldRootRowSubtree): the sweep's lookup strips, so the claim is stored stripped.
+    for (const row of oldSubtree) candidateProtectKeys.set(baseKeyOf(keyOf(row)), hold.fingerprint)
   }
-  return { holds, candidateSuppressAddKeys, candidateProtectKeys }
+  return { holds, candidateSuppressAddKeys, candidateOccupiedKeys, candidateProtectKeys }
 }
 
 /**
@@ -1323,7 +1474,10 @@ function detectDroppedHeads(context) {
       detail: { scope: 'project', unusableReason: usability.reason, reasons: usability.reasons },
     })]
   }
-  const rootComponents = new Set(existingRows.filter(isRootRow).map((row) => row.componentSourceId).filter(nonBlankString))
+  // O-7 (PR-3a, T-ratified 2026-10-23): only an ACTIVE root row counts as "the component already has its own
+  // rows". An inactive remnant does not, so a head dropped by a base rule and expanded under another parent
+  // holds here instead of the copy being ADDed with no hold.
+  const rootComponents = new Set(existingRows.filter((row) => isRootRow(row) && isActiveRow(row)).map((row) => row.componentSourceId).filter(nonBlankString))
   const byComponent = new Map()
   for (const observation of input.demandEvidence.observations) {
     if (!isPlainObject(observation) || observation.source !== 'order' || !isBaseDrop(observation)) continue
@@ -1346,6 +1500,113 @@ function detectDroppedHeads(context) {
       history: 'history_unknown',
     },
   }))
+}
+
+// ── re-emitted holds and their keys (PR-3a: AMB-1 / TD-10, TD-15(ii), TD-29) ───────────────────────
+
+/** AMB-1: re-emit iff runbook-only, or (pilot cleared AND a kind only pilot detection produces). */
+function shouldReemitPersistedHold(entry, pilot) {
+  if (entry.runbookOnly === true) return true
+  if (pilot === true) return false
+  return isPilotDetectionHoldKind(entry.kind, entry.detail)
+}
+
+/**
+ * A persisted hold as the planner emits it: the `makeHold` key layout, with the STORED fingerprint copied
+ * (never `holdFingerprint(body)`): the store keeps an open hold by fingerprint, so the next reconcile keeps
+ * this row instead of superseding it and opening a recomputed twin.
+ */
+function reemittedHold(entry) {
+  const hold = {
+    kind: entry.kind,
+    confirmable: entry.confirmable === true,
+    ...(entry.confirmable === true ? {} : { notConfirmableReason: entry.notConfirmableReason }),
+    ...(entry.shapeToken ? { shapeToken: entry.shapeToken } : {}),
+    ...(entry.continuationId ? { continuationId: entry.continuationId } : {}),
+    subject: entry.subject,
+    ...(entry.evidenceFingerprint ? { evidenceFingerprint: entry.evidenceFingerprint } : {}),
+    ...(entry.comparisonFingerprint ? { comparisonFingerprint: entry.comparisonFingerprint } : {}),
+    ...(entry.pairingFingerprint ? { pairingFingerprint: entry.pairingFingerprint } : {}),
+    detail: entry.detail,
+  }
+  hold.fingerprint = entry.fingerprint
+  return hold
+}
+
+// First claim wins (a key two holds name keeps the first fingerprint; the SKIP decision is the same).
+function claimKey(map, key, fingerprint) {
+  if (nonBlankString(key) && !map.has(key)) map.set(key, fingerprint)
+}
+
+// A new position (an expansion key) with its expansion subtree: free keys are not ADDed, occupied ones are
+// not revived / patched.
+function claimNewPositionSubtree(context, key, fingerprint, maps) {
+  const rows = context.rawExpandedKeyed.get(key)
+  if (!rows || rows.length === 0) return
+  const tokens = pathTokensOf(rows[0])
+  const subtree = tokens ? subtreeRows(context.expandedRowsComposed, tokens) : [rows[0]]
+  for (const row of subtree) {
+    const entryKey = keyOf(row)
+    if (!entryKey) continue
+    claimKey(context.existingKeyed.has(entryKey) ? maps.occupied : maps.suppress, entryKey, fingerprint)
+  }
+}
+
+// An existing (active) root row with its active, keyed existing subtree: not swept.
+function claimOldRootRowSubtree(context, rootRow, fingerprint, maps) {
+  const tokens = pathTokensOf(rootRow)
+  const subtree = tokens ? subtreeRows(context.existingRows, tokens, (row) => keyOf(row) !== null && isActiveRow(row)) : [rootRow]
+  // BASE keys (TD-14): an EXISTING row's key may carry the planner's `::duplicate:` suffix (an earlier
+  // duplicate-resolved ADD); the sweep looks its base up, so the claim is stored by base (PR-4 F-15a).
+  for (const row of subtree) claimKey(maps.protect, baseKeyOf(keyOf(row)), fingerprint)
+}
+
+function claimOldRootKeySubtree(context, key, fingerprint, maps) {
+  const rows = context.existingKeyed.get(key)
+  const root = rows ? rows.find(isActiveRow) : null
+  if (root) claimOldRootRowSubtree(context, root, fingerprint, maps)
+}
+
+// A dropped order head (TD-15(ii), O-7): every expansion position of the component with its subtree, and
+// every active root row of the component with its subtree.
+function claimDroppedHeadKeys(context, componentSourceId, fingerprint, maps) {
+  if (!nonBlankString(componentSourceId)) return
+  for (const [entryKey, rows] of context.rawExpandedKeyed.entries()) {
+    if (rows[0] && rows[0].componentSourceId === componentSourceId) claimNewPositionSubtree(context, entryKey, fingerprint, maps)
+  }
+  for (const row of context.existingRows) {
+    if (isRootRow(row) && isActiveRow(row) && row.componentSourceId === componentSourceId) claimOldRootRowSubtree(context, row, fingerprint, maps)
+  }
+}
+
+/**
+ * The keys a RE-EMITTED hold protects (R-15 / TD-29), from what its own `detail` names: a candidate's new
+ * positions and old roots (a project-level `candidate_incomplete_evidence` names none); a dropped head's
+ * component; a runbook-only relationship hold's continuation roots (`continuationRoots`, attached by the lane
+ * from the consult's continuation of ANY status) plus its pairs when present. A content change names no
+ * position (its row's decision stays what the planner computed; the suspension dominates).
+ */
+function claimReemittedHoldKeys(context, entry, fingerprint, maps) {
+  const detail = isPlainObject(entry.detail) ? entry.detail : {}
+  if (entry.kind === 'dropped_order_head_unresolved') {
+    claimDroppedHeadKeys(context, detail.componentSourceId, fingerprint, maps)
+  } else if (entry.kind === 'continuation_candidate' || entry.kind.startsWith('candidate_')) {
+    if (detail.scope !== 'project') {
+      for (const key of Array.isArray(detail.newPositionKeys) ? detail.newPositionKeys : []) claimNewPositionSubtree(context, key, fingerprint, maps)
+      for (const key of Array.isArray(detail.oldRootKeys) ? detail.oldRootKeys : []) claimOldRootKeySubtree(context, key, fingerprint, maps)
+    }
+  }
+  if (entry.continuationRoots) {
+    claimNewPositionSubtree(context, entry.continuationRoots.newRootKey, fingerprint, maps)
+    claimOldRootKeySubtree(context, entry.continuationRoots.oldRootKey, fingerprint, maps)
+  }
+  if (entry.continuationRoots || entry.kind.startsWith('relationship_')) {
+    for (const pair of Array.isArray(detail.pairs) ? detail.pairs : []) {
+      if (!isPlainObject(pair)) continue
+      if (nonBlankString(pair.newKey)) claimKey(context.existingKeyed.has(pair.newKey) ? maps.occupied : maps.suppress, pair.newKey, fingerprint)
+      if (nonBlankString(pair.oldKey)) claimKey(maps.protect, pair.oldKey, fingerprint)
+    }
+  }
 }
 
 // ── the planner seam ──────────────────────────────────────────────────────────────────────────────
@@ -1390,21 +1651,52 @@ function prepareGovernedPlanning(args) {
 
   const holds = []
   const verdicts = {}
+  const failedVerifications = []
   for (const continuation of input.continuations.slice().sort((left, right) => compareStrings(left.id, right.id))) {
     const result = verifyContinuation(context, continuation, projection.byContinuation.get(continuation.id))
     verdicts[continuation.id] = result.verdict
     const hold = verificationHold(continuation, result)
     if (hold) holds.push(hold)
+    if (hold && result.verdict !== 'valid') failedVerifications.push({ oldRootKey: continuation.oldRootKey, fingerprint: hold.fingerprint })
   }
-  let candidateSuppressAddKeys = new Map()
-  let candidateProtectKeys = new Map()
+  // The three candidate maps the planner consults (base keys -> the hold fingerprint its SKIP names):
+  // `suppress` (no ADD at a free new-subtree key), `occupied` (no UPDATE / revive at an occupied one),
+  // `protect` (no INACTIVE of an old-subtree row).
+  const maps = { suppress: new Map(), occupied: new Map(), protect: new Map() }
   if (input.pilot === true) {
     const detected = detectCandidates(context)
     holds.push(...detected.holds)
-    candidateSuppressAddKeys = detected.candidateSuppressAddKeys
-    candidateProtectKeys = detected.candidateProtectKeys
-    holds.push(...detectDroppedHeads(context))
+    maps.suppress = detected.candidateSuppressAddKeys
+    maps.occupied = detected.candidateOccupiedKeys
+    maps.protect = detected.candidateProtectKeys
+    const dropped = detectDroppedHeads(context)
+    holds.push(...dropped)
+    // TD-15(ii) / O-7: a dropped head's own rows are protected and its copies are not ADDed in the displayed plan.
+    for (const hold of dropped) {
+      if (hold.kind === 'dropped_order_head_unresolved') claimDroppedHeadKeys(context, hold.detail.componentSourceId, hold.fingerprint, maps)
+    }
   }
+  // TD-15(ii): every row under the old root of a continuation whose verdict is not `valid` is protected (a
+  // member is already protected by the projection; an extra row under the continued old subtree is not).
+  for (const failed of failedVerifications) claimOldRootKeySubtree(context, failed.oldRootKey, failed.fingerprint, maps)
+
+  // AMB-1 / TD-10 (PR-3a) — PILOT EXIT KEEPS THE HOLDS. A persisted open hold that only pilot detection could
+  // re-create (a candidate, a dropped head, a pilot content change) is re-emitted VERBATIM once the marker is
+  // cleared, and a runbook-only hold (an escalated relationship) is re-emitted always: the next reconcile then
+  // KEEPS it (same stored fingerprint) instead of superseding it, the plan stays suspended, and both refusal
+  // layers keep holding. The stored fingerprint is copied, never recomputed through `makeHold` — an escalated
+  // row's body no longer hashes to its fingerprint (the store rewrote `confirmable` / the reason), and a
+  // recomputed one would open a duplicate on every computation. The keys it names feed the same three maps
+  // detection feeds (TD-29), so the displayed plan never contradicts it.
+  for (const entry of input.persistedHolds) {
+    if (!shouldReemitPersistedHold(entry, input.pilot === true)) continue
+    const hold = reemittedHold(entry)
+    holds.push(hold)
+    claimReemittedHoldKeys(context, entry, hold.fingerprint, maps)
+  }
+  const candidateSuppressAddKeys = maps.suppress
+  const candidateOccupiedKeys = maps.occupied
+  const candidateProtectKeys = maps.protect
 
   const humanFieldIds = Array.isArray(humanFields) ? humanFields.slice() : []
   const rowHolds = new Map()
@@ -1416,15 +1708,28 @@ function prepareGovernedPlanning(args) {
     pilot: input.pilot === true,
     projection,
     candidateSuppressAddKeys,
+    candidateOccupiedKeys,
     candidateProtectKeys,
     triggerFieldIds,
-    // Which continuation (if any) claims a key, and from which end.
+    // Which continuation (if any) claims a key, and from which end. BASE key (TD-14).
     continuedRefFor(key) {
-      const suppressed = projection.suppressAddKeys.get(key)
+      const base = baseKeyOf(key)
+      const suppressed = projection.suppressAddKeys.get(base)
       if (suppressed) return { ref: suppressed, type: CONTINUATION_SKIP_TYPES.continued }
-      const protectedRef = projection.protectInactiveKeys.get(key)
+      const protectedRef = projection.protectInactiveKeys.get(base)
       if (protectedRef) return { ref: protectedRef, type: CONTINUATION_SKIP_TYPES.protected }
       return null
+    },
+    // A candidate's new-subtree key, free or occupied (TD-15(i)): the hold fingerprint its SKIP names, else
+    // null. BASE key (TD-14).
+    candidatePositionHoldFor(key) {
+      const base = baseKeyOf(key)
+      return candidateSuppressAddKeys.get(base) || candidateOccupiedKeys.get(base) || null
+    },
+    // A candidate's (or a failed relationship's, or a dropped head's) old-subtree key: the hold fingerprint
+    // its SKIP names, else null. BASE key (TD-14).
+    candidateProtectHoldFor(key) {
+      return candidateProtectKeys.get(baseKeyOf(key)) || null
     },
     // Design §6.7 (pilot), and D-4 (governed: a legacy identity hold becomes a step-4 hold).
     noteContentChange(row, existingRow, { reason }) {
@@ -1503,6 +1808,7 @@ module.exports = {
   CONTINUATION_VERDICTS,
   CONTINUATION_INPUT_KEYS,
   CONTINUATION_SKIP_TYPES,
+  PERSISTED_HOLD_KEYS,
   RECONFIRMABLE_REASONS,
   HOLD_KINDS,
   SHAPE_TOKENS,
@@ -1527,9 +1833,15 @@ module.exports = {
   relativePath,
   sheetMachineDigest,
   __internals: {
+    baseKeyOf,
     canonicalJson,
+    claimReemittedHoldKeys,
     detectCandidates,
     detectDroppedHeads,
+    isPilotDetectionHoldKind,
+    normalizePersistedHolds,
+    reemittedHold,
+    shouldReemitPersistedHold,
     evidenceUsability,
     expectedKeyForTokens,
     // Pre-enable hardening F-5 (O-6): the pilot readiness check reads "active" and "root" with THESE two

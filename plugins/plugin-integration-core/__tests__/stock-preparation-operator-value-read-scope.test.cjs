@@ -70,6 +70,9 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // what it was asked to write).
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
+// Batch-refresh step 4 PR-5: the export brackets its read with the sheet's lock generation (required by name).
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
 const path = require('node:path')
 const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
@@ -235,6 +238,8 @@ function inertService(methods) {
 
 function baseServices() {
   return {
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -443,10 +448,11 @@ function mount({ tenantPrincipalDirectory = hostDirectory(), exportBoundTo = 'A'
     },
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {
@@ -696,7 +702,7 @@ function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
   services.stockPreparationAuditStore = { async append() { return { ok: true } } }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
 
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, adapterTenants, tenantPrincipalDirectory }
 }
 

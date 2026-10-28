@@ -18,8 +18,10 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 2 — version 1 was the first fifteen; the pre-enable hardening of step-4
-// design §23.4 F-3 / F-5 added the three marked ★, which only ever refuse more):
+// THE LIST (PILOT_READINESS_VERSION 3 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// design §23.4 F-3 / F-5 added the three marked ★ (version 2); version 3 (#6324 S1/N4) makes
+// spec_read_plan_slot also require the effective online plan's slot while online read plans are ON. Every
+// version change only ever refuses more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -43,8 +45,10 @@
 //                                  and can READ this sheet's closure (so a stamp can land where the resolvers look)
 //   continuation_store_readable    the step-4 continuation table is readable      ← step 4 PR-2
 //   refresh_state_store_readable   the step-4 refresh-state table is readable     ← step 4 PR-2
-//   spec_read_plan_slot            the read plan declares the 规格 column, or server config declares it
-//                                  not applicable (never guessed)                   ← step-4 refuter B-M8
+//   spec_read_plan_slot            server config declares the 规格 column not applicable, or EVERY read plan the
+//                                  project can execute declares it: the deployment plan and, with online read
+//                                  plans ON, the effective one (`specSlotReadPlans`; S1 N4 — only refuses more)
+//                                  (never guessed)                                  ← step-4 refuter B-M8
 // ★ pack_columns_installed         EITHER the action declares at least one `ext_` column (`extensionFieldIds`)
 //                                  and EVERY declared column is installed on THIS sheet — listed live by the
 //                                  pack-install ledger for (tenant, staging project, objectId) AND present on the
@@ -56,7 +60,8 @@
 //                                  continuation is confirmed would leave it evidence_incomplete with no confirm)
 //   no_generic_writer_names_sheet  no external-system object config and no pipeline's erp-feedback option
 //                                  names this sheet or objectId (and both registries answered) ← step 4 PR-6
-//   continuation_support_version   the plugin build recognises continuations    ← step 4 PR-3 flips the marker
+//   continuation_support_version   the plugin build recognises continuations    ← flipped by the LAST PR of the
+//                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
 // ---------------------------------------------------------------------------------------------------
 
 const { resolveFieldExistence } = require('./stock-preparation-target-provisioning.cjs')
@@ -70,15 +75,15 @@ const {
   readProjectSheetPlmSystemColumnLock,
 } = require('./stock-preparation-project-targets.cjs')
 
-// THE CONTINUATION MARKER lives in its own module (read at evaluation time, see its header): a later PR
-// (step 4 PR-3: the governance consult on every lane, the planner projection, whole-pull suspension)
-// flips it to REQUIRED when the build really recognises persisted continuations on every lane. Until
-// then readiness refuses by construction (D-22).
+// THE CONTINUATION MARKER lives in its own module (read at evaluation time, see its header): the LAST PR of
+// the D-22 set (step 4 PR-3a / PR-3b — the governance consult on every lane, the planner projection, whole-
+// pull suspension, the large-lane refusal — plus PR-4, PR-5, PR-6, PR-8 and step 6) flips it to REQUIRED,
+// never ahead. PR-3a and PR-3b leave it 0, so readiness still refuses every enable by construction (D-22).
 const continuationSupport = require('./stock-preparation-continuation-support.cjs')
 // O-6: the continuation core's own "active" / "root" predicates (see no_two_copy_component above).
 const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')
 
-const PILOT_READINESS_VERSION = 2
+const PILOT_READINESS_VERSION = 3
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;
@@ -307,11 +312,15 @@ const CHECKS = Object.freeze({
     const probe = await deps.probeTableReadable(STEP4_STORE_TABLES.refreshState)
     return Boolean(probe && probe.readable === true)
   },
-  spec_read_plan_slot(deps) {
-    const readPlan = deps.action && isPlainObject(deps.action.source) ? deps.action.source.readPlan : null
-    const declared = isPlainObject(readPlan) && isPlainObject(readPlan.part) && nonEmptyString(readPlan.part.specField) !== null
-    if (declared) return true
-    return deps.specReadPlanSlotDeclaration === SPEC_READ_PLAN_SLOT_NOT_APPLICABLE
+  async spec_read_plan_slot(deps) {
+    // The explicit not-applicable declaration answers first, without asking for any plan.
+    if (deps.specReadPlanSlotDeclaration === SPEC_READ_PLAN_SLOT_NOT_APPLICABLE) return true
+    // Without the optional `specSlotReadPlans` the deployment action's own plan decides, as it always did.
+    const plans = typeof deps.specSlotReadPlans === 'function'
+      ? await deps.specSlotReadPlans()
+      : [deps.action && isPlainObject(deps.action.source) ? deps.action.source.readPlan : null]
+    return Array.isArray(plans) && plans.length > 0
+      && plans.every((readPlan) => isPlainObject(readPlan) && isPlainObject(readPlan.part) && nonEmptyString(readPlan.part.specField) !== null)
   },
   async pack_columns_installed(deps) {
     const facts = await readPackColumnFacts({
@@ -348,6 +357,8 @@ const CHECKS = Object.freeze({
  *   assertTargetSheetHoldsNoForeignActiveRows, readExistingStockPreparationRows, lock, writeScope,
  *   countOpenLargeJobs, probeTableReadable, specReadPlanSlotDeclaration, packInstallStore,
  *   customerPackDeclaration, collectGenericWriterTargets
+ * and, optionally, specSlotReadPlans: `async () => [readPlan, ...]` — every read plan spec_read_plan_slot must find
+ * the 规格 column in (absent: the action's own plan; a throw or an empty list is not ok).
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []

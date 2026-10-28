@@ -33,6 +33,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 // literals are schema ids, frozen reason tokens and synthetic cell text.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -255,6 +256,8 @@ function baseServices(sourceAdapter) {
   return {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
     stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       // G4/M2 (#5553 §3): the two accessors are DIFFERENT objects here, not an alias, because the
@@ -330,7 +333,7 @@ function mount({ config = {}, sourceAdapter, records, provisioning } = {}) {
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(sourceAdapter || createSourceAdapter()),
+    services: withRefreshGovernance(baseServices(sourceAdapter || createSourceAdapter())),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context }

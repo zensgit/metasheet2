@@ -873,6 +873,26 @@ function duplicateGroupDiscriminator(rows) {
   return null
 }
 
+// THE BASE of a duplicate-resolved key (`duplicateResolvedKey` below appends `::duplicate:<kind>:<hash>` to the
+// expansion's own idempotency key, a JSON object that EMBEDS its projectNo — bom-expansion makeIdempotencyKey).
+// The readers that strip the suffix do it through this ONE helper: the continuation core's claim maps (pairing
+// `baseKeyOf`), the carry route's project number and the carry executor's key-vs-rows project check (batch-refresh
+// step 4 PR-3a review round 1, V50B-16). Two key parsers do NOT strip it and fail closed on a suffixed key BY
+// DESIGN (batch-refresh step 4 PR-4, design §23.8 F-15): the pairing's `keyPathTokens` (a continuation root key
+// => `structure_changed`) and the continuation store's `parseKey` (a candidate hold's new root key =>
+// `new_root_key_unparsable`). A relationship whose ROOT row is duplicate-resolved is UNSUPPORTED: the claim maps
+// are base-keyed, so a stripped root would protect / suppress BOTH duplicate twins, one of which is an
+// independent row. The candidate detector therefore never emits a confirmable candidate on such a root (it
+// answers `candidate_ambiguous`, pairing `detectCandidates`), and the two parsers are the pinned backstops
+// (planner suite F-15a / F-15b, store suite ST-F15). A key without the suffix is returned unchanged; a non-string
+// is returned as given.
+const DUPLICATE_RESOLVED_KEY_SEPARATOR = '::duplicate:'
+function baseIdempotencyKeyOf(key) {
+  if (typeof key !== 'string') return key
+  const at = key.indexOf(DUPLICATE_RESOLVED_KEY_SEPARATOR)
+  return at === -1 ? key : key.slice(0, at)
+}
+
 function duplicateResolvedKey(baseKey, groupFingerprint, discriminatorKind, discriminatorValue) {
   const discriminatorHash = stableFingerprint(`${groupFingerprint}\0${discriminatorKind}\0${stableStringify(stableValue(discriminatorValue))}`)
   return `${baseKey}::duplicate:${discriminatorKind}:${discriminatorHash}`
@@ -1623,7 +1643,7 @@ function planStockPreparationConflicts(input = {}) {
       if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
       // Step 4: a row a continuation protects (or a suspended candidate's old row) is NOT swept, so it
       // is not a predecessor either (design §6.2, third consumer).
-      if (governed && (governed.continuedRefFor(key) || governed.candidateProtectKeys.has(key))) continue
+      if (governed && (governed.continuedRefFor(key) || governed.candidateProtectHoldFor(key))) continue
       const existingRow = rows[0]
       carrySources.push(existingRow.active === false ? existingRow : { ...existingRow, active: false })
     }
@@ -1648,8 +1668,12 @@ function planStockPreparationConflicts(input = {}) {
         addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
         continue
       }
-      if (!existingRow && governed.candidateSuppressAddKeys.has(key)) {
-        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: governed.candidateSuppressAddKeys.get(key) }))
+      // PR-3a (TD-15(i), O-5; TD-14, O-4): a candidate's new-subtree key — free (would be ADDed) OR already
+      // occupied by an inactive tombstone / an active copy (would be revived / patched) — is SKIPped, compared
+      // as its BASE key so a resolved duplicate group cannot escape.
+      const candidateHold = governed.candidatePositionHoldFor(key)
+      if (candidateHold) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: candidateHold }))
         continue
       }
     }
@@ -1710,8 +1734,11 @@ function planStockPreparationConflicts(input = {}) {
 
     const refreshChanges = strategy.refreshPlmSystemFields ? changedFields(row, existingRow, plmFields, templateFields) : []
     // Step 4, design §6.7 (pilot projects only): a change in a content-trigger field suspends the whole
-    // pull; the decision itself stays what the planner computed (the suspension dominates).
-    if (governed && governed.pilot && refreshChanges.length > 0 && existingRow.active !== false) {
+    // pull; the decision itself stays what the planner computed (the suspension dominates). PR-3a (O-3,
+    // TD-13): detected REGARDLESS of `conflictStrategy.refreshPlmSystemFields` — with the strategy off a
+    // material change would otherwise reach a governed pilot sheet unheld. `noteContentChange` compares the
+    // trigger fields itself and returns when none changed.
+    if (governed && governed.pilot && existingRow.active !== false) {
       governed.noteContentChange(row, existingRow, { reason: 'plm_system_refresh' })
     }
     if (refreshChanges.length === 0) {
@@ -1731,8 +1758,9 @@ function planStockPreparationConflicts(input = {}) {
         addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
         continue
       }
-      if (governed.candidateProtectKeys.has(key)) {
-        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: governed.candidateProtectKeys.get(key) }))
+      const protectHold = governed.candidateProtectHoldFor(key)
+      if (protectHold) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: protectHold }))
         continue
       }
     }
@@ -1874,6 +1902,7 @@ module.exports = {
   UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   PACK_FIELD_OWNERSHIP_REASONS,
   StockPreparationConflictPlannerError,
+  baseIdempotencyKeyOf,
   derivePackAwarePlmWritableFields,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,

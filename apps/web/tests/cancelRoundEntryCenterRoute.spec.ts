@@ -255,6 +255,7 @@ afterEach(() => {
   container?.remove()
   document.body.innerHTML = ''
   localStorage.removeItem('user_permissions')
+  localStorage.removeItem('user_roles')
   app = null
   container = null
   vi.clearAllMocks()
@@ -324,6 +325,9 @@ describe('ApprovalCenterView — cancel-round approver path', () => {
   })
 
   it('batch 通过 splits: cancel-round rows → attendance route, ordinary rows → dispatchAction', async () => {
+    // Mixed batch: the ordinary rows decide through the generic route (`approvals:act`), the cancel-round
+    // row through the attendance route (`attendance:approve`), so this approver holds both.
+    localStorage.setItem('user_permissions', JSON.stringify(['attendance:approve', 'approvals:act']))
     mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' }), cancelRow('cr_1', 'apv_orig_1')]
     await mountView()
     ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
@@ -430,6 +434,9 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
       if (id === 'apv_bad') throw new Error('冲突：状态已变更')
       return {}
     })
+    // Mixed batch: the ordinary rows decide through the generic route (`approvals:act`), the cancel-round
+    // row through the attendance route (`attendance:approve`), so this approver holds both.
+    localStorage.setItem('user_permissions', JSON.stringify(['attendance:approve', 'approvals:act']))
     mockPendingApprovals.value = [
       cancelRow('cr_1', 'apv_orig_1'),
       pendingRow({ id: 'apv_ok', requestNo: 'AP-OK' }),
@@ -475,6 +482,9 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
       if (id === 'apv_bad') throw new Error('冲突：状态已变更')
       return {}
     })
+    // Mixed batch: the ordinary rows decide through the generic route (`approvals:act`), the cancel-round
+    // row through the attendance route (`attendance:approve`), so this approver holds both.
+    localStorage.setItem('user_permissions', JSON.stringify(['attendance:approve', 'approvals:act']))
     mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1'), pendingRow({ id: 'apv_bad', requestNo: 'AP-BAD' })]
     await mountView()
     ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
@@ -527,6 +537,78 @@ describe('ApprovalCenterView — cancel-round affordances follow the attendance 
     await mountView()
     expect(container!.querySelector('[data-testid="approval-row-approve-cr_1"]')).not.toBeNull()
     expect(container!.querySelector('[data-testid="approval-row-reject-cr_1"]')).not.toBeNull()
+  })
+})
+
+describe('ApprovalCenterView — platform-row affordances follow approvals:act (as the detail view does)', () => {
+  const selectAllThenBatchApprove = async () => {
+    ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).click()
+    await flushUi()
+  }
+
+  it('a reader (approvals:read, no approvals:act) keeps the row but gets no inline 通过/驳回 and cannot batch-decide it', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read']))
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' })]
+    await mountView()
+    expect(container!.querySelector('[data-el-row="apv_plain"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-reject-apv_plain"]')).toBeNull()
+    await selectAllThenBatchApprove()
+    expect((container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).disabled).toBe(true)
+    expect((container!.querySelector('[data-testid="approval-batch-reject"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-selection-count"]')).toBeNull()
+    expect(dispatchActionSpy).not.toHaveBeenCalled()
+    expect(attendanceCalls()).toHaveLength(0)
+  })
+
+  it('an actor (approvals:read + approvals:act) gets the inline 通过/驳回 and batch-decides the row (positive control)', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' })]
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-reject-apv_plain"]')).not.toBeNull()
+    await selectAllThenBatchApprove()
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_plain', { action: 'approve' })
+  })
+
+  it('attendance:approve alone decides the cancel-round row but not the ordinary one (each row follows its own route grant)', async () => {
+    // beforeEach grants attendance:approve only.
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' }), cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-approve-cr_1"]')).not.toBeNull()
+    await selectAllThenBatchApprove()
+    expect(dispatchActionSpy).not.toHaveBeenCalled()
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
+  })
+
+  it('an administrator (role only, neither approvals:act nor attendance:approve) gets the inline 通过 on the platform AND the cancel-round row and batch-decides both', async () => {
+    // The admin bypass behind canAct / canDecideCancelRoundWith: without this positive control,
+    // dropping `access.isAdmin ||` hides every 通过/驳回 from administrators with the suite green.
+    // The reader case above is the matching negative control (same codes, no admin role).
+    localStorage.setItem('user_roles', JSON.stringify(['admin']))
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read']))
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' }), cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-approve-cr_1"]')).not.toBeNull()
+    await selectAllThenBatchApprove()
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_plain', { action: 'approve' })
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
+  })
+
+  it('an actor still gets no inline 通过/驳回 on a row whose canDecideCurrentNode is false', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_noseat', canDecideCurrentNode: false }), pendingRow({ id: 'apv_plain' })]
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_noseat"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).not.toBeNull()
+    await selectAllThenBatchApprove()
+    expect(dispatchActionSpy.mock.calls.map((c) => c[0])).toEqual(['apv_plain'])
   })
 })
 

@@ -95,6 +95,23 @@ node __tests__/stock-preparation-continuation-golden.test.cjs
 node __tests__/stock-preparation-continuation-pairing.test.cjs
 node __tests__/stock-preparation-continuation-planner.test.cjs
 node __tests__/stock-preparation-refresh-state.test.cjs
+node __tests__/stock-preparation-continuation-store.test.cjs
+node __tests__/stock-preparation-refresh-governance.test.cjs
+node __tests__/stock-preparation-refresh-lanes.test.cjs
+node __tests__/stock-preparation-refresh-small-lane.test.cjs
+node __tests__/stock-preparation-refresh-writer-tripwire.test.cjs
+node __tests__/stock-preparation-refresh-chunk-gate.test.cjs
+node __tests__/stock-preparation-refresh-large-lane.test.cjs
+node __tests__/stock-preparation-refresh-route-wiring.test.cjs
+node __tests__/stock-preparation-refresh-egress.test.cjs
+node __tests__/stock-preparation-refresh-scan.test.cjs
+node __tests__/stock-preparation-refresh-decisions.test.cjs
+node __tests__/stock-preparation-refresh-decision-routes.test.cjs
+node __tests__/stock-preparation-governed-sheet-probe.test.cjs
+node __tests__/metasheet-multitable-governed-sheet.test.cjs
+node __tests__/erp-feedback-governed-sheet.test.cjs
+node __tests__/pipeline-runner-governed-sheet.test.cjs
+node __tests__/stock-preparation-generic-writer-scan.test.cjs
 node __tests__/stock-preparation-existing-row-record-ref.test.cjs
 node __tests__/stock-preparation-foreign-existing-rows-readside.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs
@@ -104,6 +121,7 @@ node __tests__/stock-preparation-permission-matrix.test.cjs
 node __tests__/stock-preparation-members-routes.test.cjs
 node __tests__/stock-preparation-prep-line-export.test.cjs
 node __tests__/stock-preparation-prep-line-export-tenant-wall.test.cjs
+node __tests__/stock-preparation-export-gate.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight-tenant-scope.test.cjs
@@ -294,6 +312,20 @@ node __tests__/yida-send-authority-primitives.test.cjs
 node __tests__/yida-static-plan.test.cjs
 node __tests__/yida-token-client.test.cjs
 node __tests__/yida-token-exchange.test.cjs
+
+node __tests__/stock-preparation-source-membership.test.cjs
+node __tests__/stock-preparation-bom-active-state.test.cjs
+node __tests__/stock-preparation-bom-artifact-version.test.cjs
+node __tests__/stock-preparation-read-plan-bootstrap.test.cjs
+node __tests__/stock-preparation-read-plan-catalog.test.cjs
+node __tests__/stock-preparation-read-plan-execution-identity.test.cjs
+node __tests__/stock-preparation-read-plan-management.test.cjs
+node __tests__/stock-preparation-read-plan-runtime.test.cjs
+node __tests__/stock-preparation-read-plan-store.test.cjs
+node __tests__/stock-preparation-read-plan-validation-ledger.test.cjs
+node __tests__/stock-preparation-read-plan-validation-read.test.cjs
+node __tests__/stock-preparation-read-plan-validation-runtime.test.cjs
+
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---

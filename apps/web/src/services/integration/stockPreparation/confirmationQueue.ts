@@ -322,7 +322,15 @@ export async function exportStockPreparationPrepLines(
       : response.status === 404
         ? 'STOCK_PREPARATION_EXPORT_NOT_FOUND'
         : 'STOCK_PREPARATION_EXPORT_REQUEST_FAILED'
-    throw new StockPreparationConfirmApiError(response.status, code, null)
+    // PR-7 (PR-5 pg review N1): the export gate's `details.reason` (`lease_in_flight` / `state` / `not_settled`, …)
+    // and `details.status` ride along CLAMPED to lower_snake tokens, so the copy can tell the three apart.
+    const details = payload?.error && typeof payload.error === 'object'
+      ? (payload.error as { details?: unknown }).details
+      : undefined
+    const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
+      ? details as { reason?: unknown; status?: unknown }
+      : {}
+    throw new StockPreparationConfirmApiError(response.status, code, null, { reason: detailRecord.reason, status: detailRecord.status })
   }
   const blob = await response.blob()
   return {

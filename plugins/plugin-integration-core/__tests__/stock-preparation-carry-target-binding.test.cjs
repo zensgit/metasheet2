@@ -35,6 +35,7 @@
 // defect got wrong.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
 
@@ -398,7 +399,7 @@ function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, target
     stockPreparationAuditStore: auditStore,
     tenantPrincipalDirectory: env.tenantPrincipalDirectory,
   }
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, auditDb, env, context }
 }
 

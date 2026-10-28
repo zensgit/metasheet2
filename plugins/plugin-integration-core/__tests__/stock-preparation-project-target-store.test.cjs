@@ -46,6 +46,7 @@ const {
   SHEET_CONSTRAINT,
   StockPreparationProjectTargetStoreError,
   createStockPreparationProjectTargetStore,
+  lockRegistryAndCountCaseFoldedProjectGroups,
 } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
 
 const TENANT = 'tenant-s1-store'
@@ -124,6 +125,8 @@ function makeMemoryDb({ failInsertWith } = {}) {
       calls.push(['transaction'])
       return fn({
         ...tagged('trx.'),
+        async setTransactionIsolationLevel(level) { calls.push(['trx.setTransactionIsolationLevel', level]) },
+        async tryAdvisoryXactLock(key) { calls.push(['trx.tryAdvisoryXactLock', key]); return true },
         async advisoryXactLock(key) { calls.push(['trx.advisoryXactLock', key]) },
       })
     },
@@ -431,6 +434,439 @@ test('S-12 (S4 fix round 1) withActiveRowLocked: lock → FOR UPDATE → active 
 
   await store.restore({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-LOCK', actorId: 'u_restorer' })
   await assert.rejects(store.withActiveRowLocked({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-LOCK' }, async () => { throw new Error('heal failed') }), /heal failed/)
+})
+
+test('P2-S01 deferred create resolves comparison and scans inside the tenant lock before any preparation', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  let prepared = 0
+  const created = await store.create({
+    tenantId: TENANT, projectNo: 'Abc', maxPerTenant: 200,
+    resolveSourceProjectComparison: async () => {
+      db.calls.push(['resolveComparison'])
+      assert.deepEqual(db.calls.slice(0, 3), [
+        ['transaction'], ['trx.setTransactionIsolationLevel', 'read committed'],
+        ['trx.tryAdvisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}${TENANT}`],
+      ], 'read committed is the first transaction statement, before the nonblocking tenant lock')
+      return 'case-insensitive'
+    },
+  }, async () => {
+    prepared += 1
+    db.calls.push(['prepareTarget'])
+    const names = db.calls.map((call) => call[0])
+    assert.ok(names.indexOf('resolveComparison') > names.indexOf('trx.tryAdvisoryXactLock'))
+    assert.ok(names.indexOf('trx.select') > names.indexOf('resolveComparison'), 'registry scan is on the transaction handle after effective mode')
+    assert.ok(names.indexOf('trx.countRows') > names.indexOf('resolveComparison'), 'registry completeness count is on the transaction handle')
+    assert.ok(!names.includes('select') && !names.includes('countRows'), 'no autocommit guard')
+    assert.ok(!names.includes('trx.insertOne'), 'preparation precedes insert')
+    return { sheetId: 'synthetic-prepared-sheet', objectId: 'synthetic-prepared-object' }
+  })
+  assert.equal(prepared, 1)
+  assert.equal(created.projectNo, 'Abc')
+  assert.equal(created.sheetId, 'synthetic-prepared-sheet')
+  assert.equal(db.calls.at(-1)[0], 'trx.insertOne', 'insert stays in the same transaction')
+})
+
+test('P2-S02 active and archived variants refuse before deferred provision, packs or grants', async () => {
+  for (const status of ['active', 'archived']) {
+    const db = makeMemoryDb()
+    const store = makeStore(db)
+    await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: `synthetic-${status}`, objectId: 'synthetic-object' })
+    Object.assign(db.rows[0], { status, archived_at: status === 'archived' ? CLOCK : null })
+    db.calls.length = 0
+    const host = { provision: 0, pack: 0, grant: 0 }
+    const error = await expectStoreError(store.create({
+      tenantId: TENANT, projectNo: 'abc', maxPerTenant: 200,
+      resolveSourceProjectComparison: async () => 'case-insensitive',
+    }, async () => {
+      host.provision += 1; host.pack += 1; host.grant += 1
+      return { sheetId: 'synthetic-second-sheet', objectId: 'synthetic-second-object' }
+    }), 409, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+    assert.deepEqual(error.details, { field: 'projectNo' })
+    assert.doesNotMatch(error.message, /Abc|abc/)
+    assert.deepEqual(host, { provision: 0, pack: 0, grant: 0 }, 'guard precedes the entire preparation callback')
+    assert.equal(db.rows.length, 1)
+    assert.equal(db.calls[0][0], 'transaction')
+    assert.deepEqual(db.calls.slice(0, 3).map((call) => call[0]), ['transaction', 'trx.setTransactionIsolationLevel', 'trx.tryAdvisoryXactLock'])
+    assert.ok(!db.calls.some((call) => call[0] === 'trx.insertOne'))
+  }
+})
+
+test('P2-S03 deferred create requires the resolver and refuses exact duplicates or cap before preparation', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  let prepared = 0
+  const prepare = async () => { prepared += 1; return { sheetId: 'synthetic-next', objectId: 'synthetic-next-object' } }
+  // Explicit handles prevent an old implementation's required-handle validation from making
+  // this missing-resolver control pass for the wrong reason.
+  await assert.rejects(store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'ignored-sheet', objectId: 'ignored-object' }, prepare))
+  assert.equal(prepared, 0)
+  assert.equal(db.rows.length, 0)
+  await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-object' })
+  await expectStoreError(store.create({ tenantId: TENANT, projectNo: 'Abc', resolveSourceProjectComparison: async () => 'case-insensitive' }, prepare), 409, 'STOCK_PREPARATION_PROJECT_TARGET_EXISTS')
+  await expectStoreError(store.create({ tenantId: TENANT, projectNo: 'Other', maxPerTenant: 1, resolveSourceProjectComparison: async () => 'case-insensitive' }, prepare), 409, 'STOCK_PREPARATION_PROJECT_TARGET_LIMIT')
+  assert.equal(prepared, 0)
+  assert.equal(db.rows.length, 1)
+})
+
+test('P2-S04 default and case-sensitive deferred create preserve variants and tenant isolation', async () => {
+  for (const comparison of [undefined, 'case-sensitive', 'case-insensitive']) {
+    const db = makeMemoryDb()
+    const store = makeStore(db)
+    const firstTenant = comparison === 'case-insensitive' ? OTHER_TENANT : TENANT
+    await store.create({ tenantId: firstTenant, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-object' })
+    let called = 0
+    const result = await store.create({ tenantId: TENANT, projectNo: 'abc', resolveSourceProjectComparison: async () => comparison }, async () => {
+      called += 1
+      return { sheetId: 'synthetic-variant', objectId: 'synthetic-variant-object' }
+    })
+    assert.equal(result.projectNo, 'abc')
+    assert.equal(result.tenantId, TENANT)
+    assert.equal(called, 1)
+    assert.equal(db.rows.length, 2)
+  }
+})
+
+test('P2-S05 malformed or truncated registry, invalid comparison and resolver failure refuse before preparation', async () => {
+  for (const alter of [
+    (trx) => ({ ...trx, async select() { return [] } }),
+    (trx) => ({ ...trx, async select() { return [{ tenant_id: OTHER_TENANT, project_no: 'Other', sheet_id: 's', object_id: 'o', status: 'active' }] } }),
+    (trx) => ({ ...trx, async select() { return [{ tenant_id: TENANT, project_no: 1, sheet_id: 's', object_id: 'o', status: 'active' }] } }),
+    (trx) => ({ ...trx, async select() { throw new Error('synthetic-private-registry') } }),
+    (trx) => ({ ...trx, async countRows() { return '1' } }),
+    (trx) => ({ ...trx, async countRows() { return 0 }, async select() { return {} } }),
+    (trx) => ({ ...trx, async select() { return [{ project_no: 'Other', sheet_id: 's', object_id: 'o', status: 'active' }] } }),
+    (trx) => ({ ...trx, async select() { return [{ tenant_id: TENANT, project_no: ' Other ', sheet_id: 's', object_id: 'o', status: 'active' }] } }),
+  ]) {
+    const db = makeMemoryDb()
+    const store = makeStore(db)
+    await store.create({ tenantId: TENANT, projectNo: 'Other', sheetId: 'synthetic-first', objectId: 'synthetic-object' })
+    const transaction = db.transaction
+    db.transaction = (fn) => transaction((trx) => fn(alter(trx)))
+    let prepared = 0
+    await assert.rejects(store.create({ tenantId: TENANT, projectNo: 'abc', resolveSourceProjectComparison: async () => 'case-insensitive' }, async () => {
+      prepared += 1; return { sheetId: 'synthetic-second', objectId: 'synthetic-second-object' }
+    }), (error) => error.status === 503 && error.code === 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE' && !/synthetic-private/.test(error.message))
+    assert.equal(prepared, 0)
+    assert.equal(db.rows.length, 1)
+  }
+  for (const resolveSourceProjectComparison of [async () => 'Case-Insensitive', async () => { throw new Error('synthetic resolver unavailable') }]) {
+    const db = makeMemoryDb()
+    const store = makeStore(db)
+    let prepared = 0
+    await assert.rejects(store.create({ tenantId: TENANT, projectNo: 'abc', resolveSourceProjectComparison }, async () => {
+      prepared += 1; return { sheetId: 'synthetic-second', objectId: 'synthetic-second-object' }
+    }))
+    assert.equal(prepared, 0)
+    assert.equal(db.rows.length, 0)
+  }
+})
+
+test('P2-S06 exact replay rejects legacy ambiguity under the tenant lock before heal callback', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-first-object' })
+  await store.create({ tenantId: TENANT, projectNo: 'abc', sheetId: 'synthetic-second', objectId: 'synthetic-second-object' })
+  db.calls.length = 0
+  let healed = 0
+  let resolved = 0
+  await expectStoreError(store.withActiveRowLocked({ tenantId: TENANT, projectNo: 'Abc', resolveSourceProjectComparison: async () => {
+    resolved += 1
+    assert.deepEqual(db.calls.slice(0, 3).map((call) => call[0]), ['transaction', 'trx.setTransactionIsolationLevel', 'trx.tryAdvisoryXactLock'])
+    return 'case-insensitive'
+  } }, async () => { healed += 1 }), 409, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+  assert.equal(resolved, 1)
+  assert.equal(healed, 0)
+  assert.equal(db.rows.length, 2, 'legacy direct create retains its original exact-key behavior')
+})
+
+test('P2-S07 busy or unavailable nonblocking lock protocols refuse create and replay before resolver or host work', async () => {
+  const cases = [
+    ...[false, undefined, null, 1, 'true'].map((acquired) => ({
+      alter: (trx) => ({ ...trx, async tryAdvisoryXactLock() { return acquired } }),
+      status: 409, code: 'STOCK_PREPARATION_PROJECT_TARGET_BUSY',
+    })),
+    { alter: (trx) => ({ ...trx, tryAdvisoryXactLock: undefined }), status: 503, code: 'STOCK_PREPARATION_PROJECT_TARGET_LOCK_UNAVAILABLE' },
+    { alter: (trx) => ({ ...trx, setTransactionIsolationLevel: undefined }), status: 503, code: 'STOCK_PREPARATION_PROJECT_TARGET_LOCK_UNAVAILABLE' },
+  ]
+  for (const operation of ['create', 'replay']) {
+    for (const entry of cases) {
+      const db = makeMemoryDb()
+      const store = makeStore(db)
+      if (operation === 'replay') await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-object' })
+      db.calls.length = 0
+      const transaction = db.transaction
+      db.transaction = (fn) => transaction((trx) => fn(entry.alter(trx)))
+      let resolved = 0
+      let hostCalls = 0
+      const input = { tenantId: TENANT, projectNo: 'Abc', resolveSourceProjectComparison: async () => { resolved += 1; return 'case-insensitive' } }
+      const callback = async () => { hostCalls += 1; return { sheetId: 'synthetic-prepared', objectId: 'synthetic-prepared-object' } }
+      await expectStoreError(operation === 'create' ? store.create(input, callback) : store.withActiveRowLocked(input, callback), entry.status, entry.code)
+      assert.equal(resolved, 0, `${operation}: no effective-plan connection borrowed while busy or protocol unavailable`)
+      assert.equal(hostCalls, 0, `${operation}: no provision, pack or grant work`)
+      assert.ok(!db.calls.some((call) => call[0] === 'trx.advisoryXactLock'), 'opt-in path never queues a blocking advisory lock')
+      assert.equal(db.rows.length, operation === 'replay' ? 1 : 0)
+    }
+  }
+})
+
+test('P2-S08 a busy contender frees a finite pool connection so the lock holder can resolve its plan', async () => {
+  // A deterministic two-connection model: holder needs another connection in its resolver;
+  // contender occupies the second transaction connection. A blocking advisory wait would
+  // deadlock them. This checks local scheduling only, not physical PostgreSQL isolation.
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  const transaction = db.transaction
+  const poolWaiters = []
+  const lockWaiters = []
+  let inUse = 0
+  let transactionCount = 0
+  let held = false
+  let aborted = false
+  let signalHolder
+  let signalContender
+  const holderReady = new Promise((resolve) => { signalHolder = resolve })
+  const contenderEntered = new Promise((resolve) => { signalContender = resolve })
+  const withConnection = async (fn) => {
+    if (inUse >= 2 && !aborted) await new Promise((resolve) => poolWaiters.push(resolve))
+    inUse += 1
+    try { return await fn() } finally {
+      inUse -= 1
+      const release = poolWaiters.shift()
+      if (release) release()
+    }
+  }
+  db.transaction = (fn) => withConnection(async () => {
+    const index = ++transactionCount
+    if (index === 2) signalContender()
+    let ownsLock = false
+    try {
+      return await transaction((trx) => fn({
+        ...trx,
+        async tryAdvisoryXactLock(key) {
+          db.calls.push(['trx.tryAdvisoryXactLock', key])
+          if (held) return false
+          held = true; ownsLock = true; return true
+        },
+        async advisoryXactLock(key) {
+          db.calls.push(['trx.advisoryXactLock', key])
+          if (held && !aborted) await new Promise((resolve) => lockWaiters.push(resolve))
+          held = true; ownsLock = true
+        },
+      }))
+    } finally {
+      if (ownsLock) {
+        held = false
+        const release = lockWaiters.shift()
+        if (release) release()
+      }
+    }
+  })
+  let borrowed = 0
+  let holderPrepared = 0
+  let contenderResolved = 0
+  let contenderPrepared = 0
+  const holder = store.create({ tenantId: TENANT, projectNo: 'Abc', resolveSourceProjectComparison: async () => {
+    signalHolder()
+    await contenderEntered
+    await withConnection(async () => { borrowed += 1 })
+    return 'case-insensitive'
+  } }, async () => {
+    holderPrepared += 1
+    return { sheetId: 'synthetic-holder', objectId: 'synthetic-holder-object' }
+  })
+  await holderReady
+  const contender = store.create({ tenantId: TENANT, projectNo: 'abc', resolveSourceProjectComparison: async () => {
+    contenderResolved += 1; return 'case-insensitive'
+  } }, async () => {
+    contenderPrepared += 1
+    return { sheetId: 'synthetic-contender', objectId: 'synthetic-contender-object' }
+  })
+  let timer
+  try {
+    const outcomes = await Promise.race([
+      Promise.allSettled([holder, contender]),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('finite pool progress stalled behind a blocking tenant lock')), 500) }),
+    ])
+    assert.equal(outcomes[0].status, 'fulfilled')
+    assert.equal(outcomes[1].status, 'rejected')
+    assert.equal(outcomes[1].reason.status, 409)
+    assert.equal(outcomes[1].reason.code, 'STOCK_PREPARATION_PROJECT_TARGET_BUSY')
+    assert.equal(borrowed, 1, 'holder acquired the connection released by the busy contender')
+    assert.equal(holderPrepared, 1)
+    assert.equal(contenderResolved, 0)
+    assert.equal(contenderPrepared, 0)
+    assert.equal(db.rows.length, 1)
+    assert.ok(!db.calls.some((call) => call[0] === 'trx.advisoryXactLock'))
+  } finally {
+    clearTimeout(timer)
+    aborted = true
+    for (const release of [...poolWaiters.splice(0), ...lockWaiters.splice(0)]) release()
+    await Promise.allSettled([holder, contender])
+  }
+})
+
+test('P2-S09 a direct-handle create WITH a resolver (the default / case-sensitive route leg) pins READ COMMITTED, takes the BLOCKING lock and re-resolves before the insert', async () => {
+  for (const [mode, expectConflict] of [['case-insensitive', true], ['case-sensitive', false], [undefined, false]]) {
+    const db = makeMemoryDb()
+    const store = makeStore(db)
+    await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-first-object' })
+    db.calls.length = 0
+    let resolved = 0
+    const attempt = store.create({
+      tenantId: TENANT, projectNo: 'abc', sheetId: 'synthetic-variant', objectId: 'synthetic-variant-object', maxPerTenant: 200,
+      resolveSourceProjectComparison: async () => {
+        resolved += 1
+        assert.deepEqual(db.calls.slice(0, 3), [
+          ['transaction'], ['trx.setTransactionIsolationLevel', 'read committed'],
+          ['trx.advisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}${TENANT}`],
+        ], 'pinned READ COMMITTED, then the BLOCKING tenant lock, before the comparison is re-resolved')
+        return mode
+      },
+    })
+    if (expectConflict) {
+      await expectStoreError(attempt, 409, 'STOCK_PREPARATION_PROJECT_IDENTITY_CONFLICT')
+      assert.equal(db.rows.length, 1)
+      assert.ok(!db.calls.some((call) => call[0] === 'trx.insertOne'))
+    } else {
+      const created = await attempt
+      assert.equal(created.projectNo, 'abc', `${mode}: the variant registers`)
+      assert.equal(db.rows.length, 2)
+    }
+    assert.equal(resolved, 1)
+    assert.ok(!db.calls.some((call) => call[0] === 'trx.tryAdvisoryXactLock'), `${mode}: never the non-blocking lock (no BUSY)`)
+  }
+  // Without a resolver the old contract is unchanged: the blocking lock is the first statement, no pin.
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-plain', objectId: 'synthetic-plain-object' })
+  assert.deepEqual(db.calls.slice(0, 2), [['transaction'], ['trx.advisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}${TENANT}`]])
+})
+
+test('P2-S10 the activation helper locks the tenant registry, then counts case-folded groups (archived included, other tenants excluded)', async () => {
+  const seed = (db, entries) => {
+    for (const [projectNo, status = 'active', tenantId = TENANT] of entries) {
+      db.rows.push({ id: `seed-${tenantId}-${projectNo}-${status}`, tenant_id: tenantId, project_no: projectNo,
+        sheet_id: `sheet-${tenantId}-${projectNo}-${status}`, object_id: `object-${tenantId}-${projectNo}-${status}`, status })
+    }
+  }
+  for (const [entries, expected] of [
+    [[], 0],
+    [[['Abc'], ['Other']], 0],
+    [[['Abc'], ['abc', 'archived']], 1],
+    [[['Abc'], ['abc'], ['ABC', 'archived']], 1],
+    [[['Abc'], ['abc'], ['Xy'], ['XY']], 2],
+    [[['Abc'], ['abc', 'active', OTHER_TENANT]], 0],
+    [[['10'], ['0010']], 0],
+  ]) {
+    const db = makeMemoryDb()
+    seed(db, entries)
+    const groups = await db.transaction((trx) => lockRegistryAndCountCaseFoldedProjectGroups(trx, TENANT))
+    assert.equal(groups, expected, JSON.stringify(entries))
+    assert.deepEqual(db.calls.slice(0, 3).map((call) => call[0]), ['transaction', 'trx.advisoryXactLock', 'trx.countRows'],
+      'the registry lock, then the scan, on the transaction handle')
+    assert.equal(db.calls[1][1], `${PROJECT_TARGET_CREATE_LOCK_PREFIX}${TENANT}`, 'the SAME key every registration takes')
+  }
+  for (const [label, alter] of [
+    ['no lock capability', (trx) => ({ ...trx, advisoryXactLock: undefined })],
+    ['malformed row', (trx) => ({ ...trx, async select() { return [{ tenant_id: TENANT, project_no: 7, sheet_id: 's', object_id: 'o', status: 'active' }] }, async countRows() { return 1 } })],
+    ['throwing count', (trx) => ({ ...trx, async countRows() { throw new Error('synthetic-private-registry') } })],
+  ]) {
+    const db = makeMemoryDb()
+    const error = await expectStoreError(db.transaction((trx) => lockRegistryAndCountCaseFoldedProjectGroups(alter(trx), TENANT)), 503, 'STOCK_PREPARATION_PROJECT_IDENTITY_UNAVAILABLE')
+    assert.doesNotMatch(error.message, /synthetic-private/, label)
+  }
+})
+
+// F2: the three registry paths that run the identity guard with a resolver. 'create-try' is the deferred (strict)
+// create, 'create-pinned' the direct-handle create of the default / case-sensitive leg, 'replay-try' the replay's
+// locked re-check. `f2Attempt` drives one of them for 'Abc'.
+const F2_LEGS = ['create-try', 'create-pinned', 'replay-try']
+async function f2Attempt(store, leg, resolveSourceProjectComparison) {
+  const input = { tenantId: TENANT, projectNo: 'Abc', resolveSourceProjectComparison }
+  if (leg === 'create-try') return store.create(input, async () => ({ sheetId: 'synthetic-prepared', objectId: 'synthetic-prepared-object' }))
+  if (leg === 'create-pinned') return store.create({ ...input, sheetId: 'synthetic-direct', objectId: 'synthetic-direct-object' })
+  return store.withActiveRowLocked(input, async (row) => ({ healed: row.projectNo }))
+}
+
+test('P2-S11 (F2) the comparison resolver is handed exactly { executor: trx } — the transaction that holds the tenant lock — on all three paths, and its reads on it are transaction reads', async () => {
+  for (const leg of F2_LEGS) {
+    const db = makeMemoryDb()
+    const store = makeStore(db)
+    if (leg === 'replay-try') await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-first-object' })
+    db.calls.length = 0
+    const handed = []
+    await f2Attempt(store, leg, async (...args) => {
+      handed.push(args)
+      const [{ executor } = {}] = args
+      await executor.select(PROJECT_TARGET_TABLE, { where: { tenant_id: TENANT } })
+      await executor.selectOne(PROJECT_TARGET_TABLE, { tenant_id: TENANT, project_no: 'Abc' })
+      return 'case-sensitive'
+    })
+    assert.equal(handed.length, 1, `${leg}: resolved once, under the lock`)
+    assert.equal(handed[0].length, 1, `${leg}: one argument`)
+    assert.deepEqual(Object.keys(handed[0][0]), ['executor'], `${leg}: the argument is exactly { executor }`)
+    assert.equal(typeof handed[0][0].executor.advisoryXactLock, 'function', `${leg}: the executor is the transaction handle`)
+    const lock = leg === 'create-pinned' ? 'trx.advisoryXactLock' : 'trx.tryAdvisoryXactLock'
+    assert.deepEqual(db.calls.slice(0, 5).map((call) => call[0]), ['transaction', 'trx.setTransactionIsolationLevel', lock, 'trx.select', 'trx.selectOne'],
+      `${leg}: the resolver's reads run on the transaction, right after the lock`)
+    assert.ok(!db.calls.some((call) => call[0] === 'select' || call[0] === 'selectOne' || call[0] === 'countRows'), `${leg}: no autocommit read`)
+  }
+})
+
+/**
+ * F2: a connection-starved pool, modelled. While a registry transaction holds the tenant lock, an AUTOCOMMIT read
+ * finds no free connection and fails — the host pool's connect timeout, without its 10 s wait (blocking takers of the
+ * same lock each hold a pooled connection while they wait). The transaction handle has its own connection and keeps
+ * reading.
+ */
+function starvedPoolDb() {
+  const db = makeMemoryDb()
+  let held = false
+  const transaction = db.transaction
+  db.transaction = (fn) => transaction(async (trx) => {
+    try {
+      return await fn({
+        ...trx,
+        async tryAdvisoryXactLock(key) { const acquired = await trx.tryAdvisoryXactLock(key); held = acquired === true; return acquired },
+        async advisoryXactLock(key) { await trx.advisoryXactLock(key); held = true },
+      })
+    } finally { held = false }
+  })
+  for (const name of ['select', 'selectOne', 'countRows']) {
+    const read = db[name]
+    db[name] = async (...args) => {
+      if (held) throw new Error('synthetic-private-pool-exhausted')
+      return read(...args)
+    }
+  }
+  return db
+}
+
+test('P2-S12 (F2) the pool is exhausted while the tenant lock is held: a resolver that reads through its handed executor still registers (deferred, direct-handle, replay); one that reads the pool is refused', async () => {
+  for (const leg of F2_LEGS) {
+    for (const reader of ['executor', 'pool']) {
+      const db = starvedPoolDb()
+      const store = makeStore(db)
+      if (leg === 'replay-try') await store.create({ tenantId: TENANT, projectNo: 'Abc', sheetId: 'synthetic-first', objectId: 'synthetic-first-object' })
+      const rowsBefore = db.rows.length
+      // Reads on whatever handle it is handed, and on the pool only when handed none (the route resolver's shape).
+      const attempt = f2Attempt(store, leg, async ({ executor } = {}) => {
+        await (reader === 'executor' ? (executor || db) : db).select(PROJECT_TARGET_TABLE, { where: { tenant_id: TENANT } })
+        return 'case-sensitive'
+      })
+      if (reader === 'executor') {
+        const out = await attempt
+        if (leg === 'replay-try') assert.deepEqual(out, { healed: 'Abc' }, `${leg}: the heal ran`)
+        else assert.equal(out.projectNo, 'Abc', `${leg}: registered`)
+        assert.equal(db.rows.length, leg === 'replay-try' ? rowsBefore : rowsBefore + 1, `${leg}: the registration completed`)
+      } else {
+        // Control: the starvation is live — a read on the pool while the lock is held fails and nothing lands.
+        await assert.rejects(attempt, /synthetic-private-pool-exhausted/, `${leg}: a pool read under the lock is starved`)
+        assert.equal(db.rows.length, rowsBefore, `${leg}: nothing registered`)
+      }
+    }
+  }
 })
 
 test('S-06 migration 087: two unique indexes, the CHECKs, the integration_ prefix, no value column, no DROP', () => {

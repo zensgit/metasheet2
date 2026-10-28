@@ -25,7 +25,8 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
     'tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts',
     'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts']
   // The step's whole file list: a dropped file, or an unexpected positional filter, is red.
-  const lane = ['tests/integration/external-system-delete-bind-lock-protocol.db.test.ts', ...specs,
+  const lane = ['tests/integration/external-system-delete-bind-lock-protocol.db.test.ts',
+    'tests/integration/stock-preparation-read-plan-host-realdb.test.ts', ...specs,
     'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts',
     'tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts',
     'tests/integration/automation-live-authority-realdb.test.ts',

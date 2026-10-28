@@ -8,8 +8,11 @@
 //      whole-pull suspension. A pilot project on such a build would be refreshed by the old planner
 //      (ADD a copy, INACTIVE the old rows) — exactly what the pilot exists to prevent — so readiness
 //      refuses every enable while this is 0 (step-4 design D-22).
-//   1  every lane consults governance before its source read and the planner applies the continuation
-//      projection (step 4 PR-3). THAT PR flips this literal to 1 together with its lanes, never ahead.
+//   1  the build carries EVERY piece D-22 requires before a pilot may be enabled: the governance consult on
+//      every lane with the planner projection and whole-pull suspension (step 4 PR-3a / PR-3b, landed), the
+//      confirm / end routes (PR-4), the formal-export gate (PR-5), the generic-writer refusal (PR-6), change
+//      plans (PR-8) and recovery (step 6). The LAST of those PRs flips this literal to 1, never ahead; PR-3a
+//      and PR-3b deliberately leave it 0 (T-layer TD-1).
 //
 // Deliberately a plain (unfrozen) export read at EVALUATION time: the readiness suite proves the
 // positive leg by setting it to 1 in memory for one test and restoring it — no service, config or env

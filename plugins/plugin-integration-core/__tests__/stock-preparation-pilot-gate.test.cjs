@@ -18,7 +18,7 @@
 //        no guard ⇒ the pre-PR-B answer (`large_bom_bounded`) byte for byte
 //   R-01 readiness: every check passes on a satisfied fake ⇒ ready, failing [], version 1, the id list pinned
 //   R-02 EVERY CHECK FAILS CLOSED ON ITS OWN: one mutation per check id ⇒ exactly the expected failing set, the
-//        continuation marker included (the build literal is 0 until step 4 PR-3 flips it)
+//        continuation marker included (the build literal is 0 until the LAST PR of the D-22 set flips it; still 0 after PR-3b)
 //   R-03 a probe that throws is `ok: false`, never a thrown readiness; the answer is values-free
 //   R-04 collectGenericWriterTargets: both registries must answer (else incomplete); object configs and pipeline
 //        erp-feedback options are collected; a throwing registry is incomplete
@@ -38,6 +38,9 @@
 //   S-15 markPilotEnabled refusals: ABSENT / ARCHIVED 409 with no update; a bad readinessVersion 422 before any db
 //        call; the CAS backstop (an update that matches nothing) is 409 STATE_MOVED, never a silent success
 //   S-16 probeTableReadable: readable / 42P01 undefined_table / any other failure read_failed with its SQLSTATE
+//   PG-N4 (S1 N4, review candidate) spec_read_plan_slot with the optional `specSlotReadPlans`: EVERY listed plan must
+//        declare the 规格 column (an empty list, a non-list, a throwing dep fail); not applicable answers first
+//        without calling the dep; without the dep the action's own plan decides, as before
 //
 // Synthetic values only.
 
@@ -338,8 +341,10 @@ async function withContinuationSupport(version, fn) {
 
 test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the version are pinned; the answer is values-free', async () => {
   // Version 2 (pre-enable hardening, step-4 design §23.4 F-3 / F-5): three checks added, none removed or renamed.
-  assert.equal(readiness.PILOT_READINESS_VERSION, 2)
-  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (step 4 PR-3 flips it)')
+  // Version 3 (#6324 S1/N4): spec_read_plan_slot also requires the effective online plan's slot while online read
+  // plans are ON; same ids, only refuses more.
+  assert.equal(readiness.PILOT_READINESS_VERSION, 3)
+  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
     'single_project_on_sheet', 'no_two_copy_component', 'write_lock_store_readable', 'write_lock_free', 'no_open_large_job', 'export_closure_port',
@@ -351,7 +356,7 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps()))
   assert.equal(answer.ready, true, JSON.stringify(answer.failing))
   assert.deepEqual([...answer.failing], [])
-  assert.equal(answer.version, 2)
+  assert.equal(answer.version, readiness.PILOT_READINESS_VERSION)
   assert.deepEqual(answer.checks.map((check) => check.id), [...readiness.PILOT_READINESS_CHECK_IDS])
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
@@ -682,6 +687,44 @@ test('S-16 probeTableReadable: readable / undefined_table (42P01) / read_failed 
   assert.deepEqual(await makeStore(makeMemoryDb({ failSelectWith: Object.assign(new Error('relation does not exist'), { code: '42P01' }) })).probeTableReadable('integration_stock_prep_continuation'), { readable: false, reason: 'undefined_table' })
   assert.deepEqual(await makeStore(makeMemoryDb({ failSelectWith: Object.assign(new Error('permission denied'), { code: '42501' }) })).probeTableReadable('integration_stock_prep_continuation'), { readable: false, reason: 'read_failed', sqlState: '42501' })
   assert.deepEqual(await makeStore(makeMemoryDb({ failSelectWith: new Error('socket hang up') })).probeTableReadable('integration_stock_prep_continuation'), { readable: false, reason: 'read_failed' })
+})
+
+test('PG-N4 (S1 N4) spec_read_plan_slot with specSlotReadPlans: EVERY listed plan must declare the 规格 column; an empty list, a non-list and a throwing dep fail; not applicable passes WITHOUT calling the dep; without the dep the action\'s own plan decides (R-02 unchanged)', async () => {
+  const declared = { part: { specField: 'Specification' } }
+  const undeclared = { part: {} }
+  const run = (overrides) => withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps(overrides)))
+  for (const [label, plans, failing] of [
+    ['the deployment plan declares, the effective one does not', [declared, undeclared], ['spec_read_plan_slot']],
+    ['the effective plan declares, the deployment one does not', [undeclared, declared], ['spec_read_plan_slot']],
+    ['both declare', [declared, declared], []],
+    ['the deployment plan alone, declared (switch OFF)', [declared], []],
+    ['no plan at all', [], ['spec_read_plan_slot']],
+    ['not a list', declared, ['spec_read_plan_slot']],
+    ['a blank column name', [declared, { part: { specField: '  ' } }], ['spec_read_plan_slot']],
+    ['a plan without a part role', [declared, {}], ['spec_read_plan_slot']],
+  ]) {
+    const answer = await run({ specSlotReadPlans: async () => plans })
+    assert.deepEqual([...answer.failing], failing, label)
+  }
+  // A dep that throws (the effective plan could not be resolved) is not ok, never a thrown readiness; values-free.
+  const thrown = await run({ specSlotReadPlans: async () => { throw Object.assign(new Error('synthetic resolver refusal'), { status: 409, code: 'READ_PLAN_ACTIVATION_DISABLED' }) } })
+  assert.deepEqual([...thrown.failing], ['spec_read_plan_slot'])
+  assert.ok(!JSON.stringify(thrown).includes('READ_PLAN_') && !JSON.stringify(thrown).includes('synthetic resolver'), 'values-free')
+  // The explicit not-applicable declaration answers first: the dep is never asked.
+  const depCalls = []
+  const notApplicable = await run({ specReadPlanSlotDeclaration: readiness.SPEC_READ_PLAN_SLOT_NOT_APPLICABLE, specSlotReadPlans: async () => { depCalls.push('dep'); return [undeclared] } })
+  assert.deepEqual([...notApplicable.failing], [])
+  assert.deepEqual(depCalls, [], 'not applicable never calls the dep')
+  // Without the dep: today's truth table — the action's own plan, or the literal declaration (R-02's rows).
+  const undeclaredAction = { source: { readPlan: { part: {} } }, target: { sheetId: SHEET, objectId: OBJECT } }
+  for (const [label, overrides, failing] of [
+    ['a declared action', {}, []],
+    ['undeclared, nothing said', { action: undeclaredAction }, ['spec_read_plan_slot']],
+    ['undeclared, a non-literal declaration', { action: undeclaredAction, specReadPlanSlotDeclaration: 'maybe' }, ['spec_read_plan_slot']],
+    ['undeclared, declared not applicable', { action: undeclaredAction, specReadPlanSlotDeclaration: readiness.SPEC_READ_PLAN_SLOT_NOT_APPLICABLE }, []],
+  ]) {
+    assert.deepEqual([...(await run(overrides)).failing], failing, `no dep: ${label}`)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pilot-gate.test.cjs', tests, { passLine: '✓ stock-preparation-pilot-gate' })

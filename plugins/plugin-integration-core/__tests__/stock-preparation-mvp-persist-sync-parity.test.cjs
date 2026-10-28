@@ -75,6 +75,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //   SY12 mvp-persist stops forwarding the content digest to the prepare step => B1 B1s B2 red
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -291,6 +292,8 @@ function services(source, loads, { extMapping = false } = {}) {
   return {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
     stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },
@@ -394,7 +397,7 @@ function mount({ parts = [PART.A1], hourRule = false, extMapping = false } = {})
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: services(source, loads, { extMapping }),
+    services: withRefreshGovernance(services(source, loads, { extMapping })),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, records, source, loads }

@@ -15,6 +15,7 @@ const {
   DEFAULT_MAX_ROWS,
   expandPlmProjectBom,
   LARGE_BOM_BOUNDED_ERROR_TYPES,
+  STOCK_PREPARATION_BOM_EVALUATION_VERSION,
   summarizeBomExpansionForEvidence,
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
@@ -24,6 +25,7 @@ const {
 const {
   applyStockPreparationPlan,
   assertHostFencedWriteSupported,
+  assertWriterAdmitsPlan,
   countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
@@ -635,6 +637,21 @@ function requiredPrincipal(value) {
   return principal
 }
 
+function hasCurrentBomEvaluationVersion(record) {
+  return isPlainObject(record) && record.bomEvaluationVersion === STOCK_PREPARATION_BOM_EVALUATION_VERSION
+}
+
+function assertCurrentBomEvaluationVersion(record) {
+  if (!hasCurrentBomEvaluationVersion(record)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_EVALUATION_VERSION_UNSUPPORTED',
+      'large-BOM job requires the current server BOM evaluation version',
+      {},
+      409,
+    )
+  }
+}
+
 function publicBackgroundExpansionJob(job) {
   return {
     jobId: safeEvidenceToken(job && job.jobId, 'jobId'),
@@ -684,6 +701,8 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     ...scope,
     actionId,
     status: 'queued',
+    // This is producer identity, never a caller-supplied or backfilled default.
+    bomEvaluationVersion: STOCK_PREPARATION_BOM_EVALUATION_VERSION,
     authoritative: false,
     projectNoPresent: optionalString(parameters.projectNo) !== '',
     parameters,
@@ -738,6 +757,63 @@ function storedWriteObservation(value) {
     return isPlainObject(value) ? normalizeExpansionWriteObservation(value) : null
   } catch {
     return null
+  }
+}
+
+// ── the refresh governance of the large lane (batch-refresh step 4 PR-3b; design §7.1 rows 9-10, D-7, O-1) ──
+// The plan route consults the governance reader and plans ONLY a project it answered not governed (a governed one is
+// refused 409 STOCK_PREP_REFRESH_LARGE_LANE_REFUSED before the existing-row read); the verdict it hands the plan is
+// recorded on the expansion job beside `planWriteObservation`, values-free and closed to three keys. It is NOT part of
+// `largeBomPlanRevision` (the plan revision and the artifact stay byte-identical) and the planner is never handed a
+// `continuation` (O-1: the call below is an explicit literal), so a large `planArtifact.plan` never carries holds.
+const LARGE_PLAN_GOVERNANCE_VERDICT_KEYS = Object.freeze(['consulted', 'generationToken', 'verdict'])
+
+// The one verdict a large plan may carry: consulted, `not_governed`, and the generation token the consult observed —
+// a non-blank string, or null for a sheet whose lock row does not exist yet (a never-leased, never-bumped sheet; the
+// writer's non-blank rule is a chunk-time rule, checked again by every chunk's own in-lease consult).
+function isLargePlanGovernanceVerdict(value) {
+  if (!isPlainObject(value)) return false
+  if (Object.keys(value).sort().join(',') !== LARGE_PLAN_GOVERNANCE_VERDICT_KEYS.join(',')) return false
+  if (value.consulted !== true || value.verdict !== 'not_governed') return false
+  return value.generationToken === null || (typeof value.generationToken === 'string' && value.generationToken.trim() !== '')
+}
+
+// The plan's input: absent (a direct caller) => the job records none; anything else must be the route's verdict, or the
+// route is defective (500, before any IO).
+function normalizeLargePlanGovernanceVerdict(value) {
+  if (value === undefined) return null
+  if (!isLargePlanGovernanceVerdict(value)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_PLAN_GOVERNANCE_VERDICT_INVALID',
+      'the large-BOM plan was handed a governance verdict that is not a consulted not-governed verdict; nothing was planned',
+      { partial: false },
+      500,
+    )
+  }
+  return { consulted: true, verdict: 'not_governed', generationToken: value.generationToken }
+}
+
+// APPROVAL REFUSALS (O-1, E-3; §7.1 row 10), before the binder bumps and before any apply job is stored: a stored plan
+// in a GOVERNED shape (suspended, carrying holds or a continuation stanza — the private, values-bearing channel) is never
+// copied into an apply job; and an expansion planned without the not-governed verdict (planned before this change, or
+// by a caller that never consulted) is never approved — it is re-planned (the plan route consults).
+function assertLargePlanApprovable(sourceJob, plan) {
+  if (plan.suspended !== undefined || plan.holds !== undefined || plan.continuation !== undefined) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_PLAN_SUSPENDED',
+      'this large-BOM plan carries refresh holds or a suspension; it is never approved — plan the expansion again',
+      { reason: plan.suspended === true ? 'suspended' : (plan.holds !== undefined ? 'holds' : 'projected'), partial: false },
+      409,
+    )
+  }
+  const verdict = sourceJob.governanceVerdict
+  if (verdict === undefined || verdict === null || !isLargePlanGovernanceVerdict(verdict)) {
+    throw new StockPreparationLargeBomJobError(
+      'LARGE_BOM_APPLY_GOVERNANCE_UNCONSULTED',
+      'this large-BOM expansion was planned without a refresh governance verdict; plan it again before approving',
+      { reason: verdict === undefined || verdict === null ? 'verdict_absent' : 'verdict_invalid', partial: false },
+      409,
+    )
   }
 }
 
@@ -800,6 +876,7 @@ function requireSourceAdapter(adapter) {
 
 function expansionArtifactRevision({ job, expansion }) {
   return hashJson({
+    bomEvaluationVersion: job.bomEvaluationVersion,
     action: job.actionSnapshot || { actionId: job.actionId },
     parameters: job.parameters || {},
     principal: job.principal,
@@ -980,6 +1057,7 @@ function updateJobFromExpansion(job, expansion, now, logger) {
     job.authoritative = true
     job.artifactRevision = revision
     job.artifact = {
+      bomEvaluationVersion: job.bomEvaluationVersion,
       revision,
       status: expansion.status,
       rows: cloneJson(expansion.rows || []),
@@ -1032,7 +1110,13 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
       404,
     )
   }
-  if (job.status === 'completed') return cloneJson(job)
+  // Even the terminal shortcut must refuse a pre-upgrade stored result.
+  // Keep this before source reads and before mutating the stored object.
+  assertCurrentBomEvaluationVersion(job)
+  if (job.status === 'completed') {
+    assertAuthoritativeLargeBomExpansion(job)
+    return cloneJson(job)
+  }
   if (!['queued', 'running', 'paused', 'failed'].includes(job.status)) {
     throw new StockPreparationLargeBomJobError(
       'LARGE_BOM_JOB_RUN_REJECTED',
@@ -1046,6 +1130,13 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
   const runningAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   job.status = 'running'
   job.authoritative = false
+  // A retry is a new evaluation. Neither failure nor success can retain a plan
+  // (or its approval revision/evidence) from the previous evaluation.
+  delete job.artifact
+  delete job.artifactRevision
+  delete job.planArtifact
+  delete job.planRevision
+  delete job.planEvidence
   // The caps this run enforces, recorded BEFORE the first source read — see
   // `effectiveExpansionBudgets`. `updateJobFromExpansion` rewrites the same
   // stanza from the expansion summary afterwards; the two agree by
@@ -1130,6 +1221,7 @@ function normalizeExistingRows(rows) {
 
 function largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview }) {
   return hashJson({
+    bomEvaluationVersion: job.artifact.bomEvaluationVersion,
     artifactRevision: job.artifactRevision || (job.artifact && job.artifact.revision),
     existingRows,
     conflictPolicyReview: conflictPolicyReview || null,
@@ -1148,6 +1240,8 @@ function isAuthoritativeLargeBomPlan(job = {}) {
   const planArtifact = isPlainObject(job.planArtifact) ? job.planArtifact : {}
   const plan = isPlainObject(planArtifact.plan) ? planArtifact.plan : {}
   return Boolean(optionalString(job.planRevision || planArtifact.revision)) &&
+    hasCurrentBomEvaluationVersion(planArtifact) &&
+    planArtifact.sourceArtifactRevision === (job.artifactRevision || job.artifact.revision) &&
     Array.isArray(plan.decisions)
 }
 
@@ -1266,6 +1360,9 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
   assertAuthoritativeLargeBomPlan(sourceJob)
   const planArtifact = sourceJob.planArtifact
   const plan = cloneJson(planArtifact.plan)
+  // Batch-refresh step 4 PR-3b: a governed-shape plan or an unconsulted expansion is refused HERE — before the
+  // manual-confirm acknowledgement, before the binder's bump (a refusal supersedes nothing) and before the job is stored.
+  assertLargePlanApprovable(sourceJob, plan)
   const manualConfirmCount = countManualConfirmDecisions(plan)
   if (manualConfirmCount > 0 && input.acceptManualConfirmHold !== true) {
     throw new StockPreparationLargeBomJobError(
@@ -1314,6 +1411,7 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     actionId: sourceJob.actionId,
     sourceJobId: sourceJob.jobId,
     status: 'queued',
+    bomEvaluationVersion: planArtifact.bomEvaluationVersion,
     planRevision: sourceJob.planRevision || planArtifact.revision,
     targetRevision: hashJson(target),
     approvalPresent: true,
@@ -1448,6 +1546,7 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
         404,
       )
     }
+    assertCurrentBomEvaluationVersion(job)
     if (['succeeded', 'partial'].includes(job.status)) return cloneJson(job)
     if (job.status === 'running') {
       throw new StockPreparationLargeBomJobError(
@@ -1497,6 +1596,19 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     // P1-a: the chunk's writes are host-fenced; a host that cannot honour the fence refuses here, before
     // the job is touched (the writer re-checks).
     assertHostFencedWriteSupported(recordsApi, projectWriteGuard)
+    // REFRESH GOVERNANCE GATE (batch-refresh step 4 PR-3a, LB-1; design §7.1 row 11): INSIDE the lease, after
+    // the binding and the host fence, BEFORE the terminal write and before the job turns `running` — every chunk
+    // (a resume of a paused / failed job and every job approved before its project became governed included)
+    // re-consults. Governed => 409 STOCK_PREP_REFRESH_LARGE_LANE_REFUSED, unreadable => 503, retargeted => 409;
+    // a route that did not wire the gate => 501 `chunk_gate_absent`. The verdict is then checked against the
+    // plan with the writer's own zero-IO tripwire HERE, so no writer refusal can fire after `running` (a throw
+    // there would strand the job — F-7 class). On any refusal the job is untouched: no status, checkpoint or
+    // count moves and nothing is stored.
+    if (typeof input.refreshGovernanceGate !== 'function') {
+      throw new StockPreparationProjectWriteLockError(501, 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED', 'a large-BOM chunk needs the refresh governance gate; nothing was written', { reason: 'chunk_gate_absent', partial: false })
+    }
+    const governance = await input.refreshGovernanceGate({ target: cloneJson(job.target), applyJobId: job.jobId })
+    assertWriterAdmitsPlan({ plan, governance, writeFence: projectWriteGuard })
     const start = nextDecisionIndex(job)
     const decisions = plan.decisions
     if (start >= decisions.length) {
@@ -1538,6 +1650,8 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
       // same lease + generation re-checked by the host inside every record write transaction (P1-a).
       writeFence: projectWriteGuard,
       writeFenceRequired: true,
+      // PR-3a (LB-2): the gate's verdict (consulted inside this lease) — the writer re-checks it.
+      governance,
     })
 
     job.counts = mergeCounts(job.counts, applyResult.counts)
@@ -1591,6 +1705,8 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
 async function planLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
   const key = backgroundJobKey(input)
+  // PR-3b: the route's not-governed verdict, checked before any IO (a malformed one is a route defect, 500).
+  const governanceVerdict = normalizeLargePlanGovernanceVerdict(input.governanceVerdict)
   const job = await storage.get(key)
   if (!job) {
     throw new StockPreparationLargeBomJobError(
@@ -1621,6 +1737,9 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
   const expandedRows = Array.isArray(artifact.rows) ? artifact.rows.map(cloneJson) : []
   const existingRows = normalizeExistingRows(input.existingRows)
   const conflictPolicyReview = isPlainObject(input.conflictPolicyReview) ? cloneJson(input.conflictPolicyReview) : undefined
+  // O-1 (batch-refresh step 4 PR-3b): an EXPLICIT literal — no `continuation` key and no spread of `input`, so the large
+  // planner never plans a governed project's projection and its plan never carries `holds` (a governed project is
+  // refused by the route before this point). Pinned by the step-4 scan suite (SC-7) and the O-1 planner spy.
   const plan = planStockPreparationConflicts({
     template: job.actionSnapshot && job.actionSnapshot.template,
     conflictStrategy: job.actionSnapshot && job.actionSnapshot.conflictStrategy,
@@ -1654,6 +1773,8 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
   const revision = largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview })
   job.planRevision = revision
   job.planArtifact = {
+    bomEvaluationVersion: artifact.bomEvaluationVersion,
+    sourceArtifactRevision: job.artifactRevision || artifact.revision,
     revision,
     artifactRevision: job.artifactRevision || artifact.revision,
     plan: cloneJson(plan),
@@ -1665,6 +1786,9 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
   // refuses it), never the observation an earlier plan recorded.
   if (planWriteObservation) job.planWriteObservation = planWriteObservation
   else delete job.planWriteObservation
+  // PR-3b: the same rule for the governance verdict — a plan made without one carries none (and approval refuses it).
+  if (governanceVerdict) job.governanceVerdict = governanceVerdict
+  else delete job.governanceVerdict
   job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   await storage.set(key, job)
   return cloneJson(job)
@@ -1700,7 +1824,7 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     actionId: safeEvidenceToken(job.actionId, 'actionId') || undefined,
     status,
     largeBom: true,
-    authoritative: status === 'completed' && job.authoritative === true,
+    authoritative: isAuthoritativeLargeBomExpansion(job),
     artifactRevisionPresent: Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision))),
     planRevisionPresent: Boolean(optionalString(job.planRevision || (job.planArtifact && job.planArtifact.revision))),
     projectNoPresent: job.projectNoPresent === true,
@@ -1714,6 +1838,8 @@ function isAuthoritativeLargeBomExpansion(job = {}) {
   if (!isPlainObject(job)) return false
   return job.status === 'completed' &&
     job.authoritative === true &&
+    hasCurrentBomEvaluationVersion(job) &&
+    hasCurrentBomEvaluationVersion(job.artifact) &&
     Boolean(optionalString(job.artifactRevision || (job.artifact && job.artifact.revision)))
 }
 
@@ -1795,5 +1921,10 @@ module.exports = {
     nonNegativeInteger,
     normalizeChunkSize,
     requireCheckpointRecordsApi,
+    // PR-3b: the large lane's governance verdict and approval refusals (direct lib tests).
+    LARGE_PLAN_GOVERNANCE_VERDICT_KEYS,
+    assertLargePlanApprovable,
+    isLargePlanGovernanceVerdict,
+    normalizeLargePlanGovernanceVerdict,
   },
 }

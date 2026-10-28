@@ -48,10 +48,15 @@ function makeMemoryDb() {
   // S4 fix round 1: the advisory lock is a REAL per-key FIFO mutex here, released when the
   // transaction's callback settles — so a suite can force the interleaving a missing (or released
   // too early) lock would allow, instead of a lock that only records that it was asked for.
-  const lockTails = new Map()
-  // S3 fix round 2 (F4): the keys a transaction HOLDS right now (blocking or try), so the non-blocking
-  // `tryAdvisoryXactLock` answers exactly what PostgreSQL would: false at once while another transaction holds it.
-  const heldKeys = new Set()
+  // One lock space for blocking AND try acquisition. A blocking lifecycle writer
+  // must also wait behind a registration that acquired the key with try-lock.
+  const lockStates = new Map()
+  const releaseKey = (key) => {
+    const state = lockStates.get(key)
+    const next = state.waiters.shift()
+    if (next) next()
+    else lockStates.delete(key)
+  }
   const rowsOf = (table) => {
     if (!tables.has(table)) tables.set(table, [])
     return tables.get(table)
@@ -66,21 +71,22 @@ function makeMemoryDb() {
       const releases = []
       const trx = {
         ...api,
+        async setTransactionIsolationLevel(level) {
+          assert.equal(level, 'read committed')
+          calls.push(`setTransactionIsolationLevel:${level}`)
+        },
         async advisoryXactLock(key) {
           calls.push(`advisoryXactLock:${key}`)
-          const previous = lockTails.get(key) || Promise.resolve()
-          let release
-          const held = new Promise((resolve) => { release = resolve })
-          lockTails.set(key, previous.then(() => held))
-          await previous
-          heldKeys.add(key)
-          releases.push(() => { heldKeys.delete(key); release() })
+          const state = lockStates.get(key)
+          if (state) await new Promise((resolve) => { state.waiters.push(resolve) })
+          else lockStates.set(key, { waiters: [] })
+          releases.push(() => releaseKey(key))
         },
         async tryAdvisoryXactLock(key) {
           calls.push(`tryAdvisoryXactLock:${key}`)
-          if (heldKeys.has(key)) return false
-          heldKeys.add(key)
-          releases.push(() => { heldKeys.delete(key) })
+          if (lockStates.has(key)) return false
+          lockStates.set(key, { waiters: [] })
+          releases.push(() => releaseKey(key))
           return true
         },
       }
@@ -363,7 +369,28 @@ function makeRecordsApi({ provisioning = null } = {}) {
   const refuseOverview = (sheetId) => { if (stampedOverviewSheet(sheetId)) throw overviewReadOnlyError() }
   const api = {
     calls,
-    async queryRecords(input = {}) { calls.push(['queryRecords', input.sheetId]); return rows.filter((row) => row.sheetId === input.sheetId).map(clone) },
+    // Step-4 review follow-ups (item 11): the HOST's filter and paging semantics
+    // (packages/core-backend/src/multitable/query-service.ts `queryRecords`) — equality on `data ->> k` with
+    // String() coercion (an object as its JSON text), a `null` filter matches only rows WITHOUT the key
+    // (`data -> k IS NULL`; an explicit JSON null is a present key), a value list matches any element, then
+    // OFFSET / LIMIT. Rows keep insertion order (the host orders by id text; no suite depends on cross-page
+    // order). `search` / `orderBy` are not modelled.
+    async queryRecords(input = {}) {
+      calls.push(['queryRecords', input.sheetId])
+      const filters = input.filters && typeof input.filters === 'object' ? input.filters : {}
+      const textOf = (value) => (typeof value === 'object' ? JSON.stringify(value) : String(value))
+      const hit = (row) => Object.entries(filters).every(([key, wanted]) => {
+        const data = row.data || {}
+        const present = Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined
+        if (wanted === null || wanted === undefined) return !present
+        if (!present || data[key] === null) return false
+        const text = textOf(data[key])
+        return Array.isArray(wanted) ? wanted.map(String).includes(text) : text === String(wanted)
+      })
+      const matched = rows.filter((row) => row.sheetId === input.sheetId && hit(row))
+      const offset = Number.isInteger(input.offset) ? input.offset : 0
+      return matched.slice(offset, Number.isInteger(input.limit) ? offset + input.limit : undefined).map(clone)
+    },
     async createRecord(input = {}) { calls.push(['createRecord', input.sheetId]); refuseOverview(input.sheetId); const created = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }; rows.push(created); return clone(created) },
     async patchRecord(input = {}) { calls.push(['patchRecord', input.sheetId]); refuseOverview(input.sheetId); return { id: input.recordId, sheetId: input.sheetId, version: 2, data: { ...(input.changes || {}) } } },
     // S3 fix round 1 (R3): the plugin SDK delete (since fix round 2 the overview deletes through its port).
@@ -445,6 +472,10 @@ function baseServices(sourceAdapter) {
     templateRegistry: inertService(['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate']),
     readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
+    // This synthetic scope explicitly has no activation pointer; absence of the runtime is not legacy.
+    // This fixture has no online activation at any scope; registration reads metadata,
+    // while execution retains its separate no-active-version contract.
+    stockPreparationReadPlanStore: { async getActivation() { return null }, async getActiveForRuntime() { return null } },
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
   }
 }
@@ -486,6 +517,9 @@ function mountProjectSheetRoutes({
   sourceBindingStore = null,
   configExtras = {},
   serviceExtras = {},
+  // PR-4: options for the refresh governance wiring (e.g. `{ lockOnRefreshDb: true }`: one fake db for the store
+  // and the REAL lock, so the decision routes' in-transaction bump runs on the store's handle).
+  refreshOptions = {},
 } = {}) {
   const staging = `${tenantId}:integration-core`
   const routes = new Map()
@@ -564,9 +598,17 @@ function mountProjectSheetRoutes({
   }
   if (switchOn) process.env[PROJECT_SHEETS_ENABLED_ENV] = 'true'
   if (grantRoleIds) process.env[PROJECT_SHEET_GRANT_ROLE_IDS_ENV] = grantRoleIds.join(',')
+  // Batch-refresh step 4 PR-3a: the REAL refresh governance (reader + continuation store) every planning and
+  // writing route now consults — over the routes' own lock and registry store. A suite that sets
+  // `stockPreparationRefreshGovernance` in `serviceExtras` (even to null: an unwired deployment) opts out.
+  const refresh = Object.prototype.hasOwnProperty.call(serviceExtras, 'stockPreparationRefreshGovernance')
+    ? null
+    : require('./stock-preparation-refresh-governance-wiring.cjs').wireRefreshGovernance(services, refreshOptions)
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
+    // PR-3a: the governance environment the routes consult (null when the suite opted out).
+    refresh,
     // PR B: the service objects the routes captured at mount, so a suite can patch one in place (a registry
     // that answers its list read, an audit store whose vocabulary probe refuses).
     services,

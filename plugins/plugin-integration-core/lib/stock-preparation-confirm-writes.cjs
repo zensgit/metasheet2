@@ -56,6 +56,9 @@ const {
   __internals: { assertCarryViaConfirmShape },
 } = require('./stock-preparation-carry-policy.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
+// PR-3a review round 1: the ONE strip of a duplicate-resolved key's suffix (the planner mints it; table-actions
+// above already loads the planner, so this adds no load-order edge).
+const { baseIdempotencyKeyOf } = require('./stock-preparation-conflict-planner.cjs')
 // PR-0 (batch-refresh phase 2 step 4): the carry patch runs under the sheet write lease like every
 // apply write — the SAME host-fence support check and host-write bracket the apply writer uses, and
 // the lock module's own vocabulary for a refused fence. Neither module requires this one back.
@@ -1109,11 +1112,14 @@ async function applyCarryViaConfirm(input = {}) {
   }
   // ...and since a real idempotencyKey EMBEDS its projectNo (bom-expansion makeIdempotencyKey), both
   // keys must agree with the rows they addressed. A key that does not parse as that shape skips this
-  // leg — the stored-row check above is the load-bearing one and already stands.
+  // leg — the stored-row check above is the load-bearing one and already stands. A DUPLICATE-RESOLVED key
+  // (`<base>::duplicate:<kind>:<hash>`) is checked through its BASE (batch-refresh step 4 PR-3a review round 1,
+  // V50B-16): the same strip the carry route uses to consult its project, so the consulted project and the
+  // patched row's project are one; before it such a key silently skipped this leg.
   for (const [key, field] of [[decision.idempotencyKey, 'idempotencyKey'], [decision.sourceIdempotencyKey, 'sourceIdempotencyKey']]) {
     let parsed = null
     try {
-      parsed = JSON.parse(key)
+      parsed = JSON.parse(baseIdempotencyKeyOf(key))
     } catch (error) {
       parsed = null
     }

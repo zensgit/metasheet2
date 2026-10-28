@@ -332,6 +332,34 @@ function testListShape() {
     'ExternalSystemNotFoundError',
     'ExternalSystemValidationError',
     'INTERNAL_ERROR',
+    'READ_PLAN_ACTIVATION_DISABLED',
+    'READ_PLAN_ACTIVATION_INVALID',
+    'READ_PLAN_ACTIVATION_MISSING',
+    'READ_PLAN_ACTIVATION_SOURCE_MISMATCH',
+    'READ_PLAN_BINDING_SCOPE_INVALID',
+    'READ_PLAN_CONTENT_INVALID',
+    'READ_PLAN_DEPLOYMENT_INCOMPATIBLE',
+    'READ_PLAN_EXECUTION_BINDING_MISMATCH',
+    'READ_PLAN_EXECUTION_CONTENT_INVALID',
+    'READ_PLAN_EXECUTION_IDENTITY_INVALID',
+    'READ_PLAN_EXECUTION_NOT_ACTIVE',
+    'READ_PLAN_EXECUTION_SCOPE_MISMATCH',
+    'READ_PLAN_EXECUTION_TENANT_MISMATCH',
+    'READ_PLAN_GENERATION_CONFLICT',
+    'READ_PLAN_NOT_APPROVED',
+    'READ_PLAN_RUNTIME_UNAVAILABLE',
+    'READ_PLAN_SCOPE_INVALID',
+    'READ_PLAN_SOURCE_BINDING_SPLIT',
+    'READ_PLAN_SOURCE_BINDING_UNAVAILABLE',
+    'READ_PLAN_TRANSACTION_UNAVAILABLE',
+    'READ_PLAN_VALIDATION_ACTOR_MISMATCH',
+    'READ_PLAN_VALIDATION_COUNTS_INVALID',
+    'READ_PLAN_VALIDATION_INVALID',
+    'READ_PLAN_VALIDATION_REQUIRED',
+    'READ_PLAN_VALIDATION_SOURCE_CHANGED',
+    'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE',
+    'READ_PLAN_VALIDATION_SOURCE_UNAVAILABLE',
+    'READ_PLAN_VALIDATION_UNAVAILABLE',
     'SOURCE_UNAVAILABLE',
   ].sort())
 
@@ -353,6 +381,41 @@ function testListShape() {
   const registrySource = fs.readFileSync(path.join(LIB, 'external-systems.cjs'), 'utf8')
   assert.ok(registrySource.includes("'CONNECTION_RESOLUTION_FAILED'"), 'the registry fallback word exists where the list says')
   console.log('  ✓ list is closed, frozen, pinned and complete against connection-resolver.cjs')
+
+  // The configured source preflight's read-plan path (S1b part 5). Every READ_PLAN_* literal at the throw sites its
+  // execution resolver reaches is listed, and every listed READ_PLAN_* word is a literal on that path (no stale word).
+  // The store helpers (scopeOf / checkedActivation / checkedRow / requireTrx) and the validation ledger the store's
+  // getActiveForRuntime consults are covered by the verbatim pin above and by the reverse check below.
+  const readLib = (file) => fs.readFileSync(path.join(LIB, file), 'utf8').replaceAll('\r\n', '\n')
+  const sliceOf = (source, from, to, label) => {
+    assert.equal(source.split(from).length - 1, 1, `${label}: the slice start is unique`)
+    const start = source.indexOf(from)
+    const end = source.indexOf(to, start + from.length)
+    assert.ok(end > start, `${label}: the slice end exists`)
+    return source.slice(start, end)
+  }
+  const readPlanLiterals = (source) => new Set([...source.matchAll(/'(READ_PLAN_[A-Z_]+)'/g)].map((match) => match[1]))
+  const assertSlice = sliceOf(readLib('http-routes.cjs'), 'async function assertStockPreparationSourceBindingCanonical(', 'async function resolveTableActionExecution(', 'canonical-binding assert')
+  const runtimeSource = readLib('stock-preparation-read-plan-runtime.cjs')
+  const storeSource = readLib('stock-preparation-read-plan-store.cjs')
+  const ledgerSource = readLib('stock-preparation-read-plan-validation-ledger.cjs')
+  const executionSource = readLib('stock-preparation-read-plan-execution.cjs')
+  for (const [label, source, expectedCount] of [
+    ['canonical-binding assert', assertSlice, 2],
+    ['runtime pointer read', sliceOf(runtimeSource, 'async function readActiveStockPreparationReadPlan(', 'const PROJECT_IDENTITY_MAX_ROWS', 'runtime pointer read'), 1],
+    ['runtime resolver', sliceOf(runtimeSource, 'async function resolveStockPreparationReadPlanExecution(', 'const REGISTRATION_UNAVAILABLE', 'runtime resolver'), 5],
+    ['store getActiveForRuntime', sliceOf(storeSource, 'async function getActiveForRuntime(', 'async function listAudit(', 'store getActiveForRuntime'), 6],
+    ['approved-plan composition', executionSource, 6],
+  ]) {
+    const literals = readPlanLiterals(source)
+    assert.equal(literals.size, expectedCount, `${label}: the scan must find the throws it guards (found ${literals.size})`)
+    for (const code of literals) assert.ok(ROUTE_FAILURE_LOGGABLE_CODES.includes(code), `${label}: ${code} must be loggable`)
+  }
+  const pathLiterals = new Set([assertSlice, runtimeSource, storeSource, ledgerSource, executionSource].flatMap((source) => [...readPlanLiterals(source)]))
+  const listedReadPlanCodes = ROUTE_FAILURE_LOGGABLE_CODES.filter((code) => code.startsWith('READ_PLAN_'))
+  assert.equal(listedReadPlanCodes.length, 28, 'the read-plan group is the 28 words of the preflight path')
+  assert.deepEqual(listedReadPlanCodes.filter((code) => !pathLiterals.has(code)), [], 'every listed READ_PLAN_* word is a literal on the preflight path')
+  console.log('  ✓ READ_PLAN_* group complete against the configured source preflight\'s read-plan throw sites')
 }
 
 // ---------------------------------------------------------------------------

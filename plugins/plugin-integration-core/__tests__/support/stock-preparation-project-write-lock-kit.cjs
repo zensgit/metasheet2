@@ -405,12 +405,27 @@ function writeScopeOfInput(input = {}) {
 // (even as undefined) is passed through untouched — that is how the guard's own tests opt out.
 function createLibWriteLockHarness(options = {}) {
   const env = options.lock ? { lock: options.lock } : createInMemoryProjectWriteLock(options)
+  // Batch-refresh step 4 PR-3a: the REAL governance (support/stock-preparation-refresh-governance-wiring.cjs)
+  // over THIS harness's lock, so every wrapped call is planned the way the routes plan it — with the
+  // governance handle (a not-governed project pays one consult and nothing else; its plan, revision, token
+  // and response are byte-identical) — and the writer gets the verdict it now requires. Built lazily, and a
+  // caller that passes `refreshGovernance` / `refreshGovernanceGate` itself (even as undefined) opts out.
+  let refreshEnv = null
+  function refresh() {
+    if (!refreshEnv) {
+      const wiring = require('./stock-preparation-refresh-governance-wiring.cjs')
+      refreshEnv = wiring.createRefreshGovernanceEnv({ lock: env.lock, ...(options.refresh || {}) })
+    }
+    return refreshEnv
+  }
+  const tenantOf = (input) => (typeof input.tenantId === 'string' && input.tenantId ? input.tenantId : 'tenant_rgw_default')
   function wrapDryRun(dryRun) {
     return (input = {}) => {
-      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGenerationBinder')) return dryRun(input)
+      const withGovernance = Object.prototype.hasOwnProperty.call(input, 'refreshGovernance') ? input : { ...input, refreshGovernance: refresh().handleFor(tenantOf(input)) }
+      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGenerationBinder')) return dryRun(withGovernance)
       const scope = writeScopeOfInput(input)
       return dryRun({
-        ...input,
+        ...withGovernance,
         projectWriteGenerationBinder: scope
           ? async () => writeBindingFromGeneration(await env.lock.bumpGeneration(scope, { reason: 'small_preview', tenantId: input.tenantId }))
           : undefined,
@@ -419,12 +434,19 @@ function createLibWriteLockHarness(options = {}) {
   }
   function wrapApply(apply) {
     return (input = {}) => {
-      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGuard')) return apply(input)
+      // The route's server-held execution inputs (the principal, the lease run id) default here like the guard.
+      const withGovernance = {
+        startedBy: 'u_swl_test',
+        projectWriteRunId: 'swl-test-run',
+        ...input,
+        ...(Object.prototype.hasOwnProperty.call(input, 'refreshGovernance') ? {} : { refreshGovernance: refresh().handleFor(tenantOf(input)) }),
+      }
+      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGuard')) return apply(withGovernance)
       const scope = writeScopeOfInput(input)
-      if (!scope) return apply(input)
+      if (!scope) return apply(withGovernance)
       // A records fake that predates the host fence gets the fake host's fence (declared + enforced).
       const recordsApi = withFakeHostWriteFence(input.recordsApi)
-      return env.lock.withProjectWriteLease(scope, { purpose: 'small_apply', runId: 'swl-test-run', tenantId: input.tenantId }, (guard) => apply({ ...input, recordsApi, projectWriteGuard: guard }))
+      return env.lock.withProjectWriteLease(scope, { purpose: 'small_apply', runId: 'swl-test-run', tenantId: input.tenantId }, (guard) => apply({ ...withGovernance, recordsApi, projectWriteGuard: guard }))
     }
   }
   // The large lane, the way the routes drive it: the expansion start through the generation OBSERVER and
@@ -443,10 +465,32 @@ function createLibWriteLockHarness(options = {}) {
       })
     }
   }
+  // Batch-refresh step 4 PR-3b: the plan route consults the governance reader (`consultLargeLane`) and hands the plan
+  // its not-governed verdict, which approval requires — the wrapper does the same with the REAL consult over this
+  // harness's lock (a governed project is refused here exactly as the route refuses it). A caller that passes
+  // `governanceVerdict` itself (even as undefined) opts out; a job the wrapper cannot load (or that names no project
+  // / sheet) gets none, and the lib answers its own error.
+  async function largePlanVerdictFor(input) {
+    let source = null
+    try {
+      const largeBomJobs = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+      source = await largeBomJobs.loadLargeBomBackgroundExpansionJob({
+        storage: input.storage, tenantId: input.tenantId, workspaceId: input.workspaceId, actionId: input.actionId, jobId: input.jobId,
+      })
+    } catch {
+      return undefined
+    }
+    const projectNo = source && source.parameters ? source.parameters.projectNo : null
+    const sheetId = source && source.actionSnapshot && source.actionSnapshot.target ? source.actionSnapshot.target.sheetId : null
+    if (typeof projectNo !== 'string' || !projectNo || typeof sheetId !== 'string' || !sheetId) return undefined
+    const lanes = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-refresh-lanes.cjs'))
+    return lanes.largeLaneVerdictOf(await refresh().governance.consult({ tenantId: tenantOf(input), projectNo, sheetId }), 'large_plan')
+  }
   function wrapLargePlan(planJob) {
     return async (input = {}) => {
-      if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationReader')) return planJob(input)
-      return planJob({ ...input, writeGenerationReader: (scope) => env.lock.readGeneration(scope) })
+      const withVerdict = Object.prototype.hasOwnProperty.call(input, 'governanceVerdict') ? input : { ...input, governanceVerdict: await largePlanVerdictFor(input) }
+      if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationReader')) return planJob(withVerdict)
+      return planJob({ ...withVerdict, writeGenerationReader: (scope) => env.lock.readGeneration(scope) })
     }
   }
   function wrapLargeApprove(createJob) {
@@ -471,22 +515,34 @@ function createLibWriteLockHarness(options = {}) {
     }
   }
   function wrapLargeChunk(runChunk) {
+    // PR-3a: the chunk gate the route wires (the REAL consult + the REAL large-lane verdict), unless the caller
+    // passes its own `refreshGovernanceGate` (even as undefined). The project number is the expansion's.
+    const gated = (input, projectNo) => (Object.prototype.hasOwnProperty.call(input, 'refreshGovernanceGate')
+      ? input
+      : { ...input, refreshGovernanceGate: refresh().chunkGateFor(tenantOf(input), projectNo || 'SYN-SWL-UNKNOWN') })
     return async (input = {}) => {
-      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGuard')) return runChunk(input)
+      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGuard')) return runChunk(gated(input, null))
       let job = null
+      let projectNo = null
       try {
         const largeBomJobs = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
         job = await input.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...input, applyJobId: input.applyJobId || input.jobId }))
+        if (job && job.sourceJobId) {
+          const source = await largeBomJobs.loadLargeBomBackgroundExpansionJob({
+            storage: input.storage, tenantId: input.tenantId, workspaceId: input.workspaceId, actionId: job.actionId || input.actionId, jobId: job.sourceJobId,
+          })
+          projectNo = source && source.parameters ? source.parameters.projectNo : null
+        }
       } catch {
-        job = null
+        job = job || null
       }
       const scope = job && typeof job.writeScope === 'string' ? job.writeScope : null
-      if (!scope) return runChunk(input)
+      if (!scope) return runChunk(gated(input, projectNo))
       const recordsApi = withFakeHostWriteFence(input.recordsApi)
-      return env.lock.withProjectWriteLease(scope, { purpose: 'large_apply_chunk', runId: 'swl-test-chunk', tenantId: input.tenantId }, (guard) => runChunk({ ...input, recordsApi, projectWriteGuard: guard }))
+      return env.lock.withProjectWriteLease(scope, { purpose: 'large_apply_chunk', runId: 'swl-test-chunk', tenantId: input.tenantId }, (guard) => runChunk({ ...gated(input, projectNo), recordsApi, projectWriteGuard: guard }))
     }
   }
-  return { ...env, wrapDryRun, wrapApply, wrapLargeExpansionStart, wrapLargePlan, wrapLargeApprove, wrapLargeChunk, scopeOf: writeScopeOfInput }
+  return { ...env, wrapDryRun, wrapApply, wrapLargeExpansionStart, wrapLargePlan, wrapLargeApprove, wrapLargeChunk, scopeOf: writeScopeOfInput, refresh }
 }
 
 // ---------------------------------------------------------------------------------------------------

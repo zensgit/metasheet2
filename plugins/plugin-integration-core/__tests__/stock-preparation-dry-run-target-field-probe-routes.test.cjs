@@ -42,6 +42,7 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //      silent skip of the probe.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
@@ -186,6 +187,8 @@ function baseServices(sourceAdapter) {
   return {
     // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
     stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
@@ -269,7 +272,7 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [], derived
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: { ...baseServices(source.adapter), ...(extraServices || {}) },
+    services: withRefreshGovernance({ ...baseServices(source.adapter), ...(extraServices || {}) }),
     logger: {
       info(message, detail) { logLines.push(['info', message, detail]) },
       warn(message, detail) { logLines.push(['warn', message, detail]) },
