@@ -499,6 +499,8 @@ describe('legacy length-derived helpers - frozen fallback baseline (delta §5 F1
       label: '字段 3',
       required: false,
       placeholder: '',
+      // 参与打印：新字段默认参与。
+      printable: true,
       optionsText: '',
       visibility: { dependsOnFieldId: '', operator: 'eq', valueText: '' },
       detailColumns: [],

@@ -21080,6 +21080,7 @@ export interface components {
                 [key: string]: unknown;
             };
             visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+            printable?: boolean;
             /** @description Detail-group leaf columns (only when type=detail). Never contains record-link. */
             columns?: components["schemas"]["FormFieldDetailLeaf"][];
         };
@@ -21097,6 +21098,7 @@ export interface components {
             options?: components["schemas"]["FormOption"][];
             props: components["schemas"]["DepartmentFieldProps"];
             visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+            printable?: boolean;
         };
         FormFieldRecordLink: {
             id: string;
@@ -21114,6 +21116,7 @@ export interface components {
             options?: components["schemas"]["FormOption"][];
             props: components["schemas"]["RecordLinkFieldProps"];
             visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+            printable?: boolean;
         };
         FormField: components["schemas"]["FormFieldRecordLink"] | components["schemas"]["FormFieldDepartment"] | components["schemas"]["FormFieldGeneric"];
         FormSchema: {

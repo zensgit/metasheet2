@@ -207,11 +207,14 @@ describe('ApprovalFormInlineEditor explanation arm (Lock-8 L8-A)', () => {
     const el = mount([field])
     await nextTick()
     expect(el.querySelector('[data-testid="approval-explanation-config"]')).not.toBeNull()
-    // The ONLY checkbox this editor ever renders (with a single non-detail field selected, as
-    // here) is 是否必填 — zero checkboxes proves it is hidden for explanation, not merely
-    // unlabeled. Detail sub-field rows render their OWN per-column checkbox, irrelevant here
-    // since the mounted field is `explanation`, not `detail`.
-    expect(el.querySelectorAll('input[type="checkbox"]').length).toBe(0)
+    // With a single non-detail field selected, as here, this editor renders exactly two
+    // checkboxes: 是否必填 and 参与打印. Explanation keeps ONLY 参与打印 (说明 can still be left
+    // off paper), so exactly one checkbox — and it is the printable one — proves 必填 is hidden
+    // for explanation, not merely unlabeled. Detail sub-field rows render their OWN per-column
+    // checkbox, irrelevant here since the mounted field is `explanation`, not `detail`.
+    const checkboxes = el.querySelectorAll('input[type="checkbox"]')
+    expect(checkboxes.length).toBe(1)
+    expect(checkboxes[0].getAttribute('data-testid')).toBe('approval-field-printable')
     // 占位文本 binds a plain (non-checkbox) <el-input v-model="field.placeholder">; with the
     // required checkbox proven absent and the explanation config block confirmed present, the
     // total <input>/<textarea> count on the page is the closed set: 字段名称 (label) + 类型
@@ -225,8 +228,27 @@ describe('ApprovalFormInlineEditor explanation arm (Lock-8 L8-A)', () => {
     const field: FieldAuthoringDraft = { ...createEmptyFieldDraft(1), localId: 'f1', id: 'field_1', type: 'text' }
     const el = mount([field])
     await nextTick()
-    expect(el.querySelectorAll('input[type="checkbox"]').length).toBeGreaterThan(0)
+    // Exactly two checkboxes for a non-explanation type: 参与打印 (has a testid) and 必填 (has
+    // none). Counting only "> 0" would stay green even if 必填 were hidden for every type, since
+    // 参与打印 is always present — so pin the count AND that exactly one is NOT the printable one.
+    const checkboxes = Array.from(el.querySelectorAll('input[type="checkbox"]'))
+    expect(checkboxes.length).toBe(2)
+    const nonPrintable = checkboxes.filter((box) => box.getAttribute('data-testid') !== 'approval-field-printable')
+    expect(nonPrintable.length).toBe(1)
     expect(el.querySelector('[data-testid="approval-explanation-config"]')).toBeNull()
+  })
+
+  it('参与打印: unticking the checkbox writes printable=false onto the SAME draft object', async () => {
+    const field: FieldAuthoringDraft = { ...createEmptyFieldDraft(1), localId: 'f1', id: 'field_1', type: 'text' }
+    const el = mount([field])
+    await nextTick()
+    const box = el.querySelector('[data-testid="approval-field-printable"]') as HTMLInputElement
+    expect(box).not.toBeNull()
+    expect(box.checked).toBe(true)
+    box.checked = false
+    box.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(field.printable).toBe(false)
   })
 
   it('a NON-explanation field renders NO explanation property block (the arm is type-selected, not always-on)', async () => {
