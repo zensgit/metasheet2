@@ -523,6 +523,56 @@ describe('useMultitableGrid', () => {
     expect(grid.error.value).toBe('需要 sheetId 或 viewId')
   })
 
+  // 客户反馈 2026-10-27 (R74): the workbench opens the record it just created, so createRecord hands back its id
+  // (after the reload, as before). Failure and a missing context hand back null with `error` set.
+  it('createRecord returns the new record id after reloading the page', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (input === '/api/multitable/records') {
+        return new Response(JSON.stringify({ ok: true, data: { record: { id: 'rec_new', version: 1, data: {} } } }), { status: 200 })
+      }
+      if (input.startsWith('/api/multitable/view')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { fields: [], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const grid = useMultitableGrid({ sheetId: ref('sheet_1'), viewId: ref('view_1'), client: new MultitableApiClient({ fetchFn }) })
+    await vi.waitFor(() => expect(grid.loading.value).toBe(false))
+    const viewLoadsBefore = fetchFn.mock.calls.filter(([url]) => String(url).startsWith('/api/multitable/view')).length
+
+    const id = await grid.createRecord()
+
+    expect(id).toBe('rec_new')
+    expect(grid.error.value).toBeNull()
+    expect(fetchFn.mock.calls.filter(([url]) => String(url).startsWith('/api/multitable/view')).length).toBe(viewLoadsBefore + 1)
+  })
+
+  it('createRecord returns null and sets error when the server rejects the record, or when there is no context', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (input === '/api/multitable/records') {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Title is required' } }), { status: 422 })
+      }
+      if (input.startsWith('/api/multitable/view')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { fields: [], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const grid = useMultitableGrid({ sheetId: ref('sheet_1'), viewId: ref('view_1'), client: new MultitableApiClient({ fetchFn }) })
+    await vi.waitFor(() => expect(grid.loading.value).toBe(false))
+
+    await expect(grid.createRecord()).resolves.toBeNull()
+    expect(grid.error.value).toBe('Title is required')
+
+    const noContext = useMultitableGrid({ sheetId: ref(''), viewId: ref(''), client: new MultitableApiClient({ fetchFn: vi.fn() }) })
+    await expect(noContext.createRecord()).resolves.toBeNull()
+    expect(noContext.error.value).toBe('sheetId or viewId is required')
+  })
+
   it('falls back to the last non-empty page when a load lands beyond the new total', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)

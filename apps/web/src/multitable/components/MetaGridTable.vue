@@ -412,8 +412,19 @@
          grouped path which doesn't accumulate. The two paging models are mutually exclusive — except that a
          flat grid holding a page past the first cannot scroll-append (the composable only appends from row 0),
          so it keeps the pager rather than strand the viewer on that page (客户反馈 2026-10-21). The rows-per-page
-         select sits in the same footer whenever there is more than one page or a non-default size to undo. -->
-    <div v-if="showPager || showPageSizeSelect" class="meta-grid__pagination">
+         select sits in the same footer whenever there is more than one page or a non-default size to undo.
+         客户反馈 2026-10-27 (R74): the footer also carries 「跳转到第 [ ] 行」 (whenever there is more than one row, NOT
+         tied to showPager, which is off on the flat page 1) and a 「+ 新建记录」 that needs no scrolling. -->
+    <div v-if="showPager || showPageSizeSelect || showRowJump || showFooterAdd" class="meta-grid__pagination">
+      <button
+        v-if="showFooterAdd"
+        type="button"
+        class="meta-grid__page-btn meta-grid__footer-add-btn"
+        data-testid="grid-footer-add-record"
+        @click="emit('create-record')"
+      >
+        <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ l('grid.addRecordInline') }}
+      </button>
       <template v-if="showPager">
         <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
         <span class="meta-grid__page-info">{{ currentPage }} / {{ totalPages }}</span>
@@ -431,6 +442,27 @@
           <option v-for="n in pageSizeOptions" :key="n" :value="String(n)">{{ n }}</option>
         </select>
       </label>
+      <span v-if="showRowJump" class="meta-grid__row-jump">
+        <label class="meta-grid__row-jump-field">
+          <span class="meta-grid__row-jump-label">{{ l('grid.jumpToRow') }}</span>
+          <input
+            v-model="rowJumpInput"
+            type="number"
+            min="1"
+            :max="totalRows"
+            step="1"
+            inputmode="numeric"
+            class="meta-grid__row-jump-input"
+            data-testid="grid-row-jump-input"
+            :aria-label="l('grid.jumpToRowAria')"
+            @input="rowJumpHint = null"
+            @keydown.enter.prevent="onRowJumpSubmit"
+          />
+          <span v-if="jumpToRowSuffix(isZh)" class="meta-grid__row-jump-suffix">{{ jumpToRowSuffix(isZh) }}</span>
+        </label>
+        <button type="button" class="meta-grid__page-btn" data-testid="grid-row-jump-go" @click="onRowJumpSubmit">{{ l('grid.jumpToRowGo') }}</button>
+        <span v-if="rowJumpHint !== null" class="meta-grid__row-jump-hint" data-testid="grid-row-jump-hint" role="status">{{ jumpToRowTotal(rowJumpHint, isZh) }}</span>
+      </span>
     </div>
     <div v-if="loading" class="meta-grid__loading" aria-live="polite" :aria-label="l('grid.loading')">
       <div class="meta-grid__skeleton">
@@ -494,6 +526,8 @@ import {
   commentForRow,
   commentForField,
   groupNoValue,
+  jumpToRowSuffix,
+  jumpToRowTotal,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 
@@ -565,6 +599,9 @@ const props = defineProps<{
   // (mounts that do not page through the composable stay exactly as they were).
   pageSize?: number
   pageSizeOptions?: readonly number[]
+  // Footer 「跳转到第 [ ] 行」 (客户反馈 2026-10-27): the server's row count for the current filter/search. Absent →
+  // no jump box (mounts that do not page through the composable stay exactly as they were).
+  totalRows?: number
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canComment?: boolean
@@ -716,6 +753,7 @@ const filteredRows = computed(() => props.rows)
 const tableWrap = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
+const measuredFootHeight = ref(0)
 const measuredRowHeight = ref(0)
 const measuredGroupHeaderHeight = ref(0)
 const measuredGroupSubtotalHeight = ref(0)
@@ -848,6 +886,137 @@ function onPageSizeChange(event: Event) {
   const value = Number((event.target as HTMLSelectElement | null)?.value)
   if (Number.isFinite(value) && value !== props.pageSize) emit('set-page-size', value)
 }
+
+// ── Footer 「+ 新建记录」 and 「跳转到第 [ ] 行」 (客户反馈 2026-10-27, R74) ─────────────────────────────────────────
+// 「如有1000行，我一定要拉到1000行后才可以新增」: the inline add row sits after the last row, and the flat grid only
+// appends rows as it scrolls, so on a long sheet it is out of reach. The footer is outside the scroll area. Same
+// canCreate gate as the inline row (the workbench turns it off for a PLM-locked sheet, R68). An empty sheet keeps
+// its empty state, as the inline row does.
+const showFooterAdd = computed(() => props.canCreate === true && filteredRows.value.length > 0)
+
+// Row N is the number in the row-number column: startIndex + index + 1, where the index is into displayRows (the
+// server order on the flat path; the visible order on the grouped path, where row numbers are nav indices).
+const showRowJump = computed(() => typeof props.totalRows === 'number' && props.totalRows > 1)
+const rowJumpInput = ref<string | number>('')
+// The total, shown when the typed row was out of range and got clamped; null hides the hint.
+const rowJumpHint = ref<number | null>(null)
+// A jump to a row that is not loaded: the 1-based row number, waiting for the requested page to land.
+const pendingRowJump = ref<number | null>(null)
+
+function onRowJumpSubmit() {
+  const total = props.totalRows ?? 0
+  if (total < 1) return
+  const raw = String(rowJumpInput.value).trim()
+  const typed = raw === '' ? Number.NaN : Math.trunc(Number(raw))
+  if (!Number.isFinite(typed)) {
+    rowJumpHint.value = null
+    return
+  }
+  const target = Math.min(Math.max(typed, 1), total)
+  rowJumpHint.value = target === typed ? null : total
+  // The box shows the row that is actually focused (12.7 -> 12, 2001 -> 2000 next to the 共 M 行 hint).
+  rowJumpInput.value = target
+  pendingRowJump.value = null
+  if (focusLoadedRow(target)) return
+  // Not loaded: ask for its page. The flat grid then holds that page and shows the pager until page 1 (the
+  // 2026-10-21 rule above). The same page cannot hold it either (a collapsed group): nothing to load.
+  const size = typeof props.pageSize === 'number' && props.pageSize > 0 ? props.pageSize : 0
+  if (size === 0) return
+  const page = Math.ceil(target / size)
+  if (page === props.currentPage) return
+  pendingRowJump.value = target
+  emit('go-to-page', page)
+}
+
+// Focus + select the row numbered `rowNumber` if it is loaded (as a cell click does: it selects, it does not open the
+// inspector), then bring it on screen. Returns false when it is not among the loaded rows.
+function focusLoadedRow(rowNumber: number): boolean {
+  const navIndex = rowNumber - 1 - props.startIndex
+  const row = navIndex >= 0 ? displayRows.value[navIndex] : undefined
+  if (!row) return false
+  focusRow.value = navIndex
+  focusCol.value = 0
+  emit('select-record', row.id)
+  scrollJumpedRowIntoView()
+  return true
+}
+
+// The jump has to leave row N on screen, not merely mounted. The sticky header cells (and frozen top rows) cover
+// the top of the scrollport and the sticky aggregation footer covers its bottom, so "on screen" is the band between
+// them. Windowed, a pre-scroll by row arithmetic (header and footer included) makes the row mount; with windowing
+// off, the mounted row is scrolled to the nearest edge. Then the real geometry corrects the rest: the band edges,
+// and rows that are taller than the uniform window height (a 4-digit row number wraps its cell). A correction can
+// mount other rows or let content-visibility rows take their real height, so it is re-checked for a few frames.
+let rowJumpSettleToken = 0
+const ROW_JUMP_SETTLE_FRAMES = 3
+
+function scrollJumpedRowIntoView() {
+  const windowed = flatWindowEnabled.value || groupedWindowEnabled.value
+  if (windowed) scrollFocusedRowIntoWindow({ stickyBands: true })
+  const token = ++rowJumpSettleToken
+  const target = focusRow.value
+  nextTick(() => {
+    if (token !== rowJumpSettleToken || focusRow.value !== target) return
+    if (!windowed) {
+      // Windowing off (60 rows or fewer, an expanded row, printing): every row is mounted, so scroll the row itself.
+      const el = tableWrap.value?.querySelector<HTMLElement>('tbody tr.meta-grid__row--focused')
+      if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
+    }
+    correctJumpedRowIntoBand()
+    settleJumpedRow(token, target, ROW_JUMP_SETTLE_FRAMES)
+  })
+}
+
+function settleJumpedRow(token: number, target: number, framesLeft: number) {
+  if (framesLeft <= 0) return
+  const nextFrame = typeof window.requestAnimationFrame === 'function'
+    ? (cb: () => void) => window.requestAnimationFrame(() => cb())
+    : (cb: () => void) => window.setTimeout(cb, 16)
+  nextFrame(() => {
+    if (token !== rowJumpSettleToken || focusRow.value !== target) return
+    correctJumpedRowIntoBand()
+    settleJumpedRow(token, target, framesLeft - 1)
+  })
+}
+
+// Viewport y-range not covered by sticky bands: below the last header row's cells and the frozen top rows, above
+// the aggregation footer.
+function visibleRowBand(wrap: HTMLElement): { top: number; bottom: number } {
+  const wr = wrap.getBoundingClientRect()
+  let top = wr.top + wrap.clientTop
+  let bottom = top + wrap.clientHeight
+  const headerRows = wrap.querySelectorAll<HTMLElement>('thead tr')
+  const headerCell = headerRows.length > 0 ? headerRows[headerRows.length - 1].querySelector<HTMLElement>('th') : null
+  if (headerCell) top = Math.max(top, headerCell.getBoundingClientRect().bottom)
+  const frozenRows = wrap.querySelectorAll<HTMLElement>('tbody tr.meta-grid__row--frozen-top')
+  const frozenCell = frozenRows.length > 0 ? frozenRows[frozenRows.length - 1].querySelector<HTMLElement>('td.meta-grid__row-num') : null
+  if (frozenCell) top = Math.max(top, frozenCell.getBoundingClientRect().bottom)
+  wrap.querySelectorAll<HTMLElement>('tfoot.meta-grid__foot tr > td:first-child').forEach((cell) => {
+    bottom = Math.min(bottom, cell.getBoundingClientRect().top)
+  })
+  return { top, bottom }
+}
+
+// Scrolls the wrap so the focused row lies inside visibleRowBand. Returns whether it scrolled. No-op without layout
+// (jsdom) and for a frozen row (it is pinned on screen by its own sticky cells).
+function correctJumpedRowIntoBand(): boolean {
+  const wrap = tableWrap.value
+  if (!wrap || focusRow.value < 0) return false
+  const el = wrap.querySelector<HTMLElement>('tbody tr.meta-grid__row--focused')
+  if (!el || el.classList.contains('meta-grid__row--frozen-top')) return false
+  const rect = el.getBoundingClientRect()
+  if (rect.height <= 0) return false
+  const band = visibleRowBand(wrap)
+  let delta = 0
+  if (rect.top < band.top - 0.5) delta = Math.floor(rect.top - band.top)
+  else if (rect.bottom > band.bottom + 0.5) delta = Math.ceil(Math.min(rect.bottom - band.bottom, rect.top - band.top))
+  if (delta === 0) return false
+  const before = wrap.scrollTop
+  wrap.scrollTop = Math.max(0, before + delta)
+  scrollTop.value = wrap.scrollTop
+  return wrap.scrollTop !== before
+}
+
 const infiniteScrollEnabled = computed(() =>
   !printing.value && !groupedRows.value && expandedRowIds.value.size === 0,
 )
@@ -886,6 +1055,8 @@ function measureViewport() {
   const headerRow = tableWrap.value.querySelector<HTMLElement>('thead tr')
   const hh = headerRow?.offsetHeight ?? 0
   if (hh > 0) measuredHeaderHeight.value = hh
+  // The sticky aggregation footer covers the bottom of the scrollport (0 without one). Used by the row jump.
+  measuredFootHeight.value = tableWrap.value.querySelector<HTMLElement>('tfoot.meta-grid__foot')?.offsetHeight ?? 0
   maybeKickWhenNotScrollable()
 }
 
@@ -903,7 +1074,10 @@ function maybeKickWhenNotScrollable() {
 }
 // Keep the focused row inside the mounted window during keyboard navigation so arrow-keys never land on
 // an un-rendered row. No-op when windowing is off or no row is focused.
-function scrollFocusedRowIntoWindow() {
+// stickyBands (the footer row jump): row offsets start below the in-flow header, and the sticky aggregation footer
+// covers the bottom, so a row below the view is scrolled until its bottom clears both. Keyboard navigation keeps
+// the plain arithmetic.
+function scrollFocusedRowIntoWindow(opts: { stickyBands?: boolean } = {}) {
   if (!tableWrap.value || focusRow.value < 0) return
   let rowTop = 0
   let rowBottom = 0
@@ -921,9 +1095,10 @@ function scrollFocusedRowIntoWindow() {
   }
   const viewTop = tableWrap.value.scrollTop
   const viewBottom = viewTop + effectiveViewportHeight.value
+  const bottomPad = opts.stickyBands ? headerHeightPx.value + measuredFootHeight.value : 0
   let next = viewTop
   if (rowTop < viewTop) next = rowTop
-  else if (rowBottom > viewBottom) next = rowBottom - effectiveViewportHeight.value
+  else if (rowBottom + bottomPad > viewBottom) next = rowBottom + bottomPad - effectiveViewportHeight.value
   if (next !== viewTop) {
     tableWrap.value.scrollTop = next
     scrollTop.value = next
@@ -1158,6 +1333,28 @@ const displayRows = computed(() => {
   walk(groupedRows.value)
   return result
 })
+
+// Footer row jump watchers (see onRowJumpSubmit). Declared after displayRows / effectiveGroupFields, which they read.
+// The requested page landed (or the load ended): focus the row if it is there now, otherwise drop the jump so a
+// later, unrelated reload does not move the focus.
+watch(
+  [() => props.rows, () => props.startIndex, () => props.loading],
+  () => {
+    if (pendingRowJump.value === null || props.loading) return
+    const target = pendingRowJump.value
+    pendingRowJump.value = null
+    focusLoadedRow(target)
+  },
+  { flush: 'post' },
+)
+// Another sheet / view or another grouping: the row numbers mean something else now.
+watch(
+  [() => props.rangeContextKey, () => JSON.stringify(effectiveGroupFields.value.map((f) => f.id))],
+  () => {
+    pendingRowJump.value = null
+    rowJumpHint.value = null
+  },
+)
 
 function toggleSelectAll() {
   if (allSelected.value) selectedIds.value = new Set()
@@ -2149,13 +2346,19 @@ thead .meta-grid__check-col {
 .meta-grid__empty-icon { font-size: 36px; margin-bottom: 8px; opacity: 0.5; }
 .meta-grid__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }
 .meta-grid__empty-hint { font-size: 13px; color: #aaa; }
-.meta-grid__pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; border-top: 1px solid #e5e7eb; }
+.meta-grid__pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px; padding: 8px; border-top: 1px solid #e5e7eb; }
 .meta-grid__page-btn { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
 .meta-grid__page-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-grid__page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .meta-grid__page-info { font-size: 12px; color: #666; }
 .meta-grid__page-size { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #666; }
 .meta-grid__page-size-select { padding: 2px 6px; border: 1px solid #ddd; border-radius: 3px; background: #fff; font-size: 12px; }
+.meta-grid__row-jump { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #666; }
+.meta-grid__row-jump-field { display: inline-flex; align-items: center; gap: 4px; }
+.meta-grid__row-jump-input { width: 72px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 3px; background: #fff; font-size: 12px; }
+.meta-grid__row-jump-hint { color: #999; }
+.meta-grid__footer-add-btn { display: inline-flex; align-items: center; gap: 4px; margin-right: auto; color: #4a5568; }
+.meta-grid__footer-add-btn:hover { color: #2563eb; }
 .meta-grid__loading { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: stretch; background: rgba(255,255,255,.85); z-index: 10; padding-top: 40px; }
 .meta-grid__skeleton { width: 100%; padding: 0 12px; }
 .meta-grid__skeleton-row { display: flex; gap: 12px; margin-bottom: 12px; }
