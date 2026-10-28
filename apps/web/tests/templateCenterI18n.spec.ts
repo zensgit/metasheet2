@@ -1008,6 +1008,8 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
       ternary: 1,
     },
     { file: 'src/approvals/approvalCenterDetailPaneController.ts', ternary: 1 },
+    // 流程进度 rows on the detail page: every word comes from the detail label table, none in the module.
+    { file: 'src/approvals/approvalProgress.ts' },
     {
       file: 'src/approvals/assigneeSource.ts',
       ternary: 5,

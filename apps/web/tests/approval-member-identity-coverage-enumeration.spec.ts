@@ -139,6 +139,34 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
       },
     ],
   },
+  // 流程进度 rows on the detail page (approvalProgress.ts). Done rows name actors through the
+  // timeline's own `historyActorName`; open rows reuse the current-seat labels above (role seats
+  // as a count); rows ahead name fixed approvers only on this instance's own frozen version, only
+  // when EVERY configured user resolves, and never on a cancel round — otherwise the count-only
+  // summary. No id is ever a fallback.
+  {
+    site: 'ApprovalDetailView.vue — 流程进度 rows (approvalProgress.ts: done actors, open-step handlers, names ahead)',
+    coverage: ['src/approvals/approvalProgress.ts', 'approval-e2e-lifecycle.spec.ts', 'a step ahead keeps the count and its user ids are never sent'],
+    sourceChecks: [
+      {
+        file: 'src/approvals/approvalProgress.ts',
+        mustContain: [
+          'if (!lookup || input.namesWithheld) return null',
+          'if (!resolved) return null',
+          "if (source.kind !== 'static_user') return []",
+        ],
+      },
+      {
+        file: 'src/views/approval/ApprovalDetailView.vue',
+        mustContain: [
+          'const progressNamesAhead = computed(() => progressGraphSource.value.pinned && !isCancelRound.value)',
+          'expectedUserName: progressNamesAhead.value ? getResolvedUserName : null',
+          'actorName: historyActorName',
+          'currentHandlers: progressCurrentHandlers',
+        ],
+      },
+    ],
+  },
   {
     site: 'ApprovalCenterDetailPane.vue — 待处理人 role seats (pane mount)',
     coverage: ['src/views/approval/ApprovalCenterDetailPane.vue', 'approval-center-master-detail.spec.ts', 'a role seat renders 指定角色（N 个） (never 成员 N or the role id); the 成员 N ordinal numbers person seats only'],

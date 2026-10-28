@@ -1896,6 +1896,141 @@ describe('Approval E2E Lifecycle', () => {
       })
     })
 
+    // 流程进度: one row per step (start / done / open now / ahead) above the record views.
+    describe('流程进度 (process progress rows)', () => {
+      const progress = () => container!.querySelector('[data-testid="approval-flow-progress"]')
+      const steps = () => Array.from(container!.querySelectorAll<HTMLElement>('[data-testid="approval-flow-progress-step"]'))
+      const resolverAskedFor = () => resolveApprovalDirectoryUsersMock.mock.calls.flatMap((call) => call[0] as string[])
+      const userSeat = (id: string, userKey: string, nodeKey: string) => ({
+        id, type: 'user', assigneeId: userKey, sourceStep: 1, nodeKey, isActive: true, metadata: {},
+      })
+
+      it('a pending instance lists start, done (actor + result), the open step (handler + wait) and the steps ahead, above the record views', async () => {
+        resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_current', name: '孙七' }])
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_2',
+          assignments: [userSeat('asgn_2', 'user_current', 'approval_2')],
+        })
+        mockHistory.value = mockHistoryItems() // created (张三) + approve at approval_1 (当前用户)
+        mockActiveTemplate.value = mockPublishedTemplate()
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(progress()).toBeTruthy()
+        expect(steps().map((el) => el.dataset.state)).toEqual(['start', 'done', 'current', 'expected'])
+        expect(steps()[0].textContent).toContain('发起人：张三')
+        expect(steps()[1].textContent).toContain('部门主管审批')
+        expect(steps()[1].textContent).toContain('已完成')
+        expect(steps()[1].textContent).toContain('通过')
+        expect(steps()[1].textContent).toContain('处理人：当前用户')
+        expect(steps()[2].textContent).toContain('财务审批')
+        expect(steps()[2].textContent).toContain('进行中')
+        expect(steps()[2].textContent).toContain('当前处理人：孙七')
+        expect(steps()[2].textContent).toContain('已等待')
+        expect(steps()[3].textContent).toContain('结束')
+        expect(steps()[3].textContent).toContain('预计')
+        expect(progress()!.innerHTML).not.toContain('user_current')
+        // Placed above the record views, and the real history item count is unchanged.
+        const firstHistoryItem = container!.querySelector('.el-timeline-item')!
+        expect(progress()!.compareDocumentPosition(firstHistoryItem) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        expect(container!.querySelectorAll('.el-timeline-item').length).toBe(2)
+      })
+
+      it('a step ahead shows the fixed approver by name on the instance\'s own frozen version, once the user resolves', async () => {
+        resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_finance', name: '钱八' }])
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [userSeat('asgn_1', 'user_current', 'approval_1')],
+        })
+        mockActiveTemplate.value = mockPublishedTemplate()
+        // The fixture's templateVersionId is ver_1_1: this is the instance's own version.
+        mockActiveVersion.value = { id: 'ver_1_1', approvalGraph: mockPublishedTemplate().approvalGraph }
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(resolverAskedFor()).toContain('user_finance')
+        const ahead = steps().find((el) => el.textContent?.includes('财务审批'))!
+        expect(ahead.dataset.state).toBe('expected')
+        expect(ahead.textContent).toContain('预计处理人：钱八')
+        expect(progress()!.innerHTML).not.toContain('user_finance')
+      })
+
+      it('on the live template (no version loaded, as for an ordinary member), a step ahead keeps the count and its user ids are never sent', async () => {
+        resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_finance', name: '钱八' }])
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [userSeat('asgn_1', 'user_current', 'approval_1')],
+        })
+        mockActiveTemplate.value = mockPublishedTemplate()
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(resolverAskedFor()).not.toContain('user_finance')
+        const ahead = steps().find((el) => el.textContent?.includes('财务审批'))!
+        expect(ahead.dataset.state).toBe('expected')
+        expect(ahead.textContent).toContain('预计处理人：指定成员（1 人）')
+        expect(progress()!.textContent).not.toContain('钱八')
+        expect(container!.querySelector('.approval-detail__progress-hint')).toBeTruthy()
+      })
+
+      it('a version in the store that is not this instance\'s is never walked: the rows stop at the open step', async () => {
+        resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_finance', name: '钱八' }])
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [userSeat('asgn_1', 'user_current', 'approval_1')],
+        })
+        mockActiveTemplate.value = mockPublishedTemplate()
+        // Left in the app-wide store by another instance.
+        const other = mockPublishedTemplate().approvalGraph
+        mockActiveVersion.value = {
+          id: 'ver_other',
+          approvalGraph: { ...other, nodes: other.nodes.map((n) => (n.key === 'approval_2' ? { ...n, name: 'OTHER_VERSION_NODE' } : n)) },
+        }
+        await mountDetailView()
+        await flushUi(12)
+
+        expect(steps().map((el) => el.dataset.state)).toEqual(['start', 'current'])
+        // The open step is still named from this instance's own live template.
+        expect(steps()[1].textContent).toContain('部门主管审批')
+        expect(progress()!.textContent).not.toContain('OTHER_VERSION_NODE')
+        expect(resolverAskedFor()).not.toContain('user_finance')
+      })
+
+      it('an open role seat reads 指定角色（N 个） in the progress too, never the role id', async () => {
+        mockPermissionState.value = { ...mockPermissionState.value, canManageTemplates: false }
+        routeParams = { id: 'apv_pending_1' }
+        mockActiveApproval.value = mockPendingApproval({
+          currentNodeKey: 'approval_1',
+          assignments: [{ id: 'asgn_r1', type: 'role', assigneeId: 'role_secret_9', sourceStep: 1, nodeKey: 'approval_1', isActive: true, metadata: {} }],
+        })
+        mockActiveTemplate.value = mockPublishedTemplate()
+        await mountDetailView()
+        await flushUi(12)
+
+        const open = steps().find((el) => el.dataset.state === 'current')!
+        expect(open.textContent).toContain('当前处理人：指定角色（1 个）')
+        expect(progress()!.innerHTML).not.toContain('role_secret_9')
+      })
+
+      it('a concluded instance ends with one 结束 row carrying the instance status; nothing open or ahead', async () => {
+        routeParams = { id: 'apv_approved_1' }
+        mockActiveApproval.value = mockApprovedApproval()
+        mockHistory.value = mockHistoryItems()
+        mockActiveTemplate.value = mockPublishedTemplate()
+        await mountDetailView()
+
+        const states = steps().map((el) => el.dataset.state)
+        expect(states).toEqual(['start', 'done', 'end'])
+        expect(steps()[2].textContent).toContain('已结束')
+        expect(steps()[2].textContent).toContain('已通过')
+        expect(container!.querySelector('.approval-detail__progress-hint')).toBeNull()
+      })
+    })
+
     it('a non-pending instance renders NO current/upcoming section', async () => {
       routeParams = { id: 'apv_approved_1' }
       mockActiveApproval.value = mockApprovedApproval()
