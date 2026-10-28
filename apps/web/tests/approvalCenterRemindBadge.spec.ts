@@ -537,6 +537,28 @@ describe('ApprovalDetailView 催一下 (WP3 slice 1)', () => {
     expect(elSuccessSpy).toHaveBeenCalledWith('已催办')
   })
 
+  // 服务端带回站内通知计数时，提示里说明发给了几个人、角色席位暂不发通知。
+  it('says how many people got the in-app notification when the server returns the counts', async () => {
+    remindApprovalSpy.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        id: 'apv_remind_target',
+        action: 'remind',
+        remindedAt: new Date().toISOString(),
+        bridged: false,
+        sourceSystem: 'platform',
+        notifiedUserCount: 2,
+        skippedRoleSeatCount: 1,
+      },
+    })
+    await mountDetail()
+    const button = container!.querySelector('[data-testid="approval-remind-button"]') as HTMLButtonElement
+    button.click()
+    await flushUi(6)
+    expect(remindApprovalSpy).toHaveBeenCalledWith('apv_remind_target')
+    expect(elSuccessSpy).toHaveBeenCalledWith('已催办，已发站内通知给 2 人（按角色指派的处理人暂不发通知）')
+  })
+
   it('surfaces the throttle message when the server returns 429', async () => {
     const lastRemindedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString()
     remindApprovalSpy.mockResolvedValueOnce({

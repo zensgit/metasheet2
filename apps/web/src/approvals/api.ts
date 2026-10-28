@@ -1726,6 +1726,10 @@ export type RemindApprovalResult =
         remindedAt: string
         bridged: boolean
         sourceSystem: string | null
+        /** 写了几条站内通知（当前节点的用户席位，不含催办人）。老版本服务端不带。 */
+        notifiedUserCount?: number
+        /** 按角色指派、本轮不发站内通知的席位数。老版本服务端不带。 */
+        skippedRoleSeatCount?: number
       }
     }
   | {
