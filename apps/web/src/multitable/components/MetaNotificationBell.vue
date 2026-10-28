@@ -48,7 +48,7 @@
               v-if="n.eventType === 'notification.sent' && n.message"
               class="meta-notif-bell__message"
               data-test="notification-message"
-            >{{ n.message }}</span>
+            >{{ displayMessage(n) }}</span>
           </span>
           <span class="meta-notif-bell__time">{{ formatTime(n.createdAt) }}</span>
         </li>
@@ -58,12 +58,14 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { inject, onBeforeUnmount, ref } from 'vue'
+import { routerKey } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { scheduleIdle } from '../../utils/scheduleIdle'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { formatBusinessTimestamp } from '../utils/business-timezone'
 import { useNotificationInbox } from '../composables/useNotificationInbox'
+import { parseApprovalNotificationLink } from '../utils/approval-notification-link'
 import type { MetaRecordSubscriptionNotification } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { MtLink } from '../ui'
@@ -77,10 +79,17 @@ const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 const { notifications, unreadCount, loading, error, hasUnread, eventLabel, loadInbox, refreshUnreadCount, markRead, markAllRead } =
   useNotificationInbox(props.apiClient)
 
+// 催办站内通知点了跳审批详情；没有路由（如独立挂载）时只标已读。
+const router = inject(routerKey, null)
+
 const open = ref(false)
 const alignLeft = ref(false)
 const btnRef = ref<HTMLButtonElement | null>(null)
 const PANEL_WIDTH = 320
+
+function displayMessage(n: MetaRecordSubscriptionNotification): string {
+  return parseApprovalNotificationLink(n)?.text ?? n.message ?? ''
+}
 
 // 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatTime(value: string): string {
@@ -109,8 +118,13 @@ async function onItemClick(n: MetaRecordSubscriptionNotification): Promise<void>
   // navigate consumer (onNotificationNavigate in MultitableWorkbench.vue) treats any recordId as a lookup
   // target and would fetch a nonexistent record, surfacing a confusing "record not found" toast. Skip the
   // emit entirely for a blank recordId; still mark read and close the panel.
-  if (n.recordId && n.recordId.trim()) {
+  // 催办站内通知也不挂表（sheetId 为空），同样不发 navigate。
+  if (n.sheetId && n.sheetId.trim() && n.recordId && n.recordId.trim()) {
     emit('navigate', { sheetId: n.sheetId, recordId: n.recordId })
+  } else {
+    // 催办站内通知（不挂表、不挂记录，正文末行是审批详情路径）：跳到审批详情。
+    const approvalLink = parseApprovalNotificationLink(n)
+    if (approvalLink && router) void router.push(approvalLink.path).catch(() => undefined)
   }
   open.value = false
 }

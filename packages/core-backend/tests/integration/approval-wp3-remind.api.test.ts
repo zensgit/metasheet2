@@ -4,9 +4,14 @@
  * Validates:
  *  - Happy path: requester with narrow perms → 200, approval_records row created.
  *  - Rate limit: a second remind by the same user within an hour → 429.
- *  - Authorization: non-requester without `approvals:act` → 403.
+ *  - Access check: a principal who cannot read the instance → the same 404 as the
+ *    detail / history routes (APPROVAL_NOT_FOUND).
+ *  - Authorization: a participant who is neither the requester nor holds `approvals:act` → 403.
  *  - Missing target: unknown instance id → 404.
  *  - PLM source: remind records locally with bridged=false, no upstream hit.
+ *  - In-app notification: each active USER seat (not the actor) gets one `notification.sent`
+ *    row carrying 「催办」, the title, the request number and the detail path; role seats are
+ *    counted, not notified; a throttled second remind writes no further rows.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
@@ -60,6 +65,9 @@ describeIfDatabase('Approval Wave 2 WP3 slice 1 — remind', () => {
   const requesterId = `wp3-remind-requester-${suiteSuffix}`
   const strangerId = `wp3-remind-stranger-${suiteSuffix}`
   const reviewerId = `wp3-remind-reviewer-${suiteSuffix}`
+  const assigneeId = `wp3-remind-assignee-${suiteSuffix}`
+  const roleSeatId = `wp3-remind-role-${suiteSuffix}`
+  const requestNo = `WP3-REMIND-${suiteSuffix}`
   const platformInstanceId = `apv_wp3_remind_${suiteSuffix}`
   const plmExternalId = `wp3_remind_plm_${suiteSuffix}`
   const plmInstanceId = `plm:${plmExternalId}`
@@ -76,11 +84,11 @@ describeIfDatabase('Approval Wave 2 WP3 slice 1 — remind', () => {
 
     await pool.query(
       `INSERT INTO approval_instances
-         (id, status, version, source_system, workflow_key, business_key, title,
+         (id, status, version, source_system, workflow_key, business_key, title, request_no,
           requester_snapshot, subject_snapshot, policy_snapshot, metadata,
           current_step, total_steps, sync_status, created_at, updated_at)
-       VALUES ($1, 'pending', 0, 'platform', $2, $3, $4,
-               $5::jsonb,
+       VALUES ($1, 'pending', 0, 'platform', $2, $3, $4, $5,
+               $6::jsonb,
                '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
                0, 0, 'ok', now(), now())`,
       [
@@ -88,8 +96,19 @@ describeIfDatabase('Approval Wave 2 WP3 slice 1 — remind', () => {
         `wp3-remind-${suiteSuffix}`,
         `wp3:remind:${suiteSuffix}`,
         `WP3 remind approval ${suiteSuffix}`,
+        requestNo,
         JSON.stringify({ id: requesterId, name: '催办发起人' }),
       ],
+    )
+
+    // One active USER seat (notified), one active ROLE seat (counted, not notified), and one
+    // INACTIVE user seat (neither).
+    await pool.query(
+      `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, is_active)
+       VALUES ($1, 'user', $2, 1, TRUE),
+              ($1, 'role', $3, 1, TRUE),
+              ($1, 'user', $4, 1, FALSE)`,
+      [platformInstanceId, assigneeId, roleSeatId, reviewerId],
     )
 
     await pool.query(
@@ -161,6 +180,15 @@ describeIfDatabase('Approval Wave 2 WP3 slice 1 — remind', () => {
     } catch {
       // cleanup failures shouldn't mask the test result
     }
+    try {
+      await pool.query(
+        `DELETE FROM meta_record_subscription_notifications
+         WHERE user_id = ANY($1::text[])`,
+        [[requesterId, strangerId, reviewerId, assigneeId]],
+      )
+    } catch {
+      // cleanup failures shouldn't mask the test result
+    }
 
     if (server) {
       await server.stop()
@@ -175,11 +203,22 @@ describeIfDatabase('Approval Wave 2 WP3 slice 1 — remind', () => {
       body: JSON.stringify({}),
     })
     expect(response.status).toBe(200)
-    const payload = await response.json() as { ok: boolean; data: { action: string; bridged: boolean; sourceSystem: string } }
+    const payload = await response.json() as {
+      ok: boolean
+      data: {
+        action: string
+        bridged: boolean
+        sourceSystem: string
+        notifiedUserCount: number
+        skippedRoleSeatCount: number
+      }
+    }
     expect(payload.ok).toBe(true)
     expect(payload.data.action).toBe('remind')
     expect(payload.data.bridged).toBe(false)
     expect(payload.data.sourceSystem).toBe('platform')
+    expect(payload.data.notifiedUserCount).toBe(1)
+    expect(payload.data.skippedRoleSeatCount).toBe(1)
 
     const pool = poolManager.get()
     const result = await pool.query<{
@@ -195,6 +234,34 @@ describeIfDatabase('Approval Wave 2 WP3 slice 1 — remind', () => {
     expect(result.rows[0].metadata.remindedBy).toBe(requesterId)
     expect(typeof result.rows[0].metadata.remindedAt).toBe('string')
     expect(result.rows[0].metadata.bridged).toBe(false)
+
+    // In-app notification: exactly one row, for the active user seat only.
+    const notifications = await pool.query<{
+      user_id: string
+      sheet_id: string
+      record_id: string
+      event_type: string
+      actor_id: string | null
+      message: string | null
+      read_at: Date | null
+    }>(
+      `SELECT user_id, sheet_id, record_id, event_type, actor_id, message, read_at
+       FROM meta_record_subscription_notifications
+       WHERE user_id = ANY($1::text[])`,
+      [[requesterId, reviewerId, assigneeId, roleSeatId]],
+    )
+    expect(notifications.rows).toHaveLength(1)
+    const row = notifications.rows[0]
+    expect(row.user_id).toBe(assigneeId)
+    expect(row.sheet_id).toBe('')
+    expect(row.record_id).toBe('')
+    expect(row.event_type).toBe('notification.sent')
+    expect(row.actor_id).toBe(requesterId)
+    expect(row.read_at).toBeNull()
+    expect(row.message).toContain('催办')
+    expect(row.message).toContain(`WP3 remind approval ${suiteSuffix}`)
+    expect(row.message).toContain(requestNo)
+    expect(row.message?.split('\n').pop()).toBe(`/approvals/${encodeURIComponent(platformInstanceId)}`)
   })
 
   it('throttles a second remind by the same user within an hour', async () => {
@@ -222,10 +289,42 @@ describeIfDatabase('Approval Wave 2 WP3 slice 1 — remind', () => {
       [platformInstanceId, requesterId],
     )
     expect(parseInt(countResult.rows[0].count, 10)).toBe(1)
+
+    // ...and no second notification.
+    const notifCount = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM meta_record_subscription_notifications WHERE user_id = $1`,
+      [assigneeId],
+    )
+    expect(parseInt(notifCount.rows[0].count, 10)).toBe(1)
   })
 
-  it('rejects a non-requester without approvals:act perm with 403', async () => {
-    const token = await devToken(baseUrl, strangerId, { roles: 'user', perms: 'approvals:read' })
+  it('answers a principal who cannot read the instance with the same 404 as the detail route', async () => {
+    const token = await devToken(baseUrl, strangerId, { roles: 'user', perms: 'approvals:read,approvals:act' })
+    const response = await fetch(`${baseUrl}/api/approvals/${platformInstanceId}/remind`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(response.status).toBe(404)
+    const payload = await response.json() as { error: { code: string } }
+    expect(payload.error.code).toBe('APPROVAL_NOT_FOUND')
+
+    const detail = await fetch(`${baseUrl}/api/approvals/${platformInstanceId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(detail.status).toBe(404)
+
+    const pool = poolManager.get()
+    const records = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_records
+       WHERE instance_id = $1 AND action = 'remind' AND actor_id = $2`,
+      [platformInstanceId, strangerId],
+    )
+    expect(parseInt(records.rows[0].count, 10)).toBe(0)
+  })
+
+  it('rejects a participant who is neither the requester nor holds approvals:act with 403', async () => {
+    const token = await devToken(baseUrl, assigneeId, { roles: 'user', perms: 'approvals:read' })
     const response = await fetch(`${baseUrl}/api/approvals/${platformInstanceId}/remind`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },

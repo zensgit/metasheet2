@@ -1129,6 +1129,27 @@ describe('MultitableApiClient', () => {
     expect(rows[0]).toMatchObject({ eventType: 'notification.sent', recordId: '', message: 'approval done' })
   })
 
+  // 催办站内通知不挂表也不挂记录（sheetId、recordId 都是 ''）。未读数不按表过滤会算上它，所以规范化必须保留它；
+  // 其他事件类型的行没有 sheetId 时仍然丢掉。
+  it('listRecordSubscriptionNotifications keeps a sheet-less notification.sent row and still drops other sheet-less rows', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: {
+        items: [
+          { id: 'note_remind', sheetId: '', recordId: '', userId: 'user_1', eventType: 'notification.sent', actorId: 'user_2', revisionId: null, commentId: null, message: '【催办】甲 提醒你处理审批「采购申请」\n/approvals/apv_1', createdAt: '2026-10-27T08:30:12.861Z', readAt: null },
+          { id: 'note_upd', sheetId: '', recordId: 'rec_1', userId: 'user_1', eventType: 'record.updated', actorId: 'user_2', revisionId: 'rev_1', commentId: null, createdAt: '2026-10-27T08:30:12.861Z', readAt: null },
+          { id: 'note_cmt', sheetId: '', recordId: 'rec_1', userId: 'user_1', eventType: 'comment.created', actorId: 'user_2', revisionId: null, commentId: 'cmt_1', createdAt: '2026-10-27T08:30:12.861Z', readAt: null },
+        ],
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const rows = await client.listRecordSubscriptionNotifications({ limit: 50 })
+    expect(rows.map((r) => r.id)).toEqual(['note_remind'])
+    expect(rows[0]).toMatchObject({ eventType: 'notification.sent', sheetId: '', recordId: '' })
+    expect(rows[0].message).toContain('/approvals/apv_1')
+  })
+
   // Notification Center S1b — real-wire coverage for the 3 read-state methods (#1779/#1781 forward
   // rule: every contract-consuming method must round-trip URL/method/envelope, not be mocked away).
   it('getRecordSubscriptionUnreadCount GETs the unread-count route and unwraps data.count', async () => {

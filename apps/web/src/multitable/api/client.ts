@@ -1309,7 +1309,11 @@ function normalizeRecordSubscriptionNotification(
   // record-less trigger (approval.completed / approval.task_created / schedule / webhook) persists a
   // row with recordId '' — the server's unread-count already counts it, so dropping it here made the
   // bell badge say "1" while the panel said "暂无通知" (#5745 §5.4).
-  if (!id || !sheetId || !userId || !eventType) return null
+  // sheetId follows the same rule: sheet-scoped writers (automations, buttons, submit receipts) always
+  // carry one, but an approval 催办 in-app notification has no sheet and no record (both ''). The
+  // unread-count does not filter by sheet, so dropping it here would bring the same badge/list mismatch back.
+  if (!id || !userId || !eventType) return null
+  if (!sheetId && eventType !== 'notification.sent') return null
   if (!recordId && eventType !== 'notification.sent') return null
   return {
     id,

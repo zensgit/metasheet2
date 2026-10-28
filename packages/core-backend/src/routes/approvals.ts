@@ -46,6 +46,12 @@ import {
 import { isApprovalAdministrator } from '../services/approval-admin-capability'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
 import {
+  APPROVAL_REMIND_NOTIFICATION_RECORD_ID,
+  APPROVAL_REMIND_NOTIFICATION_SHEET_ID,
+  buildApprovalRemindNotificationMessage,
+} from '../services/approval-remind-notification'
+import { insertRecordSubscriptionNotifications } from '../multitable/record-subscription-service'
+import {
   canReadApprovalInstance,
   isOrgPinEnabled,
   viewerActiveOrgIds,
@@ -512,6 +518,14 @@ function resolveApprovalActorName(req: Request, fallbackId: string): string {
   if (typeof candidate !== 'string') return fallbackId
   const normalized = candidate.trim()
   return normalized.length > 0 ? normalized : fallbackId
+}
+
+/** The actor's display name for user-facing text: the name claim only — never the email or the id. */
+function resolveApprovalActorDisplayName(req: Request, actorId: string): string | null {
+  const candidate = req.user?.name
+  if (typeof candidate !== 'string') return null
+  const normalized = candidate.trim()
+  return normalized.length > 0 && normalized !== actorId ? normalized : null
 }
 
 // Exported for the same reason as `resolveApprovalActorId` above (`routes/todo.ts` consumer).
@@ -3708,10 +3722,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   })
 
   // Wave 2 WP3 slice 1: 催办 (remind / nudge). Records a `remind` row on
-  // approval_records so the timeline preserves the nudge event; the task
-  // boundary explicitly defers external notification channels (IM/email/push)
-  // to Phase 3 Notification Hub. PLM-sourced approvals are recorded locally
-  // but not forwarded upstream (bridged=false in the response).
+  // approval_records so the timeline preserves the nudge event. PLM-sourced
+  // approvals are recorded locally but not forwarded upstream (bridged=false in
+  // the response).
+  //
+  // 催办 → 站内通知：同一事务里给当前节点的用户席位（不含催办人自己）各写一条站内通知
+  // （`notification.sent`，带催办人、审批标题、审批编号和审批详情路径），与催办记录同成同败。
+  // 角色席位本轮不展开成员、不发通知，只在响应里报数量。外部通道（钉钉等）不在这里发。
+  //
+  // 访问校验与详情 / 历史接口保持一致。
   //
   // Permission model: a dedicated endpoint rather than bolting onto
   // `/actions` so that the requester — who may not hold `approvals:act` —
@@ -3737,8 +3756,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const { id } = req.params
+      // 与详情 / 历史接口的访问校验保持一致。
+      if (!isPlmApprovalId(id)) {
+        const readable = await canReadApprovalInstance(pool, userId, id)
+        if (!readable) {
+          return res.status(404).json(
+            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+          )
+        }
+      }
+
       const userName = resolveApprovalActorName(req, userId)
       let remindedDirectAssigneeIds: string[] = []
+      let notifiedUserCount = 0
+      let skippedRoleSeatCount = 0
 
       // Resolved BEFORE the transaction opens (used by the count push after COMMIT): a failed role read
       // then answers 500 before anything is written, never after the remind has committed.
@@ -3752,8 +3783,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           status: string
           source_system: string | null
           requester_snapshot: { id?: string | null } | null
+          title: string | null
+          request_no: string | null
         }>(
-          `SELECT id, status, source_system, requester_snapshot
+          `SELECT id, status, source_system, requester_snapshot, title, request_no
            FROM approval_instances
            WHERE id = $1
            FOR UPDATE`,
@@ -3856,17 +3889,44 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           ],
         )
 
-        const directAssigneesResult = await client.query<{ assignee_id: string }>(
-          `SELECT DISTINCT assignee_id
+        const activeSeatsResult = await client.query<{ assignment_type: string; assignee_id: string }>(
+          `SELECT DISTINCT assignment_type, assignee_id
            FROM approval_assignments
            WHERE instance_id = $1
              AND is_active = TRUE
-             AND assignment_type = 'user'`,
+             AND assignment_type IN ('user', 'role')`,
           [id],
         )
-        remindedDirectAssigneeIds = directAssigneesResult.rows
-          .map((row) => row.assignee_id)
-          .filter((assigneeId) => assigneeId && assigneeId !== userId)
+        remindedDirectAssigneeIds = Array.from(new Set(
+          activeSeatsResult.rows
+            .filter((row) => row.assignment_type === 'user')
+            .map((row) => row.assignee_id)
+            .filter((assigneeId) => assigneeId && assigneeId !== userId),
+        ))
+        skippedRoleSeatCount = activeSeatsResult.rows
+          .filter((row) => row.assignment_type === 'role' && row.assignee_id)
+          .length
+
+        if (remindedDirectAssigneeIds.length > 0) {
+          const inserted = await insertRecordSubscriptionNotifications(
+            (sql, params) => client.query(sql, params),
+            {
+              userIds: remindedDirectAssigneeIds,
+              sheetId: APPROVAL_REMIND_NOTIFICATION_SHEET_ID,
+              recordId: APPROVAL_REMIND_NOTIFICATION_RECORD_ID,
+              eventType: 'notification.sent',
+              message: buildApprovalRemindNotificationMessage({
+                instanceId: id,
+                title: instance.title,
+                requestNo: instance.request_no,
+                // 只用姓名；没有姓名时不退回邮箱或内部 id。
+                actorName: resolveApprovalActorDisplayName(req, userId) ?? (isRequester ? '发起人' : null),
+              }),
+              actorId: userId,
+            },
+          )
+          notifiedUserCount = inserted.inserted
+        }
 
         if (remindedDirectAssigneeIds.length > 0) {
           await client.query(
@@ -3896,6 +3956,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
             remindedAt: metadata.remindedAt,
             bridged,
             sourceSystem: metadata.sourceSystem,
+            notifiedUserCount,
+            skippedRoleSeatCount,
           },
         })
       } catch (innerError) {
