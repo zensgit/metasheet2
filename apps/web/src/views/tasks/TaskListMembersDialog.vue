@@ -729,4 +729,39 @@ onBeforeUnmount(() => {
 .tasks-list-members__close {
   align-self: flex-end;
 }
+
+/* Up to 960px: where supported, the dynamic viewport unit keeps the dialog's bottom edge inside the
+   visible viewport when browser toolbars take part of the screen (the 100vh value above is the
+   fallback). Long words break; the member rows wrap, so their labels keep their width and only a
+   part wider than the whole line, such as a long user id, breaks; the add-member input and select
+   can narrow with the dialog. */
+@media (max-width: 960px) {
+  .tasks-list-members {
+    max-height: calc(100dvh - 96px);
+    overflow-wrap: break-word;
+  }
+
+  .tasks-list-members__row {
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-list-members__add input,
+  .tasks-list-members__add select {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+
+/* Narrow screens: the dialog keeps a small margin on every side and gives the content the width. */
+@media (max-width: 720px) {
+  .tasks-list-members__backdrop {
+    padding: 16px 12px;
+  }
+
+  .tasks-list-members {
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    padding: 16px;
+  }
+}
 </style>
