@@ -55,7 +55,8 @@
 //        the effective plan must both declare the 规格 column, or the server declares it not applicable (a) deployment
 //        only ⇒ failing, ENABLE refused with nothing done; (b) online only ⇒ failing (today's answer); (c) both ⇒ ok;
 //        (d) a disabled pointer ⇒ failing; (e) switch unset ⇒ P-04 / P-05 as today, no pointer read; (f) declared not
-//        applicable ⇒ ok without asking for any plan
+//        applicable ⇒ ok without asking for any plan; (g, S1b) a binding set naming two systems ⇒ failing before any
+//        pointer read (the effective resolver refuses it)
 //
 // Synthetic values only.
 
@@ -1195,11 +1196,12 @@ function withOnlineSwitch(online) {
  * pack declared not applicable, the 规格 slot declared not applicable only when asked, the switch set or unset, and
  * the spy ledger answering an online plan that declares the column or not.
  */
-function mountN4({ online = true, mode = 'active', deploymentSpec, onlineSpec, specNotApplicable = false }) {
+function mountN4({ online = true, mode = 'active', deploymentSpec, onlineSpec, specNotApplicable = false, sourceBindingStore = null }) {
   const restoreSwitch = withOnlineSwitch(online)
   let ready
   try {
     ready = mountReady({
+      ...(sourceBindingStore ? { sourceBindingStore } : {}),
       configExtras: {
         stockPreparationPilot: { customerPack: CUSTOMER_PACK_NOT_APPLICABLE, ...(specNotApplicable ? { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } : {}) },
         stockPreparationTableActions: [{
@@ -1319,6 +1321,21 @@ test('PR-N4f switch ON, the server declares the 规格 slot NOT APPLICABLE: ok w
     const enabled = await enablePilotClaimed(h)
     assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
     assert.deepEqual(h.spy.calls, [], 'not applicable answers first: no plan, no pointer read')
+  } finally { h.restore() }
+})
+
+test('PR-N4g (S1b) switch ON, an active pointer, both plans declaring the 规格 column, but the binding set names two systems (a tenant row and a workspace row of another source): the effective resolver refuses before any pointer read, so spec_read_plan_slot fails on GET and ENABLE is 409 NOT_READY with nothing done', async () => {
+  const bindings = require('./support/stock-preparation-refresh-governance-wiring.cjs').createSourceBindingStoreFake()
+  bindings.seed({ tenantId: TENANT, actionId: ACTION_ID, workspaceId: null, externalSystemId: N4_SYSTEM })
+  bindings.seed({ tenantId: TENANT, actionId: ACTION_ID, workspaceId: 'ws_pb_hint', externalSystemId: 'other_source_synthetic' })
+  const h = mountN4({ deploymentSpec: true, onlineSpec: true, sourceBindingStore: bindings })
+  try {
+    const read = await getPilotClaimed(h)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, ['spec_read_plan_slot'])
+    assert.ok(!JSON.stringify(read.body).includes('READ_PLAN_'), 'the readiness answer stays values-free: an id and a boolean')
+    await assertEnableRefusedNothingDone(h, ['spec_read_plan_slot'], 'split binding set')
+    assert.deepEqual(h.spy.calls, [], 'refused before any pointer read')
   } finally { h.restore() }
 })
 

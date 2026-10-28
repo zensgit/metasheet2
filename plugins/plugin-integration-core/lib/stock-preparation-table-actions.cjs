@@ -1139,7 +1139,11 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
         action: effective,
         bindingScope: {
           tenantId: optionalString(input.tenantId),
-          workspaceId: binding ? binding.matchedWorkspaceId : (effective.source.workspaceId || null),
+          // S1b: this is the ACTIVATION scope, and it is the tenant's whatever binding row matched: a read-plan
+          // pointer can exist only at (tenant, null) (read-plan-management identityOf, validation-ledger
+          // lockSources, migration 089). The matched row still decides the SOURCE scope (sourceScope /
+          // legacySourceScope below), never where the pointer is read.
+          workspaceId: null,
         },
         sourceScope: {
           tenantId: optionalString(input.tenantId),
@@ -1201,7 +1205,9 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
       if (!action) throw new StockPreparationTableActionError(422, 'TABLE_ACTION_NOT_CONFIGURED', 'table action is not configured')
       const resolved = await applyPersistedSourceBinding(cloneJson(action), input, true)
       // Execution must resolve the same project target as metadata. Retain the
-      // matched source/activation scope outside the serialized action, while the
+      // scopes outside the serialized action: bindingScope is the ACTIVATION scope
+      // (always the tenant's, workspace null); the matched row's workspace lives
+      // only in sourceScope / legacySourceScope, for the source-row load. The
       // registry alone stamps the current per-project target and write marker.
       resolved.action = await applyProjectTarget(resolved.action, input)
       return resolved

@@ -5305,14 +5305,46 @@ function requireStockPreparationAudit() {
   })
   // Deployment-only registry for the registration mode: no resolvers, so no binding-source or execution preconditions.
   const deploymentTableActions = createStockPreparationTableActionRegistry({ actions: configuredTableActions })
-  // Keep matched binding scope server-side, outside the serialized action.
+  // Keep the matched SOURCE scope server-side, outside the serialized action; the activation scope is the tenant's.
   // In particular, explicit null must not be re-filled from a request selector.
   const executionSourceScopes = new WeakMap()
   const executionSourceValidations = new WeakMap()
+  // S1b: with the online read-plan switch ON, an EXECUTING lookup (and the S1 confirm) requires the (tenant, action)
+  // binding row set to be CANONICAL for the system the lookup resolved, refused 409 READ_PLAN_SOURCE_BINDING_SPLIT
+  // before any pointer read, read-plan lock transaction or source IO: an unlistable or incomplete listing (the
+  // store lists at most 64 rows) is bindings_unverifiable; two or more workspace rows without a tenant row is
+  // bindings_ambiguous; rows exist but none names the resolved system (the request's workspace hint matched no row,
+  // so it resolved the deployment default) is hint_unbound; any row naming another system is bindings_disagree. A
+  // listing that throws is 503 READ_PLAN_SOURCE_BINDING_UNAVAILABLE (the store's text never leaves). No store wired
+  // means no binding anywhere (every lane resolves the deployment default), the rule R-1 applies too.
+  // NOT atomic with the lookup before it or the pointer read after it (separate statements, no lock): a binding
+  // write landing in between makes the lane refuse, or execute the plan of the system it LOOKED UP — never one for
+  // another system (the store pins the pointer to that system and re-locks its source row). The guarantee is "the
+  // set was canonical at one instant of this request", the posture the binding-set vs. consult check already has.
+  async function assertStockPreparationSourceBindingCanonical({ tenantId, actionId, externalSystemId }) {
+    if (!stockPreparationSourceBinding) return
+    const split = (reason) => new HttpRouteError(409, 'READ_PLAN_SOURCE_BINDING_SPLIT', 'the source binding set of this action is not one agreeing tenant-level source; nothing was read or written', { actionId, reason })
+    if (typeof stockPreparationSourceBinding.listForAction !== 'function') throw split('bindings_unverifiable')
+    let listed
+    try { listed = await stockPreparationSourceBinding.listForAction({ tenantId, actionId }) } catch (_error) {
+      throw new HttpRouteError(503, 'READ_PLAN_SOURCE_BINDING_UNAVAILABLE', 'the source binding set of this action could not be read; nothing was read or written', { actionId })
+    }
+    const bindings = listed && Array.isArray(listed.bindings) ? listed.bindings : null
+    if (!bindings || listed.complete !== true) throw split('bindings_unverifiable')
+    const tenantRows = bindings.filter((binding) => binding && binding.workspaceId === null).length
+    if (tenantRows === 0 && bindings.length >= 2) throw split('bindings_ambiguous')
+    if (bindings.length > 0 && !bindings.some((binding) => binding && binding.externalSystemId === externalSystemId)) throw split('hint_unbound')
+    if (bindings.some((binding) => !binding || binding.externalSystemId !== externalSystemId)) throw split('bindings_disagree')
+  }
   async function resolveTableActionExecution(req, input, snapshotAction, requireTarget = true) {
     const scope = scopedInput(req, input)
     if (Object.prototype.hasOwnProperty.call(input, 'workspaceId')) scope.workspaceId = input.workspaceId
+    // One reading of the switch for this resolution: the canonical-binding assert and the pointer read agree.
+    const online = onlineReadPlansEnabled()
     const resolved = await tableActions.getTableActionForExecution(scope)
+    if (online) {
+      await assertStockPreparationSourceBindingCanonical({ tenantId: scope.tenantId, actionId: resolved.action.actionId, externalSystemId: resolved.action.source.externalSystemId })
+    }
     // Reconcile historically fixed the binding lookup to the tenant while its
     // legacy adapter still inherited a request workspace hint. Preserve that
     // no-pointer behavior without letting the hint select an activation scope.
@@ -5327,7 +5359,7 @@ function requireStockPreparationAudit() {
       projectNo: input.projectNo,
       projectTargetStore: stockPreparationProjectTargets,
       projectIdentityRequired: requireTarget && input.targetPurpose !== 'source' && input.targetPurpose !== 'readiness',
-      onlineReadPlansEnabled: onlineReadPlansEnabled(),
+      onlineReadPlansEnabled: online,
     })
     const action = requireTarget ? assertStockPreparationTargetReady(execution.action) : execution.action
     executionSourceScopes.set(action, execution.sourceScope)
@@ -5344,9 +5376,13 @@ function requireStockPreparationAudit() {
     // active read plan exactly as their execution resolver composes it. verifyTenant is the lanes' verified-claim
     // check (a claimless principal is refused whenever a pointer exists). No snapshot and no project-identity
     // probe: nothing executes here, the action only names what a lane would read. Callers gate on the
-    // per-request online read-plan switch; the resolution itself is switch-ON by construction.
+    // per-request online read-plan switch; the resolution itself is switch-ON by construction. S1b: so the confirm
+    // (and any later opt-in: PR-8's change-plan confirm, a release-time identity check) refuses a split, ambiguous
+    // or unbound binding set 409 READ_PLAN_SOURCE_BINDING_SPLIT before any pointer read — the same rule every lane
+    // applies under ON, so what it stamps is what every lane executes.
     const readPlanStore = services.stockPreparationReadPlanStore
     const resolved = await tableActions.getTableActionForExecution({ tenantId, workspaceId: null, actionId: PLM_STOCK_PREPARATION_ACTION_ID, projectNo, targetPurpose })
+    await assertStockPreparationSourceBindingCanonical({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, externalSystemId: resolved.action.source.externalSystemId })
     const execution = await resolveStockPreparationReadPlanExecution({
       resolved,
       store: readPlanStore,

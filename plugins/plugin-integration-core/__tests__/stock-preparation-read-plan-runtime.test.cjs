@@ -136,7 +136,7 @@ const inert = (methods) => Object.fromEntries(methods.map((name) => [name, async
 
 async function mount({ active = true, storeMissing = false, sourceWorkspaceId = null, matchedWorkspaceId = null, register = registerIntegrationRoutes, unconfigured = false, projectSheets = false, deployReadPlan,
   readPlanExtra, sourceProject, sourceCaseInsensitive = false, projectRegistry, routeTransform, routeDependencies, governanceMissing = false,
-  refreshOptions = {} } = {}) {
+  refreshOptions = {}, deploySystemId = SYSTEM } = {}) {
   const { db, state } = memoryDb()
   let sequence = 0
   const ledger = createStockPreparationReadPlanStore({ db, idGenerator: () => `synthetic-${++sequence}` })
@@ -153,7 +153,7 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
     await ledger.approve({ ...SCOPE, actor: USER.id, id: version.id })
     await ledger.activate({ ...SCOPE, actor: USER.id, id: version.id, expectedGeneration: 0 })
   }
-  const calls = { binding: [], ledger: [], adapter: [], created: [], read: [], write: [], targetRead: [] }
+  const calls = { binding: [], listed: [], ledger: [], adapter: [], created: [], read: [], write: [], targetRead: [] }
   const projectObjectId = deriveProjectSheetObjectId(TENANT, PARAMS.projectNo)
   const projectSheetId = 'synthetic-project-sheet'
   let projectTargets = null
@@ -172,7 +172,7 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
     SYN_Part: [{ id: 'part-1', code: 'SYN-001', name: 'Synthetic part' }], SYN_Bom: [], SYN_BomLine: [],
   }
   const action = {
-    source: { externalSystemId: SYSTEM, kind: 'data-source:sql-readonly', workspaceId: sourceWorkspaceId,
+    source: { externalSystemId: deploySystemId, kind: 'data-source:sql-readonly', workspaceId: sourceWorkspaceId,
       ...(deployReadPlan ? { readPlan: clone(deployReadPlan) } : {}) },
     target: { sheetId: 'synthetic-sheet', objectId: 'syntheticSandbox', fieldIdMap: Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, field.id])) },
     rootSelection: { enabled: false },
@@ -204,6 +204,8 @@ async function mount({ active = true, storeMissing = false, sourceWorkspaceId = 
     externalSystemRegistry: registry,
     stockPreparationSourceBindingStore: {
       async get(input) { calls.binding.push(clone(input)); return { externalSystemId: SYSTEM, matchedWorkspaceId, scopeFallback: matchedWorkspaceId === null ? 'tenant_null_row' : 'single_workspace_binding' } },
+      // S1b: the canonical-binding assert (switch ON) lists the set; this fixture's one row, complete.
+      async listForAction({ tenantId, actionId }) { calls.listed.push({ tenantId, actionId }); return { bindings: [{ tenantId, actionId, workspaceId: matchedWorkspaceId, externalSystemId: SYSTEM }], complete: true } },
       async set() { throw new Error('unexpected binding mutation') },
     },
     stockPreparationReadPlanStore: {
@@ -1799,5 +1801,371 @@ test('S1 anchor: the effective-action helper and its two gated callers, with a s
   ]) {
     assert.equal(routeSource.split(needle).length - 1, 1, `${label}: the seam is unique`)
     assert.throws(() => assertEffectiveActionAnchor(routeSource.replace(needle, value)), { name: 'AssertionError' }, label)
+  }
+})
+
+// ── S1b (review candidate): read-plan scope parity ──────────────────────────────────────────────────────────────────
+// The activation pointer is read at the tenant scope whatever binding row matched (a pointer can exist only at
+// (tenant, null)); the matched row selects the source row only. With the switch ON every executing lane and the S1
+// confirm first require ONE agreeing source in the binding set (http-routes.cjs
+// assertStockPreparationSourceBindingCanonical), before any pointer, lock or source read.
+const S1B_WS = 'real-workspace'
+const S1B_OTHER = 'other-source'
+const SPLIT = 'READ_PLAN_SOURCE_BINDING_SPLIT'
+const dryRun = (f, hint) => f.call(`${BASE}/dry-run`, { body: { parameters: PARAMS }, ...(hint === undefined ? {} : { query: { workspaceId: hint } }) })
+
+// The REAL source-binding store over its own synthetic memory rows ([workspaceId, externalSystemId] each), patched
+// onto the service object the routes captured at mount. `seed` replaces the rows.
+function useRealBindings(f, rows) {
+  const { db, state } = memoryDb()
+  const real = createStockPreparationSourceBindingStore({ db })
+  const seed = (list) => {
+    state[BINDING_TABLE] = list.map(([workspaceId, externalSystemId]) => ({ tenant_id: TENANT, workspace_id: workspaceId, action_id: ACTION, external_system_id: externalSystemId }))
+  }
+  seed(rows)
+  const store = f.services.stockPreparationSourceBindingStore
+  store.get = async (input) => { f.calls.binding.push(clone(input)); return real.get(input) }
+  store.listForAction = async (input) => { f.calls.listed.push(clone(input)); return real.listForAction(input) }
+  return { seed }
+}
+
+// Every read-plan execution identity the stored dry-run token record carries.
+function storedIdentities(fixture, token) {
+  const found = []
+  const walk = (value) => {
+    if (typeof value === 'string') {
+      let parsed = null
+      try { parsed = JSON.parse(value) } catch (error) { return }
+      if (parsed && typeof parsed === 'object') walk(parsed)
+    } else if (value && typeof value === 'object') {
+      for (const [key, inner] of Object.entries(value)) {
+        if (key === 'readPlanExecutionIdentity') found.push(inner)
+        else walk(inner)
+      }
+    }
+  }
+  for (const [key, value] of fixture.storage) if (key.includes(token)) walk(value)
+  return found
+}
+
+function assertSplit(result, reason, label) {
+  assertRefused(result, 409, SPLIT, label)
+  assert.deepEqual({ ...result.body.error.details }, { actionId: ACTION, reason }, label)
+}
+
+test('PAR-U1 (S1b) registry: the activation scope is the tenant\'s whatever row matched (or whatever the deployment declares); the matched row still selects the source scope', async () => {
+  const f = await mount({ active: false })
+  const registry = createStockPreparationTableActionRegistry({ actions: [f.action], resolveSourceBinding: async () => ({ externalSystemId: SYSTEM, matchedWorkspaceId: S1B_WS, scopeFallback: null }) })
+  const resolved = await registry.getTableActionForExecution({ tenantId: TENANT, workspaceId: S1B_WS })
+  assert.deepEqual(resolved.bindingScope, { tenantId: TENANT, workspaceId: null }, 'the activation scope')
+  assert.deepEqual(resolved.sourceScope, { tenantId: TENANT, workspaceId: S1B_WS }, 'the matched row selects the source row')
+  assert.deepEqual(resolved.legacySourceScope, { tenantId: TENANT, workspaceId: S1B_WS })
+  const declared = createStockPreparationTableActionRegistry({ actions: [{ ...f.action, source: { ...f.action.source, workspaceId: 'ws-declared' } }] })
+  const r1 = await declared.getTableActionForExecution({ tenantId: TENANT })
+  assert.deepEqual(r1.bindingScope, { tenantId: TENANT, workspaceId: null }, 'R1 with a declared source workspace: still the tenant scope')
+  assert.equal(r1.sourceScope.workspaceId, 'ws-declared')
+})
+
+test('PAR-U2 (S1b) runtime: SCOPE_MISMATCH names the tenant and the DEPLOYMENT-declared source workspace only; a workspace (or missing) activation scope is refused before any store call', async () => {
+  const f = await mount()
+  const touched = []
+  const store = { async getActiveForRuntime(input) { touched.push(clone(input)); return f.ledger.getActiveForRuntime(input) } }
+  const resolvedWith = async ({ action = f.action, bindingScope, sourceScope } = {}) => {
+    const registry = createStockPreparationTableActionRegistry({ actions: [action], resolveSourceBinding: async () => ({ externalSystemId: SYSTEM, matchedWorkspaceId: null, scopeFallback: 'tenant_null_row' }) })
+    const resolved = await registry.getTableActionForExecution({ tenantId: TENANT })
+    if (bindingScope !== undefined) resolved.bindingScope = bindingScope
+    if (sourceScope !== undefined) resolved.sourceScope = sourceScope
+    return resolved
+  }
+  const run = (resolved) => resolveStockPreparationReadPlanExecution({ resolved, store, verifyTenant: () => TENANT, projectIdentityRequired: false, onlineReadPlansEnabled: true })
+  // (a) a matched workspace in the SOURCE scope no longer refuses: the tenant pointer executes, the source row stays there.
+  const a = await run(await resolvedWith({ sourceScope: { tenantId: TENANT, workspaceId: 'W' } }))
+  assert.equal(a.action.readPlanExecutionIdentity.workspaceId, null)
+  assert.deepEqual(a.sourceScope, { tenantId: TENANT, workspaceId: 'W' })
+  assert.deepEqual(touched.map((input) => input.workspaceId), [null])
+  // (b) a deployment that declares source.workspaceId still refuses (fail-closed; the route leg at the top of this suite).
+  await assert.rejects(run(await resolvedWith({ action: { ...f.action, source: { ...f.action.source, workspaceId: 'different-workspace' } } })),
+    { status: 409, code: 'READ_PLAN_EXECUTION_SCOPE_MISMATCH' })
+  // (c) a source scope of another tenant
+  await assert.rejects(run(await resolvedWith({ sourceScope: { tenantId: 'other-tenant', workspaceId: null } })),
+    { status: 409, code: 'READ_PLAN_EXECUTION_SCOPE_MISMATCH' })
+  // (d) a workspace activation scope, (e) an undefined one: refused with no store call
+  touched.length = 0
+  for (const workspaceId of ['W', undefined]) {
+    await assert.rejects(run(await resolvedWith({ bindingScope: { tenantId: TENANT, workspaceId } })),
+      { status: 409, code: 'READ_PLAN_BINDING_SCOPE_INVALID' }, String(workspaceId))
+  }
+  assert.deepEqual(touched, [], 'no store call')
+})
+
+test('PAR-U2b\' (S1b) a deployment that declares source.workspaceId cannot execute an online plan: with a tenant pointer every lane refuses READ_PLAN_EXECUTION_SCOPE_MISMATCH (R1, M6: a silently inert pointer); with no pointer the deployment plan runs at the declared workspace', async () => {
+  const f = await mount()
+  const declared = createStockPreparationTableActionRegistry({ actions: [{ ...f.action, source: { ...f.action.source, workspaceId: 'ws-declared' } }] })
+  const touched = []
+  const store = { async getActiveForRuntime(input) { touched.push(input.workspaceId); return f.ledger.getActiveForRuntime(input) } }
+  for (const workspaceId of [undefined, 'ws-declared', 'request-selector']) {
+    const resolved = await declared.getTableActionForExecution({ tenantId: TENANT, ...(workspaceId ? { workspaceId } : {}) })
+    await assert.rejects(resolveStockPreparationReadPlanExecution({ resolved, store, verifyTenant: () => TENANT, projectIdentityRequired: false, onlineReadPlansEnabled: true }),
+      { status: 409, code: 'READ_PLAN_EXECUTION_SCOPE_MISMATCH' }, String(workspaceId))
+  }
+  assert.deepEqual(touched, [null, null, null], 'the pointer is read at the tenant scope')
+  const resolved = await declared.getTableActionForExecution({ tenantId: TENANT })
+  const legacy = await resolveStockPreparationReadPlanExecution({ resolved, store: noPointer, verifyTenant() { throw new Error('legacy demands no claim') }, projectIdentityRequired: false, onlineReadPlansEnabled: true })
+  assert.equal(Object.hasOwn(legacy.action, 'readPlanExecutionIdentity'), false)
+  assert.equal(legacy.sourceScope.workspaceId, 'ws-declared')
+  // The real route, R1 (no binding row), both lanes.
+  for (const active of [true, false]) {
+    const r = await mount({ active, sourceWorkspaceId: 'ws-declared', deployReadPlan: config().readPlan })
+    useRealBindings(r, [])
+    for (const hint of [undefined, 'request-selector']) {
+      const result = await dryRun(r, hint)
+      if (active) {
+        assertRefused(result, 409, 'READ_PLAN_EXECUTION_SCOPE_MISMATCH', `pointer, hint ${String(hint)}`)
+      } else {
+        assert.equal(result.statusCode, 200, `no pointer, hint ${String(hint)}: ${JSON.stringify(result.body)}`)
+        assert.deepEqual(storedIdentities(r, result.body.data.dryRunToken), [], 'the deployment plan')
+      }
+    }
+    if (active) assert.equal(r.calls.adapter.length, 0, 'refused before any source read')
+    else assert.ok(r.calls.adapter.every((input) => input.workspaceId === 'ws-declared'))
+    assert.ok(r.calls.ledger.every((input) => input.workspaceId === null))
+  }
+})
+
+test('PAR-R1 (S1b) R3/R4 hinted lane: the matched workspace row selects the source row only; the pointer is read at the tenant scope and the hinted and hint-less lanes execute the same online identity', async () => {
+  const f = await mount({ matchedWorkspaceId: S1B_WS })
+  const hinted = await dryRun(f, S1B_WS)
+  assert.equal(hinted.statusCode, 200, JSON.stringify(hinted.body))
+  assert.deepEqual(f.calls.ledger.map((input) => input.workspaceId), [null], 'the pointer is read at the tenant scope')
+  assert.equal(f.calls.adapter[0].workspaceId, S1B_WS, 'the source row is loaded at the matched scope')
+  assert.equal(f.calls.read[0].object, 'SYN_PathLink', 'the online plan executes')
+  assertForwardedCurrentRevision(f.calls)
+  const hintless = await dryRun(f)
+  assert.equal(hintless.statusCode, 200, JSON.stringify(hintless.body))
+  const hintedIdentities = storedIdentities(f, hinted.body.data.dryRunToken)
+  assert.ok(hintedIdentities.length > 0, 'the hinted token carries the execution identity')
+  assert.ok(hintedIdentities.every((identity) => identity.workspaceId === null && identity.systemId === SYSTEM))
+  assert.deepEqual(hintedIdentities, storedIdentities(f, hintless.body.data.dryRunToken), 'parity: both lanes executed the same plan identity')
+  // A disabled pointer refuses both lanes before any source read.
+  await f.ledger.deactivate({ ...SCOPE, actionId: ACTION, actor: USER.id, expectedGeneration: 1 })
+  const adapterBefore = f.calls.adapter.length
+  for (const hint of [S1B_WS, undefined]) {
+    assertRefused(await dryRun(f, hint), 409, 'READ_PLAN_ACTIVATION_DISABLED', `disabled, hint ${String(hint)}`)
+  }
+  assert.equal(f.calls.adapter.length, adapterBefore)
+  // No pointer at all: the deployment plan, at the legacy source scope, with no identity.
+  f.state[ACTIVATION_TABLE].length = 0
+  for (const hint of [S1B_WS, undefined]) {
+    const before = f.calls.adapter.length
+    const result = await dryRun(f, hint)
+    assert.equal(result.statusCode, 200, `no pointer, hint ${String(hint)}: ${JSON.stringify(result.body)}`)
+    assert.deepEqual(storedIdentities(f, result.body.data.dryRunToken), [])
+    assert.equal(f.calls.adapter[before].workspaceId, S1B_WS)
+  }
+})
+
+test('PAR-R2 (S1b) R1 hinted (no binding row, a request workspace hint): the online plan executes at the tenant scope (M6: 409 READ_PLAN_EXECUTION_SCOPE_MISMATCH), with the hint-less lane\'s identity', async () => {
+  const f = await mount()
+  useRealBindings(f, [])
+  const hinted = await dryRun(f, 'request-selector')
+  assert.equal(hinted.statusCode, 200, JSON.stringify(hinted.body))
+  assert.equal(f.calls.read[0].object, 'SYN_PathLink')
+  const hintless = await dryRun(f)
+  assert.equal(hintless.statusCode, 200, JSON.stringify(hintless.body))
+  assert.deepEqual(f.calls.ledger.map((input) => input.workspaceId), [null, null])
+  const identities = storedIdentities(f, hinted.body.data.dryRunToken)
+  assert.ok(identities.length > 0 && identities.every((identity) => identity.workspaceId === null))
+  assert.deepEqual(identities, storedIdentities(f, hintless.body.data.dryRunToken))
+})
+
+test('PAR-R1b (S1b) R3 with the deployment default != the bound system: a stray workspace hint resolves the deployment default and is refused hint_unbound before any pointer or source read', async () => {
+  const f = await mount({ deploySystemId: 'system-deploy-default' })
+  useRealBindings(f, [[S1B_WS, SYSTEM]])
+  const before = ioCounts(f)
+  const storageBefore = clone([...f.storage])
+  const stray = await dryRun(f, 'stray-workspace')
+  assertSplit(stray, 'hint_unbound', 'stray hint')
+  assert.deepEqual(ioCounts(f), before, 'no pointer, adapter, source or target read, no write')
+  assert.deepEqual([...f.storage], storageBefore, 'no token')
+  assert.deepEqual(f.calls.listed.length, 1)
+})
+
+test('PAR-R7 (S1b) R3 with the deployment default != the bound system, an active pointer for the bound system: the workbench hint and the hint-less lane both execute the online plan (the set is compared with the RESOLVED system, never the deployment\'s)', async () => {
+  const f = await mount({ deploySystemId: 'system-deploy-default' })
+  useRealBindings(f, [[S1B_WS, SYSTEM]])
+  const tokens = []
+  for (const hint of [S1B_WS, undefined]) {
+    const readsBefore = f.calls.read.length
+    const result = await dryRun(f, hint)
+    assert.equal(result.statusCode, 200, `hint ${String(hint)}: ${JSON.stringify(result.body)}`)
+    assert.equal(f.calls.read[readsBefore].object, 'SYN_PathLink', 'the online plan executes')
+    tokens.push(result.body.data.dryRunToken)
+  }
+  assert.deepEqual(f.calls.ledger.map((input) => [input.workspaceId, input.systemId]), [[null, SYSTEM], [null, SYSTEM]])
+  assert.ok(f.calls.adapter.every((input) => input.id === SYSTEM && input.workspaceId === S1B_WS))
+  assert.deepEqual(storedIdentities(f, tokens[0]), storedIdentities(f, tokens[1]))
+})
+
+test('PAR-R3 (S1b) R4 with different systems: hinted and hint-less dry-run, reconcile and mvp-persist all refuse READ_PLAN_SOURCE_BINDING_SPLIT bindings_disagree before any pointer or source read', async () => {
+  const f = await mount()
+  useRealBindings(f, [[null, SYSTEM], [S1B_WS, S1B_OTHER]])
+  const before = ioCounts(f)
+  for (const [label, run] of [
+    ['hinted dry-run', () => dryRun(f, S1B_WS)],
+    ['hint-less dry-run', () => dryRun(f)],
+    ['reconcile', () => f.call(`${BASE}/confirmation-decisions/reconcile`, { body: { parameters: PARAMS } })],
+    ['mvp-persist', () => f.call(`${BASE}/mvp-persist`, { body: { parameters: PARAMS } })],
+  ]) {
+    assertSplit(await run(), 'bindings_disagree', label)
+  }
+  assert.deepEqual(ioCounts(f), before, 'no pointer, adapter, source or target read, no write')
+  assert.equal(f.calls.listed.length, 4)
+})
+
+test('PAR-R4 (S1b) C6 (two workspace rows, no tenant row, the same system): every lane refuses bindings_ambiguous before any pointer or source read; one tenant-level row repairs it', async () => {
+  const f = await mount()
+  const bindings = useRealBindings(f, [['ws-1', SYSTEM], ['ws-2', SYSTEM]])
+  const before = ioCounts(f)
+  for (const hint of ['ws-1', undefined]) assertSplit(await dryRun(f, hint), 'bindings_ambiguous', `hint ${String(hint)}`)
+  assert.deepEqual(ioCounts(f), before)
+  bindings.seed([[null, SYSTEM], ['ws-1', SYSTEM], ['ws-2', SYSTEM]])
+  for (const hint of ['ws-1', undefined]) {
+    const result = await dryRun(f, hint)
+    assert.equal(result.statusCode, 200, `repaired, hint ${String(hint)}: ${JSON.stringify(result.body)}`)
+  }
+  assert.deepEqual(f.calls.ledger.map((input) => input.workspaceId), [null, null])
+})
+
+test('PAR-R5 (S1b) an unlistable, incomplete or failing binding listing refuses every lane before any pointer or source read; the store text never leaves', async () => {
+  for (const [label, prepare, status, code, reason] of [
+    ['no listForAction', (store) => { delete store.listForAction }, 409, SPLIT, 'bindings_unverifiable'],
+    ['incomplete listing', (store) => { store.listForAction = async ({ tenantId, actionId }) => ({ bindings: [{ tenantId, actionId, workspaceId: null, externalSystemId: SYSTEM }], complete: false }) }, 409, SPLIT, 'bindings_unverifiable'],
+    ['listing is not a list', (store) => { store.listForAction = async () => ({ bindings: null, complete: true }) }, 409, SPLIT, 'bindings_unverifiable'],
+    ['listing throws', (store) => { store.listForAction = async () => { throw new Error('SYN-private-binding') } }, 503, 'READ_PLAN_SOURCE_BINDING_UNAVAILABLE', undefined],
+  ]) {
+    const f = await mount()
+    prepare(f.services.stockPreparationSourceBindingStore)
+    const before = ioCounts(f)
+    const storageBefore = clone([...f.storage])
+    for (const hint of [undefined, 'request-selector']) {
+      const result = await dryRun(f, hint)
+      assertRefused(result, status, code, label)
+      assert.deepEqual({ ...result.body.error.details }, reason ? { actionId: ACTION, reason } : { actionId: ACTION }, label)
+      assert.ok(!JSON.stringify(result.body).includes('SYN-private-binding'), `${label}: values-free`)
+    }
+    assert.deepEqual(ioCounts(f), before, `${label}: nothing read or written`)
+    assert.deepEqual([...f.storage], storageBefore, label)
+  }
+})
+
+test('PAR-R6 (S1b) the assert is not atomic with the lookup: when the listing disagrees with what the lookup just resolved, the lane refuses before any pointer read — it never executes a plan for another system', async () => {
+  for (const [label, get, rows, reason] of [
+    ['looked up the tenant row (R2), the set gained a row for another system (R4-diff)', () => ({ externalSystemId: SYSTEM, matchedWorkspaceId: null, scopeFallback: null }), [[null, SYSTEM], [S1B_WS, S1B_OTHER]], 'bindings_disagree'],
+    ['looked up the workspace row of another system, the set still has the tenant row', () => ({ externalSystemId: S1B_OTHER, matchedWorkspaceId: S1B_WS, scopeFallback: null }), [[null, SYSTEM], [S1B_WS, S1B_OTHER]], 'bindings_disagree'],
+    ['looked up a workspace row that was re-pointed since', () => ({ externalSystemId: S1B_OTHER, matchedWorkspaceId: S1B_WS, scopeFallback: null }), [[S1B_WS, SYSTEM]], 'hint_unbound'],
+  ]) {
+    const f = await mount()
+    const store = f.services.stockPreparationSourceBindingStore
+    store.get = async (input) => { f.calls.binding.push(clone(input)); return get() }
+    store.listForAction = async ({ tenantId, actionId }) => ({ bindings: rows.map(([workspaceId, externalSystemId]) => ({ tenantId, actionId, workspaceId, externalSystemId })), complete: true })
+    const before = ioCounts(f)
+    assertSplit(await dryRun(f, S1B_WS), reason, label)
+    assert.deepEqual(ioCounts(f), before, `${label}: no pointer or source read`)
+  }
+})
+
+test('PAR-OFF (S1b) switch OFF: no binding listing, no pointer read, the deployment plan on the matched (or hinted) system — byte-identical in the split shapes too', async () => {
+  for (const value of [undefined, 'false', 'TRUE', ' true']) {
+    const register = loadRoutes(undefined, {}, { [ONLINE_READ_PLANS_ENABLED_ENV]: value }).registerIntegrationRoutes
+    const f = await mount({ matchedWorkspaceId: S1B_WS, register })
+    const result = await dryRun(f, S1B_WS)
+    assert.equal(result.statusCode, 200, `${String(value)}: ${JSON.stringify(result.body)}`)
+    assert.deepEqual(f.calls.ledger, [], `${String(value)}: no pointer read`)
+    assert.deepEqual(f.calls.listed, [], `${String(value)}: no binding listing`)
+    assert.ok(f.calls.read.every((read) => !String(read.object).startsWith('SYN_')), `${String(value)}: the online plan is never read`)
+    assert.deepEqual(storedIdentities(f, result.body.data.dryRunToken), [])
+    assert.equal(f.calls.adapter[0].workspaceId, S1B_WS)
+    const split = await mount({ register })
+    useRealBindings(split, [[null, SYSTEM], [S1B_WS, S1B_OTHER]])
+    const hinted = await dryRun(split, S1B_WS)
+    assert.equal(hinted.statusCode, 200, `${String(value)} R4-diff: ${JSON.stringify(hinted.body)}`)
+    assert.equal(split.calls.adapter[0].id, S1B_OTHER, `${String(value)}: the hinted row's system, as before (R-1 territory)`)
+    assert.deepEqual([split.calls.ledger, split.calls.listed], [[], []], `${String(value)}: no pointer read, no binding listing`)
+  }
+})
+
+test('RT-RP1c (S1b) route-level closure over R4 bindings (a tenant row and a workspace row, the same system): a candidate confirmed hint-less, then ONE governed dry-run WITH the workspace hint — its reconcile verifies the relationship\'s source step as valid (M6: source_scope_changed)', async () => {
+  const pairing = require('../lib/stock-preparation-continuation-pairing.cjs')
+  const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+  const f = await mount({ projectSheets: true, refreshOptions: { lockOnRefreshDb: true, wirePackInstallStore: true } })
+  const env = f.refreshGovernanceEnv
+  useRealBindings(f, [[null, SYSTEM], [S1B_WS, SYSTEM]])
+  f.services.stockPreparationAuditStore.appendWithin = async () => ({ ok: true })
+  const registryRow = f.state[PROJECT_TARGET_TABLE].find((row) => row.project_no === PARAMS.projectNo)
+  Object.assign(registryRow, { pilot_enabled_at: new Date('2026-10-27T00:00:00Z'), pilot_enabled_by: USER.id, pilot_readiness_version: 1 })
+  const fixture = await refreshKit.candidateHoldFixture()
+  const hold = JSON.parse(JSON.stringify(fixture.hold).split(fixture.projectNo).join(PARAMS.projectNo))
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  await env.seedHolds({ tenantId: TENANT, sheetId: f.projectSheetId, projectNo: PARAMS.projectNo }, [hold])
+  const candidateRow = env.rows('hold').find((row) => row.fingerprint === hold.fingerprint && row.status === 'open')
+  assert.ok(candidateRow, 'the candidate hold is open')
+  const params = { projectNo: PARAMS.projectNo }
+  const first = await f.call(`${DECISIONS}/holds`, { method: 'GET', params })
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body))
+  let receipt = first.body.data.readReceipt
+  const entry = first.body.data.page.holds.find((item) => item.id === candidateRow.id)
+  for (let index = 1; index < (entry && entry.pairPage ? entry.pairPage.count : 1); index += 1) {
+    const next = await f.call(`${DECISIONS}/holds`, { method: 'GET', params, query: { holdId: candidateRow.id, pairCursor: index, receipt: receipt.id } })
+    assert.equal(next.statusCode, 200, JSON.stringify(next.body))
+    receipt = next.body.data.readReceipt
+  }
+  const confirmed = await f.call(`${DECISIONS}/continuations/confirm`, { params, body: {
+    confirmProjectNo: PARAMS.projectNo, holdId: candidateRow.id, holdFingerprint: hold.fingerprint,
+    comparisonFingerprint: hold.comparisonFingerprint, evidenceFingerprint: hold.evidenceFingerprint, candidateId: hold.pairingFingerprint,
+    readReceipt: receipt.id, basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true },
+  } })
+  assert.equal(confirmed.statusCode, 201, JSON.stringify(confirmed.body))
+  const continuationId = confirmed.body.data.continuationId
+  const ledgerBefore = f.calls.ledger.length
+  const dry = await dryRun(f, S1B_WS)
+  assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+  assert.deepEqual(f.calls.ledger.slice(ledgerBefore).map((input) => input.workspaceId), [null], 'the hinted lane read the pointer at the tenant scope')
+  const continuation = env.rows('continuation').find((row) => row.id === continuationId)
+  assert.ok(continuation && continuation.last_verified_at, 'the computation reconciled and verified the relationship')
+  const verification = env.rows('hold').find((row) => row.continuation_id === continuationId && row.status === 'open')
+  assert.ok(verification, 'the reconcile persisted the relationship\'s verification hold')
+  assert.equal(verification.detail.steps.source, 'valid', 'the confirm stamped the identity the hinted lane executes')
+  assert.notEqual(continuation.last_verdict, 'source_scope_changed')
+})
+
+// The parity seams, pinned statically (the behaviour is pinned above): each mutated seam is refused.
+function assertScopeParityAnchor({ table, runtime, route }) {
+  assert.match(table, /\n {8}bindingScope: \{\n {10}tenantId: optionalString\(input\.tenantId\),\n(?: {10}\/\/[^\n]*\n)* {10}workspaceId: null,\n {8}\},\n/, 'the activation scope is the tenant\'s')
+  assert.ok(runtime.includes('(action.source.workspaceId || null) !== bindingScope.workspaceId'), 'SCOPE_MISMATCH names the declared source workspace')
+  assert.ok(runtime.includes('bindingScope.workspaceId !== null) {'), 'a workspace activation scope is refused')
+  const start = route.indexOf('  async function resolveTableActionExecution(req, input, snapshotAction, requireTarget = true) {')
+  assert.notEqual(start, -1, 'the lane resolver exists')
+  const resolver = route.slice(start, route.indexOf('\n  async function ', start + 1))
+  assert.equal(resolver.split('onlineReadPlansEnabled()').length - 1, 1, 'the lane resolver reads the switch once')
+  assert.match(resolver, /const online = onlineReadPlansEnabled\(\)\n {4}const resolved = await tableActions\.getTableActionForExecution\(scope\)\n {4}if \(online\) \{\n {6}await assertStockPreparationSourceBindingCanonical\(\{ tenantId: scope\.tenantId, actionId: resolved\.action\.actionId, externalSystemId: resolved\.action\.source\.externalSystemId \}\)\n/, 'one snapshot, then the gated assert on the resolved system')
+  assert.match(resolver, /\n {6}onlineReadPlansEnabled: online,\n/, 'the resolution uses the same snapshot')
+  assert.equal(route.split('await assertStockPreparationSourceBindingCanonical(').length - 1, 2, 'the lane resolver and the S1 helper')
+}
+
+test('PAR-ANCHOR (S1b) the parity seams in table-actions, the runtime and the lane resolver, with a self-mutation pair each', () => {
+  const read = (file) => fs.readFileSync(require.resolve(`../lib/${file}`), 'utf8').replaceAll('\r\n', '\n')
+  const sources = { table: read('stock-preparation-table-actions.cjs'), runtime: read('stock-preparation-read-plan-runtime.cjs'), route: routeSource }
+  assertScopeParityAnchor(sources)
+  for (const [label, key, needle, value] of [
+    ['the matched row selects the activation scope', 'table', '          workspaceId: null,\n        },\n        sourceScope: {', '          workspaceId: binding ? binding.matchedWorkspaceId : null,\n        },\n        sourceScope: {'],
+    ['the compare names the matched source scope', 'runtime', '(action.source.workspaceId || null) !== bindingScope.workspaceId', 'sourceScope.workspaceId !== bindingScope.workspaceId'],
+    ['a workspace activation scope accepted', 'runtime', 'bindingScope.workspaceId !== null) {', 'bindingScope.workspaceId === undefined) {'],
+    ['a second switch reading', 'route', '      onlineReadPlansEnabled: online,\n', '      onlineReadPlansEnabled: onlineReadPlansEnabled(),\n'],
+    ['an ungated or skipped lane assert', 'route', '    if (online) {\n      await assertStockPreparationSourceBindingCanonical(', '    if (false) {\n      await assertStockPreparationSourceBindingCanonical('],
+    ['the deployment system compared', 'route', 'externalSystemId: resolved.action.source.externalSystemId })\n    }\n', 'externalSystemId: configuredTableActions[0].source.externalSystemId })\n    }\n'],
+    ['the S1 helper skips the assert', 'route', '    await assertStockPreparationSourceBindingCanonical({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID', '    void ({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID'],
+  ]) {
+    assert.equal(sources[key].split(needle).length - 1, 1, `${label}: the seam is unique`)
+    assert.throws(() => assertScopeParityAnchor({ ...sources, [key]: sources[key].replace(needle, value) }), { name: 'AssertionError' }, label)
   }
 })

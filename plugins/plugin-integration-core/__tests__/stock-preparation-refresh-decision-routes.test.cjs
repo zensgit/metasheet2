@@ -45,7 +45,8 @@
 //           the EFFECTIVE read plan of the hint-less lanes: a candidate (RT-RP1), a re-confirm (RT-RP2), no pointer
 //           (RT-RP6), a request workspace hint over R4 bindings (RT-RP8); switch unset no route reads a pointer
 //           (RT-RP3); a disabled pointer, an unavailable runtime or a claimless principal refuse the confirm with
-//           nothing persisted while the other routes answer as before (RT-RP4, RT-RP5, RT-RP7)
+//           nothing persisted while the other routes answer as before (RT-RP4, RT-RP5, RT-RP7); S1b: a binding set
+//           that is not one agreeing source refuses the confirm before any pointer read (RT-RP9, RT-RP10)
 // Synthetic values only; the pilot column is seeded directly (pilot enable is impossible on this build: the
 // readiness marker CONTINUATION_SUPPORT_VERSION is 0).
 
@@ -1625,6 +1626,37 @@ test('RT-RP8 (S1) switch ON, R4 bindings (a tenant row and a workspace row namin
     assert.equal(st.continuations()[0].read_plan_digest, ids.online.readPlanDigest, 'the hint-less (tenant) binding and its pointer')
     assert.deepEqual(st.spy.calls.map((call) => call.workspaceId), [null])
   } finally { st.restore() }
+})
+
+// S1b: under ON the S1 helper refuses a binding set that is not one agreeing source before any pointer read, so the
+// confirm never stamps an identity no lane would execute. Same oracle as RT-RP4: nothing persisted.
+async function assertConfirmRefusedSplit(seedRows, reason) {
+  const bindings = wiring.createSourceBindingStoreFake()
+  for (const [workspaceId, externalSystemId] of seedRows) bindings.seed({ tenantId: TENANT, actionId: PLM_STOCK_PREPARATION_ACTION_ID, workspaceId, externalSystemId })
+  const st = mountOnline({ sourceBindingStore: bindings })
+  try {
+    const { hold, row } = await seedCandidate(st)
+    const { body } = await readAndBindClaimed(st, row, hold)
+    await st.env.lock().bumpGeneration(sheetWriteScopeKey(st.sheetId), { reason: 'small_preview', tenantId: TENANT })
+    const before = persistedState(st)
+    const refused = await confirm(st, body, CLAIMED)
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.equal(errorOf(refused).code, 'READ_PLAN_SOURCE_BINDING_SPLIT')
+    assert.equal(errorOf(refused).details.reason, reason)
+    assert.deepEqual(persistedState(st), before, 'nothing persisted: no row, the lock generation, decision_version and the trail unchanged')
+    assert.equal(st.continuations().length, 0)
+    assert.equal(st.members().length, 0)
+    assert.equal(st.holds().find((entry) => entry.id === row.id).status, 'open')
+    assert.deepEqual(st.spy.calls, [], 'no activation pointer was read')
+  } finally { st.restore() }
+}
+
+test('RT-RP9 (S1b) switch ON, an active pointer, R4 with DIFFERENT systems (a tenant row and a workspace row naming another source): the confirm is 409 READ_PLAN_SOURCE_BINDING_SPLIT bindings_disagree, nothing persisted and no pointer read', async () => {
+  await assertConfirmRefusedSplit([[null, RP_SYSTEM], [RP_WORKSPACE, 'other_source_synthetic']], 'bindings_disagree')
+})
+
+test('RT-RP10 (S1b) switch ON, an active pointer, C6 (two workspace rows of the same source, no tenant row): the confirm is 409 READ_PLAN_SOURCE_BINDING_SPLIT bindings_ambiguous, nothing persisted and no pointer read', async () => {
+  await assertConfirmRefusedSplit([[RP_WORKSPACE, RP_SYSTEM], ['ws_rd_second', RP_SYSTEM]], 'bindings_ambiguous')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-decision-routes.test.cjs', tests)

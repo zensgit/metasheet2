@@ -12,7 +12,7 @@ class StockPreparationReadPlanRuntimeError extends Error {
 }
 
 // No cache and no catch-to-legacy path. Only the store's explicit null means
-// this exact binding scope has never acquired an activation pointer.
+// the tenant scope, the only scope a pointer can occupy, has never acquired an activation pointer.
 async function readActiveStockPreparationReadPlan(store, scope) {
   if (!store || typeof store.getActiveForRuntime !== 'function') {
     throw new StockPreparationReadPlanRuntimeError(501, 'READ_PLAN_RUNTIME_UNAVAILABLE')
@@ -87,9 +87,12 @@ async function assertCaseInsensitiveProjectIdentity({ action, bindingScope, veri
 
 // `onlineReadPlansEnabled` is the caller's reading of the operator switch (stock-preparation-read-plan-switch.cjs);
 // anything but literal true means OFF: no activation pointer is read and the deployment action executes.
+// S1b: `resolved.bindingScope` is the ACTIVATION scope — the tenant scope, the only scope a pointer can occupy
+// (workspace always null, whatever binding row matched); the matched row's workspace lives only in
+// `sourceScope` / `legacySourceScope` and selects the source row, never where the pointer is read.
 async function resolveStockPreparationReadPlanExecution({ resolved, store, snapshotAction, verifyTenant, projectNo, projectTargetStore, projectIdentityRequired = true, onlineReadPlansEnabled = false } = {}) {
   const { action, bindingScope, sourceScope } = resolved
-  if (!bindingScope || !bindingScope.tenantId || bindingScope.workspaceId === undefined) {
+  if (!bindingScope || !bindingScope.tenantId || bindingScope.workspaceId !== null) {
     throw new StockPreparationReadPlanRuntimeError(409, 'READ_PLAN_BINDING_SCOPE_INVALID')
   }
   const active = onlineReadPlansEnabled === true ? await readActiveStockPreparationReadPlan(store, {
@@ -103,7 +106,9 @@ async function resolveStockPreparationReadPlanExecution({ resolved, store, snaps
     if (!active || typeof verifyTenant !== 'function' || verifyTenant() !== bindingScope.tenantId) {
       throw new StockPreparationReadPlanRuntimeError(403, 'READ_PLAN_EXECUTION_TENANT_MISMATCH')
     }
-    if (!sourceScope || sourceScope.tenantId !== bindingScope.tenantId || sourceScope.workspaceId !== bindingScope.workspaceId) {
+    // The tenant, and the DEPLOYMENT-declared source workspace (server config), never a request hint or the
+    // matched row: a deployment declaring source.workspaceId cannot execute an online plan (fail-closed).
+    if (!sourceScope || sourceScope.tenantId !== bindingScope.tenantId || (action.source.workspaceId || null) !== bindingScope.workspaceId) {
       throw new StockPreparationReadPlanRuntimeError(409, 'READ_PLAN_EXECUTION_SCOPE_MISMATCH')
     }
     if (!active.sourceValidation || typeof active.sourceValidation.connectionId !== 'string'
