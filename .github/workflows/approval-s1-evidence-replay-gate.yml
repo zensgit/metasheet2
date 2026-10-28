@@ -15,6 +15,17 @@ name: Approval S1 Evidence Replay Gate
 # wired into branch protection by this change — promoting it to an actual required context is a
 # later owner/infra choice (closeout-plan-review A-9(iv)); this workflow only makes that promotion
 # possible by existing as an unfiltered, always-green-or-red check.
+#
+# CO-HOSTED (approval-detail-leaf-attachment-pin-20260904 round 3, gate finding R3): also runs
+# scripts/ops/approval-detail-attachment-census.test.mjs — the self-test for the read-only,
+# values-free scripts/ops/approval-detail-attachment-census.sql pre-merge census. That file was
+# authored with no CI wiring of its own (`scripts/ops` self-tests are wired per-workflow in this
+# repo, never auto-discovered — see .github/workflows/attendance-staging-window-runner.yml and
+# data-source-exposure-inventory.yml for the same per-file `node --test` idiom), which left it
+# unreachable from any CI run. It is the same shape as this lane's own self-test — hermetic,
+# static, no DB, no secrets — so it is added as a second step in the SAME unfiltered job rather
+# than a new workflow file, to avoid a second full checkout/setup-node job for one more `node
+# --test` line.
 
 on:
   pull_request:
@@ -36,3 +47,5 @@ jobs:
           node-version: 20
       - name: Run hermetic replay-gate tests (no DB, no hosts)
         run: node --test scripts/ops/approval-s1-evidence-replay-gate.test.mjs
+      - name: Run hermetic detail-attachment census self-test (no DB, no hosts)
+        run: node --test scripts/ops/approval-detail-attachment-census.test.mjs
