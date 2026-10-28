@@ -401,6 +401,29 @@ ON CONFLICT (user_id, permission_code) DO NOTHING;
   "v_user_id=$adminUserId"
 ))
 
+# The grant above only inserts codes that exist in the permission catalogue; a code the catalogue
+# does not have is skipped without a word. Report those codes (diagnostics only): one read-only
+# query whose code list is the grant's list, nothing written, and a failing query never changes the
+# outcome. Twin of the same step in attendance-onprem-bootstrap-admin.sh -- same query, same
+# messages (pinned by scripts/ops/attendance-onprem-bootstrap-admin-skipped-codes.test.mjs).
+$bootstrapGrantSkippedCodesSql = @'
+SELECT string_agg(t.code, ',' ORDER BY t.code) FROM unnest(ARRAY['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin', 'permissions:read', 'permissions:write', 'roles:read', 'roles:write']) AS t(code) WHERE NOT EXISTS (SELECT 1 FROM permissions p WHERE p.code = t.code);
+'@
+$skippedGrantCodes = $null
+try {
+  $skippedGrantCodes = (Invoke-PsqlCapture -Description 'read-only check for permission codes not in catalogue' -PsqlCommand $resolvedPsqlCommand -DatabaseUrl $databaseUrl -Sql $bootstrapGrantSkippedCodesSql -TrimOutput) -replace '\s', ''
+}
+catch {
+  Write-Info 'Permission codes not in catalogue: the read-only check failed (non-fatal; the grants above are unchanged)'
+}
+if ($null -ne $skippedGrantCodes) {
+  if ($skippedGrantCodes -cnotmatch '^[a-z_:,]*$') {
+    Write-Info 'Permission codes not in catalogue: the read-only check returned an unexpected shape (non-fatal; the grants above are unchanged)'
+  } elseif (-not [string]::IsNullOrEmpty($skippedGrantCodes)) {
+    Write-Info "Permission codes not in catalogue (skipped; admin role bypass covers them): $skippedGrantCodes"
+  }
+}
+
 $adminSessionToken = ''
 if ($resolvedVerifyLogin -eq '1') {
   $loginBody = @{
