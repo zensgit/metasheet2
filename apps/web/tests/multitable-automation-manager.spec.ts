@@ -4015,24 +4015,38 @@ describe('findDuplicateAutomationRule (客户反馈 2026-10-27 4d)', () => {
     expect(findDuplicateAutomationRule(dupDraftPayload(), [legacy])?.id).toBe('rule_a')
   })
 
-  it('rules that differ only in their conditions are not duplicates', () => {
+  // Conditions are not compared: overlapping conditions still fire both rules on the same update.
+  it('a rule without conditions and a rule with conditions are reported as duplicates', () => {
+    const conditioned = dupStoredRule({
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'A' }] },
+    })
+    expect(findDuplicateAutomationRule(dupDraftPayload({ conditions: undefined }), [conditioned])?.id).toBe('rule_a')
+
+    const conditionedDraft = dupDraftPayload({
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'A' }] },
+    })
+    expect(findDuplicateAutomationRule(conditionedDraft, [dupStoredRule()])?.id).toBe('rule_a')
+  })
+
+  it('rules whose conditions differ are still reported', () => {
     const existing = dupStoredRule({
       conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'A' }] },
     })
     const otherCondition = dupDraftPayload({
-      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'B' }] },
+      conditions: { conjunction: 'OR', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'B' }] },
     })
-    expect(findDuplicateAutomationRule(otherCondition, [existing])).toBeNull()
-
-    const sameCondition = dupDraftPayload({
-      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'A' }] },
-    })
-    expect(findDuplicateAutomationRule(sameCondition, [existing])?.id).toBe('rule_a')
+    expect(findDuplicateAutomationRule(otherCondition, [existing])?.id).toBe('rule_a')
   })
 
   it('never checks webhook.received rules (each has its own endpoint)', () => {
-    const existing = dupStoredRule({ triggerType: 'webhook.received', triggerConfig: { secret: '<redacted>' } })
-    expect(findDuplicateAutomationRule(dupDraftPayload({ triggerType: 'webhook.received', triggerConfig: undefined }), [existing])).toBeNull()
+    // Everything else matches (same empty trigger config, same actions), so only the skip yields null.
+    const existing = dupStoredRule({ triggerType: 'webhook.received', triggerConfig: {} })
+    const draft = dupDraftPayload({
+      triggerType: 'webhook.received',
+      triggerConfig: {},
+      trigger: { type: 'webhook.received', config: {} },
+    })
+    expect(findDuplicateAutomationRule(draft, [existing])).toBeNull()
   })
 
   it('uses the task wording for the confirm message', () => {

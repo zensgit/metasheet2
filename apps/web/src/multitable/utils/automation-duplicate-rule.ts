@@ -10,12 +10,13 @@
 // What counts as "the same":
 //   - same trigger type;
 //   - same trigger config (key order ignored; primitive arrays compared as sets; undefined dropped);
-//   - same rule-level conditions (no conditions == empty list). Two rules that only differ in their
-//     conditions (e.g. 状态=A vs 状态=B) do not fire together, so they are not reported;
 //   - same SET of top-level action types (legacy aliases folded: notify → send_notification,
 //     update_field → update_record);
 //   - when a send_notification action is present: the same set of notification recipients.
-// Not compared: rule name, enabled state of the draft, actions nested inside branches.
+// Not compared: rule name, enabled state of the draft, actions nested inside branches, and rule-level
+// conditions. Conditions are left out on purpose: a rule with no condition and a rule with 状态=A
+// both fire when 状态=A, which is exactly the "two notifications for one update" case. Asking once
+// too often costs one click; missing that case costs a duplicate notification.
 // Only ENABLED existing rules are compared — a disabled rule does not fire, so it cannot double up.
 // `webhook.received` is skipped: each such rule has its own endpoint, and an edit may omit the
 // trigger config entirely (keep-stored-secret), so there is nothing meaningful to compare.
@@ -24,7 +25,6 @@ import type { AutomationAction, AutomationActionType, AutomationRule } from '../
 
 type RuleLike = Pick<AutomationRule, 'triggerType' | 'triggerConfig' | 'actionType' | 'actionConfig'> & {
   trigger?: AutomationRule['trigger']
-  conditions?: AutomationRule['conditions']
   actions?: AutomationAction[]
 }
 
@@ -70,16 +70,6 @@ function triggerTypeOf(rule: Partial<RuleLike>): string {
   return rule.triggerType ?? rule.trigger?.type ?? ''
 }
 
-function conditionsOf(rule: Partial<RuleLike>): unknown[] {
-  const conditions = rule.conditions?.conditions
-  return Array.isArray(conditions) ? conditions : []
-}
-
-function conditionConjunctionOf(rule: Partial<RuleLike>): string {
-  const raw = rule.conditions?.conjunction ?? rule.conditions?.logic ?? 'AND'
-  return String(raw).toUpperCase()
-}
-
 function actionsOf(rule: Partial<RuleLike>): Array<{ type: AutomationActionType; config: Record<string, unknown> }> {
   if (Array.isArray(rule.actions) && rule.actions.length > 0) {
     return rule.actions.map((action) => ({
@@ -106,7 +96,6 @@ function notificationRecipientIds(config: Record<string, unknown>): string[] {
 interface RuleFingerprint {
   triggerType: string
   triggerConfig: string
-  conditions: string
   actionTypes: string
   notificationRecipients: string
 }
@@ -119,12 +108,9 @@ function fingerprint(rule: Partial<RuleLike>): RuleFingerprint {
     if (canonicalActionType(action.type) !== 'send_notification') continue
     for (const id of notificationRecipientIds(action.config)) recipients.add(id)
   }
-  const conditions = conditionsOf(rule)
   return {
     triggerType: triggerTypeOf(rule),
     triggerConfig: JSON.stringify(canonicalize(triggerConfigOf(rule))),
-    // The conjunction only matters once there are two or more conditions.
-    conditions: JSON.stringify([conditions.length > 1 ? conditionConjunctionOf(rule) : '', canonicalize(conditions)]),
     actionTypes: actionTypes.join('|'),
     notificationRecipients: Array.from(recipients).sort().join('|'),
   }
@@ -136,8 +122,8 @@ export interface FindDuplicateRuleOptions {
 }
 
 /**
- * Returns the first ENABLED existing rule whose trigger + conditions + action types (+ notification
- * recipients) match the payload about to be saved, or null when there is none.
+ * Returns the first ENABLED existing rule whose trigger + action types (+ notification recipients)
+ * match the payload about to be saved, or null when there is none.
  */
 export function findDuplicateAutomationRule<T extends Partial<RuleLike> & { id: string; enabled?: boolean }>(
   payload: Partial<RuleLike>,
@@ -155,7 +141,6 @@ export function findDuplicateAutomationRule<T extends Partial<RuleLike> & { id: 
     if (
       other.triggerType === draft.triggerType
       && other.triggerConfig === draft.triggerConfig
-      && other.conditions === draft.conditions
       && other.actionTypes === draft.actionTypes
       && other.notificationRecipients === draft.notificationRecipients
     ) {

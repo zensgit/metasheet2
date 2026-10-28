@@ -741,6 +741,9 @@ describe('MetaAutomationRuleEditor', () => {
     const guide = container.querySelector('[data-field="formSubmittedNoFormView"]') as HTMLElement
     expect(guide.textContent).toContain('本表还没有表单视图')
     expect(guide.textContent).toContain('类型选「表单」')
+    // Wording matches the view manager's add row: 「视图名称」 input, type select, 「+ 添加」 button.
+    expect(guide.textContent).toContain('填「视图名称」')
+    expect(guide.textContent).toContain('再点「+ 添加」')
   })
 
   it('exposes start_approval as a selectable action with template + form-data mapping, and saves it', async () => {
@@ -5415,6 +5418,36 @@ describe('MetaAutomationRuleEditor', () => {
       await flushPromises()
       const summary = container.querySelector('[data-field="actionSummary"]') as HTMLElement
       expect(summary.textContent?.trim()).toBe('发送通知给 Lin Lan 等 2 人：提交了')
+    })
+
+    it('4f-b: a member listed only under their id reads as an unmatched user, not the id', async () => {
+      const client = mockClient()
+      client.listFormShareCandidates = vi.fn(async (_sheetId: string, params: { q?: string; limit?: number }) => {
+        const bare = {
+          subjectType: 'user',
+          subjectId: 'user_7',
+          label: 'user_7',
+          isActive: true,
+          dingtalkBound: false,
+          dingtalkGrantEnabled: false,
+          dingtalkPersonDeliveryAvailable: false,
+        }
+        const matches = 'user_7'.includes((params.q ?? '').toLowerCase()) ? [bare] : []
+        return { items: matches, total: matches.length, limit: params.limit ?? 8, query: params.q ?? '' }
+      })
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['user_7'], message: 'Hi' },
+        actions: [{ type: 'send_notification', config: { userIds: ['user_7'], message: 'Hi' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule })
+      await flushPromises()
+      await flushPromises()
+
+      expect(client.listFormShareCandidates).toHaveBeenCalled()
+      const summary = container.querySelector('[data-field="actionSummary"]') as HTMLElement
+      expect(summary.textContent?.trim()).toBe('Send notification to unmatched user: Hi')
+      expect(summary.textContent).not.toContain('user_7')
     })
 
     it('4f-b: while a lookup has failed the summary still never prints the raw id', async () => {
