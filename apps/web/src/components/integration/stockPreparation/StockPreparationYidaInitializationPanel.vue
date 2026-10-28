@@ -16,7 +16,7 @@
       <section v-if="state?.status === 'ready' && state.connectionTestEnabled === true" class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
         <p>测试连接（服务器已开通）：只用上面的 appKey/appSecret 向钉钉换一次令牌并当场丢弃；不写宜搭、不保存、不授权发送。须先由服务器操作员执行 bootstrap-yida-initialization-owner 建立锚点，并已手动 GET 到初始化命令。结果 ok 只证明 appKey/appSecret 是有效应用对；systemToken、userId、appType、formUuid 要到首次真实新建才知道。</p>
         <button type="button" data-testid="sp-yida-init-connection-test" :disabled="!mayTestConnection" @click="testConnection">测试连接（仅换令牌，不写表单）</button>
-        <p v-if="connectionOutcome" data-testid="sp-yida-init-connection-result">{{ outcomeCopy[connectionOutcome] }}</p>
+        <p v-if="shownOutcome" data-testid="sp-yida-init-connection-result">{{ outcomeCopy[shownOutcome] }}</p>
         <p v-if="testedPairMismatch" data-testid="sp-yida-init-connection-mismatch">已测试的凭据与当前输入不一致，请重新测试</p>
         <label v-if="testedPairMismatch"><input :checked="overrideTested" type="checkbox" data-testid="sp-yida-init-connection-override" @change="setOverride">不重新测试，仍按当前输入初始化（owner 明确决定）</label>
       </section>
@@ -30,6 +30,7 @@
       <p v-if="selectedRowKey" data-testid="sp-yida-init-selected">已选择本地 rowKey：{{ selectedRowKey }}；选择不请求、不预演、不批准、不发送。</p>
     </section>
     <p v-if="errorCode" role="alert" data-testid="sp-yida-init-error">{{ errorCode }}</p>
+    <p v-if="errorHint" data-testid="sp-yida-init-error-hint">{{ errorHint }}</p>
   </section>
 </template>
 
@@ -46,20 +47,42 @@ const reviewRef = ref(''), organizationId = ref(''), acknowledged = ref(false)
 const state = shallowRef<YidaInitializationState | null>(null)
 const commandId = ref<string | null>(null), selectedRowKey = ref('')
 const busy = ref(false), uncertain = ref(false), invalidated = ref(false), errorCode = ref('')
-// 测试连接 (display only behind the server bit). The pair that got 'ok' is a NON-reactive copy, never
-// exposed to the template or devtools state; only a version counter is reactive. No hashing: the page
-// may be served over plain HTTP where crypto.subtle is unavailable.
+// 测试连接 (display only behind the server bit). The pair sent for the shown outcome and the pair that
+// got 'ok' are NON-reactive copies, never exposed to the template or devtools state; only a version
+// counter is reactive. No hashing: the page may be served over plain HTTP where crypto.subtle is unavailable.
 const outcomeCopy: Readonly<Record<YidaConnectionTestOutcome, string>> = Object.freeze({
-  ok: 'ok：钉钉为这组 appKey/appSecret 发了令牌（令牌已在服务器丢弃）。只证明 appKey/appSecret 是有效应用对；systemToken、userId、appType、formUuid 未验证。',
-  upstream_rejected: '钉钉有应答但没有发令牌：最常见是 appKey/appSecret 不匹配，也可能是限流、代理拦截页或接口变更，系统无法区分。',
-  unreachable: '连不上钉钉：DNS、TLS、连接、重定向或代理问题；与凭据无关。',
-  timeout: '12 秒内无应答：可能是出网被防火墙丢弃或未配置代理，也可能是钉钉慢；与凭据无关',
+  ok: 'ok：钉钉为这组 appKey/appSecret 发了令牌（令牌已在服务器丢弃）。只证明 appKey/appSecret 是有效应用对；systemToken、userId、appType、formUuid 未验证，发送所需的宜搭表单接口也要到首次真实发送才验证。',
+  upstream_rejected: '钉钉有应答但没有发令牌：最常见是 appKey/appSecret 不匹配，也可能是限流、网络中间设备的拦截页或接口变更，系统无法区分。',
+  unreachable: '连不上钉钉：DNS、TLS、建立连接或重定向失败；出网被防火墙静默丢弃也显示为这一类。与凭据无关。本功能与发送都不走代理，设置 HTTP(S)_PROXY 不会改变结果。',
+  timeout: '已连上但 12 秒内钉钉没有应答：可能是钉钉或中间网络慢；与凭据无关。',
+})
+// Refusal hints, shown beside the closed code. "未向钉钉发出请求" only where the server refuses before
+// any exchange (DISABLED/DENIED/CONFLICT/THROTTLED/INPUT); CANCELLED/UNAVAILABLE may come after one.
+const refusalHints: Readonly<Record<string, string>> = Object.freeze({
+  YIDA_CONNECTION_TEST_DISABLED: '服务器的测试连接开关现在是关的（可能刚重启）；请手动 GET 刷新状态。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_DENIED: '服务器拒绝：当前登录不是部署指定的 owner、租户不符或已无管理员权限；本页材料已清空。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_CONFLICT: '另一次测试正在进行，或初始化命令已变、本地槽已初始化；请手动 GET 刷新后再试。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_THROTTLED: '两次测试至少间隔约 5 秒，请稍候再点。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_INPUT: '服务器拒绝了输入：appKey/appSecret 不能为空白，且各不超过 4096 字符。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_INACTIVE: '服务器上的测试连接组件没有启用：插件未加载，或安装包缺少探针组件（lib/yida-connection-probe.cjs）；请服务器操作员检查。',
+  YIDA_CONNECTION_TEST_CANCELLED: '服务器中途取消了本次测试（例如插件重载或服务停止）；无法确定钉钉是否已收到请求，令牌不会被保留。可稍后重试。',
+  YIDA_CONNECTION_TEST_UNAVAILABLE: '服务器未能完成本次测试（例如锚点缺失、数据库过慢或探针答复异常）；无法确定钉钉是否已收到请求，令牌不会被保留。请服务器操作员查看。',
+  YIDA_INITIALIZATION_CANCELLED: '页面 15 秒内没有收到服务器答复，已停止等待；无法确定钉钉是否已收到请求，令牌不会被保留。可稍后重试。',
+  YIDA_INITIALIZATION_UNAVAILABLE: '没有收到服务器的有效答复（网络或服务器故障）；无法确定钉钉是否已收到请求，令牌不会被保留。可稍后重试。',
 })
 const connectionOutcome = ref<YidaConnectionTestOutcome | ''>(''), overrideTested = ref(false), testedVersion = ref(0)
 let testedPair: { appKey: string; appSecret: string } | null = null
-function forgetTestedPair(): void { testedPair = null; testedVersion.value += 1; overrideTested.value = false; connectionOutcome.value = '' }
+let outcomePair: { appKey: string; appSecret: string } | null = null
+function forgetTestedPair(): void { testedPair = null; outcomePair = null; testedVersion.value += 1; overrideTested.value = false; connectionOutcome.value = '' }
 const testedPairMismatch = computed(() => testedVersion.value >= 0 && testedPair !== null
   && (testedPair.appKey !== material.appKey || testedPair.appSecret !== material.appSecret))
+// An outcome describes the exact pair that was sent: it is shown only while the inputs equal that pair.
+const shownOutcome = computed(() => testedVersion.value >= 0 && outcomePair !== null
+  && outcomePair.appKey === material.appKey && outcomePair.appSecret === material.appSecret ? connectionOutcome.value : '')
+// The two YIDA_INITIALIZATION_* hints above describe the probe request only, so they need its own code.
+const probeErrorCode = ref('')
+const errorHint = computed(() => errorCode.value !== '' && (errorCode.value.startsWith('YIDA_CONNECTION_TEST_')
+  || errorCode.value === probeErrorCode.value) ? refusalHints[errorCode.value] ?? '' : '')
 // The owner override answers one mismatch only: once the inputs equal the tested pair again it is spent,
 // so a later different edit needs a fresh tick.
 watch(testedPairMismatch, mismatch => { if (!mismatch) overrideTested.value = false }, { flush: 'sync' })
@@ -86,7 +109,8 @@ function invalidateSession(code?: string): void {
   generation += 1; client?.dispose(); client = null
   clearPrivate(); state.value = null; commandId.value = null; selectedRowKey.value = ''
   // A server DENIED keeps its own code: not owner/admin, or a token without a tenant, is not a session change.
-  busy.value = false; uncertain.value = false; invalidated.value = true; errorCode.value = code ?? 'YIDA_INITIALIZATION_SESSION_CHANGED'
+  busy.value = false; uncertain.value = false; invalidated.value = true; probeErrorCode.value = ''
+  errorCode.value = code ?? 'YIDA_INITIALIZATION_SESSION_CHANGED'
 }
 function sessionClient(): ReturnType<typeof createYidaInitializationClient> {
   if (invalidated.value) throw new YidaInitializationClientError('YIDA_INITIALIZATION_SESSION_CHANGED')
@@ -126,7 +150,7 @@ async function refresh(): Promise<void> {
   if (busy.value || invalidated.value) return
   const active = generation
   clearPrivate()
-  busy.value = true; state.value = null; selectedRowKey.value = ''; errorCode.value = ''; uncertain.value = true
+  busy.value = true; state.value = null; selectedRowKey.value = ''; errorCode.value = ''; probeErrorCode.value = ''; uncertain.value = true
   try {
     const result = await sessionClient().observe()
     if (active !== generation) return
@@ -142,20 +166,24 @@ async function testConnection(): Promise<void> {
   const active = generation
   // The exact bytes sent; inputs keep them (a probe never clears secrets or sets uncertain).
   const sent = { appKey: material.appKey, appSecret: material.appSecret }
-  busy.value = true; errorCode.value = ''; forgetTestedPair()
+  busy.value = true; errorCode.value = ''; probeErrorCode.value = ''; forgetTestedPair()
   try {
     const tested = await sessionClient().testConnection({ commandId: commandId.value, mode: 'candidate', material: { ...sent } })
     if (active !== generation) return
-    connectionOutcome.value = tested.outcome
-    if (tested.outcome === 'ok') { testedPair = { ...sent }; testedVersion.value += 1 }
+    connectionOutcome.value = tested.outcome; outcomePair = { ...sent }
+    if (tested.outcome === 'ok') testedPair = { ...sent }
+    testedVersion.value += 1
   } catch (error) {
-    if (active === generation) errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'
+    if (active === generation) {
+      errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'
+      probeErrorCode.value = errorCode.value
+    }
   } finally { if (active === generation) busy.value = false }
 }
 async function initialize(): Promise<void> {
   if (!mayInitialize.value || !props.draftInput || !commandId.value) return
   const active = generation
-  busy.value = true; uncertain.value = true; errorCode.value = ''
+  busy.value = true; uncertain.value = true; errorCode.value = ''; probeErrorCode.value = ''
   try {
     const pending = sessionClient().initialize({ commandId: commandId.value, material: { ...material },
       draft: JSON.parse(JSON.stringify(props.draftInput)) as YidaOwnerDraftInput,

@@ -87,16 +87,20 @@ function draft(value: unknown): YidaOwnerDraft {
   return Object.freeze({ targetRef: uuid(row.targetRef), operationId: uuid(row.operationId), status: 'unverified', identityKind: 'local-unverified',
     canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false, rowCount: rows.length, rows: Object.freeze(rows), reused: row.reused })
 }
+const stateKeys: readonly string[] = ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted', 'sendEnabled']
 function state(value: unknown, expectedCommand: string | null): YidaInitializationState {
-  const row = object(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted', 'sendEnabled', 'connectionTestEnabled'])
+  // The server sends connectionTestEnabled only while its switch is on (absent = off), so this
+  // bundle also reads an older backend; the key set stays closed either way.
+  const probeBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'connectionTestEnabled')
+  const row = object(value, probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys)
   const commandId = uuid(row.commandId)
   if (expectedCommand !== null && commandId !== expectedCommand) invalid()
   if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false || typeof row.sendEnabled !== 'boolean'
     || (row.status !== 'ready' && row.status !== 'initialized') || (row.status === 'ready') !== (row.draft === null)) invalid()
-  if (typeof row.connectionTestEnabled !== 'boolean') invalid()
+  if (probeBit && typeof row.connectionTestEnabled !== 'boolean') invalid()
   return Object.freeze({ commandId, status: row.status, draft: row.draft === null ? null : draft(row.draft),
     canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: row.sendEnabled,
-    connectionTestEnabled: row.connectionTestEnabled })
+    connectionTestEnabled: row.connectionTestEnabled === true })
 }
 function connectionTestResult(value: unknown, expectedCommand: string | null): YidaConnectionTestResult {
   const row = object(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])

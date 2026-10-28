@@ -26,7 +26,9 @@ function draftInput(): YidaOwnerDraftInput {
 }
 function metadata() { return { targetRef: ids.target, operationId: ids.operation, status: 'unverified', identityKind: 'local-unverified',
   canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false, rowCount: 1, rows: [{ rowKey: ids.row, index: 0 }], reused: false } }
-function ready(sendEnabled = false, connectionTestEnabled = false) { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled, connectionTestEnabled } }
+// Like the server: connectionTestEnabled is present (true) only while the switch is on, else absent.
+function ready(sendEnabled = false, connectionTestEnabled = false) { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
+  ...(connectionTestEnabled ? { connectionTestEnabled: true } : {}) } }
 function initialized(sendEnabled = false, connectionTestEnabled = false) { return { ...ready(sendEnabled, connectionTestEnabled), status: 'initialized', draft: metadata() } }
 const material: YidaInitializationMaterial = { appKey: ' SYN-KEY\r\n原字节 ', appSecret: ' SYN-SECRET\n原字节 ', systemToken: ' SYN-TOKEN\r\n原字节 ', userId: 'SYN-EXECUTION' }
 function payload(): YidaInitializationInput { return { commandId: ids.command, material: { ...material }, draft: draftInput(),
@@ -488,6 +490,12 @@ describe('Yida owner connection test behind the server display bit', () => {
     tokenRetained: false, externalWriteAttempted: false, canSend: false })
   async function observe(enabled: boolean) { fetchSpy.mockResolvedValueOnce(json(ready(false, enabled))); await click('refresh') }
   async function probe(response: Response) { fetchSpy.mockResolvedValueOnce(response); await click('connection-test') }
+  // Paste keeps the exact bytes (an input event would strip the newline).
+  async function pasteInto(field: string, value: string) {
+    const event = new Event('paste', { cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? value : '' } })
+    q(field).dispatchEvent(event); await flush()
+  }
   const clients: ReturnType<typeof createYidaInitializationClient>[] = []
   afterEach(() => { for (const value of clients.splice(0)) value.dispose() })
   const client = () => { const value = createYidaInitializationClient(); clients.push(value); return value }
@@ -506,7 +514,15 @@ describe('Yida owner connection test behind the server display bit', () => {
 
   it('POSTs exactly commandId, mode and the raw appKey/appSecret with Bearer only; keeps every input byte; never uncertain', async () => {
     mountPanel(); await observe(true); await fill()
+    // The click itself: no storage write, no console output, no crypto use of any kind.
+    const storage = (['setItem', 'removeItem', 'clear'] as const).map(name => vi.spyOn(Storage.prototype, name))
+    const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map(name => vi.spyOn(console, name))
+    const subtleProto = Object.getPrototypeOf(crypto.subtle) as Record<string, unknown>
+    const subtle = ['digest', 'encrypt', 'decrypt', 'sign', 'verify', 'importKey', 'exportKey', 'generateKey', 'deriveKey', 'deriveBits', 'wrapKey', 'unwrapKey']
+      .map(name => vi.spyOn(subtleProto as never, name as never))
+    const random = [vi.spyOn(crypto, 'randomUUID'), vi.spyOn(crypto, 'getRandomValues')]
     await probe(json(probeView('ok')))
+    for (const spy of [...storage, ...consoles, ...subtle, ...random]) { expect(spy).not.toHaveBeenCalled(); spy.mockRestore() }
     const [url, init] = fetchSpy.mock.calls[1]
     expect(url).toBe(probeEndpoint)
     expect(init).toMatchObject({ method: 'POST', credentials: 'omit', mode: 'same-origin', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer' })
@@ -526,16 +542,32 @@ describe('Yida owner connection test behind the server display bit', () => {
     expect(q('initialized').textContent).toContain('canSend=false'); expect(absent('connection')).toBe(true)
   })
 
-  it.each([
-    ['upstream_rejected', '系统无法区分'],
-    ['unreachable', '与凭据无关'],
-    ['timeout', '12 秒内无应答：可能是出网被防火墙丢弃或未配置代理，也可能是钉钉慢；与凭据无关'],
-  ])('renders %s as a class only, and initialization stays possible', async (outcome, copy) => {
+  // Each substring is unique to its own copy, so swapping two copies turns a row red.
+  const outcomeRows = [
+    ['ok', '令牌已在服务器丢弃'],
+    ['upstream_rejected', '网络中间设备的拦截页'],
+    ['unreachable', '连不上钉钉'],
+    ['timeout', '已连上但 12 秒内钉钉没有应答'],
+  ] as const
+  it.each(outcomeRows.slice(1))('renders %s as a class only, and initialization stays possible', async (outcome, copy) => {
     mountPanel(); await observe(true); await fill()
     await probe(json(probeView(outcome)))
-    expect(q('connection-result').textContent).toContain(copy)
+    const text = q('connection-result').textContent ?? ''
+    expect(text).toContain(copy)
+    for (const [other, otherCopy] of outcomeRows) if (other !== outcome) expect(text).not.toContain(otherCopy)
+    // This version's fetch ignores HTTP(S)_PROXY: no copy may suggest that configuring a proxy helps.
+    for (const misleading of ['代理问题', '未配置代理', '代理拦截页']) expect(text).not.toContain(misleading)
     expect(absent('connection-mismatch')).toBe(true); expect(absent('uncertain')).toBe(true)
     expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+  })
+  it('unreachable says a silent firewall drop lands there and that no proxy is used; timeout is only connected-then-silent', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('unreachable')))
+    expect(q('connection-result').textContent).toContain('防火墙静默丢弃也显示为这一类')
+    expect(q('connection-result').textContent).toContain('不走代理')
+    await vi.waitFor(() => expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false))
+    await probe(json(probeView('timeout')))
+    expect(q('connection-result').textContent).not.toContain('防火墙')
   })
 
   it('a refusal shows its closed code; DENIED closes the panel and clears private inputs', async () => {
@@ -544,7 +576,97 @@ describe('Yida owner connection test behind the server display bit', () => {
     expect(q('error').textContent).toBe('YIDA_CONNECTION_TEST_THROTTLED'); expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
     await probe(error('YIDA_CONNECTION_TEST_DENIED', 403))
     expect(q('error').textContent).toBe('YIDA_CONNECTION_TEST_DENIED'); noSecrets()
+    expect(q('error-hint').textContent).toContain('本页材料已清空')
     expect(q<HTMLButtonElement>('refresh').disabled).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+  })
+
+  it('403 YIDA_CONNECTION_TEST_DISABLED (switch turned off after the GET) shows its code, keeps every input and leaves initialization open', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(error('YIDA_CONNECTION_TEST_DISABLED', 403))
+    expect(q('error').textContent).toBe('YIDA_CONNECTION_TEST_DISABLED')
+    expect(q('error-hint').textContent).toContain('开关现在是关的')
+    for (const key of ['appKey', 'appSecret', 'systemToken', 'userId', 'review', 'organization']) expect(q<HTMLInputElement>(key).value.length > 0).toBe(true)
+    expect(q<HTMLInputElement>('ack').checked).toBe(true)
+    expect(q<HTMLButtonElement>('refresh').disabled).toBe(false); expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    expect(absent('uncertain')).toBe(true); expect(absent('connection-result')).toBe(true)
+  })
+
+  it.each([
+    ['YIDA_CONNECTION_TEST_DISABLED', 403, '未向钉钉发出请求'],
+    ['YIDA_CONNECTION_TEST_CONFLICT', 409, '请手动 GET 刷新后再试'],
+    ['YIDA_CONNECTION_TEST_THROTTLED', 429, '约 5 秒'],
+    ['YIDA_CONNECTION_TEST_INPUT', 400, '不超过 4096 字符'],
+    ['YIDA_CONNECTION_TEST_INACTIVE', 503, 'lib/yida-connection-probe.cjs'],
+    ['YIDA_CONNECTION_TEST_CANCELLED', 409, '无法确定钉钉是否已收到请求'],
+    ['YIDA_CONNECTION_TEST_UNAVAILABLE', 503, '无法确定钉钉是否已收到请求'],
+  ] as const)('%s keeps the code text and adds a Chinese hint beside it', async (code, status, hint) => {
+    mountPanel(); await observe(true); await fill()
+    await probe(error(code, status))
+    expect(q('error').textContent).toBe(code)
+    expect(q('error-hint').textContent).toContain(hint)
+    // Only a refusal before any exchange may claim that nothing was sent.
+    const beforeExchange = ['DISABLED', 'CONFLICT', 'THROTTLED', 'INPUT'].some(name => code === `YIDA_CONNECTION_TEST_${name}`)
+    expect((q('error-hint').textContent ?? '').includes('未向钉钉发出请求')).toBe(beforeExchange)
+  })
+
+  it('a lost or late probe reply gets a probe hint; the same code from a status GET gets none', async () => {
+    mountPanel(); await observe(true); await fill()
+    fetchSpy.mockRejectedValueOnce(new Error('SYN-PRIVATE')); await click('connection-test')
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_UNAVAILABLE')
+    expect(q('error-hint').textContent).toContain('无法确定钉钉是否已收到请求')
+    fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_UNAVAILABLE')); await click('refresh')
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_UNAVAILABLE'); expect(absent('error-hint')).toBe(true)
+    await observe(true); await fill()
+    vi.useFakeTimers()
+    const late = deferred<Response>(); fetchSpy.mockReturnValueOnce(late.promise); await click('connection-test')
+    await vi.advanceTimersByTimeAsync(15000); late.resolve(json(probeView('ok'))); await flush()
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_CANCELLED')
+    expect(q('error-hint').textContent).toContain('15 秒内没有收到服务器答复')
+    expect(absent('connection-result')).toBe(true)
+  })
+
+  it('a shown outcome belongs to the exact pair that was sent: an edit hides it, the same bytes show it again', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('unreachable')))
+    expect(q('connection-result').textContent).toContain('连不上钉钉')
+    await type('appSecret', 'SYN-SECRET-EDITED')
+    expect(absent('connection-result')).toBe(true); expect(absent('connection-mismatch')).toBe(true)
+    await pasteInto('appSecret', material.appSecret)
+    expect(q('connection-result').textContent).toContain('连不上钉钉')
+    await type('appKey', 'SYN-KEY-EDITED'); expect(absent('connection-result')).toBe(true)
+    await pasteInto('appKey', material.appKey)
+    await probe(json(probeView('ok')))
+    expect(q('connection-result').textContent).toContain('令牌已在服务器丢弃')
+    // After ok, an edit hides the ok text and shows the mismatch notice instead.
+    await type('appSecret', 'SYN-SECRET-EDITED')
+    expect(absent('connection-result')).toBe(true); expect(absent('connection-mismatch')).toBe(false)
+  })
+
+  it('tested-pair check covers appKey alone: changing only appKey after ok is a mismatch and blocks initialization', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('ok')))
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    await type('appKey', 'SYN-KEY-EDITED')
+    expect(q('connection-mismatch').textContent).toBe('已测试的凭据与当前输入不一致，请重新测试')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    await pasteInto('appKey', material.appKey)
+    expect(absent('connection-mismatch')).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+  })
+
+  it('works with crypto.subtle unavailable (a page served over plain HTTP) and never reads it', async () => {
+    const real = globalThis.crypto, subtleRead = vi.fn()
+    vi.stubGlobal('crypto', Object.create(null, {
+      getRandomValues: { value: real.getRandomValues.bind(real) }, randomUUID: { value: real.randomUUID.bind(real) },
+      subtle: { get() { subtleRead(); return undefined } },
+    }))
+    expect(globalThis.crypto.subtle).toBeUndefined(); subtleRead.mockClear()
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('ok')))
+    expect(absent('error')).toBe(true); expect(q('connection-result').textContent).toContain('令牌已在服务器丢弃')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    await type('appSecret', 'SYN-SECRET-EDITED'); expect(absent('connection-mismatch')).toBe(false)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    expect(subtleRead).not.toHaveBeenCalled()
   })
 
   it('tested-pair check: an edit after ok blocks initialization until a re-test or the explicit owner override', async () => {
@@ -610,8 +732,25 @@ describe('Yida owner connection test behind the server display bit', () => {
     const sample = { ...ready(), connectionTestEnabled: 'true' }
     const baseline = createYidaInitializationClient(); fetchSpy.mockResolvedValueOnce(json(sample))
     await expect(baseline.observe()).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' }); baseline.dispose()
-    const mutant = memoryService("  if (typeof row.connectionTestEnabled !== 'boolean') invalid()", '')(); fetchSpy.mockResolvedValueOnce(json(sample))
+    const mutant = memoryService("  if (probeBit && typeof row.connectionTestEnabled !== 'boolean') invalid()", '')(); fetchSpy.mockResolvedValueOnce(json(sample))
     await expect(mutant.observe()).resolves.toBeDefined(); mutant.dispose()
+  })
+  it('a reply without connectionTestEnabled (switch off, or an older backend) reads false and initialization still works', async () => {
+    const value = client()
+    expect(Object.hasOwn(ready(), 'connectionTestEnabled')).toBe(false)
+    fetchSpy.mockResolvedValueOnce(json(ready())); await expect(value.observe()).resolves.toMatchObject({ status: 'ready', connectionTestEnabled: false })
+    fetchSpy.mockResolvedValueOnce(json(initialized(), 201)); await expect(value.initialize(payload())).resolves.toMatchObject({ status: 'initialized', connectionTestEnabled: false })
+    for (const [data, expected] of [[{ ...ready(), connectionTestEnabled: false }, false], [ready(false, true), true]] as const) {
+      fetchSpy.mockResolvedValueOnce(json(data)); await expect(client().observe()).resolves.toMatchObject({ connectionTestEnabled: expected })
+    }
+    // Still a closed key set: a wrong type or any other extra key is refused.
+    for (const bad of [{ ...ready(), connectionTestEnabled: 'true' }, { ...ready(), connectionTestEnabled: null }, { ...ready(), connectionTestEnabledX: true }]) {
+      fetchSpy.mockResolvedValueOnce(json(bad)); await expect(client().observe()).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
+    }
+  })
+  it('requiring the key again rejects the same switch-off reply (negative assertion red)', async () => {
+    const mutant = memoryService("probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys", "[...stateKeys, 'connectionTestEnabled']")()
+    fetchSpy.mockResolvedValueOnce(json(ready())); await expect(mutant.observe()).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' }); mutant.dispose()
   })
   it('removing the closed probe-DTO flags accepts a tokenRetained=true reply (negative assertion red)', async () => {
     const check = async (factory: typeof createYidaInitializationClient, accepts: boolean) => {
