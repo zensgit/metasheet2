@@ -737,22 +737,10 @@
       />
       <el-form>
         <el-form-item :label="actionCommentLabel">
-          <!-- B1-05: quick phrases — this user's recently-used phrases first, then the fixed
-               preset list for 通过/驳回. Clicking a chip fills (or appends to) the textarea;
-               free-typed text is never remembered, only a submitted phrase that exactly
-               matches one of these chips (see `rememberQuickPhraseIfOffered`). -->
-          <div v-if="quickPhraseChips.length > 0" class="approval-detail__quick-phrases">
-            <el-tag
-              v-for="(phrase, index) in quickPhraseChips"
-              :key="phrase"
-              class="approval-detail__quick-phrase-chip"
-              effect="plain"
-              :data-testid="`approval-quick-phrase-${index}`"
-              @click="applyQuickPhrase(phrase)"
-            >
-              {{ phrase }}
-            </el-tag>
-          </div>
+          <!-- B1-05: quick phrases — this user's saved phrases first, then the fixed presets for
+               通过/驳回. A chip fills (or appends to) the textarea, which stays editable; 「存为常用语」
+               saves the current text as the user's own phrase (shared bar, ApprovalQuickPhraseBar). -->
+          <ApprovalQuickPhraseBar v-model="actionComment" :action="currentAction" :user-id="currentUserId" />
           <el-input
             ref="actionCommentInputRef"
             v-model="actionComment"
@@ -1018,19 +1006,8 @@
       />
       <el-form>
         <el-form-item :label="grammar.comment.commentLabel">
-          <!-- B1-05: quick phrases — see the 通过/驳回 dialog above for the same mechanics. -->
-          <div v-if="quickPhraseChips.length > 0" class="approval-detail__quick-phrases">
-            <el-tag
-              v-for="(phrase, index) in quickPhraseChips"
-              :key="phrase"
-              class="approval-detail__quick-phrase-chip"
-              effect="plain"
-              :data-testid="`approval-quick-phrase-${index}`"
-              @click="applyQuickPhrase(phrase)"
-            >
-              {{ phrase }}
-            </el-tag>
-          </div>
+          <!-- B1-05: quick phrases — the same shared bar as the 通过/驳回 dialog above. -->
+          <ApprovalQuickPhraseBar v-model="actionComment" :action="currentAction" :user-id="currentUserId" />
           <el-input
             v-model="actionComment"
             type="textarea"
@@ -1217,7 +1194,7 @@ import {
   uploadApprovalProcessAttachmentsAtomic,
 } from '../../approvals/attachmentUpload'
 import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
-import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
+import ApprovalQuickPhraseBar from '../../approvals/components/ApprovalQuickPhraseBar.vue'
 import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
 import {
@@ -2213,30 +2190,6 @@ const actionCommentLabel = computed(() => {
 const actionCommentPlaceholder = computed(() => (rejectCommentRequired.value ? t.value.rejectReasonPlaceholder : t.value.opinionPlaceholder))
 const actionConfirmDisabled = computed(() => commentRequiredForAction.value && !actionComment.value.trim())
 
-// B1-05: quick-phrase chips for whichever action's dialog is currently open — this user's own
-// recently-used phrases (most-recent-first) first, then the fixed preset list, deduped, capped
-// at 5. `currentAction` is kept in sync with the open dialog by `openActionDialog`/
-// `openCommentDialog` below.
-const quickPhraseChips = computed<string[]>(() => {
-  const merged = [...recentPhrases(currentUserId.value, currentAction.value), ...phrasesForAction(currentAction.value)]
-  return Array.from(new Set(merged)).slice(0, 5)
-})
-
-function applyQuickPhrase(phrase: string): void {
-  actionComment.value = actionComment.value ? `${actionComment.value}，${phrase}` : phrase
-}
-
-/**
- * Only remembers a submitted comment as a quick-phrase shortcut when it exactly matches one of
- * the phrases OFFERED for the currently open dialog's action (recent ∪ preset, i.e.
- * `quickPhraseChips` at submit time) — free-typed comments are never persisted, so this can't
- * become a backdoor free-text log.
- */
-function rememberQuickPhraseIfOffered(comment: string): void {
-  if (!quickPhraseChips.value.includes(comment)) return
-  rememberPhrase(currentUserId.value, currentAction.value, comment)
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -2632,8 +2585,8 @@ function openReturnDialog() {
 }
 
 function openCommentDialog() {
-  // B1-05: keeps `currentAction` in sync with the open dialog so `quickPhraseChips` offers the
-  // 'comment' preset/recent list here (rather than whatever approve/reject dialog ran last).
+  // B1-05: keeps `currentAction` in sync with the open dialog so the quick-phrase bar offers the
+  // 'comment' presets and saved phrases here (rather than whatever approve/reject dialog ran last).
   currentAction.value = 'comment'
   actionComment.value = ''
   actionDialogError.value = null
@@ -2816,7 +2769,6 @@ async function submitAction() {
     // each keeps its own captured-id refusal so it remains independently observable.
     if (stillActingOn(id)) {
       ElMessage.success(currentAction.value === 'approve' ? t.value.toastApproved : t.value.toastRejected)
-      rememberQuickPhraseIfOffered(actionComment.value)
       actionDialogVisible.value = false
       showNextEntry.value = true
     }
@@ -3033,7 +2985,6 @@ async function submitComment() {
     })
     if (stillActingOn(id)) {
       ElMessage.success(t.value.commentSubmitted)
-      rememberQuickPhraseIfOffered(actionComment.value)
       // Clear BEFORE closing the dialog — the close-watcher above DELETEs whatever is still in this
       // list, and these ids are now server-bound (clearing after the flip would race a DELETE
       // against an already-bound row). On the OTHER branch (the reader has moved on) the switch
@@ -3493,17 +3444,6 @@ watch(
   margin-top: 4px;
   color: var(--ms-text-3);
   font-size: 12px;
-}
-
-.approval-detail__quick-phrases {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.approval-detail__quick-phrase-chip {
-  cursor: pointer;
 }
 
 .approval-detail__add-sign-chips {
