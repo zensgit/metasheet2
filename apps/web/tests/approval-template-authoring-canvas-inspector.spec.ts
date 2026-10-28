@@ -2760,11 +2760,12 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
   })
 
   // Lock-5 gate E-2 — "no inert control". The tab renders EXACTLY the registry's implemented
-  // fields. `returnReviewMode` (§1.2) and `commentRequired` (§1.3) are part of the persisted schema
-  // but have no landed enforcement, and `signaturePolicy` renders nothing anywhere (OD-L5-10(a)) —
-  // none of them may appear. Paired with the rendered-control assertions so the absence half is not
-  // green against an empty tab.
-  it('E-2: the 操作权限 tab renders the three implemented controls and NO control for an unenforced key', async () => {
+  // fields: the three checkboxes plus the §1.3 审批意见 select (`commentRequired`, enforced at the
+  // approve / reject decision). `returnReviewMode` (§1.2) is part of the persisted schema but has no
+  // landed enforcement, and `signaturePolicy` renders nothing anywhere (OD-L5-10(a)) — neither may
+  // appear. Paired with the rendered-control assertions so the absence half is not green against an
+  // empty tab.
+  it('E-2: the 操作权限 tab renders the three checkboxes + the 审批意见 select and NO control for an unenforced key', async () => {
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
       node,
@@ -2781,14 +2782,97 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(section.querySelector('[data-testid="approval-node-operation-policy-add_reduce_sign"]')).not.toBeNull()
     expect(section.querySelector('[data-testid="approval-node-operation-policy-return"]')).not.toBeNull()
     expect(section.querySelectorAll('[data-testid="approval-node-operation-policy-row"]')).toHaveLength(3)
+    // §1.3 — the 审批意见 select renders once, with the three enforced values.
+    expect(section.querySelectorAll('[data-testid="approval-node-comment-required-row"]')).toHaveLength(1)
+    const commentSelect = section.querySelector('[data-testid="approval-node-comment-required"]') as HTMLSelectElement
+    expect(commentSelect).not.toBeNull()
+    expect(Array.from(commentSelect.options).map((o) => o.value)).toEqual(['never', 'reject_only', 'always'])
+    expect(section.textContent).toContain('审批意见')
     // NOT rendered (declared in the schema, enforcement deferred) — and `signaturePolicy` nowhere.
     expect(section.textContent).not.toContain('回退方式')
-    expect(section.textContent).not.toContain('审批意见')
     expect(section.textContent).not.toContain('手写签名')
     expect(c.querySelector('[data-testid*="signature"]')).toBeNull()
     expect(c.querySelector('[data-testid*="returnReviewMode"]')).toBeNull()
-    expect(c.querySelector('[data-testid*="commentRequired"]')).toBeNull()
     unmount()
+  })
+
+  // Lock-5 §1.3 — the 审批意见 select writes `nodeOperationPolicy.commentRequired` through the SAME
+  // edit object the checkboxes write; absent shows the default, the default removes the key.
+  async function openOperationsTab(c: HTMLElement): Promise<HTMLElement> {
+    ;(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return c.querySelector('[data-testid="approval-node-section-operations"]') as HTMLElement
+  }
+  function pickCommentRequired(section: HTMLElement, value: string): void {
+    const select = section.querySelector('[data-testid="approval-node-comment-required"]') as HTMLSelectElement
+    select.value = value
+    select.dispatchEvent(new Event('change'))
+  }
+
+  it('§1.3: an approval node with no commentRequired shows 驳回时必填（默认）; picking 同意和驳回都必填 writes the key and shows the approval-center hint; picking the default removes the whole policy', async () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { nodeOperationPolicy?: Record<string, unknown> | null }
+    const { container: c, unmount } = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const section = await openOperationsTab(c)
+    const select = section.querySelector('[data-testid="approval-node-comment-required"]') as HTMLSelectElement
+    expect(select.value).toBe('reject_only')
+    expect(select.disabled).toBe(false)
+    expect(select.options[1]!.textContent).toBe('驳回时必填（默认）')
+    expect(section.querySelector('[data-testid="approval-node-comment-required-always-hint"]')).toBeNull()
+
+    pickCommentRequired(section, 'always')
+    await nextTick()
+    expect(edit.nodeOperationPolicy).toEqual({ commentRequired: 'always' })
+    expect(section.querySelector('[data-testid="approval-node-comment-required-always-hint"]')!.textContent)
+      .toContain('批量同意')
+
+    pickCommentRequired(section, 'reject_only')
+    await nextTick()
+    // `null` ≡ remove the key on rebuild (the edit model's grammar, gate A-6).
+    expect(edit.nodeOperationPolicy).toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-comment-required-always-hint"]')).toBeNull()
+    unmount()
+  })
+
+  it('§1.3: the select keeps sibling switches — 不必填 on a node that denies transfer keeps allowTransfer:false', async () => {
+    const node: ApprovalNode = { ...makeApprovalNode('approval_x'), config: { nodeOperationPolicy: { allowTransfer: false } } as never }
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { nodeOperationPolicy?: Record<string, unknown> | null }
+    const { container: c, unmount } = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const section = await openOperationsTab(c)
+    pickCommentRequired(section, 'never')
+    await nextTick()
+    expect(edit.nodeOperationPolicy).toEqual({ allowTransfer: false, commentRequired: 'never' })
+    unmount()
+  })
+
+  it('§1.3: a persisted value outside the three is shown read-only with an honest label and never overwritten; read-only templates disable the select', async () => {
+    const node: ApprovalNode = { ...makeApprovalNode('approval_x'), config: { nodeOperationPolicy: { commentRequired: 'sometimes' } } as never }
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { nodeOperationPolicy?: Record<string, unknown> | null }
+    const unknownMount = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const section = await openOperationsTab(unknownMount.container)
+    const select = section.querySelector('[data-testid="approval-node-comment-required"]') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+    expect(select.value).toBe('__unknown__')
+    expect(select.textContent).not.toContain('sometimes')
+    pickCommentRequired(section, 'always')
+    await nextTick()
+    expect(edit.nodeOperationPolicy).toBeUndefined()
+    unknownMount.unmount()
+
+    const readOnlyApi = { ...createStubConfigApi({ approval_y: { assigneeSources: [{ kind: 'direct_manager' }] } }), readOnly: true }
+    const readOnlyEdit = readOnlyApi.approvalNodeEditFor('approval_y') as unknown as { nodeOperationPolicy?: Record<string, unknown> | null }
+    const readOnlyMount = mountDirectInspector({ node: makeApprovalNode('approval_y'), registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: readOnlyApi })
+    const roSection = await openOperationsTab(readOnlyMount.container)
+    const roSelect = roSection.querySelector('[data-testid="approval-node-comment-required"]') as HTMLSelectElement
+    expect(roSelect.disabled).toBe(true)
+    pickCommentRequired(roSection, 'always')
+    await nextTick()
+    expect(readOnlyEdit.nodeOperationPolicy).toBeUndefined()
+    readOnlyMount.unmount()
   })
 
   it('A-3: roster equals the fifteen-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
