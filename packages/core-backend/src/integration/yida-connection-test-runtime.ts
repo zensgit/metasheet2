@@ -53,7 +53,9 @@ export const YIDA_CONNECTION_TEST_BUDGET_MS = 12000
 /** Longest time from test() entry to the moment the exchange would start (the RC authorization
  * transaction sits in between). Past it the run is UNAVAILABLE with zero fetch and no cooldown stamp,
  * so the server's worst case (about this window + the 12 s budget) stays under the web client's 15 s
- * abort: the browser never reports CANCELLED while the server is still exchanging. */
+ * abort. The client timer starts before the request reaches test(), so the browser shows CANCELLED while
+ * the server still exchanges only if middleware and network take over about 1 s; the CANCELLED hint then
+ * says the outcome is unknown. */
 export const YIDA_CONNECTION_TEST_START_WINDOW_MS = 2000
 /** Per-process cooldown between two started exchanges, counted for authorized callers only. */
 export const YIDA_CONNECTION_TEST_COOLDOWN_MS = 5000
@@ -144,7 +146,8 @@ type Registration = { closed: boolean; createProbe: YidaConnectionTestRuntimeBin
 /** Owner-only, token-only connection test. Order: capture -> enabled() -> one RC authorization
  * transaction (live ACL, anchor owner/tenant, commandId, not yet initialized) -> COMMIT -> per-process
  * admission (in flight <= 1, cooldown stamped only when an exchange starts) -> enabled() again ->
- * start window -> one probe. A refused caller never touches the admission limiter. */
+ * start window -> one probe. A caller refused before COMMIT never takes the in-flight slot or stamps
+ * the cooldown. */
 export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTestRuntimeDependencies) {
   if (!dependencies?.database || typeof dependencies.database.transaction !== 'function'
     || typeof dependencies.fetch !== 'function') fail('UNAVAILABLE')
