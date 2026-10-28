@@ -51,12 +51,33 @@
       </template>
     </section>
 
+    <!-- Optional 通过 opinion with the shared quick-phrase bar: a chip fills the box, which stays
+         editable, and 通过 sends whatever is in it. Empty box = the same bare approve as before.
+         驳回 keeps opening the center's row reject dialog, which has its own bar. -->
+    <div v-if="showQuickActions" class="approval-detail-pane__opinion">
+      <ApprovalQuickPhraseBar
+        v-model="approveComment"
+        action="approve"
+        :user-id="currentUserId ?? null"
+        chip-testid-prefix="approval-detail-pane-quick-phrase"
+        control-testid-prefix="approval-detail-pane-phrase"
+      />
+      <el-input
+        v-model="approveComment"
+        type="textarea"
+        :rows="2"
+        :placeholder="t.approveOpinionPlaceholder"
+        :aria-label="t.approveOpinionLabel"
+        data-testid="approval-detail-pane-approve-comment"
+      />
+    </div>
+
     <div v-if="showQuickActions" class="approval-detail-pane__actions">
       <el-popconfirm
         :title="approveConfirmTitle"
         :confirm-button-text="t.confirm"
         :cancel-button-text="t.cancel"
-        @confirm="$emit('quick-approve', row)"
+        @confirm="$emit('quick-approve', row, approveComment)"
       >
         <template #reference>
           <el-button
@@ -93,9 +114,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
 import StatusTag from '../../components/status/StatusTag.vue'
+import ApprovalQuickPhraseBar from '../../approvals/components/ApprovalQuickPhraseBar.vue'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 import { approvalStatusTagProps, isCancelRoundWorkflow, needsCancelRoundCloseReason } from '../../approvals/cancelRound'
 import { resolveStatusDisplay } from '../../utils/statusDomains'
@@ -107,7 +129,9 @@ import { CENTER_PANE_EN, CENTER_PANE_ZH } from './approvalCenterLabels'
 // (ApprovalCenterView), which dispatches through the exact same `handleInlineApprove` /
 // `openRowReject` functions the row-level inline actions already use — this component never calls
 // the approval API directly, so there is only ever one approve/reject code path (master §M no-new-
-// verbs discipline; excluded scope: no new confirmation flow, no new dialog).
+// verbs discipline; excluded scope: no new confirmation flow, no new dialog). The optional 通过
+// opinion box (owner 2026-10-27, quick phrases in the side pane) only adds the text to that same
+// emit; the parent still owns dispatch.
 const props = defineProps<{
   /** The selected list row — already-known data, used for immediate (zero-fetch) title/status/编号. */
   row: UnifiedApprovalDTO
@@ -122,7 +146,18 @@ const props = defineProps<{
   approveLoading: boolean
   /** Mirrors the row actions' shared gate (`inlineApprovingId !== null`) — one in-flight approve at a time. */
   actionsDisabled: boolean
+  /** Signed-in user id, for saving personal quick phrases; without it the bar offers presets only. */
+  currentUserId?: string | null
 }>()
+
+// The optional 通过 opinion typed in this pane. Emitted with 通过 (the parent sends no `comment`
+// when it is blank); cleared when the pane moves to another row or stops offering actions.
+const approveComment = ref('')
+// Multi-source watch: each source is compared by value, so a list refresh that hands the pane a new
+// row object for the SAME instance keeps what the user has typed.
+watch([() => props.row.id, () => props.showQuickActions], () => {
+  approveComment.value = ''
+})
 
 // 撤销锁 P-2: the pane shows the list row immediately and the single-fetch detail once it lands. The
 // detail read whitelist-projects `cancelRoundCloseReason`, so for a cancel-round instance it is the
@@ -144,7 +179,7 @@ const statusTag = computed(() => {
 })
 
 defineEmits<{
-  (e: 'quick-approve', row: UnifiedApprovalDTO): void
+  (e: 'quick-approve', row: UnifiedApprovalDTO, comment: string): void
   (e: 'quick-reject', row: UnifiedApprovalDTO): void
   (e: 'open-full-detail', row: UnifiedApprovalDTO): void
   (e: 'close'): void
@@ -286,6 +321,11 @@ watch(
 
 .approval-detail-pane__node-error {
   color: var(--ms-color-danger);
+}
+
+.approval-detail-pane__opinion {
+  display: flex;
+  flex-direction: column;
 }
 
 .approval-detail-pane__actions {
