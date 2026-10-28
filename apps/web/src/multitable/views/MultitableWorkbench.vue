@@ -476,6 +476,7 @@
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="canCreateRecordByHand"
+        :duplicate-blocked-reason="recordDuplicateBlockedReason"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
@@ -3153,13 +3154,29 @@ async function onDeleteRecord() {
   if (grid.error.value) showError(grid.error.value)
 }
 
-// Duplicate / clone record (design 2026-06-16). Both the drawer Duplicate button and the grid right-click
-// affordance route here. Gated on canCreateRecord (the server re-enforces it + the field-mask). On success
-// the new clone is opened in the drawer (Airtable/feishu staple) so the user lands on the copy to tweak it.
+// Customer feedback 2026-10-27: /context sends `recordDuplicateBlocked` on a sheet whose rows the stock-preparation
+// plugin maintains (the duplicate route answers 409 there). The drawer shows its 复制 entry disabled with this
+// reason, and a stale emit is refused below with the same copy. Same fail-closed read: absent ⇒ unchanged.
+const recordDuplicateBlocked = computed(() => capabilitySource.value?.recordDuplicateBlocked === true)
+const recordDuplicateBlockedReason = computed(() => (
+  recordDuplicateBlocked.value ? wb('notice.recordDuplicateBlocked', isZh.value) : null
+))
+
+// Duplicate / clone record (design 2026-06-16). The drawer's 复制 entry routes here; the grid declares
+// `duplicate-record` but no gesture emits it since the right-click duplicate was removed (customer feedback
+// 2026-10-27: a right-click created a row, and 「记录已复制」 read as a clipboard copy). Gated on
+// canCreateRecord (the server re-enforces it + the field-mask) and on `recordDuplicateBlocked`, then it ASKS
+// first — the copy is a new record in this sheet. On success the new clone is selected (the drawer, already
+// open, follows it) and the toast says a record was ADDED.
 async function onDuplicateRecord(recordId?: string | null) {
   const sourceId = recordId ?? selectedRecordId.value
   if (!sourceId) return
+  if (recordDuplicateBlocked.value) {
+    showError(wb('notice.recordDuplicateBlocked', isZh.value))
+    return
+  }
   if (!ensureCanCreateRecord()) return
+  if (!window.confirm(wb('confirm.duplicateRecord', isZh.value))) return
   const newRecordId = await grid.duplicateRecord(sourceId)
   if (newRecordId) {
     showSuccess(wb('toast.recordDuplicated', isZh.value))
