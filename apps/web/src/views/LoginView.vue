@@ -187,7 +187,9 @@ const text = computed(() => {
 })
 
 const dingtalkStatusMessage = computed(() => (
-  dingtalkAvailable.value ? '' : readDingTalkStatusMessage(dingtalkStatus.value)
+  dingtalkAvailable.value || dingtalkStatus.value?.configured === false
+    ? ''
+    : readDingTalkStatusMessage(dingtalkStatus.value)
 ))
 
 // #6467: when the server reports more than one missing login variable, name all of them so the
