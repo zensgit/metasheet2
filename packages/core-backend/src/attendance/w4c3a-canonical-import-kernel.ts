@@ -1,3 +1,4 @@
+import { requireAttendancePunchDetailStoredPlanBindingV1 } from './w4c3a-punch-detail-command'
 import crypto from 'node:crypto'
 
 import {
@@ -7,6 +8,7 @@ import {
 import {
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   calculateAttendanceSegmentsV1,
+  validateFrozenContextShape,
 } from './w4c1-segment-calculator'
 import {
   canonicalAttendanceJsonV1,
@@ -151,8 +153,13 @@ function parseImportPolicyOutput(value: unknown): CanonicalImportPolicyOutputV1 
   })
 }
 
-function parseImportContext(value: unknown): FrozenAttendanceContextV1 | null {
+function parseImportContext(value: unknown, punchDetail = false): FrozenAttendanceContextV1 | null {
   if (value === null) return null
+  if (punchDetail) {
+    // Match the named preparation domain; retain optional policy fields intact.
+    if (!validateFrozenContextShape(value)) throw new Error('W4C3A_IMPORT_FREEZE_INVALID')
+    return value
+  }
   const root = exactRecord(value, [
     'schemaVersion',
     'selector',
@@ -235,7 +242,7 @@ function parseImportContext(value: unknown): FrozenAttendanceContextV1 | null {
   return root as unknown as FrozenAttendanceContextV1
 }
 
-function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1): CanonicalImportFrozenTargetV1 {
+function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1, punchDetail = false): CanonicalImportFrozenTargetV1 {
   const attributionRoot = exactRecord(write.attributionSnapshot, ['schemaVersion', 'sources'])
   const policyRoot = exactRecord(write.policySnapshot, ['schemaVersion', 'sources'])
   if (
@@ -296,7 +303,7 @@ function parseCanonicalImportFreeze(write: LegacyImportRecordWritePlanV1): Canon
         workDate: write.workDate,
       },
     })
-    const context = parseImportContext(row.context)
+    const context = parseImportContext(row.context, punchDetail)
     if (
       context !== null &&
       (context.orgId !== write.orgId ||
@@ -603,6 +610,7 @@ export async function claimAttendanceCanonicalImportRegistryV1(
     identities: readonly VerifiedAttendanceOperationIdentityV1[]
   }>,
 ): Promise<AttendanceCanonicalImportRegistryClaimV1 | null> {
+  const punchDetailBinding = requireAttendancePunchDetailStoredPlanBindingV1(input.job, input.plan)
   if (
     input.plan.manifest.batch.kind === 'idempotent_replay' ||
     input.job.acceptedWritePosture === 'legacy_projection_only'
@@ -613,7 +621,7 @@ export async function claimAttendanceCanonicalImportRegistryV1(
   // inputs before the first registry read/write so a structurally invalid plan
   // cannot leave a claimed batch behind for recovery to misinterpret.
   for (const write of input.plan.recordWrites) {
-    parseCanonicalImportFreeze(write)
+    parseCanonicalImportFreeze(write, punchDetailBinding !== null)
   }
   const batchIdentity = input.identities.find((identity) => identity.kind === 'batch')
   const itemIdentities = input.identities.filter((identity) => identity.kind === 'item')
@@ -847,6 +855,7 @@ async function ensureAuthoritativeParent(
     write: LegacyImportRecordWritePlanV1
     canonical: ReturnType<typeof calculateAttendanceSegmentsV1>
     outcome: 'completed' | 'review_required'
+    punchDetailReview: boolean
   }>,
 ): Promise<void> {
   const existing = await trx.query(
@@ -858,7 +867,13 @@ async function ensureAuthoritativeParent(
   )
   if (existing.rows.length === 1) return
   if (existing.rows.length !== 0) throw new Error('W4C3A_IMPORT_PARENT_INVALID')
-  const compatibility = requireCompatibilityProjection(input.write)
+  // The new physical-event format has no daily fallback for a review. These
+  // neutral NOT NULL storage values belong only to an invisible placeholder,
+  // following the existing §7.5 parent shape; they are never a projection.
+  const compatibility = input.punchDetailReview
+    ? { status: 'normal', firstInAt: null, lastOutAt: null, workMinutes: 0,
+        lateMinutes: 0, earlyLeaveMinutes: 0, isWorkday: input.write.isWorkday === true }
+    : requireCompatibilityProjection(input.write)
   const projection =
     input.outcome === 'completed' && input.canonical.dailyProjection !== null
       ? input.canonical.dailyProjection
@@ -1009,6 +1024,8 @@ async function appendCanonicalCalculation(
     write: LegacyImportRecordWritePlanV1
     preimage: Record<string, unknown>
     identitiesBySemanticOrdinal: ReadonlyMap<number, VerifiedAttendanceOperationIdentityV1>
+    punchDetailReview: boolean
+    punchDetail: boolean
   }>,
 ): Promise<Readonly<{
   calculationId: string
@@ -1025,7 +1042,7 @@ async function appendCanonicalCalculation(
     .sort((left, right) => left.ordinal - right.ordinal)
   if (sourceItems.length === 0) throw new Error('W4C3A_IMPORT_TARGET_EVIDENCE_MISSING')
   const sourceEvidence = sourceItems.map((item) => item.rawEvidence)
-  const freeze = parseCanonicalImportFreeze(input.write)
+  const freeze = parseCanonicalImportFreeze(input.write, input.punchDetail)
   const attribution = freeze.attribution
   const context = freeze.context
   const evidence = evidenceForSources(input.job.batchId, sourceEvidence)
@@ -1042,11 +1059,12 @@ async function appendCanonicalCalculation(
     : canonical.outcomeReasonCode
   const completed = outcome === 'completed' && canonical.dailyProjection !== null
   const mode = input.job.acceptedWritePosture === 'authoritative' ? 'authoritative' : 'shadow'
-  if (mode === 'authoritative') {
+  if (mode === 'authoritative' || input.punchDetailReview) {
     await ensureAuthoritativeParent(trx, {
       write: input.write,
       canonical,
       outcome,
+      punchDetailReview: input.punchDetailReview,
     })
     if (completed) {
       await appendLegacyBaselineIfRequired(trx, {
@@ -1076,13 +1094,13 @@ async function appendCanonicalCalculation(
   if (!terminalIdentity) throw new Error('W4C3A_IMPORT_OPERATION_IDENTITY_MISSING')
   const calculationId = crypto.randomUUID()
   const projection = completed ? canonical.dailyProjection : null
-  const compatibilityProjection = requireCompatibilityProjection(input.write)
+  const compatibilityProjection = input.punchDetailReview ? null : requireCompatibilityProjection(input.write)
   const resolvedWorkDate = attribution.posture === 'resolved_v2'
     ? attribution.value.workDate
     : null
   const shadowDiff = mode === 'shadow'
     ? computeAttendanceW4ShadowDiff({
-        legacy: {
+        legacy: compatibilityProjection ? {
           workDate: input.write.workDate,
           status: compatibilityProjection.status,
           firstInAt: compatibilityProjection.firstInAt,
@@ -1090,7 +1108,7 @@ async function appendCanonicalCalculation(
           workMinutes: compatibilityProjection.workMinutes,
           lateMinutes: compatibilityProjection.lateMinutes,
           earlyLeaveMinutes: compatibilityProjection.earlyLeaveMinutes,
-        },
+        } : null,
         calculated: projection
           ? {
               workDate: resolvedWorkDate,
@@ -1140,14 +1158,14 @@ async function appendCanonicalCalculation(
       freeze.sourceDefinitionFingerprint,
       canonicalAttendanceJsonV1(attribution),
       context === null ? null : canonicalAttendanceJsonV1(context),
-      canonicalAttendanceJsonV1(context?.segments ?? []),
+      canonicalAttendanceJsonV1(input.punchDetailReview ? [] : context?.segments ?? []),
       canonicalAttendanceJsonV1(evidence),
       canonicalAttendanceJsonV1({
         provenance,
         policySnapshot: input.write.policySnapshot,
         compatibilitySnapshot: {
-          kind: 'legacy_import',
-          projection: requireCompatibilityProjection(input.write),
+          kind: input.punchDetailReview ? 'punch_events_v1' : 'legacy_import',
+          projection: compatibilityProjection,
         },
         rawEvidence: sourceEvidence,
       }),
@@ -1236,6 +1254,32 @@ export async function executeAttendanceCanonicalImportPlanV1(
   }>,
 ): Promise<unknown> {
   const startedAt = Date.now()
+  const punchDetailBinding = requireAttendancePunchDetailStoredPlanBindingV1(input.job, input.plan)
+  let punchDetailReview = false
+  if (punchDetailBinding) {
+    if (input.registryClaim === null) throw new Error('ATTENDANCE_PUNCH_DETAIL_COMMAND_MISMATCH')
+    const write = input.plan.recordWrites[0]
+    const freeze = parseCanonicalImportFreeze(write, true)
+    const raw = input.plan.items.map((item) => item.rawEvidence)
+    const canonical = calculateAttendanceSegmentsV1({
+      attribution: freeze.attribution, context: freeze.context,
+      evidence: evidenceForSources(input.job.batchId, raw), approvedFacts: [],
+    })
+    const projection = canonical.outcome === 'completed' ? canonical.dailyProjection : null
+    const expected = {
+      status: projection?.status ?? null,
+      firstInAt: projection?.firstInAt ?? null, lastOutAt: projection?.lastOutAt ?? null,
+      workMinutes: projection?.workedMinutes ?? null,
+      lateMinutes: projection?.lateMinutes ?? null, earlyLeaveMinutes: projection?.earlyLeaveMinutes ?? null,
+      isWorkday: freeze.context?.isWorkday,
+    }
+    if (typeof expected.isWorkday !== 'boolean'
+      || (Object.keys(expected) as Array<keyof typeof expected>).some((key) => write[key] !== expected[key])
+      || importedMetricConflict(raw, freeze, canonical)) {
+      throw new Error('ATTENDANCE_PUNCH_DETAIL_PROJECTION_MISMATCH')
+    }
+    punchDetailReview = projection === null
+  }
   if (input.plan.manifest.batch.kind === 'idempotent_replay') {
     return buildAttendanceLegacyAsyncJobSummaryV1({
       plan: input.plan,
@@ -1248,7 +1292,7 @@ export async function executeAttendanceCanonicalImportPlanV1(
   }
   if (input.registryClaim !== null) {
     for (const write of input.plan.recordWrites) {
-      parseCanonicalImportFreeze(write)
+      parseCanonicalImportFreeze(write, punchDetailBinding !== null)
     }
   }
   const preimages =
@@ -1257,7 +1301,7 @@ export async function executeAttendanceCanonicalImportPlanV1(
       : await captureParentPreimages(trx, input.plan)
   const groupResult = await applyAttendanceLegacyGroupEffectsV1(trx, input.plan)
   await applyAttendanceLegacyBatchEffectsV1(trx, input.plan, groupResult)
-  if (input.registryClaim === null || input.job.acceptedWritePosture === 'shadow') {
+  if (!punchDetailReview && (input.registryClaim === null || input.job.acceptedWritePosture === 'shadow')) {
     await applyAttendanceLegacyRecordEffectsV1(trx, input.plan)
   }
   if (input.registryClaim !== null) {
@@ -1287,6 +1331,8 @@ export async function executeAttendanceCanonicalImportPlanV1(
         write,
         preimage,
         identitiesBySemanticOrdinal,
+        punchDetailReview,
+        punchDetail: punchDetailBinding !== null,
       })
       Object.assign(byItem, appended.responseByOperationId)
       for (const [operationId, response] of Object.entries(appended.responseByOperationId)) {

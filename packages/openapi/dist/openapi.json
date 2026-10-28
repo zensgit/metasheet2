@@ -3346,6 +3346,547 @@
           }
         }
       },
+      "AttendanceImportPublicRequest": {
+        "description": "Absence of inputKind selects the unchanged daily-record format. A present discriminator must select the explicit punch format; invalid variants never fall back to daily parsing.",
+        "not": {
+          "required": [
+            "__punchDetailInput"
+          ]
+        },
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AttendanceImportRequest"
+              },
+              {
+                "not": {
+                  "required": [
+                    "inputKind"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "$ref": "#/components/schemas/AttendancePunchDetailImportRequest"
+          }
+        ]
+      },
+      "AttendancePunchDetailImportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "inputKind",
+          "userId",
+          "workDate",
+          "timezone",
+          "punches"
+        ],
+        "description": "Explicit physical events for one employee and attribution day, distinct from daily rows. The server additionally validates real calendar dates, IANA timezone, strictly chronological instants and alternating directions, and independently admits the target against frozen canonical policy. A leading checkout or trailing check-in remains partial. No minutes, authority, frozen context or group assignment can be supplied. Existing token requirements, organization isolation and disabled responses remain; actor identity comes from authentication.",
+        "properties": {
+          "inputKind": {
+            "type": "string",
+            "enum": [
+              "punch_events_v1"
+            ]
+          },
+          "userId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "workDate": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "punches": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "$ref": "#/components/schemas/AttendancePunchDetailEvent"
+            }
+          },
+          "orgId": {
+            "type": "string",
+            "description": "Optional selector checked against authenticated organization; never authority."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^\\s*\\S(?:[\\s\\S]{0,126}\\S)?\\s*$",
+            "description": "Trimmed to 1 through 128 characters. The accepted key, including a literal preview prefix, is preserved on replay. Preview and commit have separate command identities."
+          },
+          "commitToken": {
+            "type": "string"
+          },
+          "previewLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "description": "Limits visible event items, not retained evidence or calculation input. Defaults to the event count."
+          },
+          "returnItems": {
+            "type": "boolean",
+            "default": true
+          },
+          "itemsLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "override"
+            ]
+          }
+        }
+      },
+      "AttendancePunchDetailEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "direction",
+          "occurredAt"
+        ],
+        "properties": {
+          "direction": {
+            "type": "string",
+            "enum": [
+              "check_in",
+              "check_out"
+            ]
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+            "description": "Canonical UTC instant with exactly three fractional digits; calendar validity is checked by the server."
+          }
+        }
+      },
+      "AttendanceImportPreviewResponseData": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AttendanceImportPreviewData"
+              },
+              {
+                "not": {
+                  "required": [
+                    "inputKind"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "$ref": "#/components/schemas/AttendancePunchDetailPreviewData"
+          }
+        ]
+      },
+      "AttendancePunchDetailPreviewData": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "inputKind",
+          "eventCount",
+          "targetCount",
+          "total",
+          "rowCount",
+          "processedRows",
+          "failedRows",
+          "items",
+          "previewLimit",
+          "truncated",
+          "targets",
+          "engine",
+          "recordUpsertStrategy",
+          "csvWarnings",
+          "groupWarnings"
+        ],
+        "properties": {
+          "inputKind": {
+            "type": "string",
+            "enum": [
+              "punch_events_v1"
+            ]
+          },
+          "eventCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "targetCount": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "rowCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "processedRows": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "failedRows": {
+            "type": "integer",
+            "enum": [
+              0
+            ]
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "sourceOrdinal",
+                "direction",
+                "occurredAt"
+              ],
+              "properties": {
+                "sourceOrdinal": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "direction": {
+                  "$ref": "#/components/schemas/AttendancePunchDetailEvent/properties/direction"
+                },
+                "occurredAt": {
+                  "$ref": "#/components/schemas/AttendancePunchDetailEvent/properties/occurredAt"
+                }
+              }
+            }
+          },
+          "previewLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "userId",
+                "workDate",
+                "outcome",
+                "reasonCode",
+                "dailyProjection",
+                "segments"
+              ],
+              "properties": {
+                "userId": {
+                  "type": "string"
+                },
+                "workDate": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "completed",
+                    "review_required"
+                  ]
+                },
+                "reasonCode": {
+                  "$ref": "#/components/schemas/AttendanceW4Calculation/properties/outcomeReasonCode"
+                },
+                "dailyProjection": {
+                  "$ref": "#/components/schemas/AttendancePunchDetailDailyProjection"
+                },
+                "segments": {
+                  "type": "array",
+                  "maxItems": 3,
+                  "items": {
+                    "$ref": "#/components/schemas/AttendancePunchDetailCalculatedSegment"
+                  }
+                }
+              }
+            }
+          },
+          "engine": {
+            "type": "string"
+          },
+          "recordUpsertStrategy": {
+            "type": "string"
+          },
+          "csvWarnings": {
+            "type": "array",
+            "maxItems": 0,
+            "items": {
+              "type": "string"
+            }
+          },
+          "groupWarnings": {
+            "type": "array",
+            "maxItems": 0,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AttendancePunchDetailDailyProjection": {
+        "type": "object",
+        "nullable": true,
+        "additionalProperties": false,
+        "required": [
+          "firstInAt",
+          "lastOutAt",
+          "workedMinutes",
+          "lateMinutes",
+          "earlyLeaveMinutes",
+          "status",
+          "timezone",
+          "workDate",
+          "meta"
+        ],
+        "description": "Null for review_required. Physical worked minutes come from the frozen calculation, not a first/last daily envelope.",
+        "properties": {
+          "firstInAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastOutAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "workedMinutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lateMinutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "earlyLeaveMinutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "late",
+              "early_leave",
+              "late_early",
+              "partial",
+              "absent",
+              "adjusted",
+              "off"
+            ]
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "workDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "meta": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          }
+        }
+      },
+      "AttendancePunchDetailCalculatedSegment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "segmentIndex",
+          "expectedStartAt",
+          "expectedEndAt",
+          "expectedStartOffsetMinutes",
+          "expectedEndOffsetMinutes",
+          "expectedStartFold",
+          "expectedEndFold",
+          "actualInAt",
+          "actualOutAt",
+          "workedMinutes",
+          "lateMinutes",
+          "earlyLeaveMinutes",
+          "overtimeExtensionMinutes",
+          "excusedByLeave",
+          "status",
+          "reasons",
+          "matchedEvidenceRefs",
+          "unmatchedEvidenceRefs"
+        ],
+        "description": "Frozen calculator projection; names differ from persisted calculation-detail segment DTOs.",
+        "properties": {
+          "segmentIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "expectedStartAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expectedEndAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expectedStartOffsetMinutes": {
+            "type": "integer"
+          },
+          "expectedEndOffsetMinutes": {
+            "type": "integer"
+          },
+          "expectedStartFold": {
+            "type": "string",
+            "enum": [
+              "unique",
+              "fold_earlier",
+              "fold_later"
+            ]
+          },
+          "expectedEndFold": {
+            "type": "string",
+            "enum": [
+              "unique",
+              "fold_earlier",
+              "fold_later"
+            ]
+          },
+          "actualInAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "actualOutAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "workedMinutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lateMinutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "earlyLeaveMinutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "overtimeExtensionMinutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "excusedByLeave": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AttendanceW4CalculationSegment/properties/status"
+          },
+          "reasons": {
+            "$ref": "#/components/schemas/AttendanceW4CalculationSegment/properties/statusReasons"
+          },
+          "matchedEvidenceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unmatchedEvidenceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AttendanceImportCommitResponseData": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AttendanceImportResult"
+              },
+              {
+                "not": {
+                  "required": [
+                    "inputKind"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "$ref": "#/components/schemas/AttendancePunchDetailImportResult"
+          }
+        ]
+      },
+      "AttendancePunchDetailImportResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AttendanceImportResult"
+          },
+          {
+            "type": "object",
+            "required": [
+              "inputKind",
+              "eventCount",
+              "targetCount"
+            ],
+            "properties": {
+              "inputKind": {
+                "type": "string",
+                "enum": [
+                  "punch_events_v1"
+                ]
+              },
+              "eventCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "targetCount": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            }
+          }
+        ]
+      },
       "AttendanceImportJob": {
         "type": "object",
         "properties": {
@@ -3422,7 +3963,19 @@
             "nullable": true
           },
           "preview": {
-            "$ref": "#/components/schemas/AttendanceImportPreviewData"
+            "description": "Verified preview only after completion; null while unavailable. Named previews retain all frozen events even when visible items are limited.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AttendanceImportPreviewResponseData"
+              },
+              {
+                "type": "object",
+                "nullable": true,
+                "enum": [
+                  null
+                ]
+              }
+            ]
           },
           "startedAt": {
             "type": "string",
@@ -26632,6 +27185,7 @@
       "x-plugin": "plugin-attendance",
       "post": {
         "summary": "Preview attendance import",
+        "description": "Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced.",
         "security": [
           {
             "bearerAuth": []
@@ -26642,7 +27196,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceImportRequest"
+                "$ref": "#/components/schemas/AttendanceImportPublicRequest"
               }
             }
           }
@@ -26659,7 +27213,7 @@
                       "type": "boolean"
                     },
                     "data": {
-                      "$ref": "#/components/schemas/AttendanceImportPreviewData"
+                      "$ref": "#/components/schemas/AttendanceImportPreviewResponseData"
                     }
                   }
                 }
@@ -26674,6 +27228,32 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "Frozen target or canonical context does not match the named command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Values-free import failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -26682,6 +27262,7 @@
       "x-plugin": "plugin-attendance",
       "post": {
         "summary": "Enqueue attendance import preview async job",
+        "description": "Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced. The existing async disabled response remains 404. Submission returns a job; current authorization is checked again when processing or reading its result. A named preview freezes its complete calculation without committing attendance records. Exact retries reuse the original job and key; changed command or preview limit returns 409.",
         "security": [
           {
             "bearerAuth": []
@@ -26692,7 +27273,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceImportRequest"
+                "$ref": "#/components/schemas/AttendanceImportPublicRequest"
               }
             }
           }
@@ -26727,6 +27308,32 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "Frozen target or canonical context does not match the named command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Values-free import failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -26735,6 +27342,7 @@
       "x-plugin": "plugin-attendance",
       "post": {
         "summary": "Commit attendance import",
+        "description": "Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced.",
         "security": [
           {
             "bearerAuth": []
@@ -26745,7 +27353,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceImportRequest"
+                "$ref": "#/components/schemas/AttendanceImportPublicRequest"
               }
             }
           }
@@ -26762,7 +27370,7 @@
                       "type": "boolean"
                     },
                     "data": {
-                      "$ref": "#/components/schemas/AttendanceImportResult"
+                      "$ref": "#/components/schemas/AttendanceImportCommitResponseData"
                     }
                   }
                 }
@@ -26777,6 +27385,32 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "Frozen target or canonical context does not match the named command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Values-free import failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -26785,6 +27419,7 @@
       "x-plugin": "plugin-attendance",
       "post": {
         "summary": "Enqueue attendance import commit async job",
+        "description": "Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced. The existing async disabled response remains 404. Submission returns a job; current authorization is checked again when processing or reading its result.",
         "security": [
           {
             "bearerAuth": []
@@ -26795,7 +27430,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceImportRequest"
+                "$ref": "#/components/schemas/AttendanceImportPublicRequest"
               }
             }
           }
@@ -26830,6 +27465,32 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "Frozen target or canonical context does not match the named command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Values-free import failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
