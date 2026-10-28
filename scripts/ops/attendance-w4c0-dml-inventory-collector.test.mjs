@@ -856,6 +856,7 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
       'attendance_import_legacy_execution_plan_chunks',
       'attendance_import_legacy_execution_plans',
       'attendance_import_legacy_terminal_responses',
+      'attendance_import_punch_preview_records',
       'attendance_import_rollback_closures',
       'attendance_import_rollback_commands',
       'attendance_import_rollback_restore_witnesses',
@@ -890,6 +891,7 @@ test('P25: the closed import/integration set has explicit family and non-authori
     'attendance_import_legacy_execution_plan_chunks',
     'attendance_import_legacy_execution_plans',
     'attendance_import_legacy_terminal_responses',
+    'attendance_import_punch_preview_records',
     'attendance_import_records_stage',
     'attendance_import_template_prefs',
     'attendance_import_tokens',
@@ -1028,7 +1030,7 @@ test('P25: generated runtime call-path census classifies every closed-table read
   const { sites } = buildP25CallPathCensus(source)
   const result = classifyP25CallPathSites(sites)
 
-  assert.equal(sites.length, 112, 'the current generated P25 read/write inventory must remain explicit')
+  assert.equal(sites.length, 127, 'the current generated P25 read/write inventory must remain explicit')
   assert.deepEqual(result.unclassified, [], 'a new P25 table/site or renamed wrapper must not inherit a broad allowlist')
   assert.deepEqual(result.countDrift, [], 'an extra P25 access in an existing wrapper must require an explicit classification')
   assert.deepEqual(result.stale, [], 'removing a P25 access must retire its classification deliberately')
@@ -1756,4 +1758,88 @@ test('approved OT calculation claims bind immutable history counts without grant
     assert.equal(classifyAttendanceCalculationReadSites([...sites, ...neighbor], decisions).unclassified.length, 1)
     assert.equal(classifyAttendanceCalculationReadSites([{ ...own[0], relPath: decision.relPath + '.neighbor' }]).unclassified.length, 1)
   }
+})
+
+test('P25 punch-preview: immutable transport stays canonical and cannot widen legacy identity adapters', () => {
+  const table = 'attendance_import_punch_preview_records'
+  assert.equal(TABLE_BUCKETS[table], 'w4_canonical')
+  const spec = P25_OPERATIONAL_TABLE_SPECS[table]
+  assert.equal(spec.family, 'durable_punch_preview')
+  assert.equal(spec.authorityClass, 'compatibility_transport')
+  assert.equal(spec.reservedIdentityTransport, true)
+  assert.deepEqual(spec.allowedIdentityAdapters, ['punch_preview_enqueue', 'punch_preview_worker'])
+  assert.deepEqual(spec.forbiddenAuthorityRoles, P25_FORBIDDEN_AUTHORITY_ROLES)
+  for (const role of P25_FORBIDDEN_AUTHORITY_ROLES) {
+    assert.throws(() => assertP25Use({ table, role, adapter: 'punch_preview_worker' }),
+      (error) => error.code === 'ATTENDANCE_P25_OPERATIONAL_AUTHORITY_FORBIDDEN')
+  }
+  for (const adapter of ['punch_preview_enqueue', 'punch_preview_worker']) {
+    assert.equal(classifyP25Use({ table, role: 'compatibility_transport', adapter }).allowed, true)
+    for (const legacy of ['attendance_import_jobs', 'attendance_import_legacy_execution_plans',
+      'attendance_import_legacy_execution_plan_chunks', 'attendance_import_legacy_terminal_responses']) {
+      assert.throws(() => assertP25Use({ table: legacy, role: 'identity_transport', adapter }),
+        (error) => error.code === 'ATTENDANCE_P25_NON_WORKER_JOB_IDENTITY_FORBIDDEN')
+    }
+  }
+  for (const adapter of ['enqueue', 'private_worker', 'sync', 'legacy_import', 'integration_sync', 'rollback']) {
+    assert.throws(() => assertP25Use({ table, role: 'compatibility_transport', adapter }),
+      (error) => error.code === 'ATTENDANCE_P25_NON_WORKER_JOB_IDENTITY_FORBIDDEN')
+  }
+  const outside = scanFileForDmlSites('plugins/plugin-attendance/preview-bypass.cjs',
+    "async function bypass() { await db.query('INSERT INTO attendance_import_punch_preview_records (job_id) VALUES ($1)', [id]) }")
+  const classified = classifyCensus(outside)
+  assert.equal(classified.outsideBoundarySites.length, 1)
+  assert.equal(classified.outsideBoundarySites[0].table, table)
+})
+
+test('P25 punch-preview: exact transport sites reject missing entries, extra accesses and borrowed adapter paths', () => {
+  const table = 'attendance_import_punch_preview_records'
+  const files = [
+    'packages/core-backend/src/attendance/w4c3a-punch-detail-preview-host.ts',
+    'packages/core-backend/src/attendance/w4c3a-punch-detail-preview-job-host.ts',
+    'packages/core-backend/src/db/migrations/zzzz20261028103000_attendance_punch_preview_records.ts',
+  ]
+  const sites = files.flatMap((relPath) => scanFileForP25CallPathSites(relPath,
+    fs.readFileSync(path.join(rootDir, relPath), 'utf8'))).filter((site) => site.table === table)
+  const entries = P25_CALL_PATH_CLASSIFICATIONS.filter((entry) => entry.table === table)
+  assert.deepEqual(sites.map((site) => [site.relPath, site.enclosingSymbol, site.access, site.verb]).sort(), [
+    [files[0], 'execute', 'read', 'select'],
+    [files[0], 'execute', 'write', 'insert'],
+    [files[1], 'execute', 'read', 'select'],
+    [files[1], 'execute', 'read', 'select'],
+    [files[2], 'up', 'read', 'select'],
+    [files[2], 'down', 'read', 'select'],
+  ].sort())
+  const classified = classifyP25CallPathSites(sites, entries)
+  assert.deepEqual(classified.unclassified, [])
+  assert.deepEqual(classified.countDrift, [])
+  assert.deepEqual(classified.stale, [])
+  assert.equal(classified.classifiedSites.length, 6)
+  const runtime = entries.find((entry) => entry.access === 'write')
+  assert.ok(runtime)
+  const absent = classifyP25CallPathSites(sites, entries.filter((entry) => entry !== runtime))
+  assert.equal(absent.unclassified.length, 1)
+  const added = classifyP25CallPathSites([...sites, sites.find((site) => site.access === 'write')], entries)
+  assert.equal(added.unclassified.length, 1)
+  assert.equal(added.countDrift.length, 1)
+  const moved = { ...runtime, relPath: 'plugins/plugin-attendance/borrowed-preview-adapter.cjs' }
+  assert.throws(() => classifyP25CallPathSites([], [moved]),
+    (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN')
+  assert.throws(() => classifyP25CallPathSites([], [{ ...runtime, adapter: 'private_worker' }]),
+    (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN')
+})
+
+test('P25 punch-preview: transport alias cannot borrow a canonical identity adapter path', () => {
+  const entry = P25_CALL_PATH_CLASSIFICATIONS.find((entry) =>
+    entry.table === 'attendance_import_punch_preview_records' && entry.access === 'write')
+  assert.ok(entry)
+  const alias = { ...entry, role: 'transport' }
+  assert.equal(classifyP25CallPathSites([alias], [alias]).classifiedSites.length, 1)
+  const borrowed = { ...alias, relPath: 'packages/core-backend/src/attendance/w4c3a-preview-borrowed.ts' }
+  assert.throws(() => classifyP25CallPathSites([borrowed], [borrowed]),
+    (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN')
+  const token = P25_CALL_PATH_CLASSIFICATIONS.find((entry) =>
+    entry.relPath === 'plugins/plugin-attendance/lib/attendance-import-token-consumer.cjs')
+  assert.ok(token)
+  assert.equal(classifyP25CallPathSites([token], [token]).classifiedSites.length, 1)
 })

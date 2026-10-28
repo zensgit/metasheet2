@@ -25,7 +25,7 @@ The complete finite local delivery audit covers 111 implementation/test/contract
 | Counterfactuals | Fold/evidence, command, preview, authorization, queue, token and typed-review guards have matching failures followed by exact restore | Harness/setup failures excluded |
 | OpenAPI | All four request/response variants, generated artifacts, 20 distinct contract cases across phases; build/SDK/guard/security checks passed | Runtime validates formats/order/timezones |
 | Quality/review | Affected types and validate:all passed; later test-only changes have exact source applicability; lint introduced0; independent finite audit found no remaining local implementation gate | Existing diagnostics retained; not a fresh whole-suite run |
-| Draft/current-head CI | Pending publication and actual checks | Local green is not CI green |
+| Draft/current-head CI | Draft #6630 published; initial backend inventory failure repaired locally; new-head CI remains pending | Local green is not CI green |
 
 ## Latest review-family phases
 
@@ -66,3 +66,22 @@ Down requires a runner-owned READ COMMITTED transaction, locks both job/preview 
 ## Independent boundaries
 
 Draft/HOLD only: no merge, deployment, R71, tag/release, feature enablement or provider writes. Correction/CALC14, real Redis/live transport, owner/manual/business acceptance and the R77 organization package remain independent. The R77 package still waits for its exact target build commit. This finite slice does not claim all EP01 callers, all DingTalk business acceptance, ordinary-reader HTTP list acceptance, every database table/SQL effect, or real-provider delivery.
+
+
+## CI inventory registration follow-up
+
+The initial published head's backend failed the explicit inventory gate: 67 assertions passed and two failed. The new preview-record table lacked classification, and nine new accesses to existing P25 tables had not entered the closed call-path ledger. Later core/native stages did not execute. Raw failed-job log: 724573 bytes, SHA-256 `6d03d0d35acb56d246481991dd9c801934154abad0e7152b86c97925d2174ba5`.
+
+The repair registers immutable preview records as canonical-boundary storage with non-authority transport semantics. The exact ledger is now 127 sites: the prior112, nine accesses to existing families, and six accesses to the new preview table. Preview enqueue/worker transport paths are exact; existing durable V1 job/plan adapter lists remain unchanged. Reserved transport aliases now receive the same exact-path check, without applying that restriction to ordinary token/staging transport. No runtime, migration, workflow, dependency or flag changed in this follow-up.
+
+Independent review found the second canonical-table closed-set expectation and the reserved transport alias counterexample. Both failed as named before correction. The final affected selection passed10 assertions, with62 filtered; this is not a fresh whole72 run. Earlier new-guard positives passed2, and separate bucket-demotion/path-removal counterfactuals each produced one matching failure. Repeated phases are not additional unique cases.
+
+One intervening local census attempt included13 retained generated worker bundles under a scanned package directory. That attempt was stopped without pass credit. All26 generated bundle/manifest files were preserved byte-for-byte outside the package scan; collector exclusions and source budgets were not relaxed. The final selection used the restored source without those noncommitted execution artifacts.
+
+Explicit same-path/same-config baseline/current lint retained six prior diagnostics and introduced none. Previous production types/validate:all evidence remains source-applicable because only inventory scripts/tests and this note changed; those passing production suites were not repeated.
+
+```sh
+node --test --test-reporter=tap --test-name-pattern='^(exact-head HEAD scan:|the three scheduled-run tables are w4_canonical|P25: (the closed import/integration set|generated runtime call-path census|durable legacy V1|non-worker adapters)|P25 mutation: removing the private-worker boundary|P25 punch-preview:)' scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
+```
+
+Evidence receipts: ci-inventory-reviewed-validation-state.json, ci-inventory-quality-state.json, ci-inventory-generated-bundle-relocation.json and the bounded independent inventory review. New-head required CI and actual full target execution remain separate final gates.
