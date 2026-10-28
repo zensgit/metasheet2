@@ -18,6 +18,8 @@ on:
   merge_group:
   pull_request:
     paths:
+      - 'apps/web/src/approvals/permissions.ts'
+      - 'apps/web/tests/approval-permissions.spec.ts'
       - 'apps/web/src/approvals/conditionEdit.ts'
       - 'apps/web/src/approvals/parallelEdit.ts'
       - 'apps/web/src/approvals/ccEdit.ts'
@@ -528,6 +530,8 @@ on:
   push:
     branches: [main]
     paths:
+      - 'apps/web/src/approvals/permissions.ts'
+      - 'apps/web/tests/approval-permissions.spec.ts'
       - 'apps/web/src/approvals/conditionEdit.ts'
       - 'apps/web/src/approvals/parallelEdit.ts'
       - 'apps/web/src/approvals/ccEdit.ts'

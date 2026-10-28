@@ -14,6 +14,7 @@ describe('approval permission grants follow the decision route', () => {
     { name: 'approval wildcard', codes: ['approvals:*'], roles: [], expected: [true, true, true, false] },
     { name: 'global wildcard', codes: ['*:*'], roles: [], expected: [true, true, true, true] },
     { name: 'administrator role without codes', codes: [], roles: ['admin'], expected: [true, true, true, true] },
+    { name: 'template manager exact grant', codes: ['approval-templates:manage'], roles: [], expected: [false, false, false, true] },
     { name: 'template wildcard stays in its resource', codes: ['approval-templates:*'], roles: [], expected: [false, false, false, true] },
     { name: 'unrelated wildcard', codes: ['attendance:*'], roles: [], expected: [false, false, false, false] },
     { name: 'approval admin code is not a wildcard', codes: ['approvals:admin'], roles: [], expected: [false, false, false, false] },
