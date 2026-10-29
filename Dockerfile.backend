@@ -10,6 +10,7 @@ COPY packages ./packages
 COPY plugins ./plugins
 COPY apps ./apps
 COPY scripts ./scripts
+COPY vendor ./vendor
 
 ENV CI=true
 RUN pnpm install --frozen-lockfile --shamefully-hoist
