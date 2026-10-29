@@ -23,6 +23,11 @@ import {
   MultitableRecordVersionConflictError,
 } from './record-errors'
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
+import {
+  assertPlmRowDeletable,
+  fieldsCarryExactStockPreparationStanza,
+  normalizePlmRowData,
+} from './plm-row-delete-guard'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
   assertTransactionalQuery,
@@ -65,6 +70,8 @@ export {
   MultitableRecordVersionConflictError,
 } from './record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './side-door-delete-trash'
+// R-66: the typed refusal a plugin-SDK delete of a PLM row throws (code RECORD_DELETE_REFUSED_PLM_ROW, status 409).
+export { PlmRowDeleteRefusedError as MultitablePlmRowDeleteRefusedError } from './plm-row-delete-guard'
 export {
   buildRecordsCacheKey,
   decodeRecordCursor,
@@ -981,11 +988,22 @@ export async function deleteRecord(
   input: DeleteMultitableRecordInput,
 ): Promise<DeletedMultitableRecord> {
   const query = input.query
-  await loadSheetAndFields(query, input.sheetId)
+  const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   // Record-lock guard (rank-8 review M1; decision d). Actor-less plugin path → a locked record cannot
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
+
+  // R-66 ① (owner 2026-10-28, plm-row-delete-guard.ts): a PLM row on a stock-preparation template sheet is
+  // refused here too — the plugin-scoped generic wrapper, the unscoped host SDK and every other SDK caller land in
+  // this function, before EITHER the D-1 or the D-2 branch. The stock-preparation pull never deletes (ADD / UPDATE
+  // / INACTIVE only), so no plugin flow is affected. The overview port's sheet carries only its own namespace
+  // (no exact `stockPreparation` stanza): the in-memory sheet half says no and NO statement is issued for it.
+  if (fieldsCarryExactStockPreparationStanza(fields)) {
+    const rowRes = await query('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [input.recordId, input.sheetId])
+    const row = (rowRes.rows as Array<{ data?: unknown }>)[0]
+    if (row) await assertPlmRowDeletable(query, input.sheetId, fields, normalizePlmRowData(row.data))
+  }
 
   const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
     query,

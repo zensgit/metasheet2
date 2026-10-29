@@ -254,8 +254,20 @@
           <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
                though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
                host — see this class's own style rule below for the current (menu-row) styling. -->
-          <hr v-if="resolvedCanDelete" class="meta-record-drawer__menu-separator" />
+          <hr v-if="resolvedCanDelete || deleteBlockedReason" class="meta-record-drawer__menu-separator" />
           <MtMenuItem v-if="resolvedCanDelete" class="meta-record-drawer__btn--danger" @select="emit('delete')">{{ l('record.delete') }}</MtMenuItem>
+          <!-- R-66: a PLM row (rowActions.deleteBlockedReason, server-derived) cannot be deleted by anyone; the entry
+               stays visible but DISABLED with the reason inline, and it emits nothing (the route refuses anyway). -->
+          <MtMenuItem
+            v-else-if="deleteBlockedReason"
+            class="meta-record-drawer__btn--danger"
+            data-testid="record-inspector-delete-blocked"
+            :disabled="true"
+            :title="deleteBlockedReason"
+          >{{ l('record.delete') }}<span
+            class="meta-record-drawer__menu-reason"
+            data-testid="record-inspector-delete-blocked-reason"
+          >{{ deleteBlockedReason }}</span></MtMenuItem>
         </MtMenu>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
@@ -620,6 +632,7 @@ import {
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { workbenchLabel } from '../utils/workbench-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   canEditField,
@@ -1475,6 +1488,12 @@ const currentRecordIndex = computed(() => {
 const canLoadSubscription = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
 const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
+// R-66: the reason text for a PLM row's disabled delete entry (zh = the server's refusal copy verbatim).
+const deleteBlockedReason = computed(() => (
+  !resolvedCanDelete.value && props.rowActions?.deleteBlockedReason === 'plm_row'
+    ? workbenchLabel('notice.plmRowDeleteBlocked', isZh.value)
+    : null
+))
 const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(props.commentPresence))
 const drawerCommentButtonClass = computed(() =>
   resolveCommentAffordanceStateClass('meta-record-drawer__btn--comment', drawerCommentAffordance.value),
