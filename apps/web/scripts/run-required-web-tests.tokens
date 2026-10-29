@@ -5,6 +5,7 @@
 # `vitest run` logical line in apps/web/scripts/run-required-web-tests.sh — not only its final `exec` line.
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
+adminAccess
 adminPageContentSearch.spec.ts
 amountAutoSum
 approval-amount-in-words
@@ -232,6 +233,8 @@ IntegrationRunDetail
 IntegrationStockPrepPanel
 IntegrationWorkbenchView
 lineDerivation
+localOrganizationClient
+localOrganizationView
 LoginView.spec.ts
 meta-ai-bulk-labels
 meta-api-error-labels
@@ -621,6 +624,7 @@ useAttendanceRequestTimezone
 useAutoSumTotal
 useDingTalkPersonRecipientStatus
 usePlmExportActions
+userApprovalRelations
 userManagementRoleMembership
 userManagementView
 uuid-no-bare-randomuuid
