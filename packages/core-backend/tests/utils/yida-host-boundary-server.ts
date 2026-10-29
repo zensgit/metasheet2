@@ -15,6 +15,7 @@ import { Pool } from 'pg'
 import { vi } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import type { createYidaInitializationRuntime } from '../../src/integration/yida-initialization-runtime'
+import type { createYidaConnectionTestRuntime } from '../../src/integration/yida-connection-test-runtime'
 import type { createYidaOwnerRuntime } from '../../src/integration/yida-owner-runtime'
 
 export const CORE_PLUGIN = 'plugin-integration-core'
@@ -22,10 +23,11 @@ export const FIXTURE_PLUGIN = 'plugin-integration-core-shadow'
 const FIXTURE_KEY = Symbol.for('metasheet.test.yida-host-boundary.fixture')
 // Keys this harness overrides; every one is restored (or deleted again) by cleanup().
 // RBAC_BYPASS is not listed: no module under src/ reads it, so overriding it proves nothing.
-const ENV_KEYS = ['SKIP_PLUGINS', 'PORT', 'RBAC_TOKEN_TRUST', 'JWT_SECRET', 'INTEGRATION_YIDA_OWNER_SEND_ENABLED'] as const
+const ENV_KEYS = ['SKIP_PLUGINS', 'PORT', 'RBAC_TOKEN_TRUST', 'JWT_SECRET', 'INTEGRATION_YIDA_OWNER_SEND_ENABLED',
+  'INTEGRATION_YIDA_CONNECTION_TEST_ENABLED'] as const
 const WINDOW_MS = 2000
 
-export type FixtureObservation = Readonly<{ called: boolean; securityType: string; owner: unknown; init: unknown }>
+export type FixtureObservation = Readonly<{ called: boolean; securityType: string; owner: unknown; init: unknown; probe: unknown }>
 export type HostActor = Readonly<{ actorId: string; tenantId: string; workspaceId: null }>
 export type HostUser = Readonly<{ id: string; token: string }>
 export type HttpResult = Readonly<{ status: number; headers: IncomingHttpHeaders; body: Record<string, unknown> }>
@@ -36,6 +38,7 @@ export type HostPrivate = {
   pluginLoader: { getPlugins(): Map<string, unknown> }
   yidaOwnerRuntime: ReturnType<typeof createYidaOwnerRuntime>
   yidaInitializationRuntime: ReturnType<typeof createYidaInitializationRuntime>
+  yidaConnectionTestRuntime: ReturnType<typeof createYidaConnectionTestRuntime>
 }
 export type YidaHostBoundaryHarness = Readonly<{
   server: MetaSheetServer
@@ -103,7 +106,7 @@ async function writeFixturePlugin(root: string): Promise<string> {
     '  async activate(context) {',
     '    const services = (context && context.services) || {}',
     '    globalThis[key] = Object.freeze({ called: true, securityType: typeof services.security,',
-    '      owner: services.yidaOwnerRuntime, init: services.yidaInitializationRuntime })',
+    '      owner: services.yidaOwnerRuntime, init: services.yidaInitializationRuntime, probe: services.yidaConnectionTestRuntime })',
     '  },',
     '  async deactivate() {},',
     '}',
@@ -190,6 +193,7 @@ export async function bootYidaHostBoundaryServer(): Promise<YidaHostBoundaryHarn
     process.env.RBAC_TOKEN_TRUST = 'false'
     process.env.JWT_SECRET = randomBytes(32).toString('hex')
     delete process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED
+    delete process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED
     // Installed before import AND construction: the host binds globalThis.fetch into the owner
     // runtime inside its constructor, so the runtime can only ever reach this refusing stub.
     globalThis.fetch = (async () => {

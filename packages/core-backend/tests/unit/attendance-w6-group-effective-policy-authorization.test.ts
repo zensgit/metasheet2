@@ -1112,8 +1112,8 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 52
-  const FROZEN_SAFE_HASH = 'c49ccdbf816cf4bab931ba3af632f60658e8fd03971eeddc1c3d623367afa21e'
+  const FROZEN_SAFE_COUNT = 53
+  const FROZEN_SAFE_HASH = '423675b2e6f10b140eb4d128b587800a742a25e1fc88656ada4e54a23a36c58c'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
@@ -1163,6 +1163,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#1",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#2",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.yidaConnectionTestRuntime//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.yidaInitializationRuntime//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.yidaOwnerRuntime//#0",
       "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>ArrowFunction>Block>TryStatement>Block>ExpressionStatement>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginLoader//#0",
@@ -1214,7 +1215,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
-    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 52, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 53, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
       for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
@@ -1237,7 +1238,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(mpart.unknown.some((o) => o.shape === 'bare')).toBe(true)
     })
 
-    it.each(['yidaOwnerRuntime', 'yidaInitializationRuntime'])(
+    it.each(['yidaOwnerRuntime', 'yidaInitializationRuntime', 'yidaConnectionTestRuntime'])(
       'a new use of the registered %s still lands in UNKNOWN rather than inheriting a property-name exemption',
       (property) => {
         const marker = 'private setupMiddleware(): void {'

@@ -79,6 +79,9 @@ export default defineConfig({
       // files in the same EXPECT_DB plugin-tests step as the YiDa real-DB proofs above.
       'tests/integration/yida-host-boundaries-realdb.test.ts',
       'tests/integration/yida-host-initialization-barrier-realdb.test.ts',
+      // Owner-run connection test (ADR adr-yida-connection-test-20261028): same step, whole files.
+      'tests/integration/yida-host-connection-test-realdb.test.ts',
+      'tests/integration/yida-connection-test-http-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.

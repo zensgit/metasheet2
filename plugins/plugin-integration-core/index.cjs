@@ -106,6 +106,7 @@ let stockPreparationSqlServerRuntime = null
 let stockPreparationRuntimeDatabase = null
 let stopYidaOwnerRuntime = null
 let stopYidaInitializationRuntime = null
+let stopYidaConnectionTestRuntime = null
 
 function buildCapabilityStatus() {
   return {
@@ -597,6 +598,23 @@ module.exports = {
         stopYidaInitializationRuntime = handle.stop.bind(handle)
       } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE') }
     }
+    // Owner-run token-only 测试连接 (ADR adr-yida-connection-test-20261028). Fails SOFT: a missing or
+    // refused probe binding leaves only this capability inactive (the host route then answers 503
+    // YIDA_CONNECTION_TEST_INACTIVE) and never takes the integration plugin down.
+    const yidaConnectionTestRuntime = context.services && context.services.yidaConnectionTestRuntime
+    if (yidaConnectionTestRuntime !== undefined) {
+      try {
+        if (!yidaConnectionTestRuntime || typeof yidaConnectionTestRuntime.activate !== 'function') {
+          throw new Error('YIDA_CONNECTION_TEST_RUNTIME_UNAVAILABLE')
+        }
+        const { createYidaConnectionProbeBinding } = require('./lib/yida-connection-probe.cjs')
+        const handle = await yidaConnectionTestRuntime.activate(createYidaConnectionProbeBinding())
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_CONNECTION_TEST_RUNTIME_UNAVAILABLE')
+        stopYidaConnectionTestRuntime = handle.stop.bind(handle)
+      } catch {
+        if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] YIDA_CONNECTION_TEST_RUNTIME_INACTIVE`)
+      }
+    }
   },
 
   async deactivate() {
@@ -605,6 +623,15 @@ module.exports = {
     // Latch the private runtimes before the legacy read drain's first await. A stopped
     // owner request retains actual pending work, so observe its rejection now
     // but await the original drain before any plugin DB is closed below.
+    let yidaConnectionTestDrain, connectionTestStopFailed = false
+    if (stopYidaConnectionTestRuntime) {
+      const stop = stopYidaConnectionTestRuntime
+      stopYidaConnectionTestRuntime = null
+      try {
+        yidaConnectionTestDrain = stop()
+        void yidaConnectionTestDrain.catch(() => {})
+      } catch { connectionTestStopFailed = true }
+    }
     let yidaInitializationDrain, initializationStopFailed = false
     if (stopYidaInitializationRuntime) {
       const stop = stopYidaInitializationRuntime
@@ -629,6 +656,10 @@ module.exports = {
     if (initializationStopFailed) throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE')
     if (yidaInitializationDrain) {
       try { await yidaInitializationDrain } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE') }
+    }
+    if (connectionTestStopFailed) throw new Error('YIDA_CONNECTION_TEST_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaConnectionTestDrain) {
+      try { await yidaConnectionTestDrain } catch { throw new Error('YIDA_CONNECTION_TEST_RUNTIME_STOP_UNAVAILABLE') }
     }
     if (stockPreparationRuntimeDatabase) {
       try {

@@ -45,9 +45,9 @@ function repoPluginNames(): string[] {
 }
 
 describe('YiDa host capability injection scoping', () => {
-  it('injects both YiDa capabilities into plugin-integration-core', () => {
+  it('injects all three YiDa capabilities into plugin-integration-core', () => {
     const services = servicesFor('plugin-integration-core')
-    for (const key of ['yidaOwnerRuntime', 'yidaInitializationRuntime']) {
+    for (const key of ['yidaOwnerRuntime', 'yidaInitializationRuntime', 'yidaConnectionTestRuntime']) {
       const capability = services[key] as { activate?: unknown } | undefined
       expect(capability, key).toBeDefined()
       expect(typeof capability?.activate, key).toBe('function')
@@ -62,15 +62,16 @@ describe('YiDa host capability injection scoping', () => {
     'plugin-integration-core ',
     'plugin-integration',
     'plugin-some-other',
-  ])('withholds both YiDa capabilities from %j', name => {
+  ])('withholds all three YiDa capabilities from %j', name => {
     const services = servicesFor(name)
     // Positive control: the same context builder did produce the shared services.
     expect(typeof services.security).toBe('object')
     expect(services.yidaOwnerRuntime).toBeUndefined()
     expect(services.yidaInitializationRuntime).toBeUndefined()
+    expect(services.yidaConnectionTestRuntime).toBeUndefined()
   })
 
-  it('withholds both YiDa capabilities from every other plugin the repo ships', () => {
+  it('withholds all three YiDa capabilities from every other plugin the repo ships', () => {
     const names = repoPluginNames()
     // Not vacuous: the scan found the core plugin and at least one real other plugin.
     expect(names).toContain('plugin-integration-core')
@@ -79,16 +80,19 @@ describe('YiDa host capability injection scoping', () => {
       const services = servicesFor(name)
       expect(typeof services.security, name).toBe('object')
       return services.yidaOwnerRuntime !== undefined || services.yidaInitializationRuntime !== undefined
+        || services.yidaConnectionTestRuntime !== undefined
     })
     expect(holders).toEqual(['plugin-integration-core'])
   })
 })
 
-it('registers both host-boundary real-PG proofs in the EXPECT_DB lane and excludes them from the no-DB runner', () => {
+it('registers the host-boundary and connection-test real-PG proofs in the EXPECT_DB lane and excludes them from the no-DB runner', () => {
   const root = path.resolve(__dirname, '..', '..', '..', '..')
   const specs = [
     'tests/integration/yida-host-boundaries-realdb.test.ts',
     'tests/integration/yida-host-initialization-barrier-realdb.test.ts',
+    'tests/integration/yida-host-connection-test-realdb.test.ts',
+    'tests/integration/yida-connection-test-http-realdb.test.ts',
   ]
   const workflow = yaml.load(readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8')) as {
     jobs: { test: { steps: Array<{ id?: string; if?: string; env?: Record<string, string>; run?: string; 'continue-on-error'?: unknown }> } }
@@ -122,4 +126,26 @@ it('registers both host-boundary real-PG proofs in the EXPECT_DB lane and exclud
   }
   visit(config)
   for (const spec of specs) expect(excluded.has(spec), spec).toBe(true)
+})
+
+it('the host reads its own default-OFF connection-test switch (exact literal), never the send switch', () => {
+  const server = new MetaSheetServer({ port: 0, host: '127.0.0.1' })
+  const runtime = (server as unknown as { yidaConnectionTestRuntime: { connectionTestEnabled(): boolean } }).yidaConnectionTestRuntime
+  const saved = { test: process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED, send: process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED }
+  try {
+    delete process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED
+    process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED = 'true'
+    expect(runtime.connectionTestEnabled()).toBe(false)
+    for (const value of ['false', 'TRUE', ' true', 'true ', '1']) {
+      process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED = value
+      expect(runtime.connectionTestEnabled(), value).toBe(false)
+    }
+    process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED = 'true'
+    delete process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED
+    expect(runtime.connectionTestEnabled()).toBe(true)
+  } finally {
+    for (const [key, value] of [['INTEGRATION_YIDA_CONNECTION_TEST_ENABLED', saved.test], ['INTEGRATION_YIDA_OWNER_SEND_ENABLED', saved.send]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value
+    }
+  }
 })

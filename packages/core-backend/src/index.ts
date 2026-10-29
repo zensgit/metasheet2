@@ -463,6 +463,7 @@ import { resolvePluginRuntimeConfig } from './plugin-runtime-config'
 import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './integration/yida-owner-runtime'
 import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
+import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -653,6 +654,13 @@ export class MetaSheetServer {
   private yidaInitializationRuntime = createYidaInitializationRuntime({
     database: { transaction: yidaOwnerTransaction },
     security: this.pluginRuntimeSecurityService,
+  })
+  // Owner-run token-only 测试连接 before initialization: its own default-OFF switch, never the send
+  // switch. Anchor owner + live integration admin are re-proved per call; nothing is persisted.
+  private yidaConnectionTestRuntime = createYidaConnectionTestRuntime({
+    database: { transaction: yidaOwnerTransaction },
+    fetch: globalThis.fetch.bind(globalThis),
+    readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,
   })
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
@@ -2085,7 +2093,8 @@ export class MetaSheetServer {
     // Uses a lazy resolver because AutomationService is initialized later
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
-    this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime))
+    this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime,
+      this.yidaConnectionTestRuntime))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
@@ -3566,6 +3575,9 @@ export class MetaSheetServer {
         yidaInitializationRuntime: manifest.name === 'plugin-integration-core'
           ? this.yidaInitializationRuntime.createPluginCapability()
           : undefined,
+        yidaConnectionTestRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaConnectionTestRuntime.createPluginCapability()
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -3604,7 +3616,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     this.cleanupPluginRuntimeRegistrations(name)
@@ -3622,7 +3635,8 @@ export class MetaSheetServer {
       if (name === 'plugin-integration-core') {
         const yidaDrain = this.yidaOwnerRuntime.deactivate()
         const initializationDrain = this.yidaInitializationRuntime.deactivate()
-        const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+        const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
+        const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
         if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
       }
       const message = error instanceof Error ? error.message : String(error)
@@ -3645,7 +3659,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     const loaded = this.pluginLoader.get(name)
@@ -3788,6 +3803,7 @@ export class MetaSheetServer {
     // unloadAll does not await its hooks and is not an adequate draining barrier.
     const yidaOwnerDrain = this.observeShutdownTask(this.yidaOwnerRuntime.stop())
     const yidaInitializationDrain = this.observeShutdownTask(this.yidaInitializationRuntime.stop())
+    const yidaConnectionTestDrain = this.observeShutdownTask(this.yidaConnectionTestRuntime.stop())
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     // Close every approval-completion producer admission synchronously. Their drains run while the
@@ -3875,7 +3891,7 @@ export class MetaSheetServer {
       this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
-    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain]
+    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaConnectionTestDrain]
 
     // 0. Stop background tasks
     shutdownTasks.push(Promise.resolve().then(() => {
