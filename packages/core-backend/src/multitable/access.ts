@@ -40,6 +40,9 @@ export type MultitableRowActions = {
   canEdit: boolean
   canDelete: boolean
   canComment: boolean
+  /** R-66 (plm-row-delete-guard.ts): set only where `canDelete` was turned false because the row is a PLM row the
+   *  stock-preparation pull maintains — the web shows the delete entry disabled with the reason. Absent elsewhere. */
+  deleteBlockedReason?: 'plm_row'
 }
 
 export function normalizePermissionCodes(value: unknown): string[] {

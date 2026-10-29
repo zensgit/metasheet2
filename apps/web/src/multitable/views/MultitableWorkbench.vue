@@ -1909,9 +1909,11 @@ function ensureCanEditRecord(recordId?: string | null): boolean {
 }
 
 function ensureCanDeleteRecord(recordId?: string | null): boolean {
-  const allowed = recordId ? (grid.resolveRowActions(recordId)?.canDelete ?? effectiveRowActions.value.canDelete) : effectiveRowActions.value.canDelete
+  const actions = recordId ? (grid.resolveRowActions(recordId) ?? effectiveRowActions.value) : effectiveRowActions.value
+  const allowed = actions.canDelete
   if (allowed) return true
-  showError(wb('toast.recordDeleteBlocked', isZh.value))
+  // R-66: a PLM row (server-derived `deleteBlockedReason`) says why — nobody may delete it.
+  showError(wb(actions.deleteBlockedReason === 'plm_row' ? 'notice.plmRowDeleteBlocked' : 'toast.recordDeleteBlocked', isZh.value))
   return false
 }
 
