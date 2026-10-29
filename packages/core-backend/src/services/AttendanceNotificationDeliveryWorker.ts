@@ -1,3 +1,4 @@
+import { DirectoryConnectionError } from '../directory/connection-disable'
 import { randomBytes } from 'crypto'
 import { query as defaultQuery } from '../db/pg'
 import { Logger } from '../core/logger'
@@ -1157,6 +1158,7 @@ function isRetryableDingTalkErrorCode(code: number): boolean {
 }
 
 function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelResult {
+  if (error instanceof DirectoryConnectionError) return { ok: false, retryable: (error.code === 'DIRECTORY_CONNECTION_BUSY' || error.statusCode >= 500), error: error.code }
   // PR #4046 Phase B — checked FIRST, before any shape-based bucket: the transport marks
   // send-tier failures whose outcome is unknowable (network error/timeout/5xx/malformed 2xx)
   // with isDingTalkOutcomeUnknown. Pre-fix these fell into the retryable buckets below and the

@@ -1,3 +1,5 @@
+// Transport-only tests; state/lock enforcement is covered by directory-connection-disable suites.
+vi.mock('../../src/directory/connection-disable', () => ({ withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform() }))
 import http from 'node:http'
 import { getEventListeners } from 'node:events'
 import type { AddressInfo } from 'node:net'

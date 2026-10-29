@@ -1,3 +1,4 @@
+import { DirectoryConnectionError, assertDirectoryConnectionEnabled, withDirectoryEnterpriseRegistration } from './connection-disable'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
@@ -337,6 +338,7 @@ export type DirectoryIntegrationSummary = {
   createdAt: string
   updatedAt: string
   config: {
+    connectionDisabled?: true
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured: boolean
@@ -1921,6 +1923,7 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     config: {
+      ...(rawConfig.connectionDisabled === true ? { connectionDisabled: true as const } : {}),
       appKey: config.appKey,
       appSecretConfigured: Boolean(config.appSecret),
       workNotificationAgentIdConfigured: Boolean(config.workNotificationAgentId),
@@ -2485,51 +2488,53 @@ export async function listDirectoryIntegrations(orgId = DEFAULT_ORG_ID): Promise
 
 export async function createDirectoryIntegration(input: DirectoryIntegrationInput): Promise<DirectoryIntegrationSummary> {
   const normalized = normalizeIntegrationInput(input)
-  await assertDirectoryProjectedGovernanceConfigValid({
-    memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-    memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-  })
-  const result = await query<DirectoryIntegrationRow>(
-    `INSERT INTO directory_integrations (
-       org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-       default_deprovision_policy, created_at, updated_at
-     )
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, NOW(), NOW())
-     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-               default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-    [
-      DEFAULT_ORG_ID,
-      DEFAULT_PROVIDER,
-      normalized.name,
-      normalized.status,
-      normalized.corpId,
-      JSON.stringify({
-        appKey: normalized.appKey,
-        appSecret: normalizeStoredSecretValue(normalized.appSecret),
-        workNotificationAgentId: normalized.workNotificationAgentId
-          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
-          : null,
-        rootDepartmentId: normalized.rootDepartmentId,
-        baseUrl: normalized.baseUrl ?? null,
-        pageSize: normalized.pageSize,
-        admissionMode: normalized.admissionMode,
-        admissionDepartmentIds: normalized.admissionDepartmentIds,
-        excludeDepartmentIds: normalized.excludeDepartmentIds,
-        memberGroupSyncMode: normalized.memberGroupSyncMode,
-        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
-        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-      }),
-      Boolean(normalized.syncEnabled),
-      normalized.scheduleCron,
-      normalized.scheduleTimezone,
-      normalized.defaultDeprovisionPolicy,
-    ],
-  ).catch((error: unknown) => {
-    throw uniqueViolationAsConflict(error)
-  })
+  return withDirectoryEnterpriseRegistration(DEFAULT_ORG_ID, normalized.corpId, normalized.appKey, async () => {
+    await assertDirectoryProjectedGovernanceConfigValid({
+      memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+      memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+    })
+    const result = await query<DirectoryIntegrationRow>(
+      `INSERT INTO directory_integrations (
+         org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+         default_deprovision_policy, created_at, updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, NOW(), NOW())
+       RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+                 default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+      [
+        DEFAULT_ORG_ID,
+        DEFAULT_PROVIDER,
+        normalized.name,
+        normalized.status,
+        normalized.corpId,
+        JSON.stringify({
+          appKey: normalized.appKey,
+          appSecret: normalizeStoredSecretValue(normalized.appSecret),
+          workNotificationAgentId: normalized.workNotificationAgentId
+            ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+            : null,
+          rootDepartmentId: normalized.rootDepartmentId,
+          baseUrl: normalized.baseUrl ?? null,
+          pageSize: normalized.pageSize,
+          admissionMode: normalized.admissionMode,
+          admissionDepartmentIds: normalized.admissionDepartmentIds,
+          excludeDepartmentIds: normalized.excludeDepartmentIds,
+          memberGroupSyncMode: normalized.memberGroupSyncMode,
+          memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+          memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+          memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+        }),
+        Boolean(normalized.syncEnabled),
+        normalized.scheduleCron,
+        normalized.scheduleTimezone,
+        normalized.defaultDeprovisionPolicy,
+      ],
+    ).catch((error: unknown) => {
+      throw uniqueViolationAsConflict(error)
+    })
 
-  return summarizeIntegration(result.rows[0])
+    return summarizeIntegration(result.rows[0])
+  })
 }
 
 /**
@@ -2807,6 +2812,10 @@ export async function updateDirectoryIntegration(
   const current = await getIntegrationRow(integrationId)
   if (!current) return null
 
+  const storedConfig = parseJsonRecord(current.config)
+  if (storedConfig.connectionDisabled === true && normalizeText(input.appKey) !== normalizeText(storedConfig.appKey)) {
+    throw new DirectoryConnectionError('DIRECTORY_CONNECTION_DISABLED', 409)
+  }
   const currentConfig = parseIntegrationConfig(current)
   const normalized = normalizeIntegrationInput(input, currentConfig)
 
@@ -2863,55 +2872,65 @@ export async function updateDirectoryIntegration(
   const scheduleTimezone = input.scheduleTimezone !== undefined
     ? normalizeOptionalText(input.scheduleTimezone)
     : current.schedule_timezone
-  const result = await query<DirectoryIntegrationRow>(
-    `UPDATE directory_integrations
-     SET name = $2,
-         status = $3,
-         corp_id = $4,
-         config = $5::jsonb,
-         sync_enabled = $6,
-         schedule_cron = $7,
-         schedule_timezone = $8,
-         default_deprovision_policy = $9,
-         updated_at = NOW()
-     WHERE id = $1
-     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-               default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-    [
-      integrationId,
-      normalized.name,
-      normalized.status,
-      normalized.corpId,
-      JSON.stringify({
-        appKey: normalized.appKey,
-        appSecret: normalizeStoredSecretValue(normalized.appSecret),
-        workNotificationAgentId: normalized.workNotificationAgentId
-          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
-          : null,
-        rootDepartmentId: normalized.rootDepartmentId,
-        baseUrl: normalized.baseUrl ?? null,
-        pageSize: normalized.pageSize,
-        admissionMode: normalized.admissionMode,
-        admissionDepartmentIds: normalized.admissionDepartmentIds,
-        excludeDepartmentIds: normalized.excludeDepartmentIds,
-        memberGroupSyncMode: normalized.memberGroupSyncMode,
-        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
-        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-        approvalCardLinkSecret: carriedApprovalCardLinkSecret,
-        approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
-        todoOperatorUnionId: carriedTodoOperatorUnionId,
-      }),
-      Boolean(normalized.syncEnabled),
-      normalized.scheduleCron,
-      scheduleTimezone,
-      normalized.defaultDeprovisionPolicy,
-    ],
-  ).catch((error: unknown) => {
-    throw uniqueViolationAsConflict(error)
-  })
+  const save = async () => {
+    const result = await query<DirectoryIntegrationRow>(
+      `UPDATE directory_integrations
+       SET name = $2,
+           status = $3,
+           corp_id = $4,
+           config = $5::jsonb || CASE WHEN config->'connectionDisabled' = 'true'::jsonb
+             THEN jsonb_build_object('connectionDisabled', true, 'connectionDisabledAppKey', config->>'connectionDisabledAppKey', 'enterpriseConnectionDisabled', config->'enterpriseConnectionDisabled')
+             ELSE '{}'::jsonb END,
+           sync_enabled = CASE WHEN config->'connectionDisabled' = 'true'::jsonb THEN FALSE ELSE $6 END,
+           schedule_cron = $7,
+           schedule_timezone = $8,
+           default_deprovision_policy = $9,
+           updated_at = NOW()
+       WHERE id = $1
+         AND ((config->'connectionDisabled') IS DISTINCT FROM 'true'::jsonb OR config->>'appKey' = ($5::jsonb)->>'appKey')
+       RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+                 default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+      [
+        integrationId,
+        normalized.name,
+        normalized.status,
+        normalized.corpId,
+        JSON.stringify({
+          appKey: normalized.appKey,
+          appSecret: normalizeStoredSecretValue(normalized.appSecret),
+          workNotificationAgentId: normalized.workNotificationAgentId
+            ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+            : null,
+          rootDepartmentId: normalized.rootDepartmentId,
+          baseUrl: normalized.baseUrl ?? null,
+          pageSize: normalized.pageSize,
+          admissionMode: normalized.admissionMode,
+          admissionDepartmentIds: normalized.admissionDepartmentIds,
+          excludeDepartmentIds: normalized.excludeDepartmentIds,
+          memberGroupSyncMode: normalized.memberGroupSyncMode,
+          memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+          memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+          memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+          approvalCardLinkSecret: carriedApprovalCardLinkSecret,
+          approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
+          todoOperatorUnionId: carriedTodoOperatorUnionId,
+        }),
+        Boolean(normalized.syncEnabled),
+        normalized.scheduleCron,
+        scheduleTimezone,
+        normalized.defaultDeprovisionPolicy,
+      ],
+    ).catch((error: unknown) => {
+      throw uniqueViolationAsConflict(error)
+    })
 
-  return summarizeIntegration(result.rows[0])
+    if (!result.rows[0]) throw new DirectoryConnectionError('DIRECTORY_CONNECTION_CHANGED', 409)
+    return summarizeIntegration(result.rows[0])
+  }
+  // Credential changes must not reuse a stopped app or race a stop in another scope.
+  return normalized.appKey !== normalizeText(storedConfig.appKey)
+    ? withDirectoryEnterpriseRegistration(current.org_id, normalized.corpId, normalized.appKey, save)
+    : save()
 }
 
 async function resolveDirectoryTestCurrentConfig(input: DirectoryIntegrationTestInput): Promise<DirectoryIntegrationConfig | undefined> {
@@ -3067,6 +3086,7 @@ export async function sampleRootDepartmentDiagnostics(
 }
 
 export async function testDirectoryIntegration(input: DirectoryIntegrationTestInput): Promise<DirectoryIntegrationTestResult> {
+  if (input.integrationId) await assertDirectoryConnectionEnabled(input.integrationId)
   const current = await resolveDirectoryTestCurrentConfig(input)
   const normalized = normalizeIntegrationInput(input, current)
   const accessToken = await fetchDingTalkAppAccessToken({
@@ -4046,6 +4066,7 @@ export async function syncDirectoryIntegration(
   // stale-run reclaim, run-lease claim, apply-txn lock, under-lock recheck, and every write.
   const integrationId = integration.id
 
+  await assertDirectoryConnectionEnabled(integrationId)
   const config = parseIntegrationConfig(integration)
   const directoryDeprovisionEnabled = isDirectoryDeprovisionEnabled()
   let directoryApplyCommitted = false
@@ -4161,6 +4182,7 @@ export async function syncDirectoryIntegration(
       // completion write, or run completion write. Bypass/remove either the lock or the recheck
       // → the two-connection create/refreeze-vs-sync barrier suite reds.
       await acquireSourceSyncFreezeLock(client, integrationId)
+      await assertDirectoryConnectionEnabled(integrationId, client)
       await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)
       const syncAccess = await lockDirectorySyncAccessGraphUsers(client, {
         integrationId,
@@ -5125,6 +5147,7 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
   const activeRunId = await findActiveDirectorySyncRunId(integrationId)
   if (activeRunId) throw new DirectorySyncInProgressError(activeRunId)
 
+  await assertDirectoryConnectionEnabled(integration.id)
   const config = parseIntegrationConfig(integration)
   const departments = await fetchAllDepartments(config, integration.name)
   const users = await fetchAllUsers(config, departments)

@@ -1,3 +1,9 @@
+import { DirectoryConnectionError } from '../../src/directory/connection-disable'
+// This suite injects or mocks transport; persistent stop enforcement has its own real-DB gate.
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(),
+  withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform(),
+}))
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/db/pg', () => ({
@@ -538,5 +544,16 @@ describe('error text never carries a secret, a URL or user content (design §8.5
     for (const result of results) {
       expect(fixed.has((result as { error: string }).error), JSON.stringify(result)).toBe(true)
     }
+  })
+})
+
+
+describe('connection-stop refusal is definite, never an unknown delivery', () => {
+  it.each([
+    ['DIRECTORY_CONNECTION_DISABLED', 409, false],
+    ['DIRECTORY_CONNECTION_BUSY', 409, true],
+    ['DIRECTORY_CONNECTION_STATE_UNAVAILABLE', 503, true],
+  ] as const)('%s keeps a values-free code', (code, status, retryable) => {
+    expect(classifyTaskDingTalkSendError(new DirectoryConnectionError(code, status), [])).toEqual({ ok: false, retryable, error: code })
   })
 })

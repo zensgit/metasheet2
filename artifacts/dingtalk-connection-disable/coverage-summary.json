@@ -1,0 +1,35 @@
+{
+  "module": "packages/core-backend/src/directory/connection-disable.ts",
+  "total": {
+    "lines": {
+      "total": 156,
+      "covered": 154,
+      "skipped": 0,
+      "pct": 98.71
+    },
+    "statements": {
+      "total": 156,
+      "covered": 154,
+      "skipped": 0,
+      "pct": 98.71
+    },
+    "functions": {
+      "total": 11,
+      "covered": 11,
+      "skipped": 0,
+      "pct": 100
+    },
+    "branches": {
+      "total": 61,
+      "covered": 53,
+      "skipped": 0,
+      "pct": 86.88
+    },
+    "branchesTrue": {
+      "total": 0,
+      "covered": 0,
+      "skipped": 0,
+      "pct": "Unknown"
+    }
+  }
+}

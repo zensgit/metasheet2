@@ -1,3 +1,4 @@
+import { withDingTalkConnectionOperation } from '../../directory/connection-disable'
 import { assertDingTalkCorpAllowed } from './runtime-policy'
 import {
   DingTalkBusinessError,
@@ -91,6 +92,7 @@ export interface DingTalkWorkNotificationResult {
 }
 
 interface DingTalkRequestOptions {
+  connectionAppKey?: string
   fetchFn?: typeof fetch
   /** Override the default per-request timeout (DT-HARDEN-06); applies PER ATTEMPT. */
   timeoutMs?: number
@@ -197,7 +199,7 @@ async function requestDingTalkJson(
   kind: DingTalkCallKind,
   options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
-  return requestDingTalkTransportJson({
+  const perform = () => requestDingTalkTransportJson({
     input,
     init,
     fallbackError,
@@ -208,6 +210,9 @@ async function requestDingTalkJson(
     signal: options?.signal,
     logUpstreamMessage: options?.logUpstreamMessage,
   })
+  return kind === 'send' || options?.connectionAppKey !== undefined
+    ? withDingTalkConnectionOperation(options?.connectionAppKey, perform)
+    : perform()
 }
 
 /**
@@ -223,7 +228,7 @@ async function requestDingTalkDirectoryJson(
   baseUrl?: string,
   options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
-  return requestDingTalkTransportJson({
+  const perform = () => requestDingTalkTransportJson({
     input: `${normalizeDirectoryBaseUrl(baseUrl)}${path}`,
     init,
     fallbackError,
@@ -234,6 +239,9 @@ async function requestDingTalkDirectoryJson(
     signal: options?.signal,
     logUpstreamMessage: options?.logUpstreamMessage,
   })
+  return kind === 'send' || options?.connectionAppKey !== undefined
+    ? withDingTalkConnectionOperation(options?.connectionAppKey, perform)
+    : perform()
 }
 
 export function readDingTalkOauthConfig(): DingTalkOauthConfig {
@@ -790,6 +798,7 @@ export interface DingTalkInteractiveApprovalCardInput {
 }
 
 export interface DingTalkInteractiveCardConfig {
+  appKey?: string
   openApiBaseUrl?: string
 }
 
@@ -867,6 +876,7 @@ export async function sendDingTalkInteractiveApprovalCard(
   config: DingTalkInteractiveCardConfig = {},
   options?: DingTalkRequestOptions,
 ): Promise<DingTalkWorkNotificationResult> {
+  options = { ...options, connectionAppKey: config.appKey ?? readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') }
   const userId = input.userId.trim()
   const robotCode = input.robotCode.trim()
   const cardTemplateId = input.cardTemplateId.trim()
@@ -975,6 +985,7 @@ export async function updateDingTalkInteractiveApprovalCard(
   config: DingTalkInteractiveCardConfig = {},
   options?: DingTalkRequestOptions,
 ): Promise<{ requestId?: string; raw: Record<string, unknown> }> {
+  options = { ...options, connectionAppKey: config.appKey ?? readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') }
   const outTrackId = input.outTrackId.trim()
   const statusText = input.statusText.trim()
   const cardParamMap: Record<string, string> = { statusText }
@@ -1029,6 +1040,7 @@ export async function sendDingTalkWorkNotificationActionCard(
   config: DingTalkMessageConfig = readDingTalkMessageConfig(),
   options?: DingTalkRequestOptions,
 ): Promise<DingTalkWorkNotificationResult> {
+  options = { ...options, connectionAppKey: config.appKey ?? readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') }
   const userIds = Array.from(new Set(
     input.userIds
       .map((userId) => String(userId ?? '').trim())
@@ -1097,6 +1109,7 @@ export async function sendDingTalkWorkNotification(
   config: DingTalkMessageConfig = readDingTalkMessageConfig(),
   options?: DingTalkRequestOptions,
 ): Promise<DingTalkWorkNotificationResult> {
+  options = { ...options, connectionAppKey: config.appKey ?? readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') }
   const userIds = Array.from(new Set(
     input.userIds
       .map((userId) => String(userId ?? '').trim())
@@ -1214,6 +1227,7 @@ export async function createDingTalkTodoTask(
   config: DingTalkInteractiveCardConfig = {},
   options?: DingTalkRequestOptions,
 ): Promise<DingTalkTodoTaskResult> {
+  options = { ...options, connectionAppKey: config.appKey ?? readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') }
   const operator = operatorUnionId.trim()
   const sourceId = input.sourceId.trim()
   const subject = input.subject.trim()
@@ -1273,6 +1287,7 @@ export async function completeDingTalkTodoTask(
   config: DingTalkInteractiveCardConfig = {},
   options?: DingTalkRequestOptions,
 ): Promise<DingTalkTodoTaskResult> {
+  options = { ...options, connectionAppKey: config.appKey ?? readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') }
   const operator = operatorUnionId.trim()
   const task = taskId.trim()
   if (!accessToken.trim()) throw new Error('DingTalk access token is required')
@@ -1309,6 +1324,7 @@ export async function deleteDingTalkTodoTask(
   config: DingTalkInteractiveCardConfig = {},
   options?: DingTalkRequestOptions,
 ): Promise<DingTalkTodoTaskResult> {
+  options = { ...options, connectionAppKey: config.appKey ?? readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') }
   const operator = operatorUnionId.trim()
   const task = taskId.trim()
   if (!accessToken.trim()) throw new Error('DingTalk access token is required')

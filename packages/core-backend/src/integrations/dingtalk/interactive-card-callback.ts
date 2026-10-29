@@ -236,7 +236,8 @@ function readCallbackCorpAnchor(payload: unknown): CallbackCorpAnchor {
  */
 async function resolveIntegrationCorpId(query: QueryFn, integrationId: string): Promise<string> {
   const result = await query(
-    `SELECT corp_id FROM directory_integrations WHERE id = $1::uuid AND provider = 'dingtalk' LIMIT 1`,
+    `SELECT corp_id FROM directory_integrations WHERE id = $1::uuid AND provider = 'dingtalk'
+        AND (config->'connectionDisabled') IS DISTINCT FROM 'true'::jsonb LIMIT 1`,
     [integrationId],
   )
   const row = (result.rows[0] ?? null) as { corp_id?: unknown } | null

@@ -1,3 +1,5 @@
+// HTTP-shape suite; persistent stop barriers are exercised by the connection-disable suites.
+vi.mock('../../src/directory/connection-disable', () => ({ withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform() }))
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   __resetDingTalkAppAccessTokenCacheForTests,

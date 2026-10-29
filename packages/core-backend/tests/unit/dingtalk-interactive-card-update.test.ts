@@ -1,3 +1,8 @@
+// This suite injects or mocks transport; persistent stop enforcement has its own real-DB gate.
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(),
+  withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform(),
+}))
 /**
  * B-4 terminal card update (Slice B design lock §B-4) — unit matrix for the copy builder and the
  * presentation-follow-up orchestration.

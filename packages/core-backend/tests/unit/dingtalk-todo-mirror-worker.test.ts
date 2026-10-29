@@ -510,7 +510,7 @@ describe('todo mirror worker — completion phase', () => {
     const h = harness({ claimed: [completingRow()] })
     const result = await h.worker.runBatch()
     expect(result).toMatchObject({ completed: 1 })
-    expect(h.completeTodoTask).toHaveBeenCalledWith('access-token', 'op-union-1', 'dt-task-1', {})
+    expect(h.completeTodoTask).toHaveBeenCalledWith('access-token', 'op-union-1', 'dt-task-1', { appKey: CONFIG.appKey })
     expect(h.writes()[0].params[4]).toBe('completed')
   })
 

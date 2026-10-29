@@ -1,0 +1,32 @@
+[
+  {
+    "guard": "send-refusal",
+    "neuteredExit": 1,
+    "restoredExit": 0,
+    "sourceBytesRestored": true
+  },
+  {
+    "guard": "stale-edit-barrier",
+    "neuteredExit": 1,
+    "restoredExit": 0,
+    "sourceBytesRestored": true
+  },
+  {
+    "guard": "credential-adoption-barrier",
+    "neuteredExit": 1,
+    "restoredExit": 0,
+    "sourceBytesRestored": true
+  },
+  {
+    "guard": "organization-status-preserved",
+    "neuteredExit": 1,
+    "restoredExit": 0,
+    "sourceBytesRestored": true
+  },
+  {
+    "guard": "login-exempt",
+    "neuteredExit": 1,
+    "restoredExit": 0,
+    "sourceBytesRestored": true
+  }
+]

@@ -182,13 +182,13 @@ export interface DingTalkTodoMirrorWorkerOptions {
     accessToken: string,
     operatorUnionId: string,
     input: DingTalkTodoTaskInput,
-    config?: { openApiBaseUrl?: string },
+    config?: { openApiBaseUrl?: string; appKey?: string },
   ) => Promise<DingTalkTodoTaskResult>
   completeTodoTask?: (
     accessToken: string,
     operatorUnionId: string,
     taskId: string,
-    config?: { openApiBaseUrl?: string },
+    config?: { openApiBaseUrl?: string; appKey?: string },
   ) => Promise<DingTalkTodoTaskResult>
 }
 
@@ -457,7 +457,7 @@ export class DingTalkTodoMirrorWorker {
           executorUnionIds: [recipient.unionId],
           ...(detailUrl ? { detailUrl } : {}),
         },
-        {},
+        { appKey: config.appKey },
       )
       const ok = await this.markCreated(row.id, attemptCount, {
         taskId: sent.taskId ?? null,
@@ -522,7 +522,7 @@ export class DingTalkTodoMirrorWorker {
     }
 
     try {
-      await this.completeTodoTask(accessToken, operatorUnionId, taskId, {})
+      await this.completeTodoTask(accessToken, operatorUnionId, taskId, { appKey: config.appKey })
       return await this.markTerminal(row.id, 'completed', attemptCount, null, false) ? 'completed' : 'lost-lease'
     } catch (error) {
       if (isDingTalkTodoTaskMissing(error)) {

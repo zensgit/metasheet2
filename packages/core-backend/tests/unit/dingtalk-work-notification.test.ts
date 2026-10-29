@@ -1,3 +1,5 @@
+// Transport-only tests; state/lock enforcement is covered by directory-connection-disable suites.
+vi.mock('../../src/directory/connection-disable', () => ({ withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform() }))
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getDingTalkWorkNotificationRuntimeStatus,

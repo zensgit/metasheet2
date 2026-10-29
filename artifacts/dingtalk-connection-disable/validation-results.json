@@ -1,0 +1,75 @@
+{
+  "date": "2026-10-29",
+  "environment": "Mac mini isolated synthetic runtime",
+  "baseCommit": "a03d804d60d83717feaedce099e5ff14216afc58",
+  "node": "20.20.2",
+  "pnpm": "10.16.1",
+  "postgres": "16",
+  "backendUnit": {
+    "files": [
+      "tests/unit/dingtalk-interactive-card-update.test.ts",
+      "tests/unit/dingtalk-todo-mirror-worker.test.ts",
+      "tests/unit/dingtalk-interactive-card-callback.test.ts",
+      "tests/unit/dingtalk-work-notification.test.ts",
+      "tests/unit/task-notification-dingtalk.test.ts",
+      "tests/unit/elearning-notification-dingtalk.test.ts",
+      "tests/unit/dingtalk-todo-client.test.ts",
+      "tests/unit/dingtalk-client.test.ts",
+      "tests/unit/attendance-notification-quiet-hours.test.ts",
+      "tests/unit/attendance-dingtalk-outcome-unknown.test.ts",
+      "tests/unit/directory-tenant-change-guard.test.ts",
+      "tests/unit/directory-connection-disable.test.ts",
+      "tests/unit/directory-sync-scheduler.test.ts",
+      "tests/unit/directory-sync-unique-violation-conflict.test.ts",
+      "tests/unit/dingtalk-work-notification-settings.test.ts",
+      "tests/unit/directory-sync-work-notification-agent-id.test.ts",
+      "tests/unit/dingtalk-transport-resilience.test.ts",
+      "tests/unit/attendance-scheduler.test.ts",
+      "tests/unit/automation-classb-dingtalk-approval-card.test.ts",
+      "tests/unit/admin-directory-5xx-values-free.test.ts",
+      "tests/unit/admin-directory-routes.test.ts",
+      "tests/unit/automation-classb-dingtalk-group.test.ts",
+      "tests/unit/automation-classb-dingtalk-person.test.ts",
+      "tests/unit/automation-v1.test.ts",
+      "tests/unit/automation-dingtalk-person-recipient-shared-decision.test.ts",
+      "tests/unit/auth-login-routes.test.ts",
+      "tests/unit/dingtalk-oauth-login-gates.test.ts",
+      "tests/unit/directory-fixed-sentence-constructors.guard.test.ts"
+    ],
+    "passed": 1252,
+    "failed": 0
+  },
+  "realDatabase": {
+    "files": [
+      "tests/integration/directory-connection-disable.realdb.test.ts"
+    ],
+    "passed": 10,
+    "failed": 0
+  },
+  "frontend": {
+    "files": [
+      "tests/directoryManagementView.spec.ts",
+      "tests/directoryConfigPickers.spec.ts"
+    ],
+    "passed": 106,
+    "failed": 0
+  },
+  "validateAll": {
+    "exit": 0,
+    "checks": [
+      "validate:plugins",
+      "lint",
+      "type-check"
+    ]
+  },
+  "mutations": {
+    "passed": 5,
+    "total": 5
+  },
+  "ci": {
+    "state": "not established by local validation; see exact-head PR checks"
+  },
+  "liveConfigurationChanged": false,
+  "realProviderCalls": false,
+  "sourceManifest": "tested-source-sha256.json"
+}

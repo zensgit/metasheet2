@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import DirectoryConnectionDisablePanel from '../src/components/directory/DirectoryConnectionDisablePanel.vue'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
 import AttendanceDingTalkMicroappHelpView from '../src/views/AttendanceDingTalkMicroappHelpView.vue'
 
@@ -8115,5 +8116,79 @@ describe('DirectoryManagementView', () => {
       expect(oldCard).not.toContain('主管绑定覆盖')
       expect(oldCard).not.toContain('耗时')
     })
+  })
+})
+
+
+describe('directory connection disable panel', () => {
+  let app: App<Element>
+  let root: HTMLDivElement
+  beforeEach(() => {
+    apiFetchMock.mockReset()
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(DirectoryConnectionDisablePanel, { integrationId: 'synthetic-integration' })
+    app.mount(root)
+  })
+  afterEach(() => { app.unmount(); root.remove() })
+  const button = (root: HTMLElement, label: string) => Array.from(root.querySelectorAll('button')).find((b) => b.textContent?.trim() === label)!
+  it('does no IO on mount; preview is read-only and disable requires explicit confirmation', async () => {
+    expect(apiFetchMock).not.toHaveBeenCalled()
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { integrationCount: 1, disabledCount: 0 } }))
+    button(root, '预览停用影响').click()
+    await flushUi()
+    expect(apiFetchMock.mock.calls).toEqual([['/api/admin/directory/integrations/synthetic-integration/disable-preview?scope=integration']])
+    expect(button(root, '确认停用连接').disabled).toBe(true)
+    const checkbox = root.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { disabled: true } }))
+    button(root, '确认停用连接').click()
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenLastCalledWith('/api/admin/directory/integrations/synthetic-integration/disable', {
+      method: 'POST', body: JSON.stringify({ scope: 'integration' }),
+    })
+    expect(root.textContent).toContain('本地账号、成员权限和业务数据已保留')
+    expect(root.textContent).toContain('登录授权未变更')
+  })
+  it('invalidates a preview when the scope changes', async () => {
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { integrationCount: 1, disabledCount: 0 } }))
+    button(root, '预览停用影响').click()
+    await flushUi()
+    const select = root.querySelector('select')!
+    select.value = 'enterprise'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(button(root, '确认停用连接')).toBeUndefined()
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { integrationCount: 2, disabledCount: 0 } }))
+    button(root, '预览停用影响').click()
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenLastCalledWith('/api/admin/directory/integrations/synthetic-integration/disable-preview?scope=enterprise')
+    expect(root.textContent).toContain('涉及 2 个集成')
+  })
+  it.each(['shared', 'network', 'malformed-success'])('does not retry or falsely acknowledge a %s disable result', async (kind) => {
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { integrationCount: 1, disabledCount: 0 } }))
+    button(root, '预览停用影响').click()
+    await flushUi()
+    const checkbox = root.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    if (kind === 'shared') apiFetchMock.mockResolvedValueOnce(createJsonResponse({ error: { code: 'DIRECTORY_CONNECTION_APP_SHARED' } }, 409))
+    else if (kind === 'network') apiFetchMock.mockRejectedValueOnce(new Error('synthetic network'))
+    else apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: {} }))
+    button(root, '确认停用连接').click()
+    await flushUi()
+    expect(root.textContent).not.toContain('钉钉连接已停用，本地账号')
+    expect(root.textContent).toContain(kind === 'shared' ? '应用凭据被范围外的集成共用' : '无法确认停用结果')
+    expect(apiFetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(1)
+  })
+  it.each([500, 403])('never presents a failed preview (%s) as success', async (status) => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ error: { code: 'FAIL' } }, status))
+    button(root, '预览停用影响').click()
+    await flushUi()
+    expect(root.textContent).toContain('无法预览停用影响')
+    expect(button(root, '确认停用连接')).toBeUndefined()
   })
 })

@@ -1,3 +1,8 @@
+// Outbound-intent/transport harness; persistent connection barriers have dedicated real-DB coverage.
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(),
+  withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform(),
+}))
 /**
  * #4196 Class-B outbound two-phase — executor wiring (unit) for send_dingtalk_approval_card (follow-up to
  * send_webhook / send_email).

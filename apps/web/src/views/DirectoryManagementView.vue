@@ -214,6 +214,7 @@
           @click="void selectIntegration(integration.id)"
         >
           <strong>{{ integration.name }}</strong>
+          <small v-if="integration.config.connectionDisabled">连接已停用（成员权限保留）</small>
           <span>{{ integration.corpId }}</span>
           <small>{{ readAdmissionModeLabel(integration) }}</small>
           <small>{{ readMemberGroupSyncLabel(integration) }}</small>
@@ -255,12 +256,18 @@
           <div class="directory-admin__summary" v-if="selectedIntegration">
             <span class="directory-admin__badge">{{ selectedIntegration.status }}</span>
             <span class="directory-admin__badge" :class="{ 'directory-admin__badge--inactive': !selectedIntegration.syncEnabled }">
-              {{ selectedIntegration.syncEnabled ? '已启用同步' : '仅手动同步' }}
+              {{ selectedIntegration.config.connectionDisabled ? '连接已停用' : selectedIntegration.syncEnabled ? '已启用同步' : '仅手动同步' }}
             </span>
             <span class="directory-admin__badge">已链接 {{ selectedIntegration.stats.linkedCount }}</span>
           </div>
         </div>
 
+        <DirectoryConnectionDisablePanel
+          v-if="selectedIntegration"
+          :key="selectedIntegration.id"
+          :integration-id="selectedIntegration.id"
+          @disabled="void loadIntegrations()"
+        />
         <div class="directory-admin__form-grid">
           <label class="directory-admin__field">
             <span>集成名称</span>
@@ -573,7 +580,7 @@
             </select>
           </label>
           <label class="directory-admin__toggle">
-            <input v-model="draft.syncEnabled" type="checkbox" />
+            <input v-model="draft.syncEnabled" type="checkbox" :disabled="selectedIntegration?.config.connectionDisabled === true" />
             <span>保存后允许自动同步</span>
           </label>
         </div>
@@ -582,10 +589,10 @@
           <button class="directory-admin__button" type="button" :disabled="busy || !canSave" @click="void saveIntegration()">
             {{ busy ? '处理中...' : selectedIntegration ? '保存变更' : '创建集成' }}
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testIntegration()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || selectedIntegration?.config.connectionDisabled === true" @click="void testIntegration()">
             测试连通性
           </button>
-          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testWorkNotificationAgentId()">
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || selectedIntegration?.config.connectionDisabled === true" @click="void testWorkNotificationAgentId()">
             测试工作通知
           </button>
           <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || draft.workNotificationAgentId.trim().length === 0" @click="void saveWorkNotificationAgentId()">
@@ -597,13 +604,13 @@
           <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="approvalCardBusy" @click="void saveApprovalCardPublicAppUrl()">
             保存对外访问地址
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || pollingRunId !== '' || !selectedIntegration" @click="void syncIntegration()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || pollingRunId !== '' || !selectedIntegration || selectedIntegration?.config.connectionDisabled === true" @click="void syncIntegration()">
             手动同步
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || previewBusy || pollingRunId !== '' || !selectedIntegration" @click="void previewSync()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || previewBusy || pollingRunId !== '' || !selectedIntegration || selectedIntegration?.config.connectionDisabled === true" @click="void previewSync()">
             {{ previewBusy ? '预览中...' : '预览同步' }}
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || asyncSyncBusy || pollingRunId !== '' || !selectedIntegration" @click="void startAsyncSync()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || asyncSyncBusy || pollingRunId !== '' || !selectedIntegration || selectedIntegration?.config.connectionDisabled === true" @click="void startAsyncSync()">
             {{ asyncSyncBusy ? '启动中...' : pollingRunId ? '后台同步中...' : '后台同步' }}
           </button>
         </footer>
@@ -2206,6 +2213,7 @@
 import { canCopyText, copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import DirectoryConnectionDisablePanel from '../components/directory/DirectoryConnectionDisablePanel.vue'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
 import DirectoryOptionPicker from '../components/directory/DirectoryOptionPicker.vue'
 import { presentRoleTitle } from './builtinCatalogPresentation'
@@ -2238,6 +2246,7 @@ type DirectoryIntegration = {
   lastSuccessAt: string | null
   lastError: string | null
   config: {
+    connectionDisabled?: boolean
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured?: boolean

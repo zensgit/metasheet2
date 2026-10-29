@@ -55,6 +55,7 @@ describe('directory_integrations unique_violation becomes DirectoryConflictError
   beforeEach(() => {
     pgMocks.query.mockReset()
     pgMocks.transaction.mockReset()
+    pgMocks.transaction.mockImplementation(async (fn) => fn({ query: pgMocks.query }))
   })
 
   it('create: a duplicate (org, provider, name) answers the name sentence, never the driver text', async () => {

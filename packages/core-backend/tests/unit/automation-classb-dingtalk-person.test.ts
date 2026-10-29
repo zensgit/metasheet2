@@ -7,6 +7,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// Transport/intent harness; connection-stop enforcement is covered by dedicated real-DB tests.
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(),
+  withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform(),
+}))
+
+
 import {
   AutomationExecutor,
   type AutomationDeps,

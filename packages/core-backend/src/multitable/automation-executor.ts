@@ -1,3 +1,4 @@
+import { DirectoryConnectionError } from '../directory/connection-disable'
 /**
  * Automation Executor — V1
  * Core execution pipeline: evaluate conditions, run actions in sequence.
@@ -5279,7 +5280,7 @@ export class AutomationExecutor {
               statusText: '等待你处理',
               rejectUrl: decisionUrl,
             },
-            {},
+            { appKey: interactiveCardConfig.clientId },
             { fetchFn: this.deps.fetchFn },
           )
         }
@@ -5773,7 +5774,7 @@ export class AutomationExecutor {
         // sent; only a provable pre-dispatch failure with no successful batch remains retryable.
         const outcome: OutboundOutcome = sentRecipients.size > 0
           ? 'sent'
-          : inFlightSendBatch
+          : inFlightSendBatch && !(error instanceof DirectoryConnectionError)
             ? classifyOutboundResult(classifyFetchError(error))
             : 'failed'
         await recordOutboundOutcome(

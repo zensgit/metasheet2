@@ -213,7 +213,7 @@ export function createDingTalkApprovalCardStreamUpdateSender(
       appKey: config.clientId,
       appSecret: config.clientSecret,
     })
-    await updateDingTalkInteractiveApprovalCard(accessToken, update)
+    await updateDingTalkInteractiveApprovalCard(accessToken, update, { appKey: config.clientId })
   }
 }
 

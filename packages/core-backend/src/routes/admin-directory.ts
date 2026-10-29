@@ -1,3 +1,4 @@
+import { DirectoryConnectionError, previewDirectoryConnectionDisable, disableDirectoryConnection } from '../directory/connection-disable'
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { auditLog } from '../audit/audit'
@@ -136,6 +137,12 @@ function sendIfLoginAliasConflict(res: Response, error: unknown): boolean {
  * tenant change, corp allowlist) run before it; every call keeps the route's own error code.
  */
 function sendDirectoryFailure(res: Response, error: unknown, code: string, fallbackMessage: string): void {
+  if (error instanceof DirectoryConnectionError) {
+    if (error.statusCode === 400) jsonError(res, 400, error.code, error.message)
+    else if (error.statusCode === 404) jsonError(res, 404, error.code, error.message)
+    else jsonError(res, 409, error.code, error.message)
+    return
+  }
   if (error instanceof DirectoryValidationError) {
     jsonError(res, 400, code, error.message)
     return
@@ -425,6 +432,29 @@ export function adminDirectoryRouter(): Router {
       jsonOk(res, { result })
     } catch (error) {
       sendDirectoryConfigFailure(res, error, 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED', 'Failed to save DingTalk work notification Agent ID', DINGTALK_CONFIG_FIXED_SENTENCES)
+    }
+  })
+
+  router.get('/integrations/:integrationId/disable-preview', async (req: Request, res: Response) => {
+    if (!await ensurePlatformAdmin(req, res) || !validateIdParam(req, res, 'integrationId')) return
+    try {
+      jsonOk(res, await previewDirectoryConnectionDisable(req.params.integrationId, req.query.scope))
+    } catch (error) {
+      sendDirectoryFailure(res, error, 'DIRECTORY_DISABLE_PREVIEW_FAILED', 'Failed to preview connection disable')
+    }
+  })
+
+  router.post('/integrations/:integrationId/disable', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId || !validateIdParam(req, res, 'integrationId')) return
+    try {
+      const result = await disableDirectoryConnection(req.params.integrationId, req.body?.scope)
+      for (const id of result.integrationIds) await refreshDirectoryIntegrationSchedule(id)
+      await auditLog({ actorId: adminUserId, actorType: 'user', action: 'disable', resourceType: 'directory-connection', resourceId: req.params.integrationId,
+        meta: { scope: req.body.scope, integrationCount: result.integrationIds.length } })
+      jsonOk(res, result)
+    } catch (error) {
+      sendDirectoryFailure(res, error, 'DIRECTORY_DISABLE_FAILED', 'Failed to disable connection')
     }
   })
 

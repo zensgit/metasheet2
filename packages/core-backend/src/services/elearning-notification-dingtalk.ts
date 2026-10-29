@@ -1,3 +1,4 @@
+import { DirectoryConnectionError } from '../directory/connection-disable'
 import {
   DingTalkBusinessError,
   DingTalkRequestError,
@@ -210,6 +211,7 @@ function isSameDestination(
 }
 
 function classifySendFailure(error: unknown): ElearningDingTalkSendOutcome {
+  if (error instanceof DirectoryConnectionError) return { outcome: 'failed', code: error.code }
   if (isDingTalkOutcomeUnknown(error)) {
     return {
       outcome: 'outcome_unknown',

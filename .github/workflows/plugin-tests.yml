@@ -1907,6 +1907,15 @@ jobs:
             tests/integration/b2a-operation-claim-078-realdb.test.ts \
             --reporter=dot
 
+      - name: Verify directory connection disable barriers (synthetic real DB)
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL required for connection disable barriers}"
+          pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/directory-connection-disable.realdb.test.ts
+
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens + cancel-round Q-A census/creation/redemption/seat-guards/FK-migration/outlet-guards/node-timeout/seed-template-visibility/attendance-entry)
         id: approval-real-db-integration
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
