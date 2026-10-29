@@ -162,6 +162,20 @@ const EXPORT_COLUMNS = Object.freeze([
   Object.freeze({ id: 'ext_blankThickness', label: '毛胚厚度' }),
   Object.freeze({ id: 'ext_blankQuantity', label: '毛胚数量' }),
   Object.freeze({ id: 'ext_blankMass', label: '毛胚质量' }),
+  // ── 采购回复 / 仓库确认: the two free-text human columns, APPENDED AT THE END (2026-10-29) ────
+  //
+  // `procurementReply` / `warehouseConfirmation` are human_preserved string columns of the main
+  // template (stock-preparation-templates.cjs, labelZh 采购回复 / 仓库确认) since the template's first
+  // version, so every provisioned target binds them. The frontline fills them in the grid, but the
+  // workbench export never projected them: the R76 synthetic trial (2026-10-29) showed a workbook
+  // without the two columns the departments had just typed into. Owner approved adding them.
+  //
+  // Same rule as #5447 and F1c above: appended, nothing above moves — the first 28 columns keep
+  // their position. No `type`: a stored string passes through verbatim, an unset cell stays blank
+  // (exportCellValue), exactly like 备注. The 沿用说明 column (CONTINUATION_NOTE_COLUMN), when present,
+  // still comes after these two: it is pushed after the whole EXPORT_COLUMNS projection.
+  Object.freeze({ id: 'procurementReply', label: '采购回复' }),
+  Object.freeze({ id: 'warehouseConfirmation', label: '仓库确认' }),
 ])
 const EXPORT_COLUMN_IDS = Object.freeze(EXPORT_COLUMNS.map((column) => column.id))
 // Every logical id the projection reads, including the fallback sources (which are never headers).
