@@ -4,6 +4,8 @@ import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../../src/attendance
 import { buildAttendanceW7MembershipTimelineLockKeyV1 } from '../../src/attendance/w7-resolver/w7-composite-lock-order'
 import { createRequire } from 'node:module'
 import type { AttendanceW4LiveScheduledBoundaryV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
+import { calculateAttendanceSegmentsV1 } from '../../src/attendance/w4c1-segment-calculator'
+import { insertShadowCalculationV1, type ShadowCalculationRowInputV1 } from '../../src/attendance/w4c2-shadow-calculation-core'
 import { createOnlinePunchDbFixture, punchClock, punchPlugin } from '../utils/attendance-online-punch-db'
 
 // Observe the factory used by actual plugin activation; every call delegates to
@@ -327,7 +329,8 @@ describe('scheduled absence uses the production timezone runtime (HTTP/PostgreSQ
       skipped:false,total:2,targetUsers:2,generated:2,reviewRequired:[],
     }}})
     const joined = (await fixture.pool.query(`SELECT c.original_calculation_id,c.original_freeze_snapshot,
-      r.current_calculation_id,calc.id,calc.context_snapshot,calc.attribution_snapshot,calc.source_definition_fingerprint,
+      r.current_calculation_id,r.id::text AS record_id,calc.id,calc.mode,calc.outcome,calc.expected_segment_count,
+      calc.context_snapshot,calc.attribution_snapshot,calc.source_definition_fingerprint,
       calc.entrypoint,o.resolved_calculation_id,o.state AS operation_state
       FROM attendance_timezone_context_companions c JOIN attendance_records r ON r.id=c.record_id
       JOIN attendance_record_calculations calc ON calc.id=c.original_calculation_id AND calc.attendance_record_id=c.record_id AND calc.org_id=c.org_id
@@ -344,6 +347,37 @@ describe('scheduled absence uses the production timezone runtime (HTTP/PostgreSQ
     expect(row.original_freeze_snapshot).toEqual({calculation:{id:row.id,context_snapshot:row.context_snapshot,
       attribution_snapshot:row.attribution_snapshot,source_definition_fingerprint:row.source_definition_fingerprint}})
     await assertFrozenTarget(actor,workDate,'Asia/Singapore')
+    if (state === 'shadow') {
+      const expected = calculateAttendanceSegmentsV1({
+        attribution: row.attribution_snapshot, context: row.context_snapshot, evidence: [], approvedFacts: [],
+      })
+      expect(expected.outcome).toBe('completed')
+      expect(expected.segments).toHaveLength(1)
+      expect({ mode: row.mode, outcome: row.outcome, count: row.expected_segment_count })
+        .toEqual({ mode: 'shadow', outcome: 'completed', count: 1 })
+      const children = (await fixture.pool.query(
+        `SELECT org_id,record_id::text,calculation_id::text,segment_index,
+          expected_start_at,expected_end_at,actual_in_at,actual_out_at,
+          work_minutes,late_minutes,early_leave_minutes,status,status_reasons,
+          matched_evidence_refs,unmatched_evidence_refs FROM attendance_record_segments
+         WHERE calculation_id=$1::uuid ORDER BY segment_index`, [row.id],
+      )).rows
+      expect(children.map(child => ({ ...child,
+        expected_start_at: child.expected_start_at.toISOString(),
+        expected_end_at: child.expected_end_at.toISOString(),
+        actual_in_at: child.actual_in_at?.toISOString() ?? null,
+        actual_out_at: child.actual_out_at?.toISOString() ?? null,
+      })), 'LIVE04_SCHEDULED_PHYSICAL_CHILD_LINEAGE').toEqual(expected.segments.map(segment => ({
+        org_id: fixture.orgId, record_id: row.record_id, calculation_id: row.id,
+        segment_index: segment.segmentIndex,
+        expected_start_at: segment.expectedStartAt, expected_end_at: segment.expectedEndAt,
+        actual_in_at: segment.actualInAt, actual_out_at: segment.actualOutAt,
+        work_minutes: segment.workedMinutes, late_minutes: segment.lateMinutes,
+        early_leave_minutes: segment.earlyLeaveMinutes, status: segment.status,
+        status_reasons: segment.reasons, matched_evidence_refs: segment.matchedEvidenceRefs,
+        unmatched_evidence_refs: segment.unmatchedEvidenceRefs,
+      })))
+    }
   })
 
   it('completed exact recovery skips unavailable mutable policy while a fresh run fails closed', async () => {
@@ -447,4 +481,121 @@ describe('scheduled absence uses the production timezone runtime (HTTP/PostgreSQ
     expect(await targetDurableState(run.run_id)).toEqual(targets)
     expect(snapshotDigest(await firstSnapshot())).toBe(firstDigest)
   })
+
+  it('LIVE04 shared INSERT rejects wrong-org parent after a legal foreign peer commits', async () => {
+    const workDate = '2026-03-03'
+    const actor = await fixture.user()
+    await policy(true)
+    await assignment(actor,workDate,'UTC')
+    await assignment(admin,workDate,'UTC')
+    // Promotion works in selected-only and whole-file order; no illegal downgrade.
+    await rollout('authoritative')
+    const ownRun = await adminRun(workDate)
+    expect(ownRun.status,ownRun.body.error?.code).toBe(200)
+    const own = (await fixture.pool.query(
+      `SELECT c.*,r.id::text AS record_id,r.status AS parent_status,r.work_minutes AS parent_minutes,
+        r.late_minutes AS parent_late,r.early_leave_minutes AS parent_early,
+        r.first_in_at AS parent_in,r.last_out_at AS parent_out
+       FROM attendance_timezone_context_companions t JOIN attendance_records r ON r.id=t.record_id
+       JOIN attendance_record_calculations c ON c.id=t.original_calculation_id
+       WHERE t.org_id=$1 AND t.user_id=$2 AND t.work_date=$3`,[fixture.orgId,actor.userId,workDate],
+    )).rows[0]
+    expect(own.outcome).toBe('completed')
+    const foreignOrg = randomUUID(), foreignShift = randomUUID()
+    await fixture.pool.query('INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)',[actor.userId,foreignOrg])
+    await fixture.pool.query(`INSERT INTO attendance_rules
+      (id,org_id,name,timezone,timezone_version,work_start_time,work_end_time,working_days,is_default)
+      VALUES($1,$2,'LIVE04 foreign peer','UTC',1,'09:00','18:00','[0,1,2,3,4,5,6]'::jsonb,true)`,[randomUUID(),foreignOrg])
+    await fixture.pool.query(`INSERT INTO attendance_shifts
+      (id,org_id,name,timezone,work_start_time,work_end_time,working_days)
+      VALUES($1,$2,'LIVE04 foreign peer','UTC','09:00','18:00','[0,1,2,3,4,5,6]'::jsonb)`,[foreignShift,foreignOrg])
+    await fixture.pool.query(`INSERT INTO attendance_shift_assignments
+      (id,org_id,user_id,shift_id,slot_index,start_date,end_date,is_active,publish_status,assignment_kind)
+      VALUES($1,$2,$3,$4,0,$5,$5,true,'published','regular')`,[randomUUID(),foreignOrg,actor.userId,foreignShift,workDate])
+    await fixture.pool.query(`INSERT INTO attendance_calculation_rollout_state
+      (org_id,state,engine_version,reason_code,actor_id,version,prior_state)
+      VALUES($1,'shadow','live04-native','TEST_FIXTURE',$2,1,NULL)`,[foreignOrg,admin.userId])
+    const priorEnabled = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    try {
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId + ',' + foreignOrg
+      expect(observed.boundary?.resolvesScheduledTimezone).toBe(true)
+      const foreignRun = await plugin.__attendanceWorkDateResolverForTests.runAutoAbsenceForOrgDate({
+        query:async (text,values) => (await fixture.pool.query(text,values)).rows,
+      },{orgId:foreignOrg,workDate,skipDedup:true,initiator:'cron',w4Boundary:observed.boundary!})
+      expect(foreignRun).toEqual({skipped:false,total:1,targetUsers:1,generated:1,reviewRequired:[]})
+      const foreign = (await fixture.pool.query(
+        `SELECT c.*,r.id::text AS record_id FROM attendance_record_calculations c
+         JOIN attendance_records r ON r.id=c.attendance_record_id AND r.org_id=c.org_id
+         WHERE c.org_id=$1 AND r.user_id=$2 AND r.work_date=$3 AND c.operation_id IS NOT NULL`,
+        [foreignOrg,actor.userId,workDate],
+      )).rows
+      expect(foreign).toHaveLength(1)
+      const peer = foreign[0]
+      expect({mode:peer.mode,outcome:peer.outcome,count:peer.expected_segment_count})
+        .toEqual({mode:'shadow',outcome:'completed',count:1})
+      expect((await fixture.pool.query(
+        'SELECT org_id,record_id::text,calculation_id::text FROM attendance_record_segments WHERE calculation_id=$1::uuid',
+        [peer.id],
+      )).rows).toEqual([{org_id:foreignOrg,record_id:peer.record_id,calculation_id:peer.id}])
+      const peerState = async () => (await fixture.pool.query(`SELECT jsonb_build_object(
+        'records',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM attendance_records r WHERE r.org_id=ANY($1::text[]) AND r.user_id=$2),
+        'calculations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM attendance_record_calculations c
+          JOIN attendance_records r ON r.id=c.attendance_record_id WHERE c.org_id=ANY($1::text[]) AND r.user_id=$2),
+        'children',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM attendance_record_segments s
+          JOIN attendance_records r ON r.id=s.record_id WHERE s.org_id=ANY($1::text[]) AND r.user_id=$2)) AS value`,
+        [[fixture.orgId,foreignOrg],actor.userId])).rows[0].value
+      const before = await peerState()
+      const physical = calculateAttendanceSegmentsV1({
+        attribution:own.attribution_snapshot,context:own.context_snapshot,evidence:[],approvedFacts:[],
+      })
+      expect(physical.outcome).toBe('completed')
+      const input: ShadowCalculationRowInputV1 = {
+        orgId:fixture.orgId,recordId:peer.record_id,version:Number(peer.version)+1,
+        entrypoint:'scheduled',operationId:randomUUID(),attribution:own.attribution_snapshot,
+        context:own.context_snapshot,segmentSnapshot:own.segment_snapshot,evidence:[],approvedFacts:[],
+        inputProvenance:{},provenanceRef:{transport:'scheduled_job',sourceRef:'plugin-attendance:auto-absence:admin-run',
+          artifactSha256:null,normalizedCsvSha256:null,convertedSheetName:null},
+        mergePolicy:'append',outcome:physical.outcome,outcomeReasonCode:physical.outcomeReasonCode,
+        segments:physical.segments,dailyProjection:physical.dailyProjection,actorId:admin.userId,correlationId:randomUUID(),
+        legacyProjection:{workDate,status:own.parent_status,firstInAt:own.parent_in,lastOutAt:own.parent_out,
+          workMinutes:own.parent_minutes,lateMinutes:own.parent_late,earlyLeaveMinutes:own.parent_early},
+      }
+      const client = await fixture.pool.connect()
+      try {
+        await client.query('BEGIN')
+        await expect(insertShadowCalculationV1({query:async (text,values) => client.query(text,values)},input))
+          .rejects.toMatchObject({code:'23503',constraint:'fk_arc_record'})
+      } finally {
+        try { await client.query('ROLLBACK') } finally { client.release() }
+      }
+      expect(await peerState(),'LIVE04_WRONG_ORG_PARENT_INSERT_HAS_NO_DELTA').toEqual(before)
+      const childClient = await fixture.pool.connect()
+      let childBindingFaults = 0
+      try {
+        await childClient.query('BEGIN')
+        // Execute the helper's real child INSERT unchanged, with a foreign org/record
+        // binding fault. Keep its new own calculation id, avoiding a duplicate peer key.
+        await expect(insertShadowCalculationV1({query:async (text,values) => {
+          if (text.includes('INSERT INTO attendance_record_segments')) {
+            if (!values) throw new Error('LIVE04_CHILD_BINDING_PARAMS_REQUIRED')
+            expect(values).toHaveLength(15)
+            const wrong = [...values]
+            wrong[0] = foreignOrg
+            wrong[1] = peer.record_id
+            childBindingFaults += 1
+            return childClient.query(text,wrong)
+          }
+          return childClient.query(text,values)
+        }},{...input,recordId:own.record_id,version:Number(own.version)+1}))
+          .rejects.toMatchObject({code:'23503',constraint:'fk_ars_calculation'})
+      } finally {
+        try { await childClient.query('ROLLBACK') } finally { childClient.release() }
+      }
+      expect(childBindingFaults).toBe(1)
+      expect(await peerState(),'LIVE04_WRONG_ORG_SHARED_INSERT_HAS_NO_DELTA').toEqual(before)
+    } finally {
+      if (priorEnabled === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorEnabled
+    }
+  },60000)
 })

@@ -42,6 +42,13 @@ import http from 'http'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool, Client } from 'pg'
+import {
+  computeAttendanceSemanticInputFingerprintV1,
+  computeAttendanceProvenanceFingerprintV1,
+} from '../../src/attendance/w4c0-fingerprints'
+import { computeAttendanceSourceDefinitionFingerprintV1 } from '../../src/attendance/w4c1-fingerprints'
+import { ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1 } from '../../src/attendance/w4c1-segment-calculator'
+import type { ApprovedAttendanceFactV1, AttendanceEvidenceV1 } from '../../src/attendance/w4c0-write-boundary-types'
 import type { MetaSheetServer } from '../../src/index'
 import {
   appendAttendanceRequestCreateSnapshotV1,
@@ -1723,6 +1730,47 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
           [orgId],
         )).rows
         expect(calculation.evidence_snapshot.map((item: { ref: string }) => item.ref).sort()).toEqual(physical.map(item => item.id).sort())
+        if (mode === 'bounded-manual' || mode === 'bounded-manual-explicit') {
+          // Derive intended inputs from native events and the pre-decision freeze,
+          // independently of the fields persisted on this calculation.
+          const nativeEvents = (await pool.query<{
+            id: string; event_type: 'check_in' | 'check_out'; occurred_at: Date; source: string
+          }>(
+            `SELECT id::text AS id, event_type, occurred_at, source FROM attendance_events
+             WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
+               AND event_type IN ('check_in', 'check_out') ORDER BY occurred_at, id`,
+            [orgId, userId, workDate],
+          )).rows
+          const expectedEvidence: AttendanceEvidenceV1[] = nativeEvents.map(event => ({
+            kind: 'punch', ref: event.id, direction: event.event_type,
+            occurredAt: event.occurred_at.toISOString(),
+            source: event.source === 'outdoor_approval' ? 'outdoor_approval' : 'attendance_event',
+          }))
+          const expectedFacts: ApprovedAttendanceFactV1[] = [{
+            kind: 'overtime', requestId, requestSnapshotVersion: frozen[0].version,
+            requestSnapshotFingerprint: frozen[0].payload_fingerprint,
+            approvalVersion: binding.approvalVersion, approvalRecordId: binding.approvalRecordId,
+            coverage: { kind: 'bounded_interval', startAt: workDate + 'T20:00:00.000Z',
+              endAt: workDate + 'T21:00:00.000Z', minutes: 60 },
+          }]
+          expect(calculation.merge_policy, 'LIVE04_NATIVE_STORED_MERGE_POLICY').toBe('merge')
+          expect(calculation.evidence_snapshot).toEqual(expectedEvidence)
+          expect(calculation.semantic_input_fingerprint, 'LIVE04_NATIVE_INTENDED_SEMANTIC_INPUTS').toBe(
+            computeAttendanceSemanticInputFingerprintV1({
+              attribution: frozen[0].attribution_snapshot, context: frozen[0].context_snapshot,
+              evidence: expectedEvidence, approvedFacts: expectedFacts, manualOverride,
+              mergePolicy: 'merge', calculationTier: 'legacy_shadow',
+              engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1, snapshotSchemaVersion: 1,
+            }),
+          )
+          expect(calculation.provenance_fingerprint).toBe(computeAttendanceProvenanceFingerprintV1({
+            transport: 'approved_request', sourceRef: requestId,
+            artifactSha256: null, normalizedCsvSha256: null, convertedSheetName: null,
+          }))
+          expect(calculation.source_definition_fingerprint).toBe(computeAttendanceSourceDefinitionFingerprintV1({
+            attribution: frozen[0].attribution_snapshot, context: frozen[0].context_snapshot,
+          }))
+        }
         const children = (await pool.query(
           'SELECT count(*)::int AS n FROM attendance_record_segments WHERE org_id = $1 AND calculation_id = $2::uuid',
           [orgId, calculation.id],
