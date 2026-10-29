@@ -33,6 +33,10 @@
  * KNOWN COST, stated: table-level `spreadsheet:write` also opens field and view management on that
  * one sheet (permission-service applySheetPermissionScope). The floor already holds exactly that
  * level on today's sheet, so this is not a new exposure; the ADR records it (§11.7).
+ * CLOSED 2026-10-29 (owner option B, R-66 ②): on a registered project sheet every capability resolver
+ * now takes field and view management away from everyone but platform admins
+ * (stock-preparation-project-sheet-schema-clamp.ts); this port still writes `spreadsheet:write`,
+ * which there confers record work only.
  */
 
 /** The same rule plugins/plugin-integration-core/lib/stock-preparation-own-base.cjs holds. */
