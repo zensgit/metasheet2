@@ -322,8 +322,26 @@ describe('DirectoryManagementView', () => {
     expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
   })
 
+  it.each([null, '合成企业'])('omits an unchanged enterprise name on unrelated saves (%s)', async (corpName) => {
+    const base = createIntegration()
+    const integration = { ...base, config: { ...base.config, corpName } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations' ? [integration] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim() === '保存变更')!.click()
+    await flushUi()
+    const writes = apiFetchMock.mock.calls.filter((call) => call[1]?.method)
+    expect(writes).toHaveLength(1)
+    expect(JSON.parse(writes[0][1].body)).not.toHaveProperty('corpName')
+  })
+
   it.each([' 新企业 ', ''])('sends enterprise name changes only on explicit form save (%s)', async (name) => {
-    const integration = createIntegration()
+    const base = createIntegration()
+    const integration = { ...base, config: { ...base.config, corpName: '原企业' } }
     apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
       items: url === '/api/admin/directory/integrations' ? [integration] : [],
     } }))
@@ -6563,7 +6581,6 @@ describe('DirectoryManagementView', () => {
           integrationId: 'dir-1',
           name: 'DingTalk CN',
           corpId: 'dingcorp',
-          corpName: '',
           appKey: 'ding-app-key',
           appSecret: '',
           rootDepartmentId: '1',

@@ -4628,11 +4628,13 @@ function readDirectoryOnboardingPackets(rawPackets: unknown[]): AutoAdmissionOnb
 }
 
 function buildPayload() {
+  const corpName = draft.corpName.trim()
+  const currentCorpName = selectedIntegration.value?.config.corpName ?? ''
   return {
     integrationId: selectedIntegration.value?.id,
     name: draft.name.trim(),
     corpId: draft.corpId.trim(),
-    corpName: draft.corpName.trim(),
+    ...(corpName !== currentCorpName ? { corpName } : {}),
     appKey: draft.appKey.trim(),
     appSecret: draft.appSecret.trim(),
     rootDepartmentId: draft.rootDepartmentId.trim() || '1',
