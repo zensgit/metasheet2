@@ -1018,6 +1018,7 @@ export default defineConfig({
       'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
       // W4C-3a OD-58 group precondition races and SQL order.
       'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
+      'tests/integration/attendance-w4c3a-preconditions-org-scope.db.test.ts',
       // W4C-3a OD-60 group/batch SQL count legs.
       'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
       // W4C-3a full-import authorization recovery matrix.
