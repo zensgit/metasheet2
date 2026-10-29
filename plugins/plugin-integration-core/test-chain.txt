@@ -291,6 +291,7 @@ node __tests__/route-failure-log-closed-code.test.cjs
 node __tests__/integration-g4-m2-adapter-load-hard-dependency.test.cjs
 node __tests__/stock-preparation-yida-allocation.test.cjs
 node __tests__/yida-approved-target-store.test.cjs
+node __tests__/yida-connection-probe.test.cjs
 node __tests__/yida-credential-material-store.test.cjs
 node __tests__/yida-delivery-runner.test.cjs
 node __tests__/yida-delivery-store.test.cjs

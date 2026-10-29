@@ -81,6 +81,28 @@ test('approval new-outcome badge switch (test report 2026-10-08): boolean, exact
   assert.equal(isActivated(spec, 'True'), false)
 })
 
+// YiDa owner-run 测试连接 (ADR adr-yida-connection-test-20261028, R-64): its own default-OFF switch,
+// danger high like the send switch, exact literal only, independent of the send switch, every cited file real.
+test('INTEGRATION_YIDA_CONNECTION_TEST_ENABLED manifest entry: exact true, danger high, independent, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,'))
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
 // ASSUMPTION(task-m4): [own-28] the TASKS_ENABLED entry: danger medium, both read points, and the
 // M4 migration the task routes depend on (named as it is on disk, so a rename is followed here).
 test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 migration on disk', () => {
