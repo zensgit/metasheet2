@@ -33,6 +33,12 @@ The first beforeAll attempt could not load TS migration files: nine leaves remai
 
 The production SQL body and all nine test assertions are unchanged after that qualified baseline. The existing whole8/whole12 concurrency suites were retained from earlier CI, not repeated locally. No full validate:all, fresh backend build, whole parent denominator, complete MUT06 or product/production acceptance is claimed.
 
+## CI corpus registration repair
+
+The first published head, `7848bf2a1d1dd0fbc05fc07426f42b43e520a52a`, failed the existing W4C-2 wiring gate before dependency installation or native execution. The complete 638310-byte backend log is retained with SHA256 `90011fcee27ee34ef17205ce981391697c97d7422298aa6e453000122466448e`. The gate actually ran 324 cases: 320 passed and 4 failed. Disk/run-list derivation found 141 attendance suites while the fixed expected set still contained 140; the new native file was missing from that set. The filename-selected two local registration checks had not covered these four corpus-wide assertions.
+
+The repair adds exactly the new suite's row to `EXPECTED_ATTENDANCE_SUITES`. Removing that row reproduces the prior source byte-for-byte; every scanner and assertion is retained. Only the four failed corpus/set/multiplicity assertions were then selected: 4 passed, 320 filtered/skipped, zero failed/todo. The 320 filtered cases are not passes. Neither the already-passed two registration leaves nor native whole-nine nor completed source-fault phases was rerun. PostgreSQL was not started. The later cleanup failure on the failed CI job followed its skipped PG-start step; no cleanup guard was changed.
+
 Actual receipts, source-fault manifests, diagnostic reports and the final local audit are retained under `artifacts/attendance-mut06-legacy-preconditions-native-20261029/`. CI evidence must be read from the eventual exact PR head; local proof is not current-head CI.
 
 Keep Draft/HOLD. No merge, deployment, R71 change, tag/release, target-server migration, business configuration or provider/live write. Stream/lifecycle/external writes remain OFF. Real UAT50004 is excluded; historical08PUT remains inconclusive. Refs #4556.
