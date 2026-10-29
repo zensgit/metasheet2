@@ -6,9 +6,6 @@ BASE_URL="${BASE_URL:-http://127.0.0.1}"
 API_BASE="${API_BASE:-${BASE_URL%/}/api}"
 BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-http://127.0.0.1:8900/health}"
 MAX_TIME="${MAX_TIME:-10}"
-SERVICE_MANAGER="${SERVICE_MANAGER:-auto}" # auto|pm2|systemd|none
-PM2_APP_NAME="${PM2_APP_NAME:-metasheet-backend}"
-SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}"
 CHECK_NGINX="${CHECK_NGINX:-1}"
 CHECK_METRICS="${CHECK_METRICS:-0}"
 METRICS_URL="${METRICS_URL:-http://127.0.0.1:8900/metrics/prom}"
@@ -24,6 +21,22 @@ function die() {
 function info() {
   echo "[attendance-onprem-healthcheck] $*" >&2
 }
+
+if [[ "${MS_HEALTH_EFFECTIVE_SERVICE_IDENTITY-}" == "1" ]]; then
+  SERVICE_MANAGER="${SERVICE_MANAGER-}"
+  PM2_APP_NAME="${PM2_APP_NAME-}"
+  SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME-}"
+  case "$SERVICE_MANAGER" in
+    pm2) [[ -n "$PM2_APP_NAME" ]] || die "Effective PM2_APP_NAME must not be empty or unset" ;;
+    systemd) [[ -n "$SYSTEMD_SERVICE_NAME" ]] || die "Effective SYSTEMD_SERVICE_NAME must not be empty or unset" ;;
+    none) ;;
+    *) die "Effective SERVICE_MANAGER must be pm2|systemd|none" ;;
+  esac
+else
+  SERVICE_MANAGER="${SERVICE_MANAGER:-auto}" # auto|pm2|systemd|none
+  PM2_APP_NAME="${PM2_APP_NAME:-metasheet-backend}"
+  SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}"
+fi
 
 function check_url() {
   local url="$1"

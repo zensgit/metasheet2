@@ -835,6 +835,29 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "Leave cancel-round product entry (approval change-request lock C v5.9, entry addendum P-1…P-11): the LAUNCH gate of POST /api/attendance/requests/:id/cancel-round, read by the attendance plugin (not by packages/core-backend/src). Default OFF; exact literal 'true' only (no trim, no case folding; '1' / 'yes' / 'TRUE' stay OFF — unlike the plugin's older env flags, it does NOT go through parseBoolean). Off: the launch answers the same 404 body as a never-existing request id, before any read or write. It gates ONLY the launch: the summary read (which reports this flag's state as entryEnabled), the approver decision, the requester's withdraw and the attendance-side pending list are not flag-gated, so a round launched while ON can still be read, decided and withdrawn after it is switched OFF. Read on every call, never cached at module load. danger=medium (PROPOSED, owner to confirm): ON lets an employee start a cancellation of their own approved leave; once the original approvers approve it, the leave is cancelled and its leave balance returned.",
     source: 'plugins/plugin-attendance/index.cjs#isAttendanceCancelRoundEntryEnabled',
   },
+  {
+    key: 'MS_EFFECTIVE_SERVICE_RECEIPT',
+    type: 'enum',
+    activationValue: 'unset / empty disables reporting; nonempty is the caller-owned receipt file path captured before ENV_FILE is sourced',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Local on-prem service-identity receipt option, not an application feature switch. Update/bootstrap capture the caller-owned output location before sourcing ENV_FILE; assignments inside ENV_FILE cannot activate or redirect it. After all existing child phases succeed, write only the raw SERVICE_MANAGER, PM2_APP_NAME and SYSTEMD_SERVICE_NAME as three NUL-terminated fields. Unset or empty requests no report. Wrappers use their own private temporary file and upgrade health-off explicitly clears the option. Do not put secrets in this option or receipt.',
+    source: 'scripts/ops/attendance-onprem-update.sh#MS_EFFECTIVE_SERVICE_RECEIPT; scripts/ops/attendance-onprem-bootstrap.sh#MS_EFFECTIVE_SERVICE_RECEIPT; scripts/ops/attendance-onprem-package-upgrade.sh#MS_EFFECTIVE_SERVICE_RECEIPT; scripts/ops/multitable-onprem-deploy-easy.sh#MS_EFFECTIVE_SERVICE_RECEIPT',
+  },
+  {
+    key: 'MS_HEALTH_EFFECTIVE_SERVICE_IDENTITY',
+    type: 'boolean',
+    activationValue: '1',
+    caseInsensitive: false,
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Local on-prem health identity validation only. Exact literal 1 enables raw resolved identity validation with no trimming or case folding: manager must be pm2, systemd or none, and a selected process name must be nonempty. Other values retain direct health invocation defaults. Wrappers enable it only after consuming their own exact three-field receipt. This switch does not authorize external sends or service writes.',
+    source: 'scripts/ops/attendance-onprem-healthcheck.sh#MS_HEALTH_EFFECTIVE_SERVICE_IDENTITY; scripts/ops/attendance-onprem-package-upgrade.sh#MS_HEALTH_EFFECTIVE_SERVICE_IDENTITY; scripts/ops/multitable-onprem-deploy-easy.sh#MS_HEALTH_EFFECTIVE_SERVICE_IDENTITY',
+  },
 ])
 
 /** Flat lookup by key, built once. */

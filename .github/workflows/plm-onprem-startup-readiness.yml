@@ -7,6 +7,7 @@ on:
       - 'scripts/ops/multitable-onprem-startup-readiness.test.mjs'
       - 'scripts/ops/multitable-onprem-private-command-logs.test.mjs'
       - 'scripts/ops/multitable-onprem-manager-handoff.test.mjs'
+      - 'scripts/ops/multitable-onprem-effective-service-handoff.test.mjs'
       - '.github/workflows/plm-onprem-startup-readiness.yml'
   push:
     branches: [main]
@@ -15,6 +16,7 @@ on:
       - 'scripts/ops/multitable-onprem-startup-readiness.test.mjs'
       - 'scripts/ops/multitable-onprem-private-command-logs.test.mjs'
       - 'scripts/ops/multitable-onprem-manager-handoff.test.mjs'
+      - 'scripts/ops/multitable-onprem-effective-service-handoff.test.mjs'
       - '.github/workflows/plm-onprem-startup-readiness.yml'
 
 permissions:
@@ -38,3 +40,4 @@ jobs:
           node --test scripts/ops/multitable-onprem-startup-readiness.test.mjs
           scripts/ops/multitable-onprem-private-command-logs.test.mjs
           scripts/ops/multitable-onprem-manager-handoff.test.mjs
+          scripts/ops/multitable-onprem-effective-service-handoff.test.mjs

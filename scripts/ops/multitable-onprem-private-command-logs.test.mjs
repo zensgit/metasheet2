@@ -26,7 +26,13 @@ for (const mode of ['success', 'admin-failure', 'health-failure']) {
       mkdirSync(ops, { recursive: true })
       const write = (name, body) => writeFileSync(path.join(ops, name), body, { mode: 0o700 })
       write('multitable-onprem-deploy-easy.sh', source)
-      write('attendance-onprem-bootstrap.sh', '#!/bin/sh\nexit 0\n')
+      write('attendance-onprem-bootstrap.sh', `#!/bin/sh
+set -eu
+if [ -n "\${MS_EFFECTIVE_SERVICE_RECEIPT-}" ]; then
+  printf '%s\\000%s\\000%s\\000' "\${SERVICE_MANAGER:-pm2}" "\${PM2_APP_NAME:-metasheet-backend}" "\${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}" > "$MS_EFFECTIVE_SERVICE_RECEIPT"
+fi
+exit 0
+`)
       write('attendance-onprem-bootstrap-admin.sh', '#!/bin/sh\nprintf %s "$ADMIN_PASSWORD" > "$SEEN_PASSWORD"\nexit "$ADMIN_EXIT"\n')
       write('multitable-onprem-healthcheck.sh', '#!/bin/sh\nprintf %s "$AUTH_TOKEN" > "$SEEN_TOKEN"\nexit "$HEALTH_EXIT"\n')
       for (const name of ['apps/web/dist/index.html', 'packages/core-backend/dist/src/db/migrate.js', 'env']) {

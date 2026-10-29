@@ -22,7 +22,13 @@ function runDeploy({ manager, verify, body = JSON.stringify({ data: { token: fre
     mkdirSync(bin)
     const write = (dir, name, text) => writeFileSync(path.join(dir, name), text, { mode: 0o700 })
     write(ops, 'multitable-onprem-deploy-easy.sh', source)
-    write(ops, 'attendance-onprem-bootstrap.sh', '#!/bin/sh\nprintf %s "$SERVICE_MANAGER" > "$FIXTURE_ROOT/bootstrap-manager"\n')
+    write(ops, 'attendance-onprem-bootstrap.sh', `#!/bin/sh
+set -eu
+printf %s "$SERVICE_MANAGER" > "$FIXTURE_ROOT/bootstrap-manager"
+if [ -n "\${MS_EFFECTIVE_SERVICE_RECEIPT-}" ]; then
+  printf '%s\\000%s\\000%s\\000' "$SERVICE_MANAGER" "\${PM2_APP_NAME:-metasheet-backend}" "\${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}" > "$MS_EFFECTIVE_SERVICE_RECEIPT"
+fi
+`)
     write(ops, 'attendance-onprem-bootstrap-admin.sh', '#!/bin/sh\nprintf %s "$VERIFY_LOGIN" > "$FIXTURE_ROOT/admin-verify"\n')
     write(ops, 'multitable-onprem-healthcheck.sh', `#!/bin/sh
 set -eu
@@ -191,11 +197,25 @@ function runUpgrade({ manager, health = '1', updateExit = '0', healthExit = '0' 
       write(ops, `attendance-onprem-${step}.sh`, `#!/bin/sh
 set -eu
 printf '%s\\n' "$SERVICE_MANAGER" > "$FIXTURE_ROOT/${step}-manager"
+if [ '${step}' = update ] && [ "$${exitVariable}" = 0 ] && [ -n "\${MS_EFFECTIVE_SERVICE_RECEIPT-}" ]; then
+  printf '%s\\000%s\\000%s\\000' "$SERVICE_MANAGER" "\${PM2_APP_NAME:-metasheet-backend}" "\${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}" > "$MS_EFFECTIVE_SERVICE_RECEIPT"
+fi
 exit "$${exitVariable}"
 `)
     }
     // Only metadata lookup and explicitly owned child-script dispatch are available in PATH.
     write(bin, 'dirname', '#!/bin/sh\nprintf %s "${1%/*}"\n')
+    write(bin, 'mktemp', `#!/bin/sh
+set -eu
+[ "$#" -eq 0 ] || exit 97
+: > "$FIXTURE_ROOT/receipt"
+printf '%s\\n' "$FIXTURE_ROOT/receipt"
+`)
+    write(bin, 'rm', `#!/bin/sh
+set -eu
+[ "$#" -eq 2 ] && [ "$1" = -f ] && [ "$2" = "$FIXTURE_ROOT/receipt" ] || exit 97
+exec /bin/rm -f "$2"
+`)
     write(bin, 'env', `#!/bin/sh
 set -eu
 last=''

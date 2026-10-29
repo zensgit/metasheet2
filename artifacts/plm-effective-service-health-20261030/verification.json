@@ -1,0 +1,199 @@
+{
+  "schema": 1,
+  "recorded_at_utc": "2026-10-29T18:53:35.578022+00:00",
+  "source_commit": "dcf2a81342cff2f6d3513a46850a9d0ef03ccbac",
+  "stacked_parent_commit": "7a4e073fa6d256e6e8c015e74e8115d93f021641",
+  "stacked_parent_PR": 6575,
+  "last_observed_main": "a03d804d60d83717feaedce099e5ff14216afc58",
+  "source_changed_paths": [
+    ".github/workflows/plm-onprem-startup-readiness.yml",
+    "scripts/ops/attendance-onprem-bootstrap.sh",
+    "scripts/ops/attendance-onprem-healthcheck.sh",
+    "scripts/ops/attendance-onprem-package-upgrade.sh",
+    "scripts/ops/attendance-onprem-update.sh",
+    "scripts/ops/global-history-flag-manifest.mjs",
+    "scripts/ops/multitable-onprem-deploy-easy.sh",
+    "scripts/ops/multitable-onprem-manager-handoff.test.mjs",
+    "scripts/ops/multitable-onprem-effective-service-handoff.test.mjs"
+  ],
+  "source_inputs": [
+    {
+      "path": "scripts/ops/attendance-onprem-bootstrap.sh",
+      "sha256": "dfff1a088272495efe462b7dcaad8adfcaf425c6268515a80cb308be70fe21e1",
+      "bytes": 2806
+    },
+    {
+      "path": "scripts/ops/attendance-onprem-env-check.sh",
+      "sha256": "7c515159951896e124e9db25e9c3b62bdf44cbb8db73d20936a2379a28e99bd2",
+      "bytes": 10471
+    },
+    {
+      "path": "scripts/ops/attendance-onprem-healthcheck.sh",
+      "sha256": "3600344364ab2dbdf49c1560148f2312d209ee8988f3b54a1c953315e3a926c0",
+      "bytes": 5559
+    },
+    {
+      "path": "scripts/ops/attendance-onprem-package-upgrade.sh",
+      "sha256": "28024765bde65393431b633b34ef4a382f7854a9afb8ed5e9fc5a2896dbd73cf",
+      "bytes": 2897
+    },
+    {
+      "path": "scripts/ops/attendance-onprem-update.sh",
+      "sha256": "e1941d08294ae5876915733a25ad8d4d5fa8e31ea3786d1fbcced9f16fd847c2",
+      "bytes": 3148
+    },
+    {
+      "path": "scripts/ops/global-history-flag-manifest.mjs",
+      "sha256": "598785a09e23bfd475c4a2ecc90d21adc35821253c80f891bbff99993396dd3b",
+      "bytes": 89943
+    },
+    {
+      "path": "scripts/ops/multitable-onprem-deploy-easy.sh",
+      "sha256": "2470ae14709a02737623e09e691b92c1db0a07750507ed1285c5eb7434f2853c",
+      "bytes": 5838
+    },
+    {
+      "path": "scripts/ops/multitable-onprem-effective-service-handoff.test.mjs",
+      "sha256": "25cf731a9a94fde87ba0efec1eeb58555ad8cfa6329645ed5bf1f5952fa9b183",
+      "bytes": 37395
+    },
+    {
+      "path": "scripts/ops/multitable-onprem-healthcheck.sh",
+      "sha256": "06204d960e0123bde1c8959b8ac35ac818c132204f7f77ca6ce94c24033786bd",
+      "bytes": 288
+    },
+    {
+      "path": "scripts/ops/multitable-onprem-manager-handoff.test.mjs",
+      "sha256": "057247f36591e8b99c7e42efa50fffe2506cf7af7d8f73bde8b4bf630b42408f",
+      "bytes": 12018
+    }
+  ],
+  "workflow_sha256": "9176550c1925592dcbcf7b200e9e503d48c8cf1d1a0710927d829fca12157f40",
+  "original_baseline": {
+    "source": "7a4e073fa6d256e6e8c015e74e8115d93f021641",
+    "tests": 4,
+    "identity_assertions_failed_as_expected": 2,
+    "envgate_passed": 2,
+    "source_hashes_unchanged": true,
+    "owned_cleanup": true
+  },
+  "first_candidate": {
+    "selected": 23,
+    "pass": 19,
+    "fail": 4,
+    "timeout_failures": 3,
+    "upgrade_missing_receipt_unexpected_exit": 0,
+    "original_RED_preserved": true,
+    "initial_Root_TAP_only_accounting_error": "Node24 default spec; corrected by parsing same log without replay"
+  },
+  "additional_deploy_missing_before_fix": {
+    "tests": 1,
+    "pass": 0,
+    "fail": 1,
+    "spawn_timeout": false,
+    "actual_wrapper_exit": 0,
+    "source_and_rm_trace_preassertions_passed": true
+  },
+  "Bash_3_2_pure_controls": {
+    "negated_compound_missing": "exit0 CONTINUE plus missing-file stderr",
+    "positive_if_else_missing_empty_truncated": "each exit7 REFUSE",
+    "positive_if_else_valid_three_NUL": "exit0 CONTINUE",
+    "real_product_execution_in_pure_controls": false
+  },
+  "final_selected_execution": [
+    {
+      "module": "scripts/ops/multitable-onprem-effective-service-handoff.test.mjs",
+      "test_name_pattern": "^effective service (RED (upgrade none to file pm2 custom name|deploy pm2 to file systemd custom unit)|carrier (framing (truncated|missing) receipt rejected|deploy missing receipt refuses before admin and health|receipt is three nul raw fields and ignores decoy))$",
+      "counts": {
+        "tests": 6,
+        "pass": 6,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "exit": 0,
+      "duration_ms": 21364.744,
+      "stderr_empty": true
+    },
+    {
+      "module": "scripts/ops/multitable-onprem-manager-handoff.test.mjs",
+      "test_name_pattern": "^(package upgrade manager handoff|default login requires fresh token and preserves caller manager:)",
+      "counts": {
+        "tests": 12,
+        "pass": 12,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "exit": 0,
+      "duration_ms": 19490.819625,
+      "stderr_empty": true
+    }
+  ],
+  "final_selected_started_at": "2026-10-29T18:48:12.354740+00:00",
+  "final_selected_ended_at": "2026-10-29T18:48:53.324954+00:00",
+  "source_hashes_unchanged": true,
+  "owned_tmp_and_home_empty_cleanup": true,
+  "reuse": {
+    "earlier_candidate_PASS_not_replayed": 18,
+    "unchanged_original_envgate_PASS_not_replayed": 2,
+    "one_prior_valid_receipt_control_repeated_because_parser_source_changed": 1,
+    "full_new_module_26_and_legacy_module_67_not_claimed_as_single_local_run": true
+  },
+  "runtime": {
+    "Node": "24.14.1 local macOS arm64",
+    "Bash": "3.2.57 local",
+    "new_case_timeout_ms": 8000,
+    "legacy_deploy_timeout_ms": 5000,
+    "limits_unchanged": true,
+    "Node20_CI_execution": "pending"
+  },
+  "effects": {
+    "actual_loader_envcheck_and_health_scripts_with_inert_commands": true,
+    "new_module_private_PATH_only": true,
+    "legacy_deploy": "clean parent environment plus finite verified Node and host utility fallback; not closed private PATH",
+    "real_HTTP_PG_services_Docker_static_build_images_install_browser_business_acceptance": false
+  },
+  "reviews": [
+    {
+      "report": "Sol-candidate-v1-source-review.json",
+      "sha256": "82c117fc0b4a0395e657f2b379274bf3d300f215b3c246151749054519284808",
+      "decision": "ACCEPT_SOURCE_LOCAL_TEST_PREPARATION_ONLY"
+    },
+    {
+      "report": "Sol-candidate-v4-source-delta-review.json",
+      "sha256": "7a9f38f301852c272c5ac59f850db8d461941cab7637726c5b63606259931b2d",
+      "decision": "ACCEPT_V4_MINIMAL_SOURCE_DELTA_AND_FINITE_SIX_CASE_REVALIDATION_PLAN_ONLY"
+    },
+    {
+      "report": "Sol-candidate-v4-effect-delta-review.json",
+      "sha256": "57f5477d62d557fc5a12f49f0b58a53534f12335a18a61d0c66a9c5cf24f807a",
+      "decision": "ADMIT_EXACT_SIX_FIRST_AND_CONDITIONALLY_FIRST_LEGACY_TWELVE_AFTER_ALL_SIX_PASS"
+    },
+    {
+      "report": "Sol-CI-registration-delta-review.json",
+      "sha256": "07d0c2ac4e0f6a95646c86dc55e9581d4b7012225b043f30484fbd0031656478",
+      "decision": "ACCEPT_THREE_LINE_REGISTRATION_DELTA_STATIC_ONLY"
+    },
+    {
+      "report": "Sol-v4-actual-result-facts-review.json",
+      "sha256": "7b4bdd0ab7b9ebdd086492b74f271c91ca931e830a48a8ccca2c1a3db8afd0d0",
+      "decision": "ACCEPT_RECORDED_V4_SIX_AND_FIRST_LEGACY12_WITH_SEPARATE_HISTORICAL_REUSE"
+    }
+  ],
+  "model_provenance": {
+    "Grok_observed": "Grok4.7 xhigh for contract and fixture source; session28 later definitively not found, cause unknown",
+    "implementation_and_independent_review_requested": "gpt-6.1-sol high",
+    "implementation_and_review_actual_profile": "not separately returned by subagent tool",
+    "Astra_Kimi_called_for_this_slice": false
+  },
+  "CI": {
+    "existing_workflow": ".github/workflows/plm-onprem-startup-readiness.yml",
+    "registration_added_entries": 3,
+    "configured_Node": 20,
+    "current_source_head_CI": "not yet published at record creation"
+  },
+  "acceptance": "finite source/unit repair accepted; full engineering goal remains OPEN; Draft only; no merge/deploy/production notifications/issue closure"
+}

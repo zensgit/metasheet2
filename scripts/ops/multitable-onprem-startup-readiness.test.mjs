@@ -36,7 +36,13 @@ for (const mode of ['immediate', 'delayed', 'unavailable', 'redirect', 'transpor
       mkdirSync(ops, { recursive: true })
       const write = (name, body) => writeFileSync(path.join(ops, name), body, { mode: 0o700 })
       write('multitable-onprem-deploy-easy.sh', source)
-      write('attendance-onprem-bootstrap.sh', '#!/bin/sh\nexit 0\n')
+      write('attendance-onprem-bootstrap.sh', `#!/bin/sh
+set -eu
+if [ -n "\${MS_EFFECTIVE_SERVICE_RECEIPT-}" ]; then
+  printf '%s\\000%s\\000%s\\000' "\${SERVICE_MANAGER:-pm2}" "\${PM2_APP_NAME:-metasheet-backend}" "\${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}" > "$MS_EFFECTIVE_SERVICE_RECEIPT"
+fi
+exit 0
+`)
       write('attendance-onprem-bootstrap-admin.sh', '#!/bin/sh\nprintf x >> "$ADMIN_ATTEMPTS"\ncode=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/auth/login")\n[ "$code" = 200 ]\n')
       write('multitable-onprem-healthcheck.sh', '#!/bin/sh\nexit 0\n')
       // Only shorten retry intervals; curl and its actual HTTP/transport results remain real.
@@ -50,8 +56,10 @@ for (const mode of ['immediate', 'delayed', 'unavailable', 'redirect', 'transpor
         env: { ...process.env, PATH: ops + ':' + process.env.PATH, ENV_FILE: path.join(root, 'env'),
           ADMIN_ATTEMPTS: path.join(root, 'admin-attempts'), API_BASE: base, ADMIN_EMAIL: 'owned@example.invalid', ADMIN_PASSWORD: 'synthetic-only',
           BUILD_WEB: '0', BUILD_BACKEND: '0', CHECK_NGINX: '0' },
-        stdio: ['ignore', 'ignore', 'ignore'],
+        stdio: ['ignore', 'ignore', 'pipe'],
       })
+      let stderr = ''
+      child.stderr.on('data', bytes => { stderr += bytes })
       const timer = setTimeout(() => child.kill(), 10000)
       const code = await new Promise((resolve, reject) => {
         child.once('error', reject)
@@ -68,6 +76,11 @@ for (const mode of ['immediate', 'delayed', 'unavailable', 'redirect', 'transpor
         assert.equal(existsSync(path.join(root, 'admin-attempts')), false, 'Admin command must not be invoked before readiness')
         assert.equal(admin, 0, 'Admin/bootstrap must not run before readiness')
         assert.equal(health, mode === 'transport' ? 0 : 30)
+        if (mode === 'transport') {
+          assert.equal(stderr.includes(
+            '[multitable-onprem-deploy-easy] ERROR: API did not become ready after service startup; admin bootstrap was not attempted',
+          ), true, 'Transport failure must reach the readiness retry limit')
+        }
       }
     } finally {
       if (server.listening) await new Promise(resolve => server.close(resolve))
