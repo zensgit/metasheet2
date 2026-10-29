@@ -34,6 +34,7 @@ import {
   restrictStockPreparationOverviewCapabilities,
 } from '../multitable/stock-preparation-overview-contract'
 import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from '../multitable/sheet-grid-export-closure'
+import { applyStockPreparationProjectSheetSchemaClamp } from '../multitable/stock-preparation-project-sheet-schema-clamp'
 
 /** Ordered stages for base-authority probes (always all four, even when base is missing). */
 export const RECORD_LINK_BASE_AUTH_STAGES = [
@@ -696,6 +697,8 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   permissions: string[]
   /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
   gridExportClosed?: true
+  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin. */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const normalizedUserId = userId.trim()
   const normalizedSheetId = sheetId.trim()
@@ -746,6 +749,11 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   if (stamps.overviewSheetIds.has(normalizedSheetId)) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
+  // Option B (owner 2026-10-29, R-66 ②): the project-sheet structure clamp, the same as the request-bound
+  // resolver's (only canManageFields / canManageViews change; platform admins untouched). Rides the
+  // `sheet_cap_eval` stage (no new stage).
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, normalizedSheetId, capabilities, isAdminRole)
+  capabilities = projectSheetClamp.capabilities
   // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the request-bound resolver's (only
   // `canExport` changes; every person, admins included). Rides the `sheet_cap_eval` stage (no new stage).
   const gridExportClosed = stamps.gridExportClosedSheetIds.has(normalizedSheetId)
@@ -758,6 +766,7 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
     capabilities,
     permissions,
     ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
+    ...(projectSheetClamp.clamped ? { stockPrepProjectSheetSchemaClamped: true as const } : {}),
   }
 }
 

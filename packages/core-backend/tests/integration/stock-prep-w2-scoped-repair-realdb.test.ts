@@ -334,6 +334,12 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
 // ---------------------------------------------------------------------------------------------
 import { assertPluginOwnsSheet, claimPluginObjectScope, isSheetOwnedByProject, MultitableSheetScopeError } from '../../src/multitable/plugin-scope'
 import { listSheetPermissionEntries, resolveSheetCapabilitiesForAccess } from '../../src/multitable/permission-service'
+// Option B (owner 2026-10-29): the transaction-bound resolver, for the project-sheet structure clamp case in S4.
+import { resolveSheetCapabilitiesForUserOnQuery } from '../../src/services/approval-record-link-txn-auth'
+// Option B fix round 1: the GET /view?seed=true door, driven over HTTP against the real router and real DB.
+import express from 'express'
+import supertestRequest from 'supertest'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/stock-preparation-project-sheet-grants'
 // S3 fix round 1 (R1): the overview's G1 READ port, against real PostgreSQL.
 import { grantStockPreparationOverviewRoleRead } from '../../src/services/stock-preparation-overview-grants'
@@ -754,6 +760,54 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     }
     const gridBefore = await grid()
     expect(gridBefore).toEqual({ liveness: 'live', canRead: true, canCreateRecord: true, canEditRecord: true })
+
+    // Option B (owner 2026-10-29, R-66 ②): on the REAL registered project sheet (real registry row written by the
+    // real claim, real G1 role grant) the floor keeps the whole record plane and notify but no longer manages
+    // fields or views — through the REST resolver and the transaction-bound one. A platform admin keeps both
+    // bits. Controls on real rows: a global manage-schema holder keeps both bits on the UNCLAIMED derived twin (no
+    // registry row) and on the sheet ANOTHER plugin claimed (same project-shaped object id), and is clamped on sheetA.
+    const floorSchema = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: floorUser, permissions: [], isAdminRole: false })
+    expect(floorSchema.capabilities).toMatchObject({
+      canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canSendNotification: true,
+      canManageFields: false, canManageViews: false,
+    })
+    expect(floorSchema.stockPrepProjectSheetSchemaClamped).toBe(true)
+    const floorOnTxn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, floorUser)
+    expect(floorOnTxn.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
+    expect(floorOnTxn.stockPrepProjectSheetSchemaClamped).toBe(true)
+    const adminSchema = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: 'u_s4_platform_admin', permissions: [], isAdminRole: true })
+    expect(adminSchema.capabilities).toMatchObject({ canManageFields: true, canManageViews: true })
+    expect('stockPrepProjectSheetSchemaClamped' in adminSchema).toBe(false)
+    const schemaHolder = { userId: `s4schema_${suffix}`, permissions: ['multitable:read', 'multitable:write', 'multitable:manage-schema'], isAdminRole: false }
+    for (const control of [unclaimedSheet, otherPluginSheet]) {
+      const kept = await resolveSheetCapabilitiesForAccess(q as never, control, schemaHolder)
+      expect(kept.capabilities, control).toMatchObject({ canManageFields: true, canManageViews: true })
+      expect('stockPrepProjectSheetSchemaClamped' in kept, control).toBe(false)
+    }
+    const schemaOnProject = await resolveSheetCapabilitiesForAccess(q as never, sheetA, schemaHolder)
+    expect(schemaOnProject.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
+
+    // The seed door (fix round 1): `GET /view?seed=true` on a LIVE sheet used to run createSeededSheet behind the
+    // canRead gate alone — six fresh-id fields and five demo records written into the project sheet by the floor.
+    // Now a live re-seed needs canManageFields && canCreateRecord: the floor reads the sheet (200) and the real
+    // field / record / view counts do not move.
+    const structureCounts = async () => {
+      const count = async (table: 'meta_fields' | 'meta_records' | 'meta_views') =>
+        Number(((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE sheet_id = $1`, [sheetA])).rows[0] as { n: number }).n)
+      return { fields: await count('meta_fields'), records: await count('meta_records'), views: await count('meta_views') }
+    }
+    const seedApp = express()
+    seedApp.use(express.json())
+    seedApp.use((req, _res, next) => {
+      ;(req as unknown as { user: unknown }).user = { id: floorUser, roles: ['member'], perms: [] }
+      next()
+    })
+    seedApp.use('/api/multitable', univerMetaRouter())
+    const countsBeforeSeed = await structureCounts()
+    const seeded = await supertestRequest(seedApp).get('/api/multitable/view').query({ sheetId: sheetA, seed: 'true' })
+    expect(seeded.status, JSON.stringify(seeded.body?.error ?? null)).toBe(200)
+    expect(await structureCounts()).toEqual(countsBeforeSeed)
+
     const grantsBefore = await permissionRows(sheetA)
     const historyBefore = await revisionCount(sheetA)
     expect(grantsBefore.some((row) => row.subject_type === 'role' && row.subject_id === ROLE_A && row.perm_code === 'spreadsheet:write')).toBe(true)

@@ -332,6 +332,9 @@ export interface MetaRowActions {
   canEdit: boolean
   canDelete: boolean
   canComment: boolean
+  /** R-66: set by the server only where `canDelete` is false because the row is a PLM row the stock-preparation
+   *  pull maintains (nobody may delete it). The delete entry is then shown disabled with the reason. */
+  deleteBlockedReason?: 'plm_row'
 }
 
 export interface MetaScopedPermissions {
@@ -392,6 +395,9 @@ export interface MetaDeletedRecord {
   /** Backend-resolved display name (name → email) for `deletedBy`; null when unresolved → fall back to the id. */
   deletedByName?: string | null
   deletedAt: string
+  /** R-66: on a stock-preparation template sheet, why the server would refuse restoring this row (a live row holds
+   *  its key, or the key column is unresolvable). Absent ⇒ restorable as before. Display only; the route decides. */
+  restoreBlocked?: 'plm_key_active' | 'plm_key_unresolved'
 }
 
 export interface MetaRecordRevision {
@@ -578,6 +584,14 @@ export interface MetaCapabilities {
    * construction, like canDeleteSheet — never applied to the rail's other rows.
    */
   canCopySheet?: boolean
+  /**
+   * Customer feedback 2026-10-27: set by /context ONLY when true — the sheet's rows are maintained by the
+   * stock-preparation plugin (a `stockPreparation*` field namespace ∧ a plugin registry row), and
+   * `POST /records/:id/duplicate` answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET there. Sent only
+   * to an actor who could otherwise create. The drawer's duplicate entry is shown disabled with the reason.
+   * Absent ⇒ unchanged. Display only: the route refuses on its own.
+   */
+  recordDuplicateBlocked?: boolean
   /**
    * R68 (#6454 judge note): set by /context ONLY when true — the sheet has a column people may not write
    * (`property.humanWriteLock`, the 备料 project sheet's PLM columns) that its own validation also marks

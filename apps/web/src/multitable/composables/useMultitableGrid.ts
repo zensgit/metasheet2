@@ -19,6 +19,7 @@ import { isFieldAlwaysReadOnly, isPropertyHiddenField } from '../utils/field-per
 import { cloneRangeValue, isRangeWritableFieldType, type RangeChange } from '../utils/grid-range-fill'
 import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import { workbenchLabel } from '../utils/workbench-labels'
 import { DEFAULT_GRID_PAGE_SIZE, clampGridPageSize } from '../utils/grid-page-size'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 
@@ -1307,8 +1308,11 @@ export function useMultitableGrid(opts: {
     return false
   }
 
-  function rejectRowDelete(): false {
-    error.value = fallback('grid.errorDeleteRowBlocked')
+  function rejectRowDelete(reason?: MetaRowActions['deleteBlockedReason']): false {
+    // R-66: a PLM row says why (zh = the server's refusal copy); every other refusal keeps the generic text.
+    error.value = reason === 'plm_row'
+      ? workbenchLabel('notice.plmRowDeleteBlocked', isZh.value)
+      : fallback('grid.errorDeleteRowBlocked')
     return false
   }
 
@@ -1319,7 +1323,9 @@ export function useMultitableGrid(opts: {
     return rowActions.value
   }
 
-  async function createRecord(data?: Record<string, unknown>) {
+  // Returns the NEW record id on success (客户反馈 2026-10-27: the workbench opens it, so a person does not have to
+  // scroll to the bottom to find the empty row), or null with `error` set. Callers that ignore it are unchanged.
+  async function createRecord(data?: Record<string, unknown>): Promise<string | null> {
     error.value = null
     const context = resolveCreateRecordContext({
       sheetId: opts.sheetId.value,
@@ -1327,19 +1333,21 @@ export function useMultitableGrid(opts: {
     })
     if (!context.sheetId && !context.viewId) {
       error.value = fallback('grid.errorContextRequired')
-      return
+      return null
     }
     if (!opts.sheetId.value && context.sheetId) opts.sheetId.value = context.sheetId
     if (!opts.viewId.value && context.viewId) opts.viewId.value = context.viewId
     try {
-      await client.createRecord({
+      const { record } = await client.createRecord({
         sheetId: context.sheetId,
         viewId: context.viewId,
         data,
       })
       await loadViewData(page.value.offset)
+      return record?.id ?? null
     } catch (e: any) {
       error.value = e.message ?? fallback('grid.errorCreateRecord')
+      return null
     }
   }
 
@@ -1368,7 +1376,8 @@ export function useMultitableGrid(opts: {
 
   async function deleteRecord(recordId: string): Promise<boolean> {
     error.value = null
-    if (resolveRowActions(recordId)?.canDelete === false) return rejectRowDelete()
+    const deleteActions = resolveRowActions(recordId)
+    if (deleteActions?.canDelete === false) return rejectRowDelete(deleteActions.deleteBlockedReason)
     try {
       const row = rows.value.find((r) => r.id === recordId)
       await client.deleteRecord(recordId, row?.version)

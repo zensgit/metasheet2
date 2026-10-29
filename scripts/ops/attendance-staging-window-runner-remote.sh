@@ -1907,6 +1907,7 @@ SELECT 'recovery09_unsupported_class6_count=' || count(*)::text
 SQL
 
   local invalid conflicts zero_membership zero_no_row zero_deactivated repairable_users active_orgs directory_orgs non_default_integrations anchor_witness class6 unsupported_class6 value
+  local recovery09_ledger="" recovery09_ready recovery09_will_run
   invalid="$(sed -n 's/^invalid_approval_action_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   conflicts="$(sed -n 's/^attachment_org_conflict_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   zero_membership="$(sed -n 's/^zero_membership_active_user_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
@@ -1928,18 +1929,54 @@ SQL
   # the corrected provisioning migration intentionally do not write them, so they must not make a
   # safe retry demand that the already-applied Recovery09 migration still be pending. Only the
   # executable no-row population and unresolved class-6 rows require the repair gate.
+  #
+  # Once that chain is recorded in kysely_migration it cannot be pending again, and a later
+  # active user with no membership is a legitimate product state (provisioning runs once;
+  # zzzz20260823050000). Record the repairable count as informational instead of failing.
+  # A chain that is genuinely unapplied must still be pending in the exact target image, and
+  # the execution premises below still apply, because those migrations are about to write.
   if [[ "$repairable_users" -gt 0 || "$class6" -gt 0 ]]; then
     if [[ "$active_orgs" != "1" ]]; then
-      grep -q 'zzzz20260823040000_recovery09_prepare_legacy_default_org' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
-        || fail "target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image"
-      grep -q 'zzzz20260823149900_recovery09_close_approval_org_gap' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
-        || fail "target precheck: multi-org repair is required but the Recovery09 gap migration is not pending in the exact target image"
-      [[ "$((zero_no_row + zero_deactivated))" == "$zero_membership" ]] \
-        || fail "target precheck: Recovery09 zero-membership buckets do not close over the measured population"
-      [[ "$directory_orgs" == "1" && "$non_default_integrations" == "0" && "$anchor_witness" -gt 0 ]] \
-        || fail "target precheck: Recovery09 legacy default anchor is not uniquely and actively witnessed"
-      [[ "$unsupported_class6" == "0" ]] \
-        || fail "target precheck: ${unsupported_class6} class-6 candidate(s) are outside the bounded Recovery09 fallback"
+      recovery09_ledger="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 \
+        -c "SELECT name FROM kysely_migration WHERE name IN ('zzzz20260823040000_recovery09_prepare_legacy_default_org','zzzz20260823050000_provision_zero_membership_active_users','zzzz20260823149900_recovery09_close_approval_org_gap') ORDER BY name;")" \
+        || fail "target precheck: could not read kysely_migration to classify the Recovery09 chain"
+      recovery09_ledger="$(printf '%s\n' "$recovery09_ledger" | tr -d '\r' | sed '/^[[:space:]]*$/d')"
+      recovery09_ready=1
+      recovery09_will_run=0
+      if ! grep -qxF -- 'zzzz20260823040000_recovery09_prepare_legacy_default_org' <<< "$recovery09_ledger"; then
+        recovery09_ready=0
+        grep -q 'zzzz20260823040000_recovery09_prepare_legacy_default_org' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+          || fail "target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image"
+        recovery09_will_run=1
+      fi
+      if ! grep -qxF -- 'zzzz20260823149900_recovery09_close_approval_org_gap' <<< "$recovery09_ledger"; then
+        recovery09_ready=0
+        grep -q 'zzzz20260823149900_recovery09_close_approval_org_gap' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+          || fail "target precheck: multi-org repair is required but the Recovery09 gap migration is not pending in the exact target image"
+        recovery09_will_run=1
+      fi
+      if ! grep -qxF -- 'zzzz20260823050000_provision_zero_membership_active_users' <<< "$recovery09_ledger"; then
+        recovery09_ready=0
+        grep -q 'zzzz20260823050000_provision_zero_membership_active_users' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+          || fail "target precheck: multi-org repair is required but the Recovery09 provisioning migration is not pending in the exact target image"
+        recovery09_will_run=1
+      fi
+      if [[ "$recovery09_ready" == "1" ]]; then
+        {
+          echo "recovery09_ledger=applied"
+          echo "recovery09_repairable_users_informational=${repairable_users}"
+        } >> "${OUTPUT_DIR}/target-read-only-prechecks.txt"
+        log "target precheck: Recovery09 chain already applied; recovery09_repairable_users_informational=${repairable_users}"
+      else
+        [[ "$recovery09_will_run" == "1" ]] \
+          || fail "target precheck: Recovery09 chain is neither applied nor pending"
+        [[ "$((zero_no_row + zero_deactivated))" == "$zero_membership" ]] \
+          || fail "target precheck: Recovery09 zero-membership buckets do not close over the measured population"
+        [[ "$directory_orgs" == "1" && "$non_default_integrations" == "0" && "$anchor_witness" -gt 0 ]] \
+          || fail "target precheck: Recovery09 legacy default anchor is not uniquely and actively witnessed"
+        [[ "$unsupported_class6" == "0" ]] \
+          || fail "target precheck: ${unsupported_class6} class-6 candidate(s) are outside the bounded Recovery09 fallback"
+      fi
     fi
   fi
   log "target read-only prechecks OK"

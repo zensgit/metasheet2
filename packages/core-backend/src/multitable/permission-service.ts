@@ -62,6 +62,7 @@ import {
   restrictStockPreparationOverviewCapabilities,
 } from './stock-preparation-overview-contract'
 import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from './sheet-grid-export-closure'
+import { applyStockPreparationProjectSheetSchemaClamp } from './stock-preparation-project-sheet-schema-clamp'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -1811,6 +1812,11 @@ export async function resolveSheetCapabilities(
   stockPrepOverview?: true
   /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
   gridExportClosed?: true
+  /**
+   * Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered stock-preparation project sheet for
+   * an actor who is not a platform admin — field and view management were taken away there.
+   */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const access = await resolveRequestAccess(req)
   return resolveSheetCapabilitiesForAccess(query, sheetId, access)
@@ -1845,6 +1851,11 @@ export async function resolveSheetCapabilitiesForAccess(
   stockPrepOverview?: true
   /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
   gridExportClosed?: true
+  /**
+   * Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered stock-preparation project sheet for
+   * an actor who is not a platform admin — field and view management were taken away there.
+   */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const sheetLiveness = await loadSheetLiveness(query, sheetId)
@@ -1884,6 +1895,13 @@ export async function resolveSheetCapabilitiesForAccess(
   if (stockPrepOverview) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
+  // Option B (owner 2026-10-29, R-66 ②; ADR §11.7): on a REGISTERED stock-preparation project sheet only a
+  // platform admin manages fields and views — every other actor loses canManageFields / canManageViews, whatever
+  // the grants resolved; nothing else changes (multitable/stock-preparation-project-sheet-schema-clamp.ts). No
+  // statement for an admin or a client-id sheet.
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, sheetId, capabilities, access.isAdminRole)
+  capabilities = projectSheetClamp.capabilities
+  const stockPrepProjectSheetSchemaClamped = projectSheetClamp.clamped
   // 备料分批拉取第一期 step 3: a sheet the host stamped closed for generic grid export loses `canExport` for EVERY
   // access, administrators included; nothing else changes.
   const gridExportClosed = stamps.gridExportClosedSheetIds.has(sheetId)
@@ -1903,6 +1921,9 @@ export async function resolveSheetCapabilitiesForAccess(
     // Present only on a closed sheet, so every other caller's result is unchanged in shape (the export route
     // names the closure to a reader; `/context` sends its marker).
     ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
+    // Present only on a clamped project sheet, so every other caller's result is unchanged in shape (the members
+    // page's grantor bound reads it: services/stock-preparation-members-host.ts).
+    ...(stockPrepProjectSheetSchemaClamped ? { stockPrepProjectSheetSchemaClamped: true as const } : {}),
   }
 }
 
@@ -1927,6 +1948,11 @@ export async function resolveSheetReadableCapabilities(
   stockPrepOverview?: true
   /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
   gridExportClosed?: true
+  /**
+   * Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered stock-preparation project sheet for
+   * an actor who is not a platform admin — field and view management were taken away there.
+   */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   return resolveSheetCapabilities(req, query, sheetId)
 }

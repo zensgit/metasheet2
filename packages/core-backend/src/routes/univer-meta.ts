@@ -155,6 +155,20 @@ import {
   resolvePeopleSheetReadBound,
 } from '../multitable/people-sheet-read-bound'
 import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
+import {
+  isPluginMaintainedRowSheet,
+  RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_BODY,
+  RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_STATUS,
+} from '../multitable/record-duplicate-guard'
+import {
+  applyPlmRowDeleteBlocks,
+  PlmRowDeleteRefusedError,
+  plmRowDeleteRefusedBody,
+  PlmRowRestoreRefusedError,
+  plmRowRestoreRefusedBody,
+  resolvePlmRowDeleteBlockedIds,
+  withPlmRowDeleteBlock,
+} from '../multitable/plm-row-delete-guard'
 import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
   isElearningProjectionBaseIdCandidate,
@@ -9509,6 +9523,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           canCopySheet = false
         }
       }
+      // Customer feedback 2026-10-27: the duplicate route refuses a sheet whose rows the stock-preparation
+      // plugin maintains (multitable/record-duplicate-guard.ts); tell the web so the drawer's duplicate entry is
+      // shown disabled with the reason. Only for an actor who could otherwise create. The namespace half runs
+      // in memory over `activeFields`, so an ordinary sheet issues no statement and its capabilities stay
+      // byte-identical. A thrown registry probe fails CLOSED to true (display only — the route decides).
+      let recordDuplicateBlocked = false
+      if (capabilities.canCreateRecord === true && effectiveSheetId) {
+        try {
+          recordDuplicateBlocked = await isPluginMaintainedRowSheet(pool.query.bind(pool), effectiveSheetId, activeFields)
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: plugin-maintained-rows probe failed for recordDuplicateBlocked; failing closed to true',
+            { reason: 'plugin_maintained_rows_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          recordDuplicateBlocked = true
+        }
+      }
       // Copy-sheet provenance on the SELECTED sheet: the source id is disclosed only to an actor who can read
       // that source sheet (ADR §6 — `sheetId` 只对能读源表者透出); the badge fields (kind, at) need no gate.
       let selectedCopiedFrom: ReturnType<typeof serializeCopiedFrom> = null
@@ -9586,6 +9617,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             canDeleteSheet,
             // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
             canCopySheet,
+            // Customer feedback 2026-10-27: sent ONLY when true (see `recordDuplicateBlocked` above); the
+            // duplicate route answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET on its own.
+            ...(recordDuplicateBlocked ? { recordDuplicateBlocked: true } : {}),
             // R68 (#6454 judge note): a sheet with a human-write-locked column that is ALSO required by its own
             // validation rule (the 备料 project sheet's PLM columns) can never take a person-created record:
             // empty fails the rule, filled is a locked write. Sent ONLY when true and only to an actor who could
@@ -17605,7 +17639,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       offset = boundedWindow.offset
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
-      if (seed) {
+      // A LIVE sheet is re-seeded only by someone who could add those columns and rows by hand. The seed
+      // writes six fields with fresh ids and five demo records, so on a live sheet it is a schema write and
+      // a record write, not a read; behind the canRead gate above alone, any reader (an `mst_` token
+      // included) could add columns and rows to a sheet whose field management is refused to them — e.g. a
+      // registered stock-preparation project sheet, where only platform admins manage fields (owner option
+      // B, 2026-10-29). Materializing an ABSENT sheet is unchanged.
+      const seedMayWriteLive = seed && sheetLiveness === 'live' && capabilities.canManageFields && capabilities.canCreateRecord
+      if (seedMayMaterialize || seedMayWriteLive) {
         await createSeededSheet({ sheetId, name: `Seed ${sheetId}` })
       }
 
@@ -17952,6 +17993,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         relationalLinkFields,
         linkValuesByRecord,
       )
+      // R-66 ① (plm-row-delete-guard.ts): which page rows are PLM rows the delete routes refuse for everyone. From
+      // the rows' UNFILTERED data (a field-permission-hidden key column still identifies the row; the route refuses
+      // regardless), in memory over `fields`; one registry statement on an exact-stanza sheet only, and none at all
+      // for an actor who cannot delete. A failed probe fails CLOSED to "blocked" (display only — the route decides).
+      const plmDeleteBlockedIds = capabilities.canDeleteRecord
+        ? await resolvePlmRowDeleteBlockedIds(pool.query.bind(pool), sheetId, fields, rows, (err) => {
+            console.error(
+              '[univer-meta] view: PLM-row probe failed for rowActionOverrides; failing closed to blocked',
+              { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+            )
+          })
+        : new Set<string>()
       for (const row of rows) {
         row.data = filterRecordDataByFieldIds(row.data, allowedFieldIds)
       }
@@ -18021,14 +18074,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             allowedFieldIds,
           )
         : undefined
-      const rowActionOverrides = buildRowActionOverrides(
+      const defaultRowActions = deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole)
+      // R-66 ①: a PLM row the actor could otherwise delete gets `canDelete: false` + `deleteBlockedReason` through
+      // the existing per-row channel (no /context key; every other row / sheet stays byte-identical).
+      const rowActionOverrides = applyPlmRowDeleteBlocks(
+        buildRowActionOverrides(
+          rows,
+          requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
+            ? await loadRecordCreatorMap(pool.query.bind(pool), sheetId, rows.map((row) => row.id))
+            : new Map(),
+          capabilities,
+          sheetScope,
+          access,
+        ),
         rows,
-        requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
-          ? await loadRecordCreatorMap(pool.query.bind(pool), sheetId, rows.map((row) => row.id))
-          : new Map(),
-        capabilities,
-        sheetScope,
-        access,
+        plmDeleteBlockedIds,
+        defaultRowActions,
       )
       // Per-row unlock gate (decision b): compute `canUnlock` server-side for the LOCKED rows so the
       // grid/drawer can show the unlock action without the client ever seeing `created_by`. The owner
@@ -18055,7 +18116,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
           fieldScopeMap,
         }),
-        rowActions: deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole),
+        rowActions: defaultRowActions,
         ...(rowActionOverrides ? { rowActionOverrides } : {}),
         ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities, viewScopeMap) } : {}),
       }
@@ -18213,8 +18274,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         readableFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, readableFieldIds)
       }
       const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], effectiveCapabilities, viewScopeMap) : {}
+      // R-66 ① (plm-row-delete-guard.ts): an existing PLM row the actor could otherwise delete answers canDelete=false
+      // + deleteBlockedReason, like GET /view. `record.data` is still unfiltered here. Public forms never delete.
       const rowActions = record
-        ? deriveRecordRowActions(effectiveCapabilities, effectiveSheetScope, effectiveAccess, record.createdBy)
+        ? withPlmRowDeleteBlock(
+            deriveRecordRowActions(effectiveCapabilities, effectiveSheetScope, effectiveAccess, record.createdBy),
+            effectiveCapabilities.canDeleteRecord
+              && (await resolvePlmRowDeleteBlockedIds(pool.query.bind(pool), sheetId, fields, [record], (err) => {
+                console.error(
+                  '[univer-meta] form-context: PLM-row probe failed for rowActions; failing closed to blocked',
+                  { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+                )
+              })).has(record.id),
+          )
         : deriveRecordRowActions({
             ...effectiveCapabilities,
             canEditRecord: effectiveCapabilities.canCreateRecord,
@@ -19499,7 +19571,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         fieldScopeMap,
       })
       const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities, viewScopeMap) : {}
-      const rowActions = deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
+      // R-66 ① (plm-row-delete-guard.ts): same per-row PLM block as GET /view, from the row's UNFILTERED stored data
+      // (`record.data` was field-masked above).
+      const rowActions = withPlmRowDeleteBlock(
+        deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy),
+        capabilities.canDeleteRecord
+          && (await resolvePlmRowDeleteBlockedIds(pool.query.bind(pool), sheetId, fields, [{ id: record.id, data: normalizeJson(row.data) }], (err) => {
+            console.error(
+              '[univer-meta] record: PLM-row probe failed for rowActions; failing closed to blocked',
+              { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+            )
+          })).has(record.id),
+      )
       // Per-row unlock gate (decision b) for the drawer's lock/unlock action. `created_by` is already
       // resolved on `record` here, so no extra read is needed. Only meaningful while locked.
       if (record.locked) {
@@ -20398,6 +20481,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
 
+      // Customer feedback 2026-10-27: no generic copy on a sheet whose rows the stock-preparation plugin
+      // maintains — the copy would clone the row's idempotency key / PLM identity and hold every later pull
+      // (multitable/record-duplicate-guard.ts). After the read gate, so a non-reader learns nothing; before
+      // any write. An ordinary sheet issues no extra statement here.
+      if (await isPluginMaintainedRowSheet(pool.query.bind(pool), sheetId, fields)) {
+        return res.status(RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_STATUS).json(RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_BODY)
+      }
+
       // Overlay forward-link values from meta_links onto a working copy of the source data (mirror/derived
       // link fields are isFieldAlwaysReadOnly → stripped below regardless, so only forward links matter).
       const sourceData: Record<string, unknown> = { ...normalizeJson(sourceRow.data) }
@@ -20539,6 +20630,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
+      // R-66 ① (plm-row-delete-guard.ts): a PLM row of a stock-preparation template sheet — refused for everyone,
+      // admins included; values-free (no sheet / record / key in the body).
+      if (err instanceof PlmRowDeleteRefusedError) {
+        return res.status(err.status).json(plmRowDeleteRefusedBody(err.reason))
+      }
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
@@ -20700,6 +20796,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
+      // R-66 (plm-row-delete-guard.ts): a live row already holds this deleted PLM row's key (or the key column is
+      // unresolvable) — restoring would make two rows per key and hold every later pull. Values-free.
+      if (err instanceof PlmRowRestoreRefusedError) {
+        return res.status(err.status).json(plmRowRestoreRefusedBody(err.reason))
+      }
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }

@@ -429,6 +429,7 @@
           :search-text="searchText" :row-density="rowDensity"
           :can-load-more="gridCanLoadMore" :infinite-scroll="gridIsFlatPath"
           :page-size="grid.pageSize?.value" :page-size-options="GRID_PAGE_SIZE_OPTIONS" @set-page-size="onSetGridPageSize"
+          :total-rows="grid.page.value.total"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
@@ -477,6 +478,7 @@
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="canCreateRecordByHand"
+        :duplicate-blocked-reason="recordDuplicateBlockedReason"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
@@ -1907,9 +1909,11 @@ function ensureCanEditRecord(recordId?: string | null): boolean {
 }
 
 function ensureCanDeleteRecord(recordId?: string | null): boolean {
-  const allowed = recordId ? (grid.resolveRowActions(recordId)?.canDelete ?? effectiveRowActions.value.canDelete) : effectiveRowActions.value.canDelete
+  const actions = recordId ? (grid.resolveRowActions(recordId) ?? effectiveRowActions.value) : effectiveRowActions.value
+  const allowed = actions.canDelete
   if (allowed) return true
-  showError(wb('toast.recordDeleteBlocked', isZh.value))
+  // R-66: a PLM row (server-derived `deleteBlockedReason`) says why — nobody may delete it.
+  showError(wb(actions.deleteBlockedReason === 'plm_row' ? 'notice.plmRowDeleteBlocked' : 'toast.recordDeleteBlocked', isZh.value))
   return false
 }
 
@@ -3153,9 +3157,16 @@ async function onHierarchyReparentRecord(payload: {
     showError(error?.message ?? wb('toast.hierarchyParentUpdateFailed', isZh.value))
   }
 }
+// Toolbar 「+ 新建记录」 and the grid's inline row / footer entry. 客户反馈 2026-10-27 (R74): the new record used to
+// land as an empty last row with the grid back on its first page, so a person scrolled to the bottom to fill it
+// in. It now opens in the inspector; resolveDeepLink fetches it when it is not among the loaded rows.
 async function onAddRecord() {
   if (!ensureCanCreateRecord()) return
-  await grid.createRecord()
+  const newRecordId = await grid.createRecord()
+  if (newRecordId) {
+    await resolveDeepLink(newRecordId)
+    return
+  }
   if (grid.error.value) showError(grid.error.value)
 }
 async function onKanbanCreateRecord(data: Record<string, unknown>) {
@@ -3176,13 +3187,29 @@ async function onDeleteRecord() {
   if (grid.error.value) showError(grid.error.value)
 }
 
-// Duplicate / clone record (design 2026-06-16). Both the drawer Duplicate button and the grid right-click
-// affordance route here. Gated on canCreateRecord (the server re-enforces it + the field-mask). On success
-// the new clone is opened in the drawer (Airtable/feishu staple) so the user lands on the copy to tweak it.
+// Customer feedback 2026-10-27: /context sends `recordDuplicateBlocked` on a sheet whose rows the stock-preparation
+// plugin maintains (the duplicate route answers 409 there). The drawer shows its 复制 entry disabled with this
+// reason, and a stale emit is refused below with the same copy. Same fail-closed read: absent ⇒ unchanged.
+const recordDuplicateBlocked = computed(() => capabilitySource.value?.recordDuplicateBlocked === true)
+const recordDuplicateBlockedReason = computed(() => (
+  recordDuplicateBlocked.value ? wb('notice.recordDuplicateBlocked', isZh.value) : null
+))
+
+// Duplicate / clone record (design 2026-06-16). The drawer's 复制 entry routes here; the grid declares
+// `duplicate-record` but no gesture emits it since the right-click duplicate was removed (customer feedback
+// 2026-10-27: a right-click created a row, and 「记录已复制」 read as a clipboard copy). Gated on
+// canCreateRecord (the server re-enforces it + the field-mask) and on `recordDuplicateBlocked`, then it ASKS
+// first — the copy is a new record in this sheet. On success the new clone is selected (the drawer, already
+// open, follows it) and the toast says a record was ADDED.
 async function onDuplicateRecord(recordId?: string | null) {
   const sourceId = recordId ?? selectedRecordId.value
   if (!sourceId) return
+  if (recordDuplicateBlocked.value) {
+    showError(wb('notice.recordDuplicateBlocked', isZh.value))
+    return
+  }
   if (!ensureCanCreateRecord()) return
+  if (!window.confirm(wb('confirm.duplicateRecord', isZh.value))) return
   const newRecordId = await grid.duplicateRecord(sourceId)
   if (newRecordId) {
     showSuccess(wb('toast.recordDuplicated', isZh.value))

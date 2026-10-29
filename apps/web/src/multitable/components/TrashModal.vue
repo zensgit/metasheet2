@@ -31,7 +31,19 @@
             <p v-else class="meta-trash__details-empty" data-test="trash-record-details-empty">{{ t('没有可显示的删除前字段值', 'No visible pre-deletion field values are available') }}</p>
             <p v-if="row.hasUnavailableDetails" class="meta-trash__details-empty" data-test="trash-record-details-partial">{{ t('部分删除前字段值不可用', 'Some visible pre-deletion field values are unavailable') }}</p>
           </div>
-          <template v-if="confirmingId === row.rec.recordId">
+          <!-- R-66: the server marks a stock-preparation PLM row it would refuse to restore (a live row holds its key, or
+               the key column is unresolvable). Restore is shown DISABLED with the reason inline; the route decides. -->
+          <template v-if="row.restoreBlockedReason">
+            <button
+              class="meta-trash__restore"
+              type="button"
+              data-test="trash-restore"
+              disabled
+              :title="row.restoreBlockedReason"
+            >{{ t('恢复', 'Restore') }}</button>
+            <span class="meta-trash__blocked-reason" data-test="trash-restore-blocked-reason">{{ row.restoreBlockedReason }}</span>
+          </template>
+          <template v-else-if="confirmingId === row.rec.recordId">
             <span class="meta-trash__confirm-text">{{ t(`恢复「${row.title}」？`, `Restore “${row.title}”?`) }}</span>
             <button
               class="meta-trash__restore"
@@ -71,6 +83,7 @@ import { useTrash } from '../composables/useTrash'
 import { formatFieldDisplay, pickRecordTitle } from '../utils/field-display'
 import { configHistoryTime } from '../utils/meta-config-history-labels'
 import { historyActor } from '../utils/meta-record-labels'
+import { workbenchLabel } from '../utils/workbench-labels'
 import { MtButton, MtIconButton } from '../ui'
 import type { MetaDeletedRecord, MetaField } from '../types'
 
@@ -157,8 +170,16 @@ const rowsWithDetails = computed(() => displayedRows.value.map((row) => {
     ...row,
     details,
     hasUnavailableDetails: visibleFieldCount > details.length,
+    restoreBlockedReason: restoreBlockedReasonOf(row.rec),
   }
 }))
+
+// R-66: the server's restoreBlocked marker → the reason text (zh = the server's refusal copy verbatim).
+function restoreBlockedReasonOf(rec: MetaDeletedRecord): string | null {
+  if (rec.restoreBlocked === 'plm_key_active') return workbenchLabel('notice.plmRowRestoreBlocked', isZh.value)
+  if (rec.restoreBlocked === 'plm_key_unresolved') return workbenchLabel('notice.plmKeyColumnMissing', isZh.value)
+  return null
+}
 
 async function confirmRestore(rec: MetaDeletedRecord): Promise<void> {
   const currentModalGeneration = modalGeneration
@@ -193,6 +214,7 @@ async function confirmRestore(rec: MetaDeletedRecord): Promise<void> {
    (UI-P2-1c T4). Class kept on the element only for selector stability — sole sharer. Red line:
    .meta-trash__restore (Restore / Confirm-restore) is delete-adjacent semantic and is NOT migrated. */
 .meta-trash__restore:disabled { cursor: default; opacity: 0.6; }
+.meta-trash__blocked-reason { flex: 1 1 100%; font-size: 12px; color: var(--meta-text-secondary, #888); }
 .meta-trash__error { color: var(--meta-danger, #c0392b); margin: 0 0 8px; }
 .meta-trash__hint { color: var(--meta-text-secondary, #888); padding: 12px 0; }
 </style>

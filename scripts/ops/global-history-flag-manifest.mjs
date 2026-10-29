@@ -59,6 +59,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime; packages/core-backend/src/integration/yida-owner-runtime.ts; plugins/plugin-integration-core/lib/yida-owner-send-port.mjs',
   },
   {
+    key: 'INTEGRATION_YIDA_CONNECTION_TEST_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true enables only the owner-run token-only 测试连接 before local initialization (one POST to the fixed DingTalk OAuth endpoint with the pasted appKey/appSecret, token discarded inside the plugin, nothing persisted, no form IO). Not a grant: anchor owner + live integration admin are re-proved in an RC transaction on every call, before a per-process limiter (one in flight, 5 s cooldown) that only authorized callers reach; the switch is read before any DB work and again right before the exchange. Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED. Turning it on means customer credentials may leave the box on the owner click: enabling on a deployed machine (a backend restart on-prem) and using real credentials are separate owner decisions (R-50, R-64, AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaConnectionTestRuntime; packages/core-backend/src/integration/yida-connection-test-runtime.ts; plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',

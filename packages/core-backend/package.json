@@ -70,7 +70,7 @@
     "socket.io": "^4.6.1",
     "uuid": "^9.0.1",
     "winston": "^3.17.0",
-    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "xlsx": "file:../../vendor/xlsx-0.20.3.tgz",
     "xml2js": "^0.6.2",
     "y-protocols": "^1.0.7",
     "yjs": "^13.6.30",

@@ -76,6 +76,7 @@ export type MetaCoreLabelKey =
   | 'grid.errorLockRow' | 'grid.errorUnlockRow'
   | 'grid.prev' | 'grid.next' | 'grid.loading'
   | 'grid.pageSize' | 'grid.pageSizeAria'
+  | 'grid.jumpToRow' | 'grid.jumpToRowAria' | 'grid.jumpToRowGo'
   | 'grid.errorLoadViewData'
   | 'grid.errorEditRowBlocked' | 'grid.errorDeleteRowBlocked'
   | 'grid.errorContextRequired'
@@ -240,6 +241,10 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.next': { en: 'Next', zh: '下一页' },
   'grid.pageSize': { en: 'Rows per page', zh: '每页行数' },
   'grid.pageSizeAria': { en: 'Rows per page', zh: '每页显示的行数' },
+  // 客户反馈 2026-10-27 (R74): footer 「跳转到第 [ ] 行」. The zh unit after the box comes from jumpToRowSuffix (en has none).
+  'grid.jumpToRow': { en: 'Go to row', zh: '跳转到第' },
+  'grid.jumpToRowAria': { en: 'Row number to go to', zh: '要跳转到的行号' },
+  'grid.jumpToRowGo': { en: 'Go', zh: '前往' },
   'grid.loading': { en: 'Loading data', zh: '正在加载数据' },
   // Frontend-owned composable fallbacks. Backend/user messages still win via `e.message ?? fallback`.
   'grid.errorLoadViewData': { en: 'Failed to load view data', zh: '加载视图数据失败' },
@@ -329,6 +334,16 @@ export function metaCoreLabel(key: MetaCoreLabelKey, isZh: boolean): string {
 export function rowCount(n: number, isZh: boolean): string {
   if (isZh) return `${n} 行`
   return `${n} row${n === 1 ? '' : 's'}`
+}
+
+// jumpToRowSuffix / jumpToRowTotal: the footer row jump (客户反馈 2026-10-27). zh reads 「跳转到第 [ ] 行」, so the
+// unit sits after the box; en reads "Go to row [ ]" and has none. The total shows when the typed row was clamped.
+export function jumpToRowSuffix(isZh: boolean): string {
+  return isZh ? '行' : ''
+}
+export function jumpToRowTotal(n: number, isZh: boolean): string {
+  if (isZh) return `共 ${n} 行`
+  return `${n} row${n === 1 ? '' : 's'} in total`
 }
 
 // selectedCount: bulk-bar count. en "selected" does not inflect; zh uses 条.

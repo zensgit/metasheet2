@@ -63,6 +63,7 @@ import {
   closeSheetGridExport,
   readSheetGridExportClosure,
 } from '../../src/services/sheet-grid-export-closure-service'
+import { STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL } from '../../src/multitable/stock-preparation-project-sheet-schema-clamp'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const rbacState = vi.hoisted(() => ({ admin: {} as Record<string, boolean>, perms: {} as Record<string, string[]> }))
@@ -273,8 +274,14 @@ describe('Q — query count (review round 1, fix 2): the closure costs NO extra 
         const stampish = (log: Log) => log.filter((e) => /system_kind|grid_export_closure/.test(e.sql))
         expect(stampish(derivedLog).map((e) => e.sql), lane).toEqual([collapse(STOCK_PREPARATION_SHEET_STAMPS_SQL)])
         expect(stampish(plainLog), lane).toEqual([])
-        // The only difference between the two sheets' statement streams is that one folded lookup.
-        expect(derivedLog.length, lane).toBe(plainLog.length + 1)
+        // Option B (owner 2026-10-29, R-66 ②): a derived-id sheet ALSO costs the project-sheet registry lookup —
+        // for a non-admin only (an admin is never clamped, so nothing is asked), and never for a client id. It is a
+        // separate statement on purpose (folding it would change the stamps SQL pinned verbatim above).
+        const registry = (log: Log) => log.filter((e) => e.sql === collapse(STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL))
+        expect(registry(derivedLog).length, lane).toBe(access.isAdminRole ? 0 : 1)
+        expect(registry(plainLog), lane).toEqual([])
+        // Otherwise the only difference between the two sheets' statement streams is that one folded lookup.
+        expect(derivedLog.length - registry(derivedLog).length, lane).toBe(plainLog.length + 1)
       }
     })
   }

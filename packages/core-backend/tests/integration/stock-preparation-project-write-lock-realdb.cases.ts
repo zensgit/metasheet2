@@ -5663,7 +5663,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               clean: {
                 status: 200, headers: 'export_columns', lastHeader: '沿用说明', notedRows: 4, note: `由 D100-01 沿用（父边用量 2，关系 ${handle}）`,
                 sRootRows: 1, sRootQty: 10, duplicatedCodes: 0, consults: ['complete', 'complete'], routeGenerationReads: 2,
-                delivered: 1, deliveredDetail: { operation: 'prep_line_export', totalRowCount: 6, activeRowCount: 6, columnCount: 29, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 },
+                delivered: 1, deliveredDetail: { operation: 'prep_line_export', totalRowCount: 6, activeRowCount: 6, columnCount: 31, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 },
                 refusedBefore: 1,
               },
               leaseAfterG0: { answer: `409:${BLOCKED}:state:executing`, streamed: false },
@@ -5812,7 +5812,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             }
             console.log(`[S5-06] ${JSON.stringify(observed)}`)
             expect(observed).toEqual({
-              status: 200, headers: 'export_columns_exactly', rows: 4, detailKeys: ['activeRowCount', 'columnCount', 'operation', 'totalRowCount'], columnCount: 28, refused: 0, stepFourRows: 0, governed: false,
+              status: 200, headers: 'export_columns_exactly', rows: 4, detailKeys: ['activeRowCount', 'columnCount', 'operation', 'totalRowCount'], columnCount: 30, refused: 0, stepFourRows: 0, governed: false,
               derivedUnderLease: 'not_governed',
               underLease: { answer: `409:${BLOCKED}:lease_in_flight:not_governed`, streamed: false },
               afterRelease: 200,

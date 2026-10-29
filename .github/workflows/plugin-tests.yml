@@ -179,6 +179,12 @@ jobs:
       - name: Frontend Docker build-context closure
         run: node --test scripts/ops/frontend-docker-context-closure.test.mjs
 
+      # Every `file:` tarball pnpm-lock.yaml resolves (the vendored SheetJS xlsx) must exist with the
+      # pinned sha512 and be copied by both Dockerfiles and both on-prem package builders before
+      # `pnpm install`. No deps, no DB; the image build runs only on push to main.
+      - name: Vendored tarball install closure
+        run: node --test scripts/ops/vendored-tarball-install-closure.test.mjs
+
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
       - name: W0 exact-anchor L6/L7 CI wiring contract
@@ -1467,6 +1473,8 @@ jobs:
             tests/integration/automation-live-authority-realdb.test.ts \
             tests/integration/yida-host-boundaries-realdb.test.ts \
             tests/integration/yida-host-initialization-barrier-realdb.test.ts \
+            tests/integration/yida-host-connection-test-realdb.test.ts \
+            tests/integration/yida-connection-test-http-realdb.test.ts \
             --reporter=verbose
 
       # These files each import the real native AuthService/JWT and scoped pool.

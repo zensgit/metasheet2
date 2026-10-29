@@ -36,6 +36,9 @@
  *         and on the C6 dry-run; nothing written, no token.
  *   S6-07 the tenant: another tenant's registered, NOT governed sheet => written (today's behaviour, plan Q-2);
  *         governed => 409 with `tenantMismatch: true`.
+ *   S6-08 (R-66, owner 2026-10-28) a PLM row the generic adapter wrote on a provisioned sheet: the REAL plugin-scoped
+ *         records.deleteRecord and the REAL unscoped host SDK answer 409 RECORD_DELETE_REFUSED_PLM_ROW, the row
+ *         stays; a keyless row on the same sheet deletes (control).
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -417,6 +420,46 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
         await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
         client.release()
       }
+    }, 300000)
+
+    // R-66 ① (owner ruling 2026-10-28「管理员也不能删 PLM 行」, packages/core-backend/src/multitable/plm-row-delete-guard.ts):
+    // the plugin SDK / host deleteRecord refuses a PLM row of a provisioned stock-preparation sheet. The row is
+    // written as the pull writes it (the generic adapter's real upsert, a non-empty idempotency key); the delete goes
+    // through the REAL plugin-scoped records API and the REAL unscoped host SDK. A keyless row on the same sheet is
+    // the control (deleted as before); the overview port's delete is driven by D16 in the write-lock cases.
+    test('S6-08 (R-66) the real plugin-scoped SDK and the host SDK cannot delete a PLM row of a provisioned sheet: 409 RECORD_DELETE_REFUSED_PLM_ROW, row intact; a keyless row deletes', async () => {
+      const st = await stack('s08', { register: false })
+      const written = await st.adapter().upsert({ object: 'main', records: [st.record('a')] })
+      expect(written.written).toBe(1)
+      const keyFieldId = (st.system.config.objects.main.fieldIdMap as Record<string, string>).idempotencyKey
+      const plmRow = (await q('SELECT id FROM meta_records WHERE sheet_id = $1 AND data ->> $2 = $3', [st.sheetId, keyFieldId, st.record('a').idempotencyKey])).rows[0]
+      expect(plmRow?.id).toBeTruthy()
+      const registry = (await q('SELECT 1 FROM plugin_multitable_object_registry WHERE sheet_id = $1', [st.sheetId])).rows.length
+      const records = st.multitable.records as any
+      const scoped = await settle(records.deleteRecord({ sheetId: st.sheetId, recordId: plmRow.id }))
+      const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+      const coreSdk = (server as unknown as { createCoreAPI: () => { multitable: { records: any } } }).createCoreAPI().multitable.records
+      const hostLevel = await settle(coreSdk.deleteRecord({ sheetId: st.sheetId, recordId: plmRow.id }))
+      const ans = (outcome: any) => (outcome.ok ? 'deleted' : `${outcome.error.status}:${outcome.error.code}:${outcome.error.reason}`)
+      const keyless = await records.createRecord({ sheetId: st.sheetId, data: {} })
+      const control = await settle(records.deleteRecord({ sheetId: st.sheetId, recordId: keyless.id }))
+      const observed = {
+        registry,
+        scoped: ans(scoped),
+        hostLevel: ans(hostLevel),
+        plmRowIntact: (await q('SELECT 1 FROM meta_records WHERE id = $1', [plmRow.id])).rows.length,
+        control: ans(control),
+        keylessGone: (await q('SELECT 1 FROM meta_records WHERE id = $1', [keyless.id])).rows.length === 0,
+      }
+      console.log(`[S6-08] ${JSON.stringify(observed)}`)
+      expect(observed).toEqual({
+        registry: 1,
+        scoped: '409:RECORD_DELETE_REFUSED_PLM_ROW:plm_row',
+        hostLevel: '409:RECORD_DELETE_REFUSED_PLM_ROW:plm_row',
+        plmRowIntact: 1,
+        control: 'deleted',
+        keylessGone: true,
+      })
     }, 300000)
 
     test('S6-07 another tenant\'s registered, NOT governed sheet => written (today, plan Q-2); governed => 409 with tenantMismatch', async () => {
