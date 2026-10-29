@@ -20,7 +20,10 @@
  *                                   confers — create, edit and delete ANY record (not write-own
  *                                   only), manage fields and views, notify — the bound for handing
  *                                   out `spreadsheet:write` (fix round 1, S2); same fresh access
- *                                   snapshot (S3)
+ *                                   snapshot (S3). On a registered project sheet where the resolver
+ *                                   reports the option-B clamp (`stockPrepProjectSheetSchemaClamped`,
+ *                                   owner 2026-10-29) the field / view bits are not required, because
+ *                                   no non-admin holds or receives them there
  *   auditLog                      → audit/audit.ts auditLog (the admin-users.ts writer)
  *   boundGrantLockWaits           → services/stock-preparation-project-sheet-grants.ts
  *                                   runWithStockPreparationProjectSheetGrantLockTimeout: the G1 call
@@ -110,14 +113,19 @@ export function createStockPrepMembersHostDeps(): StockPrepMembersDeps {
         // only), manage fields and views, send notifications. The grantor must hold all of it on this
         // sheet — GRANTED ⊆ GRANTOR — so e.g. a global `multitable:write` without
         // `multitable:manage-schema` cannot hand out schema management.
+        // Option B (owner 2026-10-29, R-66 ②): on a registered stock-preparation project sheet field and view
+        // management belong to platform admins only — the grant confers neither bit there for the grantee, and
+        // the grantor (a non-admin) holds neither. So where the resolver reports that clamp, the bound is the
+        // record-write bits and notify only; GRANTED ⊆ GRANTOR still holds. Everywhere else it is unchanged.
+        const schemaBitsBound = resolved.stockPrepProjectSheetSchemaClamped === true
+          || (capabilities.canManageFields && capabilities.canManageViews)
         if (
           resolved.sheetLiveness === 'live'
           && capabilities.canRead
           && capabilities.canCreateRecord
           && capabilities.canEditRecord
           && capabilities.canDeleteRecord
-          && capabilities.canManageFields
-          && capabilities.canManageViews
+          && schemaBitsBound
           && capabilities.canSendNotification
           && !requiresOwnWriteRowPolicy(resolved.sheetScope, access.isAdminRole)
         ) {

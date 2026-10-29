@@ -460,6 +460,7 @@ owner 2026-10-08 批准：备料作为一个应用，自带角色和成员管理
 ### 11.7 未决与已知代价
 
 - **一线的表级写也能改结构**：G1 给的 `spreadsheet:write` 同时打开该项目表的字段和视图管理（§2）。所以第一步里「操作人员」（原「一线填写」）和「开发成员」在单张项目表上的差别只在工作台的码上，不在多维表一侧。把一线收窄到「只填记录」，要宿主新增一个授权级别，或等第二步的字段范围。
+  - **2026-10-29 收口（owner 选方案 B，登记 R-66 ②）**：已登记的备料项目表（登记行 `plugin_name = plugin-integration-core`、`object_id` 匹配 `plm_stock_preparation_sandbox_p_<24hex>`）上，除平台管理员（`isAdminRole`）外，所有人一律 `canManageFields = false`、`canManageViews = false`——一线的 G1 表级写、表级 admin 授权、全局 `multitable:manage-schema`（开发成员 / 拉取人员模板）都一样被钳；记录读写、删除、评论、通知、导出、访问管理、自动化不变。三条能力解析链（REST / 协作与令牌 / 事务内）同钳，模块 `multitable/stock-preparation-project-sheet-schema-clamp.ts`。插件自己经 provisioning 端口建列、补列、建视图不经人的能力位，不受影响。「成员与权限」页授权人上界在被钳的项目表上不再要求字段 / 视图位。原先只看读权限的 `GET /view?seed=true` 对已存在的表也会播种（加 6 列、5 行演示数据），现在对已存在的表要求 `canManageFields` 且 `canCreateRecord` 才播种，否则只读不写；表不存在时的首次播种不变。代价：一线在项目表上不能保存共享视图的排序 / 筛选 / 隐藏列，也不能自建列；主表 / 环境表不在本次范围内，维持原样。
 - **开发成员的自动化和新建表**：自动化要全局 `workflow:*` 码（`multitable/access.ts:126-131`），表级授权不会打开它（`permission-service.ts:1556-1565` 里没有这一项）；在 base 里新建表要全局 `multitable:write` 或 base 属主（`univer-meta.ts:16432-16453`）。两者都没有边界，第一步不给，由平台管理员代办，或 owner 另定。
 - **「模板」权限**：没有找到独立的能力码，门未核。
 - **数据范围只能加不能减**：G1 只增不删、只有 write 一级。从自定义角色上拿掉一张项目表，或给只读角色，第一步只能走 G2 手工处理；是否给 port 加「删」和 read 级，由 owner 定。
