@@ -1,3 +1,4 @@
+import { registerEp01DstReviewCallerNativeCases } from '../utils/attendance-ep01-dst-review-callers-native'
 import { registerPunchReviewPublicNativeCases } from '../utils/attendance-punch-review-public-native'
 import { registerPunchDetailRealAuthNativeCases } from '../utils/attendance-punch-detail-real-auth-native'
 import { registerPunchPreviewDurabilityNativeCases } from '../utils/attendance-punch-preview-durability-native'
@@ -842,6 +843,8 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
   }, 120000)
 
   registerPunchReviewPublicNativeCases({ pool: () => pool, baseUrl: () => baseUrl, seedDay: seedCanonicalDay, request: requestJson })
+  registerEp01DstReviewCallerNativeCases({ pool: () => pool, baseUrl: () => baseUrl, seedDay: seedCanonicalDay, request: requestJson,
+    loadApprovalCursor, assignApprovalUser, frozenCanonicalCalculation })
   registerPunchPreviewDurabilityNativeCases(() => pool)
   registerPunchDetailRealAuthNativeCases({ pool: () => pool, baseUrl: () => baseUrl, server: () => server,
     seedDay: () => {
