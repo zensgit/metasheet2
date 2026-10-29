@@ -34,16 +34,21 @@
       "tests/unit/automation-dingtalk-person-recipient-shared-decision.test.ts",
       "tests/unit/auth-login-routes.test.ts",
       "tests/unit/dingtalk-oauth-login-gates.test.ts",
-      "tests/unit/directory-fixed-sentence-constructors.guard.test.ts"
+      "tests/unit/directory-fixed-sentence-constructors.guard.test.ts",
+      "tests/unit/admin-mounts-write-gate-guard.test.ts",
+      "tests/unit/directory-sync-run-lease.test.ts",
+      "tests/unit/directory-sync-corp-name.test.ts",
+      "tests/unit/dingtalk-connection-disable-egress.test.ts",
+      "tests/unit/approval-card-web-terminal-route.test.ts"
     ],
-    "passed": 1252,
+    "passed": 1460,
     "failed": 0
   },
   "realDatabase": {
     "files": [
       "tests/integration/directory-connection-disable.realdb.test.ts"
     ],
-    "passed": 10,
+    "passed": 11,
     "failed": 0
   },
   "frontend": {
@@ -51,7 +56,7 @@
       "tests/directoryManagementView.spec.ts",
       "tests/directoryConfigPickers.spec.ts"
     ],
-    "passed": 106,
+    "passed": 116,
     "failed": 0
   },
   "validateAll": {
@@ -63,13 +68,27 @@
     ]
   },
   "mutations": {
-    "passed": 5,
-    "total": 5
+    "historicalOriginalHead": "73953baa53bd734906efcaa758b4b57dd5c82f2f",
+    "historicalPassed": 5,
+    "currentSourceProvenance": {
+      "neuteredExit": 1,
+      "failed": 3,
+      "passed": 3,
+      "restoredExit": 0,
+      "restoredPassed": 6,
+      "sourceBytesRestored": true
+    }
   },
   "ci": {
-    "state": "not established by local validation; see exact-head PR checks"
+    "state": "pending new-head CI after push; original head test (20.x) failed, real-DB step skipped"
   },
   "liveConfigurationChanged": false,
   "realProviderCalls": false,
-  "sourceManifest": "tested-source-sha256.json"
+  "sourceManifest": "tested-source-sha256.json",
+  "codeCommit": "bf34d6f0ca43aa4bf7ef0828897c3bb5ffc81eec",
+  "combinedDisplayCommit": "71e60292ade78ec226dd89932b89563098c39cfd",
+  "redToGreen": {
+    "originalRuntimeRegressionFailures": 5,
+    "currentRuntimeFailures": 0
+  }
 }

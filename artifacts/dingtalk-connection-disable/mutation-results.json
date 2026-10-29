@@ -3,30 +3,44 @@
     "guard": "send-refusal",
     "neuteredExit": 1,
     "restoredExit": 0,
-    "sourceBytesRestored": true
+    "sourceBytesRestored": true,
+    "evidenceHead": "73953baa53bd734906efcaa758b4b57dd5c82f2f"
   },
   {
     "guard": "stale-edit-barrier",
     "neuteredExit": 1,
     "restoredExit": 0,
-    "sourceBytesRestored": true
+    "sourceBytesRestored": true,
+    "evidenceHead": "73953baa53bd734906efcaa758b4b57dd5c82f2f"
   },
   {
     "guard": "credential-adoption-barrier",
     "neuteredExit": 1,
     "restoredExit": 0,
-    "sourceBytesRestored": true
+    "sourceBytesRestored": true,
+    "evidenceHead": "73953baa53bd734906efcaa758b4b57dd5c82f2f"
   },
   {
     "guard": "organization-status-preserved",
     "neuteredExit": 1,
     "restoredExit": 0,
-    "sourceBytesRestored": true
+    "sourceBytesRestored": true,
+    "evidenceHead": "73953baa53bd734906efcaa758b4b57dd5c82f2f"
   },
   {
     "guard": "login-exempt",
     "neuteredExit": 1,
     "restoredExit": 0,
+    "sourceBytesRestored": true,
+    "evidenceHead": "73953baa53bd734906efcaa758b4b57dd5c82f2f"
+  },
+  {
+    "guard": "source-integration-provenance",
+    "codeCommit": "bf34d6f0ca43aa4bf7ef0828897c3bb5ffc81eec",
+    "neuteredExit": 1,
+    "neuteredFailed": 3,
+    "restoredExit": 0,
+    "restoredPassed": 6,
     "sourceBytesRestored": true
   }
 ]
