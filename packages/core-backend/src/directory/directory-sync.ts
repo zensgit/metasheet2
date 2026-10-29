@@ -88,6 +88,7 @@ export type DirectoryAdmissionMode = 'manual_only' | 'auto_for_scoped_department
 export type DirectoryMemberGroupSyncMode = 'disabled' | 'sync_scoped_departments'
 
 type DirectoryIntegrationConfig = {
+  corpName: string | null
   appKey: string
   appSecret: string
   workNotificationAgentId: string
@@ -337,6 +338,7 @@ export type DirectoryIntegrationSummary = {
   createdAt: string
   updatedAt: string
   config: {
+    corpName: string | null
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured: boolean
@@ -380,6 +382,7 @@ export type DirectoryDepartmentSummary = {
 }
 
 export type DirectoryIntegrationInput = {
+  corpName?: string
   name: string
   corpId: string
   appKey: string
@@ -411,6 +414,7 @@ export type DirectoryIntegrationTestInput = DirectoryIntegrationInput & {
 type NormalizedDirectoryIntegrationInput = Omit<
   DirectoryIntegrationInput,
   | 'name'
+  | 'corpName'
   | 'corpId'
   | 'appKey'
   | 'appSecret'
@@ -425,6 +429,7 @@ type NormalizedDirectoryIntegrationInput = Omit<
   | 'defaultDeprovisionPolicy'
   | 'status'
 > & {
+  corpName: string | null
   name: string
   corpId: string
   appKey: string
@@ -1884,6 +1889,7 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   const memberGroupDefaultRoleIds = normalizeMemberGroupDefaultRoleIds(config.memberGroupDefaultRoleIds)
   const memberGroupDefaultNamespaces = normalizeMemberGroupDefaultNamespaces(config.memberGroupDefaultNamespaces)
   return {
+    corpName: normalizeOptionalText(config.corpName),
     appKey,
     appSecret,
     workNotificationAgentId,
@@ -1921,6 +1927,7 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     config: {
+      corpName: config.corpName,
       appKey: config.appKey,
       appSecretConfigured: Boolean(config.appSecret),
       workNotificationAgentIdConfigured: Boolean(config.workNotificationAgentId),
@@ -2380,6 +2387,10 @@ function normalizeIntegrationInput(
   input: DirectoryIntegrationInput,
   current?: DirectoryIntegrationConfig,
 ): NormalizedDirectoryIntegrationInput {
+  if (input.corpName !== undefined && (typeof input.corpName !== 'string' || input.corpName.trim().length > 200)) {
+    throw new DirectoryValidationError('corpName must be a string of at most 200 characters')
+  }
+  const corpName = input.corpName === undefined ? current?.corpName ?? null : normalizeOptionalText(input.corpName)
   const name = normalizeText(input.name)
   const corpId = normalizeText(input.corpId)
   const appKey = normalizeText(input.appKey)
@@ -2407,6 +2418,7 @@ function normalizeIntegrationInput(
 
   return {
     ...input,
+    corpName,
     name,
     corpId,
     appKey,
@@ -2504,6 +2516,7 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       normalized.status,
       normalized.corpId,
       JSON.stringify({
+        corpName: normalized.corpName,
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
         workNotificationAgentId: normalized.workNotificationAgentId
@@ -2883,6 +2896,7 @@ export async function updateDirectoryIntegration(
       normalized.status,
       normalized.corpId,
       JSON.stringify({
+        corpName: normalized.corpName,
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
         workNotificationAgentId: normalized.workNotificationAgentId

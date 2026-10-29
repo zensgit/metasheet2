@@ -204,9 +204,14 @@
           </div>
         </div>
 
-        <div v-if="integrations.length === 0" class="directory-admin__empty">暂无目录集成</div>
+        <div v-if="integrationsLoadError" role="alert" data-testid="directory-list-error">
+          <p>目录集成加载失败，无法确认当前集成。请重试；若仍失败，请联系管理员检查服务端配置。</p>
+          <button type="button" class="directory-admin__button" :disabled="loading" @click="void loadIntegrations()">重试加载集成</button>
+        </div>
+        <div v-else-if="!integrationsLoaded" class="directory-admin__empty">正在加载目录集成…</div>
+        <div v-else-if="integrations.length === 0" class="directory-admin__empty">暂无目录集成</div>
         <button
-          v-for="integration in integrations"
+          v-for="integration in (integrationsLoaded && !integrationsLoadError ? integrations : [])"
           :key="integration.id"
           class="directory-admin__item"
           :class="{ 'directory-admin__item--active': selectedIntegrationId === integration.id }"
@@ -214,7 +219,9 @@
           @click="void selectIntegration(integration.id)"
         >
           <strong>{{ integration.name }}</strong>
-          <span>{{ integration.corpId }}</span>
+          <span>钉钉企业名称：{{ integration.config.corpName || '名称未提供' }}</span>
+          <small>Corp ID：{{ integration.corpId }}</small>
+          <small>本地组织：{{ integration.orgId || '未提供' }}</small>
           <small>{{ readAdmissionModeLabel(integration) }}</small>
           <small>{{ readMemberGroupSyncLabel(integration) }}</small>
           <small>
@@ -265,6 +272,11 @@
           <label class="directory-admin__field">
             <span>集成名称</span>
             <input v-model.trim="draft.name" class="directory-admin__input" type="text" placeholder="例如 DingTalk CN" />
+          </label>
+          <label class="directory-admin__field">
+            <span>钉钉企业名称（展示）</span>
+            <input v-model.trim="draft.corpName" class="directory-admin__input" type="text" maxlength="200" placeholder="填写已确认的企业名称" />
+            <small>仅用于展示，不代表钉钉登录应用的所属组织，不改变账号关联。</small>
           </label>
           <label class="directory-admin__field">
             <span>Corp ID</span>
@@ -2227,6 +2239,7 @@ import {
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type DirectoryIntegration = {
+  orgId?: string
   id: string
   name: string
   corpId: string
@@ -2238,6 +2251,7 @@ type DirectoryIntegration = {
   lastSuccessAt: string | null
   lastError: string | null
   config: {
+    corpName?: string | null
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured?: boolean
@@ -2553,6 +2567,7 @@ type TestResult = {
 }
 
 type DirectoryDraft = {
+  corpName: string
   name: string
   corpId: string
   appKey: string
@@ -2577,6 +2592,8 @@ type DirectoryDraft = {
 }
 
 const integrations = ref<DirectoryIntegration[]>([])
+const integrationsLoaded = ref(false)
+const integrationsLoadError = ref(false)
 const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
 const departments = ref<DirectoryDepartment[]>([])
@@ -2746,6 +2763,7 @@ const directoryNavigation = ref(readInitialDirectoryNavigation())
 const draft = reactive<DirectoryDraft>({
   name: '',
   corpId: '',
+  corpName: '',
   appKey: '',
   appSecret: '',
   workNotificationAgentId: '',
@@ -3190,6 +3208,7 @@ function resetDraft() {
   batchAdmissionOnboardingPackets.value = []
   draft.name = ''
   draft.corpId = ''
+  draft.corpName = ''
   draft.appKey = ''
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -3215,6 +3234,7 @@ function resetDraft() {
 function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.name = integration.name
   draft.corpId = integration.corpId
+  draft.corpName = integration.config.corpName ?? ''
   draft.appKey = integration.config.appKey
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -4151,13 +4171,18 @@ async function readJson(response: Response): Promise<any> {
 }
 
 async function loadIntegrations() {
+  if (integrationsLoadError.value) setStatus('')
   loading.value = true
+  integrationsLoadError.value = false
+  integrationsLoaded.value = false
   try {
     const response = await apiFetch('/api/admin/directory/integrations')
     const payload = await readJson(response)
     if (!response.ok) throw new Error(readApiError(payload, '加载目录集成失败'))
 
-    integrations.value = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    if (!Array.isArray(payload?.data?.items)) throw new Error('目录集成响应格式错误')
+    integrations.value = payload.data.items
+    integrationsLoaded.value = true
     const navigation = directoryNavigation.value
     const navigationKey = buildDirectoryNavigationKey(navigation)
     const hasPendingCrossIntegrationNavigation = (
@@ -4211,6 +4236,7 @@ async function loadIntegrations() {
       if (current) applyIntegrationToDraft(current)
     }
   } catch (error) {
+    integrationsLoadError.value = !integrationsLoaded.value
     setStatus(error instanceof Error ? error.message : '加载目录集成失败', 'error')
   } finally {
     loading.value = false
@@ -4606,6 +4632,7 @@ function buildPayload() {
     integrationId: selectedIntegration.value?.id,
     name: draft.name.trim(),
     corpId: draft.corpId.trim(),
+    corpName: draft.corpName.trim(),
     appKey: draft.appKey.trim(),
     appSecret: draft.appSecret.trim(),
     rootDepartmentId: draft.rootDepartmentId.trim() || '1',
