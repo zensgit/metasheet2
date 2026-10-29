@@ -170,7 +170,7 @@ function makeFixture() {
   }
 }
 
-async function withBackend({ routeStatus = 200, loginToken = SYNTHETIC_TOKEN }, fn) {
+async function withBackend({ routeStatus = 200, loginToken = SYNTHETIC_TOKEN, expectedLogin }, fn) {
   const calls = []
   const server = createServer((req, res) => {
     let raw = ''
@@ -181,6 +181,18 @@ async function withBackend({ routeStatus = 200, loginToken = SYNTHETIC_TOKEN }, 
       calls.push({ method: req.method, url: req.url, auth: req.headers.authorization ?? '', body: raw })
       res.setHeader('Content-Type', 'application/json')
       if (req.method === 'POST' && req.url === '/api/auth/login') {
+        if (expectedLogin !== undefined) {
+          let parsed
+          try { parsed = JSON.parse(raw) } catch {}
+          calls[calls.length - 1].parsedLoginBody = parsed
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+            || Object.keys(parsed).sort().join(',') !== 'email,password'
+            || parsed.email !== expectedLogin.email || parsed.password !== expectedLogin.password) {
+            res.statusCode = 400
+            res.end(JSON.stringify({ success: false, error: 'synthetic login JSON mismatch' }))
+            return
+          }
+        }
         res.statusCode = 200
         res.end(JSON.stringify({ success: true, data: loginToken ? { token: loginToken } : {} }))
         return
@@ -775,6 +787,68 @@ for (const [label, caller, diagnostic] of [
       assert.equal(readSource(), '')
       assert.deepEqual(fixture.readAdminInputs(), [])
       assert.deepEqual(fixture.readSql(), [])
+    } finally {
+      fixture.cleanup()
+    }
+  })
+}
+
+
+// Bash login must encode the effective credentials as JSON, preserving file-over-environment priority.
+for (const [label, password, fromFile, emailOverride] of [
+  ['plain password positive control', 'synthetic-plain-password-123', false],
+  ['double quote password', 'synthetic"password-123', false],
+  ['backslash password', 'synthetic\\password-123', false],
+  ['embedded newline and control characters', 'synthetic\npassword\t123', false],
+  ['JSON-looking injection password', 'synthetic-123","role":"admin', false],
+  ['quoted email with ordinary password', 'synthetic-email-password-123', false, '"Contract.Alias"@ci.invalid'],
+  ['ordinary file credentials override environment positive control', 'synthetic-file-password-123', true],
+]) {
+  test(`bootstrap login JSON: ${label}`, async () => {
+    const fixture = makeFixture()
+    try {
+      const email = emailOverride ?? (fromFile ? FILE_ADMIN_EMAIL : SYNTHETIC_EMAIL)
+      const readSource = fromFile ? prepareAdminInputFile(fixture, email, password) : null
+      await withBackend({ expectedLogin: { email, password } }, async ({ apiBase, calls }) => {
+        const result = await runSh(fixture, {
+          apiBase,
+          stub: {
+            PATH: `${fixture.bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+            HOME: fixture.dir,
+            CURL_HOME: fixture.dir,
+            TMPDIR: fixture.dir,
+            LC_ALL: 'C',
+            ADMIN_EMAIL: fromFile ? SYNTHETIC_EMAIL : email,
+            ADMIN_PASSWORD: fromFile ? SYNTHETIC_PASSWORD : password,
+            STUB_ADMIN_INPUT_WITNESS: '1',
+            STUB_EXPECT_ADMIN_EMAIL: email,
+            STUB_EXPECT_ADMIN_PASSWORD: password,
+            STUB_EMPTINESS: '0:0',
+            STUB_POSTCONDITION: '1:1:1',
+          },
+        })
+        assert.equal(result.status, 0, result.output)
+        const loginCalls = calls.filter(call => call.url === '/api/auth/login')
+        assert.equal(loginCalls.length, 1, 'exactly one actual login request')
+        assert.equal(loginCalls[0].method, 'POST')
+        assert.deepEqual(JSON.parse(loginCalls[0].body), { email, password })
+        assert.deepEqual(loginCalls[0].parsedLoginBody, { email, password })
+        assert.equal(calls.length, 2, 'only login and the existing local-accounts route are called')
+        const routeCalls = calls.filter(call => call.url === ROUTE_PATH)
+        assert.equal(routeCalls.length, 1)
+        assert.equal(routeCalls[0].method, 'POST')
+        assert.equal(routeCalls[0].auth, `Bearer ${SYNTHETIC_TOKEN}`)
+        assert.deepEqual(JSON.parse(routeCalls[0].body), { localUserId: SYNTHETIC_ADMIN_ID })
+        if (readSource) assert.equal(readSource(), 'loaded\n')
+        assert.deepEqual(fixture.readAdminInputs(), ['bcrypt', 'email'])
+        const sql = fixture.readSql()
+        assert.equal(sql.length, 4)
+        assert.equal(sql.filter(chunk => chunk === EXPECTED_EMPTINESS_SQL).length, 1)
+        assert.equal(sql.filter(chunk => chunk === EXPECTED_POSTCONDITION_SQL).length, 1)
+        assertStepSqlReadOnly(sql)
+        assertStepLinesValuesFree(result.output)
+        assert.match(result.output, /Local org bootstrap: OK/)
+      })
     } finally {
       fixture.cleanup()
     }

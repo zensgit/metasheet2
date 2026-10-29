@@ -266,11 +266,19 @@ if [[ "$VERIFY_LOGIN" == "1" ]]; then
   login_response_file="$(mktemp)"
   trap 'rm -f "$login_response_file"' EXIT
   info "Verifying admin login via ${api}/auth/login"
+  login_payload="$(
+    ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASSWORD="$ADMIN_PASSWORD" node -e '
+      process.stdout.write(JSON.stringify({
+        email: process.env.ADMIN_EMAIL,
+        password: process.env.ADMIN_PASSWORD,
+      }));
+    '
+  )"
   login_code="$(
-    curl -sS -o "$login_response_file" -w '%{http_code}' \
+    printf '%s' "$login_payload" | curl -sS -o "$login_response_file" -w '%{http_code}' \
       -X POST "${api}/auth/login" \
       -H 'Content-Type: application/json' \
-      --data "{\"email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}" || true
+      --data-binary @- || true
   )"
   if [[ "$login_code" != "200" ]]; then
     if [[ -f "$login_response_file" ]]; then
