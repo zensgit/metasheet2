@@ -2158,3 +2158,26 @@ describe('structural guard: routes/admin-role-members.ts (mounted at the root, o
     ])
   })
 })
+
+
+// Organization workspace is mounted beside the local CRUD router, outside admin-routes.
+const ADMIN_LOCAL_WORKSPACE = 'admin-local-organization-workspace.ts'
+function localWorkspaceOffenders(source: string) {
+  return scanResponseErrorEcho(ADMIN_LOCAL_WORKSPACE, source).offenders
+}
+
+describe('structural guard: local organization workspace', () => {
+  it('scans the workspace 5xx responses without caught-error text', () => {
+    expect(localWorkspaceOffenders(readRoute(ADMIN_LOCAL_WORKSPACE))).toEqual([])
+  })
+
+  it('detects a caught-error echo in the workspace fallback', () => {
+    const source = readRoute(ADMIN_LOCAL_WORKSPACE)
+    const injected = source.replace(
+      "jsonError(res, 500, 'LOCAL_ORG_INTERNAL_ERROR', 'Local organization request failed')",
+      "jsonError(res, 500, 'LOCAL_ORG_INTERNAL_ERROR', (error as Error).message)",
+    )
+    expect(injected).not.toBe(source)
+    expect(localWorkspaceOffenders(injected).length).toBeGreaterThan(0)
+  })
+})

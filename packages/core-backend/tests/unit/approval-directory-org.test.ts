@@ -97,6 +97,10 @@ function makeQuery(db: FakeDbWithTrace) {
       db.lastPolicyCanonicalParam = null
       return { rows: (db.requester ? [db.requester] : []) as Row[] }
     }
+    // This legacy-provider fixture has no local integration; the new native head probe is empty.
+    if (text.includes('FROM directory_integrations i') && text.includes('ad.is_department_head = true')) {
+      return { rows: [] }
+    }
     // B3 normalized-manager gate query (`ad.is_manager = true`). Default-empty means the dept has
     // no normalized manager, so the resolver falls through to the legacy leader_in_dept scan below
     // (this is why every pre-B3 fixture keeps its expectations unchanged). Requester-inclusive
