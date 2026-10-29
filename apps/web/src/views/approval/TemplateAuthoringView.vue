@@ -2114,11 +2114,11 @@ const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates
 const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupportedReason.value))
 
 // 列表摘要字段：候选 = 当前可用的顶层字段；已选但字段已删 / 改为不可用类型的 id 不显示在选择框里，
-// 保存时由 buildFormSchema 裁掉。
+// 保存时由 buildFormSchema 裁掉。无名称的字段显示「未命名字段」，不回退到字段 id。
 const summaryFieldOptions = computed(() =>
   summaryEligibleDraftFields(draft.value).map((field) => ({
     value: field.id.trim(),
-    label: field.label.trim() || field.id.trim(),
+    label: fieldDisplayLabel(field),
   })),
 )
 const summaryFieldIdsModel = computed<string[]>({
