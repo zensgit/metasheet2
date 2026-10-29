@@ -55,6 +55,8 @@ export type DingTalkApprovalCardTerminalUpdate = {
 export type DingTalkApprovalCardUpdateSender = (update: DingTalkApprovalCardTerminalUpdate) => Promise<void>
 
 export type DingTalkApprovalCardTerminalUpdateContext = {
+  /** Source from the authoritative delivery ledger, never callback payload. */
+  integrationId?: string
   /**
    * Operator display name resolved by the callback adapter from LOCAL user data (users.name).
    * Never sourced from callback payload display text (lock §B-4).
@@ -66,7 +68,7 @@ export type DingTalkApprovalCardTerminalUpdateContext = {
 
 export type DingTalkApprovalCardTerminalUpdateOutcome =
   | { status: 'updated'; outTrackId: string }
-  | { status: 'skipped'; reason: 'no_update_for_outcome' | 'stream_config_disabled' }
+  | { status: 'skipped'; reason: 'no_update_for_outcome' | 'stream_config_disabled' | 'source_integration_unresolved' }
   /** `reason` is the error class name only — values-free by construction. */
   | { status: 'failed'; outTrackId: string; reason: string }
 
@@ -205,6 +207,7 @@ export function buildDingTalkApprovalCardWebTerminalUpdate(
  */
 export function createDingTalkApprovalCardStreamUpdateSender(
   env: NodeJS.ProcessEnv = process.env,
+  integrationId?: string,
 ): DingTalkApprovalCardUpdateSender | null {
   const config = resolveDingTalkInteractiveCardStreamConfig(env)
   if (config.enabled === false) return null
@@ -213,7 +216,7 @@ export function createDingTalkApprovalCardStreamUpdateSender(
       appKey: config.clientId,
       appSecret: config.clientSecret,
     })
-    await updateDingTalkInteractiveApprovalCard(accessToken, update, { appKey: config.clientId })
+    await updateDingTalkInteractiveApprovalCard(accessToken, update, { appKey: config.clientId, integrationId })
   }
 }
 
@@ -221,12 +224,14 @@ async function applyBuiltDingTalkApprovalCardTerminalUpdate(
   build: () => DingTalkApprovalCardTerminalUpdate | null,
   fallbackOutTrackId: string,
   sender?: DingTalkApprovalCardUpdateSender,
+  integrationId?: string,
 ): Promise<DingTalkApprovalCardTerminalUpdateOutcome> {
   try {
     const update = build()
     if (!update) return { status: 'skipped', reason: 'no_update_for_outcome' }
 
-    const send = sender ?? createDingTalkApprovalCardStreamUpdateSender()
+    if (!sender && !integrationId) return { status: 'skipped', reason: 'source_integration_unresolved' }
+    const send = sender ?? createDingTalkApprovalCardStreamUpdateSender(process.env, integrationId)
     if (!send) return { status: 'skipped', reason: 'stream_config_disabled' }
 
     await send(update)
@@ -257,6 +262,7 @@ export async function applyDingTalkApprovalCardWebTerminalUpdate(
     () => buildDingTalkApprovalCardWebTerminalUpdate(outcome),
     outTrackId,
     sender,
+    'summary' in outcome ? outcome.summary.integrationId : undefined,
   )
 }
 
@@ -276,5 +282,6 @@ export async function applyDingTalkApprovalCardTerminalUpdate(
     () => buildDingTalkApprovalCardTerminalUpdate(result, context),
     outTrackId,
     sender,
+    context.integrationId,
   )
 }

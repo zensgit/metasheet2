@@ -55,6 +55,7 @@ type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 export type ApprovalCardDecision = 'approve' | 'reject'
 
 export interface ApprovalCardDeliverySummary {
+  integrationId?: string
   deliveryId: string
   deliveryKind: DingTalkApprovalCardDeliveryRow['delivery_kind']
   cardState: DingTalkApprovalCardDeliveryRow['card_state']
@@ -208,6 +209,7 @@ async function buildSummary(
     instance.policy_snapshot,
   )
   return {
+    ...(delivery.integration_id ? { integrationId: delivery.integration_id } : {}),
     deliveryId: delivery.id,
     deliveryKind: delivery.delivery_kind,
     cardState: delivery.card_state,

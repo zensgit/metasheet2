@@ -40,7 +40,24 @@ import {
   todoMirrorReasonFromInstanceStatus,
   type TodoMirrorRow,
 } from '../../src/services/dingtalk-todo-mirror-worker'
-import { DingTalkBusinessError, DingTalkRequestError } from '../../src/integrations/dingtalk/client'
+import { createDingTalkTodoTask, DingTalkBusinessError, DingTalkRequestError } from '../../src/integrations/dingtalk/client'
+
+// Exercise the real connection guard with a controllable post-send COMMIT failure.
+const connectionDb = vi.hoisted(() => ({
+  failCommit: false,
+  query: vi.fn(async (sql: string, params: unknown[] = []) => ({ rows:
+    sql.includes('AS app_matches') ? [{ id: String(params[1] ?? 'guard-integration'), app_matches: true }]
+      : sql.includes('AS disabled') ? [{ disabled: false }] : [],
+  })),
+}))
+vi.mock('../../src/db/pg', () => ({
+  query: connectionDb.query,
+  transaction: async (fn: (client: { query: typeof connectionDb.query }) => Promise<unknown>) => {
+    const result = await fn({ query: connectionDb.query })
+    if (connectionDb.failCommit) throw new Error('synthetic COMMIT failure after HTTP success')
+    return result
+  },
+}))
 
 type Call = { sql: string; params: unknown[] }
 
@@ -332,6 +349,19 @@ describe('todo mirror worker — create phase', () => {
     expect(h.writes()[0].params[2]).toBe(TODO_MIRROR_ERROR_CODES.operatorMissing)
   })
 
+  it('HTTP create success followed by connection-guard COMMIT failure never retries the todo', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'synthetic-task' }), { status: 200 }))
+    const createTodoTask = vi.fn((token, operator, input, config) => createDingTalkTodoTask(token, operator, input, config, { fetchFn }))
+    const h = harness({ claimed: [pendingRow()], linked: [{ integration_id: 'integ-1', union_id: 'u' }], createTodoTask })
+    connectionDb.failCommit = true
+    try {
+      expect(await h.worker.runBatch()).toMatchObject({ outcomeUnknown: 1, retrying: 0, failed: 0 })
+      expect(fetchFn).toHaveBeenCalledOnce()
+      expect(h.writes()[0].params[4]).toBe('outcome_unknown')
+      expect(h.writes()[0].params[6]).toBe(false)
+    } finally { connectionDb.failCommit = false }
+  })
+
   it('an OUTCOME-UNKNOWN send is TERMINAL: outcome_unknown, redelivery_safe=false, one attempt only', async () => {
     const unknown = Object.assign(new TypeError('fetch failed'), { outcomeUnknown: true })
     const h = harness({
@@ -510,7 +540,7 @@ describe('todo mirror worker — completion phase', () => {
     const h = harness({ claimed: [completingRow()] })
     const result = await h.worker.runBatch()
     expect(result).toMatchObject({ completed: 1 })
-    expect(h.completeTodoTask).toHaveBeenCalledWith('access-token', 'op-union-1', 'dt-task-1', { appKey: CONFIG.appKey })
+    expect(h.completeTodoTask).toHaveBeenCalledWith('access-token', 'op-union-1', 'dt-task-1', { appKey: CONFIG.appKey, integrationId: 'integ-1' })
     expect(h.writes()[0].params[4]).toBe('completed')
   })
 

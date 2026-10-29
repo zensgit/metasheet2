@@ -67,6 +67,7 @@ describe('dingtalk work notification settings', () => {
     const config = await readDingTalkMessageConfigFromRuntime('dir-1')
 
     expect(config).toEqual({
+      integrationId: 'dir-1',
       appKey: 'env-app-key',
       appSecret: 'env-app-secret',
       agentId: '123456789',

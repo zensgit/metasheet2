@@ -2900,6 +2900,7 @@ export async function updateDirectoryIntegration(
            default_deprovision_policy = $9,
            updated_at = NOW()
        WHERE id = $1
+         AND config->>'appKey' IS NOT DISTINCT FROM $10::text
          AND ((config->'connectionDisabled') IS DISTINCT FROM 'true'::jsonb OR config->>'appKey' = ($5::jsonb)->>'appKey')
        RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                  default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
@@ -2933,6 +2934,7 @@ export async function updateDirectoryIntegration(
         normalized.scheduleCron,
         scheduleTimezone,
         normalized.defaultDeprovisionPolicy,
+        typeof storedConfig.appKey === 'string' ? storedConfig.appKey : null,
       ],
     ).catch((error: unknown) => {
       throw uniqueViolationAsConflict(error)
@@ -3104,8 +3106,7 @@ export async function testDirectoryIntegration(input: DirectoryIntegrationTestIn
   const current = await resolveDirectoryTestCurrentConfig(input)
   const normalized = normalizeIntegrationInput(input, current)
   const accessToken = await fetchDingTalkAppAccessToken({
-    corpName: normalized.corpName,
-          appKey: normalized.appKey,
+    appKey: normalized.appKey,
     appSecret: normalized.appSecret,
     baseUrl: normalized.baseUrl ?? undefined,
   })
@@ -3154,8 +3155,7 @@ export async function testDirectoryIntegration(input: DirectoryIntegrationTestIn
   return {
     corpId: normalized.corpId,
     rootDepartmentId: normalized.rootDepartmentId,
-    corpName: normalized.corpName,
-          appKey: normalized.appKey,
+    appKey: normalized.appKey,
     departmentSampleCount: departments.length,
     sampledDepartments: departments.slice(0, 5).map((department) => ({ id: department.id, name: department.name })),
     userSampleCount: users.length,

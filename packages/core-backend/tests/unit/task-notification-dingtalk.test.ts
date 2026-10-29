@@ -197,7 +197,7 @@ describe('the app configuration comes from the identity\'s integration row only 
     await sendOnce(await channel.prepare(TARGET))
     const expected = { appKey: CONFIG.appKey, appSecret: CONFIG.appSecret, agentId: CONFIG.workNotificationAgentId, baseUrl: TASK_DINGTALK_DEFAULT_BASE_URL }
     expect(calls.tokenCalls[0].config).toEqual(expected)
-    expect(calls.sendCalls[0].config).toEqual(expected)
+    expect(calls.sendCalls[0].config).toEqual({ ...expected, integrationId: 'int-X' })
   })
 
   it('reads agentId when workNotificationAgentId is absent, a JSON-text config, and encrypted secrets', async () => {
@@ -358,7 +358,7 @@ describe('the token, the re-check after it and the one send (design §8.2 steps 
     expect(calls.sendCalls).toEqual([{
       token: 'token-T-998877',
       input: { userIds: ['dt-user-77'], title: MESSAGE.title, content: MESSAGE.content },
-      config: { appKey: CONFIG.appKey, appSecret: CONFIG.appSecret, agentId: CONFIG.workNotificationAgentId, baseUrl: TASK_DINGTALK_DEFAULT_BASE_URL },
+      config: { integrationId: 'int-X', appKey: CONFIG.appKey, appSecret: CONFIG.appSecret, agentId: CONFIG.workNotificationAgentId, baseUrl: TASK_DINGTALK_DEFAULT_BASE_URL },
       options: { timeoutMs: TASK_DINGTALK_REQUEST_TIMEOUT_MS, logUpstreamMessage: false },
     }])
     for (const response of [{ raw: {} }, { taskId: '', raw: {} }, { taskId: '  ', raw: {} }]) {

@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createDirectoryIntegration, updateDirectoryIntegration, listDirectoryIntegrations, DirectoryValidationError } from '../../src/directory/directory-sync'
 
 const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }))
-vi.mock('../../src/db/pg', () => ({ query: queryMock, transaction: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({
+  query: queryMock,
+  // Registration preflight is clear; this suite asserts metadata persistence via the real INSERT/UPDATE.
+  transaction: async (fn: (client: { query: () => Promise<{ rows: never[] }> }) => Promise<unknown>) => fn({ query: async () => ({ rows: [] }) }),
+}))
 
 const input = { name: 'Synthetic integration', corpId: 'synthetic-corp', appKey: 'synthetic-app', appSecret: 'synthetic-secret' }
 function row(config: Record<string, unknown> = {}) {
@@ -25,6 +29,13 @@ describe('directory enterprise name is display metadata', () => {
     expect(result.corpId).toBe(input.corpId)
     expect(result.orgId).toBe('synthetic-org')
     expect(result.config).not.toHaveProperty('appSecret')
+  })
+
+  it('keeps enterprise metadata and the independent connection-stop marker in the same summary', async () => {
+    queryMock.mockResolvedValue({ rows: [row({ corpName: 'Synthetic enterprise', connectionDisabled: true })] })
+    const [result] = await listDirectoryIntegrations()
+    expect(result.config).toMatchObject({ corpName: 'Synthetic enterprise', connectionDisabled: true })
+    expect(result.status).toBe('active')
   })
 
   it.each([undefined, '', '  '])('reports an unknown name without guessing from the integration label (%s)', async (corpName) => {

@@ -5280,7 +5280,7 @@ export class AutomationExecutor {
               statusText: '等待你处理',
               rejectUrl: decisionUrl,
             },
-            { appKey: interactiveCardConfig.clientId },
+            { appKey: interactiveCardConfig.clientId, integrationId: assigneeIntegrationId || undefined },
             { fetchFn: this.deps.fetchFn },
           )
         }

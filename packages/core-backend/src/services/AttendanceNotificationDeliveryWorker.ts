@@ -437,7 +437,7 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
 
     let config: DingTalkMessageConfig
     try {
-      config = await this.readConfig(recipient.integrationId)
+      config = { ...await this.readConfig(recipient.integrationId), integrationId: recipient.integrationId }
     } catch (error) {
       return classifyConfigError(error)
     }

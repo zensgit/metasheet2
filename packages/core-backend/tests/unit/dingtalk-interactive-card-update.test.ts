@@ -414,7 +414,7 @@ describe('applyDingTalkApprovalCardTerminalUpdate (presentation follow-up, never
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
-    const outcome = await applyDingTalkApprovalCardTerminalUpdate(executed(), { operatorDisplayName: '张审批' })
+    const outcome = await applyDingTalkApprovalCardTerminalUpdate(executed(), { operatorDisplayName: '张审批', integrationId: 'synthetic-integration' })
     expect(outcome).toEqual({ status: 'skipped', reason: 'stream_config_disabled' })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(createDingTalkApprovalCardStreamUpdateSender()).toBeNull()
@@ -432,7 +432,7 @@ describe('applyDingTalkApprovalCardTerminalUpdate (presentation follow-up, never
       .mockResolvedValueOnce(new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const outcome = await applyDingTalkApprovalCardTerminalUpdate(executed(), { operatorDisplayName: '张审批' })
+    const outcome = await applyDingTalkApprovalCardTerminalUpdate(executed(), { operatorDisplayName: '张审批', integrationId: 'synthetic-integration' })
     expect(outcome).toEqual({ status: 'updated', outTrackId: DELIVERY_ID })
 
     expect(fetchMock).toHaveBeenCalledTimes(2)

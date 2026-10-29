@@ -1,7 +1,10 @@
 import { sendDingTalkWorkNotification, createDingTalkTodoTask, exchangeCodeForUserAccessToken } from '../../src/integrations/dingtalk/client'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { syncDirectoryIntegration, previewDirectorySyncIntegration } from '../../src/directory/directory-sync'
 import { assertDirectoryConnectionEnabled, disableDirectoryConnection, previewDirectoryConnectionDisable, withDingTalkConnectionOperation } from '../../src/directory/connection-disable'
+
+import { readDingTalkMessageConfigFromRuntime } from '../../src/integrations/dingtalk/work-notification-settings'
+import { isDingTalkOutcomeUnknown } from '../../src/integrations/dingtalk/transport'
 
 const { q, tx } = vi.hoisted(() => ({ q: vi.fn(), tx: vi.fn() }))
 vi.mock('../../src/db/pg', () => ({ query: q, transaction: tx }))
@@ -19,10 +22,11 @@ beforeEach(() => {
     if (sql.includes('AS app_key')) return { rows }
     if (sql.includes('SELECT 1 FROM directory_integrations')) return { rows: shared ? [{ one: 1 }] : [] }
     if (sql.includes('AS disabled')) return { rows: [{ disabled: stopped }] }
-    if (sql.includes('SELECT id FROM directory_integrations')) return { rows }
+    if (sql.includes('AS app_matches')) return { rows }
     return { rows: [] }
   })
 })
+afterEach(() => vi.unstubAllEnvs())
 describe('directory connection stop boundary', () => {
   it.each([undefined, '', 'all', 'Integration', null, {}, true])('rejects an invalid scope before SQL (%s)', async (scope) => {
     await expect(disableDirectoryConnection(id, scope)).rejects.toMatchObject({ code: 'DIRECTORY_DISABLE_SCOPE_INVALID', statusCode: 400 })
@@ -88,6 +92,42 @@ describe('directory connection stop boundary', () => {
     await expect(createDingTalkTodoTask('synthetic-token', 'synthetic-operator', { sourceId: 'synthetic-source', subject: 'subject', creatorUnionId: 'synthetic-operator', executorUnionIds: ['synthetic-user'] },
       { appKey: 'synthetic-app' }, { fetchFn })).rejects.toMatchObject({ code: 'DIRECTORY_CONNECTION_DISABLED' })
     expect(fetchFn).not.toHaveBeenCalled()
+  })
+  it('rejects a stopped task source even when global credentials select a normal peer application', async () => {
+    vi.stubEnv('DINGTALK_APP_KEY', 'global-peer-app')
+    vi.stubEnv('DINGTALK_APP_SECRET', 'synthetic-global-secret')
+    vi.stubEnv('DINGTALK_AGENT_ID', '42')
+    q.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('AS app_matches')) return { rows: params[1] === id ? [{ id, app_matches: false }, { id: peer, app_matches: true }] : [{ id: peer, app_matches: true }] }
+      if (sql.includes('AS disabled')) return { rows: [{ disabled: params[0] === id }] }
+      return { rows: [] }
+    })
+    const config = await readDingTalkMessageConfigFromRuntime(id)
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, task_id: 1 }), { status: 200 }))
+    await expect(sendDingTalkWorkNotification('synthetic-token', { userIds: ['synthetic-user'], title: 'title', content: 'body' }, config, { fetchFn })).rejects.toMatchObject({ code: 'DIRECTORY_CONNECTION_DISABLED' })
+    expect(fetchFn).not.toHaveBeenCalled()
+    // The peer's own task remains allowed; disabling a source does not disable its members.
+    const peerConfig = await readDingTalkMessageConfigFromRuntime(peer)
+    await expect(sendDingTalkWorkNotification('synthetic-token', { userIds: ['synthetic-user'], title: 'title', content: 'body' }, peerConfig, { fetchFn })).resolves.toMatchObject({ taskId: '1' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+  it('does not substitute a live application when the explicit source connection disappeared', async () => {
+    q.mockImplementation(async (sql: string) => ({ rows: sql.includes('AS app_matches') ? [{ id: peer }] : [] }))
+    const send = vi.fn()
+    await expect(withDingTalkConnectionOperation('global-peer-app', send, id)).rejects.toMatchObject({ code: 'DIRECTORY_CONNECTION_NOT_FOUND' })
+    expect(send).not.toHaveBeenCalled()
+  })
+  it('marks a successful HTTP followed by COMMIT failure as outcome unknown', async () => {
+    tx.mockImplementationOnce(async (fn) => {
+      await fn({ query: q })
+      throw new Error('synthetic commit connection lost')
+    })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, task_id: 1 }), { status: 200 }))
+    const error = await sendDingTalkWorkNotification('synthetic-token', { userIds: ['synthetic-user'], title: 'title', content: 'body' },
+      { appKey: 'synthetic-app', appSecret: 'synthetic-secret', agentId: '1' }, { fetchFn }).catch((error: unknown) => error)
+    expect(fetchFn).toHaveBeenCalledOnce()
+    expect(isDingTalkOutcomeUnknown(error)).toBe(true)
+    expect(error).toMatchObject({ message: 'DIRECTORY_SEND_FINALIZATION_FAILED' })
   })
   it('leaves the OAuth code exchange outside the connection stop', async () => {
     stopped = true

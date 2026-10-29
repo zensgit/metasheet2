@@ -323,6 +323,25 @@ describe('DirectoryManagementView', () => {
     expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
   })
 
+  it('shows enterprise metadata while a stopped connection keeps sync controls disabled', async () => {
+    const base = createIntegration()
+    const integration = { ...base, syncEnabled: false, config: { ...base.config, corpName: 'Synthetic enterprise', connectionDisabled: true } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations' ? [integration] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('.directory-admin__item')?.textContent).toContain('钉钉企业名称：Synthetic enterprise')
+    expect(container!.querySelector('.directory-admin__item')?.textContent).toContain('连接已停用（成员权限保留）')
+    for (const label of ['手动同步', '预览同步', '后台同步', '测试连通性', '测试工作通知']) {
+      const button = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.trim() === label)!
+      expect(button.disabled).toBe(true)
+    }
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+  })
+
   it.each([null, '合成企业'])('omits an unchanged enterprise name on unrelated saves (%s)', async (corpName) => {
     const base = createIntegration()
     const integration = { ...base, config: { ...base.config, corpName } }

@@ -12,6 +12,15 @@ export class DirectoryConnectionError extends Error {
   }
 }
 
+/** HTTP completed but the lock transaction did not; callers must never automatically resend. */
+export class DirectorySendFinalizationError extends Error {
+  readonly outcomeUnknown = true
+  constructor() {
+    super('DIRECTORY_SEND_FINALIZATION_FAILED')
+    this.name = 'DirectorySendFinalizationError'
+  }
+}
+
 function scopeValue(value: unknown): Scope {
   if (value !== 'integration' && value !== 'enterprise') {
     throw new DirectoryConnectionError('DIRECTORY_DISABLE_SCOPE_INVALID', 400)
@@ -89,20 +98,25 @@ export async function assertDirectoryConnectionEnabled(integrationId: string, cl
 }
 
 /** Serialize registered-app egress against disable; the callback must encompass the actual HTTP attempt(s). */
-export async function withDingTalkConnectionOperation<T>(appKey: string | undefined, operation: () => Promise<T>): Promise<T> {
+export async function withDingTalkConnectionOperation<T>(appKey: string | undefined, operation: () => Promise<T>, integrationId?: string): Promise<T> {
   let operationStarted = false
+  let operationCompleted = false
   return transaction(async (client) => {
     await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     await client.query("SET LOCAL lock_timeout = '5s'")
     if (appKey) await lockApp(client, appKey)
     const result = await client.query(
-      `SELECT id FROM directory_integrations
+      `SELECT id, (config->>'appKey' = $1 OR config->>'connectionDisabledAppKey' = $1) AS app_matches FROM directory_integrations
         WHERE provider = 'dingtalk'
           AND (($1 <> '' AND (config->>'appKey' = $1 OR config->>'connectionDisabledAppKey' = $1))
-            OR ($1 = '' AND config->'connectionDisabled' = 'true'::jsonb)) ORDER BY id`, [appKey ?? ''],
+            OR ($1 = '' AND config->'connectionDisabled' = 'true'::jsonb)
+            OR id = $2::uuid) ORDER BY id`, [appKey ?? '', integrationId ?? null],
     )
+    if (integrationId && !result.rows.some((row) => String(row.id) === integrationId)) {
+      throw new DirectoryConnectionError('DIRECTORY_CONNECTION_NOT_FOUND', 404)
+    }
     if (!appKey && result.rows.length) throw new DirectoryConnectionError('DIRECTORY_CONNECTION_SCOPE_REQUIRED', 409)
-    if (appKey && result.rows.length === 0) {
+    if (appKey && (result.rows.length === 0 || (integrationId && !result.rows.some((row) => row.app_matches === true)))) {
       const stopped = await client.query(
         `SELECT 1 FROM directory_integrations WHERE provider = 'dingtalk'
           AND config->'connectionDisabled' = 'true'::jsonb LIMIT 1`,
@@ -112,8 +126,11 @@ export async function withDingTalkConnectionOperation<T>(appKey: string | undefi
     for (const row of result.rows) await acquireSourceSyncFreezeLock(client, String(row.id))
     for (const row of result.rows) await assertDirectoryConnectionEnabled(String(row.id), client)
     operationStarted = true
-    return operation()
+    const value = await operation()
+    operationCompleted = true
+    return value
   }).catch((error: unknown) => {
+    if (operationCompleted) throw new DirectorySendFinalizationError()
     if (!operationStarted && !(error instanceof DirectoryConnectionError)) {
       if (typeof error === 'object' && error !== null && 'code' in error && error.code === '55P03') connectionConflict(error)
       throw new DirectoryConnectionError('DIRECTORY_CONNECTION_STATE_UNAVAILABLE', 503)

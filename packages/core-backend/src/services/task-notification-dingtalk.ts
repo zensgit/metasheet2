@@ -404,7 +404,7 @@ export class DingTalkTaskDeliveryChannel implements TaskDeliveryChannel {
           response = await this.sendWorkNotification(
             accessToken,
             { userIds: [destination.dingTalkUserId], title: message.title, content: message.content },
-            destination.config,
+            { ...destination.config, integrationId: destination.integrationId },
             { timeoutMs: TASK_DINGTALK_REQUEST_TIMEOUT_MS, logUpstreamMessage: false },
           )
         } catch (error) {

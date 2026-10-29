@@ -320,7 +320,7 @@ export async function prepareElearningDingTalkNotification(
             title: NOTIFICATION_TITLE,
             content: notificationContent(input.kind),
           },
-          destination.messageConfig,
+          { ...destination.messageConfig, integrationId: destination.integrationId },
         )
         if (!normalizeRequiredText(result?.taskId)) {
           return {

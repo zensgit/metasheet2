@@ -123,13 +123,17 @@ describe('connection disable with real PostgreSQL and synthetic data', () => {
     expect((await pool.query('SELECT config FROM directory_integrations WHERE id = $1',[a])).rows[0].config).toMatchObject({ appKey: 'app-a', connectionDisabled: true })
   })
   it('retains the stop and enterprise marker across ordinary config saves', async () => {
-    await pool.query(`UPDATE directory_integrations SET config = '{"appKey":"app-a","appSecret":"synthetic-secret"}' WHERE id = $1`,[a])
+    await pool.query(`UPDATE directory_integrations SET config = '{"appKey":"app-a","appSecret":"synthetic-secret","corpName":"Synthetic enterprise"}' WHERE id = $1`,[a])
     await disableDirectoryConnection(a,'enterprise')
     await updateDirectoryIntegration(a,{ name: 'Renamed', corpId: 'corp-a', appKey: 'app-a', appSecret: 'synthetic-secret', syncEnabled: true, connectionDisabled: false } as never)
     const config = (await pool.query('SELECT config FROM directory_integrations WHERE id = $1',[a])).rows[0].config
     expect((await pool.query('SELECT sync_enabled FROM directory_integrations WHERE id = $1',[a])).rows[0].sync_enabled).toBe(false)
+    expect(config.corpName).toBe('Synthetic enterprise')
     expect(config.connectionDisabled).toBe(true)
     expect(config.enterpriseConnectionDisabled).toBe(true)
+    const renamed = await updateDirectoryIntegration(a,{ name: 'Renamed again', corpId: 'corp-a', appKey: 'app-a', appSecret: 'synthetic-secret', corpName: 'Renamed enterprise' })
+    expect(renamed?.config).toMatchObject({ corpName: 'Renamed enterprise', connectionDisabled: true })
+    expect(renamed?.syncEnabled).toBe(false)
     await expect(updateDirectoryIntegration(a,{ name: 'Renamed', corpId: 'corp-a', appKey: 'changed-app', appSecret: 'synthetic-secret' })).rejects.toMatchObject({ code: 'DIRECTORY_CONNECTION_DISABLED' })
   })
   it('does not let a different active integration adopt a stopped application', async () => {
@@ -137,6 +141,22 @@ describe('connection disable with real PostgreSQL and synthetic data', () => {
     await disableDirectoryConnection(a,'integration')
     await expect(updateDirectoryIntegration(c,{ name: 'Synthetic', corpId: 'corp-a', appKey: 'app-a', appSecret: 'synthetic-secret' })).rejects.toMatchObject({ code: 'DIRECTORY_ENTERPRISE_CONNECTION_DISABLED' })
     expect((await pool.query('SELECT config FROM directory_integrations WHERE id = $1',[c])).rows[0].config.appKey).toBe('app-c')
+  })
+  it('refuses a stale unchanged-app save after a peer changes app and the old app stops', async () => {
+    await pool.query(`UPDATE directory_integrations SET config = '{"appKey":"app-a","appSecret":"synthetic-secret"}' WHERE id = $1`,[b])
+    const read = deferred(); const release = deferred()
+    afterRead = async () => { read.resolve(); await release.promise }
+    const stale = updateDirectoryIntegration(b,{ name: 'Stale', corpId: 'corp-a', appKey: 'app-a', appSecret: 'synthetic-secret' })
+    stale.catch(() => {})
+    await read.promise
+    try {
+      await updateDirectoryIntegration(b,{ name: 'Current', corpId: 'corp-a', appKey: 'app-b', appSecret: 'synthetic-secret' })
+      await disableDirectoryConnection(a,'integration')
+    } finally { release.resolve() }
+    await expect(stale).rejects.toMatchObject({ code: 'DIRECTORY_CONNECTION_CHANGED' })
+    const saved = (await pool.query('SELECT config FROM directory_integrations WHERE id = $1',[b])).rows[0].config
+    expect(saved.appKey).toBe('app-b')
+    expect(await withDingTalkConnectionOperation('app-b',async () => 'peer-still-enabled')).toBe('peer-still-enabled')
   })
   it('rejects stale unregistered send contexts after a connection has stopped', async () => {
     await disableDirectoryConnection(a,'integration')

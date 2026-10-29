@@ -357,11 +357,11 @@ describe('Attendance C5 delivery worker primitives', () => {
 
     expect(query).toHaveBeenCalledWith(expect.stringContaining('directory_account_links'), ['u1', 'default'])
     expect(readConfig).toHaveBeenCalledWith('dir-1')
-    expect(fetchAccessToken).toHaveBeenCalledWith(config)
+    expect(fetchAccessToken).toHaveBeenCalledWith({ ...config, integrationId: 'dir-1' })
     expect(sendWorkNotification).toHaveBeenCalledWith(
       'access-token',
       { userIds: ['dt-user-1'], title: '排班提醒', content: '明天还没有排班。' },
-      config,
+      { ...config, integrationId: 'dir-1' },
     )
   })
 

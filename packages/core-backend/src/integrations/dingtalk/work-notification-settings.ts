@@ -188,6 +188,7 @@ export async function readDingTalkMessageConfigFromRuntime(integrationId?: strin
 
   if (envAppKey && envAppSecret && envAgentId) {
     return {
+    ...(integrationId ? { integrationId } : {}),
       appKey: envAppKey,
       appSecret: envAppSecret,
       agentId: envAgentId,
@@ -206,6 +207,7 @@ export async function readDingTalkMessageConfigFromRuntime(integrationId?: strin
   if (!agentId) throw new Error('DINGTALK_AGENT_ID, DINGTALK_NOTIFY_AGENT_ID, or directory workNotificationAgentId is not configured')
 
   return {
+    ...(integrationId ? { integrationId } : {}),
     appKey,
     appSecret,
     agentId,
@@ -306,6 +308,7 @@ export async function testDingTalkWorkNotificationAgentId(
     ? normalizeDingTalkWorkNotificationAgentId(suppliedAgentId)
     : normalizeDingTalkWorkNotificationAgentId(stored.agentId)
   const config: DingTalkMessageConfig = {
+    integrationId: stored.integrationId,
     appKey: readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID') || stored.appKey,
     appSecret: readStringEnv('DINGTALK_APP_SECRET', 'DINGTALK_CLIENT_SECRET') || stored.appSecret,
     agentId,
