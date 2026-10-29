@@ -678,3 +678,114 @@ describe('business trip real request approval and destination arrangement',() =>
   })
 
 })
+
+
+describe('settings native persisted authorization (real HTTP/PostgreSQL)', () => {
+  const live = createOnlinePunchDbFixture({ retainHistoryInIsolatedDatabase: true })
+  let owner: Awaited<ReturnType<typeof live.user>>
+  const send = (token?: string) => live.request('/api/attendance/settings', token,
+    { workDateAttribution: { postShiftTailMinutes: 31 } }, 'PUT')
+  async function state() {
+    const durable: Record<string,unknown> = {}
+    for (const table of ['attendance_events','attendance_records','attendance_requests',
+      'attendance_result_operations','attendance_result_event_outbox','attendance_record_calculations',
+      'attendance_timezone_context_companions','attendance_timezone_policy_audit']) {
+      const row = table === 'attendance_result_event_outbox'
+        ? "to_jsonb(t) - ARRAY['delivery_state','attempts','next_attempt_at','delivered_at']::text[]" : 'to_jsonb(t)'
+      durable[table] = (await live.pool.query(`SELECT coalesce(jsonb_agg(v ORDER BY v::text),'[]'::jsonb) AS value
+        FROM (SELECT ${row} AS v FROM ${table} t WHERE org_id=$1) scoped`, [live.orgId])).rows[0].value
+    }
+    return { settings: (await live.pool.query("SELECT * FROM system_configs WHERE key='attendance.settings'")).rows, durable }
+  }
+  beforeAll(async () => {
+    punchClock.setOnlinePunchInstantForTests('2029-04-10T20:00:00.000Z')
+    owner = await live.start()
+    const saved = await live.configure(owner.token, { workDateAttribution: { postShiftTailMinutes: 17 } })
+    expect(saved.body.data.workDateAttribution).toEqual({ postShiftTailMinutes: 17 })
+    expect(process.env.RBAC_BYPASS).toBe('false')
+    expect(process.env.RBAC_TOKEN_TRUST).toBe('false')
+  }, 180_000)
+  afterAll(async () => { await live.stop() }, 60_000)
+
+  it.each(['anonymous','reader','forged-claims'] as const)('SETTINGS_AUTH_REFUSAL %s leaves settings, cache and durable business rows unchanged', async mode => {
+    let token: string | undefined
+    if (mode !== 'anonymous') {
+      const actor = await live.user(false)
+      token = actor.token
+      if (mode === 'forged-claims') {
+        const minted = await live.request('/api/auth/dev-token?userId=' + actor.userId + '&tenantId=' + live.orgId
+          + '&roles=admin&perms=attendance:read,attendance:write,attendance:admin', undefined, undefined, 'GET')
+        expect(minted.status).toBe(200)
+        expect(typeof minted.body.token).toBe('string')
+        token = minted.body.token
+        const claims = JSON.parse(Buffer.from(token!.split('.')[1], 'base64url').toString())
+        expect(claims.roles).toContain('admin')
+      }
+      // Prepare the ordinary first-authentication self-service admission before
+      // the exact refusal snapshot; token claims still confer no admin DB grant.
+      expect((await live.request('/api/attendance/records?from=2029-04-10&to=2029-04-10', token, undefined, 'GET')).status).toBe(200)
+      expect((await live.pool.query("SELECT count(*)::int AS count FROM user_permissions WHERE user_id=$1 AND permission_code='attendance:admin'",
+        [actor.userId])).rows).toEqual([{ count: 0 }])
+      expect((await live.pool.query("SELECT count(*)::int AS count FROM user_roles WHERE user_id=$1 AND role_id='admin'",
+        [actor.userId])).rows).toEqual([{ count: 0 }])
+    }
+    const before = await state()
+    const refused = await send(token)
+    expect({ status: refused.status, body: refused.body }).toEqual(mode === 'anonymous'
+      ? { status: 401, body: { ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } } }
+      : { status: 403, body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } } })
+    expect(await state(), 'SETTINGS_AUTH_REFUSAL_NATIVE_ZERO_DELTA').toEqual(before)
+    const cached = await live.request('/api/attendance/settings', owner.token, undefined, 'GET')
+    expect(cached.status).toBe(200)
+    expect(cached.body.data.workDateAttribution).toEqual({ postShiftTailMinutes: 17 })
+  })
+
+  it('SETTINGS_PERMISSION_REVOKED checks persisted admin permission after the real prefix wait while membership stays active', async () => {
+    const actor = await live.user(false)
+    await live.pool.query("INSERT INTO user_permissions(user_id,permission_code) VALUES($1,'attendance:admin')", [actor.userId])
+    expect((await live.configure(actor.token, { workDateAttribution: { postShiftTailMinutes: 17 } })).status).toBe(200)
+    const before = await state()
+    const blocker = await live.pool.connect()
+    let pending: ReturnType<typeof send> | undefined
+    let completed: Awaited<ReturnType<typeof send>> | undefined
+    try {
+      await blocker.query('BEGIN')
+      const pid = (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+        [JSON.stringify(['attendance-timezone-policy-v1',live.orgId])])
+      pending = send(actor.token).then(response => { completed = response; return response })
+      let waiting = false
+      for (let attempt = 0; attempt < 250; attempt++) {
+        const locks = await live.pool.query(`SELECT 1 FROM pg_locks held JOIN pg_locks waiting
+          ON held.locktype=waiting.locktype AND held.database=waiting.database
+          AND held.classid=waiting.classid AND held.objid=waiting.objid AND held.objsubid=waiting.objsubid
+          WHERE held.pid=$1 AND held.locktype='advisory' AND held.granted=true AND waiting.granted=false`, [pid])
+        if (locks.rowCount) { waiting = true; break }
+        if (completed) break
+        await new Promise(resolve => setTimeout(resolve,20))
+      }
+      expect(waiting, 'SETTINGS_PERMISSION_REAL_PREFIX_WAIT').toBe(true)
+      await blocker.query("DELETE FROM user_permissions WHERE user_id=$1 AND permission_code='attendance:admin'", [actor.userId])
+      await blocker.query('COMMIT')
+      const refused = await pending
+      expect({ status: refused.status, body: refused.body }, 'SETTINGS_PERMISSION_FRESH_REFUSAL').toEqual({
+        status: 403, body: { ok: false, error: { code: 'ATTENDANCE_TIMEZONE_FORBIDDEN', message: 'ATTENDANCE_TIMEZONE_FORBIDDEN' } },
+      })
+      expect((await live.pool.query('SELECT is_active FROM user_orgs WHERE user_id=$1 AND org_id=$2',
+        [actor.userId,live.orgId])).rows).toEqual([{ is_active: true }])
+      expect((await live.pool.query("SELECT count(*)::int AS count FROM user_permissions WHERE user_id=$1 AND permission_code='attendance:admin'",
+        [actor.userId])).rows).toEqual([{ count: 0 }])
+      expect(await state(), 'SETTINGS_PERMISSION_REVOKED_NATIVE_ZERO_DELTA').toEqual(before)
+      expect((await live.request('/api/attendance/settings', owner.token, undefined, 'GET')).body.data.workDateAttribution)
+        .toEqual({ postShiftTailMinutes: 17 })
+    } finally {
+      await blocker.query('ROLLBACK')
+      blocker.release()
+      if (pending) await pending
+    }
+    await live.pool.query("INSERT INTO user_permissions(user_id,permission_code) VALUES($1,'attendance:admin')", [actor.userId])
+    const restored = await send(actor.token)
+    expect(restored.status, restored.body.error?.code).toBe(200)
+    expect(restored.body.data.workDateAttribution).toEqual({ postShiftTailMinutes: 31 })
+  }, 60_000)
+})
