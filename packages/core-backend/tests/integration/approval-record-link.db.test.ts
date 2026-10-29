@@ -1249,6 +1249,144 @@ describeIfDatabase('record-link form field (FWB-0 Layer 2) — real-DB publish +
     await pool.query(`DELETE FROM meta_fields WHERE id = ANY($1::text[])`, [[f1, f2]]).catch(() => {})
   })
 
+  it('record-link-options: configured display columns → label + subtitle + search; a column not shown to this filler falls back to the default rule', async () => {
+    const pool = poolManager.get()
+    const fProject = `fld_cols_project_${TS}`
+    const fDwg = `fld_cols_dwg_${TS}`
+    const fName = `fld_cols_name_${TS}`
+    const fParent = `fld_cols_parent_${TS}`
+    const recA = `rl-cols-a-${TS}`
+    const recB = `rl-cols-b-${TS}`
+    await pool.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES
+         ($1, $5, '项目号', 'string', '{}'::jsonb, 1),
+         ($2, $5, '图号', 'string', '{}'::jsonb, 2),
+         ($3, $5, '名称', 'string', '{}'::jsonb, 3),
+         ($4, $5, '父组件图号', 'string', '{}'::jsonb, 4)
+       ON CONFLICT (id) DO NOTHING`,
+      [fProject, fDwg, fName, fParent, sheetId],
+    )
+    await pool.query(
+      `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
+       VALUES ($1, $3, $4::jsonb, 1, $6), ($2, $3, $5::jsonb, 1, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        recA,
+        recB,
+        sheetId,
+        JSON.stringify({ [fProject]: `P-${TS}`, [fDwg]: `DWG-A-${TS}`, [fName]: '支架', [fParent]: `ASM-${TS}` }),
+        JSON.stringify({ [fProject]: `P-${TS}`, [fDwg]: `DWG-B-${TS}`, [fName]: '底板', [fParent]: '' }),
+        ACTOR,
+      ],
+    )
+    const fillerOptionsTok = await tok(base, FILLER, 'user', 'multitable:read,approvals:read,approvals:write')
+    const path = (extra: string) => (
+      `/api/approvals/record-link-options?baseId=${encodeURIComponent(baseId)}&sheetId=${encodeURIComponent(sheetId)}`
+      + `&limit=50&displayFieldIds=${encodeURIComponent([fDwg, fName, fParent].join(','))}${extra}`
+    )
+    try {
+      const res = await req(base, path(''), fillerOptionsTok)
+      expect(res.status, await res.clone().text()).toBe(200)
+      const body = (await res.json()) as { records: Array<{ id: string; display: string; subtitle?: string }> }
+      expect(body.records.find((r) => r.id === recA)).toEqual({ id: recA, display: `DWG-A-${TS}`, subtitle: `支架 · ASM-${TS}` })
+      expect(body.records.find((r) => r.id === recB)).toEqual({ id: recB, display: `DWG-B-${TS}`, subtitle: '底板' })
+
+      // Search reaches a non-label configured column (父组件图号) and COUNT agrees.
+      const searchRes = await req(base, path(`&search=${encodeURIComponent(`asm-${TS}`)}`), fillerOptionsTok)
+      const searchBody = (await searchRes.json()) as { records: Array<{ id: string }>; page: { total: number } }
+      expect(searchBody.records.map((r) => r.id)).toEqual([recA])
+      expect(searchBody.page.total).toBe(1)
+
+      // Hide 图号 + 名称 from the filler: those columns drop out of label, subtitle and search.
+      await pool.query(
+        `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1, $2, 'user', $4, false, false), ($1, $3, 'user', $4, false, false)`,
+        [sheetId, fDwg, fName, FILLER],
+      )
+      const hiddenRes = await req(base, path(''), fillerOptionsTok)
+      const hiddenBody = (await hiddenRes.json()) as { records: Array<{ id: string; display: string; subtitle?: string }> }
+      expect(hiddenBody.records.find((r) => r.id === recA)).toEqual({ id: recA, display: `ASM-${TS}` })
+      // Only 父组件图号 remains configured+visible and it is blank on B → today's rule (项目号).
+      expect(hiddenBody.records.find((r) => r.id === recB)).toEqual({ id: recB, display: `P-${TS}` })
+      const hiddenText = JSON.stringify(hiddenBody)
+      expect(hiddenText).not.toContain(`DWG-A-${TS}`)
+      expect(hiddenText).not.toContain('支架')
+      const hiddenSearch = await req(base, path(`&search=${encodeURIComponent(`dwg-a-${TS}`)}`), fillerOptionsTok)
+      const hiddenSearchBody = (await hiddenSearch.json()) as { records: unknown[]; page: { total: number } }
+      expect(hiddenSearchBody.records).toEqual([])
+      expect(hiddenSearchBody.page.total).toBe(0)
+    } finally {
+      await pool.query(`DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = ANY($2::text[])`, [sheetId, [fDwg, fName]]).catch(() => {})
+      await pool.query(`DELETE FROM meta_records WHERE id = ANY($1::text[])`, [[recA, recB]]).catch(() => {})
+      await pool.query(`DELETE FROM meta_fields WHERE id = ANY($1::text[])`, [[fProject, fDwg, fName, fParent]]).catch(() => {})
+    }
+  })
+
+  it('publish rejects configured display columns that are computed or not on the sheet; accepts eligible ones', async () => {
+    const pool = poolManager.get()
+    const fText = `fld_pubcols_text_${TS}`
+    const fCalc = `fld_pubcols_calc_${TS}`
+    await pool.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $3, '图号', 'string', '{}'::jsonb, 1), ($2, $3, '计算', 'formula', '{}'::jsonb, 2)
+       ON CONFLICT (id) DO NOTHING`,
+      [fText, fCalc, sheetId],
+    )
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'static_user', userIds: [ACTOR] }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'end' },
+      ],
+    }
+    const publishWith = async (suffix: string, displayFieldIds: string[]) => {
+      const key = `rl-pubcols-${suffix}-${TS}`
+      const created = await req(base, '/api/approval-templates', adminTok, {
+        method: 'POST',
+        body: {
+          key,
+          name: key,
+          formSchema: {
+            fields: [{ id: 'linked', type: 'record-link', label: '关联记录', props: { baseId, sheetId, displayFieldIds } }],
+          },
+          approvalGraph: graph,
+        },
+      })
+      expect(created.status, await created.clone().text()).toBe(201)
+      const id = ((await created.json()) as { id: string }).id
+      return req(base, `/api/approval-templates/${id}/publish`, adminTok, {
+        method: 'POST',
+        body: { policy: { allowRevoke: true } },
+      })
+    }
+    try {
+      for (const [suffix, ids] of [['calc', [fText, fCalc]], ['foreign', [`fld_no_such_${TS}`]]] as const) {
+        const published = await publishWith(suffix, [...ids])
+        expect(published.status, suffix).toBe(400)
+        const body = (await published.json()) as { code?: string; error?: { code?: string; message?: string }; message?: string }
+        expect(body.code ?? body.error?.code).toBe('VALIDATION_ERROR')
+        expect(body.message ?? body.error?.message ?? '').toMatch(/record-link target is not readable/)
+      }
+      const ok = await publishWith('ok', [fText])
+      expect(ok.status, await ok.clone().text()).toBe(200)
+    } finally {
+      await pool.query(`DELETE FROM meta_fields WHERE id = ANY($1::text[])`, [[fText, fCalc]]).catch(() => {})
+    }
+  })
+
   it('create freezes canonical trimmed recordId into form_snapshot (spaces authorized but not stored)', async () => {
     // Value authorized as readableRecordId after trim, must persist as exactly { recordId: trimmed }.
     const started = await req(base, '/api/approvals', fillerTok, {

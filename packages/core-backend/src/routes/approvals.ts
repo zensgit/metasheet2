@@ -44,7 +44,10 @@ import {
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
 import { isApprovalAdministrator } from '../services/approval-admin-capability'
-import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
+import {
+  listApprovalRecordLinkOptions,
+  parseRecordLinkDisplayFieldIdsQuery,
+} from '../services/approval-record-link-options'
 import {
   canReadApprovalInstance,
   isOrgPinEnabled,
@@ -2553,6 +2556,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         const search = typeof req.query.search === 'string' ? req.query.search : undefined
         const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
         const offset = Number.parseInt(String(req.query.offset ?? '0'), 10)
+        // Optional configured display columns (comma-separated, at most three). Malformed or
+        // repeated values are treated as absent; the service applies the same column rule as
+        // today's automatic label.
+        const displayFieldIds = parseRecordLinkDisplayFieldIdsQuery(req.query.displayFieldIds)
         const result = await listApprovalRecordLinkOptions({
           userId,
           baseId,
@@ -2560,6 +2567,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           search,
           limit: Number.isFinite(limit) ? limit : 20,
           offset: Number.isFinite(offset) ? offset : 0,
+          ...(displayFieldIds.length > 0 ? { displayFieldIds } : {}),
         })
         if (result.ok === false) {
           return res.status(result.status).json(

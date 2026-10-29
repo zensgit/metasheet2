@@ -2012,6 +2012,8 @@ export interface ApprovalRecordLinkOption {
   id: string
   /** Human label — server never falls back to raw record id. */
   display: string
+  /** Other configured display column values (only when configured and non-empty). */
+  subtitle?: string
 }
 
 export interface ApprovalRecordLinkOptionsPage {
@@ -2034,6 +2036,8 @@ export async function listApprovalRecordLinkOptions(params: {
   search?: string
   limit?: number
   offset?: number
+  /** Configured display columns of the published field (at most three; sent comma-separated). */
+  displayFieldIds?: readonly string[]
 }): Promise<ApprovalRecordLinkOptionsResult> {
   const baseId = params.baseId.trim()
   const sheetId = params.sheetId.trim()
@@ -2045,6 +2049,11 @@ export async function listApprovalRecordLinkOptions(params: {
     qs.set('baseId', baseId)
     qs.set('sheetId', sheetId)
     if (params.search?.trim()) qs.set('search', params.search.trim())
+    const displayFieldIds = (params.displayFieldIds ?? [])
+      .map((id) => (typeof id === 'string' ? id.trim() : ''))
+      .filter((id) => id.length > 0)
+      .slice(0, 3)
+    if (displayFieldIds.length > 0) qs.set('displayFieldIds', displayFieldIds.join(','))
     if (typeof params.limit === 'number') qs.set('limit', String(params.limit))
     if (typeof params.offset === 'number') qs.set('offset', String(params.offset))
     const response = await apiFetch(`/api/approvals/record-link-options?${qs.toString()}`)
@@ -2080,7 +2089,8 @@ export async function listApprovalRecordLinkOptions(params: {
         dropped += 1
         continue
       }
-      records.push({ id, display })
+      const subtitle = typeof row.subtitle === 'string' ? row.subtitle.trim() : ''
+      records.push(subtitle && subtitle !== id ? { id, display, subtitle } : { id, display })
     }
     const page = payload.page ?? {}
     const limit = typeof page.limit === 'number' ? page.limit : records.length
