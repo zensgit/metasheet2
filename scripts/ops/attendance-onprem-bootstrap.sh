@@ -14,6 +14,7 @@ SERVICE_MANAGER="${SERVICE_MANAGER:-pm2}" # pm2|systemd|none
 START_SERVICE="${START_SERVICE:-$START_PM2}"
 SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}"
 PM2_APP_NAME="${PM2_APP_NAME:-metasheet-backend}"
+readonly effective_service_receipt="${MS_EFFECTIVE_SERVICE_RECEIPT-}"
 
 function info() {
   echo "[attendance-onprem-bootstrap] $*" >&2
@@ -80,6 +81,10 @@ if [[ "$START_SERVICE" == "1" ]]; then
     echo "[attendance-onprem-bootstrap] ERROR: SERVICE_MANAGER must be pm2|systemd|none (got: ${SERVICE_MANAGER})" >&2
     exit 1
   fi
+fi
+
+if [[ -n "$effective_service_receipt" ]]; then
+  printf '%s\0%s\0%s\0' "${SERVICE_MANAGER-}" "${PM2_APP_NAME-}" "${SYSTEMD_SERVICE_NAME-}" > "$effective_service_receipt"
 fi
 
 info "Bootstrap complete"

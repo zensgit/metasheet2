@@ -16,6 +16,7 @@ SERVICE_MANAGER="${SERVICE_MANAGER:-pm2}" # pm2|systemd|none
 RESTART_SERVICE="${RESTART_SERVICE:-$RESTART_PM2}"
 SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME:-metasheet-backend.service}"
 PM2_APP_NAME="${PM2_APP_NAME:-metasheet-backend}"
+readonly effective_service_receipt="${MS_EFFECTIVE_SERVICE_RECEIPT-}"
 
 function info() {
   echo "[attendance-onprem-update] $*" >&2
@@ -93,6 +94,10 @@ if [[ "$RELOAD_NGINX" == "1" && "$(command -v systemctl || true)" != "" ]]; then
   if systemctl is-active --quiet nginx; then
     run systemctl reload nginx
   fi
+fi
+
+if [[ -n "$effective_service_receipt" ]]; then
+  printf '%s\0%s\0%s\0' "${SERVICE_MANAGER-}" "${PM2_APP_NAME-}" "${SYSTEMD_SERVICE_NAME-}" > "$effective_service_receipt"
 fi
 
 info "Update complete"

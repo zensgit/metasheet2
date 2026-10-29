@@ -81,8 +81,16 @@ api_base="${API_BASE%/}"
 web_base="$(to_web_base "$api_base")"
 auth_token=""
 
+effective_service_receipt="$(mktemp)" || die "Could not create effective service receipt"
+readonly effective_service_receipt
+trap 'status=$?; if ! rm -f "$effective_service_receipt"; then
+  info "ERROR: Could not remove effective service receipt"
+  if [[ "$status" -eq 0 ]]; then status=1; fi
+fi; exit "$status"' EXIT
+
 run env \
   ENV_FILE="$ENV_FILE" \
+  MS_EFFECTIVE_SERVICE_RECEIPT="$effective_service_receipt" \
   REQUIRE_ATTENDANCE_ONLY=0 \
   SERVICE_MANAGER="$SERVICE_MANAGER" \
   INSTALL_DEPS="$INSTALL_DEPS" \
@@ -91,6 +99,17 @@ run env \
   RUN_MIGRATIONS="$RUN_MIGRATIONS" \
   START_SERVICE="$START_SERVICE" \
   "${ROOT_DIR}/scripts/ops/attendance-onprem-bootstrap.sh"
+
+if {
+  IFS= read -r -d '' effective_service_manager &&
+  IFS= read -r -d '' effective_pm2_app_name &&
+  IFS= read -r -d '' effective_systemd_service_name &&
+  { ! IFS= read -r -d '' effective_service_extra && [[ -z "$effective_service_extra" ]]; }
+} < "$effective_service_receipt"; then
+  :
+else
+  die "Effective service receipt must contain exactly three NUL-terminated fields"
+fi
 
 verify_prebuilt_dist
 wait_for_api
@@ -137,7 +156,10 @@ if [[ -n "$auth_token" ]]; then
     BASE_URL="$web_base" \
     API_BASE="$api_base" \
     CHECK_NGINX="$CHECK_NGINX" \
-    SERVICE_MANAGER="$SERVICE_MANAGER" \
+    SERVICE_MANAGER="$effective_service_manager" \
+    PM2_APP_NAME="$effective_pm2_app_name" \
+    SYSTEMD_SERVICE_NAME="$effective_systemd_service_name" \
+    MS_HEALTH_EFFECTIVE_SERVICE_IDENTITY=1 \
     AUTH_TOKEN="$auth_token" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
     "${ROOT_DIR}/scripts/ops/multitable-onprem-healthcheck.sh"
@@ -147,7 +169,10 @@ else
     BASE_URL="$web_base" \
     API_BASE="$api_base" \
     CHECK_NGINX="$CHECK_NGINX" \
-    SERVICE_MANAGER="$SERVICE_MANAGER" \
+    SERVICE_MANAGER="$effective_service_manager" \
+    PM2_APP_NAME="$effective_pm2_app_name" \
+    SYSTEMD_SERVICE_NAME="$effective_systemd_service_name" \
+    MS_HEALTH_EFFECTIVE_SERVICE_IDENTITY=1 \
     "${ROOT_DIR}/scripts/ops/multitable-onprem-healthcheck.sh"
 fi
 
