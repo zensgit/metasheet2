@@ -19,6 +19,7 @@ import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
 import { defineStockPreparationProjectWriteLockRealDbCases } from './stock-preparation-project-write-lock-realdb.cases'
 import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stock-preparation-generic-writer-governance-realdb.cases'
+import { defineStockPreparationSheetCensusRealDbCases } from './stock-preparation-sheet-census-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -502,3 +503,5 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
 defineStockPreparationProjectWriteLockRealDbCases()
 // Batch-refresh step 4 PR-6: the generic configured writers refuse governed stock-prep sheets (real PG, S6-*).
 defineStockPreparationGenericWriterGovernanceRealDbCases()
+// Batch-refresh step 6d-1a (S6-0): the R-line doubled-sheet census pack runs on real PG with parity to the pure module (S9D-02/03).
+defineStockPreparationSheetCensusRealDbCases()
