@@ -194,6 +194,7 @@ REQUIRED_PATHS=(
   "package.json"
   "pnpm-lock.yaml"
   "pnpm-workspace.yaml"
+  "vendor/xlsx-0.20.3.tgz"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"
   "docs/deployment/multitable-platform-rc-notes-20260404.md"
@@ -444,7 +445,9 @@ Dependency policy:
   successful preflight may enter the live-root overlay/dependency transaction;
   a live dependency activation failure restores both package files and the
   previous workspace node_modules before migrations or restart. Do not bypass
-  this contract with --no-frozen-lockfile.
+  this contract with --no-frozen-lockfile. The SheetJS (xlsx 0.20.3) tarball
+  ships inside the package at vendor/xlsx-0.20.3.tgz, so the staging preflight
+  needs only the npm registry.
 
 Verification:
   A valid delivery asset passes:

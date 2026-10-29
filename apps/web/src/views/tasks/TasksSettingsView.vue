@@ -507,4 +507,30 @@ defineExpose({ readResult, draft, pending, saved, fieldErrors, saveBannerKind, o
   align-items: center;
   gap: 12px;
 }
+
+/* Up to 960px: long words break instead of widening the page, and the fieldset (whose minimum
+   width defaults to its min-content width), the text input and the select can narrow with the
+   page. */
+@media (max-width: 960px) {
+  .tasks-settings {
+    overflow-wrap: break-word;
+  }
+
+  fieldset.tasks-settings__field {
+    min-width: 0;
+  }
+
+  .tasks-settings__field input[type='text'],
+  .tasks-settings__field select {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+
+/* Narrow screens: the same breakpoint and page padding as the task centre home. */
+@media (max-width: 720px) {
+  .tasks-settings {
+    padding: 16px;
+  }
+}
 </style>

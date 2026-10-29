@@ -20,6 +20,7 @@
 - **D2 范围**：v1 仅 `.xlsx`（钉钉默认导出格式）；`.xls`（OLE2 老格式）/`.xlsm`（宏）/`.xlsb` 维持现有拦截+另存为指引。多工作表：v1 取**首个非空 sheet** + 状态提示「已读取工作表 <名>；如需其他表请另存为 CSV」；sheet 选择器 = X2。
 - **D3 SheetJS 版本姿态（安全门）**：~~仓内 `xlsx@^0.18.5` 仅测试代码使用~~（**勘误 2026-07-06 对抗审阅 #3737-P2-1**：静态 import 确为零，但存在 4 个**动态 `import('xlsx')` 生产消费方**——`MetaImportModal.vue:587` 前端解析用户上传、`MultitableWorkbench.vue:3617`/`IntegrationWorkbenchView.vue:3441` 导出、`univer-meta.ts:4612` 后端 `POST /import-xlsx` 服务端解析用户上传——**CVE 在升级前即生产可达**，D3-a 属就地修复而非前置预防）。R3 让考勤线也开始解析**用户提供的文件**。0.18.5 有已知 CVE（CVE-2023-30533 原型污染 <0.19.3；CVE-2024-22363 ReDoS <0.20.2），且 npm 渠道版本停更（官方发布已迁自有渠道）。三选一：
   - D3-a 升级到官方渠道 ≥0.20.2（改 package.json source + lockfile，多维表测试同步验证）——**推荐**；
+    - 附记 2026-10-28：同一份官方 0.20.3 字节（sha512 `oLDq…AJA==`，sha256 `8dc73fc3…9fe8`）改为入库 `vendor/xlsx-0.20.3.tgz`、经 `file:` 解析；D3-a 与 lockfile integrity fail-closed 不变，只换取包位置——#3737 登记的残余 P3（CDN 单厂商可用性耦合）就此关闭。
   - D3-b 换 `exceljs`（活跃维护，但 API/体积不同，多一颗依赖）；
   - D3-c 维持 0.18.5 + 转换侧缓解（`sheet_to_csv` 输出为纯文本、不消费解析对象图，原型污染面收窄但非零）——不推荐长期。
 - **D4 上限与失败 UX**：xlsx 原文件 ≤10MB（超限 → 报错走另存为指引，不尝试转换）；转换后 CSV 文本走既有 5MB inline/upload 分流；转换失败（加密工作簿/损坏 zip/空表）→ 可操作报错（「无法读取该 Excel：<原因>；请另存为 CSV 后重试」），**绝不静默**。日期/数字单元格用格式化文本输出（`sheet_to_csv` raw:false），与钉钉导出的文本习惯一致；发现歧义以预览为准（既有预览闸门兜底）。
