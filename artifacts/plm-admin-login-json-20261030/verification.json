@@ -1,0 +1,55 @@
+{
+  "schema": "PLM-admin-login-JSON-validation/v1",
+  "source_sha": "fecce88a0e68f8fdd183d73d380e056c7ffb32ab",
+  "parent_sha": "e33325f8a8d4281d2663205761af4fd36ce64aaf",
+  "change": "Serialize final effective ADMIN_EMAIL/ADMIN_PASSWORD using existing Node JSON.stringify; send login body through curl stdin. Preserve input guards, file priority and existing SQL/authorization.",
+  "Node_actual_local": "24.14.1",
+  "baseline": {
+    "pass": 2,
+    "fail": 5,
+    "HTTP400_causal_failures": 5
+  },
+  "candidate": {
+    "tests": 7,
+    "pass": 7,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "cases": [
+    "plain password control",
+    "double quote password",
+    "backslash password",
+    "embedded newline and tab",
+    "JSON-looking injection password",
+    "quoted email with ordinary password",
+    "file credential priority control"
+  ],
+  "script_sha256": "e6f4c90a7b35a6dd5e336e51173fac34e5746991cc3045163b758d9c6b8d4e29",
+  "test_sha256": "ae45f22cfaa8d3735392bc0f653f917a535a7ed5fb888e2447f8172871beb73e",
+  "independent_review_sha256": "5a1d6eef0cf1fcf11b4991070fb1225bc045db3be50d948631ed085f78e8a1ef",
+  "original_assertions_and_default_backend_preserved": true,
+  "initial_TAP_parser_error_preserved": true,
+  "baseline_counts_corrected_from_same_raw_spec_log_without_rerun": true,
+  "owned_fixture_tmp_empty": true,
+  "owned_capsule_removed": true,
+  "qualification": {
+    "synthetic_HTTP": "Real own127.0.0.1 login/local-accounts fixture, actualcurl, fakebcrypt/psql",
+    "current_head_remote_CI": "PENDING",
+    "real_application_HTTP_PG": "NOT_RUN",
+    "static_build": "NOT_RUN",
+    "image": "NOT_RUN",
+    "installation": "NOT_RUN",
+    "Work_browser": "DISABLED",
+    "business_acceptance": "NOT_RUN"
+  },
+  "model_record": {
+    "test_author": "gpt-6.1-sol medium requested; actual profile not separately returned",
+    "independent_reviewer": "gpt-6.1-sol medium requested; actual profile not separately returned",
+    "implementation_and_execution": "Root"
+  },
+  "Draft_only": true,
+  "HOLDs_preserved": true,
+  "whole_goal_complete": false
+}
