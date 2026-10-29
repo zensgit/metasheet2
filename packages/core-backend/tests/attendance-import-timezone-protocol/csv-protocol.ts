@@ -465,6 +465,96 @@ it('characterizes real streamed normalization for 1001 distinct subjects without
   writeFileSync(file, JSON.stringify(report, null, 2) + '\n')
 })
 
+
+type JobScopeFixture = { ownId: string; foreignId: string; batchId: string; key: string; createdAt: Date }
+async function withJobScopeFixture(action: (f: JobScopeFixture) => Promise<void>) {
+  const foreignOrg = randomUUID(), ownId = randomUUID(), foreignId = randomUUID(), batchId = randomUUID()
+  const key = 'mut06-job-' + randomUUID(), createdAt = new Date('2026-09-01T00:00:00.000Z')
+  const payload = { __jobType: 'commit', __importEngine: 'standard',
+    chunkConfig: { itemsChunkSize: 1, recordsChunkSize: 1 }, recordUpsertStrategy: 'values', itemsInsertStrategy: 'values',
+    summary: { processedRows: 0, failedRows: 0 } }
+  await pool.query('INSERT INTO user_orgs(user_id,org_id) VALUES ($1,$2)', [OWNER, foreignOrg])
+  try {
+    for (const [id, org, batch, created] of [
+      [ownId, ORG, batchId, createdAt],
+      [foreignId, foreignOrg, randomUUID(), new Date(createdAt.getTime() + 1000)],
+    ]) await pool.query('INSERT INTO attendance_import_jobs '
+      + '(id,org_id,batch_id,created_by,idempotency_key,status,payload,created_at,updated_at) '
+      + 'VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$8)',
+    [id, org, batch, OWNER, key, 'queued', JSON.stringify(payload), created])
+    expect((await pool.query('SELECT w4_contract_version FROM attendance_import_jobs WHERE id=ANY($1::uuid[])', [[ownId, foreignId]])).rows)
+      .toEqual([{ w4_contract_version: null }, { w4_contract_version: null }])
+    const snapshot = async () => ({
+      jobs: (await pool.query('SELECT to_jsonb(j) AS row FROM attendance_import_jobs j WHERE id=ANY($1::uuid[]) ORDER BY id', [[ownId, foreignId]])).rows,
+      jobCount: (await pool.query('SELECT count(*)::int AS n FROM attendance_import_jobs')).rows,
+      tokenCount: (await pool.query('SELECT count(*)::int AS n FROM attendance_import_tokens')).rows,
+      effects: (await pool.query('SELECT (SELECT count(*)::int FROM attendance_records) AS records, '
+        + '(SELECT count(*)::int FROM attendance_import_batches) AS batches, '
+        + '(SELECT count(*)::int FROM attendance_import_items) AS items')).rows[0],
+      transitions: { commits, reservations: reservationInputs.length, processors: processorCalls.length, queued: queuedJobs.length, events: events.length },
+    })
+    const before = await snapshot()
+    await action({ ownId, foreignId, batchId, key, createdAt })
+    expect(await snapshot(), 'MUT06_JOB_SCOPE_NO_MUTATION').toEqual(before)
+    expect(providerIO).not.toHaveBeenCalled()
+  } finally {
+    await pool.query('DELETE FROM attendance_import_jobs WHERE id=ANY($1::uuid[])', [[ownId, foreignId]])
+    await pool.query('DELETE FROM user_orgs WHERE user_id=$1 AND org_id=$2', [OWNER, foreignOrg])
+  }
+}
+function expectedScopedJob(f: JobScopeFixture) {
+  return { id: f.ownId, orgId: ORG, batchId: f.batchId, createdBy: OWNER, idempotencyKey: f.key,
+    kind: 'commit', status: 'queued', engine: 'standard', chunkConfig: { itemsChunkSize: 1, recordsChunkSize: 1 },
+    recordUpsertStrategy: 'values', itemsInsertStrategy: 'values', progress: 0, total: 0, progressPercent: 0,
+    processedRows: 0, failedRows: 0, skippedCount: 0, skippedRows: [], elapsedMs: 0, throughputRowsPerSec: 0,
+    error: null, preview: null, startedAt: null, finishedAt: null, createdAt: f.createdAt, updatedAt: f.createdAt }
+}
+async function invokeScopedJobRead(id: string) {
+  const response = { statusCode: 200, body: undefined as unknown, headersSent: false,
+    status(code: number) { this.statusCode = code; return this },
+    json(body: unknown) { this.body = body; this.headersSent = true; return this } }
+  const handler = routes.get('GET /api/attendance/import/jobs/:id')
+  expect(handler).toBeTypeOf('function')
+  errors.length = 0
+  await handler!({ user: { id: OWNER, orgId: ORG }, headers: {}, query: {}, params: { id }, body: {} }, response)
+  return { status: response.statusCode, body: response.body, errors: [...errors] }
+}
+function projectedJobQueries(marker: string, statuses: number[]) {
+  const queries = sqlReads.filter(sql => /FROM attendance_import_jobs AS job/.test(sql))
+  console.info('MUT06_JOB_SCOPE_NATIVE', JSON.stringify({ case: marker, statuses,
+    SQL: queries.map(sql => ({ SHA256: createHash('sha256').update(sql).digest('hex') })) }))
+  return queries
+}
+it('MUT06_JOB_SCOPE_ID: own lookup succeeds and a legal foreign job remains invisible', async () => {
+  await withJobScopeFixture(async f => {
+    sqlReads.length = 0
+    const own = await invokeScopedJobRead(f.ownId), foreign = await invokeScopedJobRead(f.foreignId)
+    const queries = projectedJobQueries('MUT06_JOB_SCOPE_ID', [own.status, foreign.status])
+    expect(own, 'MUT06_JOB_SCOPE_ID_OWN_CONTROL').toEqual({ status: 200, body: { ok: true, data: expectedScopedJob(f) }, errors: [] })
+    expect(foreign, 'MUT06_JOB_SCOPE_ID_FOREIGN_REFUSAL').toEqual({ status: 404,
+      body: { ok: false, error: { code: 'NOT_FOUND', message: 'Import job not found' } }, errors: [] })
+    expect(queries).toHaveLength(2)
+    for (const sql of queries) {
+      expect(sql, 'MUT06_JOB_SCOPE_ID_PRIMARY').toMatch(/WHERE job\.id = \$1 AND job\.org_id = \$2/)
+      // The real FK remains enforced; this is executed-predicate evidence,
+      // not a claim that an inconsistent terminal response can be inserted.
+      expect(sql, 'MUT06_JOB_SCOPE_ID_JOIN').toMatch(/terminal\.job_id = job\.id AND terminal\.org_id = job\.org_id/)
+    }
+  })
+})
+it('MUT06_JOB_SCOPE_IDEMPOTENCY: a newer foreign retry key cannot replace the own job', async () => {
+  await withJobScopeFixture(async f => {
+    sqlReads.length = 0
+    const replay = await invoke('commit-async', { ...input('CSV'), idempotencyKey: f.key })
+    const queries = projectedJobQueries('MUT06_JOB_SCOPE_IDEMPOTENCY', [replay.status])
+    expect(replay, 'MUT06_JOB_SCOPE_IDEMPOTENCY_OWN_REPLAY').toEqual({ status: 200,
+      body: { ok: true, data: { job: expectedScopedJob(f), idempotent: true } }, errors: [] })
+    expect(queries).toHaveLength(1)
+    expect(queries[0], 'MUT06_JOB_SCOPE_IDEMPOTENCY_PRIMARY').toMatch(/WHERE job\.org_id = \$1 AND job\.idempotency_key = \$2/)
+    expect(queries[0], 'MUT06_JOB_SCOPE_IDEMPOTENCY_JOIN').toMatch(/terminal\.job_id = job\.id AND terminal\.org_id = job\.org_id/)
+  })
+})
+
 it('accounts for committed CSV rows and forbids provider IO', async () => {
   const counts = (await pool.query(`SELECT (SELECT count(*)::int FROM attendance_records) records,
     (SELECT count(*)::int FROM attendance_import_batches) batches,
