@@ -891,6 +891,7 @@ export default defineConfig({
       // cannot skip-green it; wired whole-file into the attendance real-DB step in
       // plugin-tests.yml (two-point wiring; exclusion backfilled by Stage E).
       'tests/integration/attendance-w4c2-posture-matrix.db.test.ts',
+      'tests/integration/attendance-live07-native-selection.db.test.ts',
       // #4556 W4C-2 Stage E: §12.3 residual gate matrix (W2 ambiguity review shape,
       // V2-cast storage backstop, same-org/cross-org isolation, forged-witness
       // zero-SQL legs, inactive membership, authoritative fail-closed, posture
