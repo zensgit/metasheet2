@@ -820,8 +820,12 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     const ROLE_SP_READ = `stock-prep_s4read_${suffix}`
     const spAdminUser = `s4spadmin_${suffix}`
     const spDirectUser = `s4spdirect_${suffix}`
+    // The same real role and the same real G1 grant, but NO stock-prep admission row / a DISABLED one.
+    const spNoAdmUser = `s4spnoadm_${suffix}`
+    const spOffAdmUser = `s4spoffadm_${suffix}`
+    const s4Users = [spAdminUser, spDirectUser, spNoAdmUser, spOffAdmUser]
     try {
-      for (const id of [spAdminUser, spDirectUser]) {
+      for (const id of s4Users) {
         await pool.query('INSERT INTO users (id, password_hash, name, username) VALUES ($1, $2, $3, $4)', [id, 'not-a-hash', `S4 ${id.split('_')[0]}`, id])
       }
       await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2), ($3, $4)', [ROLE_SP_ADMIN, 'S4 备料主管理员', ROLE_SP_READ, 'S4 read'])
@@ -830,6 +834,8 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($3, $4), ($3, $5)', [spAdminUser, ROLE_SP_ADMIN, spDirectUser, ROLE_A, ROLE_SP_READ])
       await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'stock-prep:admin')", [spDirectUser])
       await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', true, 'platform_admin'), ($2, 'stock-prep', true, 'platform_admin')", [spAdminUser, spDirectUser])
+      await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $3), ($2, $3)', [spNoAdmUser, spOffAdmUser, ROLE_SP_ADMIN])
+      await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', false, 'platform_admin')", [spOffAdmUser])
 
       const spAdminCodes = await rbacListUserPermissions(spAdminUser, q as never)
       expect(spAdminCodes).toEqual(['stock-prep:admin'])
@@ -848,6 +854,22 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       expect(spDirectRest.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
       const spDirectTxn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, spDirectUser)
       expect(spDirectTxn.capabilities).toMatchObject({ canManageFields: false, canManageViews: false })
+      // Condition 2 carries the admission rule in every chain: the role holder WITHOUT an enabled stock-prep
+      // admission keeps nothing. REST holds the filtered list (the code is gone); the transaction-bound chain holds
+      // the UNFILTERED list (direct ∪ role ∪ legacy, the code is there) and must refuse on the statement alone; the
+      // REST resolver handed that same unfiltered list refuses the same way.
+      for (const [label, userId] of [['no admission row', spNoAdmUser], ['disabled admission row', spOffAdmUser]] as const) {
+        const filtered = await rbacListUserPermissions(userId, q as never)
+        expect(filtered, label).toEqual([])
+        const restFiltered = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId, permissions: filtered, isAdminRole: false })
+        expect(restFiltered.capabilities, label).toMatchObject({ canRead: true, canManageFields: false, canManageViews: false })
+        const txn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, userId)
+        expect(txn.permissions, label).toEqual(['stock-prep:admin'])
+        expect(txn.capabilities, label).toMatchObject({ canRead: true, canManageFields: false, canManageViews: false })
+        expect(txn.stockPrepProjectSheetSchemaClamped, label).toBe(true)
+        const restUnfiltered = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId, permissions: txn.permissions, isAdminRole: false })
+        expect(restUnfiltered.capabilities, label).toMatchObject({ canManageFields: false, canManageViews: false })
+      }
       // The ordinary-sheet control: on the unclaimed derived twin nothing about ③ applies (no grant there → no views).
       const spAdminTwin = await resolveSheetCapabilitiesForAccess(q as never, unclaimedSheet, { userId: spAdminUser, permissions: spAdminCodes, isAdminRole: false })
       expect(spAdminTwin.capabilities).toMatchObject({ canManageFields: false, canManageViews: false })
@@ -880,13 +902,13 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       expect(deletedView.status, JSON.stringify(deletedView.body?.error ?? null)).toBe(200)
       expect(await structureCounts()).toEqual(countsBeforeViews)
     } finally {
-      await pool.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [[spAdminUser, spDirectUser]]).catch(() => {})
-      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[spAdminUser, spDirectUser]]).catch(() => {})
-      await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [[spAdminUser, spDirectUser]]).catch(() => {})
+      await pool.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
       await pool.query("DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = $1", [ROLE_SP_ADMIN]).catch(() => {})
       await pool.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [[ROLE_SP_ADMIN, ROLE_SP_READ]]).catch(() => {})
       await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_SP_ADMIN, ROLE_SP_READ]]).catch(() => {})
-      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [[spAdminUser, spDirectUser]]).catch(() => {})
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [s4Users]).catch(() => {})
     }
 
     const grantsBefore = await permissionRows(sheetA)

@@ -45,6 +45,7 @@ import {
   STOCK_PREPARATION_PROJECT_SHEET_PLUGIN,
   STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL,
   STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE,
+  STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE,
   STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL,
   applyStockPreparationProjectSheetSchemaClamp,
   holdsStockPreparationProjectSheetViewManagement,
@@ -55,6 +56,7 @@ import { STOCK_PREP_ADMIN_CODE } from '../../src/services/stock-preparation-memb
 import { STOCK_PREP_ROLE_TEMPLATES } from '../../src/db/migrations/zzzz20261010124500_seed_stock_prep_role_templates'
 import { resolveSheetCapabilitiesForUserOnQuery } from '../../src/services/approval-record-link-txn-auth'
 import { isAdmin, listUserPermissions } from '../../src/rbac/service'
+import { derivePermissionNamespace } from '../../src/rbac/namespace-admission'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim()
@@ -153,7 +155,7 @@ function resolverQuery(sheetId: string, premise: Premise): QueryFn & ReturnType<
     }
     if (q === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL) {
       if (premise.roleFails) throw new Error('role lookup unavailable')
-      return { rows: premise.roleHeld === true && params[1] === 'stock-prep:admin' ? [{ '?column?': 1 }] : [] }
+      return { rows: premise.roleHeld === true && params[1] === 'stock-prep:admin' && params[2] === 'stock-prep' ? [{ '?column?': 1 }] : [] }
     }
     if (q === 'SELECT deleted_at FROM meta_sheets WHERE id = $1') return { rows: [{ deleted_at: null }] }
     if (q.includes('FROM spreadsheet_permissions')) {
@@ -328,7 +330,7 @@ function createRoutePool(actor: RouteActor) {
     const p = (i: number) => String(params[i] ?? '')
     if (q === STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL) return answerRegistry(params)
     if (q === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL) {
-      return { rows: user.roleHeld === true && p(0) === user.id && p(1) === 'stock-prep:admin' ? [{ '?column?': 1 }] : [] }
+      return { rows: user.roleHeld === true && p(0) === user.id && p(1) === 'stock-prep:admin' && p(2) === 'stock-prep' ? [{ '?column?': 1 }] : [] }
     }
     // The plugin-managed probes (sheet-delete guard / managed-field guard): only the project sheet is registered.
     if (q.includes('FROM plugin_multitable_object_registry')) return { rows: p(0) === PROJECT_SHEET ? [{ '?column?': 1 }] : [] }
@@ -537,6 +539,16 @@ describe('R-66 ③ — the pure rule, the code pin and the role condition', () =
     expect(PLUGIN_WORKBENCH_ACCESS.satisfiesStockPrepAccess([STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE], 'stock-prep:admin')).toBe(true)
   })
 
+  it('condition 2 carries the admission rule: the namespace is the helper\'s, the statement needs an ENABLED admission row', () => {
+    expect(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE).toBe('stock-prep')
+    expect(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE).toBe(derivePermissionNamespace(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE))
+    const sql = normalize(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL)
+    expect(sql).toContain('FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id')
+    expect(sql).toContain('EXISTS (SELECT 1 FROM user_namespace_admissions una WHERE una.user_id = $1 AND una.namespace = $3 AND una.enabled = true)')
+    expect(sql).not.toContain('user_permissions')
+    expect(sql).not.toContain('users.permissions')
+  })
+
   it('condition 1 is an exact literal: no wildcard, no non-array', () => {
     expect(holdsStockPreparationProjectSheetViewManagement(['stock-prep:admin'])).toBe(true)
     expect(holdsStockPreparationProjectSheetViewManagement(['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'])).toBe(false)
@@ -578,7 +590,7 @@ describe('R-66 ③ — the pure rule, the code pin and the role condition', () =
     const { query, calls } = helperQuery([{ '?column?': 1 }])
     const out = await applyStockPreparationProjectSheetSchemaClamp(query, PROJECT_SHEET, CAPS, false, { userId: ' u_sp ', permissions: ['stock-prep:admin'] })
     expect(out).toEqual({ capabilities: { ...CAPS, canManageFields: false }, clamped: true })
-    expect(roleCalls(calls)).toEqual([[STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL, ['u_sp', 'stock-prep:admin']]])
+    expect(roleCalls(calls)).toEqual([[STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL, ['u_sp', 'stock-prep:admin', 'stock-prep']]])
   })
 
   it('the code without a role row (a direct grant) keeps nothing', async () => {
@@ -685,7 +697,7 @@ describe('R-66 ③ — three-resolver parity for 备料主管理员', () => {
       const q = resolverQuery(PROJECT_SHEET, { sheetCodes: SPADMIN.sheetCodes, roleHeld: true })
       await run(q)
       const roleAsks = q.mock.calls.filter(([sql]) => normalize(sql as string) === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL)
-      expect(roleAsks.map(([, params]) => params), lane).toEqual([['u_b_clamp', 'stock-prep:admin']])
+      expect(roleAsks.map(([, params]) => params), lane).toEqual([['u_b_clamp', 'stock-prep:admin', 'stock-prep']])
     }
   })
 })
