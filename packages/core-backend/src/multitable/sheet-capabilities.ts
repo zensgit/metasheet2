@@ -21,6 +21,7 @@ import {
   loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from './stock-preparation-overview-contract'
+import { applyStockPreparationProjectSheetSchemaClamp } from './stock-preparation-project-sheet-schema-clamp'
 import { deriveCanSubmitApproval } from './submit-approval-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
@@ -268,6 +269,8 @@ export async function resolveSheetCapabilitiesForUser(
   sheetScope?: SheetPermissionScope
   isAdminRole: boolean
   permissions: string[]
+  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin. */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const isAdminRole = await isAdmin(userId)
   const permissions = await listUserPermissions(userId)
@@ -348,8 +351,14 @@ export async function resolveSheetCapabilitiesForUser(
   if ((await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
+  // Option B (owner 2026-10-29, R-66 ②): the project-sheet structure clamp, the same as the REST resolver's. This
+  // resolver fronts the Yjs field-schema flush and the API-token capability checks, so without it a non-admin
+  // could still change a project sheet's fields through those channels. Platform admins keep both bits.
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, sheetId, capabilities, isAdminRole)
+  capabilities = projectSheetClamp.capabilities
   return {
     capabilities,
+    ...(projectSheetClamp.clamped ? { stockPrepProjectSheetSchemaClamped: true as const } : {}),
     ...(sheetScope ? { sheetScope } : {}),
     isAdminRole,
     permissions,

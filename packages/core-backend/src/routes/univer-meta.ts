@@ -17615,7 +17615,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       offset = boundedWindow.offset
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
-      if (seed) {
+      // A LIVE sheet is re-seeded only by someone who could add those columns and rows by hand. The seed
+      // writes six fields with fresh ids and five demo records, so on a live sheet it is a schema write and
+      // a record write, not a read; behind the canRead gate above alone, any reader (an `mst_` token
+      // included) could add columns and rows to a sheet whose field management is refused to them — e.g. a
+      // registered stock-preparation project sheet, where only platform admins manage fields (owner option
+      // B, 2026-10-29). Materializing an ABSENT sheet is unchanged.
+      const seedMayWriteLive = seed && sheetLiveness === 'live' && capabilities.canManageFields && capabilities.canCreateRecord
+      if (seedMayMaterialize || seedMayWriteLive) {
         await createSeededSheet({ sheetId, name: `Seed ${sheetId}` })
       }
 
