@@ -5,7 +5,7 @@
  * Refreshed 2026-10-10 against main 1b843faee: registry unchanged (67 entries); line refs replaced
  * by self-verifying anchors.（登记表不变，仍是 67 条；文件里不再有任何源码行号，改为能对源码自证的锚点。）
  *
- * 2026-10-27: add the protected local department-head PATCH (68 entries / 61 platform); the baseline census below is historical.
+ * 2026-10-29: compose protected department-head PATCH + member-projection POST (69 entries / 62 platform); the baseline census below is historical.
  *
  * 为什么不能照搬 #5680 的「中间件首位必须是门」判据：
  *   本批 67 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
@@ -421,7 +421,7 @@ function parseGate(gate: string): { file: string; branches: string[][] } | null 
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（68 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
+// 登记表（69 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -501,7 +501,7 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/force-reactivate', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts restoreDeprovisionEventForRequest -> ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/compensate-orphan-deny', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts compensateSupersededDenyGrantForRequest -> ensurePlatformAdmin', family: P },
 
-  // --- routes/admin-directory-local.ts（9 条；门从 ./admin-directory import） ---
+  // --- routes/admin-directory-local.ts（10 条；门从 ./admin-directory import） ---
   { mount: 'admin-directory-local', method: 'post', path: '/departments', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory-local', method: 'patch', path: '/departments/:departmentId', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory-local', method: 'post', path: '/departments/:departmentId/archive', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
@@ -801,12 +801,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：68 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
-    expect(REGISTRY).toHaveLength(68)
+  it('登记表条数与分族口径固定：69 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
+    expect(REGISTRY).toHaveLength(69)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(61)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(62)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
       expect(entry.reg, label(entry)).toBe(MOUNTS[entry.mount].routeFile)
