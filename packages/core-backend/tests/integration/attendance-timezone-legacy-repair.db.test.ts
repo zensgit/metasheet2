@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
@@ -290,5 +290,102 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
     expect(after.counts.ordinaryLegacyRecordsWithoutCompanion-before.ordinaryLegacyRecordsWithoutCompanion).toBe(1)
     expect(after.code).toBe('ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED')
   })
+
+  const scopedPreflightExpected = {
+    code: 'ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED', scanComplete: true, counts: {
+      defaultRules: 1, missingDefaultRules: 0, multipleDefaultRules: 0, invalidDefaultTimezones: 0,
+      recordsScanned: 1, ordinaryLegacyRecordsWithoutCompanion: 1, openOrdinaryLegacyRecordsWithoutCompanion: 1,
+      unsupportedLegacyRecordsWithoutCompanion: 0, writableNowLegacyRecordsWithoutCompanion: 1,
+      v2CandidatesRequireValidation: 0, invalidCompanions: 0, companionCandidatesRequireValidation: 0,
+      legacyRepairPostureBlocked: 0, pendingRelatedRequestsScanned: 1, pendingRequestsWithoutUsableContext: 1,
+      pendingRequestsRequireValidation: 1, tokenCandidatesRequireValidation: 0, overtimeCandidatesRequireValidation: 0,
+    },
+  }
+  async function preflightScopeFixture() {
+    const ownOrg = randomUUID(), foreignOrg = randomUUID()
+    const ownAdmin = randomUUID(), foreignAdmin = randomUUID(), subject = randomUUID()
+    for (const id of [ownAdmin, foreignAdmin, subject]) {
+      await live.pool.query("INSERT INTO users(id,email,username,name,password_hash,is_active,activation_status) "
+        + "VALUES($1,$2,$1,'preflight scope fixture','disabled',true,'activated')", [id, id + '@preflight-scope.test'])
+    }
+    for (const id of [ownAdmin, foreignAdmin]) {
+      await live.pool.query("INSERT INTO user_roles(user_id,role_id) VALUES($1,'admin')", [id])
+    }
+    for (const [userId, orgId] of [[ownAdmin, ownOrg], [foreignAdmin, foreignOrg], [subject, ownOrg], [subject, foreignOrg]]) {
+      await live.pool.query('INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)', [userId, orgId])
+    }
+    for (const [orgId, zone] of [[ownOrg, 'UTC'], [foreignOrg, 'Asia/Tokyo']]) {
+      await live.pool.query('INSERT INTO attendance_rules(id,org_id,name,timezone,is_default) '
+        + "VALUES($1,$2,'preflight scope fixture',$3,true)", [randomUUID(), orgId, zone])
+      await live.pool.query('INSERT INTO attendance_timezone_policies(org_id,enabled,version,updated_by) VALUES($1,$2,1,$3)',
+        [orgId, orgId === foreignOrg, orgId === ownOrg ? ownAdmin : foreignAdmin])
+      await live.pool.query('INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday,meta) '
+        + "VALUES($1,$2,$3,$4,'UTC',$5,'partial',true,'{}'::jsonb)", [randomUUID(), orgId, subject, workDate, at('09:00')])
+      await live.pool.query('INSERT INTO attendance_requests(id,org_id,user_id,work_date,request_type,status,metadata) '
+        + "VALUES($1,$2,$3,$4,'missed_check_out','pending','{}'::jsonb)", [randomUUID(), orgId, subject, workDate])
+    }
+    await live.pool.query('INSERT INTO attendance_calculation_rollout_state '
+      + '(org_id,state,engine_version,reason_code,actor_id,version,prior_state) '
+      + "VALUES($1,'shadow','preflight-synthetic','TEST_FIXTURE',$2,1,'legacy')", [foreignOrg, foreignAdmin])
+    return { ownOrg, foreignOrg, ownAdmin, foreignAdmin }
+  }
+  async function preflightScopeSnapshot(orgs: string[]) {
+    const result = await live.pool.query(
+      "SELECT kind,data FROM (SELECT 'record' AS kind,to_jsonb(r) AS data FROM attendance_records r WHERE org_id=ANY($1::text[]) "
+      + "UNION ALL SELECT 'request',to_jsonb(r) FROM attendance_requests r WHERE org_id=ANY($1::text[]) "
+      + "UNION ALL SELECT 'companion',to_jsonb(r) FROM attendance_timezone_context_companions r WHERE org_id=ANY($1::text[]) "
+      + "UNION ALL SELECT 'event',to_jsonb(r) FROM attendance_events r WHERE org_id=ANY($1::text[]) "
+      + "UNION ALL SELECT 'rule',to_jsonb(r) FROM attendance_rules r WHERE org_id=ANY($1::text[]) "
+      + "UNION ALL SELECT 'policy',to_jsonb(r) FROM attendance_timezone_policies r WHERE org_id=ANY($1::text[]) "
+      + "UNION ALL SELECT 'rollout',to_jsonb(r) FROM attendance_calculation_rollout_state r WHERE org_id=ANY($1::text[]) "
+      + ') AS scoped_rows ORDER BY kind,data::text', [orgs])
+    return result.rows
+  }
+  async function observedPreflight(orgId: string, actorId: string, marker: string, queries: string[]) {
+    try {
+      return await inspect({ connect: async () => {
+        const client = await live.pool.connect()
+        return { query: async (sql: string, values?: unknown[]) => {
+          queries.push(sql)
+          return client.query(sql, values)
+        }, release: () => client.release() }
+      } }, { orgId, actorId })
+    } finally {
+      console.info('MUT06_PREFLIGHT_NATIVE', JSON.stringify({ case: marker,
+        SQL: queries.filter(sql => /^\s*SELECT/.test(sql)).map(sql => createHash('sha256').update(sql).digest('hex')) }))
+    }
+  }
+  it('MUT06_PREFLIGHT_SCAN: own counts exclude legal foreign records, requests, configuration and JOIN peers', async () => {
+    const f = await preflightScopeFixture(), orgs = [f.ownOrg, f.foreignOrg]
+    const before = await preflightScopeSnapshot(orgs), queries: string[] = []
+    const result = await observedPreflight(f.ownOrg, f.ownAdmin, 'MUT06_PREFLIGHT_SCAN', queries)
+    expect(result, 'MUT06_PREFLIGHT_SCAN_COUNTS').toEqual(scopedPreflightExpected)
+    const selects = queries.filter(sql => /^\s*SELECT/.test(sql))
+    expect(selects).toHaveLength(6)
+    const recordSQL = selects.find(sql => sql.includes('FROM attendance_records r LEFT JOIN'))!
+    const requestSQL = selects.find(sql => sql.includes('FROM attendance_requests req'))!
+    expect(recordSQL, 'MUT06_PREFLIGHT_RECORD_PRIMARY').toContain("WHERE r.org_id=$1 AND r.visibility_state='active'")
+    expect(recordSQL, 'MUT06_PREFLIGHT_RECORD_COMPANION_JOIN').toContain('c.record_id=r.id AND c.org_id=r.org_id')
+    expect(recordSQL, 'MUT06_PREFLIGHT_RECORD_CALCULATION_JOIN').toContain('calc.attendance_record_id=r.id AND calc.org_id=r.org_id')
+    expect(requestSQL, 'MUT06_PREFLIGHT_REQUEST_PRIMARY').toContain("WHERE req.org_id=$1 AND req.status='pending'")
+    expect(requestSQL, 'MUT06_PREFLIGHT_REQUEST_RECORD_JOIN').toContain('ON r.org_id=req.org_id AND r.user_id=req.user_id')
+    expect(requestSQL, 'MUT06_PREFLIGHT_REQUEST_COMPANION_JOIN').toContain('c.record_id=r.id AND c.org_id=r.org_id')
+    expect(queries[0]).toBe('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    expect(queries.at(-1)).toBe('COMMIT')
+    expect(await preflightScopeSnapshot(orgs), 'MUT06_PREFLIGHT_SCAN_NO_WRITES').toEqual(before)
+  })
+  it('MUT06_PREFLIGHT_ACTOR: a persisted administrator in only the foreign org cannot start the own scan', async () => {
+    const f = await preflightScopeFixture(), orgs = [f.ownOrg, f.foreignOrg]
+    const before = await preflightScopeSnapshot(orgs), control: string[] = [], denied: string[] = []
+    expect(await observedPreflight(f.ownOrg, f.ownAdmin, 'MUT06_PREFLIGHT_ACTOR_CONTROL', control),
+      'MUT06_PREFLIGHT_ACTOR_OWN_CONTROL').toEqual(scopedPreflightExpected)
+    await expect(observedPreflight(f.ownOrg, f.foreignAdmin, 'MUT06_PREFLIGHT_ACTOR_DENIED', denied),
+      'MUT06_PREFLIGHT_ACTOR_FOREIGN_REFUSAL').rejects.toMatchObject({ code: 'ATTENDANCE_TIMEZONE_LEGACY_REPAIR_ACTOR_FORBIDDEN' })
+    expect(denied.filter(sql => /^\s*SELECT/.test(sql))).toHaveLength(1)
+    expect(denied.some(sql => /FROM attendance_(records|requests)/.test(sql))).toBe(false)
+    expect(denied.at(-1)).toBe('ROLLBACK')
+    expect(await preflightScopeSnapshot(orgs), 'MUT06_PREFLIGHT_ACTOR_NO_WRITES').toEqual(before)
+  })
+
 
 })
