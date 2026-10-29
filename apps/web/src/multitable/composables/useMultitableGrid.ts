@@ -19,6 +19,7 @@ import { isFieldAlwaysReadOnly, isPropertyHiddenField } from '../utils/field-per
 import { cloneRangeValue, isRangeWritableFieldType, type RangeChange } from '../utils/grid-range-fill'
 import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import { workbenchLabel } from '../utils/workbench-labels'
 import { DEFAULT_GRID_PAGE_SIZE, clampGridPageSize } from '../utils/grid-page-size'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 
@@ -1307,8 +1308,11 @@ export function useMultitableGrid(opts: {
     return false
   }
 
-  function rejectRowDelete(): false {
-    error.value = fallback('grid.errorDeleteRowBlocked')
+  function rejectRowDelete(reason?: MetaRowActions['deleteBlockedReason']): false {
+    // R-66: a PLM row says why (zh = the server's refusal copy); every other refusal keeps the generic text.
+    error.value = reason === 'plm_row'
+      ? workbenchLabel('notice.plmRowDeleteBlocked', isZh.value)
+      : fallback('grid.errorDeleteRowBlocked')
     return false
   }
 
@@ -1372,7 +1376,8 @@ export function useMultitableGrid(opts: {
 
   async function deleteRecord(recordId: string): Promise<boolean> {
     error.value = null
-    if (resolveRowActions(recordId)?.canDelete === false) return rejectRowDelete()
+    const deleteActions = resolveRowActions(recordId)
+    if (deleteActions?.canDelete === false) return rejectRowDelete(deleteActions.deleteBlockedReason)
     try {
       const row = rows.value.find((r) => r.id === recordId)
       await client.deleteRecord(recordId, row?.version)

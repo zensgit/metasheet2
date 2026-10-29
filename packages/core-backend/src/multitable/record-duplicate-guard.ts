@@ -60,7 +60,8 @@ export const RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_BODY = Object.free
   }),
 })
 
-function normalizeProperty(value: unknown): Record<string, unknown> | null {
+/** Shared with plm-row-delete-guard.ts (same string-encoded-jsonb tolerance). */
+export function normalizeProperty(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
   // An old property stored as a JSON string inside jsonb arrives as a string scalar.
   if (typeof value === 'string') {

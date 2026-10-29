@@ -6,7 +6,10 @@
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.setFieldAria')" @click="onBulkEdit('set')">{{ l('grid.setField') }}</button>
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.clearFieldAria')" @click="onBulkEdit('clear')">{{ l('grid.clearField') }}</button>
       <button v-if="canBulkRestore" class="meta-grid__bulk-btn" :aria-label="l('grid.batchRestoreAria')" data-test="grid-bulk-restore" @click="onBulkRestore">{{ l('grid.batchRestore') }}</button>
-      <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" :aria-label="l('grid.deleteSelectedAria')" @click="onBulkDelete">{{ l('grid.deleteSelected') }}</button>
+      <button v-if="canDelete && !bulkDeleteOnlyPlmRows" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" :aria-label="l('grid.deleteSelectedAria')" @click="onBulkDelete">{{ l('grid.deleteSelected') }}</button>
+      <!-- R-66: selected PLM rows (rowActions.deleteBlockedReason) are skipped by the bulk delete; say why. When the
+           selection holds ONLY such rows (no deletable row) the delete button is hidden. Other selections unchanged. -->
+      <span v-if="canDelete && selectedPlmBlockedCount > 0" class="meta-grid__bulk-reason" data-testid="grid-bulk-delete-plm-skipped" role="status">{{ plmRowDeleteBlockedReason }}</span>
       <button class="meta-grid__bulk-btn" :aria-label="l('grid.clearSelection')" @click="selectedIds = new Set(); emit('selection-change', [])">{{ l('grid.clear') }}</button>
     </div>
     <div ref="tableWrap" class="meta-grid__table-wrap">
@@ -514,6 +517,7 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
+import { workbenchLabel } from '../utils/workbench-labels'
 import { isFieldAlwaysReadOnly, isFieldHumanWriteLocked } from '../utils/field-permissions'
 import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-eligibility'
 import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
@@ -1381,6 +1385,15 @@ function onBulkDelete() {
   const deletable = [...selectedIds.value].filter((id) => resolveRowActions(id).canDelete)
   if (deletable.length > 0) emit('bulk-delete', deletable)
 }
+
+// R-66: PLM rows in the selection (server-derived `deleteBlockedReason`) — never deletable, by anyone.
+const selectedPlmBlockedCount = computed(() =>
+  [...selectedIds.value].filter((id) => resolveRowActions(id).deleteBlockedReason === 'plm_row').length,
+)
+const bulkDeleteOnlyPlmRows = computed(() =>
+  selectedPlmBlockedCount.value > 0 && ![...selectedIds.value].some((id) => resolveRowActions(id).canDelete),
+)
+const plmRowDeleteBlockedReason = computed(() => workbenchLabel('notice.plmRowDeleteBlocked', isZh.value))
 
 // Batch restore (BS-4): emit the selected records the actor can edit (restore is a write). The server re-checks
 // per record (row-deny / write-gate / version) in the preview + execute, so this is a coarse pre-filter only.
@@ -2395,6 +2408,7 @@ thead .meta-grid__check-col {
 .meta-grid__bulk-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; }
 .meta-grid__bulk-btn--danger { color: #f56c6c; border-color: #f56c6c; }
 .meta-grid__bulk-btn--danger:hover { background: #fef0f0; }
+.meta-grid__bulk-reason { color: #909399; font-size: 11px; }
 .meta-grid__group-header { cursor: pointer; }
 .meta-grid__group-header td { padding: 6px 12px; background: #f0f4f8; font-size: 13px; font-weight: 600; color: #333; border-bottom: 1px solid #dde3ea; }
 .meta-grid__group-header:hover td { background: #e6ecf2; }

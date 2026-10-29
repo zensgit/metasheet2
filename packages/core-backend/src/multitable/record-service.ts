@@ -76,6 +76,20 @@ import {
 import { ensureRecordWriteAllowed, requiresOwnWriteRowPolicy, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 import { ensureRecordNotLocked } from './record-lock'
 import {
+  assertPlmRowDeletable,
+  findPlmRowRestoreRefusal,
+  loadPlmRowSheetProfile,
+  loadPlmTrashRestoreBlocks,
+  PlmRowRestoreRefusedError,
+  type PlmTrashRestoreBlocked,
+} from './plm-row-delete-guard'
+
+// R-66 (plm-row-delete-guard.ts): the two refusals this service throws, under the service's own error names.
+export {
+  PlmRowDeleteRefusedError as RecordPlmRowDeleteRefusedError,
+  PlmRowRestoreRefusedError as RecordPlmRowRestoreRefusedError,
+} from './plm-row-delete-guard'
+import {
   isTombstoneCaptureEnabled,
   countInboundLinkCaptureRows,
   assertWithinCaptureCap,
@@ -1010,7 +1024,7 @@ export class RecordService {
     const { recordId, expectedVersion, actorId, access, resolveSheetAccess } = input
 
     const recordRes = await this.pool.query(
-      'SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1',
+      'SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at, data FROM meta_records WHERE id = $1',
       [recordId],
     )
     if (recordRes.rows.length === 0) {
@@ -1037,6 +1051,17 @@ export class RecordService {
     // locker or owner. No silent admin bypass — an admin must explicitly unlock first. Routed through
     // the ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
     ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
+
+    // R-66 ① (owner 2026-10-28「管理员也不能删 PLM 行」, plm-row-delete-guard.ts): a PLM row on a stock-preparation
+    // template sheet is refused for EVERY actor — no admin branch. After the capability / row-policy / lock checks
+    // above (an actor who may not delete anyway learns nothing new), before the fence and any write. Serves the
+    // session route, mst_ API tokens (same route) and the web's bulk delete (N single deletes).
+    await assertPlmRowDeletable(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId),
+      normalizeJson(recordRow.data),
+    )
 
     const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
       this.pool.query.bind(this.pool),
@@ -1191,7 +1216,7 @@ export class RecordService {
     // cardinality of hidden trashed records (deny-aware count, not just deny-filtered rows).
     excludeRecordIds?: string[]
   }): Promise<{
-    records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string; inboundEdgesRecoverable?: boolean }>
+    records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string; inboundEdgesRecoverable?: boolean; restoreBlocked?: PlmTrashRestoreBlocked }>
     total: number
   }> {
     const { sheetId, access, resolveSheetAccess } = input
@@ -1251,6 +1276,22 @@ export class RecordService {
           }
         }
       }
+      // R-66 (plm-row-delete-guard.ts): on a stock-preparation template sheet, mark the trash rows restoreRecord
+      // would refuse (a live row already holds the key, or the key column is unresolvable) so the recycle bin
+      // shows Restore disabled with the reason. Display only — the restore route decides. An ordinary sheet costs
+      // one field read and no other statement; omitted-when-absent keeps every other response byte-identical. A
+      // failed probe fails CLOSED to "unresolved" (display only).
+      let restoreBlocks = new Map<string, PlmTrashRestoreBlocked>()
+      if (pageRows.length > 0) {
+        const trashRows = pageRows.map((r) => ({ recordId: String(r.record_id), data: normalizeJson(r.data) }))
+        const sheetFields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
+        try {
+          const profile = await loadPlmRowSheetProfile(this.pool.query.bind(this.pool), sheetId, sheetFields)
+          restoreBlocks = await loadPlmTrashRestoreBlocks(this.pool.query.bind(this.pool), sheetId, profile, trashRows)
+        } catch {
+          restoreBlocks = new Map(trashRows.map((row) => [row.recordId, 'plm_key_unresolved' as const]))
+        }
+      }
       const records = pageRows.map((r) => ({
         recordId: String(r.record_id),
         sheetId: String(r.sheet_id),
@@ -1262,6 +1303,7 @@ export class RecordService {
         ...(typeof r.delete_revision_id === 'string' && recoverableAnchors.has(r.delete_revision_id)
           ? { inboundEdgesRecoverable: true as const }
           : {}),
+        ...(restoreBlocks.has(String(r.record_id)) ? { restoreBlocked: restoreBlocks.get(String(r.record_id))! } : {}),
       }))
       return { records, total }
     } catch (err) {
@@ -1386,6 +1428,19 @@ export class RecordService {
           throw error
         }
       }
+      // R-66 (plm-row-delete-guard.ts): on a stock-preparation template sheet a deleted PLM row comes back from the
+      // next pull as a NEW row with the same key, so restoring it while that live row exists makes two rows per key
+      // and holds every later plan (duplicate_existing_key). Refused then, and when the key column cannot be
+      // resolved (fail closed — the trash row stays, nothing is lost); a key no live row holds is restored. Inside
+      // the fenced transaction, after the trash row is locked, so the check and the INSERT see one state. No admin
+      // branch.
+      const plmRestoreRefusal = await findPlmRowRestoreRefusal(
+        query,
+        sheetId,
+        await loadPlmRowSheetProfile(query, sheetId, sheetFields),
+        snapshot,
+      )
+      if (plmRestoreRefusal) throw new PlmRowRestoreRefusedError(plmRestoreRefusal)
       const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
       if (occupied.rows.length > 0) {
         throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)

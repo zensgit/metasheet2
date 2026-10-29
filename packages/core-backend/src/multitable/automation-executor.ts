@@ -93,6 +93,12 @@ import {
   loadStockPreparationOverviewSheetIds,
 } from './stock-preparation-overview-contract'
 import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
+import {
+  assertPlmRowDeletable,
+  loadPlmGuardFields,
+  PLM_ROW_DELETE_AUTOMATION_REFUSAL,
+  PlmRowDeleteRefusedError,
+} from './plm-row-delete-guard'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
@@ -3630,6 +3636,17 @@ export class AutomationExecutor {
         }
         ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
 
+        // R-66 ① (owner 2026-10-28, plm-row-delete-guard.ts): a rule cannot delete a PLM row on a stock-preparation
+        // template sheet, whoever authored it. Checked on the row locked FOR UPDATE above, before any write. THROWS
+        // (like the cross-base missing-record branch) so this transaction — and the #4196 Class-A claim taken above —
+        // ROLLS BACK; the catch below reports the fixed failed step.
+        await assertPlmRowDeletable(
+          query,
+          effectiveSheetId,
+          await loadPlmGuardFields(query, effectiveSheetId),
+          normalizeJson(lockRow.data),
+        )
+
         // D-2 (side-door delete recoverability, #4004; default OFF ⇒ every `sideDoorTrash` branch below is
         // dead and this method behaves byte-identically to D-1, §1.9). §1.2 anchor: ONE pre-generated uuid
         // becomes the delete revision's id, the trash row's delete_revision_id and the tombstones'
@@ -3759,6 +3776,16 @@ export class AutomationExecutor {
       // report `skipped`, not `failed` (a missing trigger record is the expected state under `record.deleted`).
       if (err instanceof SameBaseTargetRecordMissingSignal) {
         return this.targetRecordMissingSkippedResult('delete_record', effectiveSheetId, effectiveRecordId)
+      }
+      // R-66: the PLM-row refusal — rolled back above; a failed step with the fixed code, values-free log line.
+      if (err instanceof PlmRowDeleteRefusedError) {
+        logger.warn('Automation step refused: it deletes a row the PLM pull maintains', {
+          code: err.code,
+          actionType: 'delete_record',
+          ruleId: context.ruleId,
+          reason: err.reason,
+        })
+        return { actionType: 'delete_record', status: 'failed', error: PLM_ROW_DELETE_AUTOMATION_REFUSAL }
       }
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }

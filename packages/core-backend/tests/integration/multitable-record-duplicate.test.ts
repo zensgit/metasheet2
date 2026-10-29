@@ -358,3 +358,218 @@ describeRefusalIfDatabase('duplicate refusal on plugin-maintained sheets (real D
     actor = WRITER
   })
 })
+
+// ── R-66 ① (owner ruling 2026-10-28「管理员也不能删 PLM 行」): PLM rows cannot be deleted by anyone ─────────────
+//
+// multitable/plm-row-delete-guard.ts: on a sheet with the EXACT `property.stockPreparation` stanza AND a
+// `plugin_multitable_object_registry` row, a row whose `stockPreparation.key === true` column is non-empty is refused
+// by DELETE /records/:recordId for a writer AND a platform admin (409 RECORD_DELETE_REFUSED_PLM_ROW, values-free, row
+// intact); a keyless row, a tagged-but-unregistered copy, an ordinary sheet and another plugin namespace delete as
+// before; no resolvable key column fails closed. Restore from the trash is refused while a live row holds the key.
+// Real DB: jsonb property / data, real registry and trash rows, the route's own serializer. Own pinned listener.
+const describePlmDeleteIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+describePlmDeleteIfDatabase('R-66: PLM rows on stock-preparation template sheets cannot be deleted (real DB)', () => {
+  const PD = `pd_${TS}`
+  const PD_BASE = `base_${PD}`
+  const SHEET_PM = `sheet_${PD}_pm` // registered ∧ exact stanza with the key column
+  const SHEET_NOKEY = `sheet_${PD}_nokey` // registered ∧ exact stanza, no key:true column (fail closed)
+  const SHEET_LEDGER = `sheet_${PD}_ledger` // registered, only the confirmation-ledger namespace (out of the guard)
+  const SHEET_TAGCOPY = `sheet_${PD}_tagcopy` // exact stanza, NOT registered (a user's 复制数据表 copy)
+  const SHEET_PLAIN = `sheet_${PD}_plain` // ordinary
+  const ALL_SHEETS = [SHEET_PM, SHEET_NOKEY, SHEET_LEDGER, SHEET_TAGCOPY, SHEET_PLAIN]
+  const keyField = (sheetId: string) => `fld_${sheetId}_key`
+  const noteField = (sheetId: string) => `fld_${sheetId}_note`
+  const rec = (sheetId: string, name: string) => `rec_${sheetId}_${name}`
+  const WRITER = { id: `u_${PD}_writer`, roles: ['member'], perms: ['multitable:write'] }
+  const ADMIN = { id: `u_${PD}_admin`, roles: ['admin'], perms: [] as string[] }
+  let actor: { id: string; roles: string[]; perms: string[] } = WRITER
+
+  const pinned = usePinnedServer()
+  const del = (recordId: string) => request(pinned.url()).delete(`/api/multitable/records/${recordId}`)
+  const restore = (recordId: string) => request(pinned.url()).post(`/api/multitable/records/${recordId}/restore`).send({})
+  const exists = async (recordId: string) => (await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows.length > 0
+  const trashCount = async (recordId: string) =>
+    Number((await q('SELECT count(*)::int AS c FROM meta_records_trash WHERE record_id = $1', [recordId])).rows[0]?.c ?? -1)
+
+  const STANZA_KEY = { ownership: 'plm_system', preserveOnRefresh: false, required: true, key: true }
+  const STANZA_NOKEY = { ownership: 'human_preserved', preserveOnRefresh: true, required: false, key: false }
+
+  beforeAll(async () => {
+    const plmApp = express()
+    plmApp.use(express.json())
+    plmApp.use((req, _res, next) => { ;(req as any).user = actor; next() })
+    plmApp.use('/api/multitable', univerMetaRouter())
+    pinned.setApp(plmApp)
+
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [PD_BASE, 'PD Base'])
+    const keyProperty: Record<string, Record<string, unknown>> = {
+      [SHEET_PM]: { validation: [{ type: 'required' }], stockPreparation: STANZA_KEY },
+      [SHEET_NOKEY]: { stockPreparation: STANZA_NOKEY },
+      [SHEET_LEDGER]: { stockPreparationConfirmationDecision: { role: 'decision' } },
+      [SHEET_TAGCOPY]: { validation: [{ type: 'required' }], stockPreparation: STANZA_KEY },
+      [SHEET_PLAIN]: {},
+    }
+    for (const sheetId of ALL_SHEETS) {
+      await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheetId, PD_BASE, `PD ${sheetId.slice(-6)}`])
+      await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+        [keyField(sheetId), sheetId, 'Key', 'string', JSON.stringify(keyProperty[sheetId]), 1])
+      await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+        // A human-preserved template column (exact stanza, key:false) on the stanza sheets; none on the others.
+        [noteField(sheetId), sheetId, 'Note', 'string', JSON.stringify(sheetId === SHEET_PLAIN || sheetId === SHEET_LEDGER ? {} : { stockPreparation: STANZA_NOKEY }), 2])
+      await q('INSERT INTO meta_records (id, sheet_id, version, data) VALUES ($1,$2,$3,$4::jsonb)',
+        [rec(sheetId, 'keyed'), sheetId, 1, JSON.stringify({ [keyField(sheetId)]: 'KEY-1', [noteField(sheetId)]: 'human note' })])
+    }
+    // PM: a keyless hand row and a second keyed row whose key a trash row also carries.
+    await q('INSERT INTO meta_records (id, sheet_id, version, data) VALUES ($1,$2,$3,$4::jsonb)',
+      [rec(SHEET_PM, 'keyless'), SHEET_PM, 1, JSON.stringify({ [keyField(SHEET_PM)]: '', [noteField(SHEET_PM)]: 'hand row' })])
+    await q('INSERT INTO meta_records (id, sheet_id, version, data) VALUES ($1,$2,$3,$4::jsonb)',
+      [rec(SHEET_PM, 'live'), SHEET_PM, 1, JSON.stringify({ [keyField(SHEET_PM)]: 'KEY-LIVE' })])
+    for (const sheetId of [SHEET_PM, SHEET_NOKEY, SHEET_LEDGER]) {
+      await q('INSERT INTO plugin_multitable_object_registry (sheet_id, project_id, object_id, plugin_name) VALUES ($1,$2,$3,$4)',
+        [sheetId, `project_${PD}`, `object_${sheetId}`, 'plugin-integration-core'])
+    }
+    // Trash rows (as an earlier delete would have left them): one whose key a live row holds now (the next pull
+    // re-added it), one whose key nobody holds, one on the key-less sheet.
+    const trash = (recordId: string, sheetId: string, key: string) => q(
+      'INSERT INTO meta_records_trash (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7)',
+      [recordId, sheetId, PD_BASE, JSON.stringify({ [keyField(sheetId)]: key, [noteField(sheetId)]: 'kept human note' }), 1, null, WRITER.id],
+    )
+    await trash(rec(SHEET_PM, 'trash_live'), SHEET_PM, 'KEY-LIVE')
+    await trash(rec(SHEET_PM, 'trash_gone'), SHEET_PM, 'KEY-GONE')
+    await trash(rec(SHEET_NOKEY, 'trash'), SHEET_NOKEY, 'KEY-9')
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM meta_records_trash WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [ALL_SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [PD_BASE]).catch(() => {})
+  })
+
+  test.each([
+    ['a writer', WRITER],
+    ['a platform admin', ADMIN],
+  ])('a keyed PLM row: %s gets 409 RECORD_DELETE_REFUSED_PLM_ROW, values-free; the row and its cells are intact, nothing trashed', async (_label, who) => {
+    actor = who
+    const res = await del(rec(SHEET_PM, 'keyed'))
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECORD_DELETE_REFUSED_PLM_ROW',
+        message: '这一行由备料插件（PLM 拉取）维护，不能删除；请在 PLM 里处理后重新拉取。',
+        details: { reason: 'plm_row' },
+      },
+    })
+    for (const value of [SHEET_PM, rec(SHEET_PM, 'keyed'), keyField(SHEET_PM), 'KEY-1', 'plugin-integration-core']) {
+      expect(res.text).not.toContain(value)
+    }
+    expect(await exists(rec(SHEET_PM, 'keyed'))).toBe(true)
+    expect(await dbData(rec(SHEET_PM, 'keyed'))).toEqual({ [keyField(SHEET_PM)]: 'KEY-1', [noteField(SHEET_PM)]: 'human note' })
+    expect(await trashCount(rec(SHEET_PM, 'keyed'))).toBe(0)
+    actor = WRITER
+  })
+
+  test('the keyless hand row on the same sheet is deleted (and lands in the trash) as before', async () => {
+    actor = WRITER
+    const res = await del(rec(SHEET_PM, 'keyless'))
+    expect(res.status).toBe(200)
+    expect(await exists(rec(SHEET_PM, 'keyless'))).toBe(false)
+    expect(await trashCount(rec(SHEET_PM, 'keyless'))).toBe(1)
+  })
+
+  test.each([
+    ['a tagged but NOT registered copy', () => SHEET_TAGCOPY],
+    ['an ordinary sheet', () => SHEET_PLAIN],
+    ['a registered sheet of another plugin namespace (confirmation ledger)', () => SHEET_LEDGER],
+  ])('%s: a keyed row is deleted as before', async (_label, sheetOf) => {
+    actor = WRITER
+    const sheetId = sheetOf()
+    const res = await del(rec(sheetId, 'keyed'))
+    expect(res.status, sheetId).toBe(200)
+    expect(await exists(rec(sheetId, 'keyed'))).toBe(false)
+  })
+
+  test('registered stanza sheet without a resolvable key column: refused for an admin too, reason key_column_missing', async () => {
+    actor = ADMIN
+    const res = await del(rec(SHEET_NOKEY, 'keyed'))
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('RECORD_DELETE_REFUSED_PLM_ROW')
+    expect(res.body?.error?.details).toEqual({ reason: 'key_column_missing' })
+    expect(await exists(rec(SHEET_NOKEY, 'keyed'))).toBe(true)
+    actor = WRITER
+  })
+
+  test('GET /view: keyed PLM rows carry canDelete=false + deleteBlockedReason; the default and other rows are unchanged', async () => {
+    actor = WRITER
+    const res = await request(pinned.url()).get('/api/multitable/view').query({ sheetId: SHEET_PM })
+    expect(res.status).toBe(200)
+    const { rowActions, rowActionOverrides } = res.body.data.meta.permissions
+    expect(rowActions.canDelete).toBe(true)
+    expect('deleteBlockedReason' in rowActions).toBe(false)
+    expect(Object.keys(rowActionOverrides).sort()).toEqual([rec(SHEET_PM, 'keyed'), rec(SHEET_PM, 'live')].sort())
+    for (const id of Object.keys(rowActionOverrides)) {
+      expect(rowActionOverrides[id]).toEqual({ ...rowActions, canDelete: false, deleteBlockedReason: 'plm_row' })
+    }
+    const plain = await request(pinned.url()).get('/api/multitable/view').query({ sheetId: SHEET_TAGCOPY })
+    expect(plain.status).toBe(200)
+    expect('rowActionOverrides' in plain.body.data.meta.permissions).toBe(false)
+  })
+
+  test('trash list: restoreBlocked only on the row whose key a live row holds', async () => {
+    actor = WRITER
+    const res = await request(pinned.url()).get(`/api/multitable/sheets/${SHEET_PM}/trash`)
+    expect(res.status).toBe(200)
+    const byId = Object.fromEntries((res.body.data.records as Array<{ recordId: string }>).map((r) => [r.recordId, r]))
+    expect((byId[rec(SHEET_PM, 'trash_live')] as any).restoreBlocked).toBe('plm_key_active')
+    expect('restoreBlocked' in byId[rec(SHEET_PM, 'trash_gone')]).toBe(false)
+    expect('restoreBlocked' in byId[rec(SHEET_PM, 'keyless')]).toBe(false)
+    const nokey = await request(pinned.url()).get(`/api/multitable/sheets/${SHEET_NOKEY}/trash`)
+    expect(nokey.status).toBe(200)
+    expect((nokey.body.data.records as Array<{ restoreBlocked?: string }>).map((r) => r.restoreBlocked)).toEqual(['plm_key_unresolved'])
+  })
+
+  test.each([
+    ['a writer', WRITER],
+    ['a platform admin', ADMIN],
+  ])('restore while a live row holds the key: %s gets 409 RECORD_RESTORE_REFUSED_PLM_KEY_ACTIVE; no second row with that key', async (_label, who) => {
+    actor = who
+    const res = await restore(rec(SHEET_PM, 'trash_live'))
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECORD_RESTORE_REFUSED_PLM_KEY_ACTIVE',
+        message: '表里已有同一唯一键的有效行，这条已删除的 PLM 行不能恢复（恢复会造成同键两行，拉取会被卡住）。',
+        details: { reason: 'key_active' },
+      },
+    })
+    expect(res.text).not.toContain('KEY-LIVE')
+    expect(await exists(rec(SHEET_PM, 'trash_live'))).toBe(false)
+    expect(await trashCount(rec(SHEET_PM, 'trash_live'))).toBe(1)
+    const sameKey = await q("SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1 AND data ->> $2 = 'KEY-LIVE'", [SHEET_PM, keyField(SHEET_PM)])
+    expect(sameKey.rows[0]?.c).toBe(1)
+    actor = WRITER
+  })
+
+  test('restore when no live row holds the key: restored with its human cells', async () => {
+    actor = WRITER
+    const res = await restore(rec(SHEET_PM, 'trash_gone'))
+    expect(res.status).toBe(200)
+    expect(await dbData(rec(SHEET_PM, 'trash_gone'))).toEqual({ [keyField(SHEET_PM)]: 'KEY-GONE', [noteField(SHEET_PM)]: 'kept human note' })
+    expect(await trashCount(rec(SHEET_PM, 'trash_gone'))).toBe(0)
+  })
+
+  test('restore on the sheet without a resolvable key column: refused, key_column_missing; the trash row stays', async () => {
+    actor = ADMIN
+    const res = await restore(rec(SHEET_NOKEY, 'trash'))
+    expect(res.status).toBe(409)
+    expect(res.body?.error).toMatchObject({ code: 'RECORD_RESTORE_REFUSED_PLM_KEY_ACTIVE', details: { reason: 'key_column_missing' } })
+    expect(await trashCount(rec(SHEET_NOKEY, 'trash'))).toBe(1)
+    actor = WRITER
+  })
+})

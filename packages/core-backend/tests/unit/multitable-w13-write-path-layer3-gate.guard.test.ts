@@ -489,6 +489,7 @@ const MEMBER_CLASSIFICATION: Record<SurfaceName, Record<string, 'FIELD_VALUE_WRI
     MultitableRecordValidationError: 're-export from ./record-errors; an Error class, carries no field value',
     MultitableRecordVersionConflictError: 're-export from ./record-errors; an Error class, carries no field value',
     MultitableSideDoorDeleteNonTransactionalError: 're-export from ./side-door-delete-trash; an Error class, carries no field value',
+    MultitablePlmRowDeleteRefusedError: 're-export from ./plm-row-delete-guard (R-66); an Error class, carries no field value',
   },
 }
 

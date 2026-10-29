@@ -332,6 +332,9 @@ export interface MetaRowActions {
   canEdit: boolean
   canDelete: boolean
   canComment: boolean
+  /** R-66: set by the server only where `canDelete` is false because the row is a PLM row the stock-preparation
+   *  pull maintains (nobody may delete it). The delete entry is then shown disabled with the reason. */
+  deleteBlockedReason?: 'plm_row'
 }
 
 export interface MetaScopedPermissions {
@@ -392,6 +395,9 @@ export interface MetaDeletedRecord {
   /** Backend-resolved display name (name → email) for `deletedBy`; null when unresolved → fall back to the id. */
   deletedByName?: string | null
   deletedAt: string
+  /** R-66: on a stock-preparation template sheet, why the server would refuse restoring this row (a live row holds
+   *  its key, or the key column is unresolvable). Absent ⇒ restorable as before. Display only; the route decides. */
+  restoreBlocked?: 'plm_key_active' | 'plm_key_unresolved'
 }
 
 export interface MetaRecordRevision {
