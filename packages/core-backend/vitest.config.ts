@@ -29,6 +29,8 @@ export default defineConfig({
     // Most integration tests require database/external services and custom PluginLoader API.
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
+      // Whole native file runs in its dedicated EXPECT_DB lane; never conditional no-DB green.
+      'tests/integration/local-organization-workspace.db.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:
@@ -49,6 +51,8 @@ export default defineConfig({
       'tests/integration/approval-p1c-field-permissions.api.test.ts',
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
+      // Whole-file native execution in local-org-department-head-db.yml (EXPECT_DB=1).
+      'tests/integration/local-org-department-head.db.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
       // Sealed-export S3 private ingestion concurrency + transactional recovery golden. It
       // applies migration 068 in an isolated schema and requires real PostgreSQL behavior;
