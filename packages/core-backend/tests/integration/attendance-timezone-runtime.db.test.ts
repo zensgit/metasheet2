@@ -2079,3 +2079,85 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
   })
 
 })
+
+
+describe('settings native nondefault tail callers (real HTTP/PostgreSQL)', () => {
+  const live = createOnlinePunchDbFixture({ retainHistoryInIsolatedDatabase: true })
+  let owner: Awaited<ReturnType<typeof live.user>>
+  beforeAll(async () => {
+    punchClock.setOnlinePunchInstantForTests('2029-04-10T20:00:00.000Z')
+    owner = await live.start()
+    const saved = await live.configure(owner.token, { workDateAttribution: { postShiftTailMinutes: 17 } })
+    expect(saved.body.data.workDateAttribution).toEqual({ postShiftTailMinutes: 17 })
+    expect((await live.pool.query("SELECT value::jsonb->'workDateAttribution' AS value FROM system_configs WHERE key='attendance.settings'")).rows)
+      .toEqual([{ value: { postShiftTailMinutes: 17 } }])
+  }, 180_000)
+  afterAll(async () => { await live.stop() }, 60_000)
+
+  it('SETTINGS_TAIL_LIVE uses the stored 17-minute inclusive boundary through actual prepareLivePunch', async () => {
+    const shiftId = randomUUID()
+    await live.pool.query(`INSERT INTO attendance_shifts
+      (id,org_id,name,timezone,work_start_time,work_end_time,is_overnight,working_days)
+      VALUES($1,$2,'settings tail synthetic','UTC','20:00','05:00',true,'[0,1,2,3,4,5,6]'::jsonb)`, [shiftId, live.orgId])
+    for (const [instant, expectedDate] of [
+      ['2026-04-11T05:17:00.000Z', '2026-04-10'],
+      ['2026-04-11T05:17:00.001Z', '2026-04-11'],
+    ]) {
+      const actor = await live.user()
+      await live.pool.query(`INSERT INTO attendance_shift_assignments
+        (id,org_id,user_id,shift_id,start_date,end_date,is_active,publish_status)
+        VALUES($1,$2,$3,$4,'2026-04-10','2026-04-10',true,'published')`, [randomUUID(),live.orgId,actor.userId,shiftId])
+      punchClock.setOnlinePunchInstantForTests(instant)
+      const punched = await live.request('/api/attendance/punch', actor.token, {
+        orgId: live.orgId, eventType: 'check_in', operationId: randomUUID(),
+      })
+      expect(punched.status, punched.body.error?.code).toBe(200)
+      expect((await live.pool.query(`SELECT work_date::text,occurred_at FROM attendance_events
+        WHERE org_id=$1 AND user_id=$2`, [live.orgId,actor.userId])).rows,
+      'SETTINGS_TAIL_LIVE_NATIVE_WORK_DATE').toEqual([{ work_date: expectedDate, occurred_at: new Date(instant) }])
+      const frames = (await live.pool.query(`SELECT frame_snapshot FROM attendance_timezone_context_companions
+        WHERE org_id=$1 AND user_id=$2`, [live.orgId,actor.userId])).rows
+      expect(frames).toHaveLength(1)
+      const frame = frames[0].frame_snapshot
+      expect({ workDate: frame.workDate, absolute: frame.absoluteWindow, attribution: frame.attributionWindow },
+        'SETTINGS_TAIL_LIVE_NATIVE_WINDOW').toEqual({
+        workDate: expectedDate,
+        absolute: expectedDate === '2026-04-10'
+          ? { startAt: '2026-04-10T20:00:00.000Z', endAt: '2026-04-11T05:00:00.000Z' }
+          : { startAt: '2026-04-11T09:00:00.000Z', endAt: '2026-04-11T18:00:00.000Z' },
+        attribution: expectedDate === '2026-04-10'
+          ? { startAt: '2026-04-10T20:00:00.000Z', endAt: '2026-04-11T05:17:00.000Z' }
+          : { startAt: '2026-04-11T09:00:00.000Z', endAt: '2026-04-11T18:17:00.000Z' },
+      })
+    }
+  }, 60_000)
+
+  it('SETTINGS_TAIL_RELATED uses the stored 17 minutes for actual no-shift related-record approval', async () => {
+    const actor = await live.user()
+    await live.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1", [actor.userId])
+    punchClock.setOnlinePunchInstantForTests('2029-04-11T20:00:00.000Z')
+    expect((await live.pool.query('SELECT count(*)::int AS count FROM attendance_shift_assignments WHERE org_id=$1 AND user_id=$2',
+      [live.orgId,actor.userId])).rows).toEqual([{ count: 0 }])
+    const made = await live.request('/api/attendance/requests', actor.token, {
+      orgId: live.orgId, requestType: 'missed_check_in', workDate: '2029-04-12', operationId: randomUUID(),
+      requestedInAt: '2029-04-12T09:00:00.000Z', requestedOutAt: '2029-04-12T18:00:00.000Z',
+    })
+    expect(made.status, made.body.error?.code).toBe(201)
+    expect((await live.pool.query('SELECT count(*)::int AS count FROM attendance_records WHERE org_id=$1 AND user_id=$2',
+      [live.orgId,actor.userId])).rows).toEqual([{ count: 0 }])
+    const decided = await live.request('/api/attendance/requests/' + made.body.data.request.id + '/approve', owner.token, {})
+    expect(decided.status, decided.body.error?.code).toBe(200)
+    const rows = (await live.pool.query(`SELECT c.frame_snapshot,r.work_date::text,r.first_in_at,r.last_out_at
+      FROM attendance_timezone_context_companions c JOIN attendance_records r ON r.id=c.record_id AND r.org_id=c.org_id
+      WHERE c.org_id=$1 AND c.user_id=$2`, [live.orgId,actor.userId])).rows
+    expect(rows).toHaveLength(1)
+    const frame = rows[0].frame_snapshot
+    expect({ workDate: rows[0].work_date, first: rows[0].first_in_at, last: rows[0].last_out_at,
+      shiftId: frame.identity.shiftId, absolute: frame.absoluteWindow, attribution: frame.attributionWindow },
+    'SETTINGS_TAIL_RELATED_NATIVE_WINDOW').toEqual({
+      workDate: '2029-04-12', first: new Date('2029-04-12T09:00:00.000Z'), last: new Date('2029-04-12T18:00:00.000Z'),
+      shiftId: null, absolute: { startAt: '2029-04-12T09:00:00.000Z', endAt: '2029-04-12T18:00:00.000Z' },
+      attribution: { startAt: '2029-04-12T09:00:00.000Z', endAt: '2029-04-12T18:17:00.000Z' },
+    })
+  }, 60_000)
+})
