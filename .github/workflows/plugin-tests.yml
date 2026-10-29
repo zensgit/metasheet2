@@ -2306,6 +2306,7 @@ jobs:
           DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci ATTENDANCE_TEST_DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci pnpm --filter @metasheet/core-backend migrate
           DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci ATTENDANCE_TEST_DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-timezone-policy-routes.db.test.ts \
+            tests/integration/attendance-approval-requester-display.db.test.ts \
             tests/integration/attendance-business-trip.db.test.ts \
             tests/integration/attendance-multitimezone-browser.db.test.ts \
             tests/integration/attendance-timezone-policy-write-routes.db.test.ts \

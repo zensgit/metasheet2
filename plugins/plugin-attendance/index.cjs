@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const requesterDisplay = require('./lib/attendance-requester-display.cjs')
 const { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
 const {
   previousCalendarDates, createDailyCalendarScheduler,
@@ -24727,7 +24728,7 @@ function buildAttendanceApprovalInstancePayload({
     title,
     requesterSnapshot: {
       id: userId,
-      name: requesterName || userId,
+      name: requesterDisplay.displayName(requesterName),
       ...(frozenManagerId ? { managerId: frozenManagerId } : {}),
       ...(frozenDeptHeadId ? { deptHeadId: frozenDeptHeadId } : {}),
       ...(frozenManagerChainIds ? { managerChainIds: frozenManagerChainIds } : {}),
@@ -25656,6 +25657,7 @@ module.exports = {
 	        userId: args.userId,
 	        workDate: args.workDate,
 	        defaultRule,
+                referenceSegments: args.referenceSegments === true,
 	      })
 	      if (!workContext) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED','ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED')
 	      const timezone =
@@ -31216,7 +31218,7 @@ module.exports = {
                 routeInput: {
                   actorId: userId,
                   tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
-                  requesterName: getUserLabel(req, userId),
+                  requesterName: requesterDisplay.profileName(req.user, userId),
                   orgId,
                   workDate,
                   eventType,
@@ -35048,7 +35050,9 @@ module.exports = {
         requestId,
         orgId: route.orgId,
         userId: input.userId,
-        requesterName: route.requesterName,
+        requesterName: await requesterDisplay.forCreate(trx, {
+          userId: input.userId, orgId: route.orgId, actorId: route.actorId, actorName: route.requesterName,
+        }),
         draft,
         orgRelations,
         requestNamedOrgId: route.requestNamedOrgId,
@@ -35331,7 +35335,9 @@ module.exports = {
         requestId,
         orgId: route.orgId,
         userId: requesterSource.userId,
-        requesterName: route.requesterName ?? requesterSource.userId,
+        requesterName: await requesterDisplay.forCreate(trx, {
+          userId: requesterSource.userId, orgId: route.orgId, actorId: route.actorId, actorName: route.requesterName,
+        }),
         draft,
         orgRelations,
         requestNamedOrgId: route.requestNamedOrgId,
@@ -35389,7 +35395,7 @@ module.exports = {
       }
     }
 
-    async function executeShiftSwapRequestCreate(trx, prepared) {
+    async function executeShiftSwapRequestCreate(trx, prepared, operation) {
       const {
         route, requesterSource, counterpartySource, sourceKey, metadata, draft,
         requestId, approvalId, approvalPayload, approvalAssignments,
@@ -35493,6 +35499,7 @@ module.exports = {
           orgId: route.orgId,
           userId: requesterSource.userId,
           workDate: requesterSource.workDate,
+          referenceSegments: operation?.referenceSegments === true,
         }),
       })
       await trx.query(
@@ -35658,7 +35665,7 @@ module.exports = {
         if (variant === 'generic') return executeGenericRequestCreate(trx, prepared)
         if (variant === 'outdoor') return executeOutdoorRequestCreate(trx, prepared)
         if (variant === 'schedule_dispatch') return executeScheduleDispatchRequestCreate(trx, prepared)
-        if (variant === 'shift_swap') return executeShiftSwapRequestCreate(trx, prepared)
+        if (variant === 'shift_swap') return executeShiftSwapRequestCreate(trx, prepared, operation)
         throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
       },
     }
@@ -35799,7 +35806,11 @@ module.exports = {
           requestId: route.requestId,
           orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
           userId: existingRequest.user_id,
-          requesterName: existingRequest.user_id,
+          requesterName: await requesterDisplay.forPendingEdit(trx, {
+            approvalId: existingRequest.approval_instance_id,
+            userId: existingRequest.user_id, orgId: existingRequest.org_id,
+            actorId: route.actorId, actorName: route.requesterName,
+          }),
           draft,
           orgRelations,
           requestNamedOrgId: route.requestNamedOrgId,
@@ -37726,7 +37737,7 @@ module.exports = {
         const operationId = req.body.operationId || null
         const outcome = await w4RequestOperationBoundary.execute({ kind:'request_create',operationId,
           correlationId:requestCorrelationId(req,operationId,'business-trip-create'),routeVariant:'business_trip',
-          routeInput:{ actorId:actor.userId,tokenSubjectUserId:getAuthenticatedTokenSubjectUserId(req),requesterName:getUserLabel(req,actor.userId),orgId:actor.orgId,input } })
+          routeInput:{ actorId:actor.userId,tokenSubjectUserId:getAuthenticatedTokenSubjectUserId(req),requesterName:requesterDisplay.profileName(req.user,actor.userId),orgId:actor.orgId,input } })
         if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') emitEvent('attendance.requested',{
           orgId:actor.orgId,userId:input.userId,requestType:'business_trip',requestId:outcome.response?.data?.request?.id,
         })
@@ -37787,7 +37798,7 @@ module.exports = {
             routeInput: {
               actorId: userId,
               tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
-              requesterName: getUserLabel(req, userId),
+              requesterName: requesterDisplay.profileName(req.user, userId),
               orgId,
               requestId: null,
               requestBody: parsed.data,
@@ -38561,7 +38572,7 @@ module.exports = {
               actorId: actorAccess.userId,
               tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorAccess.userId,
               actorFullAdmin: actorAccess.fullAdmin === true,
-              requesterName: getUserLabel(req, input.userId),
+              requesterName: requesterDisplay.profileName(req.user, actorAccess.userId),
               orgId,
               input: {
                 userId: input.userId,
@@ -38883,7 +38894,7 @@ module.exports = {
             routeInput: {
               actorId: actorUserId,
               tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
-              requesterName: getUserLabel(req, '') || null,
+              requesterName: requesterDisplay.profileName(req.user, actorUserId),
               orgId,
               requesterAssignmentId,
               counterpartyAssignmentId,
@@ -39220,7 +39231,7 @@ module.exports = {
 	            routeInput: {
 	              actorId: requesterId,
 	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
-	              requesterName: getUserLabel(req, requesterId),
+	              requesterName: requesterDisplay.profileName(req.user, requesterId),
 	              orgId: tripScope.orgId ?? null,
 	              requestId,
 	              requestBody: parsed.data,
