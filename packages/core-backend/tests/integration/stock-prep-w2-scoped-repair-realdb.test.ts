@@ -336,6 +336,10 @@ import { assertPluginOwnsSheet, claimPluginObjectScope, isSheetOwnedByProject, M
 import { listSheetPermissionEntries, resolveSheetCapabilitiesForAccess } from '../../src/multitable/permission-service'
 // Option B (owner 2026-10-29): the transaction-bound resolver, for the project-sheet structure clamp case in S4.
 import { resolveSheetCapabilitiesForUserOnQuery } from '../../src/services/approval-record-link-txn-auth'
+// Option B fix round 1: the GET /view?seed=true door, driven over HTTP against the real router and real DB.
+import express from 'express'
+import supertestRequest from 'supertest'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/stock-preparation-project-sheet-grants'
 // S3 fix round 1 (R1): the overview's G1 READ port, against real PostgreSQL.
 import { grantStockPreparationOverviewRoleRead } from '../../src/services/stock-preparation-overview-grants'
@@ -782,6 +786,27 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     }
     const schemaOnProject = await resolveSheetCapabilitiesForAccess(q as never, sheetA, schemaHolder)
     expect(schemaOnProject.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
+
+    // The seed door (fix round 1): `GET /view?seed=true` on a LIVE sheet used to run createSeededSheet behind the
+    // canRead gate alone — six fresh-id fields and five demo records written into the project sheet by the floor.
+    // Now a live re-seed needs canManageFields && canCreateRecord: the floor reads the sheet (200) and the real
+    // field / record / view counts do not move.
+    const structureCounts = async () => {
+      const count = async (table: 'meta_fields' | 'meta_records' | 'meta_views') =>
+        Number(((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE sheet_id = $1`, [sheetA])).rows[0] as { n: number }).n)
+      return { fields: await count('meta_fields'), records: await count('meta_records'), views: await count('meta_views') }
+    }
+    const seedApp = express()
+    seedApp.use(express.json())
+    seedApp.use((req, _res, next) => {
+      ;(req as unknown as { user: unknown }).user = { id: floorUser, roles: ['member'], perms: [] }
+      next()
+    })
+    seedApp.use('/api/multitable', univerMetaRouter())
+    const countsBeforeSeed = await structureCounts()
+    const seeded = await supertestRequest(seedApp).get('/api/multitable/view').query({ sheetId: sheetA, seed: 'true' })
+    expect(seeded.status, JSON.stringify(seeded.body?.error ?? null)).toBe(200)
+    expect(await structureCounts()).toEqual(countsBeforeSeed)
 
     const grantsBefore = await permissionRows(sheetA)
     const historyBefore = await revisionCount(sheetA)

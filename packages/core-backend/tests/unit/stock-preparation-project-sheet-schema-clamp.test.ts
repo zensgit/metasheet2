@@ -14,7 +14,8 @@
  *       another plugin's registration are untouched; a registry error propagates;
  *   (c) ROUTE MATRIX (usePinnedServer, mock pool): every schema route refuses the floor and the schema holder on
  *       the project sheet with the plain FORBIDDEN, while the same person passes the gate on the unregistered
- *       twin and the platform admin passes it on the project sheet; `/context` keeps the record plane.
+ *       twin and the platform admin passes it on the project sheet; `/context` keeps the record plane;
+ *       `GET /view?seed=true` on the live project sheet reads but writes no field / record for a clamped person.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -362,6 +363,15 @@ function createRoutePool(actor: RouteActor) {
   return { query, transaction }
 }
 
+let lastRoutePool: ReturnType<typeof createRoutePool> | null = null
+
+/** Every INSERT the seed path can issue (createSeededSheet writes meta_sheets / meta_fields / meta_records). */
+function seedInserts(): string[] {
+  return (lastRoutePool?.query.mock.calls ?? [])
+    .map(([sql]) => normalize(String(sql)))
+    .filter((q) => /^INSERT INTO meta_(sheets|fields|records)\b/i.test(q))
+}
+
 async function buildRouteApp(actor: RouteActor): Promise<Express> {
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -372,7 +382,8 @@ async function buildRouteApp(actor: RouteActor): Promise<Express> {
   }))
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
-  vi.spyOn(poolManager, 'get').mockReturnValue(createRoutePool(actor) as never)
+  lastRoutePool = createRoutePool(actor)
+  vi.spyOn(poolManager, 'get').mockReturnValue(lastRoutePool as never)
   const app = express()
   app.use(express.json())
   const { sheetCodes: _sheetCodes, ...user } = ROUTE_USER[actor]
@@ -451,5 +462,28 @@ describe('option B — route matrix (mock pool, pinned server)', () => {
       if (key === 'canManageFields' || key === 'canManageViews') continue
       expect(clamped[key], key).toEqual(value)
     }
+  })
+
+  // GET /view?seed=true on a LIVE sheet runs createSeededSheet (six fresh-id fields + five demo records). Its
+  // only gate used to be canRead, so a reader whose field management is clamped could still add columns and
+  // rows to the project sheet. A live re-seed now needs canManageFields && canCreateRecord.
+  for (const actor of ['floor', 'schema'] as const) {
+    it(`SEED GET /view?seed=true: ${actor} reads the live project sheet but seeds nothing; on the unregistered twin the seed still runs`, async () => {
+      const project = await on(await buildRouteApp(actor)).get('/api/multitable/view').query({ sheetId: PROJECT_SHEET, seed: 'true' })
+      expect(project.status, JSON.stringify(project.body)).toBe(200)
+      expect(seedInserts()).toEqual([])
+
+      vi.resetModules()
+      const twin = await on(await buildRouteApp(actor)).get('/api/multitable/view').query({ sheetId: TWIN_SHEET, seed: 'true' })
+      expect(twin.status, JSON.stringify(twin.body)).toBe(200)
+      expect(seedInserts().some((q) => q.startsWith('INSERT INTO meta_fields'))).toBe(true)
+      expect(seedInserts().some((q) => q.startsWith('INSERT INTO meta_records'))).toBe(true)
+    })
+  }
+
+  it('SEED GET /view?seed=true: a platform admin keeps the live re-seed on the project sheet', async () => {
+    const project = await on(await buildRouteApp('admin')).get('/api/multitable/view').query({ sheetId: PROJECT_SHEET, seed: 'true' })
+    expect(project.status, JSON.stringify(project.body)).toBe(200)
+    expect(seedInserts().some((q) => q.startsWith('INSERT INTO meta_fields'))).toBe(true)
   })
 })

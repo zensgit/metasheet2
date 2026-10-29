@@ -12,11 +12,13 @@
  *
  * WHERE IT RUNS. Every host resolver that derives sheet capabilities for a person runs
  * {@link applyStockPreparationProjectSheetSchemaClamp}: REST `resolveSheetCapabilitiesForAccess`
- * (permission-service.ts; `/context` composes from it), the Yjs / collab / API-token
- * `resolveSheetCapabilitiesForUser` (sheet-capabilities.ts) and the transaction-bound
- * `resolveSheetCapabilitiesForUserOnQuery` (services/approval-record-link-txn-auth.ts). The routes need no
- * change: every field / view / sheet-rename / field-permission / view-permission / form-share / save-as-template
- * gate already reads those two bits.
+ * (permission-service.ts; `/context` composes from it), `resolveSheetCapabilitiesForUser`
+ * (sheet-capabilities.ts; the capability reads of collab rooms, the Yjs record bridge and API-token checks)
+ * and the transaction-bound `resolveSheetCapabilitiesForUserOnQuery` (services/approval-record-link-txn-auth.ts).
+ * The field / view / sheet-rename / field-permission / view-permission / form-share gates already read those two
+ * bits. One route needed a change: `GET /view?seed=true` re-seeded a LIVE sheet (six fields, five demo records)
+ * behind its canRead gate alone; a live re-seed now needs canManageFields && canCreateRecord (univer-meta.ts).
+ * Base-level template routes read global capabilities, not these sheet ones, and are not covered here.
  *
  * WHAT IS A REGISTERED PROJECT SHEET. A `plugin_multitable_object_registry` row (server-owned, minted only inside
  * the provisioning transaction — sheet-delete-guard.ts) whose `plugin_name` is `plugin-integration-core` and whose
