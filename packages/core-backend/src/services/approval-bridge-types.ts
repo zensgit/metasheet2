@@ -34,6 +34,13 @@ export interface UnifiedApprovalDTO {
   // Frozen form schema (detail `columns` included) from the instance's pinned template version,
   // so the read renders detail rows from the FROZEN schema, not the live template.
   formSchema?: FormSchema | null
+  /**
+   * 列表摘要用的表单结构，只在列表接口（listApprovals）上出现。取自单据绑定的模板版本
+   * （template_version_id），不是最新模板：只保留这一行快照里有值、且可作为摘要的字段，
+   * 以及该版本的摘要字段配置（只留快照里有值的那些）。没有绑定版本的行不带这个键。
+   * 由 `buildListSummarySchema` 生成。
+   */
+  summarySchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
    * Lock-3 §2.2 — the current node's TYPE (from the frozen runtime graph). The member 待办 surface

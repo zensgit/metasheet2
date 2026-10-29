@@ -1112,9 +1112,10 @@ describe('ApprovalCenterView', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // B2-01 (待办列表关键字段摘要) — list row key-field summary line. The list DTO never carries
-  // the frozen per-instance formSchema (only the detail endpoint does), so the summary is built
-  // from the LIVE template schema fetched via `getTemplate` and cached per templateId.
+  // B2-01 (待办列表关键字段摘要) — list row key-field summary line. Platform rows carry
+  // `summarySchema` from their own pinned template version (see the version-semantics tests at the
+  // end of this block); rows without one fall back to the LIVE template schema fetched via
+  // `getTemplate` and cached per templateId (the fixtures below have no `summarySchema`).
   // ---------------------------------------------------------------------------
   describe('B2-01: list row key-field summary', () => {
     const leaveTemplateSchema = {
@@ -1223,6 +1224,136 @@ describe('ApprovalCenterView', () => {
       expect(cell!.querySelector('.approval-center__row-summary')).toBeNull()
       // Silent by design — no toast, no console-visible rejection reaching the view layer.
       expect(elErrorSpy).not.toHaveBeenCalled()
+    })
+
+    // 摘要按单据绑定的模板版本解释：旧单在模板改名 / 改摘要配置之后，仍按它自己的版本显示。
+    // `summarySchema` 是列表接口按每行的 template_version_id 批量取出的版本结构（只含快照里有值的字段）；
+    // 下面的 live 模板代表「模板已经改名、改了摘要配置」之后的最新状态。
+    const renamedLiveSchema = {
+      fields: [
+        {
+          id: 'fld_leave_type',
+          type: 'select',
+          label: '假期类型',
+          options: [{ label: '带薪年假', value: 'annual' }],
+        },
+        { id: 'fld_duration', type: 'number', label: '请假天数' },
+        { id: 'fld_reason', type: 'textarea', label: '原因' },
+      ],
+      summaryFieldIds: ['fld_duration'],
+    }
+
+    it('版本语义: an old row keeps its own version\'s labels and summary config after the template is renamed / reconfigured', async () => {
+      getTemplateSpy.mockResolvedValue({ formSchema: renamedLiveSchema })
+      mockPendingApprovals.value = [
+        pendingRow({
+          id: 'apv_old',
+          templateId: 'tpl_leave',
+          templateVersionId: 'ver_1',
+          formSnapshot: { fld_leave_type: 'annual', fld_duration: 2, fld_reason: '家里有事' },
+          // 旧版本：字段名「请假类型 / 事由」，摘要配置为「事由、请假类型」。
+          summarySchema: {
+            fields: [
+              { id: 'fld_reason', type: 'textarea', label: '事由' },
+              {
+                id: 'fld_leave_type',
+                type: 'select',
+                label: '请假类型',
+                options: [{ label: '年假', value: 'annual' }],
+              },
+            ],
+            summaryFieldIds: ['fld_reason', 'fld_leave_type'],
+          },
+        }),
+        pendingRow({
+          id: 'apv_new',
+          templateId: 'tpl_leave',
+          templateVersionId: 'ver_2',
+          formSnapshot: { fld_leave_type: 'annual', fld_duration: 3, fld_reason: '回老家' },
+          summarySchema: { fields: [renamedLiveSchema.fields[1]], summaryFieldIds: ['fld_duration'] },
+        }),
+      ]
+      await mountView()
+      await flushUi(6)
+
+      const oldSummary = container!.querySelector('[data-el-row="apv_old"] [data-el-cell="标题"] .approval-center__row-summary')
+      expect(oldSummary?.textContent?.trim()).toBe('事由：家里有事 · 请假类型：年假')
+      expect(oldSummary?.textContent).not.toContain('假期类型')
+      expect(oldSummary?.textContent).not.toContain('带薪年假')
+      const newSummary = container!.querySelector('[data-el-row="apv_new"] [data-el-cell="标题"] .approval-center__row-summary')
+      expect(newSummary?.textContent?.trim()).toBe('请假天数：3')
+      // 两行都带了版本结构：不再去取最新模板（不按行、也不按模板发请求）。
+      expect(getTemplateSpy).not.toHaveBeenCalled()
+    })
+
+    it('版本语义: a row whose version hides every configured field shows no summary, never the live template\'s fields', async () => {
+      getTemplateSpy.mockResolvedValue({ formSchema: renamedLiveSchema })
+      mockPendingApprovals.value = [
+        pendingRow({
+          id: 'apv_hidden',
+          templateId: 'tpl_leave',
+          templateVersionId: 'ver_1',
+          formSnapshot: { fld_leave_type: 'annual', fld_duration: 2 },
+          summarySchema: { fields: [] },
+        }),
+      ]
+      await mountView()
+      await flushUi(6)
+
+      const cell = container!.querySelector('[data-el-row="apv_hidden"] [data-el-cell="标题"]')
+      expect(cell).toBeTruthy()
+      expect(cell!.querySelector('.approval-center__row-summary')).toBeNull()
+      expect(getTemplateSpy).not.toHaveBeenCalled()
+    })
+
+    it('版本语义: only rows without a pinned schema fall back to the live template (fetched once per template)', async () => {
+      getTemplateSpy.mockResolvedValue({ formSchema: renamedLiveSchema })
+      mockPendingApprovals.value = [
+        pendingRow({
+          id: 'apv_pinned',
+          templateId: 'tpl_leave',
+          templateVersionId: 'ver_1',
+          formSnapshot: { fld_reason: '家里有事' },
+          summarySchema: { fields: [{ id: 'fld_reason', type: 'textarea', label: '事由' }] },
+        }),
+        pendingRow({
+          id: 'apv_legacy',
+          templateId: 'tpl_legacy',
+          formSnapshot: { fld_duration: 1 },
+        }),
+      ]
+      await mountView()
+      await flushUi(6)
+
+      expect(getTemplateSpy).toHaveBeenCalledTimes(1)
+      expect(getTemplateSpy).toHaveBeenCalledWith('tpl_legacy')
+      const pinned = container!.querySelector('[data-el-row="apv_pinned"] [data-el-cell="标题"] .approval-center__row-summary')
+      expect(pinned?.textContent?.trim()).toBe('事由：家里有事')
+      const legacy = container!.querySelector('[data-el-row="apv_legacy"] [data-el-cell="标题"] .approval-center__row-summary')
+      expect(legacy?.textContent?.trim()).toBe('请假天数：1')
+    })
+
+    it('版本语义: rowSummarySchema prefers the row\'s summarySchema, then a detail formSchema, then the live cache', async () => {
+      const { rowSummarySchema, resolveRowSummaryLine } = await import('../src/approvals/useApprovalListFieldSummary')
+      const live = new Map([['tpl_leave', renamedLiveSchema as any]])
+      const pinned = { fields: [{ id: 'fld_reason', type: 'textarea', label: '事由' }] } as any
+      const frozen = { fields: [{ id: 'fld_reason', type: 'textarea', label: '旧事由' }] } as any
+      const snapshot = { fld_reason: '出差', fld_duration: 2 }
+
+      expect(rowSummarySchema(live, { templateId: 'tpl_leave', summarySchema: pinned, formSchema: frozen })).toBe(pinned)
+      expect(rowSummarySchema(live, { templateId: 'tpl_leave', formSchema: frozen })).toBe(frozen)
+      expect(rowSummarySchema(live, { templateId: 'tpl_leave' })).toBe(live.get('tpl_leave'))
+      expect(rowSummarySchema(live, { templateId: null })).toBeUndefined()
+      expect(rowSummarySchema(live, null)).toBeUndefined()
+
+      expect(resolveRowSummaryLine(live, { templateId: 'tpl_leave', formSnapshot: snapshot, summarySchema: pinned }, true))
+        .toBe('事由：出差')
+      // 详情 DTO（主从面板的单条回退）带的是冻结结构：同样按版本，不用最新模板。
+      expect(resolveRowSummaryLine(live, { templateId: 'tpl_leave', formSnapshot: snapshot, formSchema: frozen }, true))
+        .toBe('旧事由：出差')
+      // 没有版本结构的旧行：沿用最新模板（含其摘要配置）。
+      expect(resolveRowSummaryLine(live, { templateId: 'tpl_leave', formSnapshot: snapshot }, true))
+        .toBe('请假天数：2')
     })
   })
 
