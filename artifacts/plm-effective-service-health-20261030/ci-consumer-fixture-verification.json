@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "recorded_at_utc": "2026-10-29T19:26:44.542727+00:00",
+  "test_source_commit": "3edf3e3d301e8000ab195e43503f629c01fab947",
+  "published_parent": "952bb9218dd1eb8a44dcc72ae2c31c64e7a37e3f",
+  "product_source_unchanged": "dcf2a81342cff2f6d3513a46850a9d0ef03ccbac",
+  "changed_source_paths": [
+    "scripts/ops/multitable-onprem-private-command-logs.test.mjs",
+    "scripts/ops/multitable-onprem-startup-readiness.test.mjs"
+  ],
+  "source_inputs": [
+    {
+      "path": "scripts/ops/multitable-onprem-private-command-logs.test.mjs",
+      "sha256": "90784e1b68ed2ce09befb08685b540e32223a5baaeb8fb9904fddc0af2d670b5",
+      "bytes": 4243,
+      "base_sha256": "de7500f2a54e05af73566812f394c58c4e01a6fd454b68a16dae57a97a09a934",
+      "changed": true
+    },
+    {
+      "path": "scripts/ops/multitable-onprem-startup-readiness.test.mjs",
+      "sha256": "30b4cf48246a6d4483b7250dd05836520f866a6043e5355322e03ba9bfe91ec0",
+      "bytes": 4541,
+      "base_sha256": "02f356c1c668de26d72ff1f2deace31a3bd35c59375fd93455074dae9ec0d2bd",
+      "changed": true
+    },
+    {
+      "path": "scripts/ops/multitable-onprem-deploy-easy.sh",
+      "sha256": "2470ae14709a02737623e09e691b92c1db0a07750507ed1285c5eb7434f2853c",
+      "bytes": 5838,
+      "base_sha256": "2470ae14709a02737623e09e691b92c1db0a07750507ed1285c5eb7434f2853c",
+      "changed": false
+    }
+  ],
+  "original_current_head_CI": {
+    "PR": 6649,
+    "head": "952bb9218dd1eb8a44dcc72ae2c31c64e7a37e3f",
+    "run": 40936095485,
+    "job": 123666921246,
+    "Node": "20.20.2",
+    "tests": 101,
+    "pass": 94,
+    "fail": 7,
+    "new_effective_module_pass": 26,
+    "manager_module_pass": 67,
+    "transport_recorded_PASS_causal_qualification": "unqualified before new diagnostic assertion; early receipt refusal could satisfy old assertions"
+  },
+  "repair": "Two successful bootstrap substitutes now emit the optional exact3NUL receipt. Startup captures stderr and additionally requires real readiness exhaustion for transport mode. All prior assertions,10000ms timers,30attempts,realcurl,product Bash,workflow,26+67 test source bytes retained.",
+  "causal_baseline": "Old no-receipt bootstrap plus strengthened transport assertion fails only that new readiness-exhaustion assertion, after all older assertions pass.",
+  "actual_local_phases": [
+    {
+      "phase": 1,
+      "module": "scripts/ops/multitable-onprem-startup-readiness.test.mjs",
+      "pattern": "^actual deploy script waits for API readiness: transport$",
+      "counts": {
+        "tests": 1,
+        "pass": 0,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "exit": 1,
+      "duration_ms": 2402.609333,
+      "stderr_empty": true,
+      "accepted_expected_result": true
+    },
+    {
+      "phase": 2,
+      "module": "scripts/ops/multitable-onprem-private-command-logs.test.mjs",
+      "pattern": "^operator logs exclude password/token while child gets exact values: (success|admin-failure|health-failure)$",
+      "counts": {
+        "tests": 3,
+        "pass": 3,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "exit": 0,
+      "duration_ms": 4343.058291,
+      "stderr_empty": true,
+      "accepted_expected_result": true
+    },
+    {
+      "phase": 3,
+      "module": "scripts/ops/multitable-onprem-startup-readiness.test.mjs",
+      "pattern": "^actual deploy script waits for API readiness: (immediate|delayed|unavailable|redirect|transport)$",
+      "counts": {
+        "tests": 5,
+        "pass": 5,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "exit": 0,
+      "duration_ms": 5477.883125,
+      "stderr_empty": true,
+      "accepted_expected_result": true
+    }
+  ],
+  "actual_local_started_at": "2026-10-29T19:20:41.507502+00:00",
+  "actual_local_ended_at": "2026-10-29T19:20:53.817813+00:00",
+  "source_hashes_unchanged": true,
+  "owned_private_HOME_TMPDIR_empty_and_removed": true,
+  "local_runtime": {
+    "Node": "24.14.1",
+    "Bash": "3.2.57",
+    "curl_version": "8.7.1",
+    "curl_sha256": "9b3d0c8eae03bd1be5e5c13c35a2464fc9a7ec719eff5deb94b2905dad25244e"
+  },
+  "effect_scope": "Real curl requests to own ephemeral loopback Node HTTP fixture; bootstrap/admin/health domain bodies are substitutes. No actual application/PG,service installation,browser or business acceptance.",
+  "no_93_passing_case_manual_replay": true,
+  "direct_consumer_audit": "Exact952 scripts/ops/*onprem*.test.mjs literal wrapper-name scope:18tests,5matches,4actualwrapper callers; all4now handled,one package-path placeholder. No whole-repository claim.",
+  "reviews": [
+    {
+      "name": "Sol-CI-consumer-fix-v2-source-review.json",
+      "sha256": "b27842c6346d016d751d2b2643afc8a3db177df563774a00566680fc7a352210",
+      "decision": "ACCEPT_CI_CONSUMER_FIX_V2_SOURCE_AND_CAUSAL_RED_PREPARATION_ONLY"
+    },
+    {
+      "name": "Sol-CI-consumer-fix-v2-effect-admission.json",
+      "sha256": "8ec2697cafcd500ee8078fbb5a33e3225b24d33d02d8f32491de1c510a92f2b7",
+      "decision": "ADMIT_SEQUENTIAL_TRANSPORT_CAUSAL_RED1_THEN_CANDIDATE_PRIVATE3_THEN_STARTUP5_UNDER_OWNED_LOOPBACK_AND_EXPLICIT_ENVIRONMENT"
+    },
+    {
+      "name": "Sol-CI-consumer-actual-results-review.json",
+      "sha256": "ea9d3910e62aeef197696ad37439be9d3b0993594aff6c2669a468d278d379b0",
+      "decision": "ACCEPT_LOCAL_OWNED_LOOPBACK_CAUSAL_RED1_THEN_EIGHT_PASS_EVIDENCE_ONLY"
+    },
+    {
+      "name": "Sol-onprem-direct-wrapper-consumers-audit.json",
+      "sha256": "d7b73d5920469899fb5046386dfd718392921c2fb274c34174bb2c3a024b561f",
+      "decision": "NO_ADDITIONAL_DIRECT_RECEIPT_PROTOCOL_CONSUMER_FOUND_WITHIN_EXACT_LITERAL_SCOPE"
+    }
+  ],
+  "followup_current_head_Node20_CI": "pending next publication",
+  "all_Draft_no_merge_deploy_production_or_issue_close": true,
+  "whole_engineering_goal_complete": false
+}
