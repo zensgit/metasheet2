@@ -83,9 +83,9 @@ const shownOutcome = computed(() => testedVersion.value >= 0 && outcomePair !== 
 const probeErrorCode = ref('')
 const errorHint = computed(() => errorCode.value !== '' && (errorCode.value.startsWith('YIDA_CONNECTION_TEST_')
   || errorCode.value === probeErrorCode.value) ? refusalHints[errorCode.value] ?? '' : '')
-// The owner override answers one mismatch only: once the inputs equal the tested pair again it is spent,
-// so a later different edit needs a fresh tick.
-watch(testedPairMismatch, mismatch => { if (!mismatch) overrideTested.value = false }, { flush: 'sync' })
+// The owner override answers the exact appKey/appSecret it was ticked for: any later edit to either one
+// spends it, whether back to the tested pair or on to a third value, so a different value needs a fresh tick.
+watch([() => material.appKey, () => material.appSecret], () => { overrideTested.value = false }, { flush: 'sync' })
 let generation = 0
 let client: ReturnType<typeof createYidaInitializationClient> | null = null
 const locked = computed(() => busy.value || uncertain.value)

@@ -711,6 +711,29 @@ describe('Yida owner connection test behind the server display bit', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
+  it('tested-pair override answers only the inputs it was ticked for: A ok → B → tick → C clears it without passing back through A', async () => {
+    mountPanel(); await observe(true); await fill()
+    await probe(json(probeView('ok')))
+    await type('appSecret', 'SYN-SECRET-B')
+    const override = q<HTMLInputElement>('connection-override'); override.checked = true; override.dispatchEvent(new Event('change')); await flush()
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    // B → C: still a mismatch, but the tick was for B, so it is gone and C cannot be submitted.
+    await type('appSecret', 'SYN-SECRET-C')
+    expect(absent('connection-mismatch')).toBe(false)
+    expect(q<HTMLInputElement>('connection-override').checked).toBe(false)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    // appKey counts too, and so does a paste.
+    for (const edit of [() => type('appKey', 'SYN-KEY-D'), () => pasteInto('appSecret', 'SYN-SECRET-E')]) {
+      const tick = q<HTMLInputElement>('connection-override'); tick.checked = true; tick.dispatchEvent(new Event('change')); await flush()
+      expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+      await edit()
+      expect(absent('connection-mismatch')).toBe(false)
+      expect(q<HTMLInputElement>('connection-override').checked).toBe(false)
+      expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('the client requires the observed ready command, does not consume it, and closes the probe DTO', async () => {
     const value = client()
     await expect(value.testConnection(request())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_STATE_UNCONFIRMED' })
