@@ -271,7 +271,8 @@ export async function resolveSheetCapabilitiesForUser(
   permissions: string[]
   /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
   gridExportClosed?: true
-  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin. */
+  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin (R-66 ③: a
+   *  `stock-prep:admin` holder there keeps the resolved canManageViews; canManageFields is false for every non-admin). */
   stockPrepProjectSheetSchemaClamped?: true
 }> {
   const isAdminRole = await isAdmin(userId)
@@ -357,8 +358,9 @@ export async function resolveSheetCapabilitiesForUser(
   }
   // Option B (owner 2026-10-29, R-66 ②): the project-sheet structure clamp, the same as the REST resolver's. This
   // resolver fronts the Yjs field-schema flush and the API-token capability checks, so without it a non-admin
-  // could still change a project sheet's fields through those channels. Platform admins keep both bits.
-  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, sheetId, capabilities, isAdminRole)
+  // could still change a project sheet's fields through those channels. Platform admins keep both bits; R-66 ③ keeps
+  // the resolved view bit for a `stock-prep:admin` holder (`permissions` above, plus a role check on a project sheet).
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, sheetId, capabilities, isAdminRole, { userId, permissions })
   capabilities = projectSheetClamp.capabilities
   // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the REST resolver's. This resolver
   // fronts the collab rooms and API-token capability checks, so it must not report an export the REST resolver

@@ -697,7 +697,8 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   permissions: string[]
   /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
   gridExportClosed?: true
-  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin. */
+  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin (R-66 ③: a
+   *  `stock-prep:admin` holder there keeps the resolved canManageViews; canManageFields is false for every non-admin). */
   stockPrepProjectSheetSchemaClamped?: true
 }> {
   const normalizedUserId = userId.trim()
@@ -750,9 +751,13 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
   // Option B (owner 2026-10-29, R-66 ②): the project-sheet structure clamp, the same as the request-bound
-  // resolver's (only canManageFields / canManageViews change; platform admins untouched). Rides the
-  // `sheet_cap_eval` stage (no new stage).
-  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, normalizedSheetId, capabilities, isAdminRole)
+  // resolver's (only canManageFields / canManageViews change; platform admins untouched; R-66 ③ keeps the resolved
+  // view bit for a `stock-prep:admin` holder: `permissions` above plus a role check on this query, so it reads what
+  // the transaction sees). Rides the `sheet_cap_eval` stage (no new stage).
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, normalizedSheetId, capabilities, isAdminRole, {
+    userId: normalizedUserId,
+    permissions,
+  })
   capabilities = projectSheetClamp.capabilities
   // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the request-bound resolver's (only
   // `canExport` changes; every person, admins included). Rides the `sheet_cap_eval` stage (no new stage).

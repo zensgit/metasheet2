@@ -36,7 +36,8 @@
  * CLOSED 2026-10-29 (owner option B, R-66 ②): on a registered project sheet every capability resolver
  * now takes field and view management away from everyone but platform admins
  * (stock-preparation-project-sheet-schema-clamp.ts); this port still writes `spreadsheet:write`,
- * which there confers record work only.
+ * which there confers record work only — plus, for a holder of `stock-prep:admin` (备料主管理员), view management
+ * (owner 2026-10-29, R78; R-66 ③). Field management stays platform-admin-only.
  */
 
 /** The same rule plugins/plugin-integration-core/lib/stock-preparation-own-base.cjs holds. */

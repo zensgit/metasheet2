@@ -23,7 +23,9 @@
  *                                   snapshot (S3). On a registered project sheet where the resolver
  *                                   reports the option-B clamp (`stockPrepProjectSheetSchemaClamped`,
  *                                   owner 2026-10-29) the field / view bits are not required, because
- *                                   no non-admin holds or receives them there
+ *                                   no non-admin holds or receives field management there, and view
+ *                                   management only by holding `stock-prep:admin` itself (R-66 ③),
+ *                                   which this port never hands out
  *   auditLog                      → audit/audit.ts auditLog (the admin-users.ts writer)
  *   boundGrantLockWaits           → services/stock-preparation-project-sheet-grants.ts
  *                                   runWithStockPreparationProjectSheetGrantLockTimeout: the G1 call
@@ -115,8 +117,11 @@ export function createStockPrepMembersHostDeps(): StockPrepMembersDeps {
         // `multitable:manage-schema` cannot hand out schema management.
         // Option B (owner 2026-10-29, R-66 ②): on a registered stock-preparation project sheet field and view
         // management belong to platform admins only — the grant confers neither bit there for the grantee, and
-        // the grantor (a non-admin) holds neither. So where the resolver reports that clamp, the bound is the
-        // record-write bits and notify only; GRANTED ⊆ GRANTOR still holds. Everywhere else it is unchanged.
+        // the grantor (a non-admin) holds no field management. R-66 ③ (owner 2026-10-29, R78): a grantee who holds
+        // `stock-prep:admin` keeps the view bit the grant resolves for them — by that code, which this port never
+        // hands out (custom roles cannot carry it: STOCK_PREP_CUSTOM_ROLE_SELECTABLE_CODES); the bound is not about
+        // it. So where the resolver reports that clamp, the bound is the record-write bits and notify only;
+        // GRANTED ⊆ GRANTOR still holds. Everywhere else it is unchanged.
         const schemaBitsBound = resolved.stockPrepProjectSheetSchemaClamped === true
           || (capabilities.canManageFields && capabilities.canManageViews)
         if (
