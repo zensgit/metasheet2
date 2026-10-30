@@ -1158,6 +1158,35 @@ test('CP-S16 (N3-b, C06; delta probe V8D-05) the REVIEWED-CELL REGISTER: the rev
   assert.deepEqual(cells.map((cell) => `${cell.key}|${cell.fieldId}`).sort(), ['{"k":"x"}|material', '{"k":"x"}|totalQuantity'])
 })
 
+test('CP-S16b (N3-b) the register read has a CEILING of 100000 rows: exactly 100000 reviewed cells are read whole; one more makes the consult unreadable (503 STORE_FAILED row_cap, read_reviewed_cells), never a truncated "reviewed" answer', async () => {
+  const w = await world()
+  // A state row that says a review happened (only a review writes `reviewed_content_digest`), so the consult reads the register.
+  await w.db.insertOne(T.state, { id: 'rst_cps_cap', tenant_id: TENANT, sheet_id: SHEET, project_no: F.PROJECT_NO, write_scope_key: 'spw2:x', governed_since: w.clock.now(), reviewed_content_digest: 'd'.repeat(64) })
+  const register = w.db.tables.get(T.reviewedCell)
+  const at = w.clock.now()
+  const cellRow = (i) => {
+    const id = `rcell_cap_${String(i).padStart(6, '0')}`
+    const recordKey = `{"k":"cap_${i}"}`
+    return { id, tenant_id: TENANT, sheet_id: SHEET, project_no: F.PROJECT_NO, record_key: recordKey, record_key_digest: pairing.__internals.subjectDigest(recordKey), field_id: 'material', record_id: `rec_cap_${i}`, reviewed_cell: { after: 'x', afterCanonical: 'x' }, change_plan_id: 'chp_cap', reviewed_at: at, created_at: at, updated_at: at }
+  }
+  const CEILING = 100000
+  // Inserted in id order (the read's ORDER BY), straight into the kit table: the bound is what is under test, not the writer.
+  for (let i = 0; i < CEILING; i += 1) {
+    const row = cellRow(i)
+    register.set(row.id, row)
+  }
+  assert.equal(new Set(Array.from(register.values(), (row) => row.record_key_digest)).size, CEILING, 'distinct record_key_digest per row')
+  // (a) at the ceiling: the consult reads every row (paged) and hands every cell to the planner.
+  const read = await w.store.readGovernanceRows(w.scope)
+  assert.equal(read.expectedContent.length, CEILING)
+  // (b) one row above it: refused by name, never a partial register.
+  const extra = cellRow(CEILING)
+  register.set(extra.id, extra)
+  const capped = await expectError(w.store.readGovernanceRows(w.scope), { status: 503, code: CODES.STORE_FAILED, reason: 'row_cap' })
+  assert.equal(capped.details.operation, 'read_reviewed_cells')
+  assert.equal(capped.details.ceiling, CEILING)
+})
+
 // ── CP-S17 (review fix N1-b, round 2) ────────────────────────────────────────────────────────────
 
 test('CP-S17 (N1-b) the PLAIN continuation confirm (a continuation_candidate hold, PR-4) re-decides the pilot marker on its OWN transaction handle under the state lock: cleared since the consult / on another sheet => 409 NOT_PILOT, nothing persisted, no bump; unwired => 501 before any statement; the marker back => it commits', async () => {
