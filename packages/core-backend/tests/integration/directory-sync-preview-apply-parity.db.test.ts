@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto'
 /**
  * DT-OPS-02 P2 follow-up — real-DB preview/apply parity for `autoAdmissionCandidateCount`
  * (dingtalk-sync-integrated-roadmap-20260708.md, DT-OPS-02, Test/Evidence matrix "Dry-run |
@@ -39,6 +40,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 import { query } from '../../src/db/pg'
 import {
   createDirectoryIntegration,
+  buildDirectoryAutoAdmissionUsername,
   previewDirectorySyncIntegration,
   syncDirectoryIntegration,
 } from '../../src/directory/directory-sync'
@@ -618,4 +620,239 @@ describeIfDatabase('Phase A preview corp-scoped identity sentinel wiring (real D
     // positive control that prevents an implementation from collapsing every account.
     expect(preview.autoAdmissionCandidateCount).toBe(2)
   })
+})
+
+describeIfDatabase('OPS02 complete preview effects (real DB)', () => {
+  const keys = ['wouldAdmitUsers','wouldBindAccounts','wouldUnbindAccounts','wouldCreateMemberGroups',
+    'wouldSyncMemberGroups','wouldAddMemberGroupMemberships','wouldRemoveMemberGroupMemberships',
+    'wouldAssignRoles','wouldAdmitNamespaces'] as const
+  const effects = (p: Awaited<ReturnType<typeof previewDirectorySyncIntegration>>) => Object.fromEntries(keys.map(k => [k,p[k]]))
+  async function fingerprint() {
+    const out: Record<string,unknown> = {}
+    for (const table of ['users','user_login_aliases','user_external_identities','user_external_auth_grants','user_orgs',
+      'directory_integrations','directory_accounts','directory_account_links','directory_sync_runs',
+      'platform_member_groups','platform_member_group_members','user_roles','user_namespace_admissions']) {
+      out[table] = (await query(`SELECT count(*)::int AS count, md5(COALESCE(string_agg(to_jsonb(t)::text, '' ORDER BY to_jsonb(t)::text), '')) AS signature FROM ` + table + ' t')).rows
+    }
+    return out
+  }
+  async function fixture(mode: 'full'|'disabled'|'absent'|'username'|'knownUsername'|'missingRole',
+    run: (f: {integrationId:string;seed:string;local:string[];roleId:string;parent:string;child:string}) => Promise<void>) {
+    const seed=crypto.randomUUID(), corp='ops2corp-'+seed, parent='ops2parent-'+seed, child='ops2child-'+seed, roleId='ops2r_'+seed
+    const local=['a','b','pending','stale'].map(x=>'ops2_'+x+'_'+seed), owned=new Set(local)
+    let integrationId=''
+    const records=[
+      {userId:'01-existing-'+seed,name:'Synthetic A',unionId:'u-a-'+seed,openId:'o-a-'+seed,departmentIds:[child]},
+      {userId:'02-identity-'+seed,name:'Synthetic B',unionId:'u-b-'+seed,openId:'o-b-'+seed,departmentIds:[parent]},
+      {userId:'03-pending-'+seed,name:'Synthetic pending',unionId:'u-p-'+seed,openId:'o-p-'+seed,email:'pending-'+seed+'@example.com',departmentIds:[child]},
+      {userId:'04-new-'+seed,name:'Synthetic new',unionId:'u-n-'+seed,openId:'o-n-'+seed,email:'new-'+seed+'@example.com',departmentIds:[child]},
+      {userId:'05-duplicate-'+seed,name:'Synthetic duplicate',unionId:'u-d-'+seed,openId:'o-d-'+seed,email:'new-'+seed+'@example.com',departmentIds:[parent]},
+      {userId:'06-distinct-'+seed,name:'Synthetic distinct',unionId:'u-x-'+seed,openId:'o-x-'+seed,departmentIds:[parent]},
+    ]
+    const pulled=mode==='absent'?[]:(mode==='username'||mode==='knownUsername')?[{userId:(mode==='knownUsername'?'z'.repeat(80):'zzplanned-')+seed,name:'Synthetic unknown future username',
+      unionId:'u-unknown-'+seed,openId:'o-unknown-'+seed,departmentIds:[parent]}]:records
+    try {
+      await query('INSERT INTO roles (id,name) VALUES ($1,$1)',[roleId])
+      for(let i=0;i<local.length;i++) await query(`INSERT INTO users (id,email,name,password_hash,role,is_active,activation_status)
+        VALUES ($1,$2,'Synthetic owned','synthetic-unusable','user',true,'activated')`,
+      [local[i],(i===2?'pending-':'owned-'+i+'-')+seed+'@example.com'])
+      const cfg=mode==='disabled'?{memberGroupSyncMode:'disabled' as const}:{memberGroupSyncMode:'sync_scoped_departments' as const,
+        memberGroupDepartmentIds:[parent,child],memberGroupDefaultRoleIds:[roleId],memberGroupDefaultNamespaces:['crm','sales']}
+      integrationId=(await createDirectoryIntegration({name:'Synthetic OPS02 '+seed,corpId:corp,appKey:'synthetic',
+        appSecret:'synthetic-test-only',admissionMode:mode==='disabled'||mode==='absent'?'manual_only':'auto_for_scoped_departments',
+        admissionDepartmentIds:[parent],...cfg})).id
+      async function seedAccount(index:number,userId:string,active:boolean,linked:boolean) {
+        const u=records[index]
+        const id=(await query<{id:string}>(`INSERT INTO directory_accounts
+          (integration_id,corp_id,external_user_id,union_id,open_id,external_key,name,is_active)
+          VALUES ($1,$2,$3,$4,$5,$4,$6,$7) RETURNING id`,[integrationId,corp,u.userId,u.unionId,u.openId,u.name,active])).rows[0].id
+        await query(`INSERT INTO directory_account_links (directory_account_id,local_user_id,link_status,match_strategy)
+          VALUES ($1,$2,$3,'manual')`,[id,userId,linked?'linked':'pending'])
+      }
+      if(mode!=='username'&&mode!=='knownUsername') {
+        await seedAccount(0,local[0],true,true)
+        if(mode==='absent') await seedAccount(1,local[1],false,false)
+        await query(`INSERT INTO user_external_identities (provider,external_key,provider_union_id,provider_open_id,corp_id,local_user_id)
+          VALUES ('dingtalk',$1,$1,$2,$3,$4)`,[records[1].unionId,records[1].openId,corp,local[1]])
+      }
+      if(mode==='full') {
+        const marker='dingtalk-sync-group:'+integrationId+':'+parent
+        const group=(await query<{id:string}>('INSERT INTO platform_member_groups (name,description) VALUES ($1,$2) RETURNING id',['Synthetic group',marker])).rows[0].id
+        for(const id of [local[0],local[3]]) await query('INSERT INTO platform_member_group_members (group_id,user_id) VALUES ($1,$2)',[group,id])
+        for(const id of [local[0],local[3]]) await query('INSERT INTO user_roles (user_id,role_id) VALUES ($1,$2)',[id,roleId])
+        for(const [id,ns,enabled] of [[local[0],'crm',true],[local[0],'sales',false],[local[1],'crm',true],[local[3],'crm',true]] as const)
+          await query(`INSERT INTO user_namespace_admissions (user_id,namespace,enabled,source)
+            VALUES ($1,$2,$3,'directory_member_group_sync')`,[id,ns,enabled])
+      }
+      if(mode==='username'||mode==='knownUsername') {
+        const u=pulled[0], guessed=buildDirectoryAutoAdmissionUsername({id:u.userId,external_user_id:u.userId,union_id:u.unionId,open_id:u.openId})
+        await query('UPDATE users SET username=$2 WHERE id=$1',[local[3],guessed])
+      }
+      clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('synthetic-token')
+      clientMocks.getDingTalkDepartmentDetail.mockResolvedValue({deptManagerUserIdList:[]})
+      clientMocks.listDingTalkDepartments.mockImplementation(async (_:string,id:string)=>id==='1'?
+        [{id:parent,parentId:'1',name:'Synthetic parent',order:0,source:{}}]:id===parent?
+          [{id:child,parentId:parent,name:'Synthetic child',order:0,source:{}}]:[])
+      clientMocks.listDingTalkDepartmentUsers.mockImplementation(async (_:string,id:string)=>({
+        users:id===parent?pulled.map(u=>({userId:u.userId,name:u.name,departmentIds:u.departmentIds,source:{}})):[],nextCursor:null,hasMore:false}))
+      clientMocks.getDingTalkUserDetail.mockImplementation(async (_:string,id:string)=>{
+        const u=pulled.find(u=>u.userId===id);if(!u)throw new Error('Unexpected synthetic user');return {...u,source:{}}
+      })
+      await run({integrationId,seed,local,roleId,parent,child})
+    } finally {
+      if(integrationId) {
+        const links=await query<{local_user_id:string|null}>(`SELECT l.local_user_id FROM directory_account_links l
+          JOIN directory_accounts a ON a.id=l.directory_account_id WHERE a.integration_id=$1`,[integrationId])
+        for(const row of links.rows)if(row.local_user_id)owned.add(row.local_user_id)
+        await query('DELETE FROM platform_member_groups WHERE description=ANY($1::text[])',[[parent,child].map(id=>'dingtalk-sync-group:'+integrationId+':'+id)])
+        await query('DELETE FROM directory_integrations WHERE id=$1',[integrationId])
+      }
+      await query('DELETE FROM users WHERE id=ANY($1::text[])',[Array.from(owned)])
+      await query('DELETE FROM roles WHERE id=$1',[roleId])
+    }
+  }
+
+  it('projects complete effects and preserves every read-side table before apply',async()=>{
+    await fixture('full',async f=>{
+      const before=await fingerprint(),preview=await previewDirectorySyncIntegration(f.integrationId)
+      expect(effects(preview)).toEqual({wouldAdmitUsers:2,wouldBindAccounts:3,wouldUnbindAccounts:0,wouldCreateMemberGroups:1,
+        wouldSyncMemberGroups:2,wouldAddMemberGroupMemberships:5,wouldRemoveMemberGroupMemberships:1,wouldAssignRoles:3,wouldAdmitNamespaces:6})
+      expect(preview.autoAdmissionCandidateCount).toBe(2)
+      expect(await fingerprint()).toEqual(before)
+      const applied=await syncDirectoryIntegration(f.integrationId,'system:ops02-parity')
+      expect(applied.run.stats).toMatchObject({autoAdmittedCount:2,memberGroupsCreatedCount:1,memberGroupsSyncedCount:2,
+        memberGroupMembershipsUpdatedCount:6,memberGroupDefaultRoleAssignmentsCount:3,memberGroupDefaultNamespaceAdmissionsCount:6})
+      expect((await query(`SELECT l.link_status FROM directory_account_links l JOIN directory_accounts a ON a.id=l.directory_account_id
+        WHERE a.integration_id=$1 AND a.external_user_id LIKE '03-pending-%'`,[f.integrationId])).rows).toEqual([{link_status:'pending'}])
+      expect((await query('SELECT 1 FROM user_roles WHERE user_id=$1 AND role_id=$2',[f.local[3],f.roleId])).rows).toHaveLength(1)
+      expect((await query('SELECT enabled FROM user_namespace_admissions WHERE user_id=$1 AND namespace=$2',[f.local[3],'crm'])).rows).toEqual([{enabled:true}])
+      expect(effects(await previewDirectorySyncIntegration(f.integrationId))).toEqual({wouldAdmitUsers:0,wouldBindAccounts:0,wouldUnbindAccounts:0,
+        wouldCreateMemberGroups:0,wouldSyncMemberGroups:2,wouldAddMemberGroupMemberships:0,wouldRemoveMemberGroupMemberships:0,wouldAssignRoles:0,wouldAdmitNamespaces:0})
+    })
+  })
+  it('clears a confirmed binding after scoped identity ambiguity without pretending inactivity unlinks it',async()=>{
+    await fixture('full',async f=>{
+      const row=(await query<{id:string;corp_id:string;union_id:string}>(`SELECT a.id,a.corp_id,a.union_id
+        FROM directory_accounts a JOIN directory_account_links l ON l.directory_account_id=a.id
+        WHERE a.integration_id=$1 AND l.local_user_id=$2`,[f.integrationId,f.local[0]])).rows[0]
+      // Raw union IDs satisfy the existing unique index; the matcher normalizes their whitespace.
+      // The second row is loaded by the account's external key, then conflicts in the scoped union map.
+      for(const [suffix,userId] of [['a',f.local[0]],['b',f.local[2]]] as const)
+        await query(`INSERT INTO user_external_identities
+          (provider,external_key,provider_union_id,corp_id,local_user_id)
+          VALUES ('dingtalk',$1,$2,$3,$4)`,[suffix==='a'?f.seed+':ambiguous-a':row.union_id,
+            suffix==='a'?row.union_id:' '+row.union_id+' ',row.corp_id,userId])
+      const before=await fingerprint(),preview=await previewDirectorySyncIntegration(f.integrationId)
+      expect(preview.wouldUnbindAccounts).toBe(1)
+      expect(effects(preview)).toEqual({wouldAdmitUsers:2,wouldBindAccounts:3,wouldUnbindAccounts:1,wouldCreateMemberGroups:1,
+        wouldSyncMemberGroups:2,wouldAddMemberGroupMemberships:4,wouldRemoveMemberGroupMemberships:2,wouldAssignRoles:3,wouldAdmitNamespaces:5})
+      expect(await fingerprint()).toEqual(before)
+      expect((await syncDirectoryIntegration(f.integrationId,'system:ops02-ambiguous')).run.stats).toMatchObject({
+        autoAdmittedCount:2,memberGroupMembershipsUpdatedCount:6,
+        memberGroupDefaultRoleAssignmentsCount:3,memberGroupDefaultNamespaceAdmissionsCount:5,
+      })
+      expect((await query('SELECT local_user_id,link_status,match_strategy FROM directory_account_links WHERE directory_account_id=$1',[row.id])).rows)
+        .toEqual([{local_user_id:null,link_status:'unmatched',match_strategy:'none'}])
+      expect((await previewDirectorySyncIntegration(f.integrationId)).wouldUnbindAccounts).toBe(0)
+    })
+  })
+  it('keeps another integration and its same-provider identity outside preview and apply effects',async()=>{
+    await fixture('full',async f=>{
+      const own=(await query<{union_id:string;open_id:string}>(`SELECT a.union_id,a.open_id
+        FROM directory_accounts a JOIN directory_account_links l ON l.directory_account_id=a.id
+        WHERE a.integration_id=$1 AND l.local_user_id=$2`,[f.integrationId,f.local[0]])).rows[0]
+      const foreignCorp='foreign-'+f.seed,foreignKey='foreign-key-'+f.seed
+      const foreign=await createDirectoryIntegration({name:'Synthetic foreign '+f.seed,corpId:foreignCorp,
+        appKey:'synthetic',appSecret:'synthetic-test-only',admissionMode:'manual_only',memberGroupSyncMode:'disabled'})
+      let groupId=''
+      try {
+        const account=(await query<{id:string}>(`INSERT INTO directory_accounts
+          (integration_id,corp_id,external_user_id,union_id,open_id,external_key,name,is_active)
+          VALUES ($1,$2,$3,$4,$5,$3,'Synthetic foreign',true) RETURNING id`,
+        [foreign.id,foreignCorp,foreignKey,own.union_id,own.open_id])).rows[0].id
+        await query(`INSERT INTO directory_account_links (directory_account_id,local_user_id,link_status,match_strategy)
+          VALUES ($1,$2,'linked','manual')`,[account,f.local[3]])
+        await query(`INSERT INTO user_external_identities
+          (provider,external_key,provider_union_id,provider_open_id,corp_id,local_user_id)
+          VALUES ('dingtalk',$1,$2,$3,$4,$5)`,[foreignKey,own.union_id,own.open_id,foreignCorp,f.local[3]])
+        groupId=(await query<{id:string}>('INSERT INTO platform_member_groups (name,description) VALUES ($1,$2) RETURNING id',
+          ['Synthetic foreign','dingtalk-sync-group:'+foreign.id+':foreign'])).rows[0].id
+        await query('INSERT INTO platform_member_group_members (group_id,user_id) VALUES ($1,$2)',[groupId,f.local[3]])
+        const foreignSnapshot=async()=>({
+          accounts:(await query('SELECT * FROM directory_accounts WHERE integration_id=$1 ORDER BY id',[foreign.id])).rows,
+          links:(await query('SELECT * FROM directory_account_links WHERE directory_account_id=$1',[account])).rows,
+          group:(await query('SELECT * FROM platform_member_groups WHERE id=$1',[groupId])).rows,
+          members:(await query('SELECT * FROM platform_member_group_members WHERE group_id=$1 ORDER BY user_id',[groupId])).rows,
+          identities:(await query('SELECT * FROM user_external_identities WHERE provider=$1 AND corp_id=$2 ORDER BY id',
+            ['dingtalk',foreignCorp])).rows,
+        })
+        const before=await fingerprint(),other=await foreignSnapshot()
+        expect(effects(await previewDirectorySyncIntegration(f.integrationId))).toEqual({
+          wouldAdmitUsers:2,wouldBindAccounts:3,wouldUnbindAccounts:0,wouldCreateMemberGroups:1,
+          wouldSyncMemberGroups:2,wouldAddMemberGroupMemberships:5,wouldRemoveMemberGroupMemberships:1,
+          wouldAssignRoles:3,wouldAdmitNamespaces:6,
+        })
+        expect(await fingerprint()).toEqual(before)
+        expect(await foreignSnapshot()).toEqual(other)
+        expect((await syncDirectoryIntegration(f.integrationId,'system:ops02-cross-integration')).run.stats)
+          .toMatchObject({autoAdmittedCount:2,memberGroupMembershipsUpdatedCount:6})
+        expect(await foreignSnapshot()).toEqual(other)
+      } finally {
+        if(groupId)await query('DELETE FROM platform_member_groups WHERE id=$1',[groupId])
+        await query('DELETE FROM directory_integrations WHERE id=$1',[foreign.id])
+        await query('DELETE FROM user_external_identities WHERE provider=$1 AND corp_id=$2',['dingtalk',foreignCorp])
+      }
+    })
+  })
+  it('keeps group and governance effects zero when configured disabled',async()=>{
+    await fixture('disabled',async f=>{
+      expect(effects(await previewDirectorySyncIntegration(f.integrationId))).toEqual({wouldAdmitUsers:0,wouldBindAccounts:1,wouldUnbindAccounts:0,
+        wouldCreateMemberGroups:0,wouldSyncMemberGroups:0,wouldAddMemberGroupMemberships:0,wouldRemoveMemberGroupMemberships:0,wouldAssignRoles:0,wouldAdmitNamespaces:0})
+      expect((await syncDirectoryIntegration(f.integrationId,'system:ops02-disabled')).run.stats).toMatchObject({
+        autoAdmittedCount:0,memberGroupsCreatedCount:0,memberGroupsSyncedCount:0,memberGroupMembershipsUpdatedCount:0,
+        memberGroupDefaultRoleAssignmentsCount:0,memberGroupDefaultNamespaceAdmissionsCount:0})
+    })
+  })
+  it('walks inactive and vanished accounts without inventing an unlink from inactivity',async()=>{
+    await fixture('absent',async f=>{
+      const preview=await previewDirectorySyncIntegration(f.integrationId)
+      expect(preview.wouldDeactivateAccounts).toBe(1);expect(preview.wouldDeactivateLinkedAccounts).toBe(1)
+      expect(preview.wouldBindAccounts).toBe(1);expect(preview.wouldUnbindAccounts).toBe(0)
+      expect((await syncDirectoryIntegration(f.integrationId,'system:ops02-absent')).run.stats).toMatchObject({accountsDeactivatedCount:1,autoAdmittedCount:0})
+      expect((await query(`SELECT l.link_status,a.is_active FROM directory_account_links l JOIN directory_accounts a ON a.id=l.directory_account_id
+        WHERE a.integration_id=$1 ORDER BY a.external_user_id`,[f.integrationId])).rows)
+        .toEqual([{link_status:'linked',is_active:false},{link_status:'linked',is_active:false}])
+    })
+  })
+  it('does not reject new no-email admission using a guessed future account UUID suffix',async()=>{
+    await fixture('username',async f=>{
+      const p=await previewDirectorySyncIntegration(f.integrationId)
+      expect(p.wouldAdmitUsers).toBe(1);expect(p.wouldBindAccounts).toBe(1)
+      expect((await syncDirectoryIntegration(f.integrationId,'system:ops02-unknown-id')).run.stats).toMatchObject({autoAdmittedCount:1})
+    })
+  })
+  it('still refuses a knowable generated-username conflict when the fixed prefix truncates the UUID suffix',async()=>{
+    await fixture('knownUsername',async f=>{
+      const p=await previewDirectorySyncIntegration(f.integrationId)
+      expect(p.autoAdmissionCandidateCount).toBe(1)
+      expect(p.wouldAdmitUsers).toBe(0)
+      expect(p.wouldBindAccounts).toBe(0)
+      expect((await syncDirectoryIntegration(f.integrationId,'system:ops02-known-id')).run.stats)
+        .toMatchObject({autoAdmittedCount:0,autoAdmissionFailedCount:1})
+    })
+  })
+
+  it('reports role association rows after catalog drift without claiming effective permission',async()=>{
+    await fixture('missingRole',async f=>{
+      await query('DELETE FROM roles WHERE id=$1',[f.roleId])
+      const before=await fingerprint(),p=await previewDirectorySyncIntegration(f.integrationId)
+      expect(effects(p)).toEqual({wouldAdmitUsers:2,wouldBindAccounts:3,wouldUnbindAccounts:0,wouldCreateMemberGroups:2,
+        wouldSyncMemberGroups:2,wouldAddMemberGroupMemberships:6,wouldRemoveMemberGroupMemberships:0,wouldAssignRoles:4,wouldAdmitNamespaces:8})
+      expect(await fingerprint()).toEqual(before)
+      const applied=await syncDirectoryIntegration(f.integrationId,'system:ops02-role-association')
+      expect(applied.run.stats).toMatchObject({autoAdmittedCount:2,memberGroupDefaultRoleAssignmentsCount:4,memberGroupDefaultNamespaceAdmissionsCount:8})
+      expect((await query('SELECT count(*)::int AS count FROM user_roles WHERE role_id=$1',[f.roleId])).rows).toEqual([{count:4}])
+    })
+  })
+
 })

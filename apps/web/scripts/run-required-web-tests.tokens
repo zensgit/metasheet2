@@ -220,6 +220,7 @@ dingtalk-recipient-field-warnings
 directoryConfigPickers
 DirectoryDeprovisionEvidencePanel.spec.ts
 directoryManagementView
+directoryManagementViewPreviewEffects
 featureFlags.plm.spec.ts
 featureFlagsApprovalAttachments
 featureFlagsApprovalMobile
