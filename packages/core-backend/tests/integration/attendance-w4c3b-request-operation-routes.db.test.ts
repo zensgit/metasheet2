@@ -1,3 +1,9 @@
+import { computeAttendanceSemanticInputFingerprintV1 } from '../../src/attendance/w4c0-fingerprints'
+import { ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1 } from '../../src/attendance/w4c1-segment-calculator'
+import {
+  clearAttendanceW7ContextSourcePostureV1,
+  seedAttendanceW7ContextSourcePostureV1,
+} from '../utils/w7-context-source-posture-fixture'
 import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
@@ -336,6 +342,486 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       else process.env[key] = value
     }
   })
+
+  async function seedCanonicalDay(
+    workDate: string,
+    segments: Array<{ startTime: string; endTime: string; startDayOffset?: 0; endDayOffset?: 1 }>,
+  ) {
+    const fixture = await seedOrg('shadow')
+    await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+    // Existing RBAC_BYPASS fixture posture; this is not a real-auth proof.
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+      [fixture.userId, ['attendance:read', 'attendance:write']],
+    )
+    const headers = { Authorization: `Bearer ${fixture.token}` }
+    const shift = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST', headers,
+      body: {
+        name: 'canonical day synthetic', timezone: 'UTC',
+        lateGraceMinutes: 0, earlyGraceMinutes: 0, roundingMinutes: 1,
+        workingDays: [0, 1, 2, 3, 4, 5, 6], segments,
+      },
+    })
+    expect(shift.status, 'PARENT_CALC_DAY_SHIFT_HTTP_STATUS').toBe(201)
+    const shiftId: unknown = shift.body?.data?.id
+    expect(typeof shiftId).toBe('string')
+    if (typeof shiftId !== 'string') throw new Error('PARENT_CALC_DAY_SHIFT_ID_REQUIRED')
+    for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+      await pool.query(
+        `UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1`,
+        [fixture.orgId, state, prior, version],
+      )
+    }
+    expect(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED === fixture.orgId).toBe(true)
+    const assigned = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST', headers,
+      body: { userId: fixture.userId, shiftId, startDate: workDate, endDate: workDate },
+    })
+    expect(assigned.status, 'PARENT_CALC_DAY_ASSIGNMENT_HTTP_STATUS').toBe(201)
+    return { ...fixture, headers, shiftId, workDate }
+  }
+
+  async function frozenCanonicalCalculation(orgId: string, calculationId: string) {
+    const rows = await pool.query(
+      `SELECT to_jsonb(c) AS calculation,
+              (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.segment_index) FROM attendance_record_segments s
+                WHERE s.org_id = c.org_id AND s.record_id = c.attendance_record_id AND s.calculation_id = c.id) AS children
+         FROM attendance_record_calculations c WHERE c.org_id = $1 AND c.id = $2`,
+      [orgId, calculationId],
+    )
+    expect(rows.rows).toHaveLength(1)
+    return rows.rows[0]
+  }
+
+  // Date-scoped native reads support both w4_group live and w4 recompute.
+  async function readNativeProofDay(fixture: { orgId: string; userId: string; workDate: string }) {
+    const current = await pool.query(
+      `SELECT c.*, to_jsonb(r) AS parent, r.work_date::text AS record_work_date,
+              r.work_date AS record_http_work_date
+         FROM attendance_records r JOIN attendance_record_calculations c
+           ON c.id = r.current_calculation_id AND c.org_id = r.org_id AND c.attendance_record_id = r.id
+        WHERE r.org_id = $1 AND r.user_id = $2 AND r.work_date = $3::date`,
+      [fixture.orgId, fixture.userId, fixture.workDate],
+    )
+    expect(current.rows, 'NATIVE_DATE_CURRENT_POINTER_JOIN').toHaveLength(1)
+    const row = current.rows[0]
+    const children = await pool.query(
+      `SELECT segment_index, expected_start_at, expected_end_at, actual_in_at, actual_out_at,
+              work_minutes, late_minutes, early_leave_minutes, status, status_reasons
+         FROM attendance_record_segments
+        WHERE org_id = $1 AND record_id = $2 AND calculation_id = $3 ORDER BY segment_index`,
+      [fixture.orgId, row.parent.id, row.id],
+    )
+    const events = await pool.query<{ id: string; work_date: string; event_type: string; occurred_at: Date }>(
+      `SELECT id::text, work_date::text, event_type, occurred_at FROM attendance_events
+        WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date ORDER BY occurred_at, id`,
+      [fixture.orgId, fixture.userId, fixture.workDate],
+    )
+    return { row, children: children.rows, events: events.rows }
+  }
+
+  function assertNativeProofDay(
+    day: Awaited<ReturnType<typeof readNativeProofDay>>,
+    fixture: { orgId: string; userId: string; workDate: string; shiftId: string },
+    startTime: string,
+    endTime: string,
+    minutes: number,
+    groupId: string | null,
+    entrypoint: 'live' | 'recompute' = 'live',
+  ) {
+    const { row, children, events } = day
+    const start = `${fixture.workDate}T${startTime}:00.000Z`
+    const end = `${fixture.workDate}T${endTime}:00.000Z`
+    expect(row).toMatchObject({
+      org_id: fixture.orgId, attendance_record_id: row.parent.id, record_work_date: fixture.workDate,
+      calculation_kind: 'calculation', mode: 'authoritative', entrypoint,
+      outcome: 'completed', outcome_reason_code: 'calculated', projection_effect: 'set_active',
+      expected_segment_count: 1, projected_status: 'normal', projected_work_minutes: minutes,
+      projected_late_minutes: 0, projected_early_leave_minutes: 0,
+    })
+    expect(row.parent).toMatchObject({
+      org_id: fixture.orgId, user_id: fixture.userId, work_date: fixture.workDate,
+      current_calculation_id: row.id, projection_owner: groupId === null ? 'w4' : 'w4_group',
+      visibility_state: 'active', status: 'normal', work_minutes: minutes, late_minutes: 0, early_leave_minutes: 0,
+    })
+    expect([row.projected_first_in_at, row.projected_last_out_at]).toEqual([new Date(start), new Date(end)])
+    expect([new Date(row.parent.first_in_at), new Date(row.parent.last_out_at)]).toEqual([new Date(start), new Date(end)])
+    expect(row.parent.timezone).toBe('UTC')
+    expect(row.attribution_snapshot).toMatchObject({
+      posture: 'resolved_v2',
+      value: { orgId: fixture.orgId, userId: fixture.userId, workDate: fixture.workDate, shiftId: fixture.shiftId },
+    })
+    expect(row.context_snapshot).toMatchObject({
+      schemaVersion: groupId === null ? 1 : 2, selector: groupId === null ? 'legacy' : 'group_effective',
+      orgId: fixture.orgId, userId: fixture.userId, workDate: fixture.workDate,
+      shiftId: fixture.shiftId, calculationGroupId: groupId, timezone: 'UTC', roundingMinutes: 1,
+    })
+    expect(row.context_snapshot.segments).toEqual([{
+      index: 0, startTime, endTime, startDayOffset: 0, endDayOffset: 0,
+      lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0,
+    }])
+    expect(row.segment_snapshot).toEqual(row.context_snapshot.segments)
+    expect(row.approved_facts_snapshot).toEqual([])
+    expect(events.map(event => [event.work_date, event.event_type, event.occurred_at.toISOString()])).toEqual([
+      [fixture.workDate, 'check_in', start], [fixture.workDate, 'check_out', end],
+    ])
+    expect(row.evidence_snapshot).toEqual(events.map(event => ({
+      kind: 'punch', ref: event.id, direction: event.event_type,
+      occurredAt: event.occurred_at.toISOString(), source: 'attendance_event',
+    })))
+    expect(children).toEqual([{
+      segment_index: 0, expected_start_at: new Date(start), expected_end_at: new Date(end),
+      actual_in_at: new Date(start), actual_out_at: new Date(end), work_minutes: minutes,
+      late_minutes: 0, early_leave_minutes: 0, status: 'normal', status_reasons: ['within_window'],
+    }])
+  }
+
+  async function readFrozenProofTarget(fixture: { orgId: string; userId: string; workDate: string }) {
+    const rows = await pool.query(
+      `SELECT to_jsonb(r) AS parent,
+              (SELECT jsonb_agg(to_jsonb(e) ORDER BY e.occurred_at, e.id) FROM attendance_events e
+                WHERE e.org_id = r.org_id AND e.user_id = r.user_id AND e.work_date = r.work_date) AS events,
+              (SELECT count(*)::int FROM attendance_records p
+                WHERE p.org_id = r.org_id AND p.user_id = r.user_id AND p.work_date = r.work_date) AS records,
+              (SELECT count(*)::int FROM attendance_record_calculations c
+                WHERE c.org_id = r.org_id AND c.attendance_record_id = r.id) AS calculations,
+              (SELECT count(*)::int FROM attendance_record_segments s
+                WHERE s.org_id = r.org_id AND s.record_id = r.id) AS children,
+              (SELECT count(*)::int FROM attendance_events e
+                WHERE e.org_id = r.org_id AND e.user_id = r.user_id AND e.work_date = r.work_date) AS event_count
+         FROM attendance_records r WHERE r.org_id = $1 AND r.user_id = $2 AND r.work_date = $3::date`,
+      [fixture.orgId, fixture.userId, fixture.workDate],
+    )
+    expect(rows.rows).toHaveLength(1)
+    return rows.rows[0]
+  }
+
+  async function readProofShift(fixture: { orgId: string; shiftId: string }) {
+    const rows = await pool.query(
+      `SELECT to_jsonb(s) AS shift, left(s.work_start_time::text, 5) AS start_time,
+              left(s.work_end_time::text, 5) AS end_time,
+              (SELECT jsonb_agg(to_jsonb(seg) ORDER BY seg.segment_index) FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segments,
+              (SELECT jsonb_agg(jsonb_build_object(
+                'index', seg.segment_index, 'start', left(seg.start_time::text, 5),
+                'end', left(seg.end_time::text, 5), 'startOffset', seg.start_day_offset,
+                'endOffset', seg.end_day_offset) ORDER BY seg.segment_index)
+                 FROM attendance_shift_segments seg WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS timing
+         FROM attendance_shifts s WHERE s.org_id = $1 AND s.id = $2`,
+      [fixture.orgId, fixture.shiftId],
+    )
+    expect(rows.rows).toHaveLength(1)
+    return rows.rows[0]
+  }
+
+  it('CALC12_HTTP_PG: same user switches calculation groups at the inclusive effective-date boundary', async () => {
+    const ownedEnv = {
+      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
+      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    }
+    let ownedOrg: string | undefined
+    try {
+      const fixture = await seedOrg('shadow')
+      ownedOrg = fixture.orgId
+      await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+        [fixture.userId, ['attendance:read', 'attendance:write']],
+      )
+      const headers = { Authorization: `Bearer ${fixture.token}` }
+      const { buildAttendanceGroupFixedScheduleProducerKey } = pluginRequire(
+        '../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+      ) as { buildAttendanceGroupFixedScheduleProducerKey(input: {
+        groupId: string; shiftId: string; startDate: string; endDate: string
+      }): string }
+      const days = [
+        { workDate: '2026-07-01', effectiveFrom: '2026-06-01', effectiveTo: '2026-07-01', start: '09:00', end: '17:00', minutes: 480 },
+        { workDate: '2026-07-02', effectiveFrom: '2026-07-02', effectiveTo: null, start: '10:00', end: '16:00', minutes: 360 },
+      ].map(day => ({ ...day, groupId: randomUUID(), shiftId: '' }))
+      for (const day of days) {
+        const shift = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+          method: 'POST', headers,
+          body: {
+            name: 'bounded group cutover synthetic', timezone: 'UTC',
+            lateGraceMinutes: 0, earlyGraceMinutes: 0, roundingMinutes: 1,
+            workingDays: [0, 1, 2, 3, 4, 5, 6], flexPolicy: { mode: 'strict' },
+            segments: [{ startTime: day.start, endTime: day.end }],
+          },
+        })
+        expect(shift.status, 'CALC12_SHIFT_HTTP_STATUS').toBe(201)
+        expect(shift.body?.ok).toBe(true)
+        const shiftId: unknown = shift.body?.data?.id
+        expect(typeof shiftId).toBe('string')
+        if (typeof shiftId !== 'string') throw new Error('CALC12_SHIFT_ID_REQUIRED')
+        day.shiftId = shiftId
+        await pool.query(
+          `INSERT INTO attendance_groups (id, org_id, name, attendance_type, timezone)
+           VALUES ($1, $2, $3, 'fixed_shift', 'UTC')`,
+          [day.groupId, fixture.orgId, 'bounded cutover ' + day.workDate],
+        )
+        await pool.query(
+          `INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ($1, $2, $3)`,
+          [fixture.orgId, day.groupId, fixture.userId],
+        )
+        await pool.query(
+          `INSERT INTO attendance_calculation_group_memberships
+             (org_id, user_id, group_id, effective_from, effective_to, assigned_by, assigned_reason, assigned_correlation_id)
+           VALUES ($1, $2, $3, $4::date, $5::date, $2, 'bounded native proof', $6)`,
+          [fixture.orgId, fixture.userId, day.groupId, day.effectiveFrom, day.effectiveTo, randomUUID()],
+        )
+        await pool.query(
+          `INSERT INTO attendance_group_fixed_schedule_configs
+             (org_id, group_id, shift_id, start_date, end_date, revision, updated_by)
+           VALUES ($1, $2, $3, $4::date, $4::date, 1, $5)`,
+          [fixture.orgId, day.groupId, day.shiftId, day.workDate, fixture.userId],
+        )
+        const producerKey = buildAttendanceGroupFixedScheduleProducerKey({
+          groupId: day.groupId, shiftId: day.shiftId, startDate: day.workDate, endDate: day.workDate,
+        })
+        await pool.query(
+          `INSERT INTO attendance_shift_assignments
+             (org_id, user_id, shift_id, start_date, end_date, is_active, slot_index,
+              producer_type, producer_ref_id, producer_key, producer_run_id, publish_status)
+           VALUES ($1, $2, $3, $4::date, $4::date, true, 0,
+                   'attendance_group_fixed_schedule', $5, $6, $7, 'published')`,
+          [fixture.orgId, fixture.userId, day.shiftId, day.workDate, day.groupId, producerKey, randomUUID()],
+        )
+      }
+      for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+        await pool.query(
+          `UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1`,
+          [fixture.orgId, state, prior, version],
+        )
+      }
+      await seedAttendanceW7ContextSourcePostureV1(pool, fixture.orgId, 'group_authoritative', { scope: 'synthetic_staging' })
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = fixture.orgId
+      expect(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED).toBe(fixture.orgId)
+      expect(process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED).toBe(fixture.orgId)
+      // Verify both complete static source tuples before any punch is issued.
+      for (const day of days) {
+        const members = await pool.query(
+          `SELECT group_id FROM attendance_calculation_group_memberships
+            WHERE org_id = $1 AND user_id = $2 AND effective_from <= $3::date
+              AND (effective_to IS NULL OR effective_to >= $3::date) ORDER BY group_id`,
+          [fixture.orgId, fixture.userId, day.workDate],
+        )
+        expect(members.rows).toEqual([{ group_id: day.groupId }])
+        const source = await pool.query(
+          `SELECT g.attendance_type, g.timezone, m.user_id, c.shift_id,
+                  c.start_date::text, c.end_date::text, c.revision,
+                  a.shift_id AS assigned_shift, a.start_date::text AS assigned_start,
+                  a.end_date::text AS assigned_end, a.is_active, a.slot_index,
+                  a.producer_type, a.producer_ref_id, a.producer_key, a.publish_status,
+                  s.flex_mode, s.late_grace_minutes, s.early_grace_minutes, s.rounding_minutes
+             FROM attendance_groups g JOIN attendance_group_members m ON m.org_id = g.org_id AND m.group_id = g.id
+             JOIN attendance_group_fixed_schedule_configs c ON c.org_id = g.org_id AND c.group_id = g.id
+             JOIN attendance_shift_assignments a ON a.org_id = g.org_id AND a.producer_ref_id = g.id AND a.user_id = m.user_id
+             JOIN attendance_shifts s ON s.org_id = g.org_id AND s.id = c.shift_id
+            WHERE g.org_id = $1 AND g.id = $2`,
+          [fixture.orgId, day.groupId],
+        )
+        expect(source.rows).toEqual([{
+          attendance_type: 'fixed_shift', timezone: 'UTC', user_id: fixture.userId,
+          shift_id: day.shiftId, start_date: day.workDate, end_date: day.workDate, revision: 1,
+          assigned_shift: day.shiftId, assigned_start: day.workDate, assigned_end: day.workDate,
+          is_active: true, slot_index: 0, producer_type: 'attendance_group_fixed_schedule',
+          producer_ref_id: day.groupId, producer_key: buildAttendanceGroupFixedScheduleProducerKey({
+            groupId: day.groupId, shiftId: day.shiftId, startDate: day.workDate, endDate: day.workDate,
+          }), publish_status: 'published', flex_mode: 'strict',
+          late_grace_minutes: 0, early_grace_minutes: 0, rounding_minutes: 1,
+        }])
+      }
+      for (const day of days) {
+        const target = { ...fixture, ...day }
+        for (const [eventType, time] of [['check_in', day.start], ['check_out', day.end]] as const) {
+          const response = await requestJson(`${baseUrl}/api/attendance/punch`, {
+            method: 'POST', headers,
+            body: { orgId: fixture.orgId, eventType, operationId: randomUUID(), occurredAt: `${day.workDate}T${time}:00.000Z`, timezone: 'UTC' },
+          })
+          expect(response.status, 'CALC12_PUNCH_HTTP_STATUS').toBe(200)
+          expect(response.body?.ok).toBe(true)
+          const current = await readNativeProofDay(target)
+          expect(response.body?.data?.record).toMatchObject({
+            id: current.row.parent.id, work_date: JSON.parse(JSON.stringify(current.row.record_http_work_date)),
+            current_calculation_id: current.row.id, projection_owner: 'w4_group', visibility_state: 'active',
+            status: current.row.parent.status, work_minutes: current.row.parent.work_minutes,
+          })
+        }
+      }
+      const parents = await pool.query(
+        `SELECT work_date::text FROM attendance_records WHERE org_id = $1 AND user_id = $2 ORDER BY work_date`,
+        [fixture.orgId, fixture.userId],
+      )
+      expect(parents.rows).toEqual(days.map(day => ({ work_date: day.workDate })))
+      const nativeMinutes: number[] = []
+      const nativeOwners: string[] = []
+      for (const day of days) {
+        const target = { ...fixture, ...day }
+        const native = await readNativeProofDay(target)
+        assertNativeProofDay(native, target, day.start, day.end, day.minutes, day.groupId)
+        nativeMinutes.push(Number(native.row.projected_work_minutes))
+        nativeOwners.push(String(native.row.parent.projection_owner))
+      }
+      const events = await pool.query(
+        `SELECT count(*)::int AS count FROM attendance_events WHERE org_id = $1 AND user_id = $2`,
+        [fixture.orgId, fixture.userId],
+      )
+      expect(events.rows).toEqual([{ count: 4 }])
+      console.log('PARENT_CALC12_CUTOVER_HTTP_RECEIPT ' + JSON.stringify({
+        clause: 'CALC12', dateParents: parents.rows.length, groups: days.length,
+        eventCount: Number(events.rows[0].count), nativeWorkMinutes: nativeMinutes,
+        nativeProjectionOwners: nativeOwners, selector: 'group_effective',
+        membershipBoundaryAssertions: true, exactNativeSnapshotsAndEvidence: true,
+      }))
+    } finally {
+      for (const [key, value] of Object.entries(ownedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      if (ownedOrg) await clearAttendanceW7ContextSourcePostureV1(pool, ownedOrg)
+    }
+  }, 120000)
+
+  it('CALC13_HTTP_PG: actual shift edits preserve a historical frozen target and frozen_prior inputs', async () => {
+    const ownedEnv = {
+      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
+      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    }
+    try {
+      delete process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+      const fixture = await seedCanonicalDay('2026-07-03', [{ startTime: '09:00', endTime: '17:00' }])
+      for (const [eventType, time] of [['check_in', '09:00'], ['check_out', '17:00']] as const) {
+        const response = await requestJson(`${baseUrl}/api/attendance/punch`, {
+          method: 'POST', headers: fixture.headers,
+          body: { orgId: fixture.orgId, eventType, operationId: randomUUID(), occurredAt: `${fixture.workDate}T${time}:00.000Z`, timezone: 'UTC' },
+        })
+        expect(response.status, 'CALC13_PUNCH_HTTP_STATUS').toBe(200)
+        expect(response.body?.ok).toBe(true)
+        const current = await readNativeProofDay(fixture)
+        expect(response.body?.data?.record).toMatchObject({
+          id: current.row.parent.id, work_date: JSON.parse(JSON.stringify(current.row.record_http_work_date)),
+          current_calculation_id: current.row.id, projection_owner: 'w4', visibility_state: 'active',
+          status: current.row.parent.status, work_minutes: current.row.parent.work_minutes,
+        })
+      }
+      const before = await readNativeProofDay(fixture)
+      assertNativeProofDay(before, fixture, '09:00', '17:00', 480, null)
+      const c0 = before.row
+      expect(typeof c0.id).toBe('string')
+      expect(Number.isInteger(c0.version)).toBe(true)
+      const frozen = await frozenCanonicalCalculation(fixture.orgId, c0.id)
+      const targetBefore = await readFrozenProofTarget(fixture)
+      expect(targetBefore).toMatchObject({ records: 1, event_count: 2 })
+      const liveBefore = await readProofShift(fixture)
+      expect(liveBefore).toMatchObject({
+        start_time: '09:00', end_time: '17:00',
+        shift: { late_grace_minutes: 0, early_grace_minutes: 0, rounding_minutes: 1 },
+        timing: [{ index: 0, start: '09:00', end: '17:00', startOffset: 0, endOffset: 0 }],
+      })
+      const edited = await requestJson(`${baseUrl}/api/attendance/shifts/${fixture.shiftId}`, {
+        method: 'PUT', headers: fixture.headers,
+        body: { segments: [{ startTime: '10:00', endTime: '16:00' }], lateGraceMinutes: 30, earlyGraceMinutes: 20, roundingMinutes: 5 },
+      })
+      expect(edited.status, 'CALC13_SHIFT_EDIT_HTTP_STATUS').toBe(200)
+      expect(edited.body).toMatchObject({ ok: true, data: { id: fixture.shiftId } })
+      const liveEdited = await readProofShift(fixture)
+      expect(liveEdited).not.toEqual(liveBefore)
+      expect(liveEdited).toMatchObject({
+        start_time: '10:00', end_time: '16:00',
+        shift: { late_grace_minutes: 30, early_grace_minutes: 20, rounding_minutes: 5 },
+      })
+      expect(liveEdited.timing).toEqual([{ index: 0, start: '10:00', end: '16:00', startOffset: 0, endOffset: 0 }])
+      expect(await frozenCanonicalCalculation(fixture.orgId, c0.id)).toEqual(frozen)
+      expect(await readFrozenProofTarget(fixture)).toEqual(targetBefore)
+      assertNativeProofDay(await readNativeProofDay(fixture), fixture, '09:00', '17:00', 480, null)
+      const operationId = randomUUID()
+      const recomputed = await requestJson(`${baseUrl}/api/attendance/records/${c0.parent.id}/recompute`, {
+        method: 'POST', headers: { ...fixture.headers, 'X-Org-Id': fixture.orgId },
+        body: { policy: 'frozen_prior', operationId, expectedCalculationId: c0.id, expectedCalculationVersion: c0.version },
+      })
+      if (recomputed.status !== 200) {
+        const denial = recomputed.body?.error?.message
+        const reason = denial === 'Record operation requires active org membership' ? 'ORG_MEMBERSHIP_REQUIRED'
+          : denial === 'Record operation requires attendance admin permission' ? 'DB_ADMIN_REQUIRED' : 'OTHER'
+        const code = recomputed.body?.error?.code
+        console.log('CALC13_RECOMPUTE_DENIAL_DIAGNOSTIC ' + JSON.stringify({
+          status: recomputed.status, reason,
+          code: typeof code === 'string' && /^[A-Z0-9_]{1,80}$/.test(code) ? code : 'UNCLASSIFIED',
+        }))
+      }
+      expect(recomputed.status, 'CALC13_FROZEN_PRIOR_HTTP_STATUS').toBe(200)
+      // Explicit read: the canonical-day live helper is not valid after recompute.
+      const after = await readNativeProofDay(fixture)
+      const c1 = after.row
+      expect(c1.id).not.toBe(c0.id)
+      expect(recomputed.body).toEqual({
+        ok: true, data: {
+          alreadyApplied: false, calculationId: c1.id, policy: 'frozen_prior',
+          contextDecision: 'prior_calculation_frozen', projectedStatus: 'normal',
+        },
+      })
+      assertNativeProofDay(after, fixture, '09:00', '17:00', 480, null, 'recompute')
+      expect(c1).toMatchObject({
+        supersedes_calculation_id: c0.id, version: c0.version + 1, operation_id: operationId,
+        input_provenance: { policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen', priorCalculationId: c0.id },
+      })
+      // Only frozen inputs/fingerprints compare C1 to C0; identities and operation provenance differ.
+      for (const key of [
+        'attribution_snapshot', 'context_snapshot', 'segment_snapshot', 'evidence_snapshot',
+        'approved_facts_snapshot', 'manual_override_snapshot',
+        'source_definition_fingerprint',
+      ] as const) {
+        expect(c1[key], `CALC13_FROZEN_INPUT_EQUAL:${key}`).toEqual(c0[key])
+      }
+      // frozen_prior retains the persisted prior merge policy. Recompute the
+      // complete semantic inputs independently; never copy the prior hash.
+      const semanticForPolicy = (mergePolicy: 'append' | 'merge') => computeAttendanceSemanticInputFingerprintV1({
+        attribution: c0.attribution_snapshot, context: c0.context_snapshot, evidence: c0.evidence_snapshot,
+        approvedFacts: c0.approved_facts_snapshot, manualOverride: c0.manual_override_snapshot,
+        mergePolicy, calculationTier: 'segment_authoritative',
+        engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1, snapshotSchemaVersion: 1,
+      })
+      expect(c0.merge_policy, 'CALC13_PRIOR_APPEND_POLICY').toBe('append')
+      expect(c0.semantic_input_fingerprint, 'CALC13_LIVE_APPEND_SEMANTIC_DOMAIN').toBe(semanticForPolicy('append'))
+      expect(c1.merge_policy, 'CALC13_RECOMPUTE_PRESERVES_PRIOR_POLICY').toBe(c0.merge_policy)
+      expect(c1.semantic_input_fingerprint, 'CALC13_RECOMPUTE_FROZEN_PRIOR_SEMANTIC_DOMAIN').toBe(semanticForPolicy(c0.merge_policy))
+      expect(c1.semantic_input_fingerprint).toBe(c0.semantic_input_fingerprint)
+      const preservedC0 = await frozenCanonicalCalculation(fixture.orgId, c0.id)
+      expect(preservedC0).toEqual(frozen)
+      expect(await readProofShift(fixture)).toEqual(liveEdited)
+      const targetAfter = await readFrozenProofTarget(fixture)
+      expect(targetAfter.events).toEqual(targetBefore.events)
+      expect({
+        records: targetAfter.records, calculations: targetAfter.calculations,
+        children: targetAfter.children, event_count: targetAfter.event_count,
+      }).toEqual({
+        records: targetBefore.records, calculations: targetBefore.calculations + 1,
+        children: targetBefore.children + 1, event_count: targetBefore.event_count,
+      })
+      console.log('PARENT_CALC13_FROZEN_HTTP_RECEIPT ' + JSON.stringify({
+        clause: 'CALC13', editHTTP: edited.status, recomputeHTTP: recomputed.status,
+        policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen',
+        sourceWindowChanged: liveEdited.start_time !== liveBefore.start_time
+          && liveEdited.end_time !== liveBefore.end_time,
+        originalCalculationUnchanged: JSON.stringify(preservedC0) === JSON.stringify(frozen),
+        sourceFingerprintEqual: c1.source_definition_fingerprint === c0.source_definition_fingerprint,
+        semanticPolicyDomainsVerified: true,
+        semanticMergePolicyChanged: c1.semantic_input_fingerprint !== c0.semantic_input_fingerprint,
+        frozenSnapshotKeysCompared: 6, priorWorkMinutes: Number(c0.projected_work_minutes),
+        currentWorkMinutes: Number(c1.projected_work_minutes),
+        versionAdvancedByOne: c1.version === c0.version + 1, nativeProjectionOwner: c1.parent.projection_owner,
+        eventCount: Number(targetAfter.event_count),
+      }))
+    } finally {
+      for (const [key, value] of Object.entries(ownedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }, 120000)
 
   it('replays shadow create and edit without duplicate source, snapshot, operation, or outbox rows', async () => {
     const fixture = await seedOrg('shadow')
