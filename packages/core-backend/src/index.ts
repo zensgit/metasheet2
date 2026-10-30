@@ -4,6 +4,7 @@
  * CI trigger for pnpm lockfile sync
  */
 
+import { attendanceOwningSessionForClientV1 } from './attendance/attendance-owning-session'
 import type { Application, Request, Response, NextFunction, RequestHandler } from 'express';
 import type { Server as HttpServer } from 'http';
 import express from 'express'
@@ -3089,7 +3090,7 @@ export class MetaSheetServer {
                     legacyAdapters: config.legacyAdapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: (error?: Error) => client.release(error) }
+                      return { client: attendanceOwningSessionForClientV1(client), release: (error?: Error) => client.release(error) }
                     },
                   }),
                 createRequestOperationBoundary: (config: {
@@ -3099,7 +3100,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: (error?: Error) => client.release(error) }
+                      return { client: attendanceOwningSessionForClientV1(client), release: (error?: Error) => client.release(error) }
                     },
                   }),
                 // Approval-change-request lock §3 C-1 — bind the boundary the plugin just built as
@@ -3124,7 +3125,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: (error?: Error) => client.release(error) }
+                      return { client: attendanceOwningSessionForClientV1(client), release: (error?: Error) => client.release(error) }
                     },
                   }),
                 appendOperatorRetirementCalculation: (input) =>
@@ -3360,7 +3361,7 @@ export class MetaSheetServer {
                 }) => {
                   const client = await poolManager.get().getInternalPool().connect()
                   try {
-                    return await dispatchAttendanceResultEventOutboxV1(client, {
+                    return await dispatchAttendanceResultEventOutboxV1(attendanceOwningSessionForClientV1(client), {
                       emit: options.emit,
                       batchLimit: options.batchLimit,
                     })
@@ -3450,7 +3451,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client, release: (error?: Error) => client.release(error) }
+                      return { client: attendanceOwningSessionForClientV1(client), release: (error?: Error) => client.release(error) }
                     },
                   })
                   return host.commitSyncImportPlanV1(input)
@@ -3535,7 +3536,7 @@ export class MetaSheetServer {
             ? createAttendanceImportRollbackBoundaryV1({
                 acquireConnection: async () => {
                   const client = await poolManager.get().getInternalPool().connect()
-                  return { client, release: (error?: Error) => client.release(error) }
+                  return { client: attendanceOwningSessionForClientV1(client), release: (error?: Error) => client.release(error) }
                 },
               })
             : undefined,

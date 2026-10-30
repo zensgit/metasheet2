@@ -1,7 +1,13 @@
 import { runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../helpers/attendance-owning-session-unit-fixture'
 import { buildOnlinePunchRequestV1, requireOnlinePunchRequestV1, makeOnlinePunchReceiptV1, parseOnlinePunchReceiptV1,
   retryOnlinePunchClaimV1, OnlinePunchClaimCollisionError, isOnlinePunchClaimPrimaryKeyCollision, OnlinePunchConnectionUncertainError } from '../../src/attendance/online-punch-request'
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
+
 const input = { orgId: 'd16158b5-f5bb-45bb-bb26-76c79c219d01', userId: 'actor', tokenSubjectUserId: 'actor', operationId: 'd16158b5-f5bb-45bb-bb26-76c79c219d02',
   client: { eventType: 'check_in' as const, timezone: null, source: null, location: null, meta: null, photoFileId: null, requestNamedOrgId: null } }
 const normal = { ok: true as const, data: { event: { occurred_at: '2026-10-10T00:00:00Z' }, record: { work_date: '2026-10-10' } } }
@@ -63,12 +69,11 @@ describe('closed online punch domain', () => {
   })
   it('a failed rollback after an owned collision is nonretryable and never starts a second transaction', async () => {
     let begins = 0
-    const client = { query: async (sql: string) => {
-      if (sql === 'SAVEPOINT w4c5_idle_probe') throw { code: '25P01' }
+    const { client } = await createAttendanceOwningSessionUnitFixture(async (sql: string) => {
       if (sql.startsWith('BEGIN')) begins++
       if (sql === 'ROLLBACK') throw new Error('OWNED_ROLLBACK_FAILED')
       return { rows: [] }
-    } }
+    })
     await expect(retryOnlinePunchClaimV1(() => runAttendanceResultOperationTransactionV1(client,
       async () => { throw new OnlinePunchClaimCollisionError() }))).rejects.toBeInstanceOf(OnlinePunchConnectionUncertainError)
     expect(begins).toBe(1)

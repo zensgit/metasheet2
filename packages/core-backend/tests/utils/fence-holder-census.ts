@@ -23,6 +23,8 @@
  *     itself: the fence then outlives the call on the CALLER'S connection, so the caller is the holder.
  *     A SEAM joins too: a named function that takes the fence and then hands the fenced query to a function it
  *     received as a parameter (`withTransaction(sheetId, handler)`), ADR "回调缝规则".
+ *     The owning-session migration additionally proves four declaration-keyed lease delegation edges,
+ *     including the private runner's transaction lifetime; unsupported shapes are explicit refusals.
  *  4. HOLDERS — every call to an entry whose innermost enclosing function is not itself an entry (the fence
  *     stops propagating there), every src literal calling a SQL acquirer, every src DML on a trigger table.
  *     Seam call sites are holders whose checked region is the handler LITERAL passed to the seam.
@@ -94,6 +96,8 @@ export type FenceHolder = {
   entryWritesVia: string[]
 }
 
+export type LeaseDelegation = { wrapper: string; admission: string; target: string }
+
 export type Census = {
   seedCount: number
   /** Declaration labels `file#qualifiedName`. */
@@ -103,6 +107,10 @@ export type Census = {
   seams: string[]
   /** Seams that open their own transaction (a caller's continuation is NOT under the fence). */
   ownTransactionSeams: string[]
+  /** Proven lease edges, one record per syntactic site (never deduplicated by label). */
+  leaseDelegations: LeaseDelegation[]
+  /** An unsupported lease/transaction shape is evidence of failure, not an empty census. */
+  leaseRefusals: string[]
   sqlAcquirers: string[]
   triggerTables: string[]
   holders: FenceHolder[]
@@ -710,6 +718,305 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     resolveCall(call, parsedOf(call)).decls.find((d) => entries.has(d.id)) ?? null
   const declOf = (fn: ts.Node | null | undefined): Decl | null => (fn ? declByNode.get(fn) ?? null : null)
 
+  // Lease admission is NOT a transaction or a fence. Only the resolved declaration below has the
+  // reviewed callback lifetime. Keep the proof separate from the lock-derived holder ledger.
+  const registryRel = 'attendance/w4c0-operation-registry.ts'
+  const admissionRel = 'attendance/attendance-owning-session.ts'
+  const leaseRefusals = new Set<string>()
+  const leaseDelegations: LeaseDelegation[] = []
+  const delegatedBodies = new Map<string, Decl>()
+  const refuseLease = (d: Decl | string, reason: string): void => {
+    leaseRefusals.add(`${typeof d === 'string' ? d : d.label}: ${reason}`)
+  }
+  const uniqueDecl = (rel: string, name: string): Decl | undefined => {
+    const ds = localByName.get(rel)?.get(name) ?? []
+    return ds.length === 1 && ds[0].topLevel ? ds[0] : undefined
+  }
+  // Compare AST token spellings, ignoring comments, layout and quote style. This is a deliberately
+  // closed grammar, not a general control-flow verifier. Unknown shapes must be reviewed explicitly.
+  const tokens = (text: string): string => {
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, text)
+    const out: Array<[number, string]> = []
+    for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
+      out.push([kind, (kind === ts.SyntaxKind.StringLiteral
+        || kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral) ? scanner.getTokenValue() : scanner.getTokenText()])
+    }
+    return JSON.stringify(out)
+  }
+  const matches = (n: ts.Node | undefined, text: string): boolean => !!n && tokens(n.getText()) === tokens(text)
+  const callsIn = (fn: FnNode): ts.CallExpression[] => {
+    const calls: ts.CallExpression[] = []
+    visitOwn(fn, n => { if (ts.isCallExpression(n)) calls.push(n) })
+    return calls
+  }
+  const simpleParam = (fn: FnNode, i: number): ts.Identifier | undefined => {
+    const p = fn.parameters[i]
+    return p && ts.isIdentifier(p.name) && !p.initializer && !p.dotDotDotToken ? p.name : undefined
+  }
+  // The legacy resolver intentionally over-approximates some calls. A proof may not use that
+  // approximation, nor an import hidden by a local parameter/variable or a same-name declaration.
+  const strictTarget = (call: ts.CallExpression): Decl | undefined => {
+    const r = resolveCall(call, parsedOf(call))
+    if (!r.precise || r.decls.length !== 1) return undefined
+    const d = r.decls[0]
+    if (uniqueDecl(d.rel, d.name) !== d) return undefined
+    if (d.rel !== call.getSourceFile().fileName && (!ts.isFunctionDeclaration(d.fn)
+      || !d.fn.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword))) return undefined
+    const expr = unwrapExpr(call.expression)
+    const name = ts.isIdentifier(expr) ? expr.text : ts.isPropertyAccessExpression(expr)
+      && ts.isIdentifier(expr.expression) ? expr.expression.text : ''
+    if (!name) return undefined
+    let shadowed = false
+    visitAll(call.getSourceFile(), n => {
+      if ((ts.isParameter(n) || ts.isVariableDeclaration(n) || ts.isBindingElement(n))
+        && ts.isIdentifier(n.name) && n.name.text === name) shadowed = true
+      if (ts.isFunctionDeclaration(n) && n.name?.text === name && n !== d.fn) shadowed = true
+    })
+    return shadowed ? undefined : d
+  }
+  const stableBindings = (fn: FnNode, allowed: readonly ts.Identifier[]): boolean => {
+    const names = new Set(allowed.map(n => n.text))
+    let stable = true
+    visitAll(fn, n => {
+      if ((ts.isParameter(n) || ts.isVariableDeclaration(n) || ts.isBindingElement(n))
+        && ts.isIdentifier(n.name) && names.has(n.name.text) && !allowed.includes(n.name)) stable = false
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment && names.has(rootIdentifier(n.left))) stable = false
+      if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n))
+        && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
+        && names.has(rootIdentifier(n.operand))) stable = false
+    })
+    return stable
+  }
+  const returned = (call: ts.CallExpression, fn: FnNode): boolean => {
+    let n: ts.Node = call
+    if (ts.isAwaitExpression(n.parent)) n = n.parent
+    if (fn.body === n) return true // expression-bodied arrow adopts the Promise
+    if (!ts.isReturnStatement(n.parent)) return false
+    if (ts.isAwaitExpression(n)) return true
+    // A bare return inside try/finally would release the lease before the Promise settles.
+    for (let p = n.parent.parent; p && p !== fn; p = p.parent) if (ts.isTryStatement(p)) return false
+    return true
+  }
+  const admission = uniqueDecl(admissionRel, 'withAttendanceExclusiveIdleSessionV1')
+  const runner = uniqueDecl(registryRel, 'runAttendanceResultOperationOnLeaseV1')
+  const publicRunner = uniqueDecl(registryRel, 'runAttendanceResultOperationTransactionV1')
+  const acquirer = uniqueDecl(registryRel, 'acquireCleaningSessionFences')
+  const releaser = uniqueDecl(registryRel, 'releaseCleaningSessionFences')
+  // Four migration edges, not a general callback-propagation rule. The holder census itself remains
+  // primitive-derived. Each tuple requires one resolved declaration and one proved call site.
+  const leaseContracts = [
+    [registryRel, 'runAttendanceResultOperationTransactionV1', registryRel, 'runAttendanceResultOperationOnLeaseV1'],
+    ['attendance/w4c3a-rollout-control.ts', 'runControlTransaction', registryRel, 'runAttendanceResultOperationTransactionV1'],
+    ['attendance/w4c3a-rollout-control.ts', 'transitionAttendanceCalculationRolloutV1', 'attendance/w4c3a-rollout-control.ts', 'runControlTransaction'],
+    ['attendance/w7-context-source-transition.ts', 'transitionAttendanceW7ContextSourceV1', registryRel, 'runAttendanceResultOperationTransactionV1'],
+  ] as const
+  const leaseTargets = new Map<Decl, Decl>()
+  for (const [rel, name, targetRel, targetName] of leaseContracts) {
+    if (!parsedByRel.has(rel)) continue
+    const wrapper = uniqueDecl(rel, name)
+    const target = uniqueDecl(targetRel, targetName)
+    if (!wrapper || !target) refuseLease(`${rel}#${name}`, 'declaration-identity')
+    else leaseTargets.set(wrapper, target)
+  }
+  // The managed driver's identity/idle/WeakMap semantics have separate behavior gates. Here prove
+  // only the imported admission's callback lifetime: await its body before invalidating the lease.
+  const admissionProven = (() => {
+    if (!admission || [0, 1, 2].map(i => simpleParam(admission.fn, i)?.text).join(',') !== 'value,body,refusal') return false
+    if (!stableBindings(admission.fn, [0, 1, 2].map(i => simpleParam(admission.fn, i)!))) return false
+    const bodyCalls = callsIn(admission.fn).filter(c => matches(c.expression, 'body'))
+    if (bodyCalls.length !== 1 || !matches(bodyCalls[0], 'body(lease.facade)')) return false
+    const awaited = bodyCalls[0].parent
+    const ret = awaited.parent
+    const block = ret.parent
+    const guarded = block.parent
+    return ts.isAwaitExpression(awaited) && ts.isReturnStatement(ret) && ts.isBlock(block)
+      && block.statements.length === 1 && ts.isTryStatement(guarded) && guarded.tryBlock === block
+      && !!guarded.finallyBlock && matches(guarded.finallyBlock.statements[0], 'lease.active = false')
+  })()
+
+  const proveTransaction = (d: Decl): boolean => {
+    if (!acquirer || !releaser || !acquirers.has(acquirer.id) || !d.fn.body || !ts.isBlock(d.fn.body)) return false
+    const params = [0, 1, 2].map(i => simpleParam(d.fn, i))
+    if (params.some(p => !p) || params.map(p => p!.text).join(',') !== 'connection,body,options'
+      || !stableBindings(d.fn, params as ts.Identifier[])) return false
+    for (const helper of [acquirer, releaser]) {
+      const connection = simpleParam(helper.fn, 0)
+      const queries = callsIn(helper.fn).filter(c => ts.isPropertyAccessExpression(c.expression) && c.expression.name.text === 'query')
+      if (!connection || queries.length === 0 || queries.some(c => !matches(c.expression, `${connection.text}.query`))) return false
+    }
+    const calls = callsIn(d.fn)
+    // Closed transaction grammar: inserting another opaque helper cannot conceal early settlement.
+    const inventory = new Map<string, number>()
+    for (const c of calls) {
+      const name = collapse(c.expression.getText())
+      inventory.set(name, (inventory.get(name) ?? 0) + 1)
+    }
+    const expectedCalls = new Map([
+      ['assertConnectionIsIdleV1', 1], ['acquireCleaningSessionFences', 1], ['connection.query', 6],
+      ['fail', 1], ['String', 2], ['body', 1], ['isRetryableSqlState', 3],
+      ['markAttendanceW4ConnectionUncertainV1', 2], ['releaseCleaningSessionFences', 1],
+    ])
+    if (inventory.size !== expectedCalls.size || [...expectedCalls].some(([name, count]) => inventory.get(name) !== count)) return false
+    const acquire = calls.filter(c => strictTarget(c) === acquirer)
+    const release = calls.filter(c => strictTarget(c) === releaser)
+    const body = calls.filter(c => matches(c.expression, 'body'))
+    const query = calls.filter(c => ts.isPropertyAccessExpression(c.expression) && c.expression.name.text === 'query')
+    const queryWith = (sql: string) => query.filter(c => c.arguments[0] && ts.isStringLiteralLike(c.arguments[0]) && c.arguments[0].text === sql)
+    const begin = queryWith('BEGIN ISOLATION LEVEL SERIALIZABLE')
+    const commit = queryWith('COMMIT')
+    const rollback = queryWith('ROLLBACK')
+    if ([acquire, release, body, begin, commit, rollback].some(xs => xs.length !== 1)) return false
+    // No opaque query, different receiver, extra settlement, or unclassified connection consumer.
+    if (query.length !== 6 || query.some(c => !matches(c.expression, 'connection.query')
+      || !c.arguments[0] || !ts.isStringLiteralLike(c.arguments[0]) || !ts.isAwaitExpression(c.parent))) return false
+    const consumers = new Set([acquire[0], release[0], body[0]])
+    for (const c of calls) {
+      if (c.arguments.some(a => rootIdentifier(a) === 'connection') && !consumers.has(c)
+        && !matches(c, 'assertConnectionIsIdleV1(connection)')) return false
+    }
+    const statements = d.fn.body.statements
+    if (statements.length !== 3 || !matches(statements[0], 'await assertConnectionIsIdleV1(connection)')
+      || !matches(statements[1], 'let attempt = 0')) return false
+    const loop = statements[2]
+    if (!ts.isForStatement(loop) || loop.initializer || loop.condition || loop.incrementor || !ts.isBlock(loop.statement)) return false
+    const ls = loop.statement.statements
+    if (ls.length !== 3 || !matches(ls[0], 'const held: string[] = []')
+      || !matches(ls[1], 'const sessionFenced = options?.attendanceCleaningSheetIds !== undefined')) return false
+    const outer = ls[2]
+    if (!ts.isTryStatement(outer) || !outer.catchClause || !outer.finallyBlock) return false
+    const bs = outer.tryBlock.statements
+    if (bs.length !== 8 || !matches(bs[0], 'if (sessionFenced) await acquireCleaningSessionFences(connection, options.attendanceCleaningSheetIds!, held)')
+      || !matches(bs[5], 'const result = await body(connection)') || !matches(bs[7], 'return result')) return false
+    const queryTry = (stmt: ts.Statement, c: ts.CallExpression): boolean => ts.isTryStatement(stmt)
+      && stmt.tryBlock.statements.length === 1 && c.parent.parent === stmt.tryBlock.statements[0]
+      && ts.isAwaitExpression(c.parent) && !!stmt.catchClause && !stmt.finallyBlock
+    if (!queryTry(bs[1], begin[0]) || !queryTry(bs[6], commit[0])) return false
+    if (!matches((bs[1] as ts.TryStatement).catchClause, `catch (error) {
+      if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
+      throw error
+    }`) || !matches((bs[6] as ts.TryStatement).catchClause, `catch (error) {
+      if (sessionFenced && !isRetryableSqlState(error)) throw new AttendanceCleaningConnectionUncertainError()
+      if (!isRetryableSqlState(error)) throw markAttendanceW4ConnectionUncertainV1(error)
+      throw error
+    }`)) return false
+    const catchStatements = outer.catchClause.block.statements
+    if (catchStatements.length !== 3 || !queryTry(catchStatements[0], rollback[0])
+      || !matches(catchStatements[1], `if (isRetryableSqlState(error) && attempt < W4_TRANSACTION_MAX_RETRIES) {
+        attempt += 1
+        continue
+      }`) || !matches(catchStatements[2], 'throw error')) return false
+    if (!matches((catchStatements[0] as ts.TryStatement).catchClause, `catch {
+      if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
+      if (error instanceof OnlinePunchClaimCollisionError) throw new OnlinePunchConnectionUncertainError()
+      throw markAttendanceW4ConnectionUncertainV1(error)
+    }`)) return false
+    if (outer.finallyBlock.statements.length !== 1
+      || !matches(outer.finallyBlock.statements[0], 'if (sessionFenced) await releaseCleaningSessionFences(connection, held)')) return false
+    // Reject early returns (including one in a settlement catch) and direct data-write additions.
+    const returns: ts.ReturnStatement[] = []
+    visitOwn(d.fn, n => { if (ts.isReturnStatement(n)) returns.push(n) })
+    return returns.length === 1 && returns[0] === bs[7] && !subtreeWritesRecords(d.fn)
+  }
+  const transactionProven = !!runner && proveTransaction(runner)
+  if (parsedByRel.has(registryRel)) {
+    if (!runner || !publicRunner || !admission || !acquirer || !releaser) refuseLease(registryRel, 'declaration-identity')
+    if (!admissionProven) refuseLease(admissionRel, 'admission-lifetime')
+    if (!transactionProven) refuseLease(registryRel, 'transaction-shape')
+    if (transactionProven) ownTxnSeams.add(runner!.id)
+  }
+
+  const recordedLeaseCalls = new Set<ts.CallExpression>()
+  const proveLeaseEdge = (wrapper: Decl, admitCall: ts.CallExpression, call: ts.CallExpression, target: Decl): boolean => {
+    const callback = admitCall.arguments[1]
+    const connection = simpleParam(wrapper.fn, 0)
+    if (!admissionProven || strictTarget(admitCall) !== admission || strictTarget(call) !== target
+      || !callback || !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) {
+      refuseLease(wrapper, 'declaration-identity')
+      return false
+    }
+    const lease = simpleParam(callback, 0)
+    const handler = call.arguments[1]
+    const wrapperBody = simpleParam(wrapper.fn, 1)
+    if (!connection || !lease || callback.parameters.length !== 1
+      || !matches(admitCall.arguments[0], connection.text) || !matches(call.arguments[0], lease.text)
+      || !handler || !(ts.isArrowFunction(handler) || ts.isFunctionExpression(handler)
+        ? !!simpleParam(handler, 0) : !!wrapperBody && matches(handler, wrapperBody.text))
+      || !stableBindings(wrapper.fn, [connection, lease, ...wrapper.fn.parameters.slice(1)
+        .flatMap(p => ts.isIdentifier(p.name) ? [p.name] : [])])
+      || !returned(admitCall, wrapper.fn) || !returned(call, callback)) {
+      refuseLease(wrapper, 'lease-binding-or-lifetime')
+      return false
+    }
+    if (wrapper === publicRunner && (target !== runner || call.arguments.length !== 3
+      || !matches(call.arguments[1], 'body') || !matches(call.arguments[2], 'options')
+      || callback.body !== call || !transactionProven)) {
+      refuseLease(wrapper, 'registry-forwarding')
+      return false
+    }
+    if (wrapper !== publicRunner && call.arguments.length !== 2) {
+      refuseLease(wrapper, 'unknown-options-binding')
+      return false
+    }
+    const outerBody = wrapper.fn.body
+    if (leaseTargets.get(wrapper) !== target || admitCall.arguments.length !== 3
+      || !matches(admitCall.arguments[2], "() => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE')")
+      || !outerBody || !ts.isBlock(outerBody)) {
+      refuseLease(wrapper, 'delegation-shape')
+      return false
+    }
+    const outerStatements = outerBody.statements
+    let shell = false
+    if (wrapper === publicRunner) {
+      shell = outerStatements.length === 2 && matches(outerStatements[0], `if (options !== undefined && (options.attendanceCleaningAuthority !== true
+        || !Array.isArray(options.attendanceCleaningSheetIds) || options.attendanceCleaningSheetIds.length < 1
+        || options.attendanceCleaningSheetIds.length > 2)) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')`)
+    } else if (wrapper.name === 'runControlTransaction') {
+      shell = outerStatements.length === 1 && matches(callback.body, `{
+        for (let attempt = 0; ; attempt += 1) {
+          try { return await runAttendanceResultOperationTransactionV1(lease, body) }
+          catch (error) {
+            if (isAttendanceW4ConnectionUncertainV1(error)) throw error
+            if (attempt === 0 && isRetryableControlPrecondition(error)) continue
+            throw error
+          }
+        }
+      }`)
+    } else if (ts.isBlock(callback.body)) {
+      const rollout = wrapper.name === 'transitionAttendanceCalculationRolloutV1'
+      const cs = callback.body.statements
+      const guarded = cs[1]
+      shell = outerStatements.length === 3
+        && matches(outerStatements[0], 'const input = normalizeTransitionInput(rawInput)')
+        && matches(outerStatements[1], rollout ? 'const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)'
+          : 'const advisoryKey = buildAttendanceW7ContextSourceAdvisoryKeyV1(input.orgId)')
+        && cs.length === 2 && matches(cs[0], rollout
+          ? 'await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(lease, orgKey)'
+          : 'await acquireContextSourceLockSessionExclusive(lease, advisoryKey)')
+        && !!guarded && ts.isTryStatement(guarded) && !guarded.catchClause && !!guarded.finallyBlock
+        && guarded.tryBlock.statements.length === 2 && matches(guarded.tryBlock.statements[0], rollout
+          ? "await afterExclusiveRolloutLockForTests?.('transition')" : 'await afterExclusiveLockForTests?.()')
+        && call.parent.parent === guarded.tryBlock.statements[1] && ts.isAwaitExpression(call.parent)
+        && guarded.finallyBlock.statements.length === 1 && matches(guarded.finallyBlock.statements[0], rollout
+          ? 'await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(lease, orgKey).catch(() => undefined)'
+          : 'await releaseContextSourceLockSessionExclusive(lease, advisoryKey).catch(() => undefined)')
+    }
+    if (!shell) {
+      refuseLease(wrapper, 'delegation-shape')
+      return false
+    }
+    if (subtreeWritesRecords(wrapper.fn)) {
+      refuseLease(wrapper, 'delegation-direct-write')
+      return false
+    }
+    if (!recordedLeaseCalls.has(call)) {
+      recordedLeaseCalls.add(call)
+      leaseDelegations.push({ wrapper: wrapper.label, admission: admission!.label, target: target.label })
+      delegatedBodies.set(wrapper.id, target)
+    }
+    return true
+  }
+
   const isSeam = (f: FnNode, g: FnNode, fence: ts.CallExpression): boolean => {
     // ADR "回调缝规则": a seam's own closure writes nothing — it only fences and hands over. A function that
     // also writes `meta_records` itself is a holder in its own right and is checked where it writes.
@@ -736,6 +1043,14 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     return seam
   }
 
+  if (transactionProven && runner) {
+    entries.add(runner.id)
+    seams.add(runner.id)
+    const sites = allCalls.filter(({ call }) => resolveCall(call, parsedOf(call)).decls.includes(runner)
+      && strictTarget(call) === runner)
+    if (sites.length !== 1) refuseLease(runner, 'private-site-count')
+  }
+
   for (let changed = true; changed;) {
     changed = false
     for (const d of decls) {
@@ -750,6 +1065,34 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
         // An entry that ALSO hands the fenced query to a callback it was given is a seam on the CALLER'S connection.
         if (isSeam(d.fn, d.fn, joinedVia)) seams.add(d.id)
         changed = true
+      }
+    }
+    // Restore the pre-admission entry closure only through a proved lease edge. In particular,
+    // runControlTransaction's retry callback and both rollout/W7 callbacks are not ordinary scopes.
+    const candidates = new Map<Decl, Array<{ admit: ts.CallExpression; call: ts.CallExpression; target: Decl }>>()
+    for (const { call } of allCalls) {
+      const target = entryTarget(call)
+      if (!target || !ownTxnSeams.has(target.id)) continue
+      const callback = enclosingFn(call)
+      if (!callback || fnName(callback) || !ts.isCallExpression(callback.parent)) continue
+      const admit = callback.parent
+      if (admit.arguments[1] !== callback) continue
+      const wrapper = declOf(nearestNamedFn(callback))
+      if (!wrapper || !leaseTargets.has(wrapper)) continue
+      candidates.set(wrapper, [...(candidates.get(wrapper) ?? []), { admit, call, target }])
+    }
+    for (const [wrapper, sites] of candidates) {
+      if (sites.length !== 1) {
+        refuseLease(wrapper, 'delegation-site-count')
+        continue
+      }
+      const { admit, call, target } = sites[0]
+      if (!proveLeaseEdge(wrapper, admit, call, target)) continue
+      if (!entries.has(wrapper.id)) { entries.add(wrapper.id); changed = true }
+      // Literal handlers belong to host entries; forwarding an outer handler creates another seam.
+      if (ts.isIdentifier(call.arguments[1])) {
+        seams.add(wrapper.id)
+        ownTxnSeams.add(wrapper.id)
       }
     }
     for (const { call } of allCalls) {
@@ -768,6 +1111,25 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     }
   }
 
+  for (const [wrapper] of leaseTargets) {
+    if (!delegatedBodies.has(wrapper.id)) refuseLease(wrapper, 'unproven-lease-delegation')
+  }
+  if (parsedByRel.has(registryRel) && (!publicRunner || !delegatedBodies.has(publicRunner.id))) {
+    refuseLease(registryRel, 'unproven-public-delegation')
+  }
+  // Inline ONLY the proved lease edges. They do not consume one of the existing two callee levels;
+  // ordinary calls still do. A cycle is refused, never silently truncated or assigned a larger depth.
+  const bodiesOf = (start: Decl): Decl[] => {
+    const out: Decl[] = []
+    const seen = new Set<string>()
+    for (let d: Decl | undefined = start; d; d = delegatedBodies.get(d.id)) {
+      if (seen.has(d.id)) { refuseLease(start, 'delegation-cycle'); break }
+      seen.add(d.id)
+      out.push(d)
+    }
+    return out
+  }
+
   // ── writes reachable through callees (C1-F4): precise resolution only, two levels ──
   const writesMemo = new Map<string, boolean>()
   const declWritesData = (d: Decl, depth: number): boolean => {
@@ -775,12 +1137,13 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     const hit = writesMemo.get(memoKey)
     if (hit !== undefined) return hit
     writesMemo.set(memoKey, false) // cycle guard
-    let writes = literalsIn(d.fn).some(({ text }) => RECORDS_DATA_WRITE_RE.test(collapse(text)))
+    const bodies = bodiesOf(d)
+    let writes = bodies.some(b => literalsIn(b.fn).some(({ text }) => RECORDS_DATA_WRITE_RE.test(collapse(text))))
     if (!writes && depth > 1) {
-      visitAll(d.fn, (n) => {
+      for (const b of bodies) visitAll(b.fn, (n) => {
         if (writes || !ts.isCallExpression(n)) return
-        const r = resolveCall(n, d.parsed)
-        if (r.precise && r.decls.some((x) => x !== d && declWritesData(x, depth - 1))) writes = true
+        const r = resolveCall(n, b.parsed)
+        if (r.precise && r.decls.some((x) => !bodies.includes(x) && declWritesData(x, depth - 1))) writes = true
       })
     }
     writesMemo.set(memoKey, writes)
@@ -810,11 +1173,12 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
    */
   const entryWritesViaOf = (target: Decl): string[] => {
     const via = new Set<string>()
-    visitAll(target.fn, (n) => {
+    const bodies = bodiesOf(target)
+    for (const b of bodies) visitAll(b.fn, (n) => {
       if (!ts.isCallExpression(n)) return
-      const r = resolveCall(n, target.parsed)
+      const r = resolveCall(n, b.parsed)
       if (!r.precise) return
-      for (const d of r.decls) if (d !== target && declWritesData(d, 2)) via.add(`${target.qualified}>${d.qualified}`)
+      for (const d of r.decls) if (!bodies.includes(d) && declWritesData(d, 2)) via.add(`${b.qualified}>${d.qualified}`)
     })
     return [...via].sort()
   }
@@ -834,6 +1198,12 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     const named = nearestNamedFn(call)
     if (named && entries.has(declOf(named)?.id ?? '')) continue // e.g. the fence inside a seam's own transaction callback
     const scope = scopeLabel(call)
+    if (delegatedBodies.has(target.id)) {
+      const handler = call.arguments[1]
+      if (handler && (ts.isArrowFunction(handler) || ts.isFunctionExpression(handler)) && !handlerBinding(handler)) {
+        refuseLease(`${p.rel} :: ${scope}`, 'unknown-handler-binding')
+      }
+    }
     const continuation: Region[] = g ? [{ source: p.source, fn: g, after: call.getEnd(), queryBinding: argText(call, p.source) }] : []
     let kind: HolderKind = 'direct'
     let regions: Region[]
@@ -915,6 +1285,8 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     entries: labels(entries),
     seams: labels(seams),
     ownTransactionSeams: labels(ownTxnSeams),
+    leaseDelegations: leaseDelegations.sort((a, b) => a.wrapper.localeCompare(b.wrapper) || a.target.localeCompare(b.target)),
+    leaseRefusals: [...leaseRefusals].sort(),
     sqlAcquirers: [...sqlAcquirers].sort(),
     triggerTables: [...triggerTables].sort(),
     holders,

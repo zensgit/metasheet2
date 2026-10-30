@@ -1,7 +1,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
 import {
   acquireAttendanceLegacyPlanClass11V1,
   createAttendanceLegacyPlanProcessorV1,
@@ -25,6 +29,8 @@ const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../../../../..',
 )
+
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
 
 describe('W4C-3a OD-W4C-58/60 closed leaves', () => {
   it('requires frozen group/member existence branches and UUID groupRef', () => {
@@ -211,10 +217,7 @@ describe('createAttendanceLegacyPlanProcessorV1 production boundary', () => {
       return { rows: [] }
     })
     const processor = createAttendanceLegacyPlanProcessorV1({
-      acquireConnection: async () => ({
-        client: { query },
-        release,
-      }),
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(query, { onRelease: release }),
     })
     await expect(processor.processLegacyImportPlanV1('10000000-0000-4000-8000-000000000099'))
       .resolves.toEqual({ kind: 'not_found' })

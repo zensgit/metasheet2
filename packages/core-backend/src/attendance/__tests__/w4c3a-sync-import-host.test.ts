@@ -4,7 +4,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
 
 import {
   createAttendanceSyncImportHostV1,
@@ -33,6 +37,8 @@ const BATCH_ID = '10000000-0000-4000-8000-000000000001'
 const ORG_ID = '20000000-0000-4000-8000-000000000001'
 const ORIGINAL_ALLOWLIST =
   process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
 
 afterEach(() => {
   if (ORIGINAL_ALLOWLIST === undefined) {
@@ -169,6 +175,18 @@ function baseInput(
 }
 
 describe('W4C-3a P06 sync import host (unit/static)', () => {
+  it.each(['T', 'E', '?'] as const)('refuses protocol %s before SQL or business work, without discarding the caller', async initialStatus => {
+    const query = vi.fn(async () => { throw Object.freeze(new Error('query must not run')) })
+    const release = vi.fn()
+    const host = createAttendanceSyncImportHostV1({
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(query, { initialStatus, onRelease: release }),
+    })
+    await expect(host.commitSyncImportPlanV1(baseInput()))
+      .rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+    expect(query).not.toHaveBeenCalled()
+    expect(release.mock.calls).toEqual([[undefined]])
+  })
+
   it('accepts 5000 and rejects authoritative 5001 before reservation DML', async () => {
     expect(
       resolveAttendanceLegacyPlanOperationalBranchV1({
@@ -189,28 +207,18 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
     const sql: string[] = []
     let released = 0
     const host = createAttendanceSyncImportHostV1({
-      acquireConnection: async () => ({
-        client: {
-          query: async (text: string) => {
-            sql.push(text)
-            // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
-            // contract the real driver gives `assertConnectionIsIdleV1`'s own
-            // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
-            if (text === 'SAVEPOINT w4c5_idle_probe') {
-              throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+      acquireConnection: async () => createAttendanceOwningSessionUnitFixture(
+        async (text: string) => {
+          sql.push(text)
+          if (text.includes('attendance_calculation_rollout_state')) {
+            return {
+              rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
             }
-            if (text.includes('attendance_calculation_rollout_state')) {
-              return {
-                rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
-              }
-            }
-            return { rows: [] }
-          },
+          }
+          return { rows: [] }
         },
-        release: () => {
-          released += 1
-        },
-      }),
+        { onRelease: () => { released += 1 } },
+      ),
     })
     const items = Array.from({ length: 5001 }, (_, ordinal) => ({
       kind: 'apply' as const,
@@ -249,10 +257,9 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
       ),
     ).rejects.toThrow('ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED')
     expect(released).toBe(1)
-    // Gate E (#4844): the idle-precondition probe's own SAVEPOINT is genuinely the FIRST
-    // statement issued on the connection, before the wrapper's BEGIN.
-    expect(sql[0]).toBe('SAVEPOINT w4c5_idle_probe')
-    expect(sql[1]).toContain('BEGIN ISOLATION LEVEL SERIALIZABLE')
+    // Nonmutating admission adds no probe SQL before BEGIN.
+    expect(sql[0]).toBe('BEGIN ISOLATION LEVEL SERIALIZABLE')
+    expect(sql.some(text => text.includes('w4c5_idle_probe'))).toBe(false)
     expect(sql.join('\n')).not.toMatch(
       /INSERT INTO attendance_import_batches|INSERT INTO attendance_import_items|COPY |attendance_import_jobs|attendance_import_legacy_execution_plan/i,
     )
@@ -558,26 +565,17 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
       process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ORG_ID
       const sql: string[] = []
       const host = createAttendanceSyncImportHostV1({
-        acquireConnection: async () => ({
-          client: {
-            query: async (text: string) => {
-              sql.push(text)
-              // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
-              // contract the real driver gives `assertConnectionIsIdleV1`'s own
-              // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
-              if (text === 'SAVEPOINT w4c5_idle_probe') {
-                throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+        acquireConnection: async () => createAttendanceOwningSessionUnitFixture(
+          async (text: string) => {
+            sql.push(text)
+            if (text.includes('attendance_calculation_rollout_state')) {
+              return {
+                rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
               }
-              if (text.includes('attendance_calculation_rollout_state')) {
-                return {
-                  rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
-                }
-              }
-              return { rows: [] }
-            },
+            }
+            return { rows: [] }
           },
-          release: () => undefined,
-        }),
+        ),
       })
       const items = Array.from({ length: 5001 }, (_, ordinal) => ({
         kind: 'apply' as const,
@@ -614,10 +612,9 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
           }),
         ),
       ).rejects.toThrow('ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED')
-      // Gate E (#4844): the idle-precondition probe's own SAVEPOINT is genuinely the FIRST
-      // statement issued on the connection, before the wrapper's BEGIN.
-      expect(sql[0]).toBe('SAVEPOINT w4c5_idle_probe')
-      expect(sql[1]).toContain('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      // Nonmutating admission adds no probe SQL before BEGIN.
+      expect(sql[0]).toBe('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      expect(sql.some(text => text.includes('w4c5_idle_probe'))).toBe(false)
       expect(sql.join('\n')).not.toMatch(
         /INSERT INTO attendance_import_(?:jobs|batches|items)|attendance_import_legacy_execution_plan|attendance_import_legacy_terminal/i,
       )

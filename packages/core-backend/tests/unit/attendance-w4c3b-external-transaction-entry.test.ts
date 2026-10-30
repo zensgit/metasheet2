@@ -14,7 +14,11 @@
  * gate" witness. Tests that expect a refusal assert the typed CODE, never a bare throw — a bare
  * `rejects.toThrow()` here would pass on the sentinel too and would be blind to which gate fired.
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../helpers/attendance-owning-session-unit-fixture'
 import {
   AttendanceW4RequestBoundaryError,
   createAttendanceRequestOperationBoundaryV1,
@@ -22,6 +26,8 @@ import {
   type AttendanceRequestOperationAdaptersV1,
 } from '../../src/attendance/w4c3b-request-operation-boundary'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
 
 const PAST_THE_GATES = 'SENTINEL_PREPARE_IDENTITY_REACHED'
 
@@ -315,14 +321,13 @@ function refusingAdapters(refusal: unknown): AttendanceRequestOperationAdaptersV
   }) as unknown as AttendanceRequestOperationAdaptersV1
 }
 
-/** An IDLE connection, as `runAttendanceResultOperationTransactionV1`'s own probe demands. */
-function idleConnectionClient(): AttendanceW4TransactionClientV1 & { seen: string[] } {
+/** Business query script for HTTP owning entry only; external/joining fixtures above stay query-only. */
+function idleConnectionScript(): AttendanceW4TransactionClientV1 & { seen: string[] } {
   const seen: string[] = []
   return {
     seen,
     async query(sqlText: string) {
       seen.push(sqlText)
-      if (sqlText.startsWith('SAVEPOINT ')) throw pgError('25P01')
       return { rows: [] }
     },
   }
@@ -330,9 +335,9 @@ function idleConnectionClient(): AttendanceW4TransactionClientV1 & { seen: strin
 
 describe('business refusal (lock §3 C-3 / §11-④) — the boundary decides throw vs return', () => {
   it('HTTP entry: throws the adapter’s OWN error object, unchanged (账侧字节等价)', async () => {
-    const client = idleConnectionClient()
+    const client = idleConnectionScript()
     const boundary = createAttendanceRequestOperationBoundaryV1({
-      acquireConnection: async () => ({ client, release: () => undefined }),
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(client.query.bind(client)),
       adapters: refusingAdapters({
         kind: 'business_refused',
         code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
@@ -367,9 +372,9 @@ describe('business refusal (lock §3 C-3 / §11-④) — the boundary decides th
       { kind: 'business_refused', code: 'X', detail: 7, httpError: REFUSAL_HTTP_ERROR },
       { kind: 'business_refused', code: 'X', detail: null, httpError: undefined },
     ]) {
-      const client = idleConnectionClient()
+      const client = idleConnectionScript()
       const boundary = createAttendanceRequestOperationBoundaryV1({
-        acquireConnection: async () => ({ client, release: () => undefined }),
+        acquireConnection: () => createAttendanceOwningSessionUnitFixture(client.query.bind(client)),
         adapters: refusingAdapters(malformed),
       })
       expect(await codeOf(() => boundary.execute({

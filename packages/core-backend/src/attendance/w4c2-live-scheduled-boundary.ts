@@ -97,6 +97,7 @@
  *
  * Values-free discipline: closed codes only; no caller value in any error.
  */
+import type { AttendanceOwningSessionV1 } from './attendance-owning-session'
 import crypto from 'node:crypto'
 import { buildOnlinePunchRequestV1, ONLINE_PUNCH_SOURCE_REF, makeOnlinePunchReceiptV1, parseOnlinePunchReceiptV1, retryOnlinePunchClaimV1, withOnlinePunchCompanionV1, OnlinePunchConnectionUncertainError, type OnlinePunchRequestV1, type OnlinePunchReceiptV1 } from './online-punch-request'
 import type { AttendanceRequestOperationBoundaryInputV1, AttendanceRequestOperationExternalTransactionResultV1 } from './w4c3b-request-operation-boundary'
@@ -744,7 +745,7 @@ export interface AttendanceW4LiveScheduledBoundaryV1 {
 }
 
 export interface AttendanceW4BoundaryConnectionV1 {
-  readonly client: AttendanceW4TransactionClientV1
+  readonly client: AttendanceOwningSessionV1
   release(error?: Error): void
 }
 
@@ -1996,7 +1997,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
     return { context: issued.context, w7GroupShadow: null }
   }
 
-  async function withConnection<T>(body: (client: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
+  async function withConnection<T>(body: (client: AttendanceOwningSessionV1) => Promise<T>): Promise<T> {
     const connection = await deps.acquireConnection()
     let discard: Error | undefined
     try {
@@ -2035,7 +2036,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
   // rolled back — never a partial write a retry could duplicate.
   const W4C2_TARGET_CLAIM_MAX_OUTER_RETRIES = 4
   async function withConnectionRetryingTargetContention<T>(
-    body: (client: AttendanceW4TransactionClientV1) => Promise<T>,
+    body: (client: AttendanceOwningSessionV1) => Promise<T>,
   ): Promise<T> {
     let attempt = 0
     for (;;) {

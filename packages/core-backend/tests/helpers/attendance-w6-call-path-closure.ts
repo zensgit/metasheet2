@@ -454,9 +454,16 @@ export function pluginLibFilesInClosure(closure: CallPathClosure): string[] {
  * as findings rather than disappearing from the classification. This is not a
  * whole-JavaScript data-flow proof: opaque higher-order returns, arbitrary
  * identity functions, and object-spread propagation remain outside the
- * bounded grammar. The mechanism of record for W6-R1 remains the read-only
- * transaction, which refuses a write that reaches its transaction-bound
- * handle; this sweep is a second, independent leg over the same closure.
+ * bounded grammar.
+ *
+ * A separate exact-shape leg recognizes pg 8.16.3 Client.prototype.query
+ * through Reflect.apply: its third argument is the untouched first formal
+ * parameter of a named adapter. Unknown Reflect invocations are findings.
+ * Proven ReadyForQuery notifications are recorded separately from SQL sites;
+ * their declarations remain swept, including all nested authored SQL calls.
+ * The mechanism of record for W6-R1 remains the read-only transaction, which
+ * refuses a write that reaches its transaction-bound handle; this sweep is a
+ * second, independent leg over the same closure.
  *
  * `src/db/pg.ts` and `src/integration/db/connection-pool.ts` pass for a
  * structural reason (their `sql`/`sqlOrConfig` formal parameters are what
@@ -480,12 +487,21 @@ export interface PassThroughSqlArgument extends SqlArgumentSite {
   readonly paramIndex: number
   /** The parameter identifier the trace actually landed on. */
   readonly provenanceLeaf: string
+  /** Native pg rest-array forwarding is distinct from the SQL/config input. */
+  readonly carrier?: 'arguments' | 'input'
 }
 export interface SqlArgumentFinding extends SqlArgumentSite {
   readonly reason: string
 }
 
+export interface ProtocolCallbackSite extends SqlArgumentSite {
+  readonly target: 'pg.Client.prototype._handleReadyForQuery'
+}
+
 export interface SqlArguments {
+  /** Proven native protocol notifications; these carry no SQL argument. */
+  readonly protocolCallbacks: ReadonlyArray<ProtocolCallbackSite>
+  readonly nonSqlReflectCalls: ReadonlyArray<SqlArgumentSite & { readonly role: NonSqlReflectRole }>
   readonly resolved: ReadonlyArray<ResolvedSqlArgument>
   readonly passthrough: ReadonlyArray<PassThroughSqlArgument>
   /** Sites the sweep REFUSES. A non-empty list means the static leg failed. */
@@ -585,7 +601,7 @@ function adapterNameOf(fn: FunctionLike): string | null {
     parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
     parent.right === node
   ) {
-    if (ts.isIdentifier(parent.left)) return parent.left.text
+    if (ts.isIdentifier(parent.left)) return facadeQueryAdapter(fn) ? 'query' : parent.left.text
     if (ts.isPropertyAccessExpression(parent.left) && ts.isIdentifier(parent.left.name)) return parent.left.name.text
   }
   return null
@@ -995,13 +1011,14 @@ function moduleScopeLiteralConstants(closure: CallPathClosure, repoRoot: string)
 
 type Classification =
   | { kind: 'resolved'; sql: string }
-  | { kind: 'passthrough'; adapterName: string; paramIndex: number; provenanceLeaf: string }
+  | { kind: 'passthrough'; adapterName: string; paramIndex: number; provenanceLeaf: string; carrier?: 'arguments' | 'input' }
   | { kind: 'finding'; reason: string }
 
 interface ClassifierContext {
   readonly unit: ParsedUnit
   readonly literalConstants: Map<string, string>
   readonly closureFunctions: Map<string, ts.Node[]>
+  readonly pgCarriers?: ReadonlyMap<string, 'arguments' | 'input'>
 }
 
 /**
@@ -1134,6 +1151,555 @@ function classifySqlArgument(arg: ts.Expression, callSite: ts.Node, ctx: Classif
   return { kind: 'passthrough', adapterName, paramIndex, provenanceLeaf }
 }
 
+/** The only native escape understood here is the pinned pg argument-array
+ * transport. Names and type assertions alone never establish its provenance.
+ * Module sources retain imports/aliases split out of declaration-sized units.
+ * Binding lookup deliberately over-refuses duplicate/shadowed bindings, even in
+ * sibling scopes; it must not bless a same-spelled local as the package export.
+ */
+interface NativePgContext {
+  readonly unit: ParsedUnit
+  readonly module: ts.SourceFile
+  readonly pinned: boolean
+}
+
+const nativeBindingTables = new WeakMap<ts.SourceFile, Map<string, ts.Node[]>>()
+
+function nativeBinding(name: string, source: ts.SourceFile): ts.Node[] {
+  let table = nativeBindingTables.get(source)
+  if (!table) {
+    table = new Map<string, ts.Node[]>()
+    const add = (name: string, node: ts.Node): void => { table!.set(name, [...(table!.get(name) ?? []), node]) }
+    const bind = (name: ts.BindingName, node: ts.Node): void => {
+      if (ts.isIdentifier(name)) add(name.text, node)
+      else for (const element of name.elements) if (ts.isBindingElement(element)) bind(element.name, node)
+    }
+    const walk = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) || ts.isParameter(node)) bind(node.name, node)
+      else if (ts.isImportSpecifier(node) || ts.isNamespaceImport(node)) add(node.name.text, node)
+      else if (ts.isImportClause(node) && node.name) add(node.name.text, node)
+      else if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node))
+        && node.name) add(node.name.text, node)
+      node.forEachChild(walk)
+    }
+    walk(source)
+    nativeBindingTables.set(source, table)
+  }
+  return table.get(name) ?? []
+}
+
+function nativePath(expression: ts.Expression, ctx: NativePgContext, depth = 0): string[] | null {
+  if (depth >= 4) return null
+  const value = unwrapExpression(expression)
+  if (ts.isPropertyAccessExpression(value)) {
+    const parent = nativePath(value.expression, ctx, depth)
+    return parent ? [...parent, value.name.text] : null
+  }
+  if (ts.isElementAccessExpression(value)) {
+    const parent = nativePath(value.expression, ctx, depth)
+    const key = value.argumentExpression && unwrapExpression(value.argumentExpression)
+    return parent ? [...parent, key && ts.isStringLiteral(key) ? key.text : '<computed>'] : null
+  }
+  if (!ts.isIdentifier(value)) return null
+  const local = nativeBinding(value.text, ctx.unit.source)
+  const bindings = local.length ? local : nativeBinding(value.text, ctx.module)
+  if (!bindings.length && value.text === 'Reflect') return [value.text]
+  if (bindings.length !== 1) return null
+  const binding = bindings[0]
+  if (ts.isImportSpecifier(binding)) {
+    const clause = binding.parent.parent
+    const declaration = clause.parent
+    return !binding.isTypeOnly && !clause.isTypeOnly && ts.isImportDeclaration(declaration)
+      && ts.isStringLiteral(declaration.moduleSpecifier) && declaration.moduleSpecifier.text === 'pg'
+      && (binding.propertyName ?? binding.name).text === 'Client' ? ['pg.Client'] : null
+  }
+  if (ts.isVariableDeclaration(binding) && ts.isIdentifier(binding.name) && binding.initializer
+    && ts.isVariableDeclarationList(binding.parent) && (binding.parent.flags & ts.NodeFlags.Const)) {
+    return nativePath(binding.initializer, ctx, depth + 1)
+  }
+  return null
+}
+
+function nativePathIs(path: readonly string[] | null, expected: readonly string[]): boolean {
+  return path !== null && path.length === expected.length && path.every((part, i) => part === expected[i])
+}
+
+function nativeBindingsStable(ctx: NativePgContext): boolean {
+  let stable = true
+  const protectedPath = (expression: ts.Expression): boolean => {
+    const root = nativePath(expression, ctx)?.[0]
+    return root === 'pg.Client' || root === 'Reflect'
+  }
+  const walk = (node: ts.Node): void => {
+    if (!stable) return
+    if (ts.isBinaryExpression(node)
+      && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      && (protectedPath(node.left) || protectedPath(node.right))) stable = false
+    if (ts.isDeleteExpression(node) && protectedPath(node.expression)) stable = false
+    if ((ts.isPostfixUnaryExpression(node) || (ts.isPrefixUnaryExpression(node)
+      && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)))
+      && protectedPath(node.operand)) stable = false
+    // Mutable aliases and object-property escapes cannot establish native identity.
+    if (ts.isVariableDeclaration(node) && node.initializer && protectedPath(node.initializer)
+      && (!ts.isIdentifier(node.name) || !ts.isVariableDeclarationList(node.parent)
+        || !(node.parent.flags & ts.NodeFlags.Const))) stable = false
+    if (ts.isPropertyAssignment(node) && protectedPath(node.initializer)) stable = false
+    if (ts.isShorthandPropertyAssignment(node) && protectedPath(node.name)) stable = false
+    if (ts.isArrayLiteralExpression(node)) {
+      const inspect = (child: ts.Node): void => {
+        if (ts.isIdentifier(child) && protectedPath(child)) stable = false
+        child.forEachChild(inspect)
+      }
+      node.forEachChild(inspect)
+    }
+    if (ts.isReturnStatement(node) && node.expression && protectedPath(node.expression)) stable = false
+    if (ts.isCallExpression(node)) {
+      node.arguments.forEach((arg, index) => {
+        if (!protectedPath(arg)) return
+        // Only the SQL target in the exact native invocation may escape as an argument.
+        if (!(index === 0 && node.arguments.length === 3
+          && nativePathIs(nativePath(node.expression, ctx), ['Reflect', 'apply'])
+          && nativePathIs(nativePath(arg, ctx), ['pg.Client', 'prototype', 'query']))) stable = false
+      })
+    }
+    node.forEachChild(walk)
+  }
+  walk(ctx.module)
+  if (ctx.module !== ctx.unit.source) walk(ctx.unit.source)
+  return stable
+}
+
+/** Preserve a Reflect.apply refusal candidate even when a local alias or a
+ * counterfeit Reflect binding prevents native provenance from resolving. */
+function reflectInvocationPath(expression: ts.Expression, ctx: NativePgContext, depth = 0): string[] | null {
+  // Exhausted alias resolution is a refusal candidate, never a silent omission.
+  if (depth >= 4) return ['Reflect', '<computed>']
+  const value = unwrapExpression(expression)
+  if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+    const parent = reflectInvocationPath(value.expression, ctx, depth)
+    const key = ts.isPropertyAccessExpression(value) ? value.name.text
+      : value.argumentExpression && ts.isStringLiteral(value.argumentExpression) ? value.argumentExpression.text : '<computed>'
+    return parent ? [...parent, key] : null
+  }
+  if (!ts.isIdentifier(value)) return null
+  if (value.text === 'Reflect') return ['Reflect']
+  const local = nativeBinding(value.text, ctx.unit.source)
+  const bindings = local.length ? local : nativeBinding(value.text, ctx.module)
+  if (bindings.length !== 1) return null
+  const binding = bindings[0]
+  return ts.isVariableDeclaration(binding) && binding.initializer
+    ? reflectInvocationPath(binding.initializer, ctx, depth + 1) : null
+}
+
+/** Syntax equality for the three closed facade shapes, ignoring only types,
+ * assertions, parentheses and comments. String contents/operators stay exact.
+ */
+function facadeSyntaxEqual(actual: ts.Node, expected: ts.Node): boolean {
+  if (ts.isParenthesizedExpression(actual) || ts.isAsExpression(actual)
+    || ts.isTypeAssertionExpression(actual) || ts.isNonNullExpression(actual)) actual = unwrapExpression(actual)
+  if (ts.isParenthesizedExpression(expected)) expected = unwrapExpression(expected)
+  if (actual.kind !== expected.kind) return false
+  if (ts.isIdentifier(actual) && ts.isIdentifier(expected)) return actual.text === expected.text
+  if (ts.isStringLiteral(actual) && ts.isStringLiteral(expected)) return actual.text === expected.text
+  if (ts.isNumericLiteral(actual) && ts.isNumericLiteral(expected)) return actual.text === expected.text
+  if (ts.isVariableDeclarationList(actual) && ts.isVariableDeclarationList(expected)
+    && (actual.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let)) !== (expected.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let))) return false
+  const children = (node: ts.Node): ts.Node[] => {
+    const result: ts.Node[] = []
+    node.forEachChild(child => { if (!ts.isTypeNode(child)) result.push(child) })
+    return result
+  }
+  const left = children(actual), right = children(expected)
+  return left.length === right.length && left.every((child, i) => facadeSyntaxEqual(child, right[i]))
+}
+
+function facadeExpressionMatches(node: ts.Node, expression: string): boolean {
+  const source = ts.createSourceFile('facade-shape.ts', `const shape = (${expression})`, ts.ScriptTarget.ES2022, true)
+  const statement = source.statements[0]
+  return ts.isVariableStatement(statement) && !!statement.declarationList.declarations[0].initializer
+    && facadeSyntaxEqual(node, statement.declarationList.declarations[0].initializer!)
+}
+
+function facadeStatementMatches(node: ts.Node, statement: string): boolean {
+  const source = ts.createSourceFile('facade-shape.ts', statement, ts.ScriptTarget.ES2022, true)
+  return source.statements.length === 1 && facadeSyntaxEqual(node, source.statements[0])
+}
+
+function facadeGetter(from: ts.Node): ts.MethodDeclaration | null {
+  let node: ts.Node | undefined = from
+  while (node && !(ts.isMethodDeclaration(node) && propertyNameText(node.name) === 'get')) node = node.parent
+  if (!node || !ts.isMethodDeclaration(node) || !node.body || node.parameters.length !== 2
+    || !ts.isIdentifier(node.parameters[1].name) || node.parameters[1].name.text !== 'key') return null
+  const object = node.parent, construction = object.parent
+  if (!ts.isObjectLiteralExpression(object) || !ts.isNewExpression(construction)
+    || !ts.isIdentifier(construction.expression) || construction.expression.text !== 'Proxy'
+    || construction.arguments?.length !== 2 || construction.arguments[1] !== object
+    || !facadeExpressionMatches(construction.arguments[0], 'Object.create(null)')) return null
+  const declaration = construction.parent
+  if (!ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name) || declaration.name.text !== 'facade') return null
+  const owner = enclosingFunctionOf(node)
+  if (!owner || !owner.body || !ts.isBlock(owner.body) || owner.parameters.length !== 1
+    || !ts.isIdentifier(owner.parameters[0].name) || owner.parameters[0].name.text !== 'checkout') return null
+  const scope = ts.createSourceFile('facade-scope.ts', owner.getText(), ts.ScriptTarget.ES2022, true)
+  for (const name of ['checkout', 'state', 'client', 'facade', 'methods', 'method', 'key', 'listeners', 'requireCurrent']) {
+    if (nativeBinding(name, scope).length !== 1) return null
+  }
+  for (const name of ['Proxy', 'Object', 'Map', 'Reflect', 'Set']) if (nativeBinding(name, scope).length) return null
+  for (const shape of ['const { state } = checkout', 'const client = state.client', 'const methods = new Map()',
+    'const listeners = []', 'const requireCurrent = () => { if (!current(checkout)) refuse() }']) {
+    if (owner.body.statements.filter(statement => facadeStatementMatches(statement, shape)).length !== 1) return null
+  }
+  const body = node.body.statements
+  if (body.length < 2 || !body.some(statement => facadeStatementMatches(statement, 'if (methods.has(key)) return methods.get(key)'))
+    || !body.some(statement => facadeStatementMatches(statement, 'let method'))
+    || !facadeStatementMatches(body[body.length - 2], 'methods.set(key, method)')
+    || !facadeStatementMatches(body[body.length - 1], 'return method')
+    || !facadeStatementMatches(owner.body.statements[owner.body.statements.length - 1], 'return facade')) return null
+  // The cache has one declaration and exactly has/get/set uses. No alias or
+  // prepopulation may sever the returned property's relation to this branch.
+  const dispatches = body.filter(statement => ts.isIfStatement(statement)
+    && facadeExpressionMatches(statement.expression, "key === 'query'"))
+  if (dispatches.length !== 1) return null
+  const dispatch = dispatches[0]
+  const branchAssignment = (assignment: ts.BinaryExpression): boolean => {
+    const statement = assignment.parent, block = statement.parent, branch = block.parent
+    if (assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isIdentifier(assignment.left)
+      || !ts.isArrowFunction(unwrapExpression(assignment.right)) || !ts.isExpressionStatement(statement)
+      || !ts.isBlock(block) || block.statements.length !== 1 || !ts.isIfStatement(branch)
+      || branch.thenStatement !== block) return false
+    let top: ts.Node = branch
+    while (ts.isIfStatement(top.parent) && top.parent.elseStatement === top) top = top.parent
+    return top === dispatch
+  }
+  let cacheReferences = 0, invalidWrite = false
+  const walk = (child: ts.Node): void => {
+    if (ts.isIdentifier(child) && child.text === 'methods') cacheReferences += 1
+    if (ts.isBinaryExpression(child) && child.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && child.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      const path = staticAccessPath(child.left), root = path?.[0]
+      if (root && ['key', 'client', 'facade', 'state', 'checkout'].includes(root)
+        && !(path?.length === 2 && root === 'checkout' && path[1] === 'removeApplicationListeners')) invalidWrite = true
+      if (root === 'method' && !branchAssignment(child)) invalidWrite = true
+    }
+    if ((ts.isPostfixUnaryExpression(child) || (ts.isPrefixUnaryExpression(child)
+      && (child.operator === ts.SyntaxKind.PlusPlusToken || child.operator === ts.SyntaxKind.MinusMinusToken)))
+      && staticAccessPath(child.operand)?.[0] === 'method') invalidWrite = true
+    child.forEachChild(walk)
+  }
+  walk(owner)
+  return cacheReferences === 4 && !invalidWrite ? node : null
+}
+
+function facadeQueryAdapter(fn: FunctionLike): boolean {
+  if (!ts.isArrowFunction(fn) || fn.parameters.length !== 1 || !fn.parameters[0].dotDotDotToken
+    || !ts.isIdentifier(fn.parameters[0].name) || fn.parameters[0].name.text !== 'args'
+    || !facadeExpressionMatches(fn.body, 'publicQuery(args, state, checkout)')) return false
+  const assignment = fn.parent
+  const statement = assignment.parent, block = statement.parent, branch = block.parent
+  return ts.isBinaryExpression(assignment) && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    && ts.isIdentifier(assignment.left) && assignment.left.text === 'method'
+    && ts.isExpressionStatement(statement) && ts.isBlock(block) && block.statements.length === 1
+    && ts.isIfStatement(branch) && branch.thenStatement === block
+    && facadeExpressionMatches(branch.expression, "key === 'query'") && !!facadeGetter(fn)
+}
+
+const FACADE_EVENT_METHOD = `(event, listener) => {
+  requireCurrent();
+  if (event === 'newListener' || event === 'removeListener') refuse();
+  const wrapped = (...args) => {
+    if (!current(checkout)) return undefined;
+    return Reflect.apply(listener, facade, args.map(value => value === client ? facade : value));
+  };
+  listeners.push({ event, original: listener, wrapped });
+  Reflect.apply(Reflect.get(client, key), client, [event, wrapped]);
+  return facade;
+}`
+const FACADE_PUBLIC_METHOD = `(...args) => {
+  requireCurrent();
+  if (state.owner) refuse();
+  const result = Reflect.apply(Reflect.get(client, key), client, args);
+  return result === client ? facade : result;
+}`
+type NonSqlReflectRole = 'event-registration' | 'event-notification' | 'public-method'
+
+function classifyFacadeReflect(call: ts.CallExpression, ctx: NativePgContext): NonSqlReflectRole | null {
+  if (!ctx.pinned || !nativeBindingsStable(ctx) || !facadeGetter(call)) return null
+  for (const name of ['Proxy', 'Object', 'Map', 'Set']) {
+    if (nativeBinding(name, ctx.unit.source).length || nativeBinding(name, ctx.module).length) return null
+  }
+  let arrow: ts.Node | undefined = call.parent
+  while (arrow && !ts.isMethodDeclaration(arrow)) {
+    if (ts.isArrowFunction(arrow) && ts.isBinaryExpression(arrow.parent)
+      && ts.isIdentifier(arrow.parent.left) && arrow.parent.left.text === 'method') {
+      const statement = arrow.parent.parent, block = statement.parent, branch = block.parent
+      if (!ts.isExpressionStatement(statement) || !ts.isBlock(block) || block.statements.length !== 1
+        || !ts.isIfStatement(branch) || branch.thenStatement !== block) return null
+      const event = facadeExpressionMatches(arrow, FACADE_EVENT_METHOD)
+      const ordinary = facadeExpressionMatches(arrow, FACADE_PUBLIC_METHOD)
+      const bindingName = event ? 'eventAdders' : ordinary ? 'publicMethods' : null
+      if (!bindingName || !facadeExpressionMatches(branch.expression, `typeof key === 'string' && ${bindingName}.has(key)`)) return null
+      const local = nativeBinding(bindingName, ctx.unit.source)
+      const bindings = local.length ? local : nativeBinding(bindingName, ctx.module)
+      if (bindings.length !== 1 || !ts.isVariableDeclaration(bindings[0]) || !bindings[0].initializer
+        || !ts.isVariableDeclarationList(bindings[0].parent) || !(bindings[0].parent.flags & ts.NodeFlags.Const)) return null
+      const members = event ? ['on', 'addListener', 'once', 'prependListener', 'prependOnceListener']
+        : ['escapeIdentifier', 'escapeLiteral', 'setTypeParser', 'getTypeParser', 'ref', 'unref',
+          'eventNames', 'listenerCount', 'getMaxListeners', 'setMaxListeners']
+      if (!facadeExpressionMatches(bindings[0].initializer, `new Set(${JSON.stringify(members)})`)) return null
+      let stable = true
+      const inspect = (node: ts.Node): void => {
+        if (ts.isIdentifier(node) && node.text === bindingName && node !== bindings[0].name) {
+          const parent = node.parent
+          if (!(ts.isPropertyAccessExpression(parent) && parent.expression === node && parent.name.text === 'has'
+            && ts.isCallExpression(parent.parent) && parent.parent.expression === parent && parent.parent.arguments.length === 1)) stable = false
+        }
+        node.forEachChild(inspect)
+      }
+      inspect(ctx.module)
+      if (ctx.module !== ctx.unit.source) inspect(ctx.unit.source)
+      if (!stable) return null
+      return ordinary ? 'public-method' : ts.isIdentifier(call.arguments[0]) ? 'event-notification' : 'event-registration'
+    }
+    arrow = arrow.parent
+  }
+  return null
+}
+
+type NativeInvocation = { kind: 'sql'; argument: ts.Expression } | { kind: 'protocol' }
+  | { kind: 'nonSql'; role: NonSqlReflectRole }
+  | { kind: 'finding'; reason: string }
+
+function classifyNativeInvocation(call: ts.CallExpression, ctx: NativePgContext): NativeInvocation | null {
+  const callee = unwrapExpression(call.expression)
+  const path = nativePath(callee, ctx)
+  // Retain the spelling as a refusal candidate even if Reflect is shadowed or
+  // reassigned. Alias invocations are recognized, but only the direct shape passes.
+  const spelled = reflectInvocationPath(callee, ctx)
+  const reflectApply = nativePathIs(path, ['Reflect', 'apply'])
+    || (spelled?.[0] === 'Reflect' && (spelled[spelled.length - 1] === 'apply'
+      || spelled[spelled.length - 1] === '<computed>'))
+  if (reflectApply) {
+    const refusal: NativeInvocation = { kind: 'finding', reason: 'unproven native Reflect.apply SQL transport — refused' }
+    if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)
+      && callee.expression.text === 'Reflect' && nativePathIs(path, ['Reflect', 'apply']) && call.arguments.length === 3) {
+      const role = classifyFacadeReflect(call, ctx)
+      if (role) return { kind: 'nonSql', role }
+    }
+    if (!ctx.pinned || !ts.isPropertyAccessExpression(callee)
+      || !ts.isIdentifier(callee.expression) || callee.expression.text !== 'Reflect'
+      || !nativePathIs(path, ['Reflect', 'apply']) || call.arguments.length !== 3
+      || !nativePathIs(nativePath(call.arguments[0], ctx), ['pg.Client', 'prototype', 'query'])
+      || !nativeBindingsStable(ctx)) return refusal
+    const fn = enclosingFunctionOf(call)
+    const carrier = unwrapExpression(call.arguments[2])
+    const receiver = unwrapExpression(call.arguments[1])
+    if (!fn || fn.parameters.length !== 2 || !ts.isIdentifier(fn.parameters[0].name)
+      || !ts.isIdentifier(fn.parameters[1].name) || !ts.isIdentifier(carrier)
+      || carrier.text !== fn.parameters[0].name.text || !ts.isPropertyAccessExpression(receiver)
+      || receiver.name.text !== 'client' || !ts.isIdentifier(receiver.expression)
+      || receiver.expression.text !== fn.parameters[1].name.text) return refusal
+    // This exact transport forwards its carrier untouched. Reject parameter
+    // mutation, aliases, helper escapes or reads that could replace args[0].
+    let untouched = true
+    const inspectCarrier = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === carrier.text
+        && node !== fn.parameters[0].name && node !== carrier) untouched = false
+      node.forEachChild(inspectCarrier)
+    }
+    inspectCarrier(fn)
+    return untouched ? { kind: 'sql', argument: call.arguments[2] } : refusal
+  }
+  if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'call'
+    && nativePathIs(nativePath(callee.expression, ctx), ['pg.Client', 'prototype', '_handleReadyForQuery'])) {
+    const fn = enclosingFunctionOf(call)
+    const parent = fn?.parent
+    const extendsPg = parent && ts.isClassDeclaration(parent) && parent.heritageClauses?.some(clause =>
+      clause.token === ts.SyntaxKind.ExtendsKeyword && clause.types.some(type =>
+        nativePathIs(nativePath(type.expression, ctx), ['pg.Client'])))
+    const message = call.arguments[1] && unwrapExpression(call.arguments[1])
+    if (ctx.pinned && nativeBindingsStable(ctx) && call.arguments.length === 2
+      && call.arguments[0].kind === ts.SyntaxKind.ThisKeyword && fn && ts.isMethodDeclaration(fn)
+      && fn.parameters.length === 1 && ts.isIdentifier(fn.parameters[0].name)
+      && fn.name && propertyNameText(fn.name) === '_handleReadyForQuery' && extendsPg
+      && message && ts.isIdentifier(message) && message.text === fn.parameters[0].name.text) {
+      return { kind: 'protocol' }
+    }
+    return { kind: 'finding', reason: 'unproven native pg ReadyForQuery callback — refused' }
+  }
+  return null
+}
+
+const PG_EXISTING_CONFIG_BUILDER = `{
+  const timeoutMs = Number(options?.timeoutMs ?? 0);
+  const queryConfig = { text: sql, values: params };
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    queryConfig.query_timeout = Math.floor(timeoutMs);
+    queryConfig.statement_timeout = Math.floor(timeoutMs);
+  }
+  return queryConfig;
+}`
+
+const PG_REJECTION_DELIVERY = `function rejectedQuery(args, error) {
+  const config = args[0];
+  const callback = [...args].reverse().find(value => typeof value === 'function') ?? config?.callback;
+  if (typeof callback === 'function') { queueMicrotask(() => callback(error)); return undefined; }
+  if (typeof config?.submit === 'function') throw error;
+  return Promise.reject(error);
+}`
+
+/** Root writes and whole-carrier escapes are refused in every forwarding
+ * adapter, not just at submit. This is not an alias graph: a new carrier alias
+ * is a refusal. The existing args[0]/submit inspection is read-only and closed.
+ */
+function pgFormalUnchanged(fn: FunctionLike, name: string, ctx: ClassifierContext): boolean {
+  let stable = true
+  const root = (node: ts.Expression): ts.Expression => {
+    let value = unwrapExpression(node)
+    while (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) value = unwrapExpression(value.expression)
+    return value
+  }
+  const rooted = (node: ts.Expression): boolean => { const value = root(node); return ts.isIdentifier(value) && value.text === name }
+  const readonlyInspection = (declaration: ts.VariableDeclaration): boolean => {
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer
+      || !ts.isVariableDeclarationList(declaration.parent) || !(declaration.parent.flags & ts.NodeFlags.Const)
+      || !facadeExpressionMatches(declaration.initializer, `${name}[0]`)) return false
+    const alias = declaration.name.text
+    const inspect = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === alias && node !== declaration.name) {
+        const parent = node.parent
+        const truthTest = ts.isBinaryExpression(parent) && parent.left === node
+          && parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+        const submitType = ts.isPropertyAccessExpression(parent) && parent.expression === node
+          && parent.name.text === 'submit' && ts.isTypeOfExpression(parent.parent)
+        if (!truthTest && !submitType) stable = false
+      }
+      node.forEachChild(inspect)
+    }
+    if (fn.body) inspect(fn.body)
+    return stable
+  }
+  const walk = (node: ts.Node): void => {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment && rooted(node.left)) stable = false
+    if (ts.isDeleteExpression(node) && rooted(node.expression)) stable = false
+    if ((ts.isPostfixUnaryExpression(node) || (ts.isPrefixUnaryExpression(node)
+      && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken))) && rooted(node.operand)) stable = false
+    if (ts.isVariableDeclaration(node) && node.initializer && rooted(node.initializer)) {
+      const value = unwrapExpression(node.initializer)
+      if (!(ts.isPropertyAccessExpression(value) && value.name.text === 'text') && !readonlyInspection(node)) stable = false
+    }
+    if (ts.isVariableDeclaration(node) && node.initializer) {
+      const value = unwrapExpression(node.initializer)
+      if (ts.isArrayLiteralExpression(value) || ts.isObjectLiteralExpression(value)) {
+        const inspect = (child: ts.Node): void => {
+          if (ts.isIdentifier(child) && child.text === name) stable = false
+          child.forEachChild(inspect)
+        }
+        value.forEachChild(inspect)
+      }
+    }
+    if (ts.isCallExpression(node)) {
+      if (ts.isPropertyAccessExpression(node.expression) && rooted(node.expression.expression)) stable = false
+      node.arguments.forEach(arg => {
+        const value = unwrapExpression(arg)
+        if (!ts.isIdentifier(value) || value.text !== name) return
+        const callee = calleeNameOf(node)
+        if (callee && ctx.pgCarriers?.has(callee)) return
+        const declarations = callee && ctx.closureFunctions.get(callee)
+        if (!declarations || declarations.length !== 1) { stable = false; return }
+        const declaration = declarations[0]
+        const configBuilder = isFunctionLike(declaration) && declaration.body
+          && facadeStatementMatches(declaration.body, PG_EXISTING_CONFIG_BUILDER)
+        if (!configBuilder && !facadeStatementMatches(declaration, PG_REJECTION_DELIVERY)) stable = false
+      })
+    }
+    node.forEachChild(walk)
+  }
+  if (fn.body) walk(fn.body)
+  return stable
+}
+
+/** Project pg's SQL position before invoking the existing provenance grammar.
+ * Values/callbacks never participate. The depth budget counts local aliases;
+ * array/conditional syntax does not spend an extra local-provenance hop.
+ */
+function classifyPgCarrier(
+  arg: ts.Expression, call: ts.Node, ctx: ClassifierContext,
+  carrier: 'arguments' | 'input', depth = 0, seen = new Set<ts.Node>(),
+): Classification {
+  const value = unwrapExpression(arg)
+  const refuse = (reason: string): Classification => ({ kind: 'finding', reason: `native pg SQL carrier: ${reason}` })
+  const fn = enclosingFunctionOf(call)
+  const formal = fn && ts.isIdentifier(value) ? formalParameterIndex(fn).get(value.text) : undefined
+  if (formal !== undefined && ts.isIdentifier(value)) {
+    if (formal !== 0) return refuse('SQL provenance is not the first formal parameter')
+    const nativeTransport = ts.isCallExpression(call) && call.arguments[2] === arg
+      && facadeExpressionMatches(call.expression, 'Reflect.apply')
+    if (!nativeTransport && !pgFormalUnchanged(fn!, value.text, ctx)) return refuse('forwarding formal is written, aliased or escapes')
+    const verdict = classifySqlArgument(value, call, ctx)
+    return verdict.kind === 'passthrough'
+      ? { ...verdict, carrier: carrier === 'arguments' && fn!.parameters[0].dotDotDotToken ? 'input' : carrier }
+      : verdict
+  }
+  if (ts.isIdentifier(value)) {
+    const local = resolveLocalBinding(value.text, value)
+    if (local) {
+      if (depth >= 4 || seen.has(local)) return refuse('local provenance budget exhausted')
+      return classifyPgCarrier(local, call, ctx, carrier, depth + 1, new Set([...seen, local]))
+    }
+  }
+  if (ts.isConditionalExpression(value)) {
+    const left = classifyPgCarrier(value.whenTrue, call, ctx, carrier, depth, seen)
+    const right = classifyPgCarrier(value.whenFalse, call, ctx, carrier, depth, seen)
+    if (left.kind === 'finding') return left
+    if (right.kind === 'finding') return right
+    if (left.kind === 'resolved' && right.kind === 'resolved' && left.sql === right.sql) return left
+    if (left.kind === 'passthrough' && right.kind === 'passthrough'
+      && left.adapterName === right.adapterName && left.paramIndex === right.paramIndex
+      && left.provenanceLeaf === right.provenanceLeaf && left.carrier === right.carrier) return left
+    return refuse('conditional SQL inputs do not prove the same source')
+  }
+  if (carrier === 'arguments') {
+    if (!ts.isArrayLiteralExpression(value) || !value.elements.length
+      || ts.isSpreadElement(value.elements[0]) || ts.isOmittedExpression(value.elements[0])) {
+      return refuse('unproven argument-array first item')
+    }
+    return classifyPgCarrier(value.elements[0], call, ctx, 'input', depth, seen)
+  }
+  if (ts.isObjectLiteralExpression(value)) {
+    if (value.properties.some(property => property.name && propertyNameText(property.name) === 'submit')) {
+      return refuse('custom submit bypasses config.text')
+    }
+    if (value.properties.some(property => property.name && ts.isComputedPropertyName(property.name))) {
+      return refuse('computed config key')
+    }
+    const text = value.properties.filter(property => property.name && propertyNameText(property.name) === 'text')
+    const spreads = value.properties.filter(ts.isSpreadAssignment)
+    if (text.length === 1 && !spreads.length && ts.isPropertyAssignment(text[0])) {
+      return classifyPgCarrier(text[0].initializer, call, ctx, 'input', depth, seen)
+    }
+    // Exact COMMIT adapter: the first spread preserves the first formal's text,
+    // and the only following overrides are values and query_timeout, never text.
+    const first = fn?.parameters[0].name
+    const spread = spreads[0] && unwrapExpression(spreads[0].expression)
+    if (!text.length && spreads.length === 1 && value.properties.length === 3
+      && value.properties[0] === spreads[0] && first && ts.isIdentifier(first)
+      && value.properties.slice(1).every(property => ts.isPropertyAssignment(property)
+        && (propertyNameText(property.name) === 'values' || propertyNameText(property.name) === 'query_timeout'))
+      && spread && ts.isConditionalExpression(spread)
+      && facadeExpressionMatches(spread.condition, `typeof ${first.text} === 'string'`)
+      && facadeExpressionMatches(spread.whenTrue, `{ text: ${first.text} }`)
+      && ts.isIdentifier(spread.whenFalse) && spread.whenFalse.text === first.text) {
+      return classifyPgCarrier(spread.whenFalse, call, ctx, 'input', depth, seen)
+    }
+    return refuse('config.text is unknown, duplicated or hidden by an opaque spread')
+  }
+  if (ts.isArrayLiteralExpression(value)) return refuse('an array is not a SQL/config input')
+  const verdict = classifySqlArgument(value, call, ctx)
+  return verdict.kind === 'passthrough' ? { ...verdict, carrier: 'input' } : verdict
+}
+
 export function collectQuerySqlArguments(closure: CallPathClosure, repoRoot: string): SqlArguments {
   const units = parseUnits(closure)
   const literalConstants = moduleScopeLiteralConstants(closure, repoRoot)
@@ -1142,20 +1708,81 @@ export function collectQuerySqlArguments(closure: CallPathClosure, repoRoot: str
   const resolved: ResolvedSqlArgument[] = []
   const passthrough: PassThroughSqlArgument[] = []
   const findings: SqlArgumentFinding[] = []
+  const protocolCallbacks: ProtocolCallbackSite[] = []
+  const moduleSources = new Map<string, ts.SourceFile>()
+  const pgPackage = path.join(repoRoot, 'packages/core-backend/node_modules/pg/package.json')
+  const pinned = fs.existsSync(pgPackage) && JSON.parse(fs.readFileSync(pgPackage, 'utf8')).version === '8.16.3'
 
+  const nonSqlReflectCalls: Array<SqlArgumentSite & { role: NonSqlReflectRole }> = []
+  const natives = new Map<ParsedUnit, NativePgContext>()
   for (const unit of units) {
-    const ctx: ClassifierContext = { unit, literalConstants, closureFunctions }
+    let module = moduleSources.get(unit.file)
+    if (!module) {
+      module = ts.createSourceFile(unit.file, fs.readFileSync(path.join(repoRoot, unit.file), 'utf8'),
+        ts.ScriptTarget.ES2022, true, scriptKindFor(unit.file))
+      moduleSources.set(unit.file, module)
+    }
+    natives.set(unit, { unit, module: unit.source.statements.some(ts.isImportDeclaration) ? unit.source : module, pinned })
+  }
+  const carriers = new Map<string, 'arguments' | 'input'>()
+  const ambiguous = new Set<string>()
+  const register = (name: string, carrier: 'arguments' | 'input'): void => {
+    const previous = carriers.get(name)
+    if (previous && previous !== carrier) ambiguous.add(name)
+    else carriers.set(name, carrier)
+  }
+  for (const unit of units) {
+    const seed = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && classifyNativeInvocation(node, natives.get(unit)!)?.kind === 'sql') {
+        const fn = enclosingFunctionOf(node), name = fn && adapterNameOf(fn)
+        if (name) register(name, 'arguments')
+      }
+      node.forEachChild(seed)
+    }
+    seed(unit.source)
+  }
+  for (let round = 0; round < 4; round += 1) {
+    const before = carriers.size
+    for (const unit of units) {
+      const infer = (node: ts.Node): void => {
+        if (ts.isCallExpression(node)) {
+          const mode = carriers.get(calleeNameOf(node) ?? '')
+          const fn = enclosingFunctionOf(node), arg = node.arguments[0] && unwrapExpression(node.arguments[0])
+          if (mode && fn && fn.parameters.length > 0 && arg && ts.isIdentifier(arg) && ts.isIdentifier(fn.parameters[0].name)
+            && arg.text === fn.parameters[0].name.text) {
+            const name = adapterNameOf(fn)
+            if (name) register(name, mode === 'arguments' && fn.parameters[0].dotDotDotToken ? 'input' : mode)
+          }
+        }
+        node.forEachChild(infer)
+      }
+      infer(unit.source)
+    }
+    if (carriers.size === before) break
+  }
+  for (const unit of units) {
+    const ctx: ClassifierContext = { unit, literalConstants, closureFunctions, pgCarriers: carriers }
+    const native = natives.get(unit)!
     const walk = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
         const calleeName = calleeNameOf(node)
-        if (calleeName && isDbSeamCalleeName(calleeName)) {
+        const invocation = classifyNativeInvocation(node, native)
+        const carrier = invocation?.kind === 'sql' ? 'arguments' : carriers.get(calleeName ?? '')
+        if (invocation?.kind === 'finding' || invocation?.kind === 'protocol' || invocation?.kind === 'nonSql') {
+          const site = { file: unit.file, unit: unit.name, snippet: node.getText(unit.source).replace(/\s+/g, ' ').slice(0, 200) }
+          if (invocation.kind === 'finding') findings.push({ ...site, reason: invocation.reason })
+          else if (invocation.kind === 'nonSql') nonSqlReflectCalls.push({ ...site, role: invocation.role })
+          else protocolCallbacks.push({ ...site, target: 'pg.Client.prototype._handleReadyForQuery' })
+        } else if (carrier || (calleeName && isDbSeamCalleeName(calleeName))) {
           const snippet = node.getText(unit.source).replace(/\s+/g, ' ').slice(0, 200)
           const site = { file: unit.file, unit: unit.name, snippet }
-          const arg = node.arguments[0]
+          const arg = invocation?.kind === 'sql' ? invocation.argument : node.arguments[0]
           if (!arg) {
             findings.push({ ...site, reason: 'DB-seam call with no first argument — nothing to classify' })
           } else {
-            const verdict = classifySqlArgument(arg, node, ctx)
+            const verdict: Classification = ambiguous.has(calleeName ?? '')
+              ? { kind: 'finding', reason: 'ambiguous native pg carrier signature — refused' }
+              : carrier ? classifyPgCarrier(arg, node, ctx, carrier) : classifySqlArgument(arg, node, ctx)
             if (verdict.kind === 'resolved') resolved.push({ ...site, sql: verdict.sql })
             else if (verdict.kind === 'passthrough') {
               passthrough.push({
@@ -1163,6 +1790,7 @@ export function collectQuerySqlArguments(closure: CallPathClosure, repoRoot: str
                 adapterName: verdict.adapterName,
                 paramIndex: verdict.paramIndex,
                 provenanceLeaf: verdict.provenanceLeaf,
+                ...(verdict.carrier ? { carrier: verdict.carrier } : {}),
               })
             } else findings.push({ ...site, reason: verdict.reason })
           }
@@ -1182,7 +1810,7 @@ export function collectQuerySqlArguments(closure: CallPathClosure, repoRoot: str
     }
     unit.source.forEachChild(walk)
   }
-  return { resolved, passthrough, findings }
+  return { resolved, passthrough, findings, protocolCallbacks, nonSqlReflectCalls }
 }
 
 export interface PassThroughCallerReport {
@@ -1214,20 +1842,23 @@ export function checkPassThroughCallers(
   const literalConstants = moduleScopeLiteralConstants(closure, repoRoot)
   const closureFunctions = indexClosureFunctions(units)
 
-  const targets = new Map<string, { adapterName: string; paramIndex: number }>()
+  const targets = new Map<string, { adapterName: string; paramIndex: number; carrier?: 'arguments' | 'input' }>()
   for (const entry of sqlArguments.passthrough) {
     targets.set(`${entry.adapterName}#${entry.paramIndex}`, {
       adapterName: entry.adapterName,
       paramIndex: entry.paramIndex,
+      carrier: entry.carrier ?? targets.get(`${entry.adapterName}#${entry.paramIndex}`)?.carrier,
     })
   }
 
+  const pgCarriers = new Map<string, 'arguments' | 'input'>()
+  for (const target of targets.values()) if (target.carrier) pgCarriers.set(target.adapterName, target.carrier)
   const reports: PassThroughCallerReport[] = []
-  for (const { adapterName, paramIndex } of targets.values()) {
+  for (const { adapterName, paramIndex, carrier } of targets.values()) {
     let callerCount = 0
     const unclassifiedCallers: Array<{ file: string; snippet: string; reason: string }> = []
     for (const unit of units) {
-      const ctx: ClassifierContext = { unit, literalConstants, closureFunctions }
+      const ctx: ClassifierContext = { unit, literalConstants, closureFunctions, pgCarriers }
       const walk = (node: ts.Node): void => {
         if (ts.isCallExpression(node) && calleeNameOf(node) === adapterName) {
           callerCount += 1
@@ -1236,7 +1867,7 @@ export function checkPassThroughCallers(
           if (!arg) {
             unclassifiedCallers.push({ file: unit.file, snippet, reason: `no argument at index ${paramIndex}` })
           } else {
-            const verdict = classifySqlArgument(arg, node, ctx)
+            const verdict = carrier ? classifyPgCarrier(arg, node, ctx, carrier) : classifySqlArgument(arg, node, ctx)
             if (verdict.kind === 'finding') {
               unclassifiedCallers.push({ file: unit.file, snippet, reason: verdict.reason })
             }

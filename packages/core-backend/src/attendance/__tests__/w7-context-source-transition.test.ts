@@ -16,6 +16,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
 
 import {
   ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_LEGAL_TRANSITIONS_V1,
@@ -58,9 +62,10 @@ import {
 import {
   buildAttendanceCalculationRolloutAdvisoryKey,
   parseCanonicalAttendanceRolloutOrgKeyV1,
-  type AttendanceW4TransactionClientV1,
 } from '../w4c0-identity'
 import { ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV } from '../w7-resolver/w7-context-source-posture-resolver'
+
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../../')
 
@@ -94,15 +99,13 @@ function codeOf(error: unknown): string {
  * Any leg using it proves a refusal happened with ZERO database access — not
  * merely that the refusal happened before a write.
  */
-function explodingConnection(): AttendanceW4TransactionClientV1 & { calls: number } {
-  const connection = {
-    calls: 0,
-    query: async () => {
-      connection.calls += 1
-      throw new Error('THE CONNECTION MUST NOT BE TOUCHED')
-    },
-  }
-  return connection as AttendanceW4TransactionClientV1 & { calls: number }
+async function explodingConnection() {
+  let calls = 0
+  const { client } = await createAttendanceOwningSessionUnitFixture(async () => {
+    calls += 1
+    throw new Error('THE CONNECTION MUST NOT BE TOUCHED')
+  })
+  return { client, get calls() { return calls } }
 }
 
 function baseInput(
@@ -126,9 +129,9 @@ function baseInput(
 async function refusalCodeFor(
   input: AttendanceW7ContextSourceTransitionInputV1,
 ): Promise<{ code: string; calls: number }> {
-  const connection = explodingConnection()
+  const connection = await explodingConnection()
   try {
-    await transitionAttendanceW7ContextSourceV1(connection, input)
+    await transitionAttendanceW7ContextSourceV1(connection.client, input)
     return { code: '<no throw>', calls: connection.calls }
   } catch (error) {
     return { code: codeOf(error), calls: connection.calls }

@@ -71,6 +71,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   // Trip, request and timezone modules supply or protect the frozen calculation context.
   // Apply both aggregate bans to every new module; no exclusion is introduced.
   'packages/core-backend/src/attendance/attendance-business-trip-locks.ts',
+  'packages/core-backend/src/attendance/attendance-owning-session.ts',
   // Archive repair constructs frozen context; default recovery protects existing
   // freezes before rebuilding their missing source. Both aggregate bans apply.
   'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts',

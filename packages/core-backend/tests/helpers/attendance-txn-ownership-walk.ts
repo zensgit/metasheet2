@@ -1,149 +1,79 @@
 import * as ts from 'typescript'
 
 /**
- * Gate E (#4844) — DB-free static-AST classifier for "who owns this transaction". #4844 says
- * verbatim: "Enumerating known offenders converges no better here than it did the last two
- * times — the guard has to walk the exported table." This module IS that walk: given a parsed
- * `packages/core-backend/src/attendance/*.ts` file, it finds every EXPORTED function that opens
- * a transaction (`BEGIN` / `START TRANSACTION`) on one of its OWN parameters typed
- * `AttendanceW4TransactionClientV1` — i.e. a connection the CALLER supplied, not one this
- * function acquired itself — and partitions each such site into exactly one of
- * `{OWNS, JOINS, NESTED, UNKNOWN}`, fail-closed: a shape nobody reviewed lands in UNKNOWN.
+ * Gate E (#4844): classify literal BEGINs on caller ports, private lease helpers
+ * and exact exclusive callbacks. The independent census below walks ALL scopes,
+ * with no signature/export/wrapper filter: removing those shapes cannot hide SQL.
  *
- * Modelled on the existing F1 assembly guard
- * (`tests/helpers/attendance-w6-index-assembly-order.ts` + its test,
- * `tests/unit/attendance-w6-group-effective-policy-authorization.test.ts`): the same TypeScript
- * compiler AST-walk idiom (never text/regex over the raw file), the same "whitelist the ONE
- * unconditional shape, don't blacklist conditional ancestor kinds" discipline (this module's
- * `isTopLevelStatementOfFunctionBody`, modelled on that file's `classifyUnconditional`), and the
- * same context key discipline: `enclosing-symbol + ancestor-KIND path`, never line/column (those
- * drift on unrelated edits elsewhere in the file).
- *
- * Domain (narrower than F1's "every `this` use"): a `BEGIN`-site is OWNS iff the SAME exported
- * function calls `assertConnectionIsIdleV1(<sameConnectionParam>)` as a genuinely UNCONDITIONAL
- * top-level statement of its OWN body block — i.e. a direct statement of the function's body,
- * not nested inside any `if`/loop/`try`/`switch`/logical-short-circuit — occurring textually
- * BEFORE the `BEGIN` call (which MAY itself be arbitrarily nested, e.g. inside a retry loop's
- * `try` block: only the PROOF must be unconditional, not the `BEGIN` it dominates). This exactly
- * matches both converted first-batch sites ("once before the retry loop"; "before the bare
- * `BEGIN`") and the pre-existing correct sibling
- * (`planAttendanceCalculationRolloutTransitionV1` in w4c3a-rollout-control.ts).
- *
- * Scope boundaries (documented residuals, matching this repo's convention of NAMING what a
- * static walker cannot decide rather than silently guessing):
- *  - The BEGIN/idle-proof detector never crosses into a NESTED function-like boundary (arrow
- *    function, function expression, method, accessor, constructor) — a `.query('BEGIN')` issued
- *    inside a callback passed to `body` (the retry wrapper's own generic parameter) belongs to
- *    the CALLER's closure, not to this function's own transaction-management responsibility, and
- *    is correctly invisible here (it is that OTHER exported function's own site, if any).
- *  - Connection-parameter identity is NAME-based (no `TypeChecker`/symbol resolution) — a local
- *    alias (`const conn = connection`) or destructure would not be recognized as the same
- *    identity. Verified empirically (grep) that no function in `src/attendance/*.ts` does this
- *    today; a future one would surface as a NEW, unmatched `BEGIN` call with a differently-named
- *    receiver, which this walker simply does not collect at all (not silently OWNS) — it is
- *    invisible rather than misclassified, the same trade-off F1's own `argumentsReachIdentifier`
- *    documents for its domain.
- *  - `BEGIN`/`START TRANSACTION` detection only matches a `StringLiteral` or
- *    `NoSubstitutionTemplateLiteral` first argument (`ts.isStringLiteralLike`) — a dynamically
- *    interpolated query string (`TemplateExpression` with substitutions) is undecidable
- *    statically and is not detected as a BEGIN site at all (same invisible-not-misclassified
- *    trade-off). No site in this module's actual surface does this today.
+ * OWNS requires an awaited unconditional same-binding idle assertion. New lease
+ * helpers additionally have only direct exclusive-callback callers; a lease type
+ * or function name alone proves nothing. Wrapper/idle imports are exact and may
+ * not be shadowed. This is a syntactic guard, not a TypeChecker or driver proof.
+ * Receiver/type aliases, aliased proof/wrapper names, arbitrary closures and
+ * computed receivers remain unclassified; literal .query BEGINs still fail the
+ * independent census comparison. Dynamic SQL, extracted/renamed query functions
+ * and dynamic property names are outside this literal-query domain (explicitly
+ * tested). Protocol I/T/E and lease privacy need separate runtime gates.
  */
 
-const CONNECTION_TYPE_NAME = 'AttendanceW4TransactionClientV1'
+const CONNECTION_TYPE_NAMES = new Set([
+  'AttendanceW4TransactionClientV1',
+  'AttendanceSessionLeaseV1',
+  'AttendanceOwningSessionV1',
+])
 const IDLE_PROOF_CALLEE_NAME = 'assertConnectionIsIdleV1'
+const EXCLUSIVE_CALLEE_NAME = 'withAttendanceExclusiveIdleSessionV1'
 const BEGIN_STATEMENT_PATTERN = /^\s*(BEGIN\b|START\s+TRANSACTION\b)/i
 
 export type TxnOwnershipBucket = 'OWNS' | 'JOINS' | 'NESTED' | 'UNKNOWN'
 
 export interface TxnOwnershipAllowlistEntryV1 {
-  /** Basename of the file under `src/attendance/`, e.g. `'w4c3b-request-snapshots.ts'`. */
   readonly file: string
-  /** The exported function's own name. */
   readonly enclosingFunction: string
   readonly bucket: 'JOINS' | 'NESTED'
-  /** Required, reviewed justification — never optional. A function that legitimately runs
-   *  inside the caller's already-open transaction (JOINS), or that opens its own NAMED,
-   *  released savepoint nested inside the caller's transaction (NESTED), belongs here with the
-   *  reviewer's reasoning, not silently inferred by the walker. */
+  /** Reviewed justification required; never infer a joining/nested exception. */
   readonly reason: string
 }
 
-/**
- * Gate E (#4844) first-batch allowlist. EMPTY BY DESIGN: a full sweep of
- * `packages/core-backend/src/attendance/*.ts` (the guard test's own discovery) finds exactly
- * three `BEGIN`-on-caller-connection sites total, and all three are category-1 (OWNS) — the two
- * converted this batch plus the one sibling (`planAttendanceCalculationRolloutTransitionV1`)
- * that already did this correctly (W4C-5 NEW-B / PR #4839). Any FUTURE JOINS/NESTED site must be
- * added here, reviewed, with a `reason` — it must never be inferred by the walker itself, and an
- * un-added new BEGIN site lands in UNKNOWN and reds the guard, exactly as designed.
- */
 export const TXN_OWNERSHIP_ALLOWLIST_V1: readonly TxnOwnershipAllowlistEntryV1[] = []
 
 export interface BeginSiteV1 {
-  /** `enclosing-function // ancestor-KIND-path // BEGIN // #occurrence-ordinal` — stable under
-   *  unrelated edits elsewhere in the same function; changes only if this SITE itself moves to a
-   *  different syntactic context. NEVER line/column. */
   readonly key: string
   readonly file: string
   readonly enclosingFunction: string
   readonly connParamName: string
-  /** The literal BEGIN statement text, e.g. `'BEGIN ISOLATION LEVEL SERIALIZABLE'`. */
   readonly statementText: string
   readonly bucket: TxnOwnershipBucket
   readonly reason?: string
-  /** Diagnostic only — never asserted on by key/identity, only used to order/dedupe within one
-   *  file during collection. */
   readonly start: number
 }
 
+type Scope = ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression
+
 function hasExportModifier(node: ts.Node): boolean {
-  if (!ts.canHaveModifiers(node)) return false
-  const mods = ts.getModifiers(node)
-  return !!mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+  return ts.canHaveModifiers(node)
+    && !!ts.getModifiers(node)?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)
 }
 
-/** Every top-level `export function` / `export async function` declaration in the file — the
- *  "whole exported surface" this guard walks. Deliberately top-level-statements only: nothing in
- *  this codebase's `src/attendance/*.ts` exports a function any other way (verified: zero
- *  `export const x = (...) => ...` arrow exports across the directory), and a TypeScript
- *  namespace/module-nested export is not a shape this directory uses either. */
+/** Retain the original pool-acquisition domain; do not exempt new files. */
 function exportedFunctionDeclarations(source: ts.SourceFile): ts.FunctionDeclaration[] {
-  const out: ts.FunctionDeclaration[] = []
-  for (const stmt of source.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && hasExportModifier(stmt)) {
-      out.push(stmt)
-    }
-  }
-  return out
+  return source.statements.filter((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && !!node.name && !!node.body && hasExportModifier(node))
 }
 
-/** Parameters of `fn` typed exactly `AttendanceW4TransactionClientV1` (a plain `TypeReference` by
- *  name — no aliasing/renaming import exists anywhere in this directory today, verified by
- *  grep). These are the "caller-supplied connection" identities this guard reasons about. */
-function connectionParams(fn: ts.FunctionDeclaration): ts.ParameterDeclaration[] {
-  return fn.parameters.filter((p) => {
-    const t = p.type
-    return !!t && ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName) && t.typeName.text === CONNECTION_TYPE_NAME
-  })
+function connectionType(type: ts.TypeNode | undefined): boolean {
+  if (!type) return false
+  if (ts.isUnionTypeNode(type)) return type.types.every(connectionType)
+  return ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName)
+    && CONNECTION_TYPE_NAMES.has(type.typeName.text)
 }
 
-function paramName(p: ts.ParameterDeclaration): string | null {
-  return ts.isIdentifier(p.name) ? p.name.text : null
+function paramName(param: ts.ParameterDeclaration): string | null {
+  return ts.isIdentifier(param.name) ? param.name.text : null
 }
 
-/** A rebinding/closure boundary this walk does not cross — see the module docblock's first
- *  residual note. */
 function isFunctionLikeBoundary(node: ts.Node): boolean {
-  return (
-    ts.isFunctionDeclaration(node) ||
-    ts.isFunctionExpression(node) ||
-    ts.isArrowFunction(node) ||
-    ts.isMethodDeclaration(node) ||
-    ts.isGetAccessorDeclaration(node) ||
-    ts.isSetAccessorDeclaration(node) ||
-    ts.isConstructorDeclaration(node)
-  )
+  return ts.isFunctionLike(node)
 }
 
 interface RawCall {
@@ -151,213 +81,250 @@ interface RawCall {
   readonly start: number
 }
 
-/** Every `CallExpression` in `fn`'s OWN scope (its body, recursing through control-flow
- *  constructs but never into a nested function-like) matching `predicate`, in source order. */
 function collectOwnScopeCalls(
-  fn: ts.FunctionDeclaration,
+  fn: Scope,
   predicate: (call: ts.CallExpression) => boolean,
 ): RawCall[] {
   const out: RawCall[] = []
-  const visit = (node: ts.Node, isRoot: boolean): void => {
-    if (!isRoot && isFunctionLikeBoundary(node)) return
-    if (ts.isCallExpression(node) && predicate(node)) {
-      out.push({ node, start: node.getStart() })
-    }
-    node.forEachChild((child) => visit(child, false))
+  const visit = (node: ts.Node): void => {
+    if (isFunctionLikeBoundary(node)) return
+    if (ts.isCallExpression(node) && predicate(node)) out.push({ node, start: node.getStart() })
+    node.forEachChild(visit)
   }
-  if (fn.body) visit(fn.body, true)
-  out.sort((a, b) => a.start - b.start)
-  return out
+  if (fn.body) visit(fn.body)
+  return out.sort((a, b) => a.start - b.start)
 }
 
-/** `<connName>.query(<string-literal-like matching BEGIN|START TRANSACTION>, ...)` — the
- *  transaction-opening statement shape this guard targets. Returns the literal statement text on
- *  a match, `null` otherwise (including the "undecidable" cases named in the module docblock). */
 function matchBeginCall(call: ts.CallExpression, connName: string): string | null {
   const callee = call.expression
-  if (!ts.isPropertyAccessExpression(callee)) return null
-  if (callee.name.text !== 'query') return null
-  if (!ts.isIdentifier(callee.expression) || callee.expression.text !== connName) return null
-  const arg0 = call.arguments[0]
-  if (!arg0 || !ts.isStringLiteralLike(arg0)) return null
-  return BEGIN_STATEMENT_PATTERN.test(arg0.text) ? arg0.text : null
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'query'
+    || !ts.isIdentifier(callee.expression) || callee.expression.text !== connName) return null
+  const sql = call.arguments[0]
+  return sql && ts.isStringLiteralLike(sql) && BEGIN_STATEMENT_PATTERN.test(sql.text) ? sql.text : null
 }
 
-/** `assertConnectionIsIdleV1(<connName>)` — bare identifier callee, bare identifier first
- *  argument matching the SAME connection identity by name. */
-function isIdleProofCallOnConn(call: ts.CallExpression, connName: string): boolean {
-  const callee = call.expression
-  if (!ts.isIdentifier(callee) || callee.text !== IDLE_PROOF_CALLEE_NAME) return false
-  const arg0 = call.arguments[0]
-  return !!arg0 && ts.isIdentifier(arg0) && arg0.text === connName
+function bindingContains(binding: ts.BindingName, name: string): boolean {
+  return ts.isIdentifier(binding) ? binding.text === name
+    : binding.elements.some(element => !ts.isOmittedExpression(element) && bindingContains(element.name, name))
 }
 
-/**
- * WHITELIST (not blacklist) of the one unconditional shape, modelled directly on the F1 guard's
- * `classifyUnconditional`: `node` (after unwrapping at most one enclosing `await`) must be the
- * whole expression of a bare `ExpressionStatement` that is ITSELF a direct statement of `fn`'s
- * own body `Block` — zero hops. A call inside an `if`/loop/`try`/`catch`/short-circuit does NOT
- * qualify, even if it happens to run before the `BEGIN` on every path THIS version of the code
- * takes — that requires case-by-case reasoning this guard deliberately declines to do; such a
- * shape is exactly what the JOINS/NESTED allowlist (with a reviewed `reason`) exists for.
- */
-function isTopLevelStatementOfFunctionBody(fn: ts.FunctionDeclaration, call: ts.CallExpression): boolean {
-  let expr: ts.Node = call
-  const parent: ts.Node | undefined = expr.parent
-  if (parent && ts.isAwaitExpression(parent) && parent.expression === expr) {
-    expr = parent
+/** Conservative binding identity: reject shadowing or writes, including in closures,
+ * destructuring, loop targets and compound assignments. No name-only rebind proof. */
+function stableBinding(fn: Scope, name: string, parameter?: ts.ParameterDeclaration): boolean {
+  let stable = !fn.parameters.some(param => param !== parameter && bindingContains(param.name, name))
+  const writesName = (node: ts.Node): boolean => {
+    if (ts.isIdentifier(node)) return node.text === name
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return false
+    let found = false
+    node.forEachChild(child => { if (writesName(child)) found = true })
+    return found
   }
-  const stmt = expr.parent
-  if (!stmt || !ts.isExpressionStatement(stmt) || stmt.expression !== expr) return false
-  const body = stmt.parent
-  return !!body && ts.isBlock(body) && body === fn.body
+  const visit = (node: ts.Node): void => {
+    if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && node !== parameter
+      && bindingContains(node.name, name)) stable = false
+    if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node))
+      && node.name?.text === name) stable = false
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment && writesName(node.left)) stable = false
+    if ((ts.isForInStatement(node) || ts.isForOfStatement(node))
+      && !ts.isVariableDeclarationList(node.initializer) && writesName(node.initializer)) stable = false
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+      && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)
+      && writesName(node.operand)) stable = false
+    node.forEachChild(visit)
+  }
+  if (fn.body) visit(fn.body)
+  return stable
 }
 
-/** Ancestor-KIND path from (excluding) `fn` down to (including) `node`, root-to-node order.
- *  NEVER line/column — see the module docblock. Matches F1's `baseKeyOf` idiom exactly. */
-function ancestorKindPath(fn: ts.FunctionDeclaration, node: ts.Node): string {
+/** Exact unaliased import, with no competing declaration anywhere in the file.
+ * Test fixtures include these imports too; ambient/name-stamped fake guards fail. */
+function trustedImport(source: ts.SourceFile, name: string, module: string): boolean {
+  let imports = 0
+  let shadowed = false
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportSpecifier(node) && node.name.text === name) {
+      const declaration = node.parent.parent.parent
+      if ((!node.propertyName || node.propertyName.text === name)
+        && ts.isImportDeclaration(declaration) && ts.isStringLiteral(declaration.moduleSpecifier)
+        && declaration.moduleSpecifier.text === module) imports++
+      else shadowed = true
+    }
+    if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && bindingContains(node.name, name)) shadowed = true
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isFunctionExpression(node))
+      && node.name?.text === name) shadowed = true
+    if (ts.isImportClause(node) && node.name?.text === name) shadowed = true
+    if (ts.isNamespaceImport(node) && node.name.text === name) shadowed = true
+    if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === name
+      && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) shadowed = true
+    node.forEachChild(visit)
+  }
+  visit(source)
+  return imports === 1 && !shadowed
+}
+
+function enclosingDeclaration(node: ts.Node): ts.FunctionDeclaration | undefined {
+  let current: ts.Node | undefined = node.parent
+  while (current) {
+    if (ts.isFunctionDeclaration(current)) return current
+    current = current.parent
+  }
+  return undefined
+}
+
+function exclusiveCallback(source: ts.SourceFile, fn: Scope): ts.ParameterDeclaration | undefined {
+  if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return undefined
+  const call = fn.parent
+  if (!ts.isCallExpression(call) || call.arguments[1] !== fn
+    || !ts.isIdentifier(call.expression) || call.expression.text !== EXCLUSIVE_CALLEE_NAME
+    || !trustedImport(source, EXCLUSIVE_CALLEE_NAME, './attendance-owning-session')
+    || fn.parameters.length !== 1 || !ts.isIdentifier(fn.parameters[0].name)
+    || fn.parameters[0].dotDotDotToken || fn.parameters[0].initializer) return undefined
+  const lease = fn.parameters[0]
+  return stableBinding(fn, lease.name.getText(), lease) ? lease : undefined
+}
+
+/** Every use of a private helper must be a direct call with the actual callback
+ * lease in this parameter position. Escapes, aliases and mixed callers refuse. */
+function exclusiveHelperParameter(source: ts.SourceFile, fn: ts.FunctionDeclaration, index: number): boolean {
+  if (!fn.name || hasExportModifier(fn) || fn.parent !== source) return false
+  let calls = 0
+  let valid = true
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && node.text === fn.name!.text && node !== fn.name) {
+      const call = node.parent
+      if (!ts.isCallExpression(call) || call.expression !== node) valid = false
+      else {
+        calls++
+        let callback: ts.Node | undefined = call.parent
+        while (callback && !isFunctionLikeBoundary(callback)) callback = callback.parent
+        if (!callback || (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback))) valid = false
+        else {
+          const lease = exclusiveCallback(source, callback)
+          const arg = call.arguments[index]
+          // A direct callback expression or returned/awaited own-body call only.
+          let expression: ts.Node = call
+          if (ts.isAwaitExpression(expression.parent)) expression = expression.parent
+          const direct = callback.body === expression
+            || (ts.isReturnStatement(expression.parent) && expression.parent.expression === expression
+              && expression.parent.parent === callback.body)
+          if (!lease || !arg || !ts.isIdentifier(arg) || arg.text !== lease.name.getText() || !direct) valid = false
+        }
+      }
+    }
+    node.forEachChild(visit)
+  }
+  visit(source)
+  return valid && calls > 0
+}
+
+function unconditionalIdleProof(source: ts.SourceFile, fn: Scope, connName: string, before: number): boolean {
+  if (!fn.body || !ts.isBlock(fn.body)
+    || !trustedImport(source, IDLE_PROOF_CALLEE_NAME, './w4c0-identity')) return false
+  return fn.body.statements.some(statement => {
+    if (statement.end >= before || !ts.isExpressionStatement(statement)
+      || !ts.isAwaitExpression(statement.expression)) return false
+    const call = statement.expression.expression
+    return ts.isCallExpression(call) && ts.isIdentifier(call.expression)
+      && call.expression.text === IDLE_PROOF_CALLEE_NAME && call.arguments.length === 1
+      && ts.isIdentifier(call.arguments[0]) && call.arguments[0].text === connName
+  })
+}
+
+function ancestorKindPath(fn: Scope, node: ts.Node): string {
   const kinds: string[] = []
-  let current: ts.Node = node
+  let current = node
   while (current.parent && current.parent !== fn) {
     current = current.parent
     kinds.push(ts.SyntaxKind[current.kind])
   }
-  kinds.reverse()
-  return kinds.join('>')
+  return kinds.reverse().join('>')
 }
 
-/**
- * Walk the WHOLE exported surface of one already-parsed source file and partition every
- * BEGIN-on-caller-connection site into `{OWNS, JOINS, NESTED, UNKNOWN}`. `fileLabel` is the
- * basename used both for allowlist matching and for the returned sites' `file`/`key` fields — the
- * caller (the guard test) owns filesystem access; this function is pure and DB-free.
- */
 export function discoverBeginSitesV1(
   source: ts.SourceFile,
   fileLabel: string,
   allowlist: readonly TxnOwnershipAllowlistEntryV1[] = TXN_OWNERSHIP_ALLOWLIST_V1,
 ): BeginSiteV1[] {
   const out: BeginSiteV1[] = []
-  const keyOrdinal = new Map<string, number>()
-
-  for (const fn of exportedFunctionDeclarations(source)) {
-    const fnName = fn.name!.text
-    for (const param of connectionParams(fn)) {
-      const connName = paramName(param)
-      if (!connName) continue
-
-      const beginCalls = collectOwnScopeCalls(fn, (c) => matchBeginCall(c, connName) !== null)
-      if (beginCalls.length === 0) continue
-
-      const dominatingIdleStarts = collectOwnScopeCalls(fn, (c) => isIdleProofCallOnConn(c, connName))
-        .filter((c) => isTopLevelStatementOfFunctionBody(fn, c.node))
-        .map((c) => c.start)
-
-      for (const { node: beginNode, start } of beginCalls) {
-        const statementText = matchBeginCall(beginNode, connName)!
-        const dominated = dominatingIdleStarts.some((idleStart) => idleStart < start)
-
-        const baseKey = `${fnName}//${ancestorKindPath(fn, beginNode)}//BEGIN`
-        const ordinal = keyOrdinal.get(baseKey) ?? 0
-        keyOrdinal.set(baseKey, ordinal + 1)
-        const key = `${baseKey}//#${ordinal}`
-
-        let bucket: TxnOwnershipBucket
-        let reason: string | undefined
-        if (dominated) {
-          bucket = 'OWNS'
-        } else {
-          const allow = allowlist.find((a) => a.file === fileLabel && a.enclosingFunction === fnName)
-          if (allow) {
-            bucket = allow.bucket
-            reason = allow.reason
-          } else {
-            bucket = 'UNKNOWN'
+  const ordinals = new Map<string, number>()
+  const visit = (node: ts.Node): void => {
+    if ((ts.isFunctionDeclaration(node) && node.name && node.body)
+      || ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+      const fn = node as Scope
+      const callbackLease = exclusiveCallback(source, fn)
+      // Generic closures are deliberately left for the broader census to catch.
+      if (ts.isFunctionDeclaration(fn) || callbackLease) {
+        const name = ts.isFunctionDeclaration(fn) ? fn.name?.text : enclosingDeclaration(fn)?.name?.text
+        if (name) for (const [index, param] of fn.parameters.entries()) {
+          const connName = paramName(param)
+          if (!connName || (!callbackLease && !connectionType(param.type))) continue
+          const begins = collectOwnScopeCalls(fn, call => matchBeginCall(call, connName) !== null)
+          if (begins.length === 0) continue
+          const legacy = param.type && ts.isTypeReferenceNode(param.type)
+            && ts.isIdentifier(param.type.typeName) && param.type.typeName.text === 'AttendanceW4TransactionClientV1'
+          const leaseProvenance = callbackLease === param
+            || (ts.isFunctionDeclaration(fn) && exclusiveHelperParameter(source, fn, index))
+          for (const { node: call, start } of begins) {
+            const owns = (legacy || leaseProvenance) && stableBinding(fn, connName, param)
+              && unconditionalIdleProof(source, fn, connName, start)
+            const allow = allowlist.find(entry => entry.file === fileLabel
+              && entry.enclosingFunction === name && entry.reason.trim().length > 0)
+            const baseKey = `${name}//${ancestorKindPath(fn, call)}//BEGIN`
+            const ordinal = ordinals.get(baseKey) ?? 0
+            ordinals.set(baseKey, ordinal + 1)
+            out.push({
+              key: `${baseKey}//#${ordinal}`, file: fileLabel, enclosingFunction: name,
+              connParamName: connName, statementText: matchBeginCall(call, connName)!,
+              bucket: owns ? 'OWNS' : allow?.bucket ?? 'UNKNOWN',
+              reason: owns ? undefined : allow?.reason, start,
+            })
           }
         }
-
-        out.push({
-          key,
-          file: fileLabel,
-          enclosingFunction: fnName,
-          connParamName: connName,
-          statementText,
-          bucket,
-          reason,
-          start,
-        })
       }
     }
+    node.forEachChild(visit)
   }
-
-  return out
+  visit(source)
+  return out.sort((a, b) => a.start - b.start)
 }
-
-// ---------------------------------------------------------------------------
-// Independent, DELIBERATELY BROADER collector — the P2-c backstop.
-//
-// `discoverBeginSitesV1` only ever LOOKS at BEGIN calls on a receiver identifier that is the
-// NAME of a parameter whose declared type is exactly `AttendanceW4TransactionClientV1`
-// (`connectionParams`'s type-name gate). That gate is exactly right for CLASSIFYING a site's
-// ownership — but it means a `BEGIN` issued on a receiver typed something else (a raw `PoolClient`
-// parameter, an untyped parameter, a locally-narrowed alias) is not merely UNKNOWN, it is
-// INVISIBLE: `discoverBeginSitesV1` never produces a `BeginSiteV1` for it at all, so it cannot
-// even reach the UNKNOWN bucket the rest of this guard's fail-closed discipline relies on.
-//
-// This mirrors the exact defect class the F1 guard's own `independentThisStarts` exists to catch
-// (its doc comment: "so a pruning bug in the builder cannot hide behind a self-consistent-but-
-// incomplete `part.all`" — P2-c). The fix there was an INDEPENDENT, un-pruned reference walk the
-// test compares the classified set against, member-by-member. This is that walk for THIS domain:
-// every `<Identifier>.query(<string-literal-like matching BEGIN|START TRANSACTION>, ...)` call
-// inside ANY exported function's own scope — with NO type gate on the receiver at all — so a
-// differently-typed or untyped BEGIN site is found here even though `discoverBeginSitesV1` would
-// never see it. The guard test asserts the two walks' site COUNTS agree on the real tree; a
-// mismatch means `discoverBeginSitesV1`'s type gate just went blind to something this broader
-// walk still sees, and that mismatch is itself the failure — not merely "some future improvement".
-// ---------------------------------------------------------------------------
 
 export interface IndependentBeginCallSiteV1 {
   readonly enclosingFunction: string
   readonly receiverName: string
   readonly statementText: string
+  readonly start: number
 }
 
-/** Same BEGIN/START-TRANSACTION text match as `matchBeginCall`, but with NO receiver-identity or
- *  receiver-TYPE constraint at all: any `<Identifier>.query(...)` qualifies. */
-function matchBeginCallAnyReceiver(call: ts.CallExpression): { receiverName: string; text: string } | null {
-  const callee = call.expression
-  if (!ts.isPropertyAccessExpression(callee)) return null
-  if (callee.name.text !== 'query') return null
-  if (!ts.isIdentifier(callee.expression)) return null
-  const arg0 = call.arguments[0]
-  if (!arg0 || !ts.isStringLiteralLike(arg0)) return null
-  if (!BEGIN_STATEMENT_PATTERN.test(arg0.text)) return null
-  return { receiverName: callee.expression.text, text: arg0.text }
-}
-
-/**
- * Every `BEGIN`/`START TRANSACTION` `.query(...)` call inside ANY exported function's own scope
- * (same closure-boundary pruning as the classifier — see `collectOwnScopeCalls`), with NO type
- * gate on the receiver. Independent of `connectionParams`/`matchBeginCall` entirely: it re-derives
- * "every exported function" itself rather than reusing a shared helper's OUTPUT, so a bug in
- * `exportedFunctionDeclarations` cannot silently agree with itself on both sides of the
- * comparison the guard test makes.
- */
+/** Independent unpruned AST traversal: no shared discovery, type, proof, ownership
+ * or callback-recognition helpers. Includes private functions, arbitrary closures,
+ * methods, property receivers and literal computed .query access. Member-by-member
+ * start offsets are diagnostics for completeness, never stable identity keys. */
 export function independentDiscoverBeginCallSitesV1(source: ts.SourceFile): IndependentBeginCallSiteV1[] {
   const out: IndependentBeginCallSiteV1[] = []
-  for (const stmt of source.statements) {
-    if (!ts.isFunctionDeclaration(stmt) || !stmt.name || !stmt.body || !hasExportModifier(stmt)) continue
-    const fn = stmt
-    const fnName = fn.name!.text
-    const calls = collectOwnScopeCalls(fn, (c) => matchBeginCallAnyReceiver(c) !== null)
-    for (const { node } of calls) {
-      const match = matchBeginCallAnyReceiver(node)!
-      out.push({ enclosingFunction: fnName, receiverName: match.receiverName, statementText: match.text })
+  const visit = (node: ts.Node, owner: string): void => {
+    if (ts.isFunctionDeclaration(node) && node.name) owner = node.name.text
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression
+      const receiver = ts.isPropertyAccessExpression(callee) && callee.name.text === 'query'
+        ? callee.expression
+        : ts.isElementAccessExpression(callee) && callee.argumentExpression
+          && ts.isStringLiteralLike(callee.argumentExpression) && callee.argumentExpression.text === 'query'
+          ? callee.expression : undefined
+      const sql = node.arguments[0]
+      if (receiver && sql && ts.isStringLiteralLike(sql) && /^\s*(BEGIN\b|START\s+TRANSACTION\b)/i.test(sql.text)) {
+        out.push({
+          enclosingFunction: owner, receiverName: receiver.getText(source),
+          statementText: sql.text, start: node.getStart(source),
+        })
+      }
     }
+    node.forEachChild(child => visit(child, owner))
   }
+  visit(source, '<module>')
   return out
 }
-
 
 /** Pool-owned acquisitions outside the caller-client domain. Recognize only
  * unconditional own-body connect statements; every unproven BEGIN remains in
@@ -434,7 +401,7 @@ export function discoverPoolOwnedBeginSitesV1(source: ts.SourceFile): Independen
       if (writes.some(write=>write.end>acquisition.end) || writes.length>1) continue
       for (const {node} of collectOwnScopeCalls(fn,call=>matchBeginCall(call,acquisition.name)!==null)) {
         if (node.getStart()<=acquisition.end) continue
-        out.push({enclosingFunction:fn.name!.text,receiverName:acquisition.name,statementText:matchBeginCall(node,acquisition.name)!})
+        out.push({enclosingFunction:fn.name!.text,receiverName:acquisition.name,statementText:matchBeginCall(node,acquisition.name)!,start:node.getStart()})
       }
     }
   }

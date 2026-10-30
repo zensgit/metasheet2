@@ -1,3 +1,5 @@
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
+import { attendanceNativeClientForCheckoutV1 } from './attendance-owned-native-query-probe'
 /**
  * P1-1 settlement coordination, S5 groups G1 / G2: a statement recorder and an entry harness for the
  * production-inertness baseline (acceptance A01-P1 / A01-P2) and the hot-path record (A12-P4).
@@ -49,7 +51,6 @@ import { ApprovalProductService } from '../../src/services/ApprovalProductServic
 import type { ApprovalActionRequest } from '../../src/types/approval-product'
 import * as liveBoundaryModule from '../../src/attendance/w4c2-live-scheduled-boundary'
 import type { AttendanceW4LiveScheduledBoundaryV1, OnlinePunchInputV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import {
   closeLegacyRollbackWindowV1,
   transitionAttendanceCalculationRolloutV1,
@@ -203,7 +204,7 @@ export class P11StatementRecorder {
    * async scope active at release time: `pool.query` releases inside pg's own query callback, which runs
    * in the socket's async context, where no entry scope is active.
    */
-  readonly #checkedOut = new Map<object, EntryStore>()
+  readonly #checkedOut = new Map<object, { store: EntryStore; native: object }>()
 
   constructor(options: P11RecorderOptions) {
     this.#options = options
@@ -241,17 +242,23 @@ export class P11StatementRecorder {
       if (!store) return
       const label = `b${store.nextBorrow}`
       store.nextBorrow += 1
+      const native = pool instanceof AttendanceManagedPgPool
+        ? attendanceNativeClientForCheckoutV1(pool, client) : client
+      // Acquire/release use the checkout facade; native queries keep pg's receiver.
       store.borrowOf.set(client, label)
-      this.#checkedOut.set(client, store)
+      store.borrowOf.set(native, label)
+      this.#checkedOut.set(client, { store, native })
       store.steps.push(this.#stamp({ k: 'acquire', b: label }))
       store.lastActivity = Date.now()
     }
     const onRelease = (error: unknown, client: PoolClient): void => {
-      const store = this.#checkedOut.get(client) ?? this.#als.getStore()
+      const checkedOut = this.#checkedOut.get(client)
+      const store = checkedOut?.store ?? this.#als.getStore()
       if (!store) return
       this.#checkedOut.delete(client)
       const label = store.borrowOf.get(client) ?? this.#otherLabel(store, client)
       store.borrowOf.delete(client)
+      if (checkedOut) store.borrowOf.delete(checkedOut.native)
       store.steps.push(this.#stamp({ k: 'release', b: label, destroy: Boolean(error) }))
       store.lastActivity = Date.now()
     }
@@ -804,11 +811,6 @@ type W7TransitionInput = Parameters<typeof transitionAttendanceW7ContextSourceV1
 const BASE_EVIDENCE_REFERENCES = Object.freeze({ imageSha: 'img-p11', ownerAuthorizationRef: 'owner-p11', syntheticOrgRef: 'org-p11' })
 
 /** pg's own client as the W4 boundaries take it (the CLIs' `clientAdapter` / `asTrx`). */
-function trxOf(client: PoolClient): AttendanceW4TransactionClientV1 {
-  return {
-    query: (text: string, values?: unknown[]) => client.query(text, values as unknown[]),
-  } as unknown as AttendanceW4TransactionClientV1
-}
 
 export interface P11ApprovalActor {
   readonly userId: string
@@ -846,7 +848,7 @@ export const p11Entries = {
     process.env[W4_ALLOWLIST_ENV] = orgId
     const client = await poolManager.get().getInternalPool().connect()
     try {
-      return await transitionAttendanceCalculationRolloutV1(trxOf(client), {
+      return await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
         orgId,
         actorId: 'p11-inertness-actor',
         correlationId: randomUUID(),
@@ -876,7 +878,7 @@ export const p11Entries = {
   async w4ClosureRefused(orgId: string): Promise<AttendanceW4C3aRolloutControlResultV1> {
     const client = await poolManager.get().getInternalPool().connect()
     try {
-      return await closeLegacyRollbackWindowV1(trxOf(client), {
+      return await closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(client), {
         orgId,
         batchId: randomUUID(),
         actorId: 'p11-inertness-actor',
@@ -907,9 +909,7 @@ export const p11Entries = {
     const client = await poolManager.get().getInternalPool().connect()
     try {
       return await transitionAttendanceW7ContextSourceV1(
-        {
-          query: async (text: string, values?: unknown[]) => ({ rows: (await client.query(text, values as unknown[])).rows }),
-        } as unknown as AttendanceW4TransactionClientV1,
+        attendanceOwningSessionForClientV1(client),
         {
           orgId,
           actorId: 'p11-inertness-actor',

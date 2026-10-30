@@ -13,11 +13,12 @@
  *     current_policy_requested)
  * Neither is described as a migrated production recompute path.
  */
+import { withAttendanceExclusiveIdleSessionV1, type AttendanceOwningSessionV1 } from './attendance-owning-session'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceCalculationRolloutLock,
-  assertConnectionIsIdleV1,
+  AttendanceW4IdentityError,
   createVerifiedAttendanceCalculationTargetIdentityV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
@@ -208,7 +209,7 @@ export type AttendanceRecordOperationAdaptersV1 = Readonly<{
 }>
 
 export interface AttendanceRecordOperationBoundaryConnectionV1 {
-  readonly client: AttendanceW4TransactionClientV1
+  readonly client: AttendanceOwningSessionV1
   release(error?: Error): void
 }
 
@@ -330,12 +331,12 @@ export function createAttendanceRecordOperationBoundaryV1(
       try {
         const cleaningAdapter = deps.adapters[input.kind]
         if (attendanceCleaningEntry && !cleaningAdapter.prepareAttendanceCleaningFence) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID')
-        if (attendanceCleaningEntry) await assertConnectionIsIdleV1(connection.client)
+        return await withAttendanceExclusiveIdleSessionV1(connection.client, async (lease) => {
         const sheetScope = attendanceCleaningEntry
-          ? await readAttendanceCleaningSheetScope((statement, params) => connection.client.query(statement, params),
+          ? await readAttendanceCleaningSheetScope((statement, params) => lease.query(statement, params),
             await cleaningAdapter.prepareAttendanceCleaningFence!(input.routeInput))
           : undefined
-        return await runAttendanceResultOperationTransactionV1(connection.client, async (trx) => {
+        return await runAttendanceResultOperationTransactionV1(lease, async (trx) => {
           if (sheetScope) {
             const lockedScope = await readAttendanceCleaningSheetScope((statement, params) => trx.query(statement, params), sheetScope)
             if (JSON.stringify(lockedScope) !== JSON.stringify(sheetScope)) fail('W4C3C_RECORD_IDENTITY_CHANGED', 409)
@@ -478,6 +479,7 @@ export function createAttendanceRecordOperationBoundaryV1(
           }
         }, sheetScope ? { attendanceCleaningAuthority: true,
           attendanceCleaningSheetIds: [sheetScope.projectionSheetId, sheetScope.catalogSheetId] } : undefined)
+        }, () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'))
       } catch (error) {
         // Settlement coordination (r6.1 §1.1 P1-1): the runner's mark and the older uncertain classes
         // (the cleaning one included) destroy the connection; anything else returns it.
