@@ -1692,6 +1692,7 @@ exec npx vitest run \
   dingtalk-recipient-field-warnings \
   directoryConfigPickers \
   DirectoryDeprovisionEvidencePanel.spec.ts \
+  DirectoryIntegrationIdentityPanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
   formViewValidation \

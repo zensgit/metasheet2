@@ -219,6 +219,7 @@ dingtalk-public-form-link-warnings
 dingtalk-recipient-field-warnings
 directoryConfigPickers
 DirectoryDeprovisionEvidencePanel.spec.ts
+DirectoryIntegrationIdentityPanel.spec.ts
 directoryManagementView
 featureFlags.plm.spec.ts
 featureFlagsApprovalAttachments
