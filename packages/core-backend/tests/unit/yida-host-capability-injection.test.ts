@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from '../../../../scripts/ops/plugin-tests-workflow-contract.mjs'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
@@ -97,7 +98,7 @@ it('registers the host-boundary and connection-test real-PG proofs in the EXPECT
   const workflow = yaml.load(readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8')) as {
     jobs: { test: { steps: Array<{ id?: string; if?: string; env?: Record<string, string>; run?: string; 'continue-on-error'?: unknown }> } }
   }
-  const step = workflow.jobs.test.steps.find(entry => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
+  const step = requiredSuiteJob(workflow, 'runtime-db').steps.find(entry => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
   expect(step?.env?.EXPECT_DB).toBe('1')
   expect(step?.env?.DATABASE_URL).toBeTruthy()
   expect(step?.if).toBe("matrix.node-version == '20.x'")

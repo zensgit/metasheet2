@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync as readFileSyncRaw } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -57,19 +58,6 @@ const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 const INSTALL_STEP_MARKER = '      - name: Install dependencies (with log)\n'
 const BEHAVIOR_STEP_MARKER = '      - name: Time Machine D2 archive real-DB fail-not-skip behavior\n'
 
-function jobBody(workflow, jobName) {
-  const marker = `  ${jobName}:\n`
-  assert.equal(
-    workflow.split(marker).length - 1,
-    1,
-    `plugin-tests.yml must contain exactly one ${jobName} job`,
-  )
-  const start = workflow.indexOf(marker) + marker.length
-  const remainder = workflow.slice(start)
-  const nextJob = remainder.match(/^  [A-Za-z0-9_-]+:\s*$/m)
-  return nextJob ? remainder.slice(0, nextJob.index) : remainder
-}
-
 function archiveRoster(paths) {
   return paths.filter((path) => ARCHIVE_REALDB_RE.test(path))
 }
@@ -100,7 +88,7 @@ function assertD2ArchiveWiring(config, workflow) {
   assert.notEqual(excludeBody, null, 'vitest.config.ts must have a direct test.exclude array')
   assertExactRoster(quotedExcludeEntries(excludeBody), 'test.exclude')
 
-  const testJob = jobBody(workflow, 'test')
+  const testJob = requiredSuiteJobBody(workflow, 'unit')
   assert.equal(
     testJob.split(INSTALL_STEP_MARKER).length - 1,
     1,
