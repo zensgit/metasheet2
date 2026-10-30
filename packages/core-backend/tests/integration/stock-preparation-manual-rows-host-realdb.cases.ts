@@ -20,6 +20,8 @@
  *   MR2-RD-04 复制为新行 of a PLM row: the six + 备料计划 copied; identity / RUN, the lineage pair, 进度与回复 never.
  *   MR2-RD-05 修改: only the six (outside → 400); version + 1; the generic /patch still refuses the six on that row.
  *   MR2-RD-06 删除 / 恢复: the manual row deletes and restores; a PLM row and a prefix row without a creator stay refused.
+ *   MR2-RD-06b the in-transaction re-check runs AFTER the sheet fence: a second connection holds the fence and turns the
+ *             switch off; the waiting create sees the committed 'disabled' (409, nothing written).
  *   MR2-RD-07 the person field routes cannot touch the switch: PATCH /fields keeps the stored value.
  *   MR2-RD-08 /context: the block is `allowed` with the six editable ids, then `disabled` after the switch.
  * Values-free: every id is synthetic and per-run.
@@ -29,10 +31,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import express from 'express'
+import { Client } from 'pg'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { MetaSheetServer } from '../../src/index'
+import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
@@ -321,6 +325,45 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         expect(await row(refusedId)).toBeDefined()
       }
       actor = WRITER
+    })
+
+    test('MR2-RD-06b conditions 3, 4 and 6 run AFTER the sheet fence: a switch flip committed by the fence holder is seen by the waiting create', async () => {
+      // ADR §8 「B2 主机」 4. A second connection holds the sheet's canonical fence (the advisory lock createRecord takes
+      // first) and, inside that transaction, turns the switch off. The create's route pre-check still reads 'allowed'
+      // (the flip is not committed yet); the create then WAITS on the fence. Only a re-check that runs after the fence,
+      // on the transaction's own re-read, sees the committed 'disabled' — before the fence it would read 'allowed' too.
+      actor = WRITER
+      const keyId = phys(main, 'idempotencyKey')
+      const before = await keyProperty(main)
+      const rowsBefore = await rowCount(main)
+      const holder = new Client({ connectionString: process.env.DATABASE_URL })
+      await holder.connect()
+      let committed = false
+      try {
+        await holder.query('BEGIN')
+        await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(main.sheetId)])
+        await holder.query(
+          `UPDATE meta_fields SET property = jsonb_set(COALESCE(property, '{}'::jsonb), '{stockPreparationManualRows}', '"disabled"'::jsonb) WHERE sheet_id = $1 AND id = $2`,
+          [main.sheetId, keyId],
+        )
+        const pending = create(main, minimal(main)).then((res) => ({ status: res.status, body: res.body }))
+        let waiting = 0
+        for (let i = 0; i < 200 && waiting === 0; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+          waiting = Number(((await q("SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")).rows[0] as { c: number }).c)
+        }
+        expect(waiting, 'the create must be waiting on the sheet fence').toBeGreaterThan(0)
+        await holder.query('COMMIT')
+        committed = true
+        const res = await pending
+        expect(res.status, JSON.stringify(res.body).slice(0, 300)).toBe(409)
+        expect(res.body.error.details).toEqual({ reason: 'disabled' })
+        expect(await rowCount(main)).toBe(rowsBefore)
+      } finally {
+        if (!committed) await holder.query('ROLLBACK').catch(() => {})
+        await holder.end()
+        await q('UPDATE meta_fields SET property = $3::jsonb WHERE sheet_id = $1 AND id = $2', [main.sheetId, keyId, JSON.stringify(before)])
+      }
     })
 
     test('MR2-RD-07 the person field routes cannot change the switch: PATCH /fields keeps the stored value', async () => {

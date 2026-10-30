@@ -43,8 +43,9 @@ export type MultitableRowActions = {
   /** R-66 (plm-row-delete-guard.ts): set only where `canDelete` was turned false because the row is a PLM row the
    *  stock-preparation pull maintains — the web shows the delete entry disabled with the reason. Absent elsewhere. */
   deleteBlockedReason?: 'plm_row'
-  /** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): set only on a row satisfying M, on GET /view and
-   *  GET /records/:id, for an actor who can edit or delete records. Absent elsewhere. */
+  /** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3): set only on a row satisfying M, on GET /view and
+   *  GET /records/:id, for EVERY actor who can read the row (the grid's 「人工补充」 label). A display mark only —
+   *  editing controls are gated on /context's `stockPreparationManualRows` block, never on this. Absent elsewhere. */
   manualSupplement?: true
 }
 

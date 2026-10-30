@@ -541,7 +541,7 @@ describe('GET /view rowActionOverrides (R-66 ①, per-row channel, no /context k
     }
   })
 
-  it('a reader (cannot delete anyway): no overrides and no registry statement', async () => {
+  it('a reader (cannot delete anyway) on a page without a `manual:`-keyed row: no overrides and no registry statement', async () => {
     seed()
     actor = { id: 'u_plmdel_reader', roles: ['member'], perms: ['multitable:read'] }
     const res = await view(SHEET_PM)

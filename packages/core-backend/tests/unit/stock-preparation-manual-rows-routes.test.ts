@@ -52,6 +52,17 @@ const P = (n: number) => `plm_stock_preparation_sandbox_p_${n.toString(16).padSt
 type Sheets = Record<string, FakeSheet>
 let S: Sheets
 
+/**
+ * ADR §8 「B2 主机」 2: the sheet still resolves exactly ONE `key: true` column, but it is NOT the 唯一键 the host
+ * registry row derives — the derived idempotencyKey keeps its stanza with `key: false`, the flag sits on another column.
+ * Every manual-row path must fail closed (contract_mismatch).
+ */
+function keyMoved(sheet: FakeSheet): FakeSheet {
+  const key = sheet.fields.find((field) => field.id === fake.phys(sheet, 'idempotencyKey'))!
+  ;(key.property.stockPreparation as Record<string, unknown>).key = false
+  return sheet
+}
+
 function seedSheets(): Sheets {
   fake.reset()
   return {
@@ -71,6 +82,7 @@ function seedSheets(): Sheets {
     MISMATCH: fake.addSheet('MISMATCH', { objectId: P(11), target: { status: 'active', objectId: P(12) } }),
     BADROW: fake.addSheet('BADROW', { objectId: P(13), target: { status: 'active', projectNo: '   ' } }),
     TWOKEYS: fake.addSheet('TWOKEYS', { objectId: P(14), secondKey: true }),
+    KEYMOVED: keyMoved(fake.addSheet('KEYMOVED', { objectId: P(18), secondKey: true })),
     NONAME: fake.addSheet('NONAME', { objectId: P(15), omit: ['componentName'] }),
     COPY: fake.addSheet('COPY', { objectId: P(16), plugin: null, target: null }),
     PLAIN: fake.addSheet('PLAIN', { objectId: P(17), noStanza: true }),
@@ -251,6 +263,7 @@ describe('C — 新增: POST /sheets/:sheetId/manual-rows', () => {
     ['MISMATCH', 'contract_mismatch'],
     ['BADROW', 'contract_mismatch'],
     ['TWOKEYS', 'contract_mismatch'],
+    ['KEYMOVED', 'contract_mismatch'],
     ['NONAME', 'contract_mismatch'],
   ])('C-09 %s: 409 STOCK_PREP_MANUAL_ROWS_UNAVAILABLE / %s, nothing written', async (key, reason) => {
     const sheet = S[key]
@@ -544,6 +557,7 @@ describe('Y — 复制为新行: POST /records/:recordId/manual-copy', () => {
     ['ARCHIVED', 409, 'project_archived'],
     ['NO087', 409, 'not_project_sheet'],
     ['NOLOCK', 409, 'lock_missing'],
+    ['KEYMOVED', 409, 'contract_mismatch'],
   ])('Y-05 the same gates as 新增 (%s): %s %s, nothing written', async (key, status, reason) => {
     const sheet = S[key]
     const source = fake.addRecord(sheet, `rec_mrb2_copy_gate_${key}`, { componentName: 'SYN', totalQuantity: 1 }, null)
@@ -672,6 +686,7 @@ describe('E — 修改: PATCH /records/:recordId/manual-fields', () => {
     ['NO087', 'not_project_sheet'],
     ['NOLOCK', 'lock_missing'],
     ['TWOKEYS', 'contract_mismatch'],
+    ['KEYMOVED', 'contract_mismatch'],
   ])('E-08 %s: 409 %s, nothing written (a manual-shaped row there is not editable through this route)', async (key, reason) => {
     const row = manualRow(S[key], `rec_mrb2_edit_gate_${key}`)
     const before = structuredClone(row)
@@ -753,6 +768,7 @@ describe('X — GET /context: capabilities.stockPreparationManualRows', () => {
     ['KEYLOCKONLY', { state: 'unavailable', reason: 'lock_missing' }],
     ['MISMATCH', { state: 'unavailable', reason: 'contract_mismatch' }],
     ['TWOKEYS', { state: 'unavailable', reason: 'contract_mismatch' }],
+    ['KEYMOVED', { state: 'unavailable', reason: 'contract_mismatch' }],
   ])('X-02 %s: %j', async (key, expected) => {
     expect(await block(S[key])).toMatchObject(expected)
   })

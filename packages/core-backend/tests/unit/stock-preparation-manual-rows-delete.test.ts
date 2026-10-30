@@ -9,8 +9,10 @@
  *   D-09..10  restore — unchanged: a deleted manual row comes back (no live row holds its unique key); a PLM row whose key
  *             a live row holds stays refused.
  *   D-11..14  the four display sites — GET /view (the delete block AND the `manualSupplement` mark through
- *             rowActionOverrides; the creator statement only for the page's prefix rows; a reader costs nothing),
- *             GET /records/:id, the form context (row identity only: the form is unchanged, OQ7).
+ *             rowActionOverrides; the creator statement only for the page's prefix rows; the mark reaches EVERY reader,
+ *             OQ3 / §3.7, and a reader's page without a `manual:` row costs no statement), GET /records/:id (readers
+ *             included), the form context (row identity only, no mark: §3.7 names /view and /records/:id, OQ7 keeps the
+ *             form unchanged).
  *   D-15      the sinks that hand NO row identity (plugin SDK / automation / reset) keep refusing a manual row.
  *
  * Mock pool, no DB; one pinned listener (#4154). Every value is synthetic.
@@ -44,6 +46,8 @@ let PREG: FakeSheet
 let ENV: FakeSheet
 let NOKEY: FakeSheet
 let TWOKEYS: FakeSheet
+/** A registered project sheet whose rows are only PLM-keyed or keyless (no `manual:` key anywhere). */
+let PLMONLY: FakeSheet
 
 const ph = (sheet: FakeSheet, logical: string) => fake.phys(sheet, logical)
 const keyed = (sheet: FakeSheet, id: string, key: unknown, createdBy: string | null) =>
@@ -56,6 +60,9 @@ function seed() {
   // Registered with the stanza but no key:true column → key_column_missing.
   NOKEY = fake.addSheet('NOKEY', { objectId: P(22), omit: ['idempotencyKey'] })
   TWOKEYS = fake.addSheet('TWOKEYS', { objectId: P(23), secondKey: true })
+  PLMONLY = fake.addSheet('PLMONLY', { objectId: P(24) })
+  keyed(PLMONLY, 'rec_mrb2_d_plmonly_plm', PLM_KEY, null)
+  keyed(PLMONLY, 'rec_mrb2_d_plmonly_keyless', '', 'u_mrb2_person')
   keyed(PREG, 'rec_mrb2_d_manual', 'manual:v1:rec_mrb2_d_manual', 'u_mrb2_person')
   keyed(PREG, 'rec_mrb2_d_unbound', 'manual:v1:rec_mrb2_somebody', 'u_mrb2_person')
   keyed(PREG, 'rec_mrb2_d_unbound_v2', 'manual:v2:rec_mrb2_d_unbound_v2', 'u_mrb2_person')
@@ -207,18 +214,38 @@ describe('D — the four display sites', () => {
     }
   })
 
-  it('D-12 GET /view loads creators for the page\'s `manual:` prefix rows ONLY (one statement), and a reader costs neither statement', async () => {
+  it('D-12 GET /view loads creators for the page\'s `manual:` prefix rows ONLY (one statement)', async () => {
     await http().get('/api/multitable/view').query({ sheetId: PREG.sheetId })
     const creatorReads = fake.statements(/^SELECT id, created_by FROM meta_records WHERE sheet_id = \$1 AND id = ANY/)
     expect(creatorReads).toHaveLength(1)
     expect([...(creatorReads[0].params[1] as string[])].sort()).toEqual(['rec_mrb2_d_manual', 'rec_mrb2_d_nocreator', 'rec_mrb2_d_unbound', 'rec_mrb2_d_unbound_v2', 'rec_mrb2_d_wscreator'])
-    fake.sqlLog.length = 0
+  })
+
+  it('D-12b the 「人工补充」 mark reaches a READER too (OQ3, ADR §3.7): only the manual row is marked, nothing becomes deletable', async () => {
     actor = READER
     const res = await http().get('/api/multitable/view').query({ sheetId: PREG.sheetId })
+    expect(res.status).toBe(200)
+    const { rowActions, rowActionOverrides } = res.body.data.meta.permissions
+    expect(rowActions.canDelete).toBe(false)
+    expect(Object.keys(rowActionOverrides)).toEqual(['rec_mrb2_d_manual'])
+    expect(rowActionOverrides.rec_mrb2_d_manual).toEqual({ ...rowActions, manualSupplement: true })
+  })
+
+  it('D-12c a reader\'s page without a `manual:`-keyed row costs NO registry or creator statement (and gets no override)', async () => {
+    actor = READER
+    const res = await http().get('/api/multitable/view').query({ sheetId: PLMONLY.sheetId })
     expect(res.status).toBe(200)
     expect('rowActionOverrides' in res.body.data.meta.permissions).toBe(false)
     expect(fake.statements(/^SELECT plugin_name, object_id FROM plugin_multitable_object_registry/)).toEqual([])
     expect(fake.statements(/^SELECT id, created_by FROM meta_records/)).toEqual([])
+  })
+
+  it('D-12d a reader on the ENV table ((a) fails): its `manual:`-keyed rows get NO mark and the answer carries no override', async () => {
+    actor = READER
+    const res = await http().get('/api/multitable/view').query({ sheetId: ENV.sheetId })
+    expect(res.status).toBe(200)
+    expect('rowActionOverrides' in res.body.data.meta.permissions).toBe(false)
+    expect(res.text).not.toContain('manualSupplement')
   })
 
   it('D-13 GET /records/:id: the manual row carries canDelete + manualSupplement; the env-table prefix row is deletable but NOT marked ((a) fails); a PLM row is blocked', async () => {
@@ -232,6 +259,22 @@ describe('D — the four display sites', () => {
     const plm = await get('rec_mrb2_d_plm', PREG)
     expect(plm.body.data.rowActions).toMatchObject({ canDelete: false, deleteBlockedReason: 'plm_row' })
     expect('manualSupplement' in plm.body.data.rowActions).toBe(false)
+  })
+
+  it('D-13b GET /records/:id for a READER: the manual row carries the mark (and stays undeletable for them); a PLM row costs no statement', async () => {
+    actor = READER
+    const manual = await http().get('/api/multitable/records/rec_mrb2_d_manual').query({ sheetId: PREG.sheetId })
+    expect(manual.status).toBe(200)
+    expect(manual.body.data.rowActions).toMatchObject({ canDelete: false, manualSupplement: true })
+    const env = await http().get('/api/multitable/records/rec_mrb2_d_env_own').query({ sheetId: ENV.sheetId })
+    expect(env.status).toBe(200)
+    expect(env.body.data.rowActions.canDelete).toBe(false)
+    expect('manualSupplement' in env.body.data.rowActions).toBe(false)
+    fake.sqlLog.length = 0
+    const plm = await http().get('/api/multitable/records/rec_mrb2_d_plmonly_plm').query({ sheetId: PLMONLY.sheetId })
+    expect(plm.status).toBe(200)
+    expect('manualSupplement' in plm.body.data.rowActions).toBe(false)
+    expect(fake.statements(/^SELECT plugin_name, object_id FROM plugin_multitable_object_registry/)).toEqual([])
   })
 
   it('D-14 the form context passes the row identity (the manual row is deletable there too) and adds no mark (OQ7: the form is unchanged)', async () => {

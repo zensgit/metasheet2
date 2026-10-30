@@ -18235,22 +18235,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         linkValuesByRecord,
       )
       // R-66 ① (plm-row-delete-guard.ts): which page rows are PLM rows the delete routes refuse for everyone, and —
-      // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.5 / §3.7) — which are manual rows (E exempts them; M
-      // marks them `manualSupplement`). From the rows' UNFILTERED data (a field-permission-hidden key column still
-      // identifies the row; the route refuses regardless), in memory over `fields`; one registry statement on an
-      // exact-stanza sheet only, a creator statement only for the page's `manual:`-keyed rows, and none at all for an
-      // actor who can neither edit nor delete. A failed probe fails CLOSED to "blocked, not manual" (display only).
-      const plmRowDisplay: PlmRowDisplay = capabilities.canDeleteRecord || capabilities.canEditRecord
-        ? await resolvePlmRowDisplay(pool.query.bind(pool), sheetId, fields, rows, {
-            loadCreators: (recordIds) => loadRecordCreatorMap(pool.query.bind(pool), sheetId, recordIds),
-            onProbeError: (err) => {
-              console.error(
-                '[univer-meta] view: PLM-row probe failed for rowActionOverrides; failing closed to blocked',
-                { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
-              )
-            },
-          })
-        : { blockedIds: new Set<string>(), manualIds: new Set<string>() }
+      // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.5 / §3.7, OQ3) — which are manual rows (E exempts them; M
+      // marks them `manualSupplement` for EVERY actor who can read them). From the rows' UNFILTERED data (a
+      // field-permission-hidden key column still identifies the row; the route refuses regardless), in memory over
+      // `fields`; one registry statement on an exact-stanza sheet only and a creator statement only for the page's
+      // `manual:`-keyed rows. An actor who cannot delete needs the marks only: no statement at all unless the page holds
+      // such a row. A failed probe fails CLOSED to "blocked, not manual" (display only).
+      const plmRowDisplay: PlmRowDisplay = await resolvePlmRowDisplay(pool.query.bind(pool), sheetId, fields, rows, {
+        loadCreators: (recordIds) => loadRecordCreatorMap(pool.query.bind(pool), sheetId, recordIds),
+        onProbeError: (err) => {
+          console.error(
+            '[univer-meta] view: PLM-row probe failed for rowActionOverrides; failing closed to blocked',
+            { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+          )
+        },
+        onlyManualMarks: !capabilities.canDeleteRecord,
+      })
       const plmDeleteBlockedIds = capabilities.canDeleteRecord ? plmRowDisplay.blockedIds : new Set<string>()
       for (const row of rows) {
         row.data = filterRecordDataByFieldIds(row.data, allowedFieldIds)
@@ -19829,18 +19829,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities, viewScopeMap) : {}
       // R-66 ① (plm-row-delete-guard.ts): same per-row PLM block as GET /view, from the row's UNFILTERED stored data
       // (`record.data` was field-masked above), with the row identity (ADR adr-stock-prep-manual-rows-20261030 §3.5);
-      // a manual row also carries `manualSupplement: true` (§3.7). No statement for an actor who can neither edit nor
-      // delete.
-      const recordPlmDisplay: PlmRowDisplay = capabilities.canDeleteRecord || capabilities.canEditRecord
-        ? await resolvePlmRowDisplay(pool.query.bind(pool), sheetId, fields, [{ id: record.id, data: normalizeJson(row.data), createdBy: record.createdBy ?? null }], {
-            onProbeError: (err) => {
-              console.error(
-                '[univer-meta] record: PLM-row probe failed for rowActions; failing closed to blocked',
-                { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
-              )
-            },
-          })
-        : { blockedIds: new Set<string>(), manualIds: new Set<string>() }
+      // a manual row also carries `manualSupplement: true` for every actor who can read it (§3.7, OQ3). An actor who
+      // cannot delete issues no statement unless this row's key is a `manual:` prefix key.
+      const recordPlmDisplay: PlmRowDisplay = await resolvePlmRowDisplay(pool.query.bind(pool), sheetId, fields, [{ id: record.id, data: normalizeJson(row.data), createdBy: record.createdBy ?? null }], {
+        onProbeError: (err) => {
+          console.error(
+            '[univer-meta] record: PLM-row probe failed for rowActions; failing closed to blocked',
+            { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+          )
+        },
+        onlyManualMarks: !capabilities.canDeleteRecord,
+      })
       const rowActions = withManualSupplementMark(
         withPlmRowDeleteBlock(
           deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy),

@@ -364,17 +364,26 @@ export type PlmRowDisplay = {
  * caller did not hand in — one creator statement for THOSE rows (ADR §3.5 「只查前缀行」). A failed registry probe
  * fails CLOSED to "every row blocked, none manual"; a failed creator load leaves those prefix rows blocked and unmarked
  * (display only — the route decides).
+ *
+ * `onlyManualMarks`: the caller needs the 人工补充 marks only (an actor who cannot delete — the mark reaches every actor
+ * who can read the row, OQ3 / ADR §3.7). Then a page without a `manual:` prefix-key row in the sheet's single key
+ * column issues no statement at all (a mark can land on no other row), and `blockedIds` is not meaningful.
  */
 export async function resolvePlmRowDisplay(
   query: PlmRowGuardQueryFn,
   sheetId: string,
   fields: ReadonlyArray<FieldLike>,
   rows: ReadonlyArray<PlmRowDisplayRow>,
-  options: { loadCreators?: PlmRowCreatorLoader; onProbeError?: (err: unknown) => void } = {},
+  options: { loadCreators?: PlmRowCreatorLoader; onProbeError?: (err: unknown) => void; onlyManualMarks?: boolean } = {},
 ): Promise<PlmRowDisplay> {
   const blockedIds = new Set<string>()
   const manualIds = new Set<string>()
   if (rows.length === 0 || !fieldsCarryExactStockPreparationStanza(fields)) return { blockedIds, manualIds }
+  if (options.onlyManualMarks) {
+    const keyFieldIds = resolvePlmKeyFieldIds(fields)
+    if (keyFieldIds.length !== 1) return { blockedIds, manualIds }
+    if (!rows.some((row) => isManualPrefixKey((row.data ?? {})[keyFieldIds[0]]))) return { blockedIds, manualIds }
+  }
   let profile: PlmRowSheetProfile
   try {
     profile = await loadPlmRowSheetProfile(query, sheetId, fields)
