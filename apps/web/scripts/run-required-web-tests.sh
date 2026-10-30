@@ -1644,6 +1644,7 @@ exec npx vitest run \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
+  attendanceGroupManagerIdentity \
   attendanceLegacyPermissionPayload \
   attendanceLocaleControls.spec.ts \
   attendanceOverviewRequestReveal \
