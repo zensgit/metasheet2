@@ -192,7 +192,7 @@ describe('gate 2 and gate 13 under token trust', () => {
   })
 
   it('returns different rows for assigned and created', async () => {
-    const actor = await userWith({ label: 'views', codes: ['tasks:read'], admission: true })
+    const actor = await userWith({ label: 'views', codes: ['tasks:read', 'tasks:write'], admission: true })
     const other = `usr_other_views_${stamp}`
     // RULED(2026-10-07): [N2] an assignee other than the creator must be an active member of the
     // org (design §4.6). Seeded ids end in `_${stamp}`, so afterAll's sweep removes them.
@@ -282,7 +282,7 @@ describe('gate 2 and gate 13 under token trust', () => {
   })
 
   it('gate 8: invalid and missing viewer zones follow the task zone on pending-count', async () => {
-    const actor = await userWith({ label: 'g8', codes: ['tasks:read'], admission: true })
+    const actor = await userWith({ label: 'g8', codes: ['tasks:read', 'tasks:write'], admission: true })
     const picked = zoneThatDisagreesWithUtc(new Date())
     const created = await createTask({
       orgId, creatorId: `usr_g8c_${stamp}`, title: '备料复核', assignees: [actor.userId], completionMode: 'all',
@@ -304,7 +304,7 @@ describe('gate 2 and gate 13 under token trust', () => {
   })
 
   it('gate 8 negative: a UTC fallback on the count route separates invalid and missing headers', async () => {
-    const actor = await userWith({ label: 'g8neg', codes: ['tasks:read'], admission: true })
+    const actor = await userWith({ label: 'g8neg', codes: ['tasks:read', 'tasks:write'], admission: true })
     const picked = zoneThatDisagreesWithUtc(new Date())
     const created = await createTask({
       orgId, creatorId: `usr_g8n_${stamp}`, title: '备料复核', assignees: [actor.userId], completionMode: 'all',

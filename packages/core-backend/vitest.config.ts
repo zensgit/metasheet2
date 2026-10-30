@@ -1966,6 +1966,7 @@ export default defineConfig({
       'tests/integration/task-m4-list-items.db.test.ts',
       'tests/integration/task-m4-groups.db.test.ts',
       'tests/integration/task-m4-org-members.db.test.ts',
+      'tests/integration/task-member-access.db.test.ts',
       'tests/integration/task-m4-outbox.db.test.ts',
       'tests/integration/task-m4-delivery.db.test.ts',
       'tests/integration/task-m4-scheduler.db.test.ts',
