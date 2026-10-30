@@ -46,8 +46,17 @@ Mac mini仍处于让出状态。本轮没有连接它，没有启动其测试、
 
 ## 当前head CI
 
+### 加密写入点登记修复
+
+上一head `09832d8581` 的必需检查为12通过／1失败：`test (20.x)` 在加密写入点普查中发现新合成夹具6处未登记调用，导致该文件6项断言失败；其后Postgres未启动，always清理连接被拒。该失败归属本PR，不以专用PG16已通过替代必需检查。
+
+本次只为 `scripts/ops-tests/dingtalk-group-credentials-20261030.case.ts` 登记精确6处 `encryptStoredSecretValue`，并说明其只使用每轮随机材料、合成数据及临时数据库，属于测试夹具豁免。没有更改扫描根目录、忽略规则或加密存储目录。新增突变回归分别删除1处／增加1处，必须报告5／7与固定6的差异；已有新存储与YiDa写入点突变自检保留。
+
+本机Node24.14.1、复用已有依赖、独立稀疏源码扫描：修复前13项中6失败／7通过；修复后14项全部通过，含新增2个增删场景。未安装依赖，未连接Mac mini或任何应用环境。此证据仅证明定向扫描回归；Node20及完整门禁由当前head CI另行验证。
+
 独立工作流：`.github/workflows/dingtalk-credential-repair.yml`，job `credential-repair (PG16)`。固定`ubuntu-22.04` GitHub-hosted runner、Node20、pnpm10.16.1及PostgreSQL16，不使用Mac mini、自建runner、SSH或任何应用环境。
 
+- 先实跑加密扫描清单及突变自检14项，重试为0，上传独立JSON结果；路径触发器覆盖登记文件与扫描器。
 - 实跑核心17项真实PG测试，缺`DATABASE_URL`必须失败，重试为0。
 - 实跑5项备份恢复测试：49／97一致、schema-only拒绝、同计数错值拒绝、活动连接清理、删库失败仍清目录及拒绝重试。
 - 使用当前PG16客户端；客户端或服务端不是16则失败。
