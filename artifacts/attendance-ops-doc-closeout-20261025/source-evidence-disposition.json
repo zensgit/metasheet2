@@ -1,0 +1,363 @@
+{
+  "scope": "OPS-DOC E1 only",
+  "baseline": "8a426818804897a20f7674c39c56b3a445909c3a",
+  "branch": "codex/attendance-ops-doc-closeout-20261025",
+  "disposition": "Draft/HOLD; documentation correction and offline source snapshot only",
+  "document": "docs/development/dingtalk-default-off-staging-smoke-20260708.md",
+  "section_start": "## 1. E1 container login",
+  "section_end": "## 2. Work notification",
+  "sources": [
+    {
+      "id": "mount",
+      "path": "packages/core-backend/src/index.ts",
+      "symbol": "authRouter mount",
+      "start": "    this.app.use('/api/auth', authRouter)",
+      "end": "\n",
+      "lines": [
+        2027,
+        2027
+      ],
+      "sha256": "e5daf25fb086aa385d8cc616d4051905b054e4deb954fe2dd27a7e85ff9cb565",
+      "expected_actual": "/api/auth prefix"
+    },
+    {
+      "id": "pipeline",
+      "path": "packages/core-backend/src/index.ts",
+      "symbol": "setupMiddleware/setupRoutes",
+      "start": "    // Body parsing",
+      "end": "    // 路由：审批填单草稿",
+      "lines": [
+        1897,
+        2029
+      ],
+      "sha256": "1b2cddb4f74b0e9935aa7f32abfe87555b1dfb36644620f5562d093d7cfe19d5",
+      "expected_actual": "JSON parser; isWhitelisted before JWT; method override before mount"
+    },
+    {
+      "id": "handler",
+      "path": "packages/core-backend/src/routes/auth.ts",
+      "symbol": "authRouter POST E1",
+      "start": "authRouter.post('/login/dingtalk/container'",
+      "end": "\n/**",
+      "lines": [
+        1804,
+        1902
+      ],
+      "sha256": "c631e610a720866b634c7f46faca55a96e0d4a0edabfd379fbb2932da0ee95ac",
+      "expected_actual": "flag/body/limiter; success envelope and complete catch mapping"
+    },
+    {
+      "id": "features",
+      "path": "packages/core-backend/src/routes/auth.ts",
+      "symbol": "buildFeaturePayload",
+      "start": "function buildFeaturePayload(",
+      "end": "\nfunction normalizeDingTalkRedirectPath",
+      "lines": [
+        287,
+        333
+      ],
+      "sha256": "7c76bfc3ac42f980cc549dd9346291326a511f09c71df6494af5f4d0eed44b68",
+      "expected_actual": "dynamic features object; no E1 redirectPath"
+    },
+    {
+      "id": "policy",
+      "path": "packages/core-backend/src/auth/api-path-policy.ts",
+      "symbol": "GLOBAL_GATE_EXCEPTIONS",
+      "start": "export const GLOBAL_GATE_EXCEPTIONS",
+      "end": "\n/** The declared exception",
+      "lines": [
+        114,
+        165
+      ],
+      "sha256": "d3f06909a570b88a274f85c89f28fdec06bcc389b6a625ca532dd50b6ff50508",
+      "expected_actual": "exact full path; no old E1 alias"
+    },
+    {
+      "id": "path_matching",
+      "path": "packages/core-backend/src/auth/api-path-policy.ts",
+      "symbol": "apiPathEquals/apiPathHasPrefix",
+      "start": "export const API_PATH_PATTERN",
+      "end": "\n/**\n * How far",
+      "lines": [
+        47,
+        78
+      ],
+      "sha256": "1d24446b25b90a0933c35cb42a43073179951311160bf39e4a0cc9492ad75c72",
+      "expected_actual": "case-folding, trailing slash and anchored prefixes"
+    },
+    {
+      "id": "jwt",
+      "path": "packages/core-backend/src/auth/jwt-middleware.ts",
+      "symbol": "isWhitelisted",
+      "start": "export function isWhitelisted",
+      "end": "\nconst PUBLIC_FORM_CONTEXT_PATH",
+      "lines": [
+        26,
+        29
+      ],
+      "sha256": "643b4bd7858a7248f6de461eb1c7d27ad904e305cf7892c0aa7148929dd1a7b7",
+      "expected_actual": "delegates to isGateException"
+    },
+    {
+      "id": "jwt_refusal",
+      "path": "packages/core-backend/src/auth/jwt-middleware.ts",
+      "symbol": "jwtAuthMiddleware",
+      "start": "export async function jwtAuthMiddleware",
+      "end": null,
+      "lines": [
+        150,
+        169
+      ],
+      "sha256": "c2d8797251ceccf84997034e81e52b93d11c678a1a390b51794cf12a7b029eda",
+      "expected_actual": "missing Bearer: 401 ok:false nested UNAUTHORIZED"
+    },
+    {
+      "id": "exchange",
+      "path": "packages/core-backend/src/auth/dingtalk-oauth.ts",
+      "symbol": "exchangeEnterpriseAuthCodeForUser",
+      "start": "export async function exchangeEnterpriseAuthCodeForUser",
+      "end": "\nexport async function exchangeCodeForUser",
+      "lines": [
+        1589,
+        1646
+      ],
+      "sha256": "72be4e4ec75b3c60673074180a81707761921a55c520d3cb43b348f493114aef",
+      "expected_actual": "config/app token/user info/detail; unionId gate; resolveLocalUser"
+    },
+    {
+      "id": "resolve",
+      "path": "packages/core-backend/src/auth/dingtalk-oauth.ts",
+      "symbol": "resolveLocalUser",
+      "start": "async function resolveLocalUser",
+      "end": "\nexport function isDingTalkConfigured",
+      "lines": [
+        1264,
+        1387
+      ],
+      "sha256": "01abc277f9496382e401767099a43b809e2392487dfcd5e1649339832c21e10f",
+      "expected_actual": "account/grant/association/provision gates"
+    },
+    {
+      "id": "policy_error",
+      "path": "packages/core-backend/src/auth/dingtalk-oauth.ts",
+      "symbol": "DingTalkLoginPolicyError",
+      "start": "export class DingTalkLoginPolicyError",
+      "end": "\nconst pendingStates",
+      "lines": [
+        155,
+        166
+      ],
+      "sha256": "1c498448935bf66d3aac28df90e9a5ae31e6b0f03a20709c73d2cf45ae5f3e0e",
+      "expected_actual": "carried status/code; default 403/policy_denied"
+    },
+    {
+      "id": "oauth_config",
+      "path": "packages/core-backend/src/integrations/dingtalk/client.ts",
+      "symbol": "readDingTalkOauthConfig",
+      "start": "export function readDingTalkOauthConfig",
+      "end": "\nexport function readDingTalkMessageConfig",
+      "lines": [
+        239,
+        257
+      ],
+      "sha256": "1beb834946b3f0ff348d22288d4319901b64b43cdfce0c5d0a95a53191d55a61",
+      "expected_actual": "client ID/secret aliases, redirect URI, corp allowEmpty:true"
+    },
+    {
+      "id": "corp",
+      "path": "packages/core-backend/src/integrations/dingtalk/runtime-policy.ts",
+      "symbol": "DingTalkCorpNotAllowedError/assertDingTalkCorpAllowed",
+      "start": "export class DingTalkCorpNotAllowedError",
+      "end": "\nexport function maskDingTalkWebhookUrl",
+      "lines": [
+        3,
+        76
+      ],
+      "sha256": "da39d2016cb292b6d346c4aebde94cf43653000e5d25b24da01587d8dc1fc8b7",
+      "expected_actual": "separate Error subclass; empty allowlist permissive; configured mismatch rejects"
+    },
+    {
+      "id": "recovery",
+      "path": "packages/core-backend/src/db/recovery-conflict.ts",
+      "symbol": "classifyRecoveryConflict/sendIfRecoveryConflict",
+      "start": "export const RECOVERY_CONFLICT_HTTP_STATUS",
+      "end": null,
+      "lines": [
+        36,
+        133
+      ],
+      "sha256": "c44c10d60d5f505ea42c8875ab9e74dc7d6a5945261179d1859ee231fecdf192",
+      "expected_actual": "409 RECOVERY_AUTHORITY_BUSY with retryable details through jsonError"
+    },
+    {
+      "id": "response",
+      "path": "packages/core-backend/src/util/response.ts",
+      "symbol": "jsonError",
+      "start": "export function jsonError",
+      "end": "\nexport function jsonOk",
+      "lines": [
+        3,
+        6
+      ],
+      "sha256": "f4bd28bb9ccfa059043d8aca0bb4cb7b8bd784ee4ed1d08e0ddf110352cea66c",
+      "expected_actual": "ok:false nested error code/message/details"
+    },
+    {
+      "id": "failure_text",
+      "path": "packages/core-backend/src/directory/directory-failure-text.ts",
+      "symbol": "providerText/classifyDirectoryFailureText",
+      "start": "function providerText",
+      "end": null,
+      "lines": [
+        68,
+        124
+      ],
+      "sha256": "8cd154fddf74515f5ef6521dc6f7a8120fdf3909c1ed3e64dea86b5644269a63",
+      "expected_actual": "fixed RequestError text plus optional numeric HTTP suffix"
+    },
+    {
+      "id": "override",
+      "path": "packages/core-backend/src/middleware/method-override.ts",
+      "symbol": "methodOverrideMiddleware",
+      "start": "export function methodOverrideMiddleware",
+      "end": null,
+      "lines": [
+        97,
+        132
+      ],
+      "sha256": "a5ecbbc217524b10c620df9bcff85a35c1efd8a69c5b024549901edf9f25208d",
+      "expected_actual": "unhonored override claim refused before E1"
+    },
+    {
+      "id": "rate_limit",
+      "path": "packages/core-backend/src/routes/auth.ts",
+      "symbol": "checkRateLimit",
+      "start": "function checkRateLimit(",
+      "end": "\nfunction resetRateLimit",
+      "lines": [
+        189,
+        223
+      ],
+      "sha256": "fb8bac331936c7cb336ca7a0e8b69b37cb40390c47186e7f7ef0cfaec0fb8593",
+      "expected_actual": "retryAfter is integer seconds; limiter precedes provider exchange"
+    }
+  ],
+  "required_doc_fragments": [
+    "**`POST /api/auth/login/dingtalk/container`**",
+    "`authRouter.post('/login/dingtalk/container', ...)`",
+    "**exact** global JWT",
+    "{\"ok\":false,\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"Missing Bearer token\"}}",
+    "{\"success\":false,\"error\":\"DingTalk container login is not enabled\",\"code\":\"container_login_disabled\"}",
+    "{\"success\":false,\"error\":\"Missing required parameter: authCode\"}",
+    "{\"success\":false,\"error\":\"DingTalk rejected the container auth code\",\"code\":\"invalid_auth_code\"}",
+    "{\"ok\":false,\"error\":{\"code\":\"RECOVERY_AUTHORITY_BUSY\",\"message\":\"Recovery is stabilizing permissions; retry this change.\",\"details\":{\"retryable\":true}}}",
+    "{\"success\":false,\"error\":\"DingTalk authentication failed\"}",
+    "retryAfter:<seconds>",
+    "502 `identity_key_unavailable`",
+    "409 `identity_ambiguous`",
+    "503 `grant_state_unavailable`",
+    "`true`/`1`/`yes`",
+    "E1 has no `redirectPath`",
+    "Draft/HOLD",
+    "08am evidence remains inconclusive",
+    "Stream/lifecycle\nremain OFF",
+    "Real UAT and business `50004` are excluded",
+    "does **not** translate",
+    "No live smoke was run",
+    "default_off_contract_match",
+    "login_envelope_match",
+    "validation, rate limiting and exchange: `{}` must yield HTTP **404**, exactly",
+    "HTTP **400**, exactly",
+    "HTTP **200** is `{success:true,data:{mode:\"login\",user:{id,email,name,role,permissions},token,features}}`",
+    "set -o pipefail",
+    "transport_rc=$?",
+    "e1_response_filter.py default-off",
+    "e1_response_filter.py login",
+    "nonzero curl **or prompt pipeline** exit",
+    "JSON numeric",
+    "`unlinked_enabled_local_user`",
+    "`unlinked_local_user`"
+  ],
+  "changed_files": [
+    "artifacts/attendance-ops-doc-closeout-20261025/check_e1_source_contract.py",
+    "artifacts/attendance-ops-doc-closeout-20261025/e1_response_filter.py",
+    "artifacts/attendance-ops-doc-closeout-20261025/filter-review-fix-verification.json",
+    "artifacts/attendance-ops-doc-closeout-20261025/source-evidence-disposition.json",
+    "artifacts/attendance-ops-doc-closeout-20261025/verification.json",
+    "artifacts/attendance-ops-doc-closeout-20261025/verify_e1_examples.py",
+    "docs/development/dingtalk-default-off-staging-smoke-20260708.md"
+  ],
+  "verification_command": "python3 artifacts/attendance-ops-doc-closeout-20261025/check_e1_source_contract.py",
+  "remaining_gaps": [
+    "Independent reviewer and main validation pending",
+    "Main owns commit, push, Draft PR and final evidence",
+    "No current staging/deployed-source/runtime-config validation",
+    "No HTTP smoke, real UAT or business 50004 execution",
+    "No runtime tests, CI, DB or provider exchange executed",
+    "Corp-denial HTTP mapping observed as generic 500; code unchanged",
+    "Historical 08am inconclusive; no R71/tag/release/config/deploy authorization"
+  ],
+  "disposition_details": {
+    "corrected_route": "POST /api/auth/login/dingtalk/container",
+    "auth": "pre-session exact global JWT exception; existing identity/grant/corp policies retained",
+    "default_off": {
+      "http": 404,
+      "body": {
+        "success": false,
+        "error": "DingTalk container login is not enabled",
+        "code": "container_login_disabled"
+      }
+    },
+    "missing_authCode": {
+      "http": 400,
+      "body": {
+        "success": false,
+        "error": "Missing required parameter: authCode"
+      },
+      "code_field": false
+    },
+    "business_error": {
+      "http": 401,
+      "code": "invalid_auth_code",
+      "code_location": "top_level"
+    },
+    "recovery_conflict": {
+      "http": 409,
+      "code": "RECOVERY_AUTHORITY_BUSY",
+      "code_location": "error.code",
+      "retryable_location": "error.details.retryable"
+    },
+    "request_error": {
+      "http": 502,
+      "code_field": false
+    },
+    "other_error": {
+      "http": 500,
+      "code_field": false,
+      "includes": [
+        "missing OAuth config",
+        "DingTalkCorpNotAllowedError"
+      ]
+    },
+    "success": {
+      "http": 200,
+      "data_keys": [
+        "mode",
+        "user",
+        "token",
+        "features"
+      ],
+      "redirectPath": false
+    },
+    "historical_08am": "inconclusive",
+    "real_UAT": "excluded",
+    "business_50004": "excluded",
+    "Stream": "OFF",
+    "lifecycle": "OFF",
+    "live_smoke": "not_run"
+  },
+  "outside_E1_sha256": {
+    "before": "e3eaab5a3e6f3b9a27211748e8d70bda6a273dfe08685c50668dce6330d846fe",
+    "after": "fd1f7506023f752c7b9d0ea52eb858e3061b57ddf492a717b7c381d166b45389"
+  }
+}
