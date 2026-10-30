@@ -24,9 +24,37 @@ export function requiredSuiteJob(workflow, suite) {
 }
 
 export function requiredSuiteJobBody(workflow, suite) {
-  requiredSuiteJob(workflow, suite)
+  // These text-based guards also run in the Node-only Windows acceptance entry.
+  // Require the literal header format instead of adding a Python dependency there.
+  // The contracts job separately parses the complete document with real YAML.
   const source = workflow.replace(/\r\n/g, '\n')
-  const marker = `\n  ${suite}:\n`
-  assert.equal(source.split(marker).length, 2, `Expected one ${suite} job`)
-  return source.split(marker)[1].split(/\n  [\w-]+:\n/)[0]
+  const body = id => {
+    const marker = `\n  ${id}:\n`
+    assert.equal(source.split(marker).length, 2, `Expected one literal ${id} job`)
+    return source.split(marker)[1].split(/\n  [^\s#]/)[0]
+  }
+  const matrix = [
+    '    strategy:', '      fail-fast: false', '      matrix:',
+    '        node-version: [20.x]', '    steps:',
+  ]
+  const assertHeader = (id, expected) => {
+    const parts = body(id).split(/^    steps:\n/m)
+    assert.equal(parts.length, 2, `${id} must have one literal steps section`)
+    const header = (parts[0] + '    steps:').split('\n')
+      .filter(line => line.trim() && !line.trimStart().startsWith('#'))
+    assert.deepEqual(header, expected, `${id} must keep its unconditional required-gate header`)
+  }
+  assertHeader('test', [
+    `    needs: [${REQUIRED_SUITES.join(', ')}]`, '    if: always()',
+    '    runs-on: ubuntu-latest', '    timeout-minutes: 10', ...matrix,
+  ])
+  for (const id of REQUIRED_SUITES) {
+    const preflight = ['contracts', 'permissions'].includes(id)
+    assertHeader(id, [
+      ...(preflight ? [] : ['    needs: [contracts, permissions]']),
+      '    runs-on: ubuntu-22.04', `    timeout-minutes: ${preflight ? 30 : 90}`, ...matrix,
+    ])
+  }
+  assert.ok(REQUIRED_SUITES.includes(suite), 'Unknown required suite')
+  return body(suite)
 }

@@ -6,7 +6,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { parseYamlDocument } from './ci-realdb-step-contract.mjs'
 import { REQUIRED_SUITES, requireSuccessfulSuites } from './plugin-tests-required-gate.mjs'
-import { requiredSuiteJob } from './plugin-tests-workflow-contract.mjs'
+import { requiredSuiteJob, requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 
 const workflow = readFileSync(new URL('../../.github/workflows/plugin-tests.yml', import.meta.url), 'utf8')
 const baseline = JSON.parse(readFileSync(new URL('./fixtures/plugin-tests-serial-baseline-20261030.json', import.meta.url)))
@@ -136,6 +136,30 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
 })
 
 const success = () => Object.fromEntries(REQUIRED_SUITES.map(id => [id, { result: 'success', outputs: {} }]))
+
+test('Node-only wiring guards require exact gate headers without Python or npm dependencies', () => {
+  for (const suite of REQUIRED_SUITES) assert.ok(requiredSuiteJobBody(workflow, suite))
+  for (const candidate of [
+    workflow.replace('    needs: [contracts, permissions, unit, checkpoint, runtime-db, multitable-db, approval-db, attendance-db]', '    needs: [contracts]'),
+    workflow.replace('\n    if: always()\n', '\n    if: success()\n'),
+    workflow.replace('  contracts:\n', '  "contracts":\n'),
+    workflow.replace('  contracts:\n', '  contracts:\n    if: false\n'),
+    workflow.replace('  contracts:\n', '  contracts:\n    continue-on-error: true\n'),
+    workflow.replace('        node-version: [20.x]', '        node-version: [18.x]'),
+    workflow.replace('    needs: [contracts, permissions]', '    needs: [permissions]'),
+  ]) {
+    assert.notEqual(candidate, workflow)
+    assert.throws(() => requiredSuiteJobBody(candidate, 'contracts'))
+  }
+  const code = `import { readFileSync } from 'node:fs';
+    import { requiredSuiteJobBody } from ${JSON.stringify(new URL('./plugin-tests-workflow-contract.mjs', import.meta.url).href)};
+    const source = readFileSync(${JSON.stringify(fileURLToPath(new URL('../../.github/workflows/plugin-tests.yml', import.meta.url)))}, 'utf8');
+    requiredSuiteJobBody(source, 'contracts');`
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    encoding: 'utf8', env: { ...process.env, PATH: '', Path: '' },
+  })
+  assert.equal(result.status, 0, result.stderr)
+})
 
 test('every failure, cancellation, skip, missing or unknown suite fails the required gate', () => {
   requireSuccessfulSuites(success())

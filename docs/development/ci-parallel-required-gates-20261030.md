@@ -34,7 +34,7 @@ pull_request / push / merge_group 触发、并发取消范围、另外四个 job
 - 权限前置及受影响的后端回归：7 文件 / 645 项通过。
 - 宜搭三项修改过的工作流守卫及完整文件行为回归：52 项通过。
 - 全部 24 个读取 Plugin CI 工作流的后端单元文件：965 项通过。
-- 新增清单与汇总门回归：5 项通过，包括逐组失败、取消、跳过、缺失、未知结果以及实际 CLI 退出码。
+- 新增清单与汇总门回归：6 项通过，包括逐组失败、取消、跳过、缺失、未知结果以及实际 CLI 退出码。
 - 宜搭 owner 调用方与启动器合约：收集 80 项，本机 41 通过 / 39 个原有 Linux 条件跳过；CI 保留原 80 项完整验收。补查修复该守卫的旧 test-job 定位及其 runner/checkout 负例作用域。
 - GitHub Actions 结构与表达式 actionlint 检查通过。完整 shellcheck 仍提示原脚本中的既有引号/未用变量问题；未为提速修改原脚本正文。
 - sealed-export package provenance 验证通过，无 pin 更新。
@@ -42,6 +42,14 @@ pull_request / push / merge_group 触发、并发取消范围、另外四个 job
 其余工作流守卫回归与当前 Draft head 的 13 项必需 CI：在最终验证记录中按实际结果登记。本文件不预判远端成功。
 
 本机初轮一次性并发启动全部守卫出现 Python 子进程超时，另发现旧守卫仍定位串行 test job；修复定位后，并发上限 4 的补验仍有一次同类超时；该文件独立补验 6/6 通过，串行整组亦曾遇到系统 Python 管道超时，失败文件继续独立补验。此本机限制单列，Linux Node 20 完整验证交由本 PR CI；不修改 CI 的原命令或解析超时。根目录没有适用于 scripts/ops 的 ESLint 配置，新增脚本由 Node 语法/行为回归及 Actions 校验验证，不将 ESLint 未配置记作通过。
+
+## Windows 共宿入口修复
+
+Draft 的 `81180ff273` 在 Windows 必需检查暴露一次回归：原来仅需 Node 的升级共宿测试，因新的文本守卫调用完整 YAML 图核对而新增 Python 依赖，`python3` 调用返回 EOF。本轮保留失败证据，不以该 head 的 Linux 成功替代 Windows 验证。
+
+文本入口改为无外部依赖的严格格式合同：每个字面 job 恰好出现一次，job 边界识别包含引号键等其他顶层键；剔除空行/注释后的 job 头必须与固定 needs、always、runner、超时及 Node 20 矩阵逐行相等。额外条件、continue-on-error、未知格式或缺失依赖均拒绝。主清单仍用真实 YAML 解析验证完整步骤和执行图，未替换或放宽原解析器。
+
+新增无 Python / 无 npm 依赖入口回归及头部负例；冻结旧实现的无 Python 正控制确实失败，新实现成功。修复后五文件回归收集 75 项，36 通过、39 项按既有 Linux 条件跳过；Windows 共宿原用例保持完整。Windows 工作流与 provenance pin 未修改。
 
 ## 耗时、交付与回退
 
