@@ -17,6 +17,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
+import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -494,3 +495,6 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
     for (const objectId of objectIds) expect(available.has(objectId)).toBe(true)
   })
 })
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §8 「B1 插件」 1 / 10): the pull never touches a `manual:` row, the
+// export carries 来源, and the R-60 boundary holds (real PG, MR-RD-*).
+defineStockPreparationManualRowsRealDbCases()

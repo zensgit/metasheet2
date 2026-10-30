@@ -122,6 +122,15 @@ const {
   readPlanSourceObjects,
   requireResolvedB2aSourceObjects,
 } = require('./b2a-trial-registry.cjs')
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §5.1 / §5.3): the `manual:` namespace, the predicate M′, the
+// reminder and its one values-free plugin_kv record. Pure (the store is handed in), and it requires nothing of this
+// module, so the edge is cycle-free.
+const {
+  classifyManualPrefixRow,
+  createManualPrefixCollector,
+  persistManualRowsLastPull,
+  summarizeManualSupplement,
+} = require('./stock-preparation-manual-rows.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -1097,11 +1106,30 @@ function unmapRecordFields(record, fieldIdMap = {}) {
   return out
 }
 
+// 人工补充行 B1 (ADR §5.1): which `manual:` prefix row a record is — 'manual' (M′), 'unbound_prefix', or null (not a
+// prefix row). M′ reads the record ENVELOPE directly (its `id` and `createdBy`, never a `data` cell and never the
+// EXISTING_ROW_RECORD_REF Symbol) and the key from the unmapped row; (a′) is the bound target's objectId.
+function manualPrefixKindOf(target, record, row) {
+  const envelope = isPlainObject(record) && isPlainObject(record.data) ? record : null
+  return classifyManualPrefixRow({
+    objectId: target && target.objectId,
+    createdBy: envelope ? envelope.createdBy : undefined,
+    recordId: envelope ? envelope.id : undefined,
+    key: row.idempotencyKey,
+  })
+}
+
 async function readExistingStockPreparationRows(recordsApi, target, projectNo, options = {}) {
   const api = ensureRecordsApi(recordsApi)
   const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
   const maxPages = positiveInteger(options.maxPages, 'existingRows.maxPages', DEFAULT_EXISTING_ROWS_MAX_PAGES)
   const rows = []
+  // 人工补充行 B1 (ADR §5.1): EVERY row whose key starts with `manual:` leaves planning here, page by page — the M′
+  // rows as manual rows, the rest counted as unbound prefix rows. Neither enters the array the planner, the
+  // revision, the settlement digest, the change plan, the export gate's digest or pilot readiness read; both ride on
+  // the array's non-enumerable Symbol (stock-preparation-manual-rows.cjs EXISTING_ROWS_MANUAL_PREFIX), attached only
+  // when the read found one, so a sheet without a prefix row reads byte-identically (continuation golden).
+  const prefixRows = createManualPrefixCollector()
   const filters = {
     [mapFieldName('projectNo', target.fieldIdMap)]: projectNo,
   }
@@ -1116,8 +1144,19 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
     if (!Array.isArray(pageRows)) {
       throw new StockPreparationTableActionError(500, 'TABLE_ACTION_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
-    rows.push(...pageRows.map((row) => unmapRecordFields(row, target.fieldIdMap)))
-    if (pageRows.length < limit) return rows
+    for (const record of pageRows) {
+      const row = unmapRecordFields(record, target.fieldIdMap)
+      const prefixKind = manualPrefixKindOf(target, record, row)
+      if (prefixKind) {
+        prefixRows.add(prefixKind, row, isPlainObject(record) && isPlainObject(record.data) ? record.id : null)
+        continue
+      }
+      rows.push(row)
+    }
+    // THE RAW PAGE decides (ADR §5.1, the two fixed rules): the last page is the one the HOST returned short, and
+    // maxPages counts the host's pages — never the rows left after the prefix rows came out, or a page that held a
+    // manual row would read as the last one and the PLM rows behind it would never be planned.
+    if (pageRows.length < limit) return prefixRows.attachTo(rows)
   }
   throw new StockPreparationTableActionError(422, 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE', 'existing stock-preparation rows exceeded maxPages', {
     maxPages,
@@ -2301,6 +2340,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     }
   }
   const revision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
+  // 人工补充行 B1 (ADR §5.1 / §5.3): the manual rows the read took out, compared with THIS plan's ADD decisions only.
+  // Computed AFTER the revision and outside the plan, so nothing hashed moves; null for a sheet without a prefix row.
+  const manualSupplement = summarizeManualSupplement({ existingRows, addRecords: addRecordsOfPlan(plan) })
   return {
     expansion,
     existingRows,
@@ -2320,7 +2362,38 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     extFieldMapping,
     // `null` when dormant, so a caller merging it into evidence adds no key at all.
     b2aSchemaContract,
+    // 人工补充行 B1: on the RESULT only — never on `plan`, never hashed (on main beside PR-3a's `governance` / `refresh`).
+    // Present only when the read took a prefix row out (rowCount or unboundKeyCount > 0).
+    ...(manualSupplement ? { manualSupplement } : {}),
   }
+}
+
+// The `record` of every ADD decision of `plan` — what the manual-row reminder compares against (ADR §5.3: ADD only).
+function addRecordsOfPlan(plan) {
+  const decisions = plan && Array.isArray(plan.decisions) ? plan.decisions : []
+  return decisions.filter((decision) => isPlainObject(decision) && decision.decision === DECISIONS.ADD && isPlainObject(decision.record)).map((decision) => decision.record)
+}
+
+// 人工补充行 B1 (ADR §5.3): the last small-lane pull's reminder, persisted through the server-held store the route
+// hands in (`manualRowsStore`, the plugin's own context.storage) — best effort, never the answer (the timestamp is
+// taken inside the store helper's own try, so not even a bad clock value escapes). A direct lib caller without the
+// store persists nothing. Two computations have no authoritative ADD set and so leave the record alone:
+//   * one that never read the sheet — the source does not know the project (`not_found`);
+//   * one over a TRUNCATED or BOUNDED read (`hasGlobalErrors`: a small-lane cap, a page bound, a source read error) —
+//     its plan holds only part of the ADD rows, so its "nothing matched" would overwrite a true reminder with a
+//     false one (verification r1 MF-1).
+async function persistManualRowsReminder(input, dryRun, mode, action) {
+  if (!input || !input.manualRowsStore) return
+  if (dryRun.expansion && dryRun.expansion.status === 'not_found') return
+  if (dryRun.hasGlobalErrors === true) return
+  await persistManualRowsLastPull({
+    store: input.manualRowsStore,
+    sheetId: action.target.sheetId,
+    mode,
+    now: input.now,
+    summary: dryRun.manualSupplement || null,
+    logger: input.logger,
+  })
 }
 
 function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview, extFieldMapping, confirmationDecision }) {
@@ -2443,6 +2516,8 @@ async function dryRunStockPreparationAction(input = {}) {
   const missingComponents = input.includeMissingComponents === true
     ? summarizeMissingComponents(dryRun.expansion)
     : null
+  // 人工补充行 B1 (ADR §5.3): every refusal above has passed — this preview finished, so its reminder is the latest.
+  await persistManualRowsReminder(input, dryRun, 'dry_run', action)
   return {
     action: publicActionMetadata(action),
     status: dryRunStatus(dryRun),
@@ -2484,6 +2559,9 @@ async function dryRunStockPreparationAction(input = {}) {
     // suites) — a wall-clock reading would break that. `summary.readCount` inside evidence is
     // unchanged and stays the walk's own query count.
     ...(isPlainObject(dryRun.expansion.readPhase) ? { plmReadPhase: cloneJson(dryRun.expansion.readPhase) } : {}),
+    // 人工补充行 B1 (ADR §5.1): counts and record handles only (never a cell), beside `evidence` and never inside it;
+    // absent for a sheet without a `manual:` prefix row, so every such response is byte-identical.
+    ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
     // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
     // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
     // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
@@ -2895,6 +2973,10 @@ async function applyStockPreparationAction(input = {}) {
     // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
     recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
   })
+  // 人工补充行 B1 (ADR §5.3): the run finished, so this recompute's reminder is the latest — persisted best effort,
+  // after every write and never instead of the answer. (R line: no project write lease and no execution ledger, so
+  // it is written after the unleased apply; on main it is written inside the lease.)
+  await persistManualRowsReminder(input, dryRun, 'apply', action)
   return {
     action: publicActionMetadata(action),
     status: applyResult.status,
@@ -2904,6 +2986,8 @@ async function applyStockPreparationAction(input = {}) {
     // (`stockPreparationSourceContentDigest`) and strips this key from the response.
     sourceContentRevision: dryRun.sourceContentRevision,
     apply: summarizeApplyResultForEvidence(applyResult),
+    // 人工补充行 B1 (ADR §5.1): the in-lease recompute's stanza (counts + record handles), absent without a prefix row.
+    ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
     evidence: {
       actionId: action.actionId,
       projectNoPresent: Boolean(parameters.projectNo),
@@ -2976,6 +3060,8 @@ module.exports = {
     hashJson,
     normalizeActionExtensionFieldIds,
     plmSystemFieldIds,
+    addRecordsOfPlan,
+    manualPrefixKindOf,
     readExistingStockPreparationRows,
     assertTargetSheetHoldsNoForeignActiveRows,
     stockPreparationRowIsActive,
