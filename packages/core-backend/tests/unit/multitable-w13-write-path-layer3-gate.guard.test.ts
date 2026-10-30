@@ -538,6 +538,15 @@ const WRITE_PORTS: Record<PortId, Port> = {
             "(\"FIELD_POLICY_DENIED\") before patchRecords' internal write. Not the shared isFieldWriteForbidden " +
             'helper (a different, narrower per-op shape), but a genuine per-subject field_permissions check.',
         },
+        {
+          disposition: 'GATED',
+          reason:
+            '人工补充行 PATCH /records/:recordId/manual-fields (ADR adr-stock-prep-manual-rows-20261030 §3.4) — ' +
+            'manualEditFieldPermissions = deriveFieldPermissions over the fields with the human write lock lifted from ' +
+            'the six fillable columns ONLY, with the per-subject fieldScopeMap (loadFieldPermissionScopeMap), then the ' +
+            'isFieldWriteForbidden pre-check and sendForbidden BEFORE patchRecords. Only the six fillable columns are ' +
+            'accepted at all, on a row that satisfies M (re-checked in the transaction by the preWriteGuard).',
+        },
       ],
       'routes/multitable-ai.ts': [
         { disposition: 'GATED', reason: 'AI shortcut run (single target field) — targetPermission pre-check via buildRecordPatchContext.fieldPermissions (pre-existing #2106 F3 enforcement point)' },
@@ -619,6 +628,18 @@ const WRITE_PORTS: Record<PortId, Port> = {
             'map loaded by loadFieldPermissionScopeMap, skipping any field whose perm is !visible || readOnly. ' +
             'This is the proof that the create-time layer-3 question was known and answered at exactly one ' +
             'of the three create sites.',
+        },
+        {
+          disposition: 'GATED',
+          reason:
+            '人工补充行 create — createManualSupplementRow, the ONE createRecord call shared by POST ' +
+            '/sheets/:sheetId/manual-rows and POST /records/:recordId/manual-copy (ADR ' +
+            'adr-stock-prep-manual-rows-20261030 §3.2/§3.3). assertManualRowCreateFieldsWritable runs the layer-3 ' +
+            'per-subject gate (loadFieldPermissionScopeMap + deriveFieldPermissions(allowCreateOnly) + ' +
+            'isFieldWriteForbidden) over EVERY submitted field before the create, on fields whose human write lock is ' +
+            'lifted for the six fillable columns only; the copy payload is additionally built from columns the actor ' +
+            'can read AND write. The create runs on the actor\'s own capabilities with a minted manual-row extension. ' +
+            'Session-only routes.',
         },
       ],
       'multitable/copy-sheet-service.ts': [
@@ -1015,6 +1036,30 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     const univerMeta = read('routes/univer-meta.ts')
     expect(univerMeta).toMatch(
       /copyFieldScopeMap = await loadFieldPermissionScopeMap\([\s\S]{0,800}allowCreateOnly: true[\s\S]{0,900}recordService\.createRecord\(\{/,
+    )
+  })
+
+  test('smoke: the manual-row create site (univer-meta.ts) gates every submitted field per subject BEFORE recordService.createRecord', () => {
+    const univerMeta = read('routes/univer-meta.ts')
+    const gateAt = univerMeta.indexOf('function assertManualRowCreateFieldsWritable(')
+    const createAt = univerMeta.indexOf('async function createManualSupplementRow(')
+    const copyAt = univerMeta.indexOf('async function buildManualRowCopyData(')
+    expect(gateAt, 'the manual-row field gate is gone or renamed').toBeGreaterThan(-1)
+    expect(createAt, 'createManualSupplementRow is gone or renamed').toBeGreaterThan(gateAt)
+    expect(copyAt).toBeGreaterThan(createAt)
+    const gate = univerMeta.slice(gateAt, createAt)
+    expect(gate).toContain('deriveFieldPermissions(')
+    expect(gate).toContain('allowCreateOnly: true')
+    expect(gate).toContain('isFieldWriteForbidden(manualCreateFieldPermissions[fid])')
+    expect(univerMeta.slice(createAt, copyAt)).toMatch(
+      /loadFieldPermissionScopeMap\([\s\S]{0,300}assertManualRowCreateFieldsWritable\([\s\S]{0,800}recordService\.createRecord\(\{/,
+    )
+  })
+
+  test('smoke: PATCH /records/:recordId/manual-fields gates per subject BEFORE recordWriteService.patchRecords', () => {
+    const univerMeta = read('routes/univer-meta.ts')
+    expect(univerMeta).toMatch(
+      /isFieldWriteForbidden\(manualEditFieldPermissions\[fid\]\)[\s\S]{0,400}sendForbidden\(res, `Field\(s\) not writable[\s\S]{0,2500}recordWriteService\.patchRecords\(\{/,
     )
   })
 

@@ -22,6 +22,10 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { usePinnedServer } from '../utils/pinned-server'
+// 人工补充行 B2 (ADR adr-stock-prep-manual-rows-20261030 §8 「B2 主机」 11): the host's manual-row routes, the amended
+// R-66 ① exemption and the switch, on a sheet the real plugin provisioned — a cases module registered at the end of this
+// file, so it runs in this file's existing real-DB lane.
+import { defineStockPreparationManualRowsHostRealDbCases } from './stock-preparation-manual-rows-host-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -573,3 +577,5 @@ describePlmDeleteIfDatabase('R-66: PLM rows on stock-preparation template sheets
     actor = WRITER
   })
 })
+
+defineStockPreparationManualRowsHostRealDbCases()

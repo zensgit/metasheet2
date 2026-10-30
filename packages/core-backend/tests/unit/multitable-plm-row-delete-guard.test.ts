@@ -134,7 +134,9 @@ describe('loadPlmRowSheetProfile (both sheet halves)', () => {
 
   it('stanza ∧ registry row ⇒ plm with the key column; asked by sheet id against the registry', async () => {
     const query = registryQuery(true)
-    expect(await loadPlmRowSheetProfile(query, 'sheet_a', [{ id: 'k', property: KEY_PROPERTY }])).toEqual({ kind: 'plm', keyFieldIds: ['k'] })
+    // B2 (ADR adr-stock-prep-manual-rows-20261030 §3.5): the same ONE statement now also reads plugin_name / object_id;
+    // a registry row that is not a registered project sheet's carries no project-sheet object id.
+    expect(await loadPlmRowSheetProfile(query, 'sheet_a', [{ id: 'k', property: KEY_PROPERTY }])).toEqual({ kind: 'plm', keyFieldIds: ['k'], projectSheetObjectId: null })
     expect(String(query.mock.calls[0][0])).toContain('plugin_multitable_object_registry')
     expect(query.mock.calls[0][1]).toEqual(['sheet_a'])
   })

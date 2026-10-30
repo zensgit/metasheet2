@@ -43,6 +43,9 @@ export type MultitableRowActions = {
   /** R-66 (plm-row-delete-guard.ts): set only where `canDelete` was turned false because the row is a PLM row the
    *  stock-preparation pull maintains — the web shows the delete entry disabled with the reason. Absent elsewhere. */
   deleteBlockedReason?: 'plm_row'
+  /** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): set only on a row satisfying M, on GET /view and
+   *  GET /records/:id, for an actor who can edit or delete records. Absent elsewhere. */
+  manualSupplement?: true
 }
 
 export function normalizePermissionCodes(value: unknown): string[] {

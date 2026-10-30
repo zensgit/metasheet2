@@ -69,7 +69,14 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     // maskStoredRecordFieldIds) and masks each trashed record via filterRecordDataByFieldIds — mirroring the
     // live read/history path. Real-DB canary: the field-mask redaction case in
     // tests/integration/multitable-record-recycle-bin.test.ts (field_permissions.visible=false absent from trash data).
-    filterRecordDataByFieldIds: 15,
+    // 16 = +1 for the 人工补充行 create echo (ADR adr-stock-prep-manual-rows-20261030 §3.2/§3.3): createManualSupplementRow,
+    // shared by POST /sheets/:sheetId/manual-rows and POST /records/:recordId/manual-copy, masks the echo through the
+    // SAME layer-2 ∧ layer-3 composite as POST /records (deriveFieldPermissions visible ∧ maskStoredRecordFieldIds →
+    // filterRecordDataByFieldIds). PATCH /records/:recordId/manual-fields adds no call: its echo is RecordWriteService's own
+    // (record-write-service.ts, counted above). Real-DB locking test: MR2-RD-01 in the manual-row block of
+    // tests/integration/multitable-record-duplicate.test.ts (a field_permissions.visible=false column — the server-stamped
+    // 项目号 — absent from the create echo while present in the stored row).
+    filterRecordDataByFieldIds: 16,
     loadRecordSummaries: 3,
     // 6 = +2 for the 2a filter-by-link materialization in GET /view and loadDashboardSourceRows. These two
     // call-sites are FILTER-INTERNAL: buildLinkSummaries computes the permission-filtered display set used
