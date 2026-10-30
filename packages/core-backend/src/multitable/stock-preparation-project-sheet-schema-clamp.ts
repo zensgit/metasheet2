@@ -3,12 +3,42 @@
  * register R-66 ②; ADR adr-stock-prep-project-sheets-20261008 §11.7, first known cost).
  *
  * WHAT IT GUARANTEES. On a REGISTERED stock-preparation project sheet every actor who is not a platform
- * administrator resolves `canManageFields = false` and `canManageViews = false` — whatever the grants say:
+ * administrator resolves `canManageFields = false` and `canManageViews = false` (view management: see ③ below) —
+ * whatever the grants say:
  * the G1 floor role's `spreadsheet:write` row (which used to open field and view management on that one sheet,
  * permission-service.ts applyContextSheetSchemaWriteGrant), a sheet-level `spreadsheet:admin` grant, or a global
  * `multitable:manage-schema` code. EVERY other capability stays exactly as resolved: read, record create / edit /
  * delete (row deletion has its own rule), comments, notifications, export, access management, automations and
  * approval submit. Platform administrators (`isAdminRole`, the repository's single admin notion) are untouched.
+ *
+ * ③ VIEWS FOR 备料主管理员 (owner 2026-10-29, R78; register R-66 ③). One actor class keeps `canManageViews` AS
+ * RESOLVED: a holder of `stock-prep:admin` ({@link STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE}; the role
+ * template `stock-prep_admin` = 备料主管理员). The clamp does not take view management away from them; it never GIVES
+ * it either — the bit is whatever the grants resolved (on a deployment whose G1 role list names `stock-prep_admin`,
+ * the G1 `spreadsheet:write` row opens it through applyContextSheetSchemaWriteGrant; without a sheet grant or a
+ * global `multitable:write` it stays false, exactly as on an ordinary sheet). `canManageFields` stays false for
+ * them like for everyone else, and with it sheet rename, field permissions and the live re-seed.
+ *
+ * WHO COUNTS AS A HOLDER — two conditions, both required:
+ *   1. the code is in the code list the resolver holds for the actor: exact literal, no `stock-prep:*` / `*:*`
+ *      wildcard (the plugin's satisfiesStockPrepAccess rule). An in-memory test, no statement. The lists are NOT
+ *      the same in all three chains: REST and sheet-capabilities hold the namespace-admission-filtered list
+ *      (rbac/service.ts listUserPermissions → namespace-admission.ts filterPermissionCodesByNamespaceAdmission; the
+ *      list the plugin's own `stock-prep:admin` gate reads), but the transaction-bound chain holds
+ *      approval-record-link-txn-auth.ts listUserPermissionsOnQuery — direct ∪ role ∪ legacy codes with NO
+ *      admission filter. Condition 1 alone therefore does not carry the admission rule; condition 2 does;
+ *   2. the code comes from one of the actor's ROLES AND the actor holds an ENABLED `stock-prep` namespace admission
+ *      ({@link STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL}, one statement). The role half refuses a
+ *      DIRECT `user_permissions` row and the legacy `users.permissions` column, which the admission filter alone
+ *      keeps once any role of the actor reaches the namespace. The admission half is the filter's own rule for this
+ *      code (the role carrying the code puts `stock-prep` in the actor's role-reached namespaces, so what is left is
+ *      `user_namespace_admissions.enabled = true`), restated in SQL so that ALL THREE chains agree even though the
+ *      transaction-bound chain's code list is unfiltered: no admission row, or a disabled one, keeps nothing. One
+ *      deliberate difference: the filter fails OPEN when the admissions table is unavailable (degraded RBAC mode);
+ *      this statement does not — its error propagates and fails the request (fail-closed, the clamp's posture).
+ *      It is asked only when everything else already holds — a registered project sheet, a non-administrator,
+ *      condition 1 true and a resolved `canManageViews` to keep — so an ordinary sheet, and every actor without the
+ *      code, costs nothing.
  *
  * WHERE IT RUNS. Every host resolver that derives sheet capabilities for a person runs
  * {@link applyStockPreparationProjectSheetSchemaClamp}: REST `resolveSheetCapabilitiesForAccess`
@@ -80,19 +110,80 @@ export async function loadStockPreparationProjectSheetIds(
 }
 
 /**
- * Pure. On a project sheet, for a non-administrator, force `canManageFields` and `canManageViews` false and leave
- * every other key exactly as resolved. Otherwise return the input unchanged (same object).
+ * ③ (owner 2026-10-29, R78): the one code whose holder keeps view management on a project sheet — 备料主管理员
+ * (role template `stock-prep_admin`, zzzz20261010124500_seed_stock_prep_role_templates.ts). Byte-equal to the
+ * plugin's STOCK_PREP_ADMIN and the members port's STOCK_PREP_ADMIN_CODE (pinned by the unit suite).
  */
-export function restrictStockPreparationProjectSheetSchemaCapabilities<
-  T extends { canManageFields: boolean; canManageViews: boolean },
->(caps: T, isProjectSheet: boolean, isAdminRole: boolean): T {
-  if (!isProjectSheet || isAdminRole) return caps
-  return { ...caps, canManageFields: false, canManageViews: false }
+export const STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE = 'stock-prep:admin'
+
+/**
+ * The namespace-admission namespace of {@link STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE}: the part before
+ * the first `:` — rbac/namespace-admission.ts `derivePermissionNamespace('stock-prep:admin')`, the literal
+ * `grantNamespaceAdmissions` stores. A local constant (that module imports the db pool; this file stays light),
+ * pinned equal to the helper's result by the unit suite.
+ */
+export const STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE = 'stock-prep'
+
+/**
+ * ③ condition 2: does one of the actor's ROLES carry the code (`user_roles` → `role_permissions`) AND does the actor
+ * hold an ENABLED admission to the code's namespace (`user_namespace_admissions`)? A direct `user_permissions` row
+ * and the legacy `users.permissions` column are not read. Params: `[userId, code, namespace]`. Exported so tests and
+ * fakes match it exactly.
+ */
+export const STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL =
+  `SELECT 1 FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id WHERE ur.user_id = $1 AND rp.permission_code = $2 AND EXISTS (SELECT 1 FROM user_namespace_admissions una WHERE una.user_id = $1 AND una.namespace = $3 AND una.enabled = true) LIMIT 1`
+
+/**
+ * Pure. ③ condition 1: does this code list carry the view-manager code? Exact literal only; anything that is not an
+ * array of codes → false. The list may or may not be admission-filtered (see WHO COUNTS AS A HOLDER); condition 2
+ * applies the admission rule either way.
+ */
+export function holdsStockPreparationProjectSheetViewManagement(permissions: unknown): boolean {
+  return Array.isArray(permissions) && permissions.includes(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE)
+}
+
+/** The actor the resolver is deciding for: its id and the effective code list it already holds. */
+export type StockPreparationProjectSheetClampActor = {
+  userId: string
+  permissions: readonly string[]
 }
 
 /**
- * The resolvers' one call: look the sheet up (non-administrators only) and clamp. `clamped` is true only when the
- * clamp acted — the resolvers return it as the `stockPrepProjectSheetSchemaClamped` marker.
+ * ③, both conditions. The role statement runs only when condition 1 holds and the actor has a non-blank id; the
+ * caller asks only on a registered project sheet, for a non-administrator, with a resolved view bit to keep.
+ */
+async function keepsStockPreparationProjectSheetViewManagement(
+  query: StockPreparationProjectSheetQueryFn,
+  actor: StockPreparationProjectSheetClampActor,
+): Promise<boolean> {
+  if (!holdsStockPreparationProjectSheetViewManagement(actor?.permissions)) return false
+  const userId = typeof actor?.userId === 'string' ? actor.userId.trim() : ''
+  if (!userId) return false
+  const result = await query(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL, [
+    userId,
+    STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE,
+    STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE,
+  ])
+  return Array.isArray(result.rows) && result.rows.length > 0
+}
+
+/**
+ * Pure. On a project sheet, for a non-administrator, force `canManageFields` false and `canManageViews` false —
+ * except that a view manager (③) keeps `canManageViews` exactly as resolved (never raised) — and leave every other
+ * key exactly as resolved. Otherwise return the input unchanged (same object).
+ */
+export function restrictStockPreparationProjectSheetSchemaCapabilities<
+  T extends { canManageFields: boolean; canManageViews: boolean },
+>(caps: T, isProjectSheet: boolean, isAdminRole: boolean, keepsViewManagement = false): T {
+  if (!isProjectSheet || isAdminRole) return caps
+  return { ...caps, canManageFields: false, canManageViews: keepsViewManagement === true ? caps.canManageViews : false }
+}
+
+/**
+ * The resolvers' one call: look the sheet up (non-administrators only) and clamp. `actor` is the id and the
+ * effective code list the resolver already holds (③). `clamped` is true only when the clamp acted (field
+ * management is then always false; view management too unless ③ kept it) — the resolvers return it as the
+ * `stockPrepProjectSheetSchemaClamped` marker.
  */
 export async function applyStockPreparationProjectSheetSchemaClamp<
   T extends { canManageFields: boolean; canManageViews: boolean },
@@ -101,12 +192,16 @@ export async function applyStockPreparationProjectSheetSchemaClamp<
   sheetId: string,
   capabilities: T,
   isAdminRole: boolean,
+  actor: StockPreparationProjectSheetClampActor,
 ): Promise<{ capabilities: T; clamped: boolean }> {
   if (isAdminRole) return { capabilities, clamped: false }
   const isProjectSheet = (await loadStockPreparationProjectSheetIds(query, [sheetId])).has(sheetId)
   if (!isProjectSheet) return { capabilities, clamped: false }
+  // ③: nothing to keep when the grants resolved no view management — no role statement then.
+  const keepsViews = capabilities.canManageViews === true
+    && (await keepsStockPreparationProjectSheetViewManagement(query, actor))
   return {
-    capabilities: restrictStockPreparationProjectSheetSchemaCapabilities(capabilities, true, isAdminRole),
+    capabilities: restrictStockPreparationProjectSheetSchemaCapabilities(capabilities, true, isAdminRole, keepsViews),
     clamped: true,
   }
 }
