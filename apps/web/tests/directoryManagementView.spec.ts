@@ -315,10 +315,32 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
     const item = container!.querySelector('.directory-admin__item')!
-    expect(item.textContent).toContain(`钉钉企业名称：${corpName || '名称未提供'}`)
+    expect(item.textContent).toContain(`钉钉 · ${corpName || '企业名称未提供'}`)
+    expect(item.textContent).toContain('应用名称未提供')
+    expect(item.textContent).toContain('身份：未核验')
     expect(item.textContent).toContain('Corp ID：dingcorp')
     expect(item.textContent).toContain('本地组织：synthetic-org')
     expect(container!.querySelector<HTMLInputElement>('input[placeholder="填写已确认的企业名称"]')?.value).toBe(corpName || '')
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+  })
+
+  it.each(['verified', 'mismatch', 'unverified'])('shows enterprise, application and independent identity status (%s)', async (identityStatus) => {
+    const base = createIntegration({ syncEnabled: false })
+    const integration = { ...base, config: { ...base.config, corpName: '合成企业', appName: '合成应用', identityStatus,
+      identityVerification: identityStatus === 'unverified' ? null : { appCorpId: 'other-synthetic-corp', appCorpName: '应用所属企业', checkedAt: '2026-10-30T00:00:00Z' },
+    } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: { items: url === '/api/admin/directory/integrations' ? [integration] : [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const item = container!.querySelector('.directory-admin__item')!
+    expect(item.querySelector('strong')?.textContent).toContain('合成企业')
+    expect(item.textContent).toContain('应用：合成应用')
+    expect(item.textContent).toContain('用途：DingTalk CN')
+    expect(item.textContent).toContain('自动同步：关闭')
+    expect(item.querySelector('[data-testid="directory-identity-status"]')?.textContent).toContain(identityStatus === 'verified' ? '管理员已核验' : identityStatus === 'mismatch' ? '企业与应用归属不一致' : '未核验')
+    expect(item.querySelector('[role="alert"]') !== null).toBe(identityStatus === 'mismatch')
     expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
   })
 

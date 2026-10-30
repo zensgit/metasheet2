@@ -1,3 +1,4 @@
+import { readDirectoryIdentityVerification, type DirectoryIdentityVerification } from './integration-identity'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
@@ -89,6 +90,7 @@ export type DirectoryMemberGroupSyncMode = 'disabled' | 'sync_scoped_departments
 
 type DirectoryIntegrationConfig = {
   corpName: string | null
+  appName: string | null
   appKey: string
   appSecret: string
   workNotificationAgentId: string
@@ -339,6 +341,9 @@ export type DirectoryIntegrationSummary = {
   updatedAt: string
   config: {
     corpName: string | null
+    appName: string | null
+    identityStatus: 'unverified' | 'verified' | 'mismatch'
+    identityVerification: DirectoryIdentityVerification | null
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured: boolean
@@ -383,6 +388,7 @@ export type DirectoryDepartmentSummary = {
 
 export type DirectoryIntegrationInput = {
   corpName?: string
+  appName?: string
   name: string
   corpId: string
   appKey: string
@@ -415,6 +421,7 @@ type NormalizedDirectoryIntegrationInput = Omit<
   DirectoryIntegrationInput,
   | 'name'
   | 'corpName'
+  | 'appName'
   | 'corpId'
   | 'appKey'
   | 'appSecret'
@@ -430,6 +437,7 @@ type NormalizedDirectoryIntegrationInput = Omit<
   | 'status'
 > & {
   corpName: string | null
+  appName: string | null
   name: string
   corpId: string
   appKey: string
@@ -1890,6 +1898,7 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   const memberGroupDefaultNamespaces = normalizeMemberGroupDefaultNamespaces(config.memberGroupDefaultNamespaces)
   return {
     corpName: normalizeOptionalText(config.corpName),
+    appName: normalizeOptionalText(config.appName),
     appKey,
     appSecret,
     workNotificationAgentId,
@@ -1910,6 +1919,9 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
   const config = parseIntegrationConfig(row)
   // Approval-card keys are presence-only in summaries (secret never decrypted here).
   const rawConfig = parseJsonRecord(row.config)
+  const identityVerification = readDirectoryIdentityVerification(rawConfig.identityVerification, {
+    corpId: row.corp_id, appKey: config.appKey, corpName: config.corpName, appName: config.appName,
+  })
   return {
     id: row.id,
     orgId: row.org_id,
@@ -1928,6 +1940,9 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
     updatedAt: row.updated_at,
     config: {
       corpName: config.corpName,
+      appName: config.appName,
+      identityVerification,
+      identityStatus: !identityVerification ? 'unverified' : identityVerification.appCorpId === row.corp_id ? 'verified' : 'mismatch',
       appKey: config.appKey,
       appSecretConfigured: Boolean(config.appSecret),
       workNotificationAgentIdConfigured: Boolean(config.workNotificationAgentId),
@@ -2391,6 +2406,10 @@ function normalizeIntegrationInput(
     throw new DirectoryValidationError('corpName must be a string of at most 200 characters')
   }
   const corpName = input.corpName === undefined ? current?.corpName ?? null : normalizeOptionalText(input.corpName)
+  if (input.appName !== undefined && (typeof input.appName !== 'string' || input.appName.trim().length > 200)) {
+    throw new DirectoryValidationError('appName must be a string of at most 200 characters')
+  }
+  const appName = input.appName === undefined ? current?.appName ?? null : normalizeOptionalText(input.appName)
   const name = normalizeText(input.name)
   const corpId = normalizeText(input.corpId)
   const appKey = normalizeText(input.appKey)
@@ -2419,6 +2438,7 @@ function normalizeIntegrationInput(
   return {
     ...input,
     corpName,
+    appName,
     name,
     corpId,
     appKey,
@@ -2517,6 +2537,7 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       normalized.corpId,
       JSON.stringify({
         corpName: normalized.corpName,
+        appName: normalized.appName,
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
         workNotificationAgentId: normalized.workNotificationAgentId
@@ -2859,6 +2880,11 @@ export async function updateDirectoryIntegration(
   // otherwise silently wipe them on every integration-form save. The encrypted secret is carried
   // as-is — never decrypted here.
   const rawCurrentConfig = parseJsonRecord(current.config)
+  const identityVerification = normalized.appSecret === currentConfig.appSecret && normalized.baseUrl === currentConfig.baseUrl
+    ? readDirectoryIdentityVerification(rawCurrentConfig.identityVerification, {
+      corpId: normalized.corpId, appKey: normalized.appKey, corpName: normalized.corpName, appName: normalized.appName,
+    })
+    : null
   const carriedApprovalCardLinkSecret = normalizeText(rawCurrentConfig.approvalCardLinkSecret) || null
   const carriedApprovalCardPublicAppUrl = normalizeText(rawCurrentConfig.approvalCardPublicAppUrl) || null
   // Same carry-through, same reason, for the DingTalk todo mirror's operator unionId
@@ -2887,7 +2913,7 @@ export async function updateDirectoryIntegration(
          schedule_timezone = $8,
          default_deprovision_policy = $9,
          updated_at = NOW()
-     WHERE id = $1
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
     [
@@ -2897,6 +2923,8 @@ export async function updateDirectoryIntegration(
       normalized.corpId,
       JSON.stringify({
         corpName: normalized.corpName,
+        appName: normalized.appName,
+        identityVerification,
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
         workNotificationAgentId: normalized.workNotificationAgentId
@@ -2920,11 +2948,68 @@ export async function updateDirectoryIntegration(
       normalized.scheduleCron,
       scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
+      current.config === null ? null : JSON.stringify(rawCurrentConfig),
+      current.corp_id,
     ],
   ).catch((error: unknown) => {
     throw uniqueViolationAsConflict(error)
   })
 
+  if (!result.rows[0]) throw new DirectoryConflictError('Directory configuration changed; reload before saving')
+  return summarizeIntegration(result.rows[0])
+}
+
+/** Metadata-only save: cannot change credentials, schedules, synchronization or access. */
+export async function updateDirectoryIntegrationIdentity(
+  integrationId: string,
+  rawInput: unknown,
+  adminUserId: string,
+): Promise<DirectoryIntegrationSummary | null> {
+  const allowed = new Set(['corpId', 'appKey', 'corpName', 'appName', 'confirm', 'appCorpId', 'appCorpName'])
+  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)
+    || Object.keys(rawInput).some((key) => !allowed.has(key))) {
+    throw new DirectoryValidationError('Identity metadata contains unsupported fields')
+  }
+  const input = rawInput as Record<string, unknown>
+  if (input.confirm !== undefined && typeof input.confirm !== 'boolean') {
+    throw new DirectoryValidationError('Identity confirmation must be a boolean')
+  }
+  for (const field of ['corpName', 'appName']) {
+    if (typeof input[field] !== 'string' || input[field].trim().length > 200) {
+      throw new DirectoryValidationError('Identity display names must be strings of at most 200 characters')
+    }
+  }
+  const current = await getIntegrationRow(integrationId)
+  if (!current || current.provider !== DEFAULT_PROVIDER) return null
+  const rawConfig = parseJsonRecord(current.config)
+  if (input.corpId !== current.corp_id || input.appKey !== rawConfig.appKey) {
+    throw new DirectoryConflictError('Directory identity changed; reload before confirming')
+  }
+  const binding = {
+    corpId: current.corp_id,
+    appKey: normalizeText(rawConfig.appKey),
+    corpName: normalizeOptionalText(input.corpName),
+    appName: normalizeOptionalText(input.appName),
+  }
+  const identityVerification = input.confirm === true
+    ? readDirectoryIdentityVerification({
+      ...binding, appCorpId: input.appCorpId, appCorpName: input.appCorpName,
+      source: 'admin_console', checkedAt: new Date().toISOString(), checkedBy: adminUserId,
+    }, binding)
+    : readDirectoryIdentityVerification(rawConfig.identityVerification, binding)
+  if (input.confirm === true && !identityVerification) {
+    throw new DirectoryValidationError('Confirm both names and the application owner in the DingTalk administrator console first')
+  }
+  const result = await query<DirectoryIntegrationRow>(
+    `UPDATE directory_integrations
+     SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $3::jsonb AND corp_id = $4
+     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+               default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+    [integrationId, JSON.stringify({ corpName: binding.corpName, appName: binding.appName, identityVerification }),
+      current.config === null ? null : JSON.stringify(rawConfig), current.corp_id],
+  )
+  if (!result.rows[0]) throw new DirectoryConflictError('Directory configuration changed; reload before confirming')
   return summarizeIntegration(result.rows[0])
 }
 

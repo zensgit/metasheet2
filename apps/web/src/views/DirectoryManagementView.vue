@@ -218,8 +218,14 @@
           type="button"
           @click="void selectIntegration(integration.id)"
         >
-          <strong>{{ integration.name }}</strong>
-          <span>钉钉企业名称：{{ integration.config.corpName || '名称未提供' }}</span>
+          <strong>钉钉 · {{ integration.config.corpName || '企业名称未提供' }}</strong>
+          <span>用途：{{ integration.name }}</span>
+          <span>应用：{{ integration.config.appName || '应用名称未提供' }}</span>
+          <small data-testid="directory-identity-status" :class="{ 'directory-admin__chip directory-admin__chip--warning': integration.config.identityStatus === 'mismatch' }" :role="integration.config.identityStatus === 'mismatch' ? 'alert' : undefined">
+            身份：{{ integration.config.identityStatus === 'mismatch' ? '企业与应用归属不一致' : integration.config.identityStatus === 'verified' ? '管理员已核验' : '未核验' }}
+          </small>
+          <small v-if="integration.config.identityVerification">应用所属企业：{{ integration.config.identityVerification.appCorpName }}</small>
+          <small>自动同步：{{ integration.syncEnabled ? '开启' : '关闭' }}</small>
           <small>Corp ID：{{ integration.corpId }}</small>
           <small>本地组织：{{ integration.orgId || '未提供' }}</small>
           <small>{{ readAdmissionModeLabel(integration) }}</small>
@@ -261,6 +267,7 @@
           </div>
           <div class="directory-admin__summary" v-if="selectedIntegration">
             <span class="directory-admin__badge">{{ selectedIntegration.status }}</span>
+            <span v-if="selectedIntegration.config.identityStatus === 'mismatch'" class="directory-admin__chip directory-admin__chip--warning" role="alert">企业与应用归属不一致</span>
             <span class="directory-admin__badge" :class="{ 'directory-admin__badge--inactive': !selectedIntegration.syncEnabled }">
               {{ selectedIntegration.syncEnabled ? '已启用同步' : '仅手动同步' }}
             </span>
@@ -276,7 +283,11 @@
           <label class="directory-admin__field">
             <span>钉钉企业名称（展示）</span>
             <input v-model.trim="draft.corpName" class="directory-admin__input" type="text" maxlength="200" placeholder="填写已确认的企业名称" />
-            <small>仅用于展示，不代表钉钉登录应用的所属组织，不改变账号关联。</small>
+            <small>管理员填写的展示名称；填写名称不代表已核验，不改变账号关联。</small>
+          </label>
+          <label class="directory-admin__field">
+            <span>钉钉应用名称（展示）</span>
+            <input v-model.trim="draft.appName" class="directory-admin__input" type="text" maxlength="200" placeholder="填写已确认的应用名称" />
           </label>
           <label class="directory-admin__field">
             <span>Corp ID</span>
@@ -589,6 +600,15 @@
             <span>保存后允许自动同步</span>
           </label>
         </div>
+
+        <DirectoryIntegrationIdentityPanel
+          v-if="selectedIntegration"
+          :integration="selectedIntegration"
+          :corp-name="draft.corpName"
+          :app-name="draft.appName"
+          :configuration-changed="draft.corpId.trim() !== selectedIntegration.corpId || draft.appKey.trim() !== selectedIntegration.config.appKey || draft.appSecret.trim().length > 0 || draft.baseUrl.trim() !== (selectedIntegration.config.baseUrl ?? '')"
+          @saved="void loadIntegrations()"
+        />
 
         <footer class="directory-admin__footer">
           <button class="directory-admin__button" type="button" :disabled="busy || !canSave" @click="void saveIntegration()">
@@ -2219,6 +2239,7 @@ import { canCopyText, copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
+import DirectoryIntegrationIdentityPanel from '../components/directory/DirectoryIntegrationIdentityPanel.vue'
 import DirectoryOptionPicker from '../components/directory/DirectoryOptionPicker.vue'
 import { presentRoleTitle } from './builtinCatalogPresentation'
 import {
@@ -2252,6 +2273,9 @@ type DirectoryIntegration = {
   lastError: string | null
   config: {
     corpName?: string | null
+    appName?: string | null
+    identityStatus?: 'unverified' | 'verified' | 'mismatch'
+    identityVerification?: { appCorpId: string; appCorpName: string; checkedAt: string } | null
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured?: boolean
@@ -2567,6 +2591,7 @@ type TestResult = {
 }
 
 type DirectoryDraft = {
+  appName: string
   corpName: string
   name: string
   corpId: string
@@ -2764,6 +2789,7 @@ const draft = reactive<DirectoryDraft>({
   name: '',
   corpId: '',
   corpName: '',
+  appName: '',
   appKey: '',
   appSecret: '',
   workNotificationAgentId: '',
@@ -3209,6 +3235,7 @@ function resetDraft() {
   draft.name = ''
   draft.corpId = ''
   draft.corpName = ''
+  draft.appName = ''
   draft.appKey = ''
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -3235,6 +3262,7 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.name = integration.name
   draft.corpId = integration.corpId
   draft.corpName = integration.config.corpName ?? ''
+  draft.appName = integration.config.appName ?? ''
   draft.appKey = integration.config.appKey
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -4630,11 +4658,14 @@ function readDirectoryOnboardingPackets(rawPackets: unknown[]): AutoAdmissionOnb
 function buildPayload() {
   const corpName = draft.corpName.trim()
   const currentCorpName = selectedIntegration.value?.config.corpName ?? ''
+  const appName = draft.appName.trim()
+  const currentAppName = selectedIntegration.value?.config.appName ?? ''
   return {
     integrationId: selectedIntegration.value?.id,
     name: draft.name.trim(),
     corpId: draft.corpId.trim(),
     ...(corpName !== currentCorpName ? { corpName } : {}),
+    ...(appName !== currentAppName ? { appName } : {}),
     appKey: draft.appKey.trim(),
     appSecret: draft.appSecret.trim(),
     rootDepartmentId: draft.rootDepartmentId.trim() || '1',
