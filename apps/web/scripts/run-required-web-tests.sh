@@ -608,6 +608,8 @@ npx vitest run \
 # four-stage interaction and focused admin-rail behavior. Run them in an isolated
 # single fork because attendance-admin-regressions is intentionally a large mounted suite.
 NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressions attendance-group-fixed-schedule useAttendanceAdminRailNavigation attendance-experience-entrypoints --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
+# FSER-4: strict admin/member contracts and all five actual hosts; same two-point gate as the attendance workflow.
+npx vitest run attendance-fixed-schedule-effectiveness attendance-fixed-schedule-surfaces --reporter=dot
 # Employee overview 常用 icons (PR #5146 P1-3): these four specs must run in the required
 # web-tests lane, not only locally. Tokens are exact basenames; none is a substring of
 # another token already in this script (verified against useAttendanceAdmin*).
