@@ -109,11 +109,12 @@ async function fixture() {
     writeCipher: value => 'enc:' + Buffer.from(JSON.stringify(value)).toString('base64') }
 }
 
-test('realDB whole-file lane and Node contracts are registered; no-DB lane excludes the DB file', () => {
+test('realDB whole-file lane and Node contracts are registered; no-DB lane excludes the DB file', async () => {
   const root = path.resolve(__dirname, '../../..')
   const spec = 'tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts'
   const flow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8'))
-  const step = flow.jobs.test.steps.find(item => item.id === 'external-system-delete-bind-lock-protocol-real-db')
+  const { requiredSuiteJob } = await import('../../../scripts/ops/plugin-tests-workflow-contract.mjs')
+  const step = requiredSuiteJob(flow, 'runtime-db').steps.find(item => item.id === 'external-system-delete-bind-lock-protocol-real-db')
   assert.equal(step.env.EXPECT_DB, '1'); assert.equal(step.if, "matrix.node-version == '20.x'")
   assert.ok(step.env.DATABASE_URL)
   const command = step.run.replace(/\\\r?\n/g, ' ')
