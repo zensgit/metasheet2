@@ -444,6 +444,7 @@ describe('dispatch helpers (tasks/recordTaskDispatch.ts)', () => {
 
   it('a failed create reads as one message kind per known failure', () => {
     expect(classifyDispatchFailure({ kind: 'validation', code: 'INACTIVE_ORG_MEMBER' })).toBe('INACTIVE_ORG_MEMBER')
+    expect(classifyDispatchFailure({ kind: 'validation', code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })).toBe('ASSIGNEE_TASK_ACCESS_REQUIRED')
     expect(classifyDispatchFailure({ kind: 'validation', code: 'INVALID_ASSIGNEES' })).toBe('INVALID_ASSIGNEES')
     expect(classifyDispatchFailure({ kind: 'validation', code: 'LIMIT' })).toBe('LIMIT')
     expect(classifyDispatchFailure({ kind: 'validation', code: 'TIME_ZONE_REQUIRED' })).toBe('INVALID_DATE')
@@ -898,6 +899,7 @@ describe('派发任务 dialog: in-flight guard', () => {
 describe('派发任务 dialog: error mapping', () => {
   const cases: Array<[string, () => Response, string]> = [
     ['INACTIVE_ORG_MEMBER', () => jsonResponse(422, { error: { code: 'INACTIVE_ORG_MEMBER' } }), '有负责人不是当前组织的有效成员'],
+    ['ASSIGNEE_TASK_ACCESS_REQUIRED', () => jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }), '有负责人还不能使用任务功能，请管理员先为其开通任务权限。'],
     ['INVALID_ASSIGNEES', () => jsonResponse(422, { error: { code: 'INVALID_ASSIGNEES' } }), '用户 ID 格式不正确'],
     ['LIMIT', () => jsonResponse(422, { error: { code: 'LIMIT' } }), '负责人最多 50 人'],
     ['ORG_MISSING', () => jsonResponse(422, { error: { code: 'ORG_MISSING' } }), '请先选择组织'],
