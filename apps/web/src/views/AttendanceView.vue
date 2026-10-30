@@ -10451,6 +10451,7 @@ import {
   type AttendanceRecordRequestPrefill,
 } from './attendance/attendanceRecordRequestPrefill'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
+import { createAttendanceGroupRosterReadFence } from './attendance/attendanceGroupRosterReadFence'
 import { attendanceReportDateRangeError, isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
@@ -14189,6 +14190,9 @@ const attendanceGroupTypeFilter = ref<AttendanceGroupType | ''>('')
 const attendanceGroupCopyingId = ref<string | null>(null)
 const attendanceGroupDeletingId = ref<string | null>(null)
 const attendanceGroupManagerLoading = ref(false)
+const attendanceGroupRosterContext = () => ({ groupId: attendanceGroupMemberGroupId.value, orgId: orgId.value })
+const attendanceGroupMemberReadFence = createAttendanceGroupRosterReadFence(attendanceGroupRosterContext, attendanceSessionGuard.isCurrent)
+const attendanceGroupManagerReadFence = createAttendanceGroupRosterReadFence(attendanceGroupRosterContext, attendanceSessionGuard.isCurrent)
 const attendanceGroupManagerSaving = ref(false)
 const attendanceGroupRulePolicyDrawerOpen = ref(false)
 const attendanceGroupWorkTimeDrawerOpen = ref(false)
@@ -29545,8 +29549,10 @@ async function saveAttendanceGroup() {
 }
 
 async function loadAttendanceGroupMembers() {
+  const isCurrent = attendanceGroupMemberReadFence.begin()
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId) {
+    attendanceGroupMemberLoading.value = false
     attendanceGroupMembers.value = []
     attendanceGroupMemberTotal.value = 0
     attendanceGroupMemberResolvedUsers.value = {}
@@ -29555,11 +29561,13 @@ async function loadAttendanceGroupMembers() {
   attendanceGroupMemberLoading.value = true
   try {
     const response = await apiFetch(`/api/attendance/groups/${groupId}/members`)
+    if (!isCurrent()) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
     }
     const data = await response.json()
+    if (!isCurrent()) return
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load group members', '加载分组成员失败')))
     }
@@ -29568,11 +29576,12 @@ async function loadAttendanceGroupMembers() {
     attendanceGroupMembers.value = items
     attendanceGroupMemberTotal.value = Number(data.data?.total ?? items.length) || items.length
     syncAttendanceGroupMemberCount(groupId, attendanceGroupMemberTotal.value)
-    void resolveAttendanceGroupMemberLabels(groupId, items)
+    void resolveAttendanceGroupMemberLabels(items, isCurrent)
   } catch (error: any) {
+    if (!isCurrent()) return
     setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
-    attendanceGroupMemberLoading.value = false
+    if (isCurrent()) attendanceGroupMemberLoading.value = false
   }
 }
 
@@ -29598,8 +29607,10 @@ function normalizeAttendanceGroupManagerRow(value: any): AttendanceGroupManager 
 }
 
 async function loadAttendanceGroupManagers() {
+  const isCurrent = attendanceGroupManagerReadFence.begin()
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId) {
+    attendanceGroupManagerLoading.value = false
     attendanceGroupManagers.value = []
     attendanceGroupManagerResolvedUsers.value = {}
     return
@@ -29607,11 +29618,13 @@ async function loadAttendanceGroupManagers() {
   attendanceGroupManagerLoading.value = true
   try {
     const response = await apiFetch(`/api/attendance/groups/${groupId}/managers`)
+    if (!isCurrent()) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
     }
     const data = await response.json()
+    if (!isCurrent()) return
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load group owners', '加载考勤组负责人失败')))
     }
@@ -29620,18 +29633,19 @@ async function loadAttendanceGroupManagers() {
       ? data.data.items.map(normalizeAttendanceGroupManagerRow).filter(Boolean) as AttendanceGroupManager[]
       : []
     attendanceGroupManagers.value = items
-    void resolveAttendanceGroupManagerLabels(groupId, items)
+    void resolveAttendanceGroupManagerLabels(items, isCurrent)
   } catch (error: any) {
+    if (!isCurrent()) return
     setStatus(readErrorMessage(error, tr('Failed to load group owners', '加载考勤组负责人失败')), 'error')
   } finally {
-    attendanceGroupManagerLoading.value = false
+    if (isCurrent()) attendanceGroupManagerLoading.value = false
   }
 }
 
-async function resolveAttendanceGroupMemberLabels(groupId: string, members: AttendanceGroupMember[]) {
+async function resolveAttendanceGroupMemberLabels(members: AttendanceGroupMember[], isCurrent: () => boolean) {
   const userIds = attendanceGroupMemberResolverUserIds(members)
   if (userIds.length === 0) {
-    if (attendanceGroupMemberGroupId.value === groupId) {
+    if (isCurrent()) {
       attendanceGroupMemberResolvedUsers.value = {}
     }
     return
@@ -29642,28 +29656,29 @@ async function resolveAttendanceGroupMemberLabels(groupId: string, members: Atte
       method: 'POST',
       body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
-    if (attendanceGroupMemberGroupId.value !== groupId) return
+    if (!isCurrent()) return
     if (response.status === 403 || response.status === 404) {
       attendanceGroupMemberResolvedUsers.value = {}
       return
     }
     const data = await response.json().catch(() => null)
+    if (!isCurrent()) return
     if (!response.ok || !data?.ok) {
       attendanceGroupMemberResolvedUsers.value = {}
       return
     }
     attendanceGroupMemberResolvedUsers.value = normalizeAttendanceGroupMemberResolvedUsers(data.data, userIds)
   } catch {
-    if (attendanceGroupMemberGroupId.value === groupId) {
+    if (isCurrent()) {
       attendanceGroupMemberResolvedUsers.value = {}
     }
   }
 }
 
-async function resolveAttendanceGroupManagerLabels(groupId: string, managers: AttendanceGroupManager[]) {
+async function resolveAttendanceGroupManagerLabels(managers: AttendanceGroupManager[], isCurrent: () => boolean) {
   const userIds = attendanceGroupManagerUserIds(managers)
   if (userIds.length === 0) {
-    if (attendanceGroupMemberGroupId.value === groupId) {
+    if (isCurrent()) {
       attendanceGroupManagerResolvedUsers.value = {}
     }
     return
@@ -29674,19 +29689,20 @@ async function resolveAttendanceGroupManagerLabels(groupId: string, managers: At
       method: 'POST',
       body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
-    if (attendanceGroupMemberGroupId.value !== groupId) return
+    if (!isCurrent()) return
     if (response.status === 403 || response.status === 404) {
       attendanceGroupManagerResolvedUsers.value = {}
       return
     }
     const data = await response.json().catch(() => null)
+    if (!isCurrent()) return
     if (!response.ok || !data?.ok) {
       attendanceGroupManagerResolvedUsers.value = {}
       return
     }
     attendanceGroupManagerResolvedUsers.value = normalizeAttendanceGroupMemberResolvedUsers(data.data, userIds)
   } catch {
-    if (attendanceGroupMemberGroupId.value === groupId) {
+    if (isCurrent()) {
       attendanceGroupManagerResolvedUsers.value = {}
     }
   }
@@ -31100,6 +31116,12 @@ watch(
     })
   },
 )
+
+// Invalidate synchronously so A -> B -> A cannot revive A's earlier request.
+watch([attendanceGroupMemberGroupId, orgId, attendancePluginActive], () => {
+  attendanceGroupMemberReadFence.invalidate()
+  attendanceGroupManagerReadFence.invalidate()
+}, { flush: 'sync' })
 
 watch([attendanceGroupMemberGroupId, attendancePluginActive], ([, pluginActive]) => {
   if (pluginActive) {
