@@ -28,6 +28,9 @@
 //         throw; UPDATE / INACTIVE keep the shared `decisionKey` path untouched (the refusal is ADD-only).
 //   MP-09 the R-60 boundary (ADR §6): the settlement's machine digest over the reader's rows is the same with no manual
 //         row, with one, and after the manual row is edited — so a governed project's formal export does not move.
+//   MP-10 a preview over a TRUNCATED read (the small-lane cap, `large_bom_bounded`) holds only part of the ADD rows: it
+//         creates no reminder record and leaves an existing one byte-identical (verification r1 MF-1). MP-03 also pins
+//         WHERE each record is written: the apply's inside its write lease, a preview's outside any lease.
 //
 // Synthetic values only.
 
@@ -41,6 +44,7 @@ const { DECISIONS, EXISTING_ROW_CREATED_BY, EXISTING_ROW_RECORD_REF } = require(
 const { EXISTING_ROWS_MANUAL_PREFIX, manualPrefixRowsOf } = require(path.join(LIB, 'stock-preparation-manual-rows.cjs'))
 const { machineBandFieldIds, sheetMachineDigest } = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+const { sheetWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 const kit = require('./support/stock-preparation-project-write-lock-kit.cjs')
 
 const { readExistingStockPreparationRows, unmapRecordFields } = tableActions.__internals
@@ -82,12 +86,23 @@ function sheetWith(sheetId, rows = []) {
   return sheet
 }
 
-function pullEnv(sheetId, { objectId = PROJECT_OBJECT_ID, rows = [], plmData = kit.goldenPlmData(PROJECT_NO), withStore = true } = {}) {
+function pullEnv(sheetId, { objectId = PROJECT_OBJECT_ID, rows = [], plmData = kit.goldenPlmData(PROJECT_NO), withStore = true, action: actionOverride } = {}) {
   const harness = kit.createLibWriteLockHarness()
   const sheet = sheetWith(sheetId, rows)
   const storage = kit.createConsumableStorage()
+  // Every reminder write, with the sheet's lease state AT THAT MOMENT (read through the harness's real lock module):
+  // the apply's record is written inside its write lease, a preview's outside any lease.
+  const reminderWrites = []
+  const storeSet = storage.set
+  storage.set = async (key, value) => {
+    if (key === `${LAST_PULL_KEY_PREFIX}${sheetId}`) {
+      const state = await harness.lock.readState(sheetWriteScopeKey(sheetId))
+      reminderWrites.push({ mode: value && value.mode, leaseHeld: state.leaseHeld, leasePurpose: state.leasePurpose || null })
+    }
+    return storeSet.call(storage, key, value)
+  }
   const source = kit.createSourceAdapter(plmData)
-  const action = actionFor(sheetId, objectId)
+  const action = actionOverride || actionFor(sheetId, objectId)
   const common = () => ({
     action,
     parameters: { projectNo: PROJECT_NO },
@@ -106,7 +121,7 @@ function pullEnv(sheetId, { objectId = PROJECT_OBJECT_ID, rows = [], plmData = k
   const lastPull = () => (storage.map.has(`${LAST_PULL_KEY_PREFIX}${sheetId}`) ? kit.clone(storage.map.get(`${LAST_PULL_KEY_PREFIX}${sheetId}`)) : null)
   const rowOf = (id) => sheet.rows.find((row) => row.id === id)
   const writesTo = (id) => sheet.writes().filter(([method, input]) => method === 'patchRecord' && input.recordId === id)
-  return { harness, sheet, storage, source, action, dryRun, apply, lastPull, rowOf, writesTo }
+  return { harness, sheet, storage, source, action, dryRun, apply, lastPull, rowOf, writesTo, reminderWrites }
 }
 
 // A response with its two run-varying values masked: the random token and the read phase's wall time.
@@ -258,6 +273,13 @@ test('MP-03 the manual row end to end: not planned, not hashed, reported, never 
   assert.deepEqual(env.lastPull(), {
     at: '2026-10-30T02:00:00.000Z', mode: 'dry_run', rowCount: 1, unboundKeyCount: 0, matchedManualCount: 0, matchedManualRecordIds: [], unboundRecordIds: [],
   })
+  // WHERE each record was written: the apply's INSIDE its write lease (the in-lease recompute's reminder, after the
+  // execution is closed), each preview's outside any lease.
+  assert.deepEqual(env.reminderWrites, [
+    { mode: 'dry_run', leaseHeld: false, leasePurpose: null },
+    { mode: 'apply', leaseHeld: true, leasePurpose: 'small_apply' },
+    { mode: 'dry_run', leaseHeld: false, leasePurpose: null },
+  ])
 })
 
 test('MP-04 名称 + 规格 + 材料 decide without a 图号; a COPY of an existing PLM row never reminds (it is a SKIP, not an ADD)', async () => {
@@ -468,6 +490,36 @@ test('MP-09 the settlement digest over the reader\'s rows is the same with no ma
   movedPlm[0].version = 2
   movedPlm[0].data.componentCode = 'SYN-B-MOVED'
   assert.notEqual(await digestOf([...movedPlm, manual]), base)
+})
+
+// ── MP-10: a truncated read never persists a reminder (verification r1 MF-1) ────────────────────────────
+
+test('MP-10 a preview over a TRUNCATED read (the small-lane cap: large_bom_bounded) leaves the reminder record alone — never created, never overwritten', async () => {
+  // The manual row copies part B's 图号, and B is the SECOND expanded row — beyond maxRows 1.
+  const manual = () => personRow('sheet_mr_p10', 'rec_mr_p10', { componentCode: 'SWL-B-001', componentName: '人工补充件', totalQuantity: 1 })
+  const bounded = () => ({ ...kit.goldenAction({ maxRows: 1 }), target: { sheetId: 'sheet_mr_p10', objectId: PROJECT_OBJECT_ID } })
+  // Control: the COMPLETE read matches it — the truth is 1.
+  const complete = pullEnv('sheet_mr_p10', { rows: [manual()] })
+  const truth = await complete.dryRun()
+  assert.equal(truth.status, 'ready')
+  assert.equal(truth.manualSupplement.matchedManualCount, 1)
+  assert.equal(complete.lastPull().matchedManualCount, 1)
+  // (a) No record yet: the bounded preview creates none (its ADD set is partial, so its "0 matched" would be false).
+  const fresh = pullEnv('sheet_mr_p10', { rows: [manual()], action: bounded() })
+  const a = await fresh.dryRun()
+  assert.equal(a.status, 'large_bom_bounded', JSON.stringify(a.evidence && a.evidence.expansion))
+  assert.equal(a.manualSupplement.rowCount, 1, 'the sheet read itself is complete')
+  assert.equal(fresh.lastPull(), null, 'no record created')
+  assert.deepEqual(fresh.reminderWrites, [])
+  // (b) An existing record (a true reminder) is byte-identical after the bounded preview.
+  const kept = pullEnv('sheet_mr_p10', { rows: [manual()], action: bounded() })
+  const earlier = { at: '2026-10-29T00:00:00.000Z', mode: 'dry_run', rowCount: 1, unboundKeyCount: 0, matchedManualCount: 1, matchedManualRecordIds: ['rec_mr_p10'], unboundRecordIds: [] }
+  kept.storage.map.set(`${LAST_PULL_KEY_PREFIX}sheet_mr_p10`, kit.clone(earlier))
+  const before = JSON.stringify(kept.storage.map.get(`${LAST_PULL_KEY_PREFIX}sheet_mr_p10`))
+  const b = await kept.dryRun()
+  assert.equal(b.status, 'large_bom_bounded')
+  assert.equal(JSON.stringify(kept.storage.map.get(`${LAST_PULL_KEY_PREFIX}sheet_mr_p10`)), before, 'the true reminder survives byte-identical')
+  assert.deepEqual(kept.reminderWrites, [])
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-manual-rows-pull.test.cjs', tests)

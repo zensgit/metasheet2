@@ -2605,17 +2605,22 @@ function addRecordsOfPlan(plan) {
 }
 
 // 人工补充行 B1 (ADR §5.3): the last small-lane pull's reminder, persisted through the server-held store the route
-// hands in (`manualRowsStore`, the plugin's own context.storage) — best effort, never the answer. A computation that
-// never read the sheet (the source does not know the project) has nothing to say and leaves the record alone; a
-// direct lib caller without the store persists nothing.
+// hands in (`manualRowsStore`, the plugin's own context.storage) — best effort, never the answer (the timestamp is
+// taken inside the store helper's own try, so not even a bad clock value escapes). A direct lib caller without the
+// store persists nothing. Two computations have no authoritative ADD set and so leave the record alone:
+//   * one that never read the sheet — the source does not know the project (`not_found`);
+//   * one over a TRUNCATED or BOUNDED read (`hasGlobalErrors`: a small-lane cap, a page bound, a source read error) —
+//     its plan holds only part of the ADD rows, so its "nothing matched" would overwrite a true reminder with a
+//     false one (verification r1 MF-1).
 async function persistManualRowsReminder(input, dryRun, mode, action) {
   if (!input || !input.manualRowsStore) return
   if (dryRun.expansion && dryRun.expansion.status === 'not_found') return
+  if (dryRun.hasGlobalErrors === true) return
   await persistManualRowsLastPull({
     store: input.manualRowsStore,
     sheetId: action.target.sheetId,
     mode,
-    at: new Date(Number.isFinite(input.now) ? input.now : Date.now()).toISOString(),
+    now: input.now,
     summary: dryRun.manualSupplement || null,
     logger: input.logger,
   })

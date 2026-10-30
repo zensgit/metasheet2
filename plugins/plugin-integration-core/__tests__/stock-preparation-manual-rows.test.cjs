@@ -11,8 +11,8 @@
 //         one, 名称 + 规格 + 材料 (each trimmed) must all agree; numbers compare as their decimal text; the id lists are
 //         sorted and capped at 50; `matchedManualRecordIds` are MANUAL rows' ids; null when nothing was collected.
 //   MR-05 persistence (ADR §5.3): the key, the values-free value; a pull with nothing to say writes only over an existing
-//         record; an unknown mode / blank sheet / store without get+set writes nothing; a failing store is logged with a
-//         code and never throws.
+//         record; an unknown mode / blank sheet / store without get+set writes nothing; a failing store — or a `now`
+//         that is no valid time — is logged with a code and never throws.
 //
 // Synthetic values only.
 
@@ -176,7 +176,7 @@ test('MR-04 the reminder compares ADD records only: 图号 first; else 名称 + 
   assert.equal(capped.matchedManualRecordIds[49], 'rec_m_49')
 })
 
-test('MR-05 persistence: key + values-free value; a silent pull overwrites only an existing record; guards; a failing store never throws', async () => {
+test('MR-05 persistence: key + values-free value; a silent pull overwrites only an existing record; guards; a failing store or a bad clock never throws', async () => {
   const store = memoryStore()
   const summary = { rowCount: 2, unboundKeyCount: 1, matchedManualCount: 1, matchedManualRecordIds: ['rec_m1'], unboundRecordIds: ['rec_u1'] }
   assert.equal(await persistManualRowsLastPull({ store, sheetId: 'sheet_mr', mode: 'dry_run', at: '2026-10-30T01:00:00.000Z', summary }), true)
@@ -208,6 +208,15 @@ test('MR-05 persistence: key + values-free value; a silent pull overwrites only 
   assert.deepEqual(warnings[0][1], { code: 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE', mode: 'apply' })
   assert.equal(JSON.stringify(warnings).includes('ZZSENTINELVALUEZZ'), false, 'the log line carries the code, never the message')
   assert.equal(await persistManualRowsLastPull({ store: failing, sheetId: 'sheet_mr', mode: 'apply', at: 'x', summary }), false, 'no logger: still no throw')
+  // The timestamp from `now` (epoch ms) is taken INSIDE the best-effort try: a value that is no valid time is logged
+  // and writes nothing — it never throws out of the pull.
+  const clocked = memoryStore()
+  assert.equal(await persistManualRowsLastPull({ store: clocked, sheetId: 'sheet_mr_now', mode: 'dry_run', now: Date.parse('2026-10-30T04:00:00.000Z'), summary }), true)
+  assert.equal(clocked.map.get('stockPrepManualRows:lastPull:v1:sheet_mr_now').at, '2026-10-30T04:00:00.000Z')
+  const clockWarnings = []
+  assert.equal(await persistManualRowsLastPull({ store: clocked, sheetId: 'sheet_mr_bad_now', mode: 'dry_run', now: 1e20, summary, logger: { warn: (...args) => clockWarnings.push(args) } }), false)
+  assert.equal(clocked.map.has('stockPrepManualRows:lastPull:v1:sheet_mr_bad_now'), false)
+  assert.deepEqual(clockWarnings.map((args) => args[1]), [{ code: 'PERSIST_FAILED', mode: 'dry_run' }])
   // The value is values-free by shape: exactly these seven keys.
   assert.deepEqual(Object.keys(store.map.get('stockPrepManualRows:lastPull:v1:sheet_mr')).sort(), ['at', 'matchedManualCount', 'matchedManualRecordIds', 'mode', 'rowCount', 'unboundKeyCount', 'unboundRecordIds'])
 })

@@ -20,8 +20,9 @@
  *   MR-RD-02 a registered, NOT-governed project sheet holding a manual row and an unbound prefix row (no creator):
  *            preview ready with two ADDs and no INACTIVE, `manualSupplement` reports both (the manual row matched by
  *            图号 against an ADD); the apply writes the two PLM rows and leaves both prefix rows byte-identical
- *            (version, data, created_by); the reminder sits in real plugin_kv, values-free, per pull; the export is 200
- *            with 来源 as the 31st column (人工补充 / 人工（非补充） / PLM) and the audit row's columnCount is 31.
+ *            (version, data, created_by); the reminder sits in real plugin_kv, values-free, per pull — the apply's record
+ *            written INSIDE its write lease, each preview's outside any lease (read through the real lock); the export is
+ *            200 with 来源 as the 31st column (人工补充 / 人工（非补充） / PLM) and the audit row's columnCount is 31.
  *   MR-RD-03 the R-60 boundary on a PILOT project: settled, the export is 200 with 30 columns; a manual row inserted
  *            => 200 with 来源; the manual row edited through the host (version + 1, two PLM-band cells) => 200 (never
  *            409 SHEET_CHANGED_SINCE_SETTLEMENT), and the next preview stays `ready`; control: a host-side machine write
@@ -185,13 +186,29 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
         target: envEnsured.target,
       }
       const routes = new Map<string, any>()
+      // The routes' storage is the REAL plugin_kv storage, observed: every reminder write records the sheet's lease state
+      // at that moment, read through the real lock (the apply's record is written inside its lease, a preview's outside).
+      const lastPullKey = manualRowsLib.manualRowsLastPullKey(sheetId)
+      kvKeys.push(lastPullKey)
+      const reminderWrites: Array<{ mode: unknown; leaseHeld: boolean; leasePurpose: unknown }> = []
+      const realStorage: any = pluginContext.storage
+      const observedStorage: any = {
+        ...realStorage,
+        async set(key: string, value: any) {
+          if (key === lastPullKey) {
+            const state = await lock.readState(sheetWriteScopeKey(sheetId))
+            reminderWrites.push({ mode: value && value.mode, leaseHeld: state.leaseHeld, leasePurpose: state.leasePurpose || null })
+          }
+          return realStorage.set(key, value)
+        },
+      }
       const routeContext = {
         api: {
           http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
           multitable,
           database: pluginContext.api.database,
         },
-        storage: pluginContext.storage,
+        storage: observedStorage,
         config: {
           stockPreparationTableActions: [actionConfig],
           stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envObjectId] },
@@ -232,12 +249,10 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
         await handler({ user: puller, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
         return res
       })
-      const lastPullKey = manualRowsLib.manualRowsLastPullKey(sheetId)
-      kvKeys.push(lastPullKey)
       const fields = ensured.target.fieldIdMap as Record<string, string>
       const physical = (logical: string) => fields[logical] || logical
       return {
-        tenantId, projectNo, sheetId, objectId, multitable, target: ensured.target, physical,
+        tenantId, projectNo, sheetId, objectId, multitable, target: ensured.target, physical, reminderWrites,
         async dryRun() {
           const res = await call('POST', PATHS.dryRun, { body: { parameters: { projectNo } }, params: { actionId: ACTION_ID } })
           if (res.body && res.body.data && typeof res.body.data.dryRunToken === 'string') kvKeys.push(`integration:table-action:dry-run-token:${res.body.data.dryRunToken}`)
@@ -314,6 +329,13 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
       expect(second.body.data.counts).toEqual({ add: 0, update: 0, skip: 2, inactive: 0, manual_confirm: 0 })
       expect(second.body.data.manualSupplement).toEqual({ rowCount: 1, unboundKeyCount: 1, matchedManualCount: 0, matchedManualRecordIds: [], unboundRecordIds: [unboundId] })
       expect(await st.lastPull()).toMatchObject({ mode: 'dry_run', matchedManualCount: 0, matchedManualRecordIds: [] })
+      // WHERE each reminder was written, through the real routes and the real lock: the apply's INSIDE its write lease
+      // (the lib persists the in-lease recompute's reminder before the route releases), each preview's outside any lease.
+      expect(st.reminderWrites).toEqual([
+        { mode: 'dry_run', leaseHeld: false, leasePurpose: null },
+        { mode: 'apply', leaseHeld: true, leasePurpose: 'small_apply' },
+        { mode: 'dry_run', leaseHeld: false, leasePurpose: null },
+      ])
 
       // The export: 来源 as the 31st column, the three values, the audit row's columnCount 31.
       const exported = await st.exportLines()

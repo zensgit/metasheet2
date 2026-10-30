@@ -210,26 +210,29 @@ function manualRowsLastPullRecord({ at, mode, summary }) {
 }
 
 /**
- * Persist the last small-lane pull's reminder (ADR §5.3), BEST EFFORT: a storage failure is logged (code only) and
- * never fails the pull it describes. A pull with something to say writes its record; a pull with nothing to say
- * overwrites a record only when one exists (so an earlier reminder never outlives the pull that cleared it), and a
- * sheet that never had a prefix row never gets a record. Returns true when a record was written.
+ * Persist the last small-lane pull's reminder (ADR §5.3), BEST EFFORT: a failure — the store, or a clock value that is
+ * not a valid time — is logged (code only) and never fails the pull it describes. The record's `at` is the explicit
+ * `at` string when given, else `now` (epoch ms; the current time when absent), converted INSIDE the try. A pull with
+ * something to say writes its record; a pull with nothing to say overwrites a record only when one exists (so an
+ * earlier reminder never outlives the pull that cleared it), and a sheet that never had a prefix row never gets a
+ * record (a reader treats "no record" as all zeros). Returns true when a record was written.
  */
-async function persistManualRowsLastPull({ store, sheetId, mode, at, summary, logger } = {}) {
+async function persistManualRowsLastPull({ store, sheetId, mode, at, now, summary, logger } = {}) {
   const key = manualRowsLastPullKey(sheetId)
   if (!key || !store || typeof store.get !== 'function' || typeof store.set !== 'function') return false
   if (!MANUAL_ROWS_LAST_PULL_MODES.includes(mode)) return false
   try {
+    const stamp = typeof at === 'string' ? at : new Date(Number.isFinite(now) ? now : Date.now()).toISOString()
     if (!summary) {
       const previous = await store.get(key)
       if (previous === null || previous === undefined) return false
     }
-    await store.set(key, manualRowsLastPullRecord({ at, mode, summary }))
+    await store.set(key, manualRowsLastPullRecord({ at: stamp, mode, summary }))
     return true
   } catch (error) {
     if (logger && typeof logger.warn === 'function') {
       logger.warn('[plugin-integration-core] stock-prep manual-rows reminder could not be persisted; the pull result stands', {
-        code: error && typeof error.code === 'string' ? error.code : 'STORAGE_FAILED',
+        code: error && typeof error.code === 'string' ? error.code : 'PERSIST_FAILED',
         mode,
       })
     }

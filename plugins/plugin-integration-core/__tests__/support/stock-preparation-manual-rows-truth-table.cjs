@@ -48,6 +48,8 @@ const MANUAL_ROWS_TRUTH_TABLE = Object.freeze([
   { name: 'the own key plus a trailing space (exact equality)', input: { objectId: PROJECT_OBJECT_ID, createdBy: CREATOR, recordId: RECORD_ID, key: `${OWN_KEY} ` }, expected: UNBOUND },
   { name: 'no record id (null)', input: { objectId: PROJECT_OBJECT_ID, createdBy: CREATOR, recordId: null, key: 'manual:v1:' }, expected: UNBOUND },
   { name: 'an empty record id', input: { objectId: PROJECT_OBJECT_ID, createdBy: CREATOR, recordId: '', key: 'manual:v1:' }, expected: UNBOUND },
+  // The key IS `'manual:v1:' + recordId` here, so only the blank-id rule keeps it out of M (same as the two rows above).
+  { name: 'a whitespace-only record id', input: { objectId: PROJECT_OBJECT_ID, createdBy: CREATOR, recordId: '   ', key: 'manual:v1:   ' }, expected: UNBOUND },
   { name: 'a LEADING space is not the namespace (raw comparison), and the creator makes it non-PLM', input: { objectId: PROJECT_OBJECT_ID, createdBy: CREATOR, recordId: RECORD_ID, key: ` ${OWN_KEY}` }, expected: PERSON_NOT_PREFIX },
   { name: 'the namespace is case-sensitive', input: { objectId: PROJECT_OBJECT_ID, createdBy: CREATOR, recordId: RECORD_ID, key: `MANUAL:v1:${RECORD_ID}` }, expected: PERSON_NOT_PREFIX },
   { name: 'a PLM key written by the plugin', input: { objectId: PROJECT_OBJECT_ID, createdBy: null, recordId: RECORD_ID, key: PLM_KEY }, expected: PLM },
