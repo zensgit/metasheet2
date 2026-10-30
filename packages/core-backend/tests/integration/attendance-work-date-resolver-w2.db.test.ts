@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
+import type { PoolClient } from 'pg'
 import { listActiveCurrentOpenRecordsForWorkDateResolverV1 } from '../../src/attendance/w4c3c-active-current'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -541,5 +542,147 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
       attributionTailMinutes: 120,
     })
     expect(beyond.kind).toBe('unresolved')
+  })
+})
+
+type W204ShiftRow = { id: string; org_id: string; segment_count: number }
+type W204Fixture = {
+  client: PoolClient
+  orgs: [string, string]
+  shiftIds: [string, string]
+  userId: string
+}
+
+describeIfDatabase('W204 native unfiltered shift lookup organization facets (real DB)', () => {
+  const pool = new Pool({ connectionString: dbUrl, max: 1 })
+  const calendar = attendancePlugin.__attendanceReportFieldCatalogForTests as {
+    resolveEffectiveCalendar: (
+      db: { query: (sql: string, params?: unknown[]) => Promise<unknown[]> },
+      args: Record<string, unknown>,
+    ) => Promise<unknown>
+  }
+
+  afterAll(async () => { await pool.end() })
+
+  async function withFixture(check: (fixture: W204Fixture) => Promise<void>) {
+    const client = await pool.connect()
+    let began = false
+    const suffix = randomUUID()
+    const orgs: [string, string] = ['w204-a-' + suffix, 'w204-b-' + suffix]
+    const shiftIds: [string, string] = [randomUUID(), randomUUID()]
+    const userId = 'w204-user-' + suffix
+    try {
+      await client.query('BEGIN')
+      began = true
+      await client.query('SET LOCAL statement_timeout = 10000')
+      await client.query(
+        `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin)
+         VALUES ($1, $2, $1, 'W204 Fixture', 'x', 'user', '[]'::jsonb, true, false)`,
+        [userId, userId + '@example.test'],
+      )
+      for (const [index, orgId] of orgs.entries()) {
+        await client.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)', [userId, orgId])
+        await client.query(
+          `INSERT INTO attendance_shifts
+             (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days)
+           VALUES ($1, $2, 'W204 Scoped', 'UTC', '09:00', '17:00', false, '[0,1,2,3,4,5,6]'::jsonb)`,
+          [shiftIds[index], orgId],
+        )
+        for (let segment = 0; segment <= index; segment += 1) {
+          await client.query(
+            `INSERT INTO attendance_shift_segments
+               (org_id, shift_id, segment_index, start_time, end_time)
+             VALUES ($1, $2, $3, $4::time, $5::time)`,
+            [orgId, shiftIds[index], segment, segment === 0 ? '09:00' : '13:00', segment === 0 ? '12:00' : '17:00'],
+          )
+        }
+        const rotationId = randomUUID()
+        // Existing persisted whitespace reference reaches the native unfiltered
+        // branch. No new entry point or fabricated returned rows are used.
+        await client.query(
+          `INSERT INTO attendance_rotation_rules (id, org_id, name, timezone, shift_sequence, is_active)
+           VALUES ($1, $2, 'W204 Rotation', 'UTC', '["   "]'::jsonb, true)`,
+          [rotationId, orgId],
+        )
+        await client.query(
+          `INSERT INTO attendance_rotation_assignments
+             (id, org_id, user_id, rotation_rule_id, start_date, end_date, is_active, publish_status)
+           VALUES ($1, $2, $3, $4, '2051-01-03', '2051-01-03', true, 'published')`,
+          [randomUUID(), orgId, userId, rotationId],
+        )
+      }
+      await check({ client, orgs, shiftIds, userId })
+    } finally {
+      try {
+        if (began) await client.query('ROLLBACK')
+      } finally {
+        client.release()
+      }
+    }
+  }
+
+  async function captureLookup(fixture: W204Fixture, orgId: string) {
+    const calls: { sql: string; params: unknown[]; rows: W204ShiftRow[] }[] = []
+    await calendar.resolveEffectiveCalendar({
+      async query(sql, params) {
+        const result = await fixture.client.query<W204ShiftRow>(sql, params)
+        // Match the carrier independently of either predicate being tested.
+        if (/FROM\s+attendance_shifts\s+s/.test(sql) && /AS segment_count/.test(sql)
+          && !/s\.(?:id|name)\s*=\s*ANY/.test(sql)) {
+          calls.push({ sql, params: params ? [...params] : [], rows: result.rows })
+        }
+        return result.rows
+      },
+    }, { orgId, userId: fixture.userId, from: '2051-01-03', to: '2051-01-03', calendarPolicyOverrides: [] })
+    expect(calls, 'W204_NATIVE_UNFILTERED_CALL_COUNT').toHaveLength(1)
+    return calls[0]
+  }
+
+  it('W204_OUTER native unfiltered lookup returns only the requested organization in both directions', async () => {
+    await withFixture(async (fixture) => {
+      for (const [index, orgId] of fixture.orgs.entries()) {
+        const call = await captureLookup(fixture, orgId)
+        expect(call.rows.filter(row => row.org_id !== orgId), 'W204_OUTER_ZERO_FOREIGN_ROWS').toHaveLength(0)
+        expect(call.rows.map(row => ({ id: row.id, org_id: row.org_id }))).toEqual([
+          { id: fixture.shiftIds[index], org_id: orgId },
+        ])
+        expect(call.params).toEqual([orgId])
+      }
+    })
+  })
+
+  it('W204_SEGMENT executed unfiltered carrier retains the segment organization predicate and own counts', async () => {
+    await withFixture(async (fixture) => {
+      for (const [index, orgId] of fixture.orgs.entries()) {
+        const call = await captureLookup(fixture, orgId)
+        // This facet observes the actual executed carrier. The composite FK
+        // prevents a legal foreign segment with this shift ID; no leak is claimed.
+        expect(call.sql, 'W204_SEGMENT_EXECUTED_ORG_PREDICATE').toMatch(/seg\.org_id\s*=\s*s\.org_id/)
+        expect(call.rows.filter(row => row.id === fixture.shiftIds[index]).map(row => row.segment_count)).toEqual([index + 1])
+      }
+    })
+  })
+
+  it('W204_INTEGRITY native composite FK rejects a foreign segment while legal segment counts survive', async () => {
+    await withFixture(async ({ client, orgs, shiftIds }) => {
+      for (const [index, orgId] of orgs.entries()) {
+        await client.query('SAVEPOINT w204_foreign_segment')
+        try {
+          await expect(client.query(
+            `INSERT INTO attendance_shift_segments (org_id, shift_id, segment_index, start_time, end_time)
+             VALUES ($1, $2, 2, '18:00', '19:00')`,
+            [orgs[1 - index], shiftIds[index]],
+          )).rejects.toMatchObject({ code: '23503', constraint: 'fk_attendance_shift_segments_shift_org' })
+        } finally {
+          await client.query('ROLLBACK TO SAVEPOINT w204_foreign_segment')
+          await client.query('RELEASE SAVEPOINT w204_foreign_segment')
+        }
+        const rows = await client.query(
+          'SELECT segment_index FROM attendance_shift_segments WHERE org_id = $1 AND shift_id = $2 ORDER BY segment_index',
+          [orgId, shiftIds[index]],
+        )
+        expect(rows.rows).toEqual(index === 0 ? [{ segment_index: 0 }] : [{ segment_index: 0 }, { segment_index: 1 }])
+      }
+    })
   })
 })
