@@ -2837,9 +2837,10 @@ components:
     AttendanceShiftCapabilities:
       type: object
       description: >-
-        Values-safe capability projection (state and labels only). Shows that
-        authoritative segment calculation is disabled by default; while disabled,
-        multi-segment authoring is preview-only.
+        Values-safe capability projection (state and labels only). Calculation
+        availability remains disabled by default. The request-scoped canonical
+        reference posture independently supplies the multi-segment authoring hint;
+        admitted reference authoring does not assert authoritative calculation.
       properties:
         segmentCalculation:
           type: object

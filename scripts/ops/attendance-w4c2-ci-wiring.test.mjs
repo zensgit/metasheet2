@@ -2227,6 +2227,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
   'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
   'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
+  'tests/integration/attendance-shift-reference-capability.db.test.ts',
   'tests/integration/attendance-shift-segments-migration.db.test.ts',
   'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
   'tests/integration/attendance-shift-swap.test.ts',
