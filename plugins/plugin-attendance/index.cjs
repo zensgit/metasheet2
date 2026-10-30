@@ -26255,6 +26255,7 @@ module.exports = {
       'AttendanceW4AuthorizationError',
       'AttendanceW4LiveScheduledBoundaryError',
       'AttendanceW4RequestBoundaryError',
+      'AttendanceApprovedOvertimeInputError',
       'ApprovedLeaveCancellationError',
       'AttendanceW4MergePolicyError',
       // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
@@ -39385,6 +39386,10 @@ module.exports = {
           const resolvedAt = requestRow.request_type === 'business_trip' ? getBusinessTripServerInstant() : new Date()
           let finalOvertimeAnchor = null
           let lockedRequestSnapshot = null
+          let preparedOvertimeCalculation = null
+          let preparedOvertimeContext = null
+          let hideOvertimeReviewRecord = false
+          let terminalRequestBindResult = null
 
           // W4C-3b P12: lock latest immutable request snapshot BEFORE any terminal
           // approval/request DML. Authoritative + missing snapshot fails closed here
@@ -39424,6 +39429,27 @@ module.exports = {
                 422,
                 'OVERTIME_ATTRIBUTION_SNAPSHOT_MISMATCH',
                 'Overtime attribution snapshot does not match the request subject and work date',
+              )
+            }
+          }
+
+          if (action === 'approve' && isFinalApproval && requestType === 'overtime'
+            && (operation.acceptedWritePosture === 'authoritative' || operation.acceptedWritePosture === 'shadow')) {
+            if (!lockedRequestSnapshot || (lockedRequestSnapshot.kind !== 'locked'
+              && !(operation.acceptedWritePosture === 'shadow' && lockedRequestSnapshot.kind === 'missing_shadow_allowed'))) {
+              throw new HttpError(409, 'ATTENDANCE_OVERTIME_SNAPSHOT_UNSUPPORTED', 'Overtime calculation snapshot is unavailable')
+            }
+            if (typeof attendanceW4SegmentCalculationPort?.prepareApprovedOvertimeCalculation !== 'function'
+              || typeof attendanceW4SegmentCalculationPort?.readPreparedApprovedOvertimeContext !== 'function'
+              || typeof attendanceW4SegmentCalculationPort?.appendApprovedOvertimeCalculation !== 'function') {
+              throw new HttpError(503, 'ATTENDANCE_OVERTIME_CALCULATION_PORT_UNAVAILABLE', 'Overtime calculation is unavailable')
+            }
+            preparedOvertimeCalculation = await attendanceW4SegmentCalculationPort.prepareApprovedOvertimeCalculation({
+              facade: trx, operation, requestId, preTerminalSnapshot: lockedRequestSnapshot,
+            })
+            if (operation.acceptedWritePosture === 'authoritative') {
+              preparedOvertimeContext = attendanceW4SegmentCalculationPort.readPreparedApprovedOvertimeContext(
+                trx, operation, preparedOvertimeCalculation,
               )
             }
           }
@@ -39549,6 +39575,7 @@ module.exports = {
                   ? lockedRequestSnapshot.snapshot.payloadFingerprint
                   : undefined,
             })
+            terminalRequestBindResult = bindResult
             if (bindResult && (bindResult.kind === 'bound' || bindResult.kind === 'unsupported_pre_w4_shadow')) {
               nextMetadata[requestSnapshotTerminalBindingMetaKey] = bindResult.binding
             }
@@ -39848,10 +39875,12 @@ module.exports = {
               }
             }
             const frozenTarget = freshRequestTimezoneTargets.get(trx)
-            const baseRule = frozenTarget?.rule ?? await loadDefaultRule(trx, orgId)
-            const context = frozenTarget
-              ? {rule:frozenTarget.rule,isWorkingDay:frozenTarget.isWorkingDay,holiday:null}
-              : await resolveWorkContext({
+            const baseRule = preparedOvertimeContext ? null : frozenTarget?.rule ?? await loadDefaultRule(trx, orgId)
+            const context = preparedOvertimeContext
+              ? { rule: { timezone: preparedOvertimeContext.timezone }, isWorkingDay: preparedOvertimeContext.isWorkday, holiday: null }
+              : frozenTarget
+                ? {rule:frozenTarget.rule,isWorkingDay:frozenTarget.isWorkingDay,holiday:null}
+                : await resolveWorkContext({
                   db: trx,
                   orgId,
                   userId: requestRow.user_id,
@@ -39922,6 +39951,21 @@ module.exports = {
                 existingRow: existingCorrectionRow,
                 client: trx,
               })
+            } else if (preparedOvertimeCalculation && operation.acceptedWritePosture === 'authoritative') {
+              const calculated = await attendanceW4SegmentCalculationPort.appendApprovedOvertimeCalculation({
+                facade: trx, operation, prepared: preparedOvertimeCalculation,
+                bindResult: terminalRequestBindResult,
+              })
+              const calculatedRows = await trx.query(
+                'SELECT * FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND id = $3::uuid',
+                [orgId, requestRow.user_id, calculated.recordId],
+              )
+              record = calculatedRows[0]
+              if (!record) {
+                throw new HttpError(409, 'ATTENDANCE_OVERTIME_RESULT_RECORD_MISSING', 'Overtime calculation record is unavailable')
+              }
+              hideOvertimeReviewRecord = calculated.outcome === 'review_required'
+                && record.visibility_state === 'retired' && record.visibility_reason === 'review_placeholder'
             } else if (requestType === 'leave' || requestType === 'overtime') {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
               const overtimeRecordMeta = requestType === 'overtime' && finalOvertimeAnchor
@@ -39961,6 +40005,17 @@ module.exports = {
                 meta: overtimeRecordMeta,
                 client: trx,
               })
+              if (preparedOvertimeCalculation && operation.acceptedWritePosture === 'shadow') {
+                // Keep the served legacy projection; comparison persistence is mandatory
+                // in this same approval transaction and never takes the W4 pointer.
+                const compared = await attendanceW4SegmentCalculationPort.appendApprovedOvertimeCalculation({
+                  facade: trx, operation, prepared: preparedOvertimeCalculation,
+                  bindResult: terminalRequestBindResult,
+                })
+                if (!record || compared.recordId !== record.id) {
+                  throw new HttpError(409, 'ATTENDANCE_OVERTIME_RESULT_RECORD_MISSING', 'Overtime calculation record is unavailable')
+                }
+              }
             } else if (requestType === 'outdoor_punch') {
               // ② S3 外勤审批 (#2304): final approve materialises the deferred outdoor punch as ONE real
               // punch event (the original eventType + occurredAt, source='outdoor_approval') and appends the
@@ -40094,7 +40149,7 @@ module.exports = {
           return {
             requestId,
             status: isFinalApproval ? newStatus : 'pending',
-            record,
+            record: hideOvertimeReviewRecord ? null : record,
             orgId: null,
             userId: requestRow.user_id,
             approvalStep: {
