@@ -55,7 +55,7 @@ Mac mini仍处于让出状态。本轮没有连接它，没有启动其测试、
 
 工作流复用仓库已有`ankane/setup-postgres@v1`方式，版本与用户设置依据[该action的官方说明](https://github.com/ankane/setup-postgres)。
 
-**CI状态：待新Draft PR触发，当前没有全绿结论。** 将按实际head更新；不把以前17＋5或其他PR的结果替代本轮检查。
+当前head执行结果以Draft PR检查页和[本分支独立工作流运行记录](https://github.com/zensgit/metasheet2/actions/workflows/dingtalk-credential-repair.yml?query=branch%3Acodex%2Fdingtalk-credential-repair-20261030)为准；PR正文记录绑定head的结果快照。本MD中的历史17＋5或工作流定义本身不作为本轮CI通过证据。
 
 ## 后续边界
 
