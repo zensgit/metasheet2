@@ -15,8 +15,14 @@
  *   (c) ROUTE MATRIX (usePinnedServer, mock pool): every schema route refuses the floor and the schema holder on
  *       the project sheet with the plain FORBIDDEN, while the same person passes the gate on the unregistered
  *       twin and the platform admin passes it on the project sheet; `/context` keeps the record plane;
- *       `GET /view?seed=true` on the live project sheet reads but writes no field / record for a clamped person.
+ *       `GET /view?seed=true` on the live project sheet reads but writes no field / record for a clamped person;
+ *   (d) R-66 ③ (owner 2026-10-29, R78): 备料主管理员 — `stock-prep:admin` in the effective codes AND held through a
+ *       role — keeps the RESOLVED canManageViews on the project sheet (never raised: no grant → still false) and
+ *       loses canManageFields like everyone else, in all three resolvers; a direct grant, a `stock-prep:*` wildcard
+ *       and the puller codes stay clamped; ordinary sheets are byte-identical and cost no role statement; the view
+ *       routes pass and the field / sheet-rename / field-permission routes and the live re-seed stay refused.
  */
+import { createRequire } from 'node:module'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -38,15 +44,28 @@ import { STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID } from '../../src/multitab
 import {
   STOCK_PREPARATION_PROJECT_SHEET_PLUGIN,
   STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL,
+  STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE,
+  STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE,
+  STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL,
   applyStockPreparationProjectSheetSchemaClamp,
+  holdsStockPreparationProjectSheetViewManagement,
   loadStockPreparationProjectSheetIds,
   restrictStockPreparationProjectSheetSchemaCapabilities,
 } from '../../src/multitable/stock-preparation-project-sheet-schema-clamp'
+import { STOCK_PREP_ADMIN_CODE } from '../../src/services/stock-preparation-members'
+import { STOCK_PREP_ROLE_TEMPLATES } from '../../src/db/migrations/zzzz20261010124500_seed_stock_prep_role_templates'
 import { resolveSheetCapabilitiesForUserOnQuery } from '../../src/services/approval-record-link-txn-auth'
 import { isAdmin, listUserPermissions } from '../../src/rbac/service'
+import { derivePermissionNamespace } from '../../src/rbac/namespace-admission'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim()
+
+// R-66 ③: the plugin's own ladder, required live so the code pin below cannot drift from it.
+const PLUGIN_WORKBENCH_ACCESS = createRequire(import.meta.url)('../../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs') as {
+  STOCK_PREP_PERMISSION_CODES: readonly string[]
+  satisfiesStockPrepAccess: (permissions: string[], code: string) => boolean
+}
 
 const PROJECT = 'tenant_b_clamp:integration-core'
 const PROJECT_OBJECT = `plm_stock_preparation_sandbox_p_${'0a1b2c3d4e5f'.repeat(2)}`
@@ -79,6 +98,8 @@ function answerRegistry(params: unknown[]): { rows: unknown[] } {
 }
 
 // ── (a) pure clamp + lookup ──────────────────────────────────────────────────────────────────────
+
+const NO_ACTOR = { userId: 'u_b_clamp', permissions: [] as string[] }
 
 describe('option B — the pure clamp and the lookup', () => {
   const CAPS = {
@@ -114,15 +135,15 @@ describe('option B — the pure clamp and the lookup', () => {
 
   it('the resolvers\' helper asks nothing for an admin and propagates a registry error for everyone else', async () => {
     const failing = vi.fn(async () => { throw new Error('registry unavailable') })
-    await expect(applyStockPreparationProjectSheetSchemaClamp(failing, PROJECT_SHEET, CAPS, true)).resolves.toEqual({ capabilities: CAPS, clamped: false })
+    await expect(applyStockPreparationProjectSheetSchemaClamp(failing, PROJECT_SHEET, CAPS, true, NO_ACTOR)).resolves.toEqual({ capabilities: CAPS, clamped: false })
     expect(failing).not.toHaveBeenCalled()
-    await expect(applyStockPreparationProjectSheetSchemaClamp(failing, PROJECT_SHEET, CAPS, false)).rejects.toThrow('registry unavailable')
+    await expect(applyStockPreparationProjectSheetSchemaClamp(failing, PROJECT_SHEET, CAPS, false, NO_ACTOR)).rejects.toThrow('registry unavailable')
   })
 })
 
 // ── (b) three-resolver parity ────────────────────────────────────────────────────────────────────
 
-type Premise = { sheetCodes?: string[]; registryFails?: boolean }
+type Premise = { sheetCodes?: string[]; registryFails?: boolean; roleHeld?: boolean; roleFails?: boolean }
 
 /** Answers every statement the three resolvers issue for one sheet. */
 function resolverQuery(sheetId: string, premise: Premise): QueryFn & ReturnType<typeof vi.fn> {
@@ -131,6 +152,10 @@ function resolverQuery(sheetId: string, premise: Premise): QueryFn & ReturnType<
     if (q === STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL) {
       if (premise.registryFails) throw new Error('registry unavailable')
       return answerRegistry(params)
+    }
+    if (q === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL) {
+      if (premise.roleFails) throw new Error('role lookup unavailable')
+      return { rows: premise.roleHeld === true && params[1] === 'stock-prep:admin' && params[2] === 'stock-prep' ? [{ '?column?': 1 }] : [] }
     }
     if (q === 'SELECT deleted_at FROM meta_sheets WHERE id = $1') return { rows: [{ deleted_at: null }] }
     if (q.includes('FROM spreadsheet_permissions')) {
@@ -146,7 +171,7 @@ const accessOf = (permissions: string[], isAdminRole: boolean): ResolvedRequestA
   isAdminRole,
 })
 
-type Person = { label: string; permissions: string[]; isAdminRole: boolean; sheetCodes: string[] }
+type Person = { label: string; permissions: string[]; isAdminRole: boolean; sheetCodes: string[]; roleHeld?: boolean }
 const CLAMPED_PERSONS: Person[] = [
   { label: 'the floor role holding only the G1 spreadsheet:write sheet grant', permissions: [], isAdminRole: false, sheetCodes: ['spreadsheet:write'] },
   { label: 'a global multitable:write + multitable:manage-schema holder', permissions: ['multitable:read', 'multitable:write', MULTITABLE_MANAGE_SCHEMA_PERMISSION], isAdminRole: false, sheetCodes: [] },
@@ -161,7 +186,7 @@ const RESOLVERS: Resolver[] = [
   {
     name: 'resolveSheetCapabilitiesForAccess (REST, /context)',
     run: async (sheetId, person, premise = {}) => {
-      const r = await resolveSheetCapabilitiesForAccess(resolverQuery(sheetId, { sheetCodes: person.sheetCodes, ...premise }), sheetId, accessOf(person.permissions, person.isAdminRole))
+      const r = await resolveSheetCapabilitiesForAccess(resolverQuery(sheetId, { sheetCodes: person.sheetCodes, roleHeld: person.roleHeld, ...premise }), sheetId, accessOf(person.permissions, person.isAdminRole))
       return { capabilities: r.capabilities as unknown as Record<string, unknown>, marker: r.stockPrepProjectSheetSchemaClamped === true }
     },
   },
@@ -170,7 +195,7 @@ const RESOLVERS: Resolver[] = [
     run: async (sheetId, person, premise = {}) => {
       vi.mocked(isAdmin).mockResolvedValue(person.isAdminRole)
       vi.mocked(listUserPermissions).mockResolvedValue(person.permissions)
-      const r = await resolveSheetCapabilitiesForUser(resolverQuery(sheetId, { sheetCodes: person.sheetCodes, ...premise }) as never, sheetId, 'u_b_clamp')
+      const r = await resolveSheetCapabilitiesForUser(resolverQuery(sheetId, { sheetCodes: person.sheetCodes, roleHeld: person.roleHeld, ...premise }) as never, sheetId, 'u_b_clamp')
       return { capabilities: r.capabilities as unknown as Record<string, unknown>, marker: r.stockPrepProjectSheetSchemaClamped === true }
     },
   },
@@ -178,7 +203,7 @@ const RESOLVERS: Resolver[] = [
     name: 'resolveSheetCapabilitiesForUserOnQuery (automation FWB / record-permission routes)',
     run: async (sheetId, person, premise = {}) => {
       const r = await resolveSheetCapabilitiesForUserOnQuery(
-        resolverQuery(sheetId, { sheetCodes: person.sheetCodes, ...premise }),
+        resolverQuery(sheetId, { sheetCodes: person.sheetCodes, roleHeld: person.roleHeld, ...premise }),
         sheetId,
         'u_b_clamp',
         undefined,
@@ -277,12 +302,16 @@ const FIELD_OF: Record<string, string> = { [PROJECT_SHEET]: 'fld_b_clamp_project
 const VIEW_OF: Record<string, string> = { [PROJECT_SHEET]: 'view_b_clamp_project', [TWIN_SHEET]: 'view_b_clamp_twin' }
 const FORBIDDEN_CODE = 'FORBIDDEN'
 
-type RouteActor = 'floor' | 'schema' | 'admin'
-const ROUTE_USER: Record<RouteActor, { id: string; roles: string[]; perms: string[]; sheetCodes: string[] }> = {
+type RouteActor = 'floor' | 'schema' | 'admin' | 'spadmin' | 'spadminDirect'
+const ROUTE_USER: Record<RouteActor, { id: string; roles: string[]; perms: string[]; sheetCodes: string[]; roleHeld?: boolean }> = {
   // No global code at all: the G1 sheet grant (role row) is what opens the sheet — perms resolve to [] from rbac.
   floor: { id: 'u_b_clamp_floor', roles: ['member'], perms: [], sheetCodes: ['spreadsheet:write'] },
   schema: { id: 'u_b_clamp_schema', roles: ['member'], perms: ['multitable:read', 'multitable:write', MULTITABLE_MANAGE_SCHEMA_PERMISSION], sheetCodes: [] },
   admin: { id: 'u_b_clamp_admin', roles: ['admin'], perms: [], sheetCodes: [] },
+  // R-66 ③: 备料主管理员 — `stock-prep:admin` held through a role (the stock-prep_admin template) plus the G1 grant.
+  spadmin: { id: 'u_b_clamp_spadmin', roles: ['member'], perms: ['stock-prep:admin'], sheetCodes: ['spreadsheet:write'], roleHeld: true },
+  // The same effective code and G1 grant, but NOT from a role (a direct user_permissions row): clamped like the floor.
+  spadminDirect: { id: 'u_b_clamp_spadmin_direct', roles: ['member'], perms: ['stock-prep:admin'], sheetCodes: ['spreadsheet:write'], roleHeld: false },
 }
 
 function createRoutePool(actor: RouteActor) {
@@ -300,6 +329,9 @@ function createRoutePool(actor: RouteActor) {
     const q = normalize(sql)
     const p = (i: number) => String(params[i] ?? '')
     if (q === STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL) return answerRegistry(params)
+    if (q === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL) {
+      return { rows: user.roleHeld === true && p(0) === user.id && p(1) === 'stock-prep:admin' && p(2) === 'stock-prep' ? [{ '?column?': 1 }] : [] }
+    }
     // The plugin-managed probes (sheet-delete guard / managed-field guard): only the project sheet is registered.
     if (q.includes('FROM plugin_multitable_object_registry')) return { rows: p(0) === PROJECT_SHEET ? [{ '?column?': 1 }] : [] }
     if (q.includes('FROM spreadsheet_permissions')) {
@@ -386,7 +418,7 @@ async function buildRouteApp(actor: RouteActor): Promise<Express> {
   vi.spyOn(poolManager, 'get').mockReturnValue(lastRoutePool as never)
   const app = express()
   app.use(express.json())
-  const { sheetCodes: _sheetCodes, ...user } = ROUTE_USER[actor]
+  const { sheetCodes: _sheetCodes, roleHeld: _roleHeld, ...user } = ROUTE_USER[actor]
   app.use((req, _res, next) => {
     ;(req as unknown as { user: unknown }).user = { ...user }
     next()
@@ -426,7 +458,7 @@ describe('option B — route matrix (mock pool, pinned server)', () => {
   })
 
   for (const route of ROUTES) {
-    for (const actor of ['floor', 'schema'] as const) {
+    for (const actor of ['floor', 'schema', 'spadminDirect'] as const) {
       it(`${route.key} ${route.label}: ${actor} is refused on the project sheet and passes the gate on the unregistered twin`, async () => {
         const app = await buildRouteApp(actor)
         const twin = await route.send(app, TWIN_SHEET)
@@ -467,7 +499,7 @@ describe('option B — route matrix (mock pool, pinned server)', () => {
   // GET /view?seed=true on a LIVE sheet runs createSeededSheet (six fresh-id fields + five demo records). Its
   // only gate used to be canRead, so a reader whose field management is clamped could still add columns and
   // rows to the project sheet. A live re-seed now needs canManageFields && canCreateRecord.
-  for (const actor of ['floor', 'schema'] as const) {
+  for (const actor of ['floor', 'schema', 'spadmin', 'spadminDirect'] as const) {
     it(`SEED GET /view?seed=true: ${actor} reads the live project sheet but seeds nothing; on the unregistered twin the seed still runs`, async () => {
       const project = await on(await buildRouteApp(actor)).get('/api/multitable/view').query({ sheetId: PROJECT_SHEET, seed: 'true' })
       expect(project.status, JSON.stringify(project.body)).toBe(200)
@@ -485,5 +517,235 @@ describe('option B — route matrix (mock pool, pinned server)', () => {
     const project = await on(await buildRouteApp('admin')).get('/api/multitable/view').query({ sheetId: PROJECT_SHEET, seed: 'true' })
     expect(project.status, JSON.stringify(project.body)).toBe(200)
     expect(seedInserts().some((q) => q.startsWith('INSERT INTO meta_fields'))).toBe(true)
+  })
+})
+
+// ── (d) R-66 ③ (owner 2026-10-29, R78): 备料主管理员 manages VIEWS (not fields) on a registered project sheet ──
+
+describe('R-66 ③ — the pure rule, the code pin and the role condition', () => {
+  const CAPS = {
+    canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
+    canManageFields: true, canManageViews: true, canComment: true, canSendNotification: true,
+    canExport: true, canManageSheetAccess: true, canManageAutomation: true,
+  }
+
+  it('the code is byte-equal to the members port, the plugin ladder and the 备料主管理员 role template', () => {
+    expect(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE).toBe('stock-prep:admin')
+    expect(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE).toBe(STOCK_PREP_ADMIN_CODE)
+    const template = STOCK_PREP_ROLE_TEMPLATES.find((t) => t.id === 'stock-prep_admin')
+    expect(template?.name).toBe('备料主管理员')
+    expect(template?.permissions).toEqual([STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE])
+    expect(PLUGIN_WORKBENCH_ACCESS.STOCK_PREP_PERMISSION_CODES).toContain(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE)
+    expect(PLUGIN_WORKBENCH_ACCESS.satisfiesStockPrepAccess([STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE], 'stock-prep:admin')).toBe(true)
+  })
+
+  it('condition 2 carries the admission rule: the namespace is the helper\'s, the statement needs an ENABLED admission row', () => {
+    expect(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE).toBe('stock-prep')
+    expect(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_NAMESPACE).toBe(derivePermissionNamespace(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_CODE))
+    const sql = normalize(STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL)
+    expect(sql).toContain('FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id')
+    expect(sql).toContain('EXISTS (SELECT 1 FROM user_namespace_admissions una WHERE una.user_id = $1 AND una.namespace = $3 AND una.enabled = true)')
+    expect(sql).not.toContain('user_permissions')
+    expect(sql).not.toContain('users.permissions')
+  })
+
+  it('condition 1 is an exact literal: no wildcard, no non-array', () => {
+    expect(holdsStockPreparationProjectSheetViewManagement(['stock-prep:admin'])).toBe(true)
+    expect(holdsStockPreparationProjectSheetViewManagement(['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'])).toBe(false)
+    expect(holdsStockPreparationProjectSheetViewManagement(['stock-prep:*'])).toBe(false)
+    expect(holdsStockPreparationProjectSheetViewManagement(['*:*'])).toBe(false)
+    expect(holdsStockPreparationProjectSheetViewManagement([' stock-prep:admin'])).toBe(false)
+    expect(holdsStockPreparationProjectSheetViewManagement('stock-prep:admin')).toBe(false)
+    expect(holdsStockPreparationProjectSheetViewManagement(undefined)).toBe(false)
+  })
+
+  it('the pure clamp with keep=true: fields still false, views exactly as resolved — never raised', () => {
+    expect(restrictStockPreparationProjectSheetSchemaCapabilities(CAPS, true, false, true)).toEqual({ ...CAPS, canManageFields: false })
+    const noViews = { ...CAPS, canManageViews: false }
+    expect(restrictStockPreparationProjectSheetSchemaCapabilities(noViews, true, false, true)).toEqual({ ...noViews, canManageFields: false })
+    // Only the literal true keeps: a truthy non-boolean does not.
+    expect(restrictStockPreparationProjectSheetSchemaCapabilities(CAPS, true, false, 1 as unknown as boolean).canManageViews).toBe(false)
+    // Off a project sheet / for an admin: still the same object.
+    expect(restrictStockPreparationProjectSheetSchemaCapabilities(CAPS, false, false, true)).toBe(CAPS)
+  })
+
+  type Call = [string, unknown[]]
+  const helperQuery = (roleRows: unknown[] | Error) => {
+    const calls: Call[] = []
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      const q = normalize(sql)
+      calls.push([q, params])
+      if (q === STOCK_PREPARATION_PROJECT_SHEET_REGISTRY_SQL) return answerRegistry(params)
+      if (q === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL) {
+        if (roleRows instanceof Error) throw roleRows
+        return { rows: roleRows }
+      }
+      throw new Error(`unexpected statement: ${q}`)
+    })
+    return { query, calls }
+  }
+  const roleCalls = (calls: Call[]) => calls.filter(([q]) => q === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL)
+
+  it('a role-held code keeps the view bit (one role statement, bound to the actor and the literal); fields are false', async () => {
+    const { query, calls } = helperQuery([{ '?column?': 1 }])
+    const out = await applyStockPreparationProjectSheetSchemaClamp(query, PROJECT_SHEET, CAPS, false, { userId: ' u_sp ', permissions: ['stock-prep:admin'] })
+    expect(out).toEqual({ capabilities: { ...CAPS, canManageFields: false }, clamped: true })
+    expect(roleCalls(calls)).toEqual([[STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL, ['u_sp', 'stock-prep:admin', 'stock-prep']]])
+  })
+
+  it('the code without a role row (a direct grant) keeps nothing', async () => {
+    const { query, calls } = helperQuery([])
+    const out = await applyStockPreparationProjectSheetSchemaClamp(query, PROJECT_SHEET, CAPS, false, { userId: 'u_sp', permissions: ['stock-prep:admin'] })
+    expect(out).toEqual({ capabilities: { ...CAPS, canManageFields: false, canManageViews: false }, clamped: true })
+    expect(roleCalls(calls)).toHaveLength(1)
+  })
+
+  it('no role statement when there is nothing to keep, no code, a blank actor, an ordinary sheet or an admin', async () => {
+    const cases: Array<{ sheetId: string; caps: typeof CAPS; isAdmin: boolean; actor: { userId: string; permissions: string[] } }> = [
+      { sheetId: PROJECT_SHEET, caps: { ...CAPS, canManageViews: false }, isAdmin: false, actor: { userId: 'u_sp', permissions: ['stock-prep:admin'] } },
+      { sheetId: PROJECT_SHEET, caps: CAPS, isAdmin: false, actor: { userId: 'u_sp', permissions: ['stock-prep:read', 'stock-prep:operate'] } },
+      { sheetId: PROJECT_SHEET, caps: CAPS, isAdmin: false, actor: { userId: '  ', permissions: ['stock-prep:admin'] } },
+      { sheetId: TWIN_SHEET, caps: CAPS, isAdmin: false, actor: { userId: 'u_sp', permissions: ['stock-prep:admin'] } },
+      { sheetId: 'sheet_plain', caps: CAPS, isAdmin: false, actor: { userId: 'u_sp', permissions: ['stock-prep:admin'] } },
+      { sheetId: PROJECT_SHEET, caps: CAPS, isAdmin: true, actor: { userId: 'u_sp', permissions: ['stock-prep:admin'] } },
+    ]
+    for (const c of cases) {
+      const { query, calls } = helperQuery(new Error('must not be asked'))
+      const out = await applyStockPreparationProjectSheetSchemaClamp(query, c.sheetId, c.caps, c.isAdmin, c.actor)
+      expect(roleCalls(calls), JSON.stringify(c)).toEqual([])
+      if (c.sheetId === PROJECT_SHEET && !c.isAdmin) expect(out.capabilities.canManageViews, JSON.stringify(c)).toBe(false)
+      else expect(out.capabilities, JSON.stringify(c)).toBe(c.caps)
+    }
+  })
+
+  it('a role-lookup error propagates (fail the request, never keep the bit open)', async () => {
+    const { query } = helperQuery(new Error('role lookup unavailable'))
+    await expect(applyStockPreparationProjectSheetSchemaClamp(query, PROJECT_SHEET, CAPS, false, { userId: 'u_sp', permissions: ['stock-prep:admin'] }))
+      .rejects.toThrow('role lookup unavailable')
+  })
+})
+
+describe('R-66 ③ — three-resolver parity for 备料主管理员', () => {
+  beforeEach(() => {
+    vi.mocked(isAdmin).mockReset()
+    vi.mocked(listUserPermissions).mockReset()
+  })
+
+  const SPADMIN: Person = { label: '备料主管理员 (stock-prep:admin through a role) with the G1 grant', permissions: ['stock-prep:admin'], isAdminRole: false, sheetCodes: ['spreadsheet:write'], roleHeld: true }
+  const FLOOR = CLAMPED_PERSONS[0]!
+  const OTHERS: Person[] = [
+    { label: 'stock-prep:admin as a DIRECT grant (no role row) with the G1 grant', permissions: ['stock-prep:admin'], isAdminRole: false, sheetCodes: ['spreadsheet:write'], roleHeld: false },
+    { label: 'a stock-prep:* wildcard holder with a role row and the G1 grant', permissions: ['stock-prep:*'], isAdminRole: false, sheetCodes: ['spreadsheet:write'], roleHeld: true },
+    { label: 'the puller codes with a role row and the G1 grant', permissions: ['stock-prep:pull', 'stock-prep:operate', 'stock-prep:read'], isAdminRole: false, sheetCodes: ['spreadsheet:write'], roleHeld: true },
+  ]
+
+  for (const resolver of RESOLVERS) {
+    it(`${resolver.name}: keeps view management, loses field management, everything else as on the twin`, async () => {
+      const plain = await resolver.run(TWIN_SHEET, SPADMIN)
+      expect(plain.marker).toBe(false)
+      expect(plain.capabilities).toMatchObject({ canManageFields: true, canManageViews: true })
+      const project = await resolver.run(PROJECT_SHEET, SPADMIN)
+      expect(project.capabilities.canManageViews).toBe(true)
+      expect(project.capabilities.canManageFields).toBe(false)
+      for (const [key, value] of Object.entries(plain.capabilities)) {
+        if (key === 'canManageFields') continue
+        expect(project.capabilities[key], key).toBe(value)
+      }
+      expect(Object.keys(project.capabilities).sort()).toEqual(Object.keys(plain.capabilities).sort())
+      expect(project.marker).toBe(true)
+    })
+
+    for (const person of OTHERS) {
+      it(`${resolver.name}: ${person.label} is clamped like the floor`, async () => {
+        const plain = await resolver.run(TWIN_SHEET, person)
+        const project = await resolver.run(PROJECT_SHEET, person)
+        expectOnlySchemaBitsRemoved(project.capabilities, plain.capabilities)
+        expect(project.marker).toBe(true)
+      })
+    }
+
+    it(`${resolver.name}: without a sheet grant the code raises nothing (views stay false) and asks no role statement`, async () => {
+      const noGrant: Person = { ...SPADMIN, sheetCodes: [] }
+      const project = await resolver.run(PROJECT_SHEET, noGrant, { roleFails: true })
+      expect(project.capabilities.canManageViews).toBe(false)
+      expect(project.capabilities.canManageFields).toBe(false)
+      expect(project.capabilities.canRead).toBe(false)
+    })
+
+    it(`${resolver.name}: a role-lookup error propagates`, async () => {
+      await expect(resolver.run(PROJECT_SHEET, SPADMIN, { roleFails: true })).rejects.toThrow('role lookup unavailable')
+    })
+
+    it(`${resolver.name}: ordinary sheets are byte-identical to the floor's and cost no role statement`, async () => {
+      for (const sheetId of [TWIN_SHEET, MAIN_SHEET, OTHER_PLUGIN_SHEET, 'sheet_plain']) {
+        const asFloor = await resolver.run(sheetId, FLOOR)
+        const asSpadmin = await resolver.run(sheetId, SPADMIN, { roleFails: true })
+        expect(asSpadmin, sheetId).toEqual(asFloor)
+      }
+    })
+  }
+
+  it('the role statement is asked once on the project sheet, with the actor id, in every resolver', async () => {
+    const lanes: Array<[string, (q: QueryFn) => Promise<unknown>]> = [
+      ['rest', (q) => resolveSheetCapabilitiesForAccess(q, PROJECT_SHEET, accessOf(SPADMIN.permissions, false))],
+      ['collab', (q) => resolveSheetCapabilitiesForUser(q as never, PROJECT_SHEET, 'u_b_clamp')],
+      ['onQuery', (q) => resolveSheetCapabilitiesForUserOnQuery(q, PROJECT_SHEET, 'u_b_clamp', undefined, { isAdminRole: false, permissions: SPADMIN.permissions })],
+    ]
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(SPADMIN.permissions)
+    for (const [lane, run] of lanes) {
+      const q = resolverQuery(PROJECT_SHEET, { sheetCodes: SPADMIN.sheetCodes, roleHeld: true })
+      await run(q)
+      const roleAsks = q.mock.calls.filter(([sql]) => normalize(sql as string) === STOCK_PREPARATION_PROJECT_SHEET_VIEW_MANAGER_ROLE_SQL)
+      expect(roleAsks.map(([, params]) => params), lane).toEqual([['u_b_clamp', 'stock-prep:admin', 'stock-prep']])
+    }
+  })
+})
+
+describe('R-66 ③ — route matrix for 备料主管理员 (mock pool, pinned server)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  const VIEW_ROUTES = new Set(['V1', 'V2', 'V3', 'V4'])
+  for (const route of ROUTES) {
+    if (VIEW_ROUTES.has(route.key)) {
+      it(`${route.key} ${route.label}: 备料主管理员 passes the gate on the project sheet exactly as on the twin`, async () => {
+        const app = await buildRouteApp('spadmin')
+        const twin = await route.send(app, TWIN_SHEET)
+        const project = await route.send(app, PROJECT_SHEET)
+        expect(twin.status, `twin ${JSON.stringify(twin.body)}`).toBe(route.ok)
+        expect(project.status, `project ${JSON.stringify(project.body)}`).toBe(route.ok)
+      })
+    } else {
+      it(`${route.key} ${route.label}: 备料主管理员 is refused on the project sheet (fields / sheet name stay admin-only) and passes on the twin`, async () => {
+        const app = await buildRouteApp('spadmin')
+        const twin = await route.send(app, TWIN_SHEET)
+        expect(twin.status, `twin ${JSON.stringify(twin.body)}`).toBe(route.ok)
+        const project = await route.send(app, PROJECT_SHEET)
+        expect(project.status, JSON.stringify(project.body)).toBe(403)
+        expect(project.body?.error?.code).toBe(FORBIDDEN_CODE)
+      })
+    }
+  }
+
+  it('GET /context: 备料主管理员 sees canManageViews=true, canManageFields=false on the project sheet; the rest as on the twin', async () => {
+    const app = await buildRouteApp('spadmin')
+    const twin = await on(app).get(`/api/multitable/context?sheetId=${TWIN_SHEET}`)
+    const project = await on(app).get(`/api/multitable/context?sheetId=${PROJECT_SHEET}`)
+    expect(twin.status, JSON.stringify(twin.body)).toBe(200)
+    expect(project.status, JSON.stringify(project.body)).toBe(200)
+    const plain = twin.body.data.capabilities as Record<string, unknown>
+    const kept = project.body.data.capabilities as Record<string, unknown>
+    expect(plain).toMatchObject({ canManageFields: true, canManageViews: true })
+    expect(kept).toMatchObject({ canRead: true, canCreateRecord: true, canManageFields: false, canManageViews: true })
+    for (const [key, value] of Object.entries(plain)) {
+      if (key === 'canManageFields') continue
+      expect(kept[key], key).toEqual(value)
+    }
   })
 })
