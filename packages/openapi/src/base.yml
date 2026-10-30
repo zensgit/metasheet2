@@ -931,6 +931,10 @@ components:
             visibilityState: { type: string, enum: [active, retired] }
             visibilityReason: { type: string, enum: [active, review_placeholder, import_rollback, operator_retirement] }
             posture: { type: string, enum: [shadow, authoritative, undeterminable] }
+            calculationMode:
+              type: string
+              enum: [envelope_legacy]
+              description: Present only for an active visible legacy_untracked daily projection with no current calculation pointer. Does not classify immutable history.
     AttendanceW4ShadowBacklogItem:
       type: object
       additionalProperties: false

@@ -1964,6 +1964,13 @@
                   "authoritative",
                   "undeterminable"
                 ]
+              },
+              "calculationMode": {
+                "type": "string",
+                "enum": [
+                  "envelope_legacy"
+                ],
+                "description": "Present only for an active visible legacy_untracked daily projection with no current calculation pointer. Does not classify immutable history."
               }
             }
           }

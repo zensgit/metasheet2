@@ -435,6 +435,7 @@ export interface AttendanceCalculationDetailResponse {
     readonly visibilityState: string
     readonly visibilityReason: string
     readonly posture: CalculationMode | 'undeterminable'
+    readonly calculationMode?: 'envelope_legacy'
   }
 }
 
@@ -448,6 +449,10 @@ function parseRecord(row: RecordRow): AttendanceCalculationDetailResponse['curre
     visibilityState: row.visibility_state,
     visibilityReason: row.visibility_reason,
     posture: row.current_mode === null ? 'undeterminable' : row.current_mode as CalculationMode,
+    ...(row.projection_owner === 'legacy_untracked' && row.current_calculation_id === null
+      && row.visibility_state === 'active' && row.visibility_reason === 'active'
+      ? { calculationMode: 'envelope_legacy' as const }
+      : {}),
   }
 }
 

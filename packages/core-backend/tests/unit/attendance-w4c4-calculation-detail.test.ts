@@ -432,3 +432,101 @@ describe('W4C-4 DecisionTrace immutable authoritative evidence', () => {
     expect(trace.conclusion.status).toBeNull()
   })
 })
+
+
+describe('CALC15_ENVELOPE named legacy read response exception', () => {
+  const legacy = {
+    ...detailRecord,
+    current_calculation_id: null as string | null,
+    current_mode: null as string | null,
+    projection_owner: 'legacy_untracked',
+  }
+
+  function makeQuery(record: Record<string, unknown>, calls: string[]): AttendanceW4CalculationQuery {
+    return (async <T extends QueryResultRow = QueryResultRow>(sql: string) => {
+      calls.push(sql)
+      if (/FROM attendance_record_segments segment/.test(sql)) return result([detailSegment]) as unknown as QueryResult<T>
+      if (/FROM attendance_record_calculations calculation/.test(sql)) return result([detailCalculation]) as unknown as QueryResult<T>
+      return result([record]) as unknown as QueryResult<T>
+    }) as AttendanceW4CalculationQuery
+  }
+
+  it('adds only the literal legacy label to the visible pointer-null full response', async () => {
+    const calls: string[] = []
+    const response = await readAttendanceCalculationDetail(
+      { orgId: ORG_ID, recordId: RECORD_ID }, makeQuery(legacy, calls),
+    )
+    expect(response).toEqual({
+      recordId: RECORD_ID,
+      calculation: null,
+      segments: [],
+      current: {
+        projectionOwner: 'legacy_untracked',
+        visibilityState: 'active',
+        visibilityReason: 'active',
+        posture: 'undeterminable',
+        calculationMode: 'envelope_legacy',
+      },
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatch(/WHERE r\.id = \$1::uuid AND r\.org_id = \$2/)
+    expect(calls.every(sql => /^\s*SELECT\b/i.test(sql))).toBe(true)
+  })
+
+  it.each([
+    ['retired placeholder', { visibility_state: 'retired', visibility_reason: 'review_placeholder' }],
+    ['retired active reason', { visibility_state: 'retired' }],
+    ['active review reason', { visibility_reason: 'review_placeholder' }],
+    ['tracked owner', { projection_owner: 'w4' }],
+    ['group owner', { projection_owner: 'w4_group' }],
+    ['legacy pointer', { current_calculation_id: CALCULATION_ID, current_mode: 'authoritative' }],
+  ])('keeps the exact old current shape for %s', async (_label, mutation) => {
+    const record = { ...legacy, ...mutation }
+    const calls: string[] = []
+    const response = await readAttendanceCalculationDetail(
+      { orgId: ORG_ID, recordId: RECORD_ID }, makeQuery(record, calls),
+    )
+    expect(response).toEqual({
+      recordId: RECORD_ID,
+      calculation: record.current_calculation_id === null ? null : {
+        id: CALCULATION_ID,
+        version: 2,
+        kind: 'calculation',
+        mode: 'authoritative',
+        entrypoint: 'live',
+        engineVersion: 'attendance-segment-v1',
+        snapshotSchemaVersion: 1,
+        outcome: 'completed',
+        outcomeReasonCode: 'calculated',
+        projectionEffect: 'set_active',
+        expectedSegmentCount: 1,
+        projectedStatus: 'partial',
+        projectedWorkMinutes: 420,
+        projectedLateMinutes: 35,
+        projectedEarlyLeaveMinutes: 0,
+        shadowDiff: null,
+        createdAt: '2026-08-03T10:00:00.000Z',
+      },
+      segments: record.current_calculation_id === null ? [] : [{
+        index: 0,
+        expectedStartAt: '2026-08-03T01:00:00.000Z',
+        expectedEndAt: '2026-08-03T10:00:00.000Z',
+        actualInAt: '2026-08-03T01:35:00.000Z',
+        actualOutAt: null,
+        workMinutes: 420,
+        lateMinutes: 35,
+        earlyLeaveMinutes: 0,
+        status: 'missing_check_out',
+        statusReasons: ['missing_check_out'],
+      }],
+      current: {
+        projectionOwner: record.projection_owner,
+        visibilityState: record.visibility_state,
+        visibilityReason: record.visibility_reason,
+        posture: record.current_mode ?? 'undeterminable',
+      },
+    })
+    expect(calls).toHaveLength(record.current_calculation_id === null ? 1 : 3)
+    expect(calls.every(sql => /^\s*SELECT\b/i.test(sql))).toBe(true)
+  })
+})
