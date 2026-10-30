@@ -243,11 +243,38 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
       channel: 'live',
       calendarWorkDate: '2026-07-17',
     })
-    // Afternoon 13-17 and Overlap 12-16 both contain 13:30
+    // Morning 06-14, afternoon 13-17 and overlap 12-16 all contain 13:30.
     expect(result.kind).toBe('ambiguous')
     if (result.kind === 'ambiguous') {
       expect((result.candidates as unknown[]).length).toBeGreaterThanOrEqual(2)
     }
+    const expectedAmbiguity = {
+      kind: 'ambiguous', reasonCode: helpers.WORK_DATE_REASON.OVERLAPPING_SHIFT_WINDOWS,
+      candidates: [
+        { workDate: '2026-07-17', shiftId: morningShiftId, segmentIndex: null,
+          absoluteWindow: { startAt: '2026-07-17T06:00:00.000Z', endAt: '2026-07-17T14:00:00.000Z' } },
+        { workDate: '2026-07-17', shiftId: afternoonShiftId, segmentIndex: null,
+          absoluteWindow: { startAt: '2026-07-17T13:00:00.000Z', endAt: '2026-07-17T17:00:00.000Z' } },
+        { workDate: '2026-07-17', shiftId: overlapShiftId, segmentIndex: null,
+          absoluteWindow: { startAt: '2026-07-17T12:00:00.000Z', endAt: '2026-07-17T16:00:00.000Z' } },
+      ].sort((a, b) => a.shiftId.localeCompare(b.shiftId)),
+    }
+    expect(result).toEqual(expectedAmbiguity)
+    const reversed = helpers.createPluginAttendanceWorkDateResolver({
+      async query(sql: string, params?: unknown[]) {
+        const rows = await db.query(sql, params)
+        return sql.includes('FROM attendance_shift_assignments a') ? [...rows].reverse() : rows
+      },
+    }, { activeCurrent: { listOpenForWorkDateResolver: listActiveCurrentOpenRecordsForWorkDateResolverV1 } })
+    const reversedResult = await reversed.resolver.resolve({
+      orgId: orgA, userId, occurredAt: new Date('2026-07-17T13:30:00.000Z'),
+      timezone: 'UTC', channel: 'live', calendarWorkDate: '2026-07-17',
+    })
+    expect(reversedResult).toEqual(expectedAmbiguity)
+    console.log('PARENT_WINDOW_OUTCOME_RECEIPT ' + JSON.stringify({
+      phase: 'CALC06_AMBIGUOUS', kind: result.kind,
+      reasonCode: result.reasonCode, candidates: 3, reversedNativeRowsEqual: true,
+    }))
 
     await pool.query(`DELETE FROM attendance_shift_assignments WHERE id = $1`, [overlapAsgId])
     await pool.query(`DELETE FROM attendance_shifts WHERE id = $1`, [overlapShiftId])
@@ -541,5 +568,13 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
       attributionTailMinutes: 120,
     })
     expect(beyond.kind).toBe('unresolved')
+    expect(beyond).toEqual({
+      kind: 'unresolved', reasonCode: helpers.WORK_DATE_REASON.NO_MATCHING_SHIFT, evidenceSnapshot: null,
+    })
+    console.log('PARENT_WINDOW_OUTCOME_RECEIPT ' + JSON.stringify({
+      phase: 'CALC06_NO_WINDOW', kind: beyond.kind, reasonCode: beyond.reasonCode,
+      noGuessedIdentity: !('shiftId' in beyond) && !('workDate' in beyond) && !('segmentIndex' in beyond),
+      evidenceSnapshotNull: beyond.evidenceSnapshot === null,
+    }))
   })
 })
