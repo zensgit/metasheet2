@@ -42,3 +42,9 @@ Source review, selector correction and rounding correction each have independent
 Owned artifact receipts: native-validation-v3-state.json; two-new-requester-multisegment-green-v3.vitest.json; requester-snapshot-reference-bit-fault-v3.vitest.json; native-v3-independent-execution-review.json; focused-quality-v3-state.json; focused-quality-harness-continuation-disposition.json; runtime-whitespace-equivalence.json; main-precommit-source-and-validation-audit.json. Current source and local-evidence SHA bindings are recorded in precommit-source-manifest.json and main-precommit-source-and-validation-audit.json. Publication adds the exact commit manifest and PR readback.
 
 All PRs remain Draft/HOLD. No merge, deployment, R71 change, release/tag, target installation/migration, provider write or live acceptance follows. R77 organization delivery and manual/owner/live residuals remain separate.
+
+## CI signature anchor continuation
+
+The failed current-head backend job 123790290146 reached the approval real-DB batch and reported exactly one failing source-text assertion: its shift-swap writer anchor still named the former two-parameter signature. The repair above introduced the third trusted operation parameter. This continuation updates only that exact anchor to the current three-parameter signature; the five-writer census, 4000-character window, 120-character FK-pair regex and all assertions remain byte-identical. No runtime, SQL, migration, workflow, dependency or flag changes follow.
+
+The complete failed raw log is retained with ContentLength/stream/remote SHA checks. Later attendance integration was skipped after that failure, so this parent head does not have current whole68 requester CI evidence. Validation of this continuation selects only the one failed source-text guard; unchanged passed cases and native suites are not rerun. Source-text execution is not real-database or business-behavior execution.
