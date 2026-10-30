@@ -1,0 +1,143 @@
+{
+  "at": "2026-10-25T23:50:38.944920+00:00",
+  "status": "local-qualified-Draft-HOLD-current-head-CI-pending",
+  "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "runtimeDiff": "Current editor draft-preview call omits saved ruleSetId; all other AttendanceView bytes equal base after replacing this one block. Backend/API/parser/writers unchanged.",
+  "originalActualRoute": "Config-only and saved-ID-only controls; both-fields request reloads stored config. Real registered route/local HTTP, injected synthetic principal, SQL mocked. Not PG/JWT/auth acceptance.",
+  "originalMounted": {
+    "matchingRed": 2,
+    "positiveControlPassed": 1
+  },
+  "candidateMounted": {
+    "uniquePassed": 3,
+    "phases": "two initial candidate cases; affected events case after correcting only fixture normalization",
+    "filteredExcludedOnAffectedRun": 2,
+    "freshAllThreeClaim": false
+  },
+  "restoreSavedIDMutation": {
+    "matchingRed": 2,
+    "positiveControlPassed": 1,
+    "exactCandidateRestored": true
+  },
+  "registrationGuardPassed": 36,
+  "adminNeighborPassed": 146,
+  "qualityBuild": {
+    "newSpecESLintExit": 0,
+    "validateAllExit": 0,
+    "webBuildExit": 0,
+    "tokenManifestAndBashSyntaxExit": 0,
+    "entireAVBaseDiagnostics": 17,
+    "entireAVCandidateDiagnostics": 17,
+    "introducedAVDiagnostics": 0,
+    "fullAVLintClean": false
+  },
+  "nativeBrowser": [
+    {
+      "phase": "Enter-retained-before-later-harness-failure",
+      "sourceHead": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+      "sourcePinsMatched": true,
+      "previewPOSTs": 1,
+      "savedIDAbsent": true,
+      "visibleResolvedEqualsDraft": true,
+      "writeAttempts": 0,
+      "externalForwarded": 0,
+      "pageErrors": 0,
+      "proofSHA256": "0a366a1de54e8e057d69c93e838b82f485148e1e24efb1fa6a1958639b5ee077",
+      "ownedServerStopped": true,
+      "ownedPortClosed": true
+    },
+    {
+      "phase": "remaining-Space-with-sample-events",
+      "sourceHead": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+      "sourcePinsMatched": true,
+      "previewPOSTs": 1,
+      "savedIDAbsent": true,
+      "visibleResolvedEqualsDraft": true,
+      "writeAttempts": 0,
+      "externalForwarded": 0,
+      "pageErrors": 0,
+      "proofSHA256": "907a7b2312ee67dca4c071dcbce10f6db0a45355475aa8f3b265b96e120345f7",
+      "ownedServerStopped": true,
+      "ownedPortClosed": true
+    }
+  ],
+  "screenshots": [
+    {
+      "file": "artifacts/attendance-rule-draft-preview-20261026/native-enter.png",
+      "sha256": "f68b79fdb09a49eb6f0424403c17c226652ec88dc2dcca2200e36a0e049d73b8"
+    },
+    {
+      "file": "artifacts/attendance-rule-draft-preview-20261026/native-space-events.png",
+      "sha256": "57f1aceb08e1b021fc972e4a430bc4b88805d9c072a322de1b8a20a35488905e"
+    }
+  ],
+  "independentReview": "Sol/high source-only: no confirmed introduced P1/P2; main independently verified actual evidence. Edit/save exact-ID preservation established by unchanged source, not a fresh writer test.",
+  "retainedFailures": "Original red reproduction JSON message postcheck omitted stdout diff. Initial candidate event oracle expected raw UTC rather than existing local normalization. First native phase passed Enter then failed JSON-string equality after existing pretty-format/blank-user normalization. These are preserved; affected-only corrections did not change parser, budgets or assertions about current draft/no writers.",
+  "boundaries": {
+    "Draft": true,
+    "merge": false,
+    "deploy": false,
+    "R71Change": false,
+    "StreamLifecycle": "OFF",
+    "realUAT": false,
+    "business50004": "excluded",
+    "historical08PUT": "INCONCLUSIVE",
+    "humanAT": false,
+    "wholeParentAccepted": false,
+    "freshPGOrProviderProof": false
+  },
+  "logReceipts": [
+    {
+      "name": "candidate-events-affected",
+      "exit": 0,
+      "counts": {
+        "skipped": 2,
+        "passed": 1
+      },
+      "sha256": "0c9ca4138ce1e22e6c42168f4e5a72428f7d0171633044de1378fd28cb15d387"
+    },
+    {
+      "name": "saved-id-mutation",
+      "exit": 1,
+      "counts": {
+        "passed": 1,
+        "failed": 2
+      },
+      "sha256": "cef24d4748219bcae14baa4926a66da9f0eed16acef0abaf608bcd87615837d2"
+    },
+    {
+      "name": "registration-guards",
+      "exit": 0,
+      "counts": {
+        "passed": 36
+      },
+      "sha256": "ecccb1893f9b053a6f003b85871fc452891a484b522a655b52d568f6016c7880"
+    },
+    {
+      "name": "admin-neighbor",
+      "exit": 0,
+      "counts": {
+        "passed": 146
+      },
+      "sha256": "305bace8eeeaa26d4c78e24c06976fc5c36e3993b075b8c2ff9b9335193be84b"
+    },
+    {
+      "name": "new-spec-lint",
+      "exit": 0,
+      "counts": null,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "validate-all",
+      "exit": 0,
+      "counts": null,
+      "sha256": "61d7674a4de24370e9813fb171f71ae0e31276e044af777377c1e9d07bc159f9"
+    },
+    {
+      "name": "web-build",
+      "exit": 0,
+      "counts": null,
+      "sha256": "01cda39971ed9af4c32f8eee302f409fff4c2081015877652348f47313209d05"
+    }
+  ]
+}
