@@ -194,9 +194,8 @@ export async function seedOrgMembers(
  * cleanup deletes task rows only (design §4.6, [N2]: an assignee or follower someone else writes
  * must be an active member of the org). `seed` runs seedOrgMembers for ids this record has not
  * seen; an id it already seeded (the same user in a second org) gets only the `user_orgs` row.
- * `drop` deletes exactly the recorded ids' task access rows (`user_namespace_admissions`,
- * `user_roles`), `user_orgs` and `users` rows and forgets them, so a file with several `afterAll`
- * hooks can call it in each.
+ * `drop` deletes exactly the recorded ids' task access and role rows, `user_orgs` and `users` rows
+ * and forgets them, so a file with several `afterAll` hooks can call it in each.
  */
 export function orgMemberSeeds(): {
   seed: (orgId: string, userIds: string[]) => Promise<void>
