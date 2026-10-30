@@ -35,6 +35,7 @@ pull_request / push / merge_group 触发、并发取消范围、另外四个 job
 - 宜搭三项修改过的工作流守卫及完整文件行为回归：52 项通过。
 - 全部 24 个读取 Plugin CI 工作流的后端单元文件：965 项通过。
 - 新增清单与汇总门回归：5 项通过，包括逐组失败、取消、跳过、缺失、未知结果以及实际 CLI 退出码。
+- 宜搭 owner 调用方与启动器合约：收集 80 项，本机 41 通过 / 39 个原有 Linux 条件跳过；CI 保留原 80 项完整验收。补查修复该守卫的旧 test-job 定位及其 runner/checkout 负例作用域。
 - GitHub Actions 结构与表达式 actionlint 检查通过。完整 shellcheck 仍提示原脚本中的既有引号/未用变量问题；未为提速修改原脚本正文。
 - sealed-export package provenance 验证通过，无 pin 更新。
 

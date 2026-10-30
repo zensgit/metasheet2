@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { randomUUID, createHash } from 'node:crypto'
@@ -133,12 +134,13 @@ test('archive and binary digest removal each defeats its isolated negative oracl
 })
 
 function extractTestJob(source) {
-  const lines = source.split('\n')
-  const jobs = lines.flatMap((line, index) => line === '  test:' ? [index] : [])
-  assert.equal(jobs.length, 1, 'required integration job must occur exactly once')
-  let end = jobs[0] + 1
-  while (end < lines.length && !/^  \S/u.test(lines[end])) end++
-  return lines.slice(jobs[0], end)
+  return requiredSuiteJobBody(source, 'runtime-db').split('\n')
+}
+
+function mutateOwnerJob(from, to) {
+  const body = requiredSuiteJobBody(workflow, 'runtime-db')
+  assert.ok(body.includes(from), 'mutation must target the owner proof job')
+  return workflow.replace(body, body.replace(from, to))
 }
 
 function assertTestJobRunner(source) {
@@ -175,11 +177,11 @@ test('required test job pins one literal ubuntu-22.04 runner for the compatibili
   assertTestJobRunner(workflow)
   const pin = '    runs-on: ubuntu-22.04\n'
   for (const mutation of [
-    workflow.replace(pin, '    runs-on: ubuntu-latest\n'),
-    workflow.replace(pin, '    runs-on: ubuntu-24.04\n'),
-    workflow.replace(pin, '    runs-on: ${{ matrix.runner }}\n'),
-    workflow.replace(pin, pin + pin),
-    workflow.replace(pin, ''),
+    mutateOwnerJob(pin, '    runs-on: ubuntu-latest\n'),
+    mutateOwnerJob(pin, '    runs-on: ubuntu-24.04\n'),
+    mutateOwnerJob(pin, '    runs-on: ${{ matrix.runner }}\n'),
+    mutateOwnerJob(pin, pin + pin),
+    mutateOwnerJob(pin, ''),
   ]) {
     assert.notEqual(mutation, workflow, 'mutation must change the actual workflow runner pin')
     assert.throws(() => assertTestJobRunner(mutation))
@@ -189,10 +191,10 @@ test('required test job pins one literal ubuntu-22.04 runner for the compatibili
 test('required job excludes only the exact tracked runtime env in its fresh checkout', () => {
   assert.deepEqual(checkoutPatterns, ['/*', '!/packages/core-backend/.env'])
   for (const mutation of [
-    workflow.replace('sparse-checkout-cone-mode: false', 'sparse-checkout-cone-mode: true'),
-    workflow.replace('!/packages/core-backend/.env', '!/packages/core-backend/.env*'),
-    workflow.replace('!/packages/core-backend/.env', '!/packages/core-backend/tests'),
-    workflow.replace('            /*\n', '            /scripts/\n'),
+    mutateOwnerJob('sparse-checkout-cone-mode: false', 'sparse-checkout-cone-mode: true'),
+    mutateOwnerJob('!/packages/core-backend/.env', '!/packages/core-backend/.env*'),
+    mutateOwnerJob('!/packages/core-backend/.env', '!/packages/core-backend/tests'),
+    mutateOwnerJob('            /*\n', '            /scripts/\n'),
   ]) {
     assert.notEqual(mutation, workflow)
     assert.throws(() => extractCheckoutPatterns(mutation))
