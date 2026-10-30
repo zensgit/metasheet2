@@ -1,3 +1,4 @@
+import { DirectoryConnectionError } from '../../src/directory/connection-disable'
 /**
  * #6163 S6 — routes/admin-directory.ts (mounted at /api/admin/directory): no 5xx body carries caught error
  * text, and the status of a directory-sync failure comes from the error's TYPE, not from a regex over its text.
@@ -92,6 +93,11 @@ const auditMocks = vi.hoisted(() => ({
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
   transaction: vi.fn(),
+}))
+
+const connectionMocks = vi.hoisted(() => ({ previewDirectoryConnectionDisable: vi.fn(), disableDirectoryConnection: vi.fn() }))
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(), ...connectionMocks,
 }))
 
 vi.mock('../../src/directory/directory-sync', async (importOriginal) => {
@@ -228,6 +234,18 @@ const CATCH_SITES: Site[] = [
       fallback: 'Failed to save DingTalk work notification Agent ID',
       typed: [configTyped('integrationId is required'), configTyped('DingTalk appSecret is required'), encryptionMaterialTyped],
     },
+  },
+  {
+    owner: 'GET /integrations/:integrationId/disable-preview',
+    calls: [{ method: 'get', path: '/integrations/:integrationId/disable-preview', params: INTEGRATION, query: { scope: 'integration' } }],
+    fail: rejectWith(connectionMocks.previewDirectoryConnectionDisable),
+    outcome: helper('DIRECTORY_DISABLE_PREVIEW_FAILED', 'Failed to preview connection disable'),
+  },
+  {
+    owner: 'POST /integrations/:integrationId/disable',
+    calls: [{ method: 'post', path: '/integrations/:integrationId/disable', params: INTEGRATION, body: { scope: 'integration' } }],
+    fail: rejectWith(connectionMocks.disableDirectoryConnection),
+    outcome: helper('DIRECTORY_DISABLE_FAILED', 'Failed to disable connection'),
   },
   {
     owner: 'GET /integrations',
@@ -641,7 +659,7 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
 const loggedTexts = (): string => collectStrings(warnSpy.mock.calls).join('\n')
 
 beforeEach(() => {
-  for (const group of [syncMocks, alertDeliveryMocks, workNotificationMocks, approvalCardMocks, evidenceMocks, schedulerMocks, auditMocks]) {
+  for (const group of [connectionMocks, syncMocks, alertDeliveryMocks, workNotificationMocks, approvalCardMocks, evidenceMocks, schedulerMocks, auditMocks]) {
     for (const fn of Object.values(group)) fn.mockReset()
   }
   evidenceMocks.readDeprovisionRuntimeFlags.mockReturnValue({})
@@ -691,7 +709,7 @@ describe('routes/admin-directory.ts — every catch clause is enumerated (#6163 
     expect(clauses.filter((c) => !c.binding).map((c) => c.owner)).toEqual(BARE_CATCH_SITES.map((s) => s.owner))
     // The plain-text count, so a clause the AST walk could misread still has to be listed.
     expect(ROUTE_SOURCE.split('catch (').length - 1).toBe(CATCH_SITES.length)
-    expect(CATCH_SITES.length).toBe(35)
+    expect(CATCH_SITES.length).toBe(37)
   })
 
   it('every sendDirectoryFailure call in the route is a helper site of the table, with its code and literal fallback', () => {
@@ -1050,5 +1068,32 @@ describe('non-vacuity', () => {
   it('the marker probes ran, one per responding call plus the 502 and the nothing-committed batches', () => {
     expect(markerProbesRun).toBeGreaterThan(0)
     expect(markerProbesRun).toBe(EXPECTED_MARKER_PROBES)
+  })
+})
+
+
+describe('connection disable API results', () => {
+  it('returns exact counts on a read-only preview', async () => {
+    connectionMocks.previewDirectoryConnectionDisable.mockResolvedValue({ integrationCount: 2, disabledCount: 0 })
+    const res = await invoke({ method: 'get', path: '/integrations/:integrationId/disable-preview', params: INTEGRATION, query: { scope: 'enterprise' } })
+    expect(res.body).toEqual({ ok: true, data: { integrationCount: 2, disabledCount: 0 } })
+    expect(connectionMocks.disableDirectoryConnection).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+  it('refreshes only committed target schedules and emits a counts-only audit', async () => {
+    connectionMocks.disableDirectoryConnection.mockResolvedValue({ integrationIds: [INTEGRATION.integrationId], disabled: true })
+    const res = await invoke({ method: 'post', path: '/integrations/:integrationId/disable', params: INTEGRATION, body: { scope: 'enterprise' } })
+    expect(res.body).toEqual({ ok: true, data: { integrationIds: [INTEGRATION.integrationId], disabled: true } })
+    expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith(INTEGRATION.integrationId)
+    expect(auditMocks.auditLog.mock.calls[0][0].meta).toEqual({ scope: 'enterprise', integrationCount: 1 })
+  })
+  it.each([400, 404, 409])('maps a connection refusal to %s with a fixed code', async (status) => {
+    const code = status === 400 ? 'DIRECTORY_DISABLE_SCOPE_INVALID' : status === 404 ? 'DIRECTORY_CONNECTION_NOT_FOUND' : 'DIRECTORY_CONNECTION_BUSY'
+    connectionMocks.disableDirectoryConnection.mockRejectedValue(new DirectoryConnectionError(code, status))
+    const res = await invoke({ method: 'post', path: '/integrations/:integrationId/disable', params: INTEGRATION, body: { scope: 'integration' } })
+    expect(res.statusCode).toBe(status)
+    expect(res.body.error.code).toBe(code)
+    expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 })

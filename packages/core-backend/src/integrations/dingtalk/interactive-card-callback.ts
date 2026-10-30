@@ -197,6 +197,7 @@ type CallbackCompletionEvidence = {
 }
 
 type ResolvedCallbackOutcome = {
+  integrationId?: string
   result: DingTalkApprovalCardCallbackResult
   operatorDisplayName: string | null
   completionEvidence: CallbackCompletionEvidence | null
@@ -236,7 +237,8 @@ function readCallbackCorpAnchor(payload: unknown): CallbackCorpAnchor {
  */
 async function resolveIntegrationCorpId(query: QueryFn, integrationId: string): Promise<string> {
   const result = await query(
-    `SELECT corp_id FROM directory_integrations WHERE id = $1::uuid AND provider = 'dingtalk' LIMIT 1`,
+    `SELECT corp_id FROM directory_integrations WHERE id = $1::uuid AND provider = 'dingtalk'
+        AND (config->'connectionDisabled') IS DISTINCT FROM 'true'::jsonb LIMIT 1`,
     [integrationId],
   )
   const row = (result.rows[0] ?? null) as { corp_id?: unknown } | null
@@ -451,8 +453,8 @@ export async function executeDingTalkApprovalCardCallback(
   deps: DingTalkApprovalCardCallbackDeps,
   payload: unknown,
 ): Promise<DingTalkApprovalCardCallbackResult> {
-  const { result, operatorDisplayName, completionEvidence } = await resolveDingTalkApprovalCardCallbackOutcome(deps, payload)
-  await applyDingTalkApprovalCardTerminalUpdate(result, { operatorDisplayName }, deps.cardUpdateSender)
+  const { result, operatorDisplayName, completionEvidence, integrationId } = await resolveDingTalkApprovalCardCallbackOutcome(deps, payload)
+  await applyDingTalkApprovalCardTerminalUpdate(result, { operatorDisplayName, integrationId }, deps.cardUpdateSender)
   if (completionEvidence) {
     // One atomic, values-free record binds the corp-anchor result and terminal callback outcome to
     // the same completed invocation. UAT must consume this record instead of joining independent
@@ -560,6 +562,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
       result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: corpRefusal },
       operatorDisplayName: null,
       completionEvidence,
+      integrationId: delivery.integration_id,
     }
   }
 
@@ -569,6 +572,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
       result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: operator.reason },
       operatorDisplayName: null,
       completionEvidence,
+      integrationId: delivery.integration_id,
     }
   }
 
@@ -581,6 +585,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
       result: { outcome: 'link_secret_unavailable', deliveryId: delivery.id },
       operatorDisplayName: operator.userName,
       completionEvidence,
+      integrationId: delivery.integration_id,
     }
   }
   const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
@@ -610,12 +615,14 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
         result: { outcome: 'executed', deliveryId: delivery.id, summary: outcome.summary },
         operatorDisplayName,
         completionEvidence,
+        integrationId: delivery.integration_id,
       }
     case 'stale':
       return {
         result: { outcome: 'stale', deliveryId: delivery.id, summary: outcome.summary },
         operatorDisplayName,
         completionEvidence,
+        integrationId: delivery.integration_id,
       }
     case 'engine_rejected':
       // Values-free: the engine's human-readable message may carry titles/names — only the stable
@@ -630,6 +637,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
         },
         operatorDisplayName,
         completionEvidence,
+        integrationId: delivery.integration_id,
       }
     case 'not_found':
     default:
@@ -637,6 +645,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
         result: { outcome: 'wrapper_not_found', deliveryId: delivery.id },
         operatorDisplayName,
         completionEvidence,
+        integrationId: delivery.integration_id,
       }
   }
 }

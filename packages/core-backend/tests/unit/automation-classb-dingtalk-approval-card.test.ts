@@ -16,6 +16,24 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// Exercise the real connection guard with a controllable post-send COMMIT failure.
+const connectionDb = vi.hoisted(() => ({
+  failCommit: false,
+  query: vi.fn(async (sql: string, params: unknown[] = []) => ({ rows:
+    sql.includes('AS app_matches') ? [{ id: String(params[1] ?? 'guard-integration'), app_matches: true }]
+      : sql.includes('AS disabled') ? [{ disabled: false }] : [],
+  })),
+}))
+vi.mock('../../src/db/pg', () => ({
+  query: connectionDb.query,
+  transaction: async (fn: (client: { query: typeof connectionDb.query }) => Promise<unknown>) => {
+    const result = await fn({ query: connectionDb.query })
+    if (connectionDb.failCommit) throw new Error('synthetic COMMIT failure after HTTP success')
+    return result
+  },
+}))
+
+
 import {
   AutomationExecutor,
   type AutomationDeps,
@@ -128,6 +146,7 @@ function ruleWith(action: { type: string; config: Record<string, unknown> }): Au
 const only = (m: Map<string, IntentRow>) => [...m.values()][0]
 
 beforeEach(() => {
+  connectionDb.failCommit = false
   delete process.env[FLAG]
   process.env.PUBLIC_APP_URL = 'https://app.test'
   process.env.APPROVAL_CARD_LINK_SECRET = 'link-secret'
@@ -167,6 +186,19 @@ describe('flag ON — two-phase intent/outcome', () => {
     expect(exec.steps[0]?.status).toBe('success')
     expect(only(h.intent).status).toBe('sent')
     // gettoken + asyncsend = 2 fetches; exactly one asyncsend (one card delivered).
+    expect(h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend'))).toHaveLength(1)
+  })
+
+  it('HTTP success followed by connection-guard COMMIT failure is terminal unknown and never resends', async () => {
+    const h = makeHarness((call) => (call === 0 ? tokenResponse() : asyncSendOk()))
+    connectionDb.failCommit = true
+    const first = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(first.steps[0]?.status).toBe('failed')
+    expect(only(h.intent).status).toBe('outcome_unknown')
+    expect(h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend'))).toHaveLength(1)
+    connectionDb.failCommit = false
+    const retry = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(retry.steps[0]?.alreadyApplied).toBe(true)
     expect(h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend'))).toHaveLength(1)
   })
 

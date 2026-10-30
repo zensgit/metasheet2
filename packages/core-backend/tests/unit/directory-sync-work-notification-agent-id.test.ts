@@ -8,7 +8,7 @@ const { queryMock } = vi.hoisted(() => ({
 
 vi.mock('../../src/db/pg', () => ({
   query: queryMock,
-  transaction: vi.fn(),
+  transaction: vi.fn(async (fn) => fn({ query: queryMock })),
 }))
 
 function integrationRow(config: Record<string, unknown> = {}) {

@@ -1,3 +1,9 @@
+import { DirectoryConnectionError } from '../../src/directory/connection-disable'
+// This suite injects or mocks transport; persistent stop enforcement has its own real-DB gate.
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(),
+  withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform(),
+}))
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/db/pg', () => ({
@@ -191,7 +197,7 @@ describe('the app configuration comes from the identity\'s integration row only 
     await sendOnce(await channel.prepare(TARGET))
     const expected = { appKey: CONFIG.appKey, appSecret: CONFIG.appSecret, agentId: CONFIG.workNotificationAgentId, baseUrl: TASK_DINGTALK_DEFAULT_BASE_URL }
     expect(calls.tokenCalls[0].config).toEqual(expected)
-    expect(calls.sendCalls[0].config).toEqual(expected)
+    expect(calls.sendCalls[0].config).toEqual({ ...expected, integrationId: 'int-X' })
   })
 
   it('reads agentId when workNotificationAgentId is absent, a JSON-text config, and encrypted secrets', async () => {
@@ -352,7 +358,7 @@ describe('the token, the re-check after it and the one send (design §8.2 steps 
     expect(calls.sendCalls).toEqual([{
       token: 'token-T-998877',
       input: { userIds: ['dt-user-77'], title: MESSAGE.title, content: MESSAGE.content },
-      config: { appKey: CONFIG.appKey, appSecret: CONFIG.appSecret, agentId: CONFIG.workNotificationAgentId, baseUrl: TASK_DINGTALK_DEFAULT_BASE_URL },
+      config: { integrationId: 'int-X', appKey: CONFIG.appKey, appSecret: CONFIG.appSecret, agentId: CONFIG.workNotificationAgentId, baseUrl: TASK_DINGTALK_DEFAULT_BASE_URL },
       options: { timeoutMs: TASK_DINGTALK_REQUEST_TIMEOUT_MS, logUpstreamMessage: false },
     }])
     for (const response of [{ raw: {} }, { taskId: '', raw: {} }, { taskId: '  ', raw: {} }]) {
@@ -538,5 +544,16 @@ describe('error text never carries a secret, a URL or user content (design §8.5
     for (const result of results) {
       expect(fixed.has((result as { error: string }).error), JSON.stringify(result)).toBe(true)
     }
+  })
+})
+
+
+describe('connection-stop refusal is definite, never an unknown delivery', () => {
+  it.each([
+    ['DIRECTORY_CONNECTION_DISABLED', 409, false],
+    ['DIRECTORY_CONNECTION_BUSY', 409, true],
+    ['DIRECTORY_CONNECTION_STATE_UNAVAILABLE', 503, true],
+  ] as const)('%s keeps a values-free code', (code, status, retryable) => {
+    expect(classifyTaskDingTalkSendError(new DirectoryConnectionError(code, status), [])).toEqual({ ok: false, retryable, error: code })
   })
 })

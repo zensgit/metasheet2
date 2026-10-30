@@ -9,6 +9,7 @@ type DirectoryScheduleRow = {
   id: string
   name: string
   status: string
+  connection_disabled?: boolean
   sync_enabled: boolean
   schedule_cron: string | null
   // Roadmap §7.8: NULL for every integration created before this landed (and for any
@@ -35,12 +36,13 @@ function normalizeText(value: unknown): string {
 
 function shouldSchedule(row: DirectoryScheduleRow | null): row is DirectoryScheduleRow {
   if (!row) return false
-  return row.status === 'active' && row.sync_enabled === true && normalizeText(row.schedule_cron).length > 0
+  return row.connection_disabled !== true && row.status === 'active' && row.sync_enabled === true && normalizeText(row.schedule_cron).length > 0
 }
 
 async function listScheduleRows(): Promise<DirectoryScheduleRow[]> {
   const result = await query<DirectoryScheduleRow>(
-    `SELECT id, name, status, sync_enabled, schedule_cron, schedule_timezone
+    `SELECT id, name, status, sync_enabled, schedule_cron, schedule_timezone,
+            config->'connectionDisabled' = 'true'::jsonb AS connection_disabled
      FROM directory_integrations
      WHERE provider = 'dingtalk'`,
   )
@@ -49,7 +51,8 @@ async function listScheduleRows(): Promise<DirectoryScheduleRow[]> {
 
 async function getScheduleRow(integrationId: string): Promise<DirectoryScheduleRow | null> {
   const result = await query<DirectoryScheduleRow>(
-    `SELECT id, name, status, sync_enabled, schedule_cron, schedule_timezone
+    `SELECT id, name, status, sync_enabled, schedule_cron, schedule_timezone,
+            config->'connectionDisabled' = 'true'::jsonb AS connection_disabled
      FROM directory_integrations
      WHERE id = $1 AND provider = 'dingtalk'`,
     [integrationId],

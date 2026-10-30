@@ -1,4 +1,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+
+// Transport/intent harness; connection-stop enforcement is covered by dedicated real-DB tests.
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(),
+  withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform(),
+}))
+
 import { evaluateCondition, evaluateConditions, type AutomationCondition, type ConditionGroup } from '../../src/multitable/automation-conditions'
 import { AutomationExecutor, truncateDingTalkMessageText, AUTOMATION_NO_RECIPIENTS_ERROR, DINGTALK_RECIPIENTS_UNREACHABLE_REASON, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
 import { AutomationScheduler, cronHasNoMatchingDay, nextCronOccurrenceMs, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'

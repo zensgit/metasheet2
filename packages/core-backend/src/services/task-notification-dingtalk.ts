@@ -1,3 +1,4 @@
+import { DirectoryConnectionError } from '../directory/connection-disable'
 /**
  * DingTalk work-notification channel for task notifications (M4 PR-3b design
  * `docs/development/task-m4-pr3b-backend-design-20261001.md` §8).
@@ -330,6 +331,7 @@ const RETRYABLE_BUSINESS_TEXT_RE = /rate.?limit|too many|throttl|system busy|ser
  * outcome, since an error that cannot be recognised does not prove the request was not sent.
  */
 export function classifyTaskDingTalkSendError(error: unknown, values: readonly string[]): TaskDeliveryChannelResult {
+  if (error instanceof DirectoryConnectionError) return { ok: false, retryable: (error.code === 'DIRECTORY_CONNECTION_BUSY' || error.statusCode >= 500), error: error.code }
   const codes = TASK_DINGTALK_CHANNEL_CODES
   if (isDingTalkOutcomeUnknown(error)) {
     return { ok: false, retryable: false, outcomeUnknown: true, error: withDetail(codes.sendOutcomeUnknown, error, values) }
@@ -402,7 +404,7 @@ export class DingTalkTaskDeliveryChannel implements TaskDeliveryChannel {
           response = await this.sendWorkNotification(
             accessToken,
             { userIds: [destination.dingTalkUserId], title: message.title, content: message.content },
-            destination.config,
+            { ...destination.config, integrationId: destination.integrationId },
             { timeoutMs: TASK_DINGTALK_REQUEST_TIMEOUT_MS, logUpstreamMessage: false },
           )
         } catch (error) {

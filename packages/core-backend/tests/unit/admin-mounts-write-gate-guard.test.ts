@@ -3,15 +3,15 @@
  * `/api/admin/**` 切片）的写路由守卫 —— #5680 的扩面。
  *
  * Refreshed 2026-10-10 against main 1b843faee: registry unchanged (67 entries); line refs replaced
- * by self-verifying anchors.（登记表不变，仍是 67 条；文件里不再有任何源码行号，改为能对源码自证的锚点。）
+ * by self-verifying anchors. 2026-10-29: add directory disable (68 entries).
  *
  * 为什么不能照搬 #5680 的「中间件首位必须是门」判据：
- *   本批 67 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
- *   其余 63 条的门在**处理器体内**（`ensurePlatformAdmin` / `ensureRoleDelegationAdmin` / `isAdmin` 直调）：
- *   58 条是处理器第一条语句（56 条平台门 + 2 条委派门）；reactivate / force-reactivate / compensate 3 条
+ *   本批 68 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
+ *   其余 64 条的门在**处理器体内**（`ensurePlatformAdmin` / `ensureRoleDelegationAdmin` / `isAdmin` 直调）：
+ *   59 条是处理器第一条语句（57 条平台门 + 2 条委派门）；reactivate / force-reactivate / compensate 3 条
  *   先调 helper，helper 的第一条语句是门；restore 1 条先做无副作用的 mode 解析再过门（见登记表注释）；
  *   permissions 1 条先判 pool 与身份再直调 `isAdmin`（2026-10-10 刷新时逐条实读）。
- *   用 `router.stack` 看中间件链，只会看到「首位 = `authenticate`（仅认证）」或「首位 = 唯一的处理器」。照搬结构判据会把这 63 条全判红（假红），进而逼人为了过测试去挪代码。
+ *   用 `router.stack` 看中间件链，只会看到「首位 = `authenticate`（仅认证）」或「首位 = 唯一的处理器」。照搬结构判据会把这 64 条全判红（假红），进而逼人为了过测试去挪代码。
  *   所以这里换成两条断言，缺一不可：
  *     (A) 行为：逐条写路由，非管理员 -> 该 router 既有的拒绝码，且下游 service / DB / 审计零调用；
  *     (B) 清单双向反查：从 `router.stack` 枚举出的写路由集合，必须与本文件的登记表**双向**相等。
@@ -42,7 +42,7 @@
  *    `admin-users.ts` import 的 `rbac/platform-admin.ts` `hasLegacyAdminClaim`——后者是 `admin-users.ts`
  *    原私有副本原样迁出的）认的形态并不完全一致，取并集才安全。下面的
  *    `LEGACY_CLAIM_PREDICATES` 把四种形态写成谓词并对 fixture 自检——fixture 若被改成带 claim，
- *    自检先红，而不是让 67 条 403 断言悄悄变成「门根本没跑」。
+ *    自检先红，而不是让 68 条 403 断言悄悄变成「门根本没跑」。
  *
  * 3) 下游零调用的探针是「模块级绊线」：把每个 router 直接依赖的 service 模块的函数导出换成记录调用名的
  *    桩（类导出与常量原样保留），再断言记录为空。DB（`db/pg` 的 `query`/`transaction`/`pool.query`）
@@ -417,7 +417,7 @@ function parseGate(gate: string): { file: string; branches: string[][] } | null 
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（67 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
+// 登记表（68 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -471,11 +471,12 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/:id/activate', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/login-aliases/backfill', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
 
-  // --- routes/admin-directory.ts（20 条） ---
+  // --- routes/admin-directory.ts（21 条） ---
   { mount: 'admin-directory', method: 'post', path: '/dingtalk/work-notification/test', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'put', path: '/dingtalk/work-notification', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'post', path: '/integrations', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/disable', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/approval-card-config/secret/generate', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId/approval-card-config', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'post', path: '/integrations/test', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
@@ -795,12 +796,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：67 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
-    expect(REGISTRY).toHaveLength(67)
+  it('登记表条数与分族口径固定：68 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
+    expect(REGISTRY).toHaveLength(68)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(60)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(61)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
       expect(entry.reg, label(entry)).toBe(MOUNTS[entry.mount].routeFile)

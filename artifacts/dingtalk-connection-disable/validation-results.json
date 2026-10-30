@@ -1,0 +1,94 @@
+{
+  "date": "2026-10-29",
+  "environment": "Mac mini isolated synthetic runtime",
+  "baseCommit": "a03d804d60d83717feaedce099e5ff14216afc58",
+  "node": "20.20.2",
+  "pnpm": "10.16.1",
+  "postgres": "16",
+  "backendUnit": {
+    "files": [
+      "tests/unit/dingtalk-interactive-card-update.test.ts",
+      "tests/unit/dingtalk-todo-mirror-worker.test.ts",
+      "tests/unit/dingtalk-interactive-card-callback.test.ts",
+      "tests/unit/dingtalk-work-notification.test.ts",
+      "tests/unit/task-notification-dingtalk.test.ts",
+      "tests/unit/elearning-notification-dingtalk.test.ts",
+      "tests/unit/dingtalk-todo-client.test.ts",
+      "tests/unit/dingtalk-client.test.ts",
+      "tests/unit/attendance-notification-quiet-hours.test.ts",
+      "tests/unit/attendance-dingtalk-outcome-unknown.test.ts",
+      "tests/unit/directory-tenant-change-guard.test.ts",
+      "tests/unit/directory-connection-disable.test.ts",
+      "tests/unit/directory-sync-scheduler.test.ts",
+      "tests/unit/directory-sync-unique-violation-conflict.test.ts",
+      "tests/unit/dingtalk-work-notification-settings.test.ts",
+      "tests/unit/directory-sync-work-notification-agent-id.test.ts",
+      "tests/unit/dingtalk-transport-resilience.test.ts",
+      "tests/unit/attendance-scheduler.test.ts",
+      "tests/unit/automation-classb-dingtalk-approval-card.test.ts",
+      "tests/unit/admin-directory-5xx-values-free.test.ts",
+      "tests/unit/admin-directory-routes.test.ts",
+      "tests/unit/automation-classb-dingtalk-group.test.ts",
+      "tests/unit/automation-classb-dingtalk-person.test.ts",
+      "tests/unit/automation-v1.test.ts",
+      "tests/unit/automation-dingtalk-person-recipient-shared-decision.test.ts",
+      "tests/unit/auth-login-routes.test.ts",
+      "tests/unit/dingtalk-oauth-login-gates.test.ts",
+      "tests/unit/directory-fixed-sentence-constructors.guard.test.ts",
+      "tests/unit/admin-mounts-write-gate-guard.test.ts",
+      "tests/unit/directory-sync-run-lease.test.ts",
+      "tests/unit/directory-sync-corp-name.test.ts",
+      "tests/unit/dingtalk-connection-disable-egress.test.ts",
+      "tests/unit/approval-card-web-terminal-route.test.ts"
+    ],
+    "passed": 1460,
+    "failed": 0
+  },
+  "realDatabase": {
+    "files": [
+      "tests/integration/directory-connection-disable.realdb.test.ts"
+    ],
+    "passed": 11,
+    "failed": 0
+  },
+  "frontend": {
+    "files": [
+      "tests/directoryManagementView.spec.ts",
+      "tests/directoryConfigPickers.spec.ts"
+    ],
+    "passed": 116,
+    "failed": 0
+  },
+  "validateAll": {
+    "exit": 0,
+    "checks": [
+      "validate:plugins",
+      "lint",
+      "type-check"
+    ]
+  },
+  "mutations": {
+    "historicalOriginalHead": "73953baa53bd734906efcaa758b4b57dd5c82f2f",
+    "historicalPassed": 5,
+    "currentSourceProvenance": {
+      "neuteredExit": 1,
+      "failed": 3,
+      "passed": 3,
+      "restoredExit": 0,
+      "restoredPassed": 6,
+      "sourceBytesRestored": true
+    }
+  },
+  "ci": {
+    "state": "pending new-head CI after push; original head test (20.x) failed, real-DB step skipped"
+  },
+  "liveConfigurationChanged": false,
+  "realProviderCalls": false,
+  "sourceManifest": "tested-source-sha256.json",
+  "codeCommit": "bf34d6f0ca43aa4bf7ef0828897c3bb5ffc81eec",
+  "combinedDisplayCommit": "71e60292ade78ec226dd89932b89563098c39cfd",
+  "redToGreen": {
+    "originalRuntimeRegressionFailures": 5,
+    "currentRuntimeFailures": 0
+  }
+}

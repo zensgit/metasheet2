@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// This suite assumes enabled connections to isolate lease ordering; real-DB stop barriers run separately.
+vi.mock('../../src/directory/connection-disable', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/connection-disable')>(),
+  assertDirectoryConnectionEnabled: vi.fn(async () => undefined),
+}))
+
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
   transaction: vi.fn(),

@@ -204,9 +204,14 @@
           </div>
         </div>
 
-        <div v-if="integrations.length === 0" class="directory-admin__empty">暂无目录集成</div>
+        <div v-if="integrationsLoadError" role="alert" data-testid="directory-list-error">
+          <p>目录集成加载失败，无法确认当前集成。请重试；若仍失败，请联系管理员检查服务端配置。</p>
+          <button type="button" class="directory-admin__button" :disabled="loading" @click="void loadIntegrations()">重试加载集成</button>
+        </div>
+        <div v-else-if="!integrationsLoaded" class="directory-admin__empty">正在加载目录集成…</div>
+        <div v-else-if="integrations.length === 0" class="directory-admin__empty">暂无目录集成</div>
         <button
-          v-for="integration in integrations"
+          v-for="integration in (integrationsLoaded && !integrationsLoadError ? integrations : [])"
           :key="integration.id"
           class="directory-admin__item"
           :class="{ 'directory-admin__item--active': selectedIntegrationId === integration.id }"
@@ -214,7 +219,10 @@
           @click="void selectIntegration(integration.id)"
         >
           <strong>{{ integration.name }}</strong>
-          <span>{{ integration.corpId }}</span>
+          <small v-if="integration.config.connectionDisabled">连接已停用（成员权限保留）</small>
+          <span>钉钉企业名称：{{ integration.config.corpName || '名称未提供' }}</span>
+          <small>Corp ID：{{ integration.corpId }}</small>
+          <small>本地组织：{{ integration.orgId || '未提供' }}</small>
           <small>{{ readAdmissionModeLabel(integration) }}</small>
           <small>{{ readMemberGroupSyncLabel(integration) }}</small>
           <small>
@@ -255,16 +263,27 @@
           <div class="directory-admin__summary" v-if="selectedIntegration">
             <span class="directory-admin__badge">{{ selectedIntegration.status }}</span>
             <span class="directory-admin__badge" :class="{ 'directory-admin__badge--inactive': !selectedIntegration.syncEnabled }">
-              {{ selectedIntegration.syncEnabled ? '已启用同步' : '仅手动同步' }}
+              {{ selectedIntegration.config.connectionDisabled ? '连接已停用' : selectedIntegration.syncEnabled ? '已启用同步' : '仅手动同步' }}
             </span>
             <span class="directory-admin__badge">已链接 {{ selectedIntegration.stats.linkedCount }}</span>
           </div>
         </div>
 
+        <DirectoryConnectionDisablePanel
+          v-if="selectedIntegration"
+          :key="selectedIntegration.id"
+          :integration-id="selectedIntegration.id"
+          @disabled="void loadIntegrations()"
+        />
         <div class="directory-admin__form-grid">
           <label class="directory-admin__field">
             <span>集成名称</span>
             <input v-model.trim="draft.name" class="directory-admin__input" type="text" placeholder="例如 DingTalk CN" />
+          </label>
+          <label class="directory-admin__field">
+            <span>钉钉企业名称（展示）</span>
+            <input v-model.trim="draft.corpName" class="directory-admin__input" type="text" maxlength="200" placeholder="填写已确认的企业名称" />
+            <small>仅用于展示，不代表钉钉登录应用的所属组织，不改变账号关联。</small>
           </label>
           <label class="directory-admin__field">
             <span>Corp ID</span>
@@ -573,7 +592,7 @@
             </select>
           </label>
           <label class="directory-admin__toggle">
-            <input v-model="draft.syncEnabled" type="checkbox" />
+            <input v-model="draft.syncEnabled" type="checkbox" :disabled="selectedIntegration?.config.connectionDisabled === true" />
             <span>保存后允许自动同步</span>
           </label>
         </div>
@@ -582,10 +601,10 @@
           <button class="directory-admin__button" type="button" :disabled="busy || !canSave" @click="void saveIntegration()">
             {{ busy ? '处理中...' : selectedIntegration ? '保存变更' : '创建集成' }}
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testIntegration()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || selectedIntegration?.config.connectionDisabled === true" @click="void testIntegration()">
             测试连通性
           </button>
-          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testWorkNotificationAgentId()">
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || selectedIntegration?.config.connectionDisabled === true" @click="void testWorkNotificationAgentId()">
             测试工作通知
           </button>
           <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || draft.workNotificationAgentId.trim().length === 0" @click="void saveWorkNotificationAgentId()">
@@ -597,13 +616,13 @@
           <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="approvalCardBusy" @click="void saveApprovalCardPublicAppUrl()">
             保存对外访问地址
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || pollingRunId !== '' || !selectedIntegration" @click="void syncIntegration()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || pollingRunId !== '' || !selectedIntegration || selectedIntegration?.config.connectionDisabled === true" @click="void syncIntegration()">
             手动同步
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || previewBusy || pollingRunId !== '' || !selectedIntegration" @click="void previewSync()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || previewBusy || pollingRunId !== '' || !selectedIntegration || selectedIntegration?.config.connectionDisabled === true" @click="void previewSync()">
             {{ previewBusy ? '预览中...' : '预览同步' }}
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || asyncSyncBusy || pollingRunId !== '' || !selectedIntegration" @click="void startAsyncSync()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || asyncSyncBusy || pollingRunId !== '' || !selectedIntegration || selectedIntegration?.config.connectionDisabled === true" @click="void startAsyncSync()">
             {{ asyncSyncBusy ? '启动中...' : pollingRunId ? '后台同步中...' : '后台同步' }}
           </button>
         </footer>
@@ -2206,6 +2225,7 @@
 import { canCopyText, copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import DirectoryConnectionDisablePanel from '../components/directory/DirectoryConnectionDisablePanel.vue'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
 import DirectoryOptionPicker from '../components/directory/DirectoryOptionPicker.vue'
 import { presentRoleTitle } from './builtinCatalogPresentation'
@@ -2227,6 +2247,7 @@ import {
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type DirectoryIntegration = {
+  orgId?: string
   id: string
   name: string
   corpId: string
@@ -2238,6 +2259,8 @@ type DirectoryIntegration = {
   lastSuccessAt: string | null
   lastError: string | null
   config: {
+    connectionDisabled?: boolean
+    corpName?: string | null
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured?: boolean
@@ -2553,6 +2576,7 @@ type TestResult = {
 }
 
 type DirectoryDraft = {
+  corpName: string
   name: string
   corpId: string
   appKey: string
@@ -2577,6 +2601,8 @@ type DirectoryDraft = {
 }
 
 const integrations = ref<DirectoryIntegration[]>([])
+const integrationsLoaded = ref(false)
+const integrationsLoadError = ref(false)
 const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
 const departments = ref<DirectoryDepartment[]>([])
@@ -2746,6 +2772,7 @@ const directoryNavigation = ref(readInitialDirectoryNavigation())
 const draft = reactive<DirectoryDraft>({
   name: '',
   corpId: '',
+  corpName: '',
   appKey: '',
   appSecret: '',
   workNotificationAgentId: '',
@@ -3190,6 +3217,7 @@ function resetDraft() {
   batchAdmissionOnboardingPackets.value = []
   draft.name = ''
   draft.corpId = ''
+  draft.corpName = ''
   draft.appKey = ''
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -3215,6 +3243,7 @@ function resetDraft() {
 function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.name = integration.name
   draft.corpId = integration.corpId
+  draft.corpName = integration.config.corpName ?? ''
   draft.appKey = integration.config.appKey
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -4151,13 +4180,18 @@ async function readJson(response: Response): Promise<any> {
 }
 
 async function loadIntegrations() {
+  if (integrationsLoadError.value) setStatus('')
   loading.value = true
+  integrationsLoadError.value = false
+  integrationsLoaded.value = false
   try {
     const response = await apiFetch('/api/admin/directory/integrations')
     const payload = await readJson(response)
     if (!response.ok) throw new Error(readApiError(payload, '加载目录集成失败'))
 
-    integrations.value = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    if (!Array.isArray(payload?.data?.items)) throw new Error('目录集成响应格式错误')
+    integrations.value = payload.data.items
+    integrationsLoaded.value = true
     const navigation = directoryNavigation.value
     const navigationKey = buildDirectoryNavigationKey(navigation)
     const hasPendingCrossIntegrationNavigation = (
@@ -4211,6 +4245,7 @@ async function loadIntegrations() {
       if (current) applyIntegrationToDraft(current)
     }
   } catch (error) {
+    integrationsLoadError.value = !integrationsLoaded.value
     setStatus(error instanceof Error ? error.message : '加载目录集成失败', 'error')
   } finally {
     loading.value = false
@@ -4602,10 +4637,13 @@ function readDirectoryOnboardingPackets(rawPackets: unknown[]): AutoAdmissionOnb
 }
 
 function buildPayload() {
+  const corpName = draft.corpName.trim()
+  const currentCorpName = selectedIntegration.value?.config.corpName ?? ''
   return {
     integrationId: selectedIntegration.value?.id,
     name: draft.name.trim(),
     corpId: draft.corpId.trim(),
+    ...(corpName !== currentCorpName ? { corpName } : {}),
     appKey: draft.appKey.trim(),
     appSecret: draft.appSecret.trim(),
     rootDepartmentId: draft.rootDepartmentId.trim() || '1',

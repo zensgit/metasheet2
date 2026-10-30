@@ -1,3 +1,5 @@
+// Transport-only tests; state/lock enforcement is covered by directory-connection-disable suites.
+vi.mock('../../src/directory/connection-disable', () => ({ withDingTalkConnectionOperation: (_key: string, perform: () => Promise<unknown>) => perform() }))
 /**
  * DingTalk TODO client (design §6/§9) — FIXTURED responses only, never the real network.
  *

@@ -3078,10 +3078,10 @@ describe('adminDirectoryRouter', () => {
       return called
     }
 
-    it('is not vacuous: 22 routes carry one of the three ids (15 integration, 1 deprovision-events, 5 account, 1 alert)', () => {
+    it('is not vacuous: 24 routes carry one of the three ids (17 integration, 1 deprovision-events, 5 account, 1 alert)', () => {
       const routes = paramRoutes()
-      expect(routes).toHaveLength(22)
-      expect(routes.filter((r) => r.params.includes('integrationId'))).toHaveLength(16)
+      expect(routes).toHaveLength(24)
+      expect(routes.filter((r) => r.params.includes('integrationId'))).toHaveLength(18)
       expect(routes.filter((r) => r.params.includes('accountId'))).toHaveLength(5)
       expect(routes.filter((r) => r.params.includes('alertId'))).toHaveLength(1)
     })
