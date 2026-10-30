@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict'
+import {execFileSync,spawnSync} from 'node:child_process'
+import {readFileSync,writeFileSync} from 'node:fs'
+import path from 'node:path'
+import {SOURCE,TAG,verifyImage} from './staging-directory-candidate.mjs'
+const backend=`ghcr.io/zensgit/metasheet2-backend:${TAG}`,web=`ghcr.io/zensgit/metasheet2-web:${TAG}`
+const docker=args=>execFileSync('docker',args,{encoding:'utf8',maxBuffer:16*1024*1024,timeout:180000})
+for(const ref of [backend,web])verifyImage(JSON.parse(docker(['image','inspect',ref]))[0])
+const build=JSON.parse(docker(['run','--rm','--network','none','--entrypoint','cat',web,'/usr/share/nginx/html/build-info.json']))
+assert.equal(build.commit,SOURCE);assert.equal(build.imageTag,TAG)
+docker(['run','--rm','--network','none','--entrypoint','sh',web,'-c','test -s /usr/share/nginx/html/index.html && test -d /usr/share/nginx/html/assets'])
+const providerCode="const p=require('/app/packages/core-backend/dist/src/db/migration-provider.js').createCoreBackendMigrationProvider({excludedNames:[]});p.getMigrations().then(m=>{console.log(JSON.stringify(Object.keys(m).sort()));process.exit(0)}).catch(()=>process.exit(1))"
+const names=JSON.parse(docker(['run','--rm','--network','none','-e','NODE_ENV=test','-e','DATABASE_URL=postgres://invalid:invalid@127.0.0.1:1/unreachable','--entrypoint','node',backend,'-e',providerCode]))
+const expected=JSON.parse(readFileSync(new URL('./staging-directory-candidate-migrations.json',import.meta.url)))
+assert.deepEqual(names,expected);assert.equal(names.length,459)
+writeFileSync('candidate-provider-names.json',JSON.stringify(names,null,2))
+docker(['run','--rm','--network','none','--entrypoint','node',backend,'-e',"const fs=require('fs');if(!fs.readFileSync('/app/packages/core-backend/dist/src/routes/admin-directory.js','utf8').includes('/integrations/:integrationId/identity'))process.exit(1)"])
+const vitest=path.posix.join(path.posix.dirname(docker(['run','--rm','--network','none','--workdir','/app/packages/core-backend','--entrypoint','node',backend,'-p',"require.resolve('vitest/package.json')"]).trim()),'vitest.mjs')
+function tests(role,files,expectedTests){
+ const front=role==='frontend';const output=`${role}-candidate-tests.json`
+ const args=['run','--rm','--network','none','-e','NODE_ENV=test','-e','CI=false','-e','DATABASE_URL=postgres://invalid:invalid@127.0.0.1:1/unreachable',
+   '--mount',`type=bind,source=${process.cwd()},target=/receipts`,
+   ...(front?['--mount',`type=bind,source=${path.resolve('source/apps/web')},target=/app/apps/web`]:[]),
+   '--workdir',front?'/app/apps/web':'/app/packages/core-backend','--entrypoint','node',backend,vitest,'run',...files,'--reporter=json',`--outputFile=/receipts/${output}`]
+ const p=spawnSync('docker',args,{encoding:'utf8',timeout:180000,maxBuffer:32*1024*1024})
+ writeFileSync(`${role}-candidate-tests.log`,`${p.stdout||''}\n${p.stderr||''}`)
+ assert.equal(p.status,0,`${role} candidate tests failed; inspect private job log`)
+ const r=JSON.parse(readFileSync(output));assert.equal(r.success,true);assert.equal(r.numFailedTests,0);assert.equal(r.numPendingTests,0);assert.equal(r.numPassedTests,expectedTests)
+ return {passed:r.numPassedTests,files:r.testResults.map(f=>path.basename(f.name))}
+}
+const front=tests('frontend',['tests/DirectoryIntegrationIdentityPanel.spec.ts','tests/directoryManagementView.spec.ts','tests/run-required-web-tests-shape.spec.ts'],104)
+const back=tests('backend',['tests/unit/directory-integration-identity.test.ts','tests/unit/directory-sync-corp-name.test.ts','tests/unit/admin-directory-routes.test.ts'],192)
+writeFileSync('candidate-validation.json',JSON.stringify({source:SOURCE,tag:TAG,passed:true,providerCount:names.length,frontend:front,backend:back,network:'none',webBuildInfoVerified:true},null,2))
+console.log('Candidate payloads: exact revision/platform, 459 migrations, 104 frontend and 192 backend tests passed.')
