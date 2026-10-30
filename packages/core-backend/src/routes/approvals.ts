@@ -397,6 +397,8 @@ const approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'a
 // CANDIDATE directory, NOT an authorization fact: the actual transfer/create/delegate is still gated
 // by dispatchAction / createApproval / delegation-create downstream.
 const approvalParticipantDirectoryGuard = rbacGuardAny(['approvals:read', 'approvals:write', 'approvals:act'])
+const approvalActionGuard = rbacGuard('approvals', 'act')
+const approvalRequesterRevokeGuard = rbacGuardAny(['approvals:act', 'approvals:write'])
 
 let approvalsDegraded = false
 const allowDegradation = process.env.APPROVALS_OPTIONAL === '1'
@@ -4188,7 +4190,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approvals/:id/actions', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
+  r.post('/api/approvals/:id/actions', authenticate, (req, res, next) => {
+    const guard = req.body?.action === 'revoke' ? approvalRequesterRevokeGuard : approvalActionGuard
+    return guard(req, res, next)
+  }, async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
 
@@ -4273,6 +4278,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         userId,
         userName: resolveApprovalActorName(req, userId),
         roles: await resolveApprovalActorRoles(req),
+        ...(action === 'revoke' ? { requesterRevokeRoute: true as const } : {}),
         ip: req.ip || null,
         userAgent: req.get('user-agent') || null,
       }
