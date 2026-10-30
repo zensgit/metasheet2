@@ -1,3 +1,4 @@
+import { Client } from 'pg'
 /**
  * DT-OPS-02 P2 follow-up — real-DB preview/apply parity for `autoAdmissionCandidateCount`
  * (dingtalk-sync-integrated-roadmap-20260708.md, DT-OPS-02, Test/Evidence matrix "Dry-run |
@@ -211,6 +212,66 @@ describeIfDatabase('DT-OPS-02 preview/apply auto-admission parity (real DB)', ()
 
   it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  it('production sync batches department and account metadata without changing persisted results or repeat counts', async () => {
+    const target = await createDirectoryIntegration({
+      name: `metadata-${TS}`, corpId: CORP + '_metadata', appKey: `metadata-key-${TS}`, appSecret: 'synthetic-metadata-secret',
+    })
+    const targetIntegrationId = target.id
+    try {
+      // The old preview/apply cases must retain their original one-linked/four-new fixture.
+      await query(`INSERT INTO directory_accounts
+        (integration_id, provider, corp_id, external_user_id, union_id, external_key, name, is_active)
+        VALUES($1,'dingtalk',$2,$3,$4,$4,'Seeded metadata',true)`,
+      [targetIntegrationId, CORP + '_metadata', DT_LINKED, UNION_LINKED])
+      const statements: string[] = []
+      const originalQuery = Client.prototype.query
+      const observer = vi.spyOn(Client.prototype, 'query').mockImplementation(function (this: Client, ...args: unknown[]) {
+        const first = args[0]
+        const sql = typeof first === 'string' ? first : (first as { text?: string } | undefined)?.text
+        if (sql && /^\s*INSERT INTO directory_(?:departments|accounts)\s*\(/i.test(sql)) statements.push(sql)
+        return Reflect.apply(originalQuery, this, args)
+      } as typeof Client.prototype.query)
+      try {
+        const first = await syncDirectoryIntegration(targetIntegrationId, 'test')
+        expect({ synced: first.run.stats.accountsSynced, created: first.run.stats.accountsCreatedCount,
+          updated: first.run.stats.accountsUpdatedCount }).toEqual({ synced: 5, created: 4, updated: 1 })
+        expect((await query(`SELECT external_user_id, name, is_active FROM directory_accounts
+          WHERE integration_id=$1 ORDER BY external_user_id`, [targetIntegrationId])).rows).toEqual([
+          { external_user_id: DT_EMAILMATCH, name: 'EmailMatch DT User', is_active: true },
+          { external_user_id: DT_LINKED, name: 'Linked DT User', is_active: true },
+          { external_user_id: DT_MOBILEMATCH, name: 'MobileMatch DT User', is_active: true },
+          { external_user_id: DT_NEW, name: 'New DT User', is_active: true },
+          { external_user_id: DT_OOS_NEW, name: 'Out-of-scope New DT User', is_active: true },
+        ].sort((a, b) => a.external_user_id.localeCompare(b.external_user_id)))
+        expect((await query(`SELECT external_department_id, name, order_index, is_active FROM directory_departments
+          WHERE integration_id=$1 AND external_department_id=ANY($2::text[]) ORDER BY external_department_id`,
+        [targetIntegrationId, [DEPT_IN, DEPT_OUT]])).rows).toEqual([
+          { external_department_id: DEPT_IN, name: 'In-Scope', order_index: 0, is_active: true },
+          { external_department_id: DEPT_OUT, name: 'Out-of-Scope', order_index: 1, is_active: true },
+        ])
+        expect({ departmentStatements: statements.filter(sql => /INSERT INTO directory_departments/i.test(sql)).length,
+          accountStatements: statements.filter(sql => /INSERT INTO directory_accounts/i.test(sql)).length })
+          .toEqual({ departmentStatements: 1, accountStatements: 1 })
+        statements.length = 0
+        const repeat = await syncDirectoryIntegration(targetIntegrationId, 'test')
+        expect({ synced: repeat.run.stats.accountsSynced, created: repeat.run.stats.accountsCreatedCount,
+          updated: repeat.run.stats.accountsUpdatedCount }).toEqual({ synced: 5, created: 0, updated: 5 })
+        expect({ departmentStatements: statements.filter(sql => /INSERT INTO directory_departments/i.test(sql)).length,
+          accountStatements: statements.filter(sql => /INSERT INTO directory_accounts/i.test(sql)).length })
+          .toEqual({ departmentStatements: 1, accountStatements: 1 })
+      } finally { observer.mockRestore() }
+    } finally {
+      await query('DELETE FROM directory_sync_runs WHERE integration_id=$1', [targetIntegrationId])
+      await query(`DELETE FROM directory_account_links WHERE directory_account_id IN
+        (SELECT id FROM directory_accounts WHERE integration_id=$1)`, [targetIntegrationId])
+      await query(`DELETE FROM directory_account_departments WHERE directory_account_id IN
+        (SELECT id FROM directory_accounts WHERE integration_id=$1)`, [targetIntegrationId])
+      await query('DELETE FROM directory_accounts WHERE integration_id=$1', [targetIntegrationId])
+      await query('DELETE FROM directory_departments WHERE integration_id=$1', [targetIntegrationId])
+      await query('DELETE FROM directory_integrations WHERE id=$1', [targetIntegrationId])
+    }
   })
 
   it('preview reports exactly 1 auto-admission candidate (the genuinely new in-scope user)', async () => {
