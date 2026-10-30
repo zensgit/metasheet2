@@ -1,0 +1,17 @@
+{
+  "status": 200,
+  "ok": true,
+  "counts": {
+    "departmentsSeen": 1,
+    "accountsSeen": 2,
+    "wouldCreateAccounts": 0,
+    "wouldDeactivateAccounts": 0,
+    "wouldDeactivateLinkedAccounts": 0,
+    "autoAdmissionCandidateCount": 0,
+    "autoAdmissionSkippedMissingEmailCount": 0,
+    "autoAdmissionExcludedCount": 0
+  },
+  "realSyncPerformed": false,
+  "accountBindingChanged": false,
+  "outboundEnabled": false
+}

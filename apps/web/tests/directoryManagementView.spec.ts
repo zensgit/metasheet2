@@ -268,6 +268,123 @@ describe('DirectoryManagementView', () => {
     container = null
   })
 
+  it('distinguishes loading, list failure and confirmed empty, and allows a read-only retry', async () => {
+    let finish!: (value: unknown) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.textContent).toContain('正在加载目录集成')
+    expect(container!.textContent).not.toContain('暂无目录集成')
+
+    finish(createJsonResponse({ error: { code: 'DIRECTORY_LIST_FAILED', message: 'Failed to load directory integrations' } }, 500))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-list-error"]')?.textContent).toContain('无法确认当前集成')
+    expect(container!.textContent).not.toContain('暂无目录集成')
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+    container!.querySelector<HTMLButtonElement>('[data-testid="directory-list-error"] button')!.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-list-error"]')).toBeNull()
+    expect(container!.textContent).toContain('暂无目录集成')
+    expect(apiFetchMock.mock.calls).toEqual([
+      ['/api/admin/directory/integrations'],
+      ['/api/admin/directory/integrations'],
+    ])
+  })
+
+  it.each(['network', 'malformed'])('does not interpret a %s failure as an empty integration list', async (kind) => {
+    if (kind === 'network') apiFetchMock.mockRejectedValue(new Error('network failed'))
+    else apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: {} }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-list-error"]')).not.toBeNull()
+    expect(container!.textContent).not.toContain('暂无目录集成')
+  })
+
+  it.each([null, '合成企业'])('labels the enterprise name, Corp ID and local organization separately (%s)', async (corpName) => {
+    const integration = createIntegration({ orgId: 'synthetic-org' })
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations'
+        ? [{ ...integration, config: { ...integration.config, corpName } }] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const item = container!.querySelector('.directory-admin__item')!
+    expect(item.textContent).toContain(`钉钉 · ${corpName || '企业名称未提供'}`)
+    expect(item.textContent).toContain('应用名称未提供')
+    expect(item.textContent).toContain('身份：未核验')
+    expect(item.textContent).toContain('Corp ID：dingcorp')
+    expect(item.textContent).toContain('本地组织：synthetic-org')
+    expect(container!.querySelector<HTMLInputElement>('input[placeholder="填写已确认的企业名称"]')?.value).toBe(corpName || '')
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+  })
+
+  it.each(['verified', 'mismatch', 'unverified'])('shows enterprise, application and independent identity status (%s)', async (identityStatus) => {
+    const base = createIntegration({ syncEnabled: false })
+    const integration = { ...base, config: { ...base.config, corpName: '合成企业', appName: '合成应用', identityStatus,
+      identityVerification: identityStatus === 'unverified' ? null : { appCorpId: 'other-synthetic-corp', appCorpName: '应用所属企业', checkedAt: '2026-10-30T00:00:00Z' },
+    } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: { items: url === '/api/admin/directory/integrations' ? [integration] : [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const item = container!.querySelector('.directory-admin__item')!
+    expect(item.querySelector('strong')?.textContent).toContain('合成企业')
+    expect(item.textContent).toContain('应用：合成应用')
+    expect(item.textContent).toContain('用途：DingTalk CN')
+    expect(item.textContent).toContain('自动同步：关闭')
+    expect(item.querySelector('[data-testid="directory-identity-status"]')?.textContent).toContain(identityStatus === 'verified' ? '管理员已核验' : identityStatus === 'mismatch' ? '企业与应用归属不一致' : '未核验')
+    expect(item.querySelector('[role="alert"]') !== null).toBe(identityStatus === 'mismatch')
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+  })
+
+  it.each([null, '合成企业'])('omits an unchanged enterprise name on unrelated saves (%s)', async (corpName) => {
+    const base = createIntegration()
+    const integration = { ...base, config: { ...base.config, corpName } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations' ? [integration] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim() === '保存变更')!.click()
+    await flushUi()
+    const writes = apiFetchMock.mock.calls.filter((call) => call[1]?.method)
+    expect(writes).toHaveLength(1)
+    expect(JSON.parse(writes[0][1].body)).not.toHaveProperty('corpName')
+  })
+
+  it.each([' 新企业 ', ''])('sends enterprise name changes only on explicit form save (%s)', async (name) => {
+    const base = createIntegration()
+    const integration = { ...base, config: { ...base.config, corpName: '原企业' } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations' ? [integration] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const nameInput = container!.querySelector<HTMLInputElement>('input[placeholder="填写已确认的企业名称"]')!
+    nameInput.value = name
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+    Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim() === '保存变更')!.click()
+    await flushUi()
+    const writes = apiFetchMock.mock.calls.filter((call) => call[1]?.method)
+    expect(writes).toHaveLength(1)
+    expect(writes[0][0]).toBe('/api/admin/directory/integrations/dir-1')
+    expect(writes[0][1].method).toBe('PUT')
+    expect(JSON.parse(writes[0][1].body)).toMatchObject({ corpName: name.trim(), corpId: integration.corpId, syncEnabled: integration.syncEnabled })
+  })
+
   it('offers server OAuth configuration guidance before a directory integration exists', async () => {
     apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
     app = createApp(DirectoryManagementView)

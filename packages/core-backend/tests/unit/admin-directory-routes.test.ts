@@ -60,6 +60,7 @@ const directoryMocks = vi.hoisted(() => ({
   testDirectoryIntegration: vi.fn(),
   unbindDirectoryAccount: vi.fn(),
   updateDirectoryIntegration: vi.fn(),
+  updateDirectoryIntegrationIdentity: vi.fn(),
 }))
 
 const schedulerMocks = vi.hoisted(() => ({
@@ -141,6 +142,7 @@ vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
   testDirectoryIntegration: directoryMocks.testDirectoryIntegration,
   unbindDirectoryAccount: directoryMocks.unbindDirectoryAccount,
   updateDirectoryIntegration: directoryMocks.updateDirectoryIntegration,
+  updateDirectoryIntegrationIdentity: directoryMocks.updateDirectoryIntegrationIdentity,
 }))
 
 vi.mock('../../src/directory/directory-sync-scheduler', () => ({
@@ -255,6 +257,7 @@ async function invokeRoute(
 
 describe('adminDirectoryRouter', () => {
   beforeEach(() => {
+    directoryMocks.updateDirectoryIntegrationIdentity.mockReset()
     rbacMocks.isRbacAdmin.mockReset()
     auditMocks.auditLog.mockReset()
     directoryMocks.acknowledgeDirectorySyncAlert.mockReset()
@@ -1877,6 +1880,41 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  it('attributes identity metadata to the authenticated admin without scheduling or synchronizing', async () => {
+    const integrationId = 'd1000000-0000-4000-8000-000000000001'
+    const body = { corpId: 'synthetic-corp', appKey: 'synthetic-app', corpName: '合成企业', appName: '合成应用', confirm: false }
+    directoryMocks.updateDirectoryIntegrationIdentity.mockResolvedValue({ id: integrationId, config: { identityStatus: 'unverified' } })
+    const response = await invokeRoute('put', '/integrations/:integrationId/identity', {
+      params: { integrationId }, body, user: { id: 'actual-admin', role: 'admin' },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.updateDirectoryIntegrationIdentity).toHaveBeenCalledWith(integrationId, body, 'actual-admin')
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
+    expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'actual-admin', meta: { identityStatus: 'unverified' } }))
+  })
+
+  it.each([undefined, { id: 'ordinary-user', role: 'user' }])('protects identity confirmation with the platform admin gate (%j)', async (user) => {
+    rbacMocks.isRbacAdmin.mockResolvedValue(false)
+    const response = await invokeRoute('put', '/integrations/:integrationId/identity', {
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' }, user,
+    })
+    expect(response.statusCode).toBe(user ? 403 : 401)
+    expect(directoryMocks.updateDirectoryIntegrationIdentity).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [new DirectoryConflictError('changed'), 409],
+    [new DirectoryValidationError('invalid'), 400],
+  ])('maps identity confirmation failures without starting jobs (%s)', async (error, status) => {
+    directoryMocks.updateDirectoryIntegrationIdentity.mockRejectedValue(error)
+    const response = await invokeRoute('put', '/integrations/:integrationId/identity', {
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' }, user: { id: 'actual-admin', role: 'admin' },
+    })
+    expect(response.statusCode).toBe(status)
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
+  })
+
   it('supports admin checks via RBAC fallback', async () => {
     rbacMocks.isRbacAdmin.mockResolvedValue(true)
     directoryMocks.listDirectorySyncRuns.mockResolvedValue({
@@ -3078,10 +3116,10 @@ describe('adminDirectoryRouter', () => {
       return called
     }
 
-    it('is not vacuous: 22 routes carry one of the three ids (15 integration, 1 deprovision-events, 5 account, 1 alert)', () => {
+    it('is not vacuous: 23 routes carry scoped ids, including 17 integration paths', () => {
       const routes = paramRoutes()
-      expect(routes).toHaveLength(22)
-      expect(routes.filter((r) => r.params.includes('integrationId'))).toHaveLength(16)
+      expect(routes).toHaveLength(23)
+      expect(routes.filter((r) => r.params.includes('integrationId'))).toHaveLength(17)
       expect(routes.filter((r) => r.params.includes('accountId'))).toHaveLength(5)
       expect(routes.filter((r) => r.params.includes('alertId'))).toHaveLength(1)
     })
