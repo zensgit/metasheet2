@@ -808,6 +808,109 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     expect(seeded.status, JSON.stringify(seeded.body?.error ?? null)).toBe(200)
     expect(await structureCounts()).toEqual(countsBeforeSeed)
 
+    // R-66 ③ (owner 2026-10-29, R78): 备料主管理员 manages VIEWS (not fields) on the REAL registered project sheet.
+    // A real role in the stock-prep namespace carrying only `stock-prep:admin` (the stock-prep_admin template's one
+    // code), G1-granted `spreadsheet:write` on sheetA through the real port, its member admitted to the namespace:
+    // the member's REAL effective codes (rbac listUserPermissions on this query — namespace-admission filtered) and
+    // the REAL role rows decide. Views kept, fields clamped, in the REST and the transaction-bound resolver; over
+    // HTTP against the real router, a view is created and deleted while a field create and a sheet rename are
+    // refused. Control on real rows: the same code as a DIRECT user_permissions row on a member of the G1 floor
+    // role who also holds a stock-prep:read role (so the admission filter KEEPS the direct code) stays clamped.
+    const ROLE_SP_ADMIN = `stock-prep_s4adm_${suffix}`
+    const ROLE_SP_READ = `stock-prep_s4read_${suffix}`
+    const spAdminUser = `s4spadmin_${suffix}`
+    const spDirectUser = `s4spdirect_${suffix}`
+    // The same real role and the same real G1 grant, but NO stock-prep admission row / a DISABLED one.
+    const spNoAdmUser = `s4spnoadm_${suffix}`
+    const spOffAdmUser = `s4spoffadm_${suffix}`
+    const s4Users = [spAdminUser, spDirectUser, spNoAdmUser, spOffAdmUser]
+    try {
+      for (const id of s4Users) {
+        await pool.query('INSERT INTO users (id, password_hash, name, username) VALUES ($1, $2, $3, $4)', [id, 'not-a-hash', `S4 ${id.split('_')[0]}`, id])
+      }
+      await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2), ($3, $4)', [ROLE_SP_ADMIN, 'S4 备料主管理员', ROLE_SP_READ, 'S4 read'])
+      await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'stock-prep:admin'), ($2, 'stock-prep:read')", [ROLE_SP_ADMIN, ROLE_SP_READ])
+      await scopedApi().provisioning.grantSheetRoleWrite!({ projectId, sheetId: sheetA, objectId: objectA, roleIds: [ROLE_SP_ADMIN], actorId: 'u_s4_pull' })
+      await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($3, $4), ($3, $5)', [spAdminUser, ROLE_SP_ADMIN, spDirectUser, ROLE_A, ROLE_SP_READ])
+      await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'stock-prep:admin')", [spDirectUser])
+      await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', true, 'platform_admin'), ($2, 'stock-prep', true, 'platform_admin')", [spAdminUser, spDirectUser])
+      await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $3), ($2, $3)', [spNoAdmUser, spOffAdmUser, ROLE_SP_ADMIN])
+      await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', false, 'platform_admin')", [spOffAdmUser])
+
+      const spAdminCodes = await rbacListUserPermissions(spAdminUser, q as never)
+      expect(spAdminCodes).toEqual(['stock-prep:admin'])
+      const spDirectCodes = await rbacListUserPermissions(spDirectUser, q as never)
+      expect([...spDirectCodes].sort()).toEqual(['stock-prep:admin', 'stock-prep:read'])
+
+      const spAdminRest = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: spAdminUser, permissions: spAdminCodes, isAdminRole: false })
+      expect(spAdminRest.capabilities).toMatchObject({
+        canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
+        canManageFields: false, canManageViews: true,
+      })
+      expect(spAdminRest.stockPrepProjectSheetSchemaClamped).toBe(true)
+      const spAdminTxn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, spAdminUser)
+      expect(spAdminTxn.capabilities).toMatchObject({ canManageFields: false, canManageViews: true })
+      const spDirectRest = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: spDirectUser, permissions: spDirectCodes, isAdminRole: false })
+      expect(spDirectRest.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
+      const spDirectTxn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, spDirectUser)
+      expect(spDirectTxn.capabilities).toMatchObject({ canManageFields: false, canManageViews: false })
+      // Condition 2 carries the admission rule in every chain: the role holder WITHOUT an enabled stock-prep
+      // admission keeps nothing. REST holds the filtered list (the code is gone); the transaction-bound chain holds
+      // the UNFILTERED list (direct ∪ role ∪ legacy, the code is there) and must refuse on the statement alone; the
+      // REST resolver handed that same unfiltered list refuses the same way.
+      for (const [label, userId] of [['no admission row', spNoAdmUser], ['disabled admission row', spOffAdmUser]] as const) {
+        const filtered = await rbacListUserPermissions(userId, q as never)
+        expect(filtered, label).toEqual([])
+        const restFiltered = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId, permissions: filtered, isAdminRole: false })
+        expect(restFiltered.capabilities, label).toMatchObject({ canRead: true, canManageFields: false, canManageViews: false })
+        const txn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, userId)
+        expect(txn.permissions, label).toEqual(['stock-prep:admin'])
+        expect(txn.capabilities, label).toMatchObject({ canRead: true, canManageFields: false, canManageViews: false })
+        expect(txn.stockPrepProjectSheetSchemaClamped, label).toBe(true)
+        const restUnfiltered = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId, permissions: txn.permissions, isAdminRole: false })
+        expect(restUnfiltered.capabilities, label).toMatchObject({ canManageFields: false, canManageViews: false })
+      }
+      // The ordinary-sheet control: on the unclaimed derived twin nothing about ③ applies (no grant there → no views).
+      const spAdminTwin = await resolveSheetCapabilitiesForAccess(q as never, unclaimedSheet, { userId: spAdminUser, permissions: spAdminCodes, isAdminRole: false })
+      expect(spAdminTwin.capabilities).toMatchObject({ canManageFields: false, canManageViews: false })
+      expect('stockPrepProjectSheetSchemaClamped' in spAdminTwin).toBe(false)
+
+      const routeApp = (userId: string, perms: string[]) => {
+        const app = express()
+        app.use(express.json())
+        app.use((req, _res, next) => {
+          ;(req as unknown as { user: unknown }).user = { id: userId, roles: ['member'], perms }
+          next()
+        })
+        app.use('/api/multitable', univerMetaRouter())
+        return app
+      }
+      const spAdminApp = routeApp(spAdminUser, spAdminCodes)
+      const countsBeforeViews = await structureCounts()
+      const createdView = await supertestRequest(spAdminApp).post('/api/multitable/views').send({ sheetId: sheetA, name: 'S4 ③ view' })
+      expect(createdView.status, JSON.stringify(createdView.body?.error ?? null)).toBe(201)
+      const createdViewId = String(createdView.body?.data?.view?.id ?? createdView.body?.data?.id ?? '')
+      expect(createdViewId).not.toBe('')
+      expect((await structureCounts()).views).toBe(countsBeforeViews.views + 1)
+      const field = await supertestRequest(spAdminApp).post('/api/multitable/fields').send({ sheetId: sheetA, name: 'S4 ③ column', type: 'string' })
+      expect(field.status).toBe(403)
+      const rename = await supertestRequest(spAdminApp).patch(`/api/multitable/sheets/${sheetA}`).send({ name: 'S4 ③ renamed' })
+      expect(rename.status).toBe(403)
+      const directView = await supertestRequest(routeApp(spDirectUser, spDirectCodes)).post('/api/multitable/views').send({ sheetId: sheetA, name: 'S4 ③ direct view' })
+      expect(directView.status).toBe(403)
+      const deletedView = await supertestRequest(spAdminApp).delete(`/api/multitable/views/${createdViewId}`)
+      expect(deletedView.status, JSON.stringify(deletedView.body?.error ?? null)).toBe(200)
+      expect(await structureCounts()).toEqual(countsBeforeViews)
+    } finally {
+      await pool.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query("DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = $1", [ROLE_SP_ADMIN]).catch(() => {})
+      await pool.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [[ROLE_SP_ADMIN, ROLE_SP_READ]]).catch(() => {})
+      await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_SP_ADMIN, ROLE_SP_READ]]).catch(() => {})
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [s4Users]).catch(() => {})
+    }
+
     const grantsBefore = await permissionRows(sheetA)
     const historyBefore = await revisionCount(sheetA)
     expect(grantsBefore.some((row) => row.subject_type === 'role' && row.subject_id === ROLE_A && row.perm_code === 'spreadsheet:write')).toBe(true)
