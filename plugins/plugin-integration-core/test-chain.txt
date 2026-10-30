@@ -313,6 +313,9 @@ node __tests__/yida-send-authority-primitives.test.cjs
 node __tests__/yida-static-plan.test.cjs
 node __tests__/yida-token-client.test.cjs
 node __tests__/yida-token-exchange.test.cjs
+node __tests__/stock-preparation-manual-rows.test.cjs
+node __tests__/stock-preparation-manual-rows-pull.test.cjs
+node __tests__/stock-preparation-manual-rows-export.test.cjs
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---

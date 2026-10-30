@@ -21,8 +21,12 @@ const {
   StockPreparationProjectWriteLockError,
   isHostWriteFenceError,
 } = require('./stock-preparation-project-write-lock.cjs')
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §5.2): the reserved `manual:` namespace.
+const { isManualPrefixKey } = require('./stock-preparation-manual-rows.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
+// The ONE decision a key in the reserved namespace refuses (ADR §5.2): an ADD. Its per-decision code.
+const APPLY_MANUAL_KEY_RESERVED = 'APPLY_MANUAL_KEY_RESERVED'
 const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
   'create_record_failed',
   'duplicate_target_key',
@@ -609,6 +613,17 @@ async function callFencedRecordsApi(operation, writeFence, callback) {
 
 async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
   const key = decisionKey(decision, target)
+  // 人工补充行 B1 (ADR §5.2): an ADD never mints a key in the reserved `manual:` namespace (a PLM key starts with `{`,
+  // so only a defect or a forged plan gets here). Refused HERE, right after the key is taken and before any lookup or
+  // write, so this one decision fails APPLY_MANUAL_KEY_RESERVED and the run goes on. Deliberately NOT inside the shared
+  // `decisionKey`: the batch prefetch, the UPDATE / INACTIVE path, the result rows and the failure bookkeeping all
+  // call it, and putting the refusal there would fail every UPDATE / INACTIVE of such a key one by one.
+  if (isManualPrefixKey(key)) {
+    throw new StockPreparationApplyWriterError('an add decision must not carry a key in the reserved manual: namespace', {
+      code: APPLY_MANUAL_KEY_RESERVED,
+      decision: DECISIONS.ADD,
+    })
+  }
   let record = copyPayload(decision.record, 'decision.record')
   if (!Object.prototype.hasOwnProperty.call(record, target.keyField)) record[target.keyField] = key
   assertNoHumanFields(record, 'add record', humanFields)
@@ -1212,6 +1227,8 @@ function summarizeApplyResultForEvidence(result = {}) {
 
 module.exports = {
   APPLY_PERMISSIONS,
+  // 人工补充行 B1: the per-decision code of an ADD refused for a `manual:` key.
+  APPLY_MANUAL_KEY_RESERVED,
   // PR-8: the version fence's stop code (the lanes / store / decisions spell the same literal).
   CHANGE_PLAN_STALE_CODE,
   WRITER_STOP_REASONS,

@@ -19,6 +19,7 @@ import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
 import { defineStockPreparationProjectWriteLockRealDbCases } from './stock-preparation-project-write-lock-realdb.cases'
 import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stock-preparation-generic-writer-governance-realdb.cases'
+import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -502,3 +503,6 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
 defineStockPreparationProjectWriteLockRealDbCases()
 // Batch-refresh step 4 PR-6: the generic configured writers refuse governed stock-prep sheets (real PG, S6-*).
 defineStockPreparationGenericWriterGovernanceRealDbCases()
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §8 「B1 插件」 1 / 10): the pull never touches a `manual:` row, the
+// export carries 来源, and the R-60 boundary holds (real PG, MR-RD-*).
+defineStockPreparationManualRowsRealDbCases()

@@ -7939,6 +7939,10 @@ function requireStockPreparationAudit() {
             recordsApi: getMultitableRecordsApi(),
             tokenStore: context.storage,
             policyStore: context.storage,
+            // 人工补充行 B1 (ADR §5.3): the last small-lane pull's reminder lands in the plugin's own durable storage
+            // (one values-free record per sheet), best effort — logged, never the answer.
+            manualRowsStore: context.storage,
+            logger: routeLogger,
             conflictPolicyReview: body.conflictPolicyReview,
             // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
             // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
@@ -8507,6 +8511,8 @@ function requireStockPreparationAudit() {
               recordsApi: getMultitableRecordsApi(),
               tokenStore: context.storage,
               policyStore: context.storage,
+              // 人工补充行 B1 (ADR §5.3): same store as the dry-run route — the apply's in-lease reminder, best effort.
+              manualRowsStore: context.storage,
               // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
               // Absent (e.g. prod default) → undefined → apply fail-closed.
               sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
