@@ -56,6 +56,13 @@
 //     component of a real project inactive is a legitimate state, not an unknown project.
 
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §6): the `manual:` namespace and the 来源 classification.
+// Pure (no IO, no records verb), so the read-only contract above is unchanged.
+const {
+  ROW_SOURCES,
+  exportRowSourceOf,
+  isManualPrefixKey,
+} = require('./stock-preparation-manual-rows.cjs')
 
 // `permission` is the SERVER's own capability toward the managed table, asserted here as an internal
 // invariant. It is NOT the caller's tier and cannot be: the route passes a literal 'admin', so this
@@ -190,6 +197,20 @@ const EXPORT_COLUMN_IDS = Object.freeze(EXPORT_COLUMNS.map((column) => column.id
 // the warehouse need to read on the line) is answered by the customer; the column's existence is not.
 const CONTINUATION_NOTE_COLUMN = Object.freeze({ id: '__continuationNote', label: '沿用说明' })
 const CONTINUATION_HANDLE_LENGTH = 8
+// 来源 (人工补充行 B1, ADR §6; owner OQ3: no 来源 column on the sheet). ONE column, its own constant like 沿用说明 —
+// deliberately OUTSIDE EXPORT_COLUMNS and EXPORT_SOURCE_FIELD_IDS, so it is never field-resolved and never reported in
+// `unresolvedColumns`. Present ONLY when a PRINTED active row is not a PLM row (env sheet or project sheet alike);
+// placed right after the 30th column (仓库确认) and before 沿用说明, which stays last — so 沿用说明 is the 31st or the
+// 32nd column and a reader takes columns by header, never by position. A pure-PLM workbook, its headers and its
+// audit row are byte-identical to before (C09). The three values (stock-preparation-manual-rows.cjs
+// exportRowSourceOf): M′ => 人工补充; any other `manual:` prefix row and any other row with a creator => 人工（非补充）;
+// the rest => PLM.
+const SOURCE_COLUMN = Object.freeze({ id: '__source', label: '来源' })
+const SOURCE_LABELS = Object.freeze({
+  [ROW_SOURCES.MANUAL_SUPPLEMENT]: '人工补充',
+  [ROW_SOURCES.MANUAL_OTHER]: '人工（非补充）',
+  [ROW_SOURCES.PLM]: 'PLM',
+})
 // Every logical id the projection reads, including the fallback sources (which are never headers).
 const EXPORT_SOURCE_FIELD_IDS = Object.freeze([
   ...EXPORT_COLUMN_IDS,
@@ -440,6 +461,9 @@ const COMPONENT_SPEC_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id ==
 // not a logical field id and deliberately not projected: no EXPORT_COLUMN reads it, so it can never
 // reach a cell, and the double underscore keeps it out of any collision with a mapped column key.
 const ROW_IDENTITY_KEY = '__prepLineRecordId'
+// Where `unmapRow` parks a NON-PLM row's 来源 token (人工补充行 B1) — same rules as ROW_IDENTITY_KEY: never projected,
+// never a mapped column key. ABSENT on a PLM row, so a row without a creator or a `manual:` key unmaps exactly as before.
+const ROW_SOURCE_KEY = '__prepLineRowSource'
 
 // Blank (absent / null / whitespace-only) collapses to '' — the same blankness the projection's own
 // fallback uses (isBlankCell), so a cell that prints empty also sorts as empty.
@@ -607,7 +631,7 @@ function displayDedupeKey(row) {
 //
 // 编码器和展开层同一个:tokens 解析出来之后**重新** `JSON.stringify`,父 = 去掉最后一段 tokens 后
 // 再编码。这样节点身份与父身份都是规范串,不依赖存进表里那一串的空白/转义细节。
-// 这里不 require bom-expansion.cjs(本模块只依赖 common.cjs,见模块头「结构上只读」),
+// 这里不 require bom-expansion.cjs(本模块只依赖 common.cjs 与纯函数的 manual-rows.cjs,见模块头「结构上只读」),
 // 而是由用例把两边的编码器钉在一起(prep-line-export.test.cjs:encodeBomPath === makePath)。
 function encodeBomPath(tokens) {
   return JSON.stringify(tokens)
@@ -822,7 +846,7 @@ function resolveExportFieldBindings(target) {
   return { map, unbound }
 }
 
-function unmapRow(row, fieldIdMap) {
+function unmapRow(row, fieldIdMap, objectId = null) {
   const data = recordData(row)
   const inverse = {}
   for (const [logical, physical] of Object.entries(fieldIdMap)) inverse[physical] = logical
@@ -834,10 +858,27 @@ function unmapRow(row, fieldIdMap) {
   // record is the `{ id, data }` shape — when `recordData` fell back to treating the record itself
   // as the data bag there is no record id to speak of, and the key simply stays absent.
   if (data !== row && typeof row?.id === 'string' && row.id !== '') out[ROW_IDENTITY_KEY] = row.id
+  // 人工补充行 B1 (ADR §6): the row's 来源, decided HERE — the creator comes off the record ENVELOPE (never a cell),
+  // the key is the row's already-resolved 唯一键 (SORT_FIELD_IDS), `objectId` is the bound target's. Parked only for a
+  // non-PLM row.
+  const envelope = data !== row
+  const source = exportRowSourceOf({
+    objectId,
+    createdBy: envelope ? row.createdBy : undefined,
+    recordId: envelope ? row.id : undefined,
+    key: out.idempotencyKey,
+  })
+  if (source !== ROW_SOURCES.PLM) out[ROW_SOURCE_KEY] = source
   return out
 }
 
-async function queryAllMainRows(recordsApi, sheetId, fieldIdMap, projectNo) {
+function rowSourceOf(data) {
+  return data[ROW_SOURCE_KEY] === ROW_SOURCES.MANUAL_SUPPLEMENT || data[ROW_SOURCE_KEY] === ROW_SOURCES.MANUAL_OTHER
+    ? data[ROW_SOURCE_KEY]
+    : ROW_SOURCES.PLM
+}
+
+async function queryAllMainRows(recordsApi, sheetId, fieldIdMap, projectNo, objectId = null) {
   const physicalProjectNoKey = fieldIdMap.projectNo
   const rows = []
   for (let page = 0; page < READ_MAX_PAGES; page += 1) {
@@ -850,7 +891,7 @@ async function queryAllMainRows(recordsApi, sheetId, fieldIdMap, projectNo) {
     if (!Array.isArray(pageRows)) {
       throw new StockPreparationPrepLineExportError(500, 'PREP_LINE_EXPORT_RECORDS_API_INVALID', 'queryRecords must return an array', { sheetId })
     }
-    rows.push(...pageRows.map((row) => unmapRow(row, fieldIdMap)))
+    rows.push(...pageRows.map((row) => unmapRow(row, fieldIdMap, objectId)))
     if (pageRows.length < READ_PAGE_LIMIT) return rows
   }
   throw new StockPreparationPrepLineExportError(422, 'PREP_LINE_EXPORT_RESULT_TOO_LARGE', 'stock-preparation export exceeded the page bound', { maxPages: READ_MAX_PAGES })
@@ -917,7 +958,7 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
   const scopedProjectNo = requiredString(projectNo, 'projectNo')
 
   const resolution = resolveExportFieldBindings(boundTarget)
-  const allRows = await queryAllMainRows(api, boundTarget.sheetId, resolution.map, scopedProjectNo)
+  const allRows = await queryAllMainRows(api, boundTarget.sheetId, resolution.map, scopedProjectNo, boundTarget.objectId)
   if (allRows.length === 0) {
     throw new StockPreparationPrepLineExportError(
       404,
@@ -931,22 +972,37 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     throw new StockPreparationPrepLineExportError(422, 'PREP_LINE_EXPORT_ROWS_TOO_LARGE', 'stock-preparation export exceeded the row bound', { maxRows: MAX_EXPORT_ROWS })
   }
   const headers = EXPORT_COLUMNS.map((column) => column.label)
+  // 人工补充行 B1 (ADR §6 「去重吞行」): EVERY `manual:` prefix row stays OUT of the tree's identity and out of the
+  // display dedupe. Inside it a prefix row could swallow a PLM root and its whole subtree (it sorts before `{` on the
+  // 唯一键 tiebreak) or be swallowed itself, and a prefix row with a path would adopt PLM children. They are appended
+  // after the tree (and its stranded rows), in the flat comparator's order, so the export never loses one. For a sheet
+  // without a prefix row `treeRows` holds every active row and nothing below differs from before.
+  const treeRows = activeRows.filter((data) => !isManualPrefixKey(data.idempotencyKey))
+  const prefixRows = activeRows.filter((data) => isManualPrefixKey(data.idempotencyKey))
   // Deterministic hierarchy order BEFORE the projection — since F1c the DEPTH-FIRST BOM TREE
   // (orderRowsAsBomTree), 老系统 iterHandle 的形状,而不再只是「按父组件图号分带」。身份列认不出
   // 来的老部署自动退回 F1b 的平比较器,所以没有任何一种部署会比改之前更乱。
-  const ordering = orderRowsAsBomTree(activeRows)
+  const ordering = orderRowsAsBomTree(treeRows)
+  const printedRows = prefixRows.length > 0 ? ordering.rows.concat(sortExportRows(prefixRows)) : ordering.rows
   // PR-5: the 沿用说明 column exists only for a project with a live 沿用关系 (see CONTINUATION_NOTE_COLUMN);
-  // without one, `headers` and every row below are the pre-PR-5 projection byte for byte.
-  const notes = continuationNotesFor(activeRows, continuation)
+  // without one, `headers` and every row below are the pre-PR-5 projection byte for byte. (A prefix row is never a
+  // relationship's member nor its new parent: the planner never sees one.)
+  const notes = continuationNotesFor(treeRows, continuation)
+  // 来源 (ADR §6): only when a PRINTED active row is not a PLM row (a dedupe-collapsed row is not printed).
+  const sourceCounts = { [ROW_SOURCES.MANUAL_SUPPLEMENT]: 0, [ROW_SOURCES.MANUAL_OTHER]: 0, [ROW_SOURCES.PLM]: 0 }
+  for (const data of printedRows) sourceCounts[rowSourceOf(data)] += 1
+  const sourceColumn = sourceCounts[ROW_SOURCES.MANUAL_SUPPLEMENT] + sourceCounts[ROW_SOURCES.MANUAL_OTHER] > 0
   let continuedRowCount = 0
-  const rows = ordering.rows.map((data) => {
+  const rows = printedRows.map((data) => {
     const cells = EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column)))
+    if (sourceColumn) cells.push(SOURCE_LABELS[rowSourceOf(data)])
     if (notes === null) return cells
     const note = typeof data[ROW_IDENTITY_KEY] === 'string' ? notes.get(data[ROW_IDENTITY_KEY]) : undefined
     if (note !== undefined) continuedRowCount += 1
     cells.push(note === undefined ? '' : note)
     return cells
   })
+  if (sourceColumn) headers.push(SOURCE_COLUMN.label)
   if (notes !== null) headers.push(CONTINUATION_NOTE_COLUMN.label)
   return {
     projectNo: scopedProjectNo,
@@ -954,6 +1010,12 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     activeRowCount: activeRows.length,
     headers,
     rows,
+    // 人工补充行 B1, present only when the 来源 column is: values-free counts of the printed non-PLM rows.
+    ...(sourceColumn ? {
+      sourceColumn: true,
+      manualSupplementRowCount: sourceCounts[ROW_SOURCES.MANUAL_SUPPLEMENT],
+      manualOtherRowCount: sourceCounts[ROW_SOURCES.MANUAL_OTHER],
+    } : {}),
     // PR-5, present only when the 沿用说明 column is: values-free counts of the continued rows.
     ...(notes === null ? {} : { continuationColumn: true, continuedRowCount }),
     // Values-free ordering facts. `collapsedRowCount` is the ONE number that explains a workbook
@@ -1045,11 +1107,15 @@ module.exports = {
     pathIdentityOf,
     componentIdentityOf,
     rowSortNo,
+    rowSourceOf,
     unmapRow,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
     ROW_IDENTITY_KEY,
+    ROW_SOURCE_KEY,
     SCOPE_FIELD_IDS,
     SORT_FIELD_IDS,
+    SOURCE_COLUMN,
+    SOURCE_LABELS,
   },
 }
