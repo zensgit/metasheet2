@@ -86,7 +86,7 @@
     "s6aRuntimeAuthorityRealDbTest": "609da9054db15ced3567417b31ae743f2c3be1656f5e3d0874a77c3a4cbd0375",
     "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "1bd015f35eb30e4bc59894abab8d226d871eb06d4838c5d602ddf9af1eae1330",
-    "multitableOnpremPackageBuild": "ae6759221ff244e04ee4c87c2c50da7ee8ea5f7887bb059175d3575c38c6e105",
+    "multitableOnpremPackageBuild": "53c03e1e3f675c17bfa1b7861fefad4c8ba1be5a10e553a9dce5ba246f4148ea",
     "s6aPowershell51Workflow": "a2bbd2c9ec9fb82d3950a9923b4acdc3d3f59ea4672fd7a59b763e09be8acd4d"
   }
 }

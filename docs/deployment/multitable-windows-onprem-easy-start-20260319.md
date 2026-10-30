@@ -252,6 +252,14 @@ Detailed operator runbooks included in the package:
 - `docs/operations/integration-k3wise-internal-trial-runbook.md`
 - `docs/operations/integration-k3wise-live-gate-execution-package.md`
 
+## 9.2) Tasks (optional)
+
+Tasks are off in this package. To turn them on for a customer (the backend switch, a role with
+task access, and task access for each person), follow
+[tasks-enablement.md](./tasks-enablement.md) (`docs/deployment/tasks-enablement.md`, included in
+the package). Set the switch only after the install or upgrade steps above have finished, then
+restart the backend.
+
 ## 10) Upgrade later
 
 ```bash
