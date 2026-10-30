@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 // R5 (per-run summary block below): the DingTalk HTTP client is mocked so real
@@ -20,14 +21,20 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 }))
 
 import { query } from '../../src/db/pg'
+import { poolManager } from '../../src/integration/db/connection-pool'
+import type { DirectoryRunFilter } from '../../src/directory/directory-sync-observation-filter'
 import {
   countConsecutiveFailedRuns,
   getDirectoryInactiveLinkedMetric,
   getDirectoryManagerBindingCoverage,
 } from '../../src/directory/directory-sync-alert-delivery'
 import {
+  acknowledgeDirectorySyncAlert,
   createDirectoryIntegration,
+  DirectoryValidationError,
+  listDirectorySyncAlerts,
   listDirectorySyncRuns,
+  type DirectorySyncAlertFilter,
   syncDirectoryIntegration,
 } from '../../src/directory/directory-sync'
 
@@ -639,5 +646,192 @@ describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', (
   it('returns zero for a threshold high enough that nothing qualifies', async () => {
     const metric = await getDirectoryInactiveLinkedMetric(integrationId, 3650)
     expect(metric).toMatchObject({ count: 0, sample: [] })
+  })
+})
+
+// This file already belongs to the DB lane. Keep this outside describeIfDatabase so
+// an incorrectly invoked lane cannot report these SQL cases as skip-shaped success.
+it('observation SQL lane requires DATABASE_URL', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
+describe('observation service filters reject before SQL', () => {
+  it.each([
+    { label: 'unknown', value: 'unknown' },
+    { label: 'unsupported success', value: 'success' },
+    { label: 'empty', value: '' },
+    { label: 'whitespace', value: ' all ' },
+    { label: 'case variant', value: 'ALL' },
+    { label: 'array', value: ['all'] },
+    { label: 'object', value: { filter: 'all' } },
+    { label: 'number', value: 1 },
+    { label: 'boolean', value: false },
+    { label: 'null', value: null },
+  ])('rejects $label run and alert filters without issuing SQL', async ({ value }) => {
+    // Spy on the mutable pool instance: db/pg.query delegates here; ESM named
+    // exports themselves are not configurable. A regression cannot reach Postgres.
+    const sqlSpy = vi.spyOn(poolManager.get(), 'query').mockRejectedValue(new Error('Unexpected observation SQL'))
+    try {
+      const integrationId = randomUUID()
+      await expect(listDirectorySyncRuns(
+        integrationId, { limit: 2, offset: 0 }, value as DirectoryRunFilter,
+      )).rejects.toBeInstanceOf(DirectoryValidationError)
+      await expect(listDirectorySyncAlerts(
+        integrationId, { limit: 2, offset: 0 }, value as DirectorySyncAlertFilter,
+      )).rejects.toBeInstanceOf(DirectoryValidationError)
+      expect(sqlSpy).not.toHaveBeenCalled()
+    } finally {
+      sqlSpy.mockRestore()
+    }
+  })
+})
+
+describeIfDatabase('observation filters and tied pagination (real DB)', () => {
+  const timestamp = '2026-01-02T03:04:05.000Z'
+  const actor = 'system:directory-observation-test'
+  const statuses = ['all', 'running', 'completed', 'failed', 'aborted'] as const
+  const filters = ['all', 'pending', 'acknowledged'] as const
+  const scopes = [
+    { label: 'primary', copies: [3, 3, 3], pending: 5, acknowledged: 3 },
+    { label: 'other', copies: [2, 1, 1], pending: 1, acknowledged: 4 },
+  ].map((scope) => ({
+    label: scope.label,
+    integrationId: randomUUID(),
+    runs: [
+      ...(['completed', 'failed', 'aborted'] as const).flatMap((status, index) =>
+        Array.from({ length: scope.copies[index] }, () => ({ id: randomUUID(), status }))),
+      // The lease index permits at most ONE running row per integration.
+      { id: randomUUID(), status: 'running' as const },
+    ],
+    alerts: Array.from({ length: scope.pending + scope.acknowledged }, (_, index) => ({
+      id: randomUUID(), acknowledged: index >= scope.pending,
+    })),
+  }))
+
+  beforeAll(async () => {
+    for (const scope of scopes) {
+      await query(
+        `INSERT INTO directory_integrations (id, name, corp_id) VALUES ($1, $2, $3)`,
+        [scope.integrationId, `directory-sync-alert-coverage-ops-${scope.integrationId}`, `dsac-ops-${scope.integrationId}`],
+      )
+      // Insert in the opposite ID order to the required tie-breaker, so physical
+      // insertion order cannot accidentally supply the expected descending pages.
+      for (const run of [...scope.runs].sort((a, b) => a.id.localeCompare(b.id))) {
+        await query(
+          `INSERT INTO directory_sync_runs (id, integration_id, status, started_at, finished_at, trigger_source)
+           VALUES ($1, $2, $3, $4, $5, 'manual')`,
+          [run.id, scope.integrationId, run.status, timestamp, run.status === 'running' ? null : timestamp],
+        )
+      }
+      for (const alert of [...scope.alerts].sort((a, b) => a.id.localeCompare(b.id))) {
+        await query(
+          `INSERT INTO directory_sync_alerts
+             (id, integration_id, run_id, level, code, message, details, acknowledged_at, acknowledged_by, created_at)
+           VALUES ($1, $2, $3, 'warning', 'root_department_sparse', 'Synthetic observation', '{}'::jsonb, $4, $5, $6)`,
+          [alert.id, scope.integrationId, scope.runs[0].id, alert.acknowledged ? timestamp : null, alert.acknowledged ? actor : null, timestamp],
+        )
+      }
+    }
+  })
+
+  afterAll(async () => {
+    // Generated IDs are known before setup starts, including on partial failure.
+    // Delete exact fixtures only; do not truncate or touch other integrations.
+    await query(`DELETE FROM directory_sync_alerts WHERE id = ANY($1::uuid[])`, [scopes.flatMap((scope) => scope.alerts.map((alert) => alert.id))])
+    await query(`DELETE FROM directory_sync_runs WHERE id = ANY($1::uuid[])`, [scopes.flatMap((scope) => scope.runs.map((run) => run.id))])
+    await query(`DELETE FROM directory_integrations WHERE id = ANY($1::uuid[])`, [scopes.map((scope) => scope.integrationId)])
+  })
+
+  it.each(scopes.flatMap((scope) => statuses.map((status) => ({ scope, label: scope.label, status }))))(
+    '$label runs: $status count and rows share integration/status and deterministic pages',
+    async ({ scope, status }) => {
+      const expected = scope.runs
+        .filter((run) => status === 'all' || run.status === status)
+        .sort((a, b) => b.id.localeCompare(a.id))
+      const seen: string[] = []
+      for (let offset = 0; offset <= expected.length; offset += 2) {
+        const page = await listDirectorySyncRuns(scope.integrationId, { limit: 2, offset }, status)
+        expect(page.total).toBe(expected.length)
+        expect(page.items.map((run) => ({ id: run.id, integrationId: run.integrationId, status: run.status }))).toEqual(
+          expected.slice(offset, offset + 2).map((run) => ({ ...run, integrationId: scope.integrationId })),
+        )
+        seen.push(...page.items.map((run) => run.id))
+      }
+      const beyond = await listDirectorySyncRuns(scope.integrationId, { limit: 2, offset: expected.length }, status)
+      expect(beyond).toEqual({ items: [], total: expected.length })
+      expect(seen).toEqual(expected.map((run) => run.id))
+      expect(new Set(seen).size).toBe(seen.length)
+      if (status === 'all') {
+        expect(await listDirectorySyncRuns(scope.integrationId, { limit: 2, offset: 0 })).toEqual(
+          await listDirectorySyncRuns(scope.integrationId, { limit: 2, offset: 0 }, 'all'),
+        )
+      }
+    },
+  )
+
+  async function assertAlertPages(scope: typeof scopes[number], filter: DirectorySyncAlertFilter) {
+    const counts = {
+      total: scope.alerts.length,
+      pending: scope.alerts.filter((alert) => !alert.acknowledged).length,
+      acknowledged: scope.alerts.filter((alert) => alert.acknowledged).length,
+    }
+    const expected = scope.alerts
+      .filter((alert) => filter === 'all' || alert.acknowledged === (filter === 'acknowledged'))
+      .sort((a, b) => Number(a.acknowledged) - Number(b.acknowledged) || b.id.localeCompare(a.id))
+    const seen: string[] = []
+    for (let offset = 0; offset <= expected.length; offset += 2) {
+      const page = await listDirectorySyncAlerts(scope.integrationId, { limit: 2, offset }, filter)
+      expect(page.total).toBe(expected.length)
+      expect(page.counts).toEqual(counts)
+      expect(page.items.map((alert) => ({
+        id: alert.id, integrationId: alert.integrationId, runId: alert.runId,
+        acknowledged: alert.acknowledgedAt !== null, acknowledgedBy: alert.acknowledgedBy,
+      }))).toEqual(expected.slice(offset, offset + 2).map((alert) => ({
+        ...alert, integrationId: scope.integrationId, runId: scope.runs[0].id,
+        acknowledgedBy: alert.acknowledged ? actor : null,
+      })))
+      seen.push(...page.items.map((alert) => alert.id))
+    }
+    expect(await listDirectorySyncAlerts(scope.integrationId, { limit: 2, offset: expected.length }, filter)).toEqual({
+      items: [], total: expected.length, counts,
+    })
+    expect(seen).toEqual(expected.map((alert) => alert.id))
+    expect(new Set(seen).size).toBe(seen.length)
+  }
+
+  it.each(scopes.flatMap((scope) => filters.map((filter) => ({ scope, label: scope.label, filter }))))(
+    '$label alerts: $filter pages retain global counts and use unique ID ties within ack state',
+    async ({ scope, filter }) => {
+      await assertAlertPages(scope, filter)
+      if (filter === 'all') {
+        expect(await listDirectorySyncAlerts(scope.integrationId, { limit: 2, offset: 0 })).toEqual(
+          await listDirectorySyncAlerts(scope.integrationId, { limit: 2, offset: 0 }, 'all'),
+        )
+      }
+    },
+  )
+
+  it('acknowledgement moves only the selected integration counts and preserves tied pages and first actor', async () => {
+    const scope = scopes[0]
+    const alert = scope.alerts.find((item) => !item.acknowledged)!
+    try {
+      const first = await acknowledgeDirectorySyncAlert(alert.id, actor)
+      expect(first).toMatchObject({ id: alert.id, integrationId: scope.integrationId, acknowledgedBy: actor })
+      expect(first?.acknowledgedAt).not.toBeNull()
+      const repeated = await acknowledgeDirectorySyncAlert(alert.id, 'system:other-observation-actor')
+      expect(repeated?.acknowledgedAt).toEqual(first?.acknowledgedAt)
+      expect(repeated?.acknowledgedBy).toBe(actor)
+      alert.acknowledged = true
+      for (const filter of filters) {
+        await assertAlertPages(scope, filter)
+        await assertAlertPages(scopes[1], filter)
+      }
+    } finally {
+      await query(
+        `UPDATE directory_sync_alerts SET acknowledged_at = NULL, acknowledged_by = NULL WHERE id = $1 AND integration_id = $2`,
+        [alert.id, scope.integrationId],
+      )
+      alert.acknowledged = false
+    }
   })
 })

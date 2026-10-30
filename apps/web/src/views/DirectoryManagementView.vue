@@ -1707,8 +1707,8 @@
                 :key="option.value"
                 class="directory-admin__button directory-admin__button--secondary"
                 :class="{ 'directory-admin__button--active': alertFilter === option.value }"
+                :data-testid="'directory-alerts-filter-' + option.value"
                 type="button"
-                :disabled="loadingAlerts"
                 @click="void updateAlertFilter(option.value)"
               >
                 {{ option.label }}{{ alertCounts[option.value] > 0 ? ` (${alertCounts[option.value]})` : '' }}
@@ -1724,8 +1724,8 @@
             </div>
           </div>
           <div v-if="loadingAlerts" class="directory-admin__empty">最近告警加载中...</div>
-          <div v-else-if="filteredAlerts.length === 0" class="directory-admin__empty">暂无告警</div>
-          <article v-for="alert in filteredAlerts" :key="alert.id" class="directory-admin__alert">
+          <div v-else-if="alerts.length === 0" class="directory-admin__empty">暂无告警</div>
+          <article v-for="alert in alerts" :key="alert.id" class="directory-admin__alert">
             <div class="directory-admin__alert-head">
               <div>
                 <strong>{{ readAlertLevelLabel(alert.level) }}</strong>
@@ -1741,6 +1741,14 @@
               </div>
             </div>
             <p>{{ alert.message }}</p>
+            <details v-if="directoryAlertDetailRows(alert.details).length" data-testid="directory-alert-details">
+              <summary>告警详情</summary>
+              <dl>
+                <template v-for="detail in directoryAlertDetailRows(alert.details)" :key="detail.label">
+                  <dt>{{ detail.label }}</dt><dd>{{ detail.value }}</dd>
+                </template>
+              </dl>
+            </details>
             <p v-if="alert.acknowledgedAt" class="directory-admin__hint">
               确认时间：{{ formatDateTime(alert.acknowledgedAt) }}{{ alert.acknowledgedBy ? ` · ${alert.acknowledgedBy}` : '' }}
             </p>
@@ -1755,6 +1763,11 @@
               </button>
             </div>
           </article>
+          <nav class="directory-admin__actions" aria-label="告警分页" data-testid="directory-alert-page">
+            <button type="button" class="directory-admin__button" data-testid="directory-alerts-prev" :disabled="loadingAlerts || alertPage <= 1" @click="void changeAlertPage(alertPage - 1)">上一页</button>
+            <span>第 {{ alertPage }} / {{ alertPages }} 页 · 共 {{ alertTotal }} 条</span>
+            <button type="button" class="directory-admin__button" data-testid="directory-alerts-next" :disabled="loadingAlerts || alertPage >= alertPages" @click="void changeAlertPage(alertPage + 1)">下一页</button>
+          </nav>
         </section>
 
         <section v-if="selectedIntegration" class="directory-admin__section">
@@ -2142,11 +2155,17 @@
               <h3>运行记录</h3>
               <p class="directory-admin__hint">展示最近同步执行结果与聚合统计。</p>
             </div>
-            <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingRuns" @click="void loadRuns(selectedIntegration.id)">
-              {{ loadingRuns ? '刷新中...' : '刷新记录' }}
-            </button>
+            <div class="directory-admin__actions">
+              <button v-for="option in runStatusOptions" :key="option.value" type="button" class="directory-admin__button directory-admin__button--secondary"
+                :class="{ 'directory-admin__button--active': runStatus === option.value }" :data-testid="'directory-runs-filter-' + option.value"
+                @click="void updateRunStatus(option.value)">{{ option.label }}</button>
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingRuns" @click="void loadRuns(selectedIntegration.id)">
+                {{ loadingRuns ? '刷新中...' : '刷新记录' }}
+              </button>
+            </div>
           </div>
-          <div v-if="runs.length === 0" class="directory-admin__empty">暂无运行记录</div>
+          <div v-if="loadingRuns" class="directory-admin__empty">运行记录加载中...</div>
+          <div v-else-if="runs.length === 0" class="directory-admin__empty">暂无运行记录</div>
           <article v-for="run in runs" :key="run.id" class="directory-admin__run">
             <div class="directory-admin__run-head">
               <strong>{{ run.status }}</strong>
@@ -2191,6 +2210,11 @@
             </p>
             <p v-if="run.errorMessage" class="directory-admin__status directory-admin__status--error">{{ run.errorMessage }}</p>
           </article>
+          <nav class="directory-admin__actions" aria-label="运行记录分页" data-testid="directory-run-page">
+            <button type="button" class="directory-admin__button" data-testid="directory-runs-prev" :disabled="loadingRuns || runPage <= 1" @click="void changeRunPage(runPage - 1)">上一页</button>
+            <span>第 {{ runPage }} / {{ runPages }} 页 · 共 {{ runTotal }} 条</span>
+            <button type="button" class="directory-admin__button" data-testid="directory-runs-next" :disabled="loadingRuns || runPage >= runPages" @click="void changeRunPage(runPage + 1)">下一页</button>
+          </nav>
         </section>
 
         <DirectoryDeprovisionEvidencePanel
@@ -2218,6 +2242,8 @@ import {
   type DirectoryRoleCatalogItem,
 } from './directoryConfigPickerOptions'
 import { apiFetch } from '../utils/api'
+import { useDirectorySyncObservability, type DirectoryObservationAlert as DirectorySyncAlert, type DirectoryObservationRun as DirectoryRun } from '../composables/useDirectorySyncObservability'
+import { directoryAlertDetailRows } from './directoryAlertDetails'
 import {
   DINGTALK_REDIRECT_URI_REQUIREMENT,
   formatDingTalkLoginEnvList,
@@ -2261,15 +2287,6 @@ type DirectoryIntegration = {
     linkedCount: number
     lastRunStatus: string | null
   }
-}
-
-type DirectoryRun = {
-  id: string
-  status: string
-  startedAt: string
-  finishedAt: string | null
-  stats: Record<string, unknown>
-  errorMessage: string | null
 }
 
 // Mirrors DirectorySyncPreview from packages/core-backend/src/directory/directory-sync.ts
@@ -2326,21 +2343,7 @@ type DirectoryScheduleSnapshot = {
   observationMessage: string
 }
 
-type DirectoryAlertFilter = 'all' | 'pending' | 'acknowledged'
 type DirectoryDepartmentScopeFilter = 'all' | 'configured' | 'issues' | 'inactive' | 'unlinked' | 'staleBatch' | DirectoryDepartmentTargetField
-
-type DirectorySyncAlert = {
-  id: string
-  integrationId: string
-  runId: string | null
-  level: 'info' | 'warning' | 'error'
-  code: string
-  message: string
-  details: Record<string, unknown> | null
-  createdAt: string
-  acknowledgedAt: string | null
-  acknowledgedBy: string | null
-}
 
 type DirectoryReviewItemFilter = 'all' | 'pending_binding' | 'inactive_linked' | 'missing_identifier'
 
@@ -2577,11 +2580,9 @@ type DirectoryDraft = {
 }
 
 const integrations = ref<DirectoryIntegration[]>([])
-const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
 const departments = ref<DirectoryDepartment[]>([])
 const scheduleSnapshot = ref<DirectoryScheduleSnapshot | null>(null)
-const alerts = ref<DirectorySyncAlert[]>([])
 const reviewItems = ref<DirectoryReviewItem[]>([])
 const accountsSectionRef = ref<HTMLElement | null>(null)
 const accountPageSizeOptions = [25, 50, 100]
@@ -2591,10 +2592,19 @@ const accountTotal = ref(0)
 const focusedAccountId = ref('')
 const pendingFocusedAccountScroll = ref(false)
 const selectedIntegrationId = ref('')
+const observation = useDirectorySyncObservability(selectedIntegrationId, message => setStatus(message, 'error'))
+const {
+  runs, alerts, loadingRuns, loadingAlerts, runPage, alertPage, runTotal, alertTotal,
+  runPages, alertPages, runStatus, alertFilter, alertCounts,
+  loadRuns, loadAlerts, changeRunPage, changeAlertPage, updateRunStatus, updateAlertFilter,
+} = observation
+const runStatusOptions = [
+  { value: 'all' as const, label: '全部' }, { value: 'running' as const, label: '运行中' },
+  { value: 'completed' as const, label: '已完成' }, { value: 'failed' as const, label: '失败' },
+  { value: 'aborted' as const, label: '已中止' },
+]
 const loading = ref(false)
-const loadingRuns = ref(false)
 const loadingSchedule = ref(false)
-const loadingAlerts = ref(false)
 const loadingReviewItems = ref(false)
 const loadingMoreReviewItems = ref(false)
 const loadingAccounts = ref(false)
@@ -2684,7 +2694,6 @@ const roleCatalogLoaded = ref(false)
 const roleCatalogLoading = ref(false)
 const roleCatalogError = ref('')
 const accountQuery = ref('')
-const alertFilter = ref<DirectoryAlertFilter>('all')
 const reviewFilter = ref<DirectoryReviewItemFilter>('all')
 const pendingBindingView = ref<PendingBindingView>('recommended')
 const pendingBindingViewTouched = ref(false)
@@ -2796,16 +2805,6 @@ const accountRangeEnd = computed(() => (
     ? 0
     : Math.min(accountPage.value * accountPageSize.value, accountTotal.value)
 ))
-const alertCounts = computed<Record<DirectoryAlertFilter, number>>(() => ({
-  all: alerts.value.length,
-  pending: alerts.value.filter((item) => !item.acknowledgedAt).length,
-  acknowledged: alerts.value.filter((item) => Boolean(item.acknowledgedAt)).length,
-}))
-const filteredAlerts = computed(() => {
-  if (alertFilter.value === 'pending') return alerts.value.filter((item) => !item.acknowledgedAt)
-  if (alertFilter.value === 'acknowledged') return alerts.value.filter((item) => Boolean(item.acknowledgedAt))
-  return alerts.value
-})
 const reviewCounts = computed<Record<DirectoryReviewItemFilter, number>>(() => ({
   all: reviewItems.value.length,
   pending_binding: reviewItems.value.filter((item) => item.kind === 'pending_binding').length,
@@ -3149,6 +3148,7 @@ function syncDirectoryNavigationFromLocation(): boolean {
 
 function resetDraft() {
   selectedIntegrationId.value = ''
+  acknowledgingAlertId.value = ''
   testResult.value = null
   runs.value = []
   accounts.value = []
@@ -3171,7 +3171,6 @@ function resetDraft() {
   accountPageSize.value = accountPageSizeOptions[0]
   accountTotal.value = 0
   accountQuery.value = ''
-  alertFilter.value = 'all'
   reviewFilter.value = 'all'
   pendingBindingView.value = 'recommended'
   pendingBindingViewTouched.value = false
@@ -4070,6 +4069,7 @@ async function selectIntegration(
   // background-sync poll must survive those).
   if (pollingRunId.value && pollingIntegrationId !== integrationId) stopRunPolling()
   if (previewResult.value && previewResult.value.integrationId !== integrationId) previewResult.value = null
+  if (selectedIntegrationId.value !== integrationId) acknowledgingAlertId.value = ''
   selectedIntegrationId.value = integrationId
   approvalCardLinkSecretEnvOverrideActive.value = false
   testResult.value = null
@@ -4090,7 +4090,6 @@ async function selectIntegration(
   accountPage.value = 1
   accountTotal.value = 0
   reviewBatchProgress.value = null
-  alertFilter.value = 'all'
   reviewFilter.value = 'all'
   pendingBindingView.value = 'recommended'
   pendingBindingViewTouched.value = false
@@ -4988,6 +4987,7 @@ let runPollStartedAtMs = 0
 
 async function pollAsyncRun(integrationId: string, runId: string, token: number): Promise<void> {
   let body: unknown = null
+  const observationVersion = observation.runPollVersion()
   let responseOk = false
   try {
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/runs?page=1&pageSize=10`)
@@ -5002,10 +5002,10 @@ async function pollAsyncRun(integrationId: string, runId: string, token: number)
     setStatus(readApiError(body, '后台同步状态查询失败，已停止轮询，请手动刷新运行记录'), 'error')
     return
   }
-  const data = (body as { data?: { items?: unknown } } | null)?.data
+  const data = (body as { data?: { items?: unknown; total?: unknown } } | null)?.data
   const items = data && Array.isArray(data.items) ? (data.items as DirectoryRun[]) : []
-  // Keep the 运行记录 panel live while polling — it is the run-status surface.
-  runs.value = items
+  // A first-page background poll must never replace a newer page or filter selection.
+  observation.applyFirstPageRunPoll(observationVersion, integrationId, items, data?.total)
   const run = items.find((item) => item.id === runId)
   if (run && run.status !== 'running') {
     stopRunPolling()
@@ -5222,21 +5222,6 @@ async function loadDepartments(integrationId: string, options: { force?: boolean
   }
 }
 
-async function loadRuns(integrationId: string) {
-  loadingRuns.value = true
-  try {
-    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/runs?page=1&pageSize=10`)
-    const body = await readJson(response)
-    if (!response.ok) throw new Error(readApiError(body, '加载同步记录失败'))
-    runs.value = Array.isArray(body?.data?.items) ? body.data.items : []
-  } catch (error) {
-    runs.value = []
-    setStatus(error instanceof Error ? error.message : '加载同步记录失败', 'error')
-  } finally {
-    loadingRuns.value = false
-  }
-}
-
 async function loadScheduleSnapshot(integrationId: string) {
   loadingSchedule.value = true
   try {
@@ -5249,22 +5234,6 @@ async function loadScheduleSnapshot(integrationId: string) {
     setStatus(error instanceof Error ? error.message : '加载自动同步观测失败', 'error')
   } finally {
     loadingSchedule.value = false
-  }
-}
-
-async function loadAlerts(integrationId: string) {
-  loadingAlerts.value = true
-  try {
-    const params = new URLSearchParams({ page: '1', pageSize: '20', filter: 'all' })
-    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/alerts?${params.toString()}`)
-    const body = await readJson(response)
-    if (!response.ok) throw new Error(readApiError(body, '加载最近告警失败'))
-    alerts.value = Array.isArray(body?.data?.items) ? body.data.items : []
-  } catch (error) {
-    alerts.value = []
-    setStatus(error instanceof Error ? error.message : '加载最近告警失败', 'error')
-  } finally {
-    loadingAlerts.value = false
   }
 }
 
@@ -5351,10 +5320,6 @@ async function loadReviewItems(integrationId: string, options: { append?: boolea
     if (append) loadingMoreReviewItems.value = false
     else loadingReviewItems.value = false
   }
-}
-
-async function updateAlertFilter(value: DirectoryAlertFilter) {
-  alertFilter.value = value
 }
 
 async function updateReviewFilter(value: DirectoryReviewItemFilter) {
@@ -5459,19 +5424,26 @@ function matchesPendingBindingView(item: DirectoryReviewItem): boolean {
 
 async function acknowledgeAlert(alert: DirectorySyncAlert) {
   if (!selectedIntegration.value || alert.acknowledgedAt) return
+  const integrationId = selectedIntegration.value.id
+  const context = observation.contextVersion()
+  const current = () => selectedIntegrationId.value === integrationId && context === observation.contextVersion()
   acknowledgingAlertId.value = alert.id
   try {
     const response = await apiFetch(`/api/admin/directory/alerts/${alert.id}/ack`, {
       method: 'POST',
     })
+    if (!current()) return
     const body = await readJson(response)
+    if (!current()) return
     if (!response.ok) throw new Error(readApiError(body, '确认告警失败'))
-    await loadAlerts(selectedIntegration.value.id)
+    const refreshed = await loadAlerts(integrationId)
+    if (!current() || !refreshed) return
     setStatus('目录告警已确认')
   } catch (error) {
+    if (!current()) return
     setStatus(error instanceof Error ? error.message : '确认告警失败', 'error')
   } finally {
-    acknowledgingAlertId.value = ''
+    if (current() && acknowledgingAlertId.value === alert.id) acknowledgingAlertId.value = ''
   }
 }
 

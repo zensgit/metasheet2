@@ -142,6 +142,21 @@ function requiredLaneExecCommand(script: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it.each([
+    'apps/web/src/composables/useDirectorySyncObservability.ts',
+    'apps/web/src/views/directoryAlertDetails.ts',
+    'apps/web/tests/directoryManagementViewObservability.spec.ts',
+  ])('classifies and executes directory observation regression for %s', path => {
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain(path)
+    const cases = workflow.match(/case "\$path" in([\s\S]*?)\)\s*relevant=true/)?.[1]
+    expect(cases).toBeTruthy()
+    expect(cases!.split(/\|\\?\s*/).map(value => value.trim())).toContain(path)
+    expect(targetedRunCommand(workflow).split(/\s+/)).toContain('directoryManagementViewObservability')
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    expect(requiredLaneExecCommand(required).split(/\s+/)).toContain('directoryManagementViewObservability')
+  })
+
   it('carries server clock and admin control specs in the classifiers and both test lanes', () => {
     const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
     const required = requiredLaneExecCommand(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')).split(/\s+/)

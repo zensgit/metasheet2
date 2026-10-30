@@ -1693,6 +1693,7 @@ exec npx vitest run \
   directoryConfigPickers \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
+  directoryManagementViewObservability \
   featureFlagsApprovalMobile \
   formViewValidation \
   integrationErrorCodeLabels \

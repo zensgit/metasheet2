@@ -1,3 +1,4 @@
+import { readDirectoryRunFilter, readDirectoryAlertFilter } from '../directory/directory-sync-observation-filter'
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { auditLog } from '../audit/audit'
@@ -77,9 +78,9 @@ const logger = new Logger('AdminDirectoryRoutes')
 const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function normalizeAlertFilter(value: unknown): 'all' | 'pending' | 'acknowledged' {
-  const normalized = typeof value === 'string' ? value.trim() : ''
-  if (normalized === 'pending' || normalized === 'acknowledged') return normalized
-  return 'all'
+  const filter = readDirectoryAlertFilter(value)
+  if (filter === null) throw new DirectoryValidationError('filter must be all, pending or acknowledged')
+  return filter
 }
 
 function normalizeReviewFilter(value: unknown): 'all' | 'pending_binding' | 'inactive_linked' | 'missing_identifier' {
@@ -797,7 +798,11 @@ export function adminDirectoryRouter(): Router {
         defaultPageSize: 20,
         maxPageSize: 100,
       })
-      const result = await listDirectorySyncRuns(req.params.integrationId, { limit: pageSize, offset })
+      const status = readDirectoryRunFilter(req.query.status)
+      if (status === null) throw new DirectoryValidationError('status must be all, running, completed, failed or aborted')
+      const result = status === 'all'
+        ? await listDirectorySyncRuns(req.params.integrationId, { limit: pageSize, offset })
+        : await listDirectorySyncRuns(req.params.integrationId, { limit: pageSize, offset }, status)
       jsonOk(res, {
         items: result.items,
         total: result.total,
