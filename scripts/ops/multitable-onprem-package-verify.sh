@@ -1061,6 +1061,7 @@ required=(
   "plugins/plugin-integration-core/plugin.json"
   "plugins/plugin-integration-core/index.cjs"
   "plugins/plugin-integration-core/lib/http-routes.cjs"
+  "plugins/plugin-integration-core/lib/yida-connection-probe.cjs"
   "plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs"
