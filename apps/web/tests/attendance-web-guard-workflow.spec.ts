@@ -142,6 +142,21 @@ function requiredLaneExecCommand(script: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it.each([
+    ['featureFlagsAttendanceGroupEffectivePolicyPanel.spec.ts', 'featureFlagsAttendanceGroupEffectivePolicyPanel', 'featureFlagsAttendanceGroupEffectivePolicyPanel'],
+    ['attendance-decision-trace-metric.spec.ts', 'attendance-decision-trace-metric', 'attendance-decision-trace-metric'],
+  ])('classifies and executes the closeout regression in both web lanes: %s', (spec, token, requiredToken) => {
+    const path = `apps/web/tests/${spec}`
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain(path)
+    const cases = workflow.match(/case "\$path" in([\s\S]*?)\)\s*relevant=true/)?.[1]
+    expect(cases).toBeTruthy()
+    expect(cases!.split(/\|\\?\s*/).map(value => value.trim())).toContain(path)
+    expect(targetedRunCommand(workflow).split(/\s+/)).toContain(token)
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    expect(requiredLaneExecCommand(required).split(/\s+/)).toContain(requiredToken)
+  })
+
   it('carries server clock and admin control specs in the classifiers and both test lanes', () => {
     const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
     const required = requiredLaneExecCommand(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')).split(/\s+/)

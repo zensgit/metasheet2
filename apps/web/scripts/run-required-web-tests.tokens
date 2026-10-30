@@ -144,6 +144,7 @@ attendance-approval-option-hint
 attendance-approval-option-wiring
 attendance-daily-calendar-copy
 attendance-date-only-format
+attendance-decision-trace-metric
 attendance-experience-entrypoints
 attendance-group-fixed-schedule
 attendance-import-preview-regression.spec.ts
@@ -224,6 +225,7 @@ directoryManagementView
 featureFlags.plm.spec.ts
 featureFlagsApprovalAttachments
 featureFlagsApprovalMobile
+featureFlagsAttendanceGroupEffectivePolicyPanel
 formViewValidation
 fwb-rule-authoring
 fwb-rule-authoring-helpers
