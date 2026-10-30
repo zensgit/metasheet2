@@ -175,6 +175,12 @@ function createRefreshGovernanceEnv(options = {}) {
   const packInstallStore = options.packInstallStore === undefined ? createPackInstallStoreFake() : options.packInstallStore
   const sourceBindingStore = options.sourceBindingStore === undefined ? null : options.sourceBindingStore
   const bump = refreshKit.createFakeBumpWithin()
+  // Step 5 PR-8: the audit row a reconciliation appends when it invalidates a confirmed change plan — recorded here
+  // (with the handle it rode, so a suite can assert it is the reconciliation's own transaction handle).
+  const invalidationAudits = []
+  async function recordInvalidationAudit(trx, event) {
+    invalidationAudits.push({ trx, event: refreshKit.clone(event) })
+  }
 
   function handleFor(tenantId = DEFAULT_TENANT, overrides = {}) {
     const pick = (name, fallback) => (Object.prototype.hasOwnProperty.call(overrides, name) ? overrides[name] : fallback)
@@ -187,6 +193,7 @@ function createRefreshGovernanceEnv(options = {}) {
       projectId: pick('projectId', `${tenantId}:integration-core`),
       defaultObjectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
       extFieldMapping: pick('extFieldMapping', options.extFieldMapping || null),
+      auditWithin: pick('auditWithin', recordInvalidationAudit),
     })
   }
 
@@ -213,6 +220,7 @@ function createRefreshGovernanceEnv(options = {}) {
     packInstallStore,
     sourceBindingStore,
     bump,
+    invalidationAudits,
     lock: currentLock,
     handleFor,
     chunkGateFor,
@@ -245,7 +253,7 @@ function createRefreshGovernanceEnv(options = {}) {
       if (!row) throw new Error('wiring: the candidate hold was not persisted')
       return store.confirmContinuation({
         ...scope, holdId: row.id, echo: refreshKit.echoOf(hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy, sourceIdentity,
-      }, { bumpWithin: bump.bumpWithin })
+      }, { bumpWithin: bump.bumpWithin, pilotWithin: refreshKit.seedPilotWithin })
     },
     // R-6's corrected recipe: confirm -> reconcile a reconfirm hold WITH a status-reason verdict -> escalate.
     async seedEscalatedContinuation(input, hold, { sourceIdentity, verdict = 'source_scope_changed' } = {}) {

@@ -435,6 +435,29 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
     control: 'stock-prep-refresh-end',
   }),
+  // 备料分批拉取第一期 step 5 PR-8 (register R-63): the change plan (page / confirm / review), PULL tier, no control
+  // until PR-9 — byte-equal to the plugin manifest (F-01).
+  Object.freeze({
+    capability: 'refresh.changePlan',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.changePlanConfirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.reviewComplete',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
+    control: null,
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

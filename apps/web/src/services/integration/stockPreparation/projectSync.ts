@@ -184,6 +184,14 @@ export type StockPreparationProjectSyncReason =
   | 'WRITE_STATE_MOVED'
   | 'WRITE_REFRESH_STORE_UNAVAILABLE'
   | 'WRITE_REFRESH_SCOPE_CHANGED'
+  // Batch-refresh step 5 PR-8 review fix B1 — 409 STOCK_PREP_CHANGE_PLAN_STALE at the apply, read by the TRI-STATE
+  // `details.partial` exactly as WL-6 reads LEASE_LOST: ROW_CHANGED_MIDWAY (`true`: the version fence stopped the run
+  // after a host write was attempted — rows may have landed; register R-63 ①, live for EVERY project), ROW_CHANGED
+  // (`false` / unreported: neutral — neither "nothing written" nor "rows landed"), CHANGE_PLAN_STALE (the reason
+  // tokens only a run bound to a confirmed change plan produces — the one reading that may name the 变更计划).
+  | 'WRITE_ROW_CHANGED_MIDWAY'
+  | 'WRITE_ROW_CHANGED'
+  | 'WRITE_CHANGE_PLAN_STALE'
   // 4. 批次存档
   | 'BATCH_ARCHIVED'
   | 'BATCH_ALREADY_ARCHIVED'
@@ -512,6 +520,10 @@ export type StockPreparationProjectSyncVerdict =
   | 'suspended'
   // PR-7 (F-19): an earlier write of a governed project did not finish; the project waits for recovery.
   | 'awaiting_recovery'
+  // PR-8 review fix B1: the write STOPPED after a host write was attempted (or it is not known whether one was) —
+  // rows may already be in the sheet. Never `blocked`, whose headline is 「数据没有变化」 (G-4: `blocked` is reserved
+  // for runs where nothing was written).
+  | 'interrupted'
   | 'blocked'
   | 'not_run'
 
@@ -714,10 +726,44 @@ export const STOCK_PREP_REFRESH_SCOPE_CHANGED_CODES: readonly string[] = Object.
 ])
 
 /**
+ * Batch-refresh step 5 PR-8 — the version fence's / the change plan's stop code (plugin stock-preparation-apply-writer.cjs
+ * CHANGE_PLAN_STALE_CODE; the lanes and the continuation store spell the same literal).
+ */
+export const STOCK_PREP_CHANGE_PLAN_STALE_CODE = 'STOCK_PREP_CHANGE_PLAN_STALE'
+
+/**
+ * The `details.reason` tokens of STOCK_PREP_CHANGE_PLAN_STALE that ONLY an apply bound to a confirmed change plan can
+ * meet (refresh-lanes `assertChangePlanCurrent`, the store's reconcile re-assert and its bound begin). Every other reason
+ * — the writer's version-fence stops (`machine_columns_moved`, `record_missing`, `record_replaced`,
+ * `duplicate_target_key`, `version_conflict_repeated`) — reaches ANY project's apply, so its copy never names the
+ * 变更计划 (register R-63 ①; PR-8 review B1).
+ */
+export const STOCK_PREP_CHANGE_PLAN_BOUND_STALE_REASONS: readonly string[] = Object.freeze([
+  'plan_replaced',
+  'plan_invalidated',
+  'plan_written',
+  'plan_absent',
+  'plan_scope',
+])
+
+/**
  * PR-7: the apply step's batch-refresh refusals; `null` for every other failure. Checked AFTER the write-lock
  * classifier (unchanged). PULL_SUSPENDED is a refusal before any write by construction (`details.partial: false`).
+ *
+ * PR-8 review fix B1: STOCK_PREP_CHANGE_PLAN_STALE is read by the server's TRI-STATE `details.partial` (the WL-6 rule
+ * for LEASE_LOST): `true` => WRITE_ROW_CHANGED_MIDWAY (rows may have landed); otherwise a reason only a plan-bound run
+ * produces => WRITE_CHANGE_PLAN_STALE, anything else => WRITE_ROW_CHANGED — both neutral, preview again.
  */
-export function classifyRefreshApplyFailure(errorCode: string | null): StockPreparationProjectSyncReason | null {
+export function classifyRefreshApplyFailure(
+  errorCode: string | null,
+  context: { partial?: boolean | null; detailReason?: string | null } = {},
+): StockPreparationProjectSyncReason | null {
+  if (errorCode === STOCK_PREP_CHANGE_PLAN_STALE_CODE) {
+    if (context.partial === true) return 'WRITE_ROW_CHANGED_MIDWAY'
+    return context.detailReason && STOCK_PREP_CHANGE_PLAN_BOUND_STALE_REASONS.includes(context.detailReason)
+      ? 'WRITE_CHANGE_PLAN_STALE'
+      : 'WRITE_ROW_CHANGED'
+  }
   if (errorCode === STOCK_PREP_PULL_SUSPENDED_CODE) return 'WRITE_PULL_SUSPENDED'
   if (errorCode === STOCK_PREP_REFRESH_BINDING_STALE_CODE) return 'WRITE_BINDING_STALE'
   if (errorCode === STOCK_PREP_REFRESH_RECOVERY_PENDING_CODE) return 'WRITE_RECOVERY_PENDING'
@@ -869,6 +915,33 @@ export function classifyPlanStep(
   return result(index, 'dry-run', 'ok', 'PLAN_READY', base)
 }
 
+/**
+ * PR-8 review fix B1 — the apply FAILURES after which rows MAY be in the sheet (projectSync's own partial-write
+ * contract: "rows may have landed" only on a positive `details.partial: true`, "nothing was written" only on a positive
+ * `false`). Always: the readings that are themselves "may have landed" or "not known" (WRITE_INTERRUPTED, the lock
+ * store failing mid-run, the version fence stopping mid-run, the unconfirmed stop). Also any failure whose step detail
+ * carries the server's `partial: 1`. And the two neutral change-plan readings unless the server POSITIVELY reported
+ * `partial: false`.
+ */
+const STOCK_PREP_WRITE_MAY_HAVE_LANDED_REASONS: readonly StockPreparationProjectSyncReason[] = Object.freeze([
+  'WRITE_INTERRUPTED',
+  'WRITE_LOCK_FAILED_MIDWAY',
+  'WRITE_ROW_CHANGED_MIDWAY',
+  'WRITE_STOPPED_UNCONFIRMED',
+])
+const STOCK_PREP_WRITE_NEUTRAL_STOP_REASONS: readonly StockPreparationProjectSyncReason[] = Object.freeze([
+  'WRITE_ROW_CHANGED',
+  'WRITE_CHANGE_PLAN_STALE',
+])
+
+export function applyStepMayHaveLanded(step: StockPreparationProjectSyncStepResult | null | undefined): boolean {
+  if (!step || step.id !== 'apply' || step.status !== 'fail') return false
+  if (STOCK_PREP_WRITE_MAY_HAVE_LANDED_REASONS.includes(step.reason)) return true
+  const partial = step.detail ? step.detail.partial : undefined
+  if (partial === 1) return true
+  return STOCK_PREP_WRITE_NEUTRAL_STOP_REASONS.includes(step.reason) && partial !== 0
+}
+
 /** The tally + the verdict. See `imported` on the report for why step 4 is excluded from it. */
 export function summarizeProjectSync(
   steps: StockPreparationProjectSyncStepResult[],
@@ -901,6 +974,8 @@ export function summarizeProjectSync(
   // an awaiting-recovery project says so instead of 「这次没有导入成功」.
   else if (plan?.reason === 'PLAN_SUSPENDED' || write?.reason === 'WRITE_PULL_SUSPENDED') verdict = 'suspended'
   else if (plan?.reason === 'PLAN_RECOVERY_PENDING' || write?.reason === 'WRITE_RECOVERY_PENDING') verdict = 'awaiting_recovery'
+  // PR-8 review fix B1: a write that stopped after rows may have landed never reads 「数据没有变化」.
+  else if (applyStepMayHaveLanded(write)) verdict = 'interrupted'
   else if (steps.length > 0) verdict = 'blocked'
 
   return {
@@ -1533,8 +1608,12 @@ export async function runStockPreparationProjectSync(
     })
     // PR-7: the batch-refresh refusals, after the lock's (unchanged). A suspended pull is a SKIP (nothing was
     // written by construction); the rest FAIL with their own next step. The tri-state `partial` and the reason
-    // token ride to the detail so "may have landed" is said only on `true`.
-    const refreshReason = lockReason ? null : classifyRefreshApplyFailure(code)
+    // token ride to the detail so "may have landed" is said only on `true`. PR-8 review fix B1: the change-plan /
+    // version-fence stop is classified BY that tri-state (and its reason token), like LEASE_LOST.
+    const refreshReason = lockReason ? null : classifyRefreshApplyFailure(code, {
+      partial: error instanceof StockPreparationProjectSyncCallError ? error.detailPartial : null,
+      detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
+    })
     if (refreshReason && error instanceof StockPreparationProjectSyncCallError) {
       if (error.detailReason) detail.reason = error.detailReason
       if (error.detailPartial !== null) detail.partial = error.detailPartial ? 1 : 0
@@ -1551,6 +1630,13 @@ export async function runStockPreparationProjectSync(
 
   // ---- 4. 批次存档 ---------------------------------------------------------
   if (!writeOk) {
+    // PR-8 review fix B1: after a stop that may have put rows in the sheet, NOT_ATTEMPTED's 「这次没有写入数据」 would
+    // be false — the archive is skipped as an incomplete write instead (its own sentence: some rows did not land).
+    const write = steps.find((step) => step.id === 'apply')
+    if (applyStepMayHaveLanded(write)) {
+      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_WRITE_INCOMPLETE', {}))
+      return done()
+    }
     record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
     return done()
   }

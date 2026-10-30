@@ -65,12 +65,17 @@
 //
 // THE ANSWER is frozen and server-held (it carries the PRIVATE member keys the planner's projection needs;
 // it is never a response body): `{ ok: true, scope, governed, pilot, registry, continuations, members, holds,
-// state, executions, changePlans: [], lock: { state, generation }, decisionVersionObserved }` — exactly
+// state, executions, changePlans, expectedContent, lock: { state, generation }, decisionVersionObserved }` — exactly
 // what lib/stock-preparation-refresh-state.cjs `readProjectRefreshState` derives from and, through
 // `plannerSlice`, what the pure core's `normalizeContinuationInput` accepts (non-ended headers with
-// `memberCount`, claim_active members). `changePlans` is a literal empty list until step 5's migration exists.
+// `memberCount`, claim_active members). `changePlans` (step 5 PR-8, migration 104; O-19 closed) are the PENDING
+// plans — `confirmed` and `written` — as the store's values-free summaries, read in the same snapshot.
+// `expectedContent` (PR-8 review fix N3, C06) is the content the reviews (round 2: the reviewed-cell register, every cell
+// any review bound) and the pending written plan left on the sheet (record ids, keys, after values — PRIVATE, like the
+// member keys): the planner holds any such cell the sheet no longer carries, so a review never stays valid over content
+// it did not see.
 //
-// `governed` = pilot.enabled === true || any durable step-4 row for (tenant, project) on any sheet — the
+// `governed` = pilot.enabled === true || any durable step-4 / step-5 row for (tenant, project) on any sheet — the
 // registry marker alone or persisted rows alone both govern (D3 / C10 / U07: clearing the pilot marker
 // never releases protection that rows hold).
 //
@@ -279,6 +284,13 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     assertRows(rows.holds, scope, 'continuation', 'refresh_hold')
     assertRows(rows.states, scope, 'continuation', 'refresh_state')
     assertRows(rows.executions, scope, 'continuation', 'refresh_execution')
+    // Step 5 PR-8 (O-19 closed): the pending change plans the store read in the same snapshot (values-free summaries
+    // carrying their scope triple). A store answer without the list is unreadable by name, never "no plan".
+    if (!Array.isArray(rows.changePlans)) throw storeFailed('continuation', 'read_change_plans', null)
+    assertRows(rows.changePlans, scope, 'continuation', 'change_plan')
+    // Review fix N3: the content the reviews (the register) and the pending written plan left on the sheet (private, for
+    // the planner only). A store answer without it is unreadable by name, never "nothing to compare".
+    if (!Array.isArray(rows.expectedContent)) throw storeFailed('continuation', 'read_change_plans', null)
     if (rows.states.length > 1) throw retargeted('continuation', 'refresh_state', 'multiple_state_rows')
 
     let lockState
@@ -307,6 +319,7 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     const state = rows.states[0] || null
     const pilot = pilotOf(registry)
     const anyRows = continuations.length > 0 || rows.members.length > 0 || rows.holds.length > 0 || state !== null || rows.executions.length > 0
+      || rows.changePlans.length > 0
     return Object.freeze({
       ok: true,
       scope,
@@ -318,10 +331,31 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
       holds: Object.freeze(rows.holds.slice()),
       state,
       executions: Object.freeze(rows.executions.slice()),
-      changePlans: Object.freeze([]),
+      changePlans: Object.freeze(rows.changePlans.slice()),
+      expectedContent: Object.freeze(rows.expectedContent.slice()),
       lock,
       decisionVersionObserved: state ? state.decisionVersion : 0,
     })
+  }
+
+  /**
+   * Step 5 PR-8 review fix N1: the pilot marker of ONE project read ON THE CALLER'S TRANSACTION HANDLE — PR B's
+   * projection by (tenant, project) with `{ executor: trx }`, the consult's own registry read. The combined change-plan
+   * confirm calls it after its state-row lock (the PR-4 rule: every admissibility fact under the lock). Answers
+   * `{ enabled }`: true only for a pilot row registered on THIS sheet (the consult refuses any other pilot row as
+   * retargeted). A thrown read is the governance 503 (never "not pilot"); unwired is 501.
+   */
+  async function readPilotWithin(input = {}, trx) {
+    const scope = normalizeScope(input)
+    requireWired()
+    if (!trx || typeof trx.selectOne !== 'function') throw unavailable('pilot_read_handle')
+    let row
+    try {
+      row = await projectTargetStore.getPilotState({ tenantId: scope.tenantId, projectNo: scope.projectNo }, { executor: trx })
+    } catch (error) {
+      throw translate('registry', 'pilot_state_within', error)
+    }
+    return Object.freeze({ enabled: Boolean(row && row.pilot === true && row.sheetId === scope.sheetId) })
   }
 
   /**
@@ -346,7 +380,7 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     return Object.freeze({ consult: answer, error: null, state: readProjectRefreshState(answer) })
   }
 
-  return Object.freeze({ consult, readRefreshState, plannerSlice })
+  return Object.freeze({ consult, readRefreshState, readPilotWithin, plannerSlice })
 }
 
 module.exports = {
