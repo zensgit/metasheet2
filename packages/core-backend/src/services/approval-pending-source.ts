@@ -95,6 +95,7 @@ const AGGREGATE_ALL_SOURCE_SYSTEMS = null
 
 export const approvalPendingSource: PendingSource = {
   name: APPROVAL_PENDING_SOURCE_NAME,
+  permission: 'approvals:read',
 
   async listPendingForUser(viewer: PendingViewer): Promise<PendingItem[]> {
     if (!pool) {

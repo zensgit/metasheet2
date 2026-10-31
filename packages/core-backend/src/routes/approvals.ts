@@ -62,6 +62,7 @@ import {
   isApprovalMineOutcomeBadgeEnabled,
 } from '../services/approval-notify-badge-flags'
 import { countApprovalPendingForViewer } from '../services/approval-pending-query'
+import { APPROVAL_PENDING_SOURCE_NAME } from '../services/approval-pending-source'
 import {
   assignmentMatchesActor,
   decidableNodeKeysForInstance,
@@ -1441,6 +1442,8 @@ export async function publishApprovalCountsForUsers(
       roles,
       ...(permissions ? { permissions } : {}),
       reason,
+      // An approval action can only change the approval source's number.
+      sources: [APPROVAL_PENDING_SOURCE_NAME],
     }),
   ])))
 }

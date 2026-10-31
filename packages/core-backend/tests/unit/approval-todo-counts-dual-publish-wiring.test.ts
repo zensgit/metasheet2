@@ -59,6 +59,20 @@ describe('publishApprovalCountsForUsers dual-publish wiring (B-2, todo-center-de
     }
   })
 
+  it('the todo publish names the approval source; the approval publish names none', async () => {
+    mockedApprovalPublish.mockClear()
+    mockedTodoPublish.mockClear()
+
+    await publishApprovalCountsForUsers(undefined, [{ userId: 'user-a' }, { userId: 'user-b' }], 'decide')
+
+    expect(mockedTodoPublish).toHaveBeenCalledTimes(2)
+    for (const call of mockedTodoPublish.mock.calls) expect(call[0].sources).toEqual(['approval'])
+    expect(mockedApprovalPublish).toHaveBeenCalledTimes(2)
+    for (const call of mockedApprovalPublish.mock.calls) {
+      expect(Object.prototype.hasOwnProperty.call(call[0], 'sources')).toBe(false)
+    }
+  })
+
   it('publishes nothing for an empty/blank-only user list (no spurious broadcasts)', async () => {
     mockedApprovalPublish.mockClear()
     mockedTodoPublish.mockClear()
