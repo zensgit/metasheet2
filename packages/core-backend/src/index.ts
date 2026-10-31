@@ -252,6 +252,11 @@ import {
   W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
 } from './attendance/w4c3b-request-snapshots'
 import {
+  prepareApprovedOvertimeCalculationV1,
+  readPreparedApprovedOvertimeContextV1,
+  appendApprovedOvertimeCalculationV1,
+} from './attendance/w4c3b-approved-overtime'
+import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
   correlationIdMiddleware,
@@ -3517,6 +3522,9 @@ export class MetaSheetServer {
                 bindRequestSnapshotOnTerminalDecision: (
                   input: Parameters<typeof bindAttendanceRequestTerminalSnapshotV1>[0],
                 ) => bindAttendanceRequestTerminalSnapshotV1(input),
+                prepareApprovedOvertimeCalculation: prepareApprovedOvertimeCalculationV1,
+                readPreparedApprovedOvertimeContext: readPreparedApprovedOvertimeContextV1,
+                appendApprovedOvertimeCalculation: appendApprovedOvertimeCalculationV1,
                 buildRequestCalculationPayloadFromRequestRow:
                   buildAttendanceRequestCalculationPayloadFromRequestRowV1,
                 computeRequestPayloadFingerprint:

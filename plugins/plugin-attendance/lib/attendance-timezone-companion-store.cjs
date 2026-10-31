@@ -40,7 +40,8 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
     function revive(value) {
       if (Array.isArray(value)) return value.map(revive)
       if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-        key, ['startAt', 'endAt'].includes(key) && typeof item === 'string' ? new Date(item) : revive(item),
+        key, key === 'frozenAttribution' ? item
+          : ['startAt', 'endAt'].includes(key) && typeof item === 'string' ? new Date(item) : revive(item),
       ]))
       return value
     }
