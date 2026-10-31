@@ -954,7 +954,7 @@ interface DryRunProgressState {
 }
 const dryRunProgress = ref<DryRunProgressState | null>(null)
 let dryRunAbort: AbortController | null = null
-/** Bumped on every run and every unmount, so a re-attach probe that is still in flight lets go. */
+/** Bumped on every run, every invalidation and every unmount, so a re-attach probe that is still in flight lets go. */
 let dryRunWatchEpoch = 0
 
 function minutesSeconds(ms: number): string {
@@ -1082,6 +1082,11 @@ const runGuard = createStockPrepProjectSyncRunGuard((cause) => {
   resetRunState()
   if (targetPrompt.value) answerTargetPrompt(false)
   dryRunProgress.value = null
+  // …and the re-attach probe that painted it lets go: its polls go to the project and scope it started under (a poll
+  // already in flight also carries the old session), so after a tenant, workspace or session switch it would paint a
+  // trial that is not this board's back here. A project switch starts the new project's own probe from the seed
+  // watch; nothing is probed from here.
+  dryRunWatchEpoch += 1
   // A write ticked from this page never continues under another principal's session.
   if (cause === 'session') largeBomChannel.value = null
 })

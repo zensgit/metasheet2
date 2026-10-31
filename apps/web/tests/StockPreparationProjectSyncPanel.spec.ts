@@ -1097,6 +1097,96 @@ describe('StockPreparationProjectSyncPanel', () => {
       expect(runButton(root).disabled).toBe(false)
     })
 
+    const promptProjectNo = (root: HTMLElement) => root.querySelector('[data-testid="stock-prep-project-sync-target-prompt-project-no"]')?.textContent ?? null
+
+    it('R78-a8: the 「新建」 question open on A is answered no when the board opens B — nothing is created, and B\'s own 同步 asks about B by name', async () => {
+      const log: string[] = []
+      const double = api({ dryRun: vi.fn().mockResolvedValue(PLAN) })
+      const target = absentTarget(log)
+      const { root, board, onSynced, onProjectTargetChanged } = mountOnBoard({ api: double, targetApi: target })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      expect(promptOf(root)).toBe('create')
+      expect(promptProjectNo(root)).toBe(PROJECT_A)
+      board.projectNo = PROJECT_B
+      await flushUi(12)
+      expect(promptOf(root), 'no 「新建」 question about A on B\'s board').toBeNull()
+      expect(target.create).not.toHaveBeenCalled()
+      expect(double.dryRun).not.toHaveBeenCalled()
+      expect(noticeOf(root)).toBeNull()
+      expect(onSynced).not.toHaveBeenCalled()
+      expect(onProjectTargetChanged).not.toHaveBeenCalled()
+      expect(runButton(root).disabled).toBe(false)
+      await press(root, 'stock-prep-project-sync-run')
+      expect(promptOf(root)).toBe('create')
+      expect(promptProjectNo(root), 'B\'s own question names B').toBe(PROJECT_B)
+      expect((target.get as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0])).toEqual([PROJECT_A, PROJECT_B])
+      expect(target.create).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['tenant', { tenantId: 'tenant-syn-other' }],
+      ['workspace', { workspaceId: 'workspace-syn-other' }],
+    ] as Array<[string, Partial<typeof SCOPE>]>)('R78-a9 (%s): the 「重新拉取」 question open on A is answered no when the scope moves — A is not pulled, and 同步 is usable', async (_label, other) => {
+      const { root, board, double, log, onSynced, onProjectTargetChanged } = await repullQuestionOpenOnA()
+      board.scope = { ...SCOPE, ...other } as typeof SCOPE
+      await flushUi(12)
+      expect(promptOf(root), 'no question from the scope the board left').toBeNull()
+      expect(log).toEqual(['target.get'])
+      expect(double.dryRun).not.toHaveBeenCalled()
+      expect(double.apply).not.toHaveBeenCalled()
+      expect(noticeOf(root)).toBeNull()
+      expect(onSynced).not.toHaveBeenCalled()
+      expect(onProjectTargetChanged).not.toHaveBeenCalled()
+      expect(runButton(root).disabled).toBe(false)
+    })
+
+    it('R78-a10: A → B → A with the 「重新拉取」 question open on A — the old question does not come back on A, and a fresh 同步 there asks again and its yes counts', async () => {
+      const { root, board, double, log, onSynced } = await repullQuestionOpenOnA()
+      board.projectNo = PROJECT_B
+      await flushUi()
+      board.projectNo = PROJECT_A
+      await flushUi(12)
+      expect(promptOf(root), 'the old question never comes back').toBeNull()
+      expect(double.dryRun).not.toHaveBeenCalled()
+      expect(noticeOf(root)).toBeNull()
+      expect(onSynced).not.toHaveBeenCalled()
+      expect(runButton(root).disabled).toBe(false)
+      await press(root, 'stock-prep-project-sync-run')
+      expect(promptOf(root), 'the fresh run on A asks its own question').toBe('repull')
+      await press(root, 'stock-prep-project-sync-target-prompt-confirm')
+      expect((double.dryRun as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0])).toEqual([PROJECT_A])
+      expect(double.apply).toHaveBeenCalledWith(PROJECT_A, 'tok_syn')
+      expect(log).toEqual(['target.get', 'target.get', 'target.get'])
+      expect(verdictOf(root)).toBe('imported')
+      expect(onSynced).toHaveBeenCalledTimes(1)
+    })
+
+    it('R78-a11: 「新建」 confirmed on A, and A\'s trial lands after A → B → A — its 「确认写入」 question is not shown even back on A, and nothing is written', async () => {
+      const log: string[] = []
+      const plan = held(PLAN)
+      const double = api({ dryRun: plan.fn as never })
+      const { root, board, onSynced, onProjectTargetChanged } = mountOnBoard({ api: double, targetApi: absentTarget(log) })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      await press(root, 'stock-prep-project-target-create')
+      expect(log).toEqual(['target.get', 'target.create'])
+      expect(promptOf(root), 'A\'s trial is still running: nothing asked yet').toBeNull()
+      board.projectNo = PROJECT_B
+      await flushUi()
+      board.projectNo = PROJECT_A
+      await flushUi()
+      plan.release()
+      await flushUi(12)
+      expect(promptOf(root), 'a run the board has left asks nothing, even back on its own project').toBeNull()
+      expect(double.apply).not.toHaveBeenCalled()
+      expect(double.archive).not.toHaveBeenCalled()
+      expect(verdictOf(root)).toBeNull()
+      expect(onSynced).not.toHaveBeenCalled()
+      expect(onProjectTargetChanged).not.toHaveBeenCalled()
+      expect(runButton(root).disabled).toBe(false)
+    })
+
     // R78 known limitation b: on the board the project box is the board's project, a run in flight included.
     const projectBox = (root: HTMLElement) => root.querySelector('[data-testid="stock-prep-project-sync-project-no"]') as HTMLInputElement
 
@@ -1135,6 +1225,60 @@ describe('StockPreparationProjectSyncPanel', () => {
       apply.release()
       await flushUi(12)
       expect(probed).toEqual([PROJECT_A, PROJECT_B])
+    })
+
+    it('R78-b3: the waiting re-attach probe runs once — a later run on B that ends without a switch does not probe again', async () => {
+      const probed: string[] = []
+      const apply = held(APPLIED)
+      const double = api({
+        dryRun: vi.fn().mockResolvedValue(PLAN),
+        apply: apply.fn as never,
+        dryRunJobStatus: vi.fn(async (projectNo: string) => { probed.push(projectNo); return null }),
+      })
+      const { root, board } = mountOnBoard({ api: double })
+      await flushUi()
+      await press(root, 'stock-prep-project-sync-run')
+      board.projectNo = PROJECT_B
+      await flushUi()
+      apply.release()
+      await flushUi(12)
+      expect(probed).toEqual([PROJECT_A, PROJECT_B])
+      ;(double.apply as ReturnType<typeof vi.fn>).mockResolvedValue(APPLIED)
+      await press(root, 'stock-prep-project-sync-run')
+      expect((double.dryRun as ReturnType<typeof vi.fn>).mock.calls[1][0]).toBe(PROJECT_B)
+      expect(verdictOf(root)).toBe('imported')
+      await flushUi(12)
+      expect(probed, 'no second probe after a run on B with no switch').toEqual([PROJECT_A, PROJECT_B])
+    })
+
+    it('R78-b4: A → B → C while A\'s run is in flight — the box shows C, the waiting probe runs once, for C, and the next 同步 pulls C', async () => {
+      const PROJECT_C = 'SYN-PROJ-C'
+      const probed: string[] = []
+      const apply = held(APPLIED)
+      const double = api({
+        dryRun: vi.fn().mockResolvedValue(PLAN),
+        apply: apply.fn as never,
+        dryRunJobStatus: vi.fn(async (projectNo: string) => { probed.push(projectNo); return null }),
+      })
+      const { root, board } = mountOnBoard({ api: double })
+      await flushUi()
+      expect(probed).toEqual([PROJECT_A])
+      await press(root, 'stock-prep-project-sync-run')
+      expect(double.apply).toHaveBeenCalledTimes(1)
+      board.projectNo = PROJECT_B
+      await flushUi()
+      board.projectNo = PROJECT_C
+      await flushUi()
+      expect(projectBox(root).value, 'the box follows every switch, not only the first').toBe(PROJECT_C)
+      expect(probed, 'not while A\'s run is in flight').toEqual([PROJECT_A])
+      apply.release()
+      await flushUi(12)
+      expect(probed, 'once, for the project the board is on now').toEqual([PROJECT_A, PROJECT_C])
+      ;(double.dryRun as ReturnType<typeof vi.fn>).mockClear()
+      ;(double.apply as ReturnType<typeof vi.fn>).mockResolvedValue(APPLIED)
+      await press(root, 'stock-prep-project-sync-run')
+      expect((double.dryRun as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(PROJECT_C)
+      expect(verdictOf(root)).toBe('imported')
     })
 
     // R78 known limitation c: the trial's progress line belongs to the run (or 核对) that is current. A's poll goes on
@@ -1190,6 +1334,38 @@ describe('StockPreparationProjectSyncPanel', () => {
       await flushUi(12)
       expect(progressLine(root)).toBeNull()
       expect(root.querySelector('[data-testid="stock-prep-project-sync-check-result"]')).toBeNull()
+      expect(onSynced).not.toHaveBeenCalled()
+    })
+
+    // The re-attach lane (R67 ④): the 「上次的试算还在后台…」 line a mount's probe painted goes on any invalidation, and
+    // the probe that painted it lets go — its polls go to the scope it started under. Nothing is probed for the new
+    // scope or session from here (a press of 同步 there still attaches to a trial that is running).
+    it.each([
+      ['workspace', (board: { scope: { tenantId: string; workspaceId: string } }) => { board.scope = { ...SCOPE, workspaceId: 'workspace-syn-other' } }],
+      ['tenant', (board: { scope: { tenantId: string; workspaceId: string } }) => { board.scope = { ...SCOPE, tenantId: 'tenant-syn-other' } }],
+      ['session', () => {
+        localStorage.setItem('auth_token', 'synthetic-session-other')
+        notifyAuthPrincipalChange()
+      }],
+    ] as Array<[string, (board: any) => void]>)('R78-c4 (%s): the re-attach line of A\'s earlier trial goes on the switch, and the probe started before it does not paint it back', async (_label, change) => {
+      let releaseWait: () => void = () => {}
+      const wait = vi.fn(() => new Promise<void>((done) => { releaseWait = done }))
+      const probed: string[] = []
+      const double = api({
+        dryRunJobStatus: vi.fn(async (projectNo: string) => { probed.push(projectNo); return { status: 'running' as const, elapsedMs: 83_000 } }),
+      })
+      const { root, board, onSynced } = mountOnBoard({ api: double, dryRunPollWait: wait })
+      await flushUi()
+      expect(probed).toEqual([PROJECT_A])
+      expect(progressLine(root)?.getAttribute('data-dry-run-progress')).toBe('resumed')
+      change(board)
+      await flushUi()
+      expect(progressLine(root), 'cleared on the switch').toBeNull()
+      releaseWait()
+      await flushUi(12)
+      expect(progressLine(root), 'not painted back from the trial the board has left').toBeNull()
+      expect(probed, 'the probe started before the switch polls no more').toEqual([PROJECT_A])
+      expect(double.dryRun).not.toHaveBeenCalled()
       expect(onSynced).not.toHaveBeenCalled()
     })
 
