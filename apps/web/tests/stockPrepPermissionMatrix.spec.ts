@@ -309,6 +309,12 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   // apps/web/tests/StockPreparationProjectArchive.spec.ts (PB-ALIGN).
   'stock-prep-project-pilot-status',
   'stock-prep-project-pilot-enable',
+  // 人工补充行 B4 (R-68): the switch-state line and the typed-confirmation switch button live on the project sync
+  // panel (StockPreparationProjectTargetManualRows.vue), ADMIN tier, rendered only once the server's read answered for
+  // a registered sheet. Their alignment, both directions, per actor, is asserted there in
+  // apps/web/tests/StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN).
+  'stock-prep-project-manual-rows-status',
+  'stock-prep-project-manual-rows-set',
   // S3 (R-37): the project-level fields form and its 「保存」 live on 项目备料页's sheet-state line, the
   // 「刷新项目总览」 button on 今天要处理's project-sheets line — OPERATE, each rendered only once the
   // server answered with the switch on. Their alignment, both directions, per actor, is asserted on
