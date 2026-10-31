@@ -26,6 +26,12 @@ cursors keep the pull running.
 - A user/get detail must resolve the requested user ID. Reject mismatches and
   malformed ID/name types; retain the requested-ID fallback for omitted identity
   and preserve optional profile/manager fields.
+- Every non-null supplied department-detail ID alias must match the ID sent on
+  the wire; malformed/conflicting aliases and non-finite numeric wire identities
+  make that department's enrichment fail. Preserve legacy
+  omitted/null identity fallback and manager normalization. The existing
+  best-effort path carries prior managers forward and continues other departments;
+  a matching success-empty remains authoritative. Its warning is values-free.
 - Cursor sets are per department. Do not require monotonic cursors. An explicitly
   final page may omit its cursor. Keep unique-user detail deduplication and
   multi-department membership merging.

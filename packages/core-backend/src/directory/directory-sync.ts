@@ -3292,10 +3292,7 @@ export async function fetchAllDepartments(
       if (apiCalls) apiCalls.departmentDetailCalls += 1
       return getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl })
     },
-    (deptId, error) =>
-      logger.warn(
-        `dept-head: department/get failed for dept ${deptId} (integration ${integrationName}); carrying prior forward: ${readErrorMessage(error, 'unknown error')}`,
-      ),
+    () => logger.warn('DingTalk department detail unavailable; carrying prior manager list forward'),
   )
 
   return departments

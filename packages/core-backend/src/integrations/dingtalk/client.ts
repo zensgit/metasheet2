@@ -565,13 +565,14 @@ export async function getDingTalkDepartmentDetail(
   departmentId: string,
   config?: { baseUrl?: string },
 ): Promise<{ deptManagerUserIdList: string[] }> {
+  const requestedDepartmentId = Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId)
   const payload = await requestDingTalkDirectoryJson(
     `/topapi/v2/department/get?access_token=${encodeURIComponent(accessToken)}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        dept_id: Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId),
+        dept_id: requestedDepartmentId,
       }),
     },
     'Failed to read DingTalk department detail',
@@ -580,6 +581,17 @@ export async function getDingTalkDepartmentDetail(
   )
 
   const result = readNestedPayload(payload)
+  const returnedIds = parseDingTalkDepartmentIds(
+    [result.dept_id, result.id].filter((id) => id !== undefined && id !== null),
+    [],
+  )
+  if (
+    (typeof requestedDepartmentId === 'number' && !Number.isFinite(requestedDepartmentId))
+    || returnedIds === null
+    || returnedIds.some((id) => id !== String(requestedDepartmentId).trim())
+  ) {
+    throw new DingTalkIncompleteResponseError('Failed to read DingTalk department detail', {})
+  }
   // DingTalk `/topapi/v2/department/get` returns `dept_manager_userid_list` as a
   // comma-separated string of userids; tolerate an array too for forward-compat.
   const rawManagers = result.dept_manager_userid_list ?? result.deptManagerUseridList
