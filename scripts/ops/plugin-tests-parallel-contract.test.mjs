@@ -60,6 +60,14 @@ function assertParallelWorkflow(doc) {
       assert.deepEqual(actual.splice(-1), [resultUpload(suite)])
     }
     for (const step of actual) {
+      if (suite === 'approval-db' && step.id === 'approval-real-db-integration') {
+        // Explicit additive suite: preserve the frozen original command byte-for-byte.
+        const addition = '  tests/integration/directory-controlled-handover.db.test.ts \\\n'
+        const predecessor = '  tests/integration/directory-org-transfer-source-freeze.db.test.ts \\\n'
+        assert.equal(step.run.split(addition).length - 1, 1, 'Handover DB suite must run exactly once')
+        assert.ok(step.run.includes(predecessor + addition), 'Keep the new whole-file suite at its reviewed position')
+        step.run = step.run.replace(addition, '')
+      }
       if (suite !== 'unit' && step.name === 'Upload install log on failure') {
         assert.equal(step.with.name, `install-log-${nodeMatrix}-${suite}`)
         step.with.name = `install-log-${nodeMatrix}`
@@ -108,6 +116,7 @@ test('each database suite owns a fresh runner/database and migration ordering', 
 
 test('removed/filtered/reordered steps, disabled suites and a weakened aggregate are rejected', () => {
   const mutations = [
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
     doc => { doc.jobs.unit.steps.pop() },
     doc => { doc.jobs.unit.steps.find(step => step.name === 'Run core-backend tests').run += ' -t selected' },
     doc => { doc.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').if = false },
