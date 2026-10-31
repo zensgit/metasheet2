@@ -94,6 +94,7 @@ vi.mock('../src/composables/useLocale', () => ({
 
 import TasksView from '../src/views/tasks/TasksView.vue'
 import TaskListView from '../src/views/tasks/TaskListView.vue'
+import { TASK_SEARCH_DEBOUNCE_MS } from '../src/tasks/tasksSearch'
 import {
   DEFAULT_GROUP_KEY,
   applyMove,
@@ -2402,6 +2403,58 @@ describe('/task-lists/:id — answers that land after the page moved on', () => 
 // was cut short by its page, the existing [fe-35] rule still holds moves off. The fake backend here
 // honours `status` the way the server does; the cells above keep the fake that ignores it.
 // ---------------------------------------------------------------------------------------------
+
+describe('/tasks — title search and the board', () => {
+  async function typeSearch(el: HTMLElement, text: string): Promise<void> {
+    const input = shown(el, 'tasks-search-input') as HTMLInputElement
+    input.value = text
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    await new Promise((resolve) => setTimeout(resolve, TASK_SEARCH_DEBOUNCE_MS + 20))
+    await flush()
+  }
+
+  beforeEach(() => {
+    window.localStorage.setItem('metasheet.tasks.statusFilter', 'all')
+  })
+  afterEach(() => {
+    window.localStorage.removeItem('metasheet.tasks.statusFilter')
+  })
+
+  it('search|board|under 全部 a placed task the search leaves out is a hidden entry: moves stay on, the line names the search', async () => {
+    seedGrouped()
+    const el = await mountAt('/tasks')
+    expect(layout(el)).toEqual(GROUPED_LAYOUT)
+    h_.tasksReply.mockImplementation(() => {
+      const items = assigned.filter((item) => item.id !== 't2')
+      return jsonResponse(200, { items, total: items.length })
+    })
+    await typeSearch(el, 'task')
+    expect(reads('/api/tasks?view=assigned&status=all&q=task')).toBe(1)
+    expect(layout(el)).toEqual([
+      ['tg_def', ['t5', 't6'], ['t3']],
+      ['tg_a', ['t4', 't1'], []],
+      ['tg_b', [], []],
+    ])
+    expect(shown(el, 'tasks-groups-reorder-off')).toBeNull()
+    expect(text(el, 'tasks-groups-hidden-by-filter')).toBe('另有 1 项已分组任务不在当前搜索结果中，未显示')
+    expect(moveState(el, 't5')).toEqual({ up: false, down: true, join: null, select: true })
+  })
+
+  it('search|board|a step under search still counts the hidden task in the position it sends', async () => {
+    seedGrouped()
+    const el = await mountAt('/tasks')
+    h_.tasksReply.mockImplementation(() => {
+      const items = assigned.filter((item) => item.id !== 't2')
+      return jsonResponse(200, { items, total: items.length })
+    })
+    await typeSearch(el, 'task')
+    await clickIn(el, 't6', 'tasks-group-move-up')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t6 {"groupId":null,"position":0}'])
+    // The server's order: t6, t5, t2 — the hidden task keeps its place in the index space.
+    expect(userPlacements.filter((p) => p.groupId === 'tg_def').sort((a, b) => a.position - b.position).map((p) => p.taskId)).toEqual(['t6', 't5', 't2'])
+  })
+})
 
 describe('/tasks — the status filter and the board (G2-core)', () => {
   function clearStorage(): void {

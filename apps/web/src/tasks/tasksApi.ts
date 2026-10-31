@@ -244,13 +244,16 @@ export type TaskStatusFilter = 'open' | 'done' | 'all'
  *  `page`; `total` is parsed but not used (`[fe-10]`). G2-core: `status`, when given, is sent as
  *  `&status=` after the view (and before the page); without it the request string is unchanged.
  *  The list page always passes it, `all` included, so its answer never depends on the server's
- *  default for an absent status. */
-export async function listTasks(view: TaskView, page?: { offset: number }, status?: TaskStatusFilter): Promise<ListTasksResult> {
+ *  default for an absent status. Title search: `q`, when given and not empty, is sent as `&q=` after
+ *  the status (and before the page); without it the request string is unchanged. Encoding is inside
+ *  the `try`: text that cannot be encoded (a lone surrogate) reads as a failed request, not a throw. */
+export async function listTasks(view: TaskView, page?: { offset: number }, status?: TaskStatusFilter, q?: string): Promise<ListTasksResult> {
   const statusQuery = status === undefined ? '' : `&status=${encodeURIComponent(status)}`
   const query = page === undefined ? '' : `&limit=${TASK_PAGE_LIMIT}&offset=${page.offset}`
   let response: Response
   try {
-    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}${statusQuery}${query}`)
+    const searchQuery = q === undefined || q === '' ? '' : `&q=${encodeURIComponent(q)}`
+    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}${statusQuery}${searchQuery}${query}`)
   } catch {
     return { kind: 'error', status: 0 }
   }
