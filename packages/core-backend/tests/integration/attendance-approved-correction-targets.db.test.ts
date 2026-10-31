@@ -7,7 +7,8 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
-import { approvedCorrectionGroupV2Fixture } from '../utils/attendance-approved-correction-group-v2-fixture'
+import type { approvedCorrectionGroupV2Fixture } from '../utils/attendance-approved-correction-group-v2-fixture'
+import { readNativeCorrectionParentPosture, seedNativeApprovedCorrectionSource } from '../utils/attendance-approved-correction-native-source-fixture'
 import type { MetaSheetServer } from '../../src/index'
 import {
   restoreAttendanceSettingsRow,
@@ -77,6 +78,7 @@ describe('attendance approved correction targets (real W53 source server and dat
     rbacTokenTrust: process.env.RBAC_TOKEN_TRUST,
     skipPlugins: process.env.SKIP_PLUGINS,
     rollout: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    w7Context: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
   }
 
   async function mintToken(userId: string, tenantId?: string): Promise<string> {
@@ -274,7 +276,7 @@ describe('attendance approved correction targets (real W53 source server and dat
       requestType: 'time_correction', requestedInAt: '2049-08-21T09:00:00.000Z',
       requestedOutAt: '2049-08-21T18:00:00.000Z', reason: 'approved correction A',
       correctionTargets: { schemaVersion: 1, source: data.source, checkIn: target(0, 'check_in'), checkOut: target(1, 'check_out') } }
-    const headers = { Authorization: 'Bearer ' + fixture.token }
+    const headers = { Authorization: 'Bearer ' + fixture.token, 'x-org-id': fixture.orgId }
     const created = await requestJson(baseUrl + '/api/attendance/requests', { method: 'POST', headers, body })
     expect(created.status, created.raw).toBe(201)
     return { body, headers, created, requestId: String(created.body!.data.request.id) }
@@ -330,6 +332,7 @@ describe('attendance approved correction targets (real W53 source server and dat
             DATABASE_URL: priorEnv.databaseUrl, RBAC_BYPASS: priorEnv.rbacBypass,
             RBAC_TOKEN_TRUST: priorEnv.rbacTokenTrust, SKIP_PLUGINS: priorEnv.skipPlugins,
             ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: priorEnv.rollout,
+            ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: priorEnv.w7Context,
           })) {
             if (value === undefined) delete process.env[key]
             else process.env[key] = value
@@ -354,7 +357,9 @@ describe('attendance approved correction targets (real W53 source server and dat
 
     it('requires explicit multisegment selection and rejects display/foreign-source/foreign-user targets atomically', async () => {
       const fixture = await seedOrg('shadow')
-      await seedApprovedCorrectionSource(fixture)
+      await seedNativeApprovedCorrectionSource(pool, fixture)
+      const before = await counts(fixture.orgId)
+      expect({ requests: before.requests, snapshots: before.snapshots }).toEqual({ requests: 0, snapshots: 0 })
       const candidate = await loadCorrectionTargets(fixture)
       expect(candidate.status, candidate.raw).toBe(200)
       const data = candidate.body!.data
@@ -383,17 +388,21 @@ describe('attendance approved correction targets (real W53 source server and dat
           correctionTargets: { ...base.correctionTargets, checkIn: data.candidates[0].target } } })
       expect(other.status, other.raw).toBe(422)
       expect(other.body!.error.code).toBe('ATTENDANCE_CORRECTION_SOURCE_UNSUPPORTED')
-      expect(await counts(fixture.orgId)).toEqual({ requests: 0, snapshots: 0, operations: 0, outbox: 0 })
+      expect(await counts(fixture.orgId)).toEqual(before)
     })
 
     it('retains targets on edit/replay, binds displayed snapshot OCC, and appends two-sided canonical shadow facts once', async () => {
       const fixture = await seedOrg('shadow')
-      const source = await seedApprovedCorrectionSource(fixture)
+      const source = await seedNativeApprovedCorrectionSource(pool, fixture)
       const made = await createExactCorrection(fixture)
       const { headers, requestId } = made
       const replay = await requestJson(baseUrl + '/api/attendance/requests', { method: 'POST', headers, body: made.body })
       expect(replay.body).toEqual(made.created.body)
-      const read = () => requestJson(baseUrl + '/api/attendance/requests/' + requestId, { headers })
+      const read = async () => {
+        const response = await requestJson(baseUrl + '/api/attendance/requests/' + requestId, { headers })
+        expect(response.status, response.raw).toBe(200)
+        return response
+      }
       const original = (await read()).body!.data.request.decisionContext
       expect(original).toEqual({ schemaVersion: 1, requestId,
         approvalInstanceId: made.created.body!.data.request.approval_instance_id,
@@ -435,17 +444,17 @@ describe('attendance approved correction targets (real W53 source server and dat
       expect(fact.changes[1].target).toEqual({ kind: 'insertion', direction: 'check_out', segmentIndex: 1 })
       expect(calculated.rows[0].context_snapshot).toEqual(source.context)
       expect(await requestDecisionResidue(fixture.orgId, requestId)).toEqual({ operations: 1, outbox: 1, approval_records: 1 })
-      const parent = await pool.query('SELECT current_calculation_id FROM attendance_records WHERE id=$1', [source.recordId])
-      expect(parent.rows[0].current_calculation_id).toBe(source.calculationId)
+      expect(await readNativeCorrectionParentPosture(pool, fixture.orgId, source.recordId)).toEqual(source.parentPreimage)
     })
 
     it('moves the authoritative pointer through the existing guarded core writer', async () => {
       const fixture = await seedOrg('shadow')
-      const source = await seedApprovedCorrectionSource(fixture)
       await pool.query("UPDATE attendance_calculation_rollout_state SET state='eligible',prior_state='shadow',version=3 WHERE org_id=$1", [fixture.orgId])
       await pool.query("UPDATE attendance_calculation_rollout_state SET state='authoritative',prior_state='eligible',version=4 WHERE org_id=$1", [fixture.orgId])
+      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { mode: 'authoritative' })
       const made = await createExactCorrection(fixture)
       const read = await requestJson(baseUrl + '/api/attendance/requests/' + made.requestId, { headers: made.headers })
+      expect(read.status, read.raw).toBe(200)
       const shown = read.body!.data.request.decisionContext
       const operationId = randomUUID()
       const approved = await requestJson(baseUrl + '/api/attendance/requests/' + made.requestId + '/approve', {
@@ -464,9 +473,10 @@ describe('attendance approved correction targets (real W53 source server and dat
 
     it('rejects an intervening punch before terminal writes with zero decision residue', async () => {
       const fixture = await seedOrg('shadow')
-      await seedApprovedCorrectionSource(fixture)
+      await seedNativeApprovedCorrectionSource(pool, fixture)
       const made = await createExactCorrection(fixture)
       const read = await requestJson(baseUrl + '/api/attendance/requests/' + made.requestId, { headers: made.headers })
+      expect(read.status, read.raw).toBe(200)
       const shown = read.body!.data.request.decisionContext
       await pool.query(
         'INSERT INTO attendance_events (id,org_id,user_id,work_date,event_type,occurred_at,source,timezone) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
@@ -481,9 +491,16 @@ describe('attendance approved correction targets (real W53 source server and dat
     })
     it('retains an explicit group_effective frozenV2 source through the real correction route', async () => {
       const fixture = await seedOrg('shadow')
-      const group = approvedCorrectionGroupV2Fixture(fixture.orgId, fixture.userId, '2049-08-21', randomUUID())
-      const source = await seedApprovedCorrectionSource(fixture, group)
-      expect(source.context).toEqual(group.context)
+      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { groupV2: true })
+      expect(source.context).toEqual(source.preparedContext)
+      const frozenSource = () => pool.query(
+        `SELECT to_jsonb(c) AS calculation,
+                (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.segment_index) FROM attendance_record_segments s
+                  WHERE s.calculation_id=c.id AND s.record_id=c.attendance_record_id AND s.org_id=c.org_id) AS segments
+           FROM attendance_record_calculations c WHERE c.id=$1 AND c.org_id=$2`,
+        [source.calculationId, fixture.orgId])
+      const sourcePreimage = (await frozenSource()).rows
+      expect(sourcePreimage).toHaveLength(1)
       const candidate = await loadCorrectionTargets(fixture)
       expect(candidate.status, candidate.raw).toBe(200)
       expect(candidate.body!.data.posture).toBe('canonical')
@@ -502,13 +519,15 @@ describe('attendance approved correction targets (real W53 source server and dat
         "SELECT context_snapshot,approved_facts_snapshot,mode FROM attendance_record_calculations WHERE org_id=$1 AND entrypoint='correction' AND operation_id=$2",
         [fixture.orgId, operationId])
       expect(rows.rows).toHaveLength(1)
-      expect(rows.rows[0].context_snapshot).toEqual(group.context)
+      expect(rows.rows[0].context_snapshot).toEqual(source.context)
       expect(rows.rows[0].context_snapshot.schemaVersion).toBe(2)
       expect(rows.rows[0].context_snapshot.selector).toBe('group_effective')
-      expect(rows.rows[0].context_snapshot.calculationGroupId).toBe(group.context.calculationGroupId)
+      expect(rows.rows[0].context_snapshot.calculationGroupId).toBe(source.groupId)
       expect(rows.rows[0].mode).toBe('shadow')
       expect(rows.rows[0].approved_facts_snapshot).toHaveLength(1)
       expect(rows.rows[0].approved_facts_snapshot[0].changes).toHaveLength(2)
+      expect((await frozenSource()).rows).toEqual(sourcePreimage)
+      expect(await readNativeCorrectionParentPosture(pool, fixture.orgId, source.recordId)).toEqual(source.parentPreimage)
       expect(await requestDecisionResidue(fixture.orgId, made.requestId, operationId))
         .toEqual({ operations: 1, outbox: 1, approval_records: 1 })
     })
@@ -517,31 +536,19 @@ describe('attendance approved correction targets (real W53 source server and dat
       expect(process.env.RBAC_BYPASS).toBe('false')
       expect(process.env.RBAC_TOKEN_TRUST).toBe('false')
       const fixture = await seedOrg('shadow')
-      const { approvedCorrectionFixture } = await import('../utils/attendance-approved-correction-fixture')
       const workDate = new Date().toISOString().slice(0, 10)
       const startAt = workDate + 'T00:00:00.000Z'
       const endAt = new Date(Date.parse(startAt) + 86_400_000).toISOString()
-      const initial = approvedCorrectionFixture(fixture.orgId, fixture.userId, workDate)
-      initial.context.segments = [{ ...initial.context.segments[0], endTime: '18:00' }]
-      initial.evidence = initial.evidence.slice(0, 1)
-      if (initial.attribution.posture !== 'resolved_v2') throw new Error('SOURCE04_FIXTURE_ATTRIBUTION_REQUIRED')
-      initial.attribution.value.absoluteWindow = { startAt, endAt }
-      initial.attribution.value.attributionWindow = { startAt, endAt }
-      initial.attribution.value.attributionTailMinutes = 0
-      // Keep the six existing helpers unchanged. Its override annotation names
-      // groupV2, but the helper already consumes both supported frozen shapes.
-      // Actual bytes remain daily V1 and pass the real canonical calculator.
-      const source = await seedApprovedCorrectionSource(fixture,
-        initial as unknown as Parameters<typeof seedApprovedCorrectionSource>[1])
-      expect(source.context).toEqual(initial.context)
+      await pool.query("UPDATE attendance_calculation_rollout_state SET state='eligible',prior_state='shadow',version=3 WHERE org_id=$1", [fixture.orgId])
+      await pool.query("UPDATE attendance_calculation_rollout_state SET state='authoritative',prior_state='eligible',version=4 WHERE org_id=$1", [fixture.orgId])
+      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { mode: 'authoritative', workDate, singleSegment: true })
+      expect(source.context).toEqual(source.preparedContext)
       const genuineInRef = source.evidence[0].ref
-      const headers = { Authorization: 'Bearer ' + fixture.token }
+      const headers = { Authorization: 'Bearer ' + fixture.token, 'x-org-id': fixture.orgId }
       const initialEvents = await pool.query(
         'SELECT id::text,event_type FROM attendance_events WHERE org_id=$1 AND user_id=$2 AND work_date=$3 ORDER BY id',
         [fixture.orgId, fixture.userId, workDate])
       expect(initialEvents.rows).toEqual([{ id: genuineInRef, event_type: 'check_in' }])
-      await pool.query("UPDATE attendance_calculation_rollout_state SET state='eligible',prior_state='shadow',version=3 WHERE org_id=$1", [fixture.orgId])
-      await pool.query("UPDATE attendance_calculation_rollout_state SET state='authoritative',prior_state='eligible',version=4 WHERE org_id=$1", [fixture.orgId])
 
       const targetUrl = baseUrl + '/api/attendance/correction-targets?workDate=' + encodeURIComponent(workDate)
       const beforeTargets = await requestJson(targetUrl, { headers })
@@ -551,7 +558,7 @@ describe('attendance approved correction targets (real W53 source server and dat
       expect(beforeTargets.body!.data.candidates.map((item: { target: unknown }) => item.target)).toEqual([
         originalTarget, { kind: 'insertion', segmentIndex: 0, direction: 'check_out' },
       ])
-      const correctedInAt = initial.instant('09:00')
+      const correctedInAt = source.instant('09:00')
       const created = await requestJson(baseUrl + '/api/attendance/requests', {
         method: 'POST', headers, body: {
           operationId: randomUUID(), orgId: fixture.orgId, workDate, requestType: 'time_correction',
@@ -601,7 +608,7 @@ describe('attendance approved correction targets (real W53 source server and dat
       const checkoutOperationId = randomUUID()
       // requestJson delegates this URL through requestOnlinePunchFixture:
       // occurredAt is removed from HTTP and selects only the existing test clock.
-      const checkoutAt = initial.instant('18:00')
+      const checkoutAt = source.instant('18:00')
       const checkedOut = await requestJson(baseUrl + '/api/attendance/punch', {
         method: 'POST', headers, body: {
           orgId: fixture.orgId, operationId: checkoutOperationId,
