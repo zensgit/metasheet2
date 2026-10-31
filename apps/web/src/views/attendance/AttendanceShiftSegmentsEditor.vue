@@ -1,5 +1,5 @@
 <template>
-  <div class="shift-segments" data-attendance-shift-segments>
+  <div ref="editorRoot" class="shift-segments" data-attendance-shift-segments>
     <div class="shift-segments__header">
       <span>{{ tr('Paid work segments', '计薪工作时段') }}</span>
       <button
@@ -26,6 +26,7 @@
         <span>{{ tr('Start', '开始') }}</span>
         <AttendanceLocaleTimeInput
           v-model="segment.startTime"
+          :aria-label="tr(`Segment ${segmentIndex + 1} start`, `时段 ${segmentIndex + 1} 开始`)"
           :data-attendance-shift-segment-start="segmentIndex"
         />
       </label>
@@ -33,6 +34,7 @@
         <span>{{ tr('End', '结束') }}</span>
         <AttendanceLocaleTimeInput
           v-model="segment.endTime"
+          :aria-label="tr(`Segment ${segmentIndex + 1} end`, `时段 ${segmentIndex + 1} 结束`)"
           :data-attendance-shift-segment-end="segmentIndex"
         />
       </label>
@@ -130,7 +132,7 @@
 <script setup lang="ts">
 import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
 import { Bottom, Delete, Plus, Top } from '@element-plus/icons-vue'
-import { computed } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type {
   AttendanceShiftSegmentAnalysis,
@@ -143,6 +145,7 @@ defineProps<{
 }>()
 
 const segments = defineModel<AttendanceShiftSegmentDraft[]>('segments', { required: true })
+const editorRoot = ref<HTMLElement | null>(null)
 const { isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const canAddSegment = computed(() => (
@@ -154,6 +157,13 @@ const addSegmentTitle = computed(() => (
     ? tr('A cross-midnight segment must be last.', '跨午夜时段必须是最后一段。')
     : tr('Add segment', '添加时段')
 ))
+
+function focusSegment(index: number): void {
+  void nextTick(() => {
+    const row = editorRoot.value?.querySelectorAll<HTMLElement>('[data-attendance-shift-segment-row]')[index]
+    row?.querySelector<HTMLInputElement>('[data-attendance-locale-time-typed]')?.focus()
+  })
+}
 
 function addSegment(): void {
   if (!canAddSegment.value) return
@@ -169,18 +179,23 @@ function addSegment(): void {
     endTime: `${String(nextHour).padStart(2, '0')}:${String(nextMinute).padStart(2, '0')}`,
     endDayOffset: nextTotalMinutes >= 1440 ? 1 : 0,
   })
+  focusSegment(segments.value.length - 1)
 }
 
 function moveSegment(index: number, direction: -1 | 1): void {
   const target = index + direction
   if (target < 0 || target >= segments.value.length) return
   const [segment] = segments.value.splice(index, 1)
-  if (segment) segments.value.splice(target, 0, segment)
+  if (segment) {
+    segments.value.splice(target, 0, segment)
+    focusSegment(target)
+  }
 }
 
 function removeSegment(index: number): void {
   if (segments.value.length <= 1) return
   segments.value.splice(index, 1)
+  focusSegment(Math.min(index, segments.value.length - 1))
 }
 </script>
 
