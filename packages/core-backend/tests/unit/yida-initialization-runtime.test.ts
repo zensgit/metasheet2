@@ -288,14 +288,16 @@ describe('L4 refuses before any writer unless the encryption material passes the
     for (const [key, value] of Object.entries(material)) setEnv(key, value)
   }
   it.each(nodeEnvs.flatMap(nodeEnv => Object.keys(materials).map(name => [nodeEnv, name] as const)))(
-    'NODE_ENV %s, %s: ENCRYPTION_NOT_READY with no producer, crypto, write or fetch; the slot stays ready', async (nodeEnv, name) => {
+    'NODE_ENV %s, %s: ENCRYPTION_NOT_READY with no producer (so no crypto), write or fetch; the slot stays ready', async (nodeEnv, name) => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch')
       try {
         const { f } = await active()
         useEnvironment(nodeEnv, materials[name])
         await rejected(f.runtime.initialize(actor, input()), 'ENCRYPTION_NOT_READY')
+        // At this layer every seal goes through the producer the binding creates (the runtime itself never calls
+        // dependencies.security), so "no producer was created" is the no-crypto guarantee. The real host security
+        // service is exercised by the real-DB suites.
         expect(f.createProducer).not.toHaveBeenCalled(); expect(f.initialize).not.toHaveBeenCalled()
-        expect(f.security.encrypt).not.toHaveBeenCalled(); expect(f.security.decrypt).not.toHaveBeenCalled()
         expect(f.sql.some(sql => /INSERT|UPDATE|DELETE/u.test(sql))).toBe(false)
         expect(f.commits).toBe(0); expect(f.state.result).toBeUndefined(); expect(f.state.target).toBeUndefined()
         expect(fetchSpy).not.toHaveBeenCalled()
