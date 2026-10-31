@@ -710,6 +710,36 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Give the code below to the platform admin.',
   }),
   /**
+   * 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; R-68) — the per-sheet switch's own refusals
+   * (projectManualRows.ts STOCK_PREP_MANUAL_ROWS_ERROR_CODES lists them; StockPreparationProjectTargetManualRows.spec.ts
+   * MR-COPY pins each one's two lines). The archived / absent / mismatched-confirmation refusals are the project-target
+   * codes above.
+   */
+  STOCK_PREP_MANUAL_ROWS_POLICY_INVALID: Object.freeze({
+    zh: '「允许人工补充行」只能设为允许或关闭,这次的请求两者都不是,什么都没有改动。',
+    en: 'The manual supplementary rows switch can only be set to allowed or turned off, and this request was neither; nothing was changed.',
+    zhNext: '刷新页面后再试一次。',
+    enNext: 'Refresh the page and try again.',
+  }),
+  STOCK_PREP_MANUAL_ROWS_KEY_COLUMN_MISSING: Object.freeze({
+    zh: '这张项目表缺少唯一键列,「允许人工补充行」没法设置,什么都没有改动。',
+    en: 'This project sheet has no unique-key column, so the manual supplementary rows switch cannot be set; nothing was changed.',
+    zhNext: '请联系管理员核对本表的结构。',
+    enNext: 'Ask an administrator to check this sheet’s structure.',
+  }),
+  STOCK_PREP_MANUAL_ROWS_SWITCH_UNCONFIRMED: Object.freeze({
+    zh: '「允许人工补充行」已经写入,但写完回读时没能确认结果(这次修改已记入审计)。',
+    en: 'The manual supplementary rows switch was written, but reading it back did not confirm the result (the change is in the audit trail).',
+    zhNext: '请刷新页面看现在的状态,并把下面的代码交给平台管理员检查本表。',
+    enNext: 'Refresh the page to see the current state, and give the code below to the platform admin to check this sheet.',
+  }),
+  STOCK_PREP_MANUAL_ROWS_HOST_UNSUPPORTED: Object.freeze({
+    zh: '这个部署的主机读写不了表的列设置,「允许人工补充行」在这里用不了,什么都没有改动。',
+    en: 'This deployment’s host cannot read or write a sheet’s column settings, so the manual supplementary rows switch is not available here; nothing was changed.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  /**
    * 备料分批拉取第一期 step 3 PR B — the pilot marker's own codes (plugin stock-preparation-pilot-gate.cjs). The
    * large-lane refusal reads 「试点项目不走大 BOM 通道」 on every large route; the over-cap refusal on the dry run;
    * NOT_READY lists the failing check ids beside the sentence (the board renders them); UNREADABLE fails closed.
@@ -3761,6 +3791,21 @@ export const STOCK_PREP_AUDIT_ACTION_MODE_PLAIN: Record<string, Record<string, S
       en: "Repaired a project's stock-preparation sheet (filled in option lists / locked PLM columns)",
     }),
   }),
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68): the per-sheet switch writes its row
+  // under 088's `project_fields_update` — the switch is a project-level setting of the sheet, and a new action would
+  // need a new CHECK-constraint migration — with one closed mode per value it was SET to
+  // (http-routes.cjs STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES). Read by action alone it said 「改了一个项目的项目级信息」;
+  // the S3 mode `updated` (负责人 / 备注 / 计划完成) keeps that line.
+  project_fields_update: Object.freeze({
+    manual_rows_allowed: Object.freeze({
+      zh: '为一个项目的备料表打开了「允许人工补充行」',
+      en: "Allowed manual supplementary rows on a project's stock-preparation sheet",
+    }),
+    manual_rows_disabled: Object.freeze({
+      zh: '为一个项目的备料表关闭了「允许人工补充行」',
+      en: "Turned off manual supplementary rows on a project's stock-preparation sheet",
+    }),
+  }),
 })
 
 export function stockPrepAuditActionPlain(action: string, mode?: string | null): StockPrepPlainText | null {
@@ -3944,6 +3989,152 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
 
 export function stockPrepProjectTargetPlain(id: string): StockPrepPlainEntry | null {
   return lookup(STOCK_PREP_PROJECT_TARGET_PLAIN, id)
+}
+
+// ---------------------------------------------------------------------------
+// 人工补充行 B4 — the project sync panel's manual-rows section (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 /
+// §8 「B4」 3; OQ4, OQ6; register R-68)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every sentence StockPreparationProjectTargetManualRows.vue says, keyed by front-end ids (nothing server-side emits
+ * them). THREE wording rules the ADR fixes:
+ *   * the reminder NEVER promises a merge — 「永远不自动合并」 (OQ4): it says the system does not merge and leaves the
+ *     decision to the reader;
+ *   * the unbound-row guidance is the ADR §8 「B4」 3 text: rows with a creator may be deleted; rows without one need
+ *     their key changed BEFORE the lock is completed; after the lock only an approved database operation remains;
+ *   * turning the switch off stops 新增 and 复制为新行 ONLY — existing manual rows stay editable and deletable (§4
+ *     「关闭的含义」).
+ * VALUES-FREE: counts and record handles are rendered by the panel beside these sentences, never baked into them
+ * (the count-bearing builders below put only a number in).
+ */
+export const STOCK_PREP_MANUAL_ROWS_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  title: Object.freeze({ zh: '人工补充行', en: 'Manual supplementary rows' }),
+  status_allowed_default: Object.freeze({
+    zh: '「允许人工补充行」:已允许(默认)。',
+    en: '“Allow manual supplementary rows”: allowed (the default).',
+  }),
+  status_allowed: Object.freeze({ zh: '「允许人工补充行」:已允许。', en: '“Allow manual supplementary rows”: allowed.' }),
+  status_disabled: Object.freeze({ zh: '「允许人工补充行」:已关闭。', en: '“Allow manual supplementary rows”: turned off.' }),
+  meaning: Object.freeze({
+    zh: '允许时,有权限的人可以在这张项目表上「新增人工补充行」和「复制为新行」;关闭后这两个入口不再出现,已有的人工补充行照旧可以修改、删除。',
+    en: 'While allowed, people with access can “Add a manual supplementary row” and “Copy as a new row” on this project sheet; turned off, those two entries disappear, and existing manual supplementary rows can still be edited and deleted.',
+  }),
+  lock_missing: Object.freeze({
+    zh: '这张表的 PLM 列锁还没有补齐:补锁之前,即使开关是允许,也不能新增人工补充行。',
+    en: 'This sheet’s PLM column lock is not complete yet: until it is, no manual supplementary row can be added, even while the switch says allowed.',
+    zhNext: '请联系管理员修复本表(补锁)。',
+    enNext: 'Ask an administrator to repair this sheet (complete the lock).',
+  }),
+  key_column_missing: Object.freeze({
+    zh: '这张表缺少唯一键列,没法设置这个开关。',
+    en: 'This sheet has no unique-key column, so this switch cannot be set.',
+    zhNext: '请联系管理员核对本表的结构。',
+    enNext: 'Ask an administrator to check this sheet’s structure.',
+  }),
+  archived: Object.freeze({
+    zh: '这个项目的备料表已归档,不能修改这个开关。',
+    en: 'This project’s stock-preparation sheet is archived, so this switch cannot be changed.',
+    zhNext: '请拉取人员先恢复这张表。',
+    enNext: 'Ask a pull operator to restore the sheet first.',
+  }),
+  action_disable: Object.freeze({ zh: '关闭人工补充行', en: 'Turn off manual supplementary rows' }),
+  action_allow: Object.freeze({ zh: '允许人工补充行', en: 'Allow manual supplementary rows' }),
+  confirm_disable: Object.freeze({
+    zh: '关闭后,这张表不能再新增人工补充行,也不能「复制为新行」;已有的人工补充行不受影响。',
+    en: 'Once turned off, no manual supplementary row can be added to this sheet and “Copy as a new row” is gone; existing manual supplementary rows are not affected.',
+  }),
+  confirm_allow: Object.freeze({
+    zh: '打开后,有权限的人可以在这张表上新增人工补充行和「复制为新行」。',
+    en: 'Once allowed, people with access can add manual supplementary rows to this sheet and “Copy as a new row”.',
+  }),
+  confirm_action: Object.freeze({ zh: '确认修改', en: 'Confirm the change' }),
+  confirm_cancel: Object.freeze({ zh: '取消', en: 'Cancel' }),
+  result_disabled: Object.freeze({ zh: '已关闭「允许人工补充行」。', en: 'Manual supplementary rows are now turned off.' }),
+  result_allowed: Object.freeze({ zh: '已允许人工补充行。', en: 'Manual supplementary rows are now allowed.' }),
+  result_unchanged: Object.freeze({ zh: '开关本来就是这个状态,没有改动。', en: 'The switch was already in that state; nothing changed.' }),
+  result_mismatch: Object.freeze({
+    zh: '输入的项目号和这个项目对不上,没有修改。',
+    en: 'The typed project number does not match this project, so nothing was changed.',
+    zhNext: '请照页面上显示的项目号原样再输入一次(字母大小写也要一致)。',
+    enNext: 'Type the project number exactly as shown (letter case included) and try again.',
+  }),
+  result_not_permitted: Object.freeze({
+    zh: '只有备料主管理员(或平台管理员)可以修改这个开关。',
+    en: 'Only a stock-prep administrator (or a platform administrator) can change this switch.',
+  }),
+  last_pull_none: Object.freeze({
+    zh: '最近的拉取没有读到人工补充行,也没有需要处理的异常行。',
+    en: 'The latest pulls read no manual supplementary row and no anomalous row to handle.',
+  }),
+  last_pull_unavailable: Object.freeze({
+    zh: '最近一次拉取的人工补充行提醒暂时读不到。',
+    en: 'The latest pull’s manual-row reminder cannot be read right now.',
+    zhNext: '稍后再看;一直这样请联系平台管理员。',
+    enNext: 'Look again later; if it keeps happening, ask the platform admin.',
+  }),
+  reminder_explain: Object.freeze({
+    zh: '同一物料:图号相同;人工行没填图号时,名称、规格、材料都相同。系统不会自动合并,请核对后自己决定保留哪一行。',
+    en: 'The same material: the same drawing number; or, where the manual row has none, the same name, specification and material. The system never merges them — check and decide yourself which row to keep.',
+  }),
+  unbound_explain: Object.freeze({
+    zh: '这些行的唯一键以 manual: 开头,却不是这张表的人工补充行,拉取不再维护它们。',
+    en: 'These rows have a unique key starting with manual: but are not manual supplementary rows of this sheet, so pulls no longer maintain them.',
+  }),
+  unbound_guidance: Object.freeze({
+    zh: '处理办法:有建行人的,可以直接删除;没有建行人的,要在补锁之前把唯一键改掉;补锁之后,只能由负责人批准后做数据库处理。',
+    en: 'What to do: rows with a creator can simply be deleted; rows without one need their unique key changed before the lock is completed; once the lock is complete, only a database operation approved by the person in charge remains.',
+  }),
+  view_rows: Object.freeze({ zh: '查看这些行', en: 'See these rows' }),
+  admin_only: Object.freeze({
+    zh: '「允许人工补充行」开关和人工补充行的拉取提醒只对备料主管理员显示;需要调整请联系备料主管理员(或平台管理员)。',
+    en: 'The “Allow manual supplementary rows” switch and the pull reminder for manual rows are shown to stock-prep administrators only; to change something, contact a stock-prep administrator (or a platform administrator).',
+  }),
+  read_failed: Object.freeze({
+    zh: '人工补充行的设置暂时读不到。',
+    en: 'The manual supplementary rows settings cannot be read right now.',
+  }),
+})
+
+export function stockPrepManualRowsPlain(id: string): StockPrepPlainEntry {
+  return lookup(STOCK_PREP_MANUAL_ROWS_PLAIN, id) ?? { zh: id, en: id }
+}
+
+/** 「月-日 时:分」 in the reader's local time; null when the stamp is not a time. */
+function manualRowsClockText(iso: string | null): string | null {
+  if (!iso) return null
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return null
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+}
+
+/** The reminder's first line: when the last pull ran and how many manual rows it read. Counts only. */
+export function stockPrepManualRowsCountText(lastPull: { at: string | null; mode: 'dry_run' | 'apply' | null; rowCount: number | null }): StockPrepPlainText {
+  const clock = manualRowsClockText(lastPull.at)
+  const count = lastPull.rowCount ?? 0
+  const kindZh = lastPull.mode === 'apply' ? '写入' : '试算'
+  const kindEn = lastPull.mode === 'apply' ? 'write' : 'preview'
+  return {
+    zh: clock ? `最近一次拉取(${kindZh},${clock})时,这张表有 ${count} 行人工补充行。` : `最近一次拉取时,这张表有 ${count} 行人工补充行。`,
+    en: clock ? `At the latest pull (${kindEn}, ${clock}) this sheet had ${count} manual supplementary row(s).` : `At the latest pull this sheet had ${count} manual supplementary row(s).`,
+  }
+}
+
+/** 「其中 N 行和 PLM 本次新增的行是同一物料」 — the OQ4 reminder's count. */
+export function stockPrepManualRowsMatchedText(count: number): StockPrepPlainText {
+  return {
+    zh: `其中 ${count} 行和 PLM 这次新增的行是同一物料。`,
+    en: `${count} of them match a row PLM newly added in that pull.`,
+  }
+}
+
+/** 「另有 N 行以 manual: 开头但不是本表的人工补充行」 — the unbound prefix rows' count (ADR §2.4). */
+export function stockPrepManualRowsUnboundText(count: number): StockPrepPlainText {
+  return {
+    zh: `另有 ${count} 行的唯一键以 manual: 开头,但不是这张表的人工补充行。`,
+    en: `${count} more row(s) have a unique key starting with manual: but are not manual supplementary rows of this sheet.`,
+  }
 }
 
 /**

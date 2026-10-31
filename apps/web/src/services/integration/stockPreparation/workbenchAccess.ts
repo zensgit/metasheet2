@@ -388,6 +388,25 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
     control: 'stock-prep-project-pilot-enable',
   }),
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; OQ6; R-68) — byte-equal to the plugin manifest's two
+  // switch rows. Both ADMIN. Their controls live on the project sync panel (StockPreparationProjectTargetManualRows.vue):
+  // the switch-state line, rendered once the server's read answered for a registered sheet, and the typed-confirmation
+  // switch button, rendered only while the server says `may.set` — never on the confirmation-queue view;
+  // StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN) asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.manualRowsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.manualRowsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-set',
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
   // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
   // PULL tier. PR-7 (R-62) assigned their control ids: they live on 「拉取待确认」

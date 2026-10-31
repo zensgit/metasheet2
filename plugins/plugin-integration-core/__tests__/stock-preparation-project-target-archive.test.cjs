@@ -28,10 +28,11 @@
 //        archiving frees nothing; restoring at the cap is NOT refused (the row was already counted).
 //   A-08 THE §6 ROUTE TABLE, row by row, on one archived project: create, dry-run, apply, reconcile,
 //        mvp-persist, 大 BOM expansion-start / plan / apply-start / apply-run, conflict-policies save
-//        / delete, 结转 carry/confirm and 交接推进 each refuse 409 STOCK_PREPARATION_PROJECT_ARCHIVED
-//        with no write (no record written, no audit row, no cursor move, no apply-job step, no sheet
-//        provisioned); and 看板, 导出, 交接状态, conflict-policies list and GET target answer EXACTLY
-//        what they answered before the archive.
+//        / delete, 结转 carry/confirm, 交接推进 and (人工补充行 B4) the manual-rows switch SET each refuse 409
+//        STOCK_PREPARATION_PROJECT_ARCHIVED with no write (no record written, no audit row, no cursor move,
+//        no apply-job step, no sheet provisioned, no field property patched); and 看板, 导出, 交接状态,
+//        conflict-policies list and GET target answer EXACTLY what they answered before the archive — GET
+//        target and the switch READ moving only their lifecycle fields (status, archivedAt, may.*).
 //   A-09 confirm 裁决 (the §6 row's first member): with the switch on, confirming a decision whose
 //        ledger row names an archived project is 409 ARCHIVED and the ledger is NOT patched; 录入值回读
 //        still answers; restore → the same confirm succeeds; switch off → the registry is never
@@ -98,6 +99,8 @@ const BOARD_PATH = '/api/integration/stock-preparation/projects/:projectNo/board
 const EXPORT_PATH = '/api/integration/stock-preparation/prep-lines/export'
 const CONFIRM_PATH = '/api/integration/stock-preparation/confirmation-decisions/confirm'
 const VALUE_ENTRY_PATH = '/api/integration/stock-preparation/confirmation-decisions/value-entry'
+// 人工补充行 B4 (R-68): the per-sheet switch — its SET is a §6 write row, its READ a read row.
+const MANUAL_ROWS_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'
 const ACTION_ID = PLM_STOCK_PREPARATION_ACTION_ID
 const JOB_SCOPE = Object.freeze({ tenantId: TENANT, workspaceId: 'workspace-default' })
 const MVP_PERSIST_ENV = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
@@ -404,6 +407,8 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
   const previousMvp = process.env[MVP_PERSIST_ENV]
   process.env[MVP_PERSIST_ENV] = 'true'
   const h = mount({
+    // 人工补充行 B4: the switch reads the key column through the host's per-field read port.
+    fieldReads: true,
     configExtras: {
       stockPreparationHandoff: {
         tenantId: TENANT,
@@ -454,6 +459,13 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     assert.equal(before.policiesList, '200:ok')
     const targetBefore = await getTarget(h, FLOOR)
     assert.equal(targetBefore.statusCode, 200)
+    // 人工补充行 B4: the switch READ, before (ADMIN; the key column carries no switch yet → allowed by default).
+    const manualRowsRead = () => projectSheet.call(h.routes, 'GET', MANUAL_ROWS_PATH, { user: WORKBENCH_ADMIN, params: { projectNo: PROJECT }, query: { tenantId: TENANT } })
+    const switchBefore = await manualRowsRead()
+    assert.equal(switchBefore.statusCode, 200, JSON.stringify(switchBefore.body))
+    assert.equal(switchBefore.body.data.status, 'active')
+    assert.equal(switchBefore.body.data.policy, 'allowed')
+    assert.equal(switchBefore.body.data.may.set, true)
 
     // ARCHIVE.
     const archived = await archive(h, PULLER)
@@ -478,6 +490,8 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
       ['conflict-policies delete', () => projectSheet.call(h.routes, 'DELETE', POLICIES_PATH, { user: PLATFORM_ADMIN, params: { actionId: ACTION_ID }, body: {}, query: { tenantId: TENANT, projectNo: PROJECT } })],
       ['carry confirm', () => projectSheet.call(h.routes, 'POST', CARRY_PATH, { user: PLATFORM_ADMIN, body: { decision: { idempotencyKey: JSON.stringify({ projectNo: PROJECT }) } } })],
       ['handoff advance', () => projectSheet.call(h.routes, 'POST', HANDOFF_ADVANCE_PATH, { user: PLATFORM_ADMIN, body: { projectNo: PROJECT, fromStepKey: 'prep_entry' } })],
+      // 人工补充行 B4 (ADR §4): the switch SET — 「已归档时 POST 回 409」 — with a well-formed, confirmed body.
+      ['manual-rows switch', () => projectSheet.call(h.routes, 'POST', MANUAL_ROWS_PATH, { user: WORKBENCH_ADMIN, params: { projectNo: PROJECT }, body: { confirmProjectNo: PROJECT, policy: 'disabled' } })],
     ]
     for (const [label, run] of writes) {
       const res = await run()
@@ -488,6 +502,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     assert.equal(h.auditAppends.length, auditAfterArchive, 'no write row wrote an audit row')
     assert.equal(recordWrites(), writesBefore, 'no record was created or patched')
     assert.ok(!h.provisioning.calls.some((call) => call[0] === 'ensureObject' || call[0] === 'grantSheetRoleWrite'), 'no sheet provisioned, no grant')
+    assert.ok(!h.provisioning.calls.some((call) => call[0] === 'patchObjectFieldProperty' || call[0] === 'getObjectField'), 'the switch SET read and patched no field property')
     assert.ok(!handoffCalls.includes('advance') && !handoffCalls.includes('claimNotification'), 'the handoff cursor did not move and nobody was notified')
     const applyJob = await h.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, applyJobId }))
     assert.equal(applyJob.status, 'queued', 'the approved apply job did not run a chunk')
@@ -511,6 +526,16 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     }
     assert.deepEqual(withoutLifecycle(target.body.data), withoutLifecycle(targetBefore.body.data), 'GET target: only status, archivedAt and may.* change')
     assert.notEqual(target.body.data.archivedAt, targetBefore.body.data.archivedAt)
+    // 人工补充行 B4 (ADR §4 「GET 照常回答」): the switch READ still answers; only status and may.set move.
+    const switchAfter = await manualRowsRead()
+    assert.equal(switchAfter.statusCode, 200, JSON.stringify(switchAfter.body))
+    assert.equal(switchAfter.body.data.status, 'archived')
+    assert.equal(switchAfter.body.data.may.set, false)
+    const withoutSwitchLifecycle = (data) => {
+      const { status: _status, may: _may, ...rest } = data
+      return rest
+    }
+    assert.deepEqual(withoutSwitchLifecycle(switchAfter.body.data), withoutSwitchLifecycle(switchBefore.body.data), 'the switch READ: only status and may.* change')
 
     // RESTORE → the same lane is open again (positive control for every 409 above).
     assert.equal((await restore(h, PULLER)).statusCode, 200)

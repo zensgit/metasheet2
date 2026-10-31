@@ -3072,8 +3072,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // relationship detail, confirm / keep / end all resolve the PULL-tier scope there, before any host work.
   // 备料分批拉取第一期 step 5 PR-8 (R-63) added NO call site — the change-plan page, confirm and review (section D,
   // items 29–31) resolve the PULL-tier scope through that same shared context.
-  assert.equal(callSites, 25, 'G9: twenty-five call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable', 'stockPreparationRefreshDecisionContext', 'stockPreparationRefreshContinuationConfirm', 'stockPreparationRefreshChangePlanConfirm', 'stockPreparationRefreshChangeReviewComplete']) {
+  // 人工补充行 B4 (R-68) added TWO — the per-sheet switch's GET and POST (section D, items 32–33): the registry row whose
+  // key column carries the switch, and the staging project the provisioning port is addressed to, are the proven tenant's.
+  assert.equal(callSites, 27, 'G9: twenty-seven call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable', 'stockPreparationRefreshDecisionContext', 'stockPreparationRefreshContinuationConfirm', 'stockPreparationRefreshChangePlanConfirm', 'stockPreparationRefreshChangeReviewComplete', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

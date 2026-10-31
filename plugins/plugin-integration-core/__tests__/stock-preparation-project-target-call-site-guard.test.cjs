@@ -442,6 +442,58 @@ check('C-13 (S3 fix round 1) the four S3 routes: gate → switch before any IO; 
   assert.match(helper, /roleIds: resolveProjectSheetGrantRoleIds\(process\.env\)/, 'the overview READ grant: roles from server config, never the request')
 })
 
+// C-14 (人工补充行 B4, ADR adr-stock-prep-manual-rows-20261030 §4; register R-68) THE PER-SHEET SWITCH: both handlers
+// are ADMIN → switch first; the tenant from the host-vouched scope and the staging project from it (no request
+// projectId); the SET's typed confirmation is pure and precedes the scope; the write happens ONLY inside the registry's
+// locked re-check, ONLY through the switch library (whose one host write is a one-key provisioning patch — never raw
+// SQL), and the one audit row (088's project_fields_update, a closed mode) follows it; the READ writes nothing.
+check('C-14 (B4) the switch routes: ADMIN gate → switch before any IO; scope-derived tenant and staging; the SET writes one key-column property through the provisioning port inside the locked re-check, then audits', () => {
+  const bodyOf = (handler) => {
+    const start = CODE.indexOf(`    async ${handler}(req, res) {`)
+    assert.notEqual(start, -1, `${handler} exists`)
+    return CODE.slice(start, CODE.indexOf('\n    },', start))
+  }
+  for (const handler of ['stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet']) {
+    const body = bodyOf(handler)
+    assert.match(body, /^ {4}async [A-Za-z]+\(req, res\) \{\n {6}const user = requireAccess\(req, STOCK_PREP_ADMIN\)\n {6}requireProjectSheetsEnabled\(\)\n/, `${handler}: the ADMIN gate is the first statement and the switch the second`)
+    assert.ok(body.indexOf('await ') > body.indexOf('requireProjectSheetsEnabled()'), `${handler}: no IO before the switch`)
+    assert.match(body, /resolveOperatorValueScope\(\{/, `${handler}: tenant from the host-vouched scope`)
+    const staging = body.match(/resolveIntegrationStagingProjectId\([^)]*\)/g) || []
+    assert.deepEqual(staging, ['resolveIntegrationStagingProjectId(scope.tenantId, undefined)'], `${handler}: the staging project is derived once, from the scope, with no request projectId`)
+    for (const forbidden of ['resolveTenantId(', 'user.tenantId', 'input.projectId', 'body.projectId', '.query(', 'UPDATE ', 'patchObjectFieldProperty(']) {
+      assert.ok(!body.includes(forbidden), `${handler}: must not reach ${forbidden}`)
+    }
+  }
+  const getBody = bodyOf('stockPreparationProjectManualRowsGet')
+  for (const forbidden of ['setManualRowsPolicy(', 'audit.append(', 'withActiveRowLocked(', 'requireStockPreparationAudit()']) {
+    assert.ok(!getBody.includes(forbidden), `the READ writes nothing (${forbidden})`)
+  }
+  assert.match(getBody, /readManualRowsLastPull\(\{ store: context\.storage, sheetId: row\.sheetId \}\)/, 'the reminder is read from the plugin\'s own storage, keyed by the REGISTRY row\'s sheet')
+  const setBody = bodyOf('stockPreparationProjectManualRowsSet')
+  const requestAt = setBody.indexOf('stockPreparationManualRowsSwitchRequest(req)')
+  const scopeAt = setBody.indexOf('resolveOperatorValueScope({')
+  const lockAt = setBody.indexOf('store.withActiveRowLocked(')
+  const writeAt = setBody.indexOf('setManualRowsPolicy(')
+  const appendAt = setBody.indexOf('audit.append(')
+  assert.ok(requestAt !== -1 && scopeAt !== -1 && requestAt < scopeAt, 'the typed confirmation and the closed policy are checked (pure) before the scope and every await')
+  assert.ok(lockAt !== -1 && writeAt > lockAt, 'the write runs inside the registry\'s locked re-check')
+  assert.equal((setBody.match(/setManualRowsPolicy\(/g) || []).length, 1, 'exactly one write call')
+  assert.match(setBody, /objectId: locked\.objectId, policy \}\)/, 'the write is addressed by the LOCKED registry row\'s objectId, never the request')
+  assert.ok(appendAt > writeAt, 'the audit row follows the write')
+  assert.match(setBody, /if \(change\.written\) \{\s*await audit\.append\(\{[\s\S]*?action: STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION,[\s\S]*?mode: STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES\[policy\],/, 'ONE row, 088\'s project_fields_update, a closed mode, only when written')
+  const unconfirmedAt = setBody.indexOf('if (change.unconfirmed) throw manualRowsSwitchUnconfirmedError(change.unconfirmed)')
+  assert.ok(unconfirmedAt > appendAt, 'an unconfirmed write is AUDITED before it answers 500 — a landed switch change is never left unaudited')
+  assert.match(setBody, /confirmed: change\.unconfirmed === null,/, 'the row says whether the read-back confirmed the write')
+  assert.match(CODE, /const STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES = Object\.freeze\(\{\s*allowed: 'manual_rows_allowed',\s*disabled: 'manual_rows_disabled',\s*\}\)/, 'the two closed audit modes')
+  // The library: its ONE host write is the one-key patch of the key column; it has no SQL of its own.
+  const LIB_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-manual-rows.cjs'), 'utf8'))
+  assert.equal((LIB_CODE.match(/patchObjectFieldProperty\(/g) || []).length, 1, 'the switch library has exactly one provisioning write')
+  assert.match(LIB_CODE, /port\.patchObjectFieldProperty\(\{\s*projectId,\s*objectId,\s*fieldId: MANUAL_ROWS_KEY_FIELD_ID,\s*propertyPatch: \{ \[MANUAL_ROWS_POLICY_PROPERTY_KEY\]: policy \},\s*\}\)/, 'one key, the switch, on the key column — never the lock or the stanza')
+  for (const forbidden of ['.query(', 'UPDATE ', 'INSERT ', 'DELETE ']) {
+    assert.ok(!LIB_CODE.includes(forbidden), `the switch library has no raw SQL (${forbidden})`)
+  }
+})
+
 if (failed) {
   console.error(`stock-preparation-project-target-call-site-guard.test.cjs FAILED (${failed} of ${passed + failed})`)
   process.exit(1)
