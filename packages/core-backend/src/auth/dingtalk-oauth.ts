@@ -74,6 +74,7 @@ interface LocalUserRow {
   role: string
   is_active: boolean
   activation_status?: string | null
+  deleted_at?: string | null
 }
 
 export type DingTalkOAuthIntent = 'login' | 'bind' | 'activate'
@@ -592,7 +593,8 @@ async function recheckLocalUserAuthorization(
   const result = await client.query(
     `SELECT COALESCE(role, 'user') AS role,
             COALESCE(is_active, TRUE) AS is_active,
-            activation_status
+            activation_status,
+            (to_jsonb(users) ->> 'deleted_at') AS deleted_at
        FROM users
       WHERE id = $1::text
       LIMIT 1`,
@@ -612,6 +614,7 @@ async function recheckLocalUserAuthorization(
       row.activation_status === null || row.activation_status === undefined
         ? null
         : String(row.activation_status),
+    deleted_at: row.deleted_at === null || row.deleted_at === undefined ? null : String(row.deleted_at),
   })
   const grantState = await readGrantState(localUserId, client)
   if (requireGrant && grantState !== 'enabled') {
@@ -1050,7 +1053,8 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
             COALESCE(name, '') AS name,
             COALESCE(role, 'user') AS role,
             COALESCE(is_active, TRUE) AS is_active,
-            activation_status
+            activation_status,
+            (to_jsonb(users) ->> 'deleted_at') AS deleted_at
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -1071,7 +1075,8 @@ async function findIdentityUser(
               COALESCE(u.name, '') AS name,
               COALESCE(u.role, 'user') AS role,
               COALESCE(u.is_active, TRUE) AS is_active,
-              u.activation_status
+              u.activation_status,
+              (to_jsonb(u) ->> 'deleted_at') AS deleted_at
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
@@ -1123,13 +1128,14 @@ async function findIdentityUser(
 }
 
 function assertLocalUserLoginAllowed(
-  localUser: Pick<LocalUserRow, 'is_active' | 'role' | 'activation_status'>,
+  localUser: Pick<LocalUserRow, 'is_active' | 'role' | 'activation_status' | 'deleted_at'>,
 ): void {
   // Shared closed-set gate (PR #4559): only exact pending_activation | activated.
   const denial = evaluateUserAuthenticationGate({
     is_active: localUser.is_active,
     role: localUser.role,
     activation_status: localUser.activation_status,
+    deleted_at: localUser.deleted_at,
   })
   if (!denial) return
   if (denial.code === 'ACCOUNT_PENDING_ACTIVATION' || denial.code === 'ACCOUNT_ACTIVATION_INVALID') {

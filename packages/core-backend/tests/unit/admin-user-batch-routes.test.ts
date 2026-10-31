@@ -163,22 +163,27 @@ describe('admin user batch routes', () => {
     expect(audit.auditLog.mock.calls.some((call) => call[0]?.resourceId === 'disable')).toBe(true)
   })
 
-  it('audits a refused hard delete after the typed confirmation', async () => {
+  it('moves a confirmed hard delete into the recycle bin without deleting the user row', async () => {
     pg.query.mockResolvedValue({
-      rows: [{ id: 'user-lin', email: 'linlan@example.com', name: '林岚', role: 'user', department: null, is_active: true }],
+      rows: [{ id: 'user-lin', email: 'linlan@example.com', name: '林岚', role: 'user', department: null, is_active: true, c: 2 }],
     })
 
     const response = await request(app())
       .post('/api/admin/users/batch/delete')
       .send({ userIds: ['user-lin'], mode: 'hard', confirmText: '永久删除' })
 
-    expect(response.status).toBe(409)
-    expect(response.body.error.code).toBe('HARD_DELETE_UNSUPPORTED')
+    expect(response.status).toBe(200)
+    expect(response.body.data.mode).toBe('recycle')
+    expect(response.body.data.successCount).toBe(1)
+    expect(response.body.data.results[0].message).toBe('已移入回收站')
+    const statements = pg.query.mock.calls.map((call) => String(call[0]))
+    expect(statements.some((sql) => sql.includes('SET deleted_at'))).toBe(true)
+    expect(statements.some((sql) => /DELETE\s+FROM\s+users/i.test(sql))).toBe(false)
+    expect(sessions.revokeUserSessions).toHaveBeenCalledWith('user-lin', expect.objectContaining({ reason: 'user-recycled' }))
     expect(audit.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'delete',
-      resourceId: 'hard-delete',
-      meta: expect.objectContaining({ outcome: 'refused', code: 'HARD_DELETE_UNSUPPORTED' }),
+      resourceType: 'user-batch',
+      resourceId: 'recycle',
     }))
-    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('DELETE FROM'))).toBe(false)
   })
 })

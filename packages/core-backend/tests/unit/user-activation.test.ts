@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   ACCOUNT_ACTIVATION_INVALID_CODE,
+  ACCOUNT_DELETED_CODE,
   ACCOUNT_INACTIVE_CODE,
   ACCOUNT_PASSWORD_LOGIN_DISABLED_CODE,
   ACCOUNT_PENDING_ACTIVATION_CODE,
@@ -106,6 +107,14 @@ describe('user-activation helpers (T1)', () => {
     expect(() =>
       assertPendingUserCannotBeActivatedViaGenericStatusApi('activated', true),
     ).not.toThrow()
+  })
+
+  it('refuses sign-in when the account is in the recycle bin even if it is still marked active', () => {
+    expect(evaluateUserAuthenticationGate({
+      is_active: true,
+      activation_status: 'activated',
+      deleted_at: '2026-10-01T00:00:00.000Z',
+    })?.code).toBe(ACCOUNT_DELETED_CODE)
   })
 
   it('detects pending activation', () => {

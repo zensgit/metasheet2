@@ -18,6 +18,7 @@ import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 export const USER_ACTIVATION_STATUSES = ['pending_activation', 'activated'] as const
 export type UserActivationStatus = (typeof USER_ACTIVATION_STATUSES)[number]
 
+export const ACCOUNT_DELETED_CODE = 'ACCOUNT_DELETED'
 export const ACCOUNT_PENDING_ACTIVATION_CODE = 'ACCOUNT_PENDING_ACTIVATION'
 export const ACCOUNT_INACTIVE_CODE = 'ACCOUNT_INACTIVE'
 export const ACCOUNT_PASSWORD_LOGIN_DISABLED_CODE = 'ACCOUNT_PASSWORD_LOGIN_DISABLED'
@@ -60,6 +61,7 @@ export type UserAuthGateInput = {
   role?: string | null
   activation_status?: string | null
   local_password_set?: boolean | null
+  deleted_at?: string | Date | null
 }
 
 export type UserAuthGateDenial = {
@@ -74,6 +76,12 @@ export function evaluateUserAuthenticationGate(
   user: UserAuthGateInput,
   options: { requireLocalPassword?: boolean } = {},
 ): UserAuthGateDenial | null {
+  if (user.deleted_at != null && String(user.deleted_at).trim().length > 0) {
+    return {
+      code: ACCOUNT_DELETED_CODE,
+      message: 'Account is in the recycle bin and cannot sign in',
+    }
+  }
   if (user.role === 'disabled' || user.is_active === false) {
     return {
       code: ACCOUNT_INACTIVE_CODE,
