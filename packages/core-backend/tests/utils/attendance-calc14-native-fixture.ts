@@ -127,7 +127,7 @@ export function createAttendanceCalc14NativeFixture() {
     const prior=await recordFor(day)
     if (!prior?.calculation_id) throw new Error('CALC14_NATIVE_FROZEN_TARGET_MISSING')
     return host.request(`/api/attendance/records/${prior.record_id}/recompute`,admin.token,{
-      policy:'frozen_prior',operationId:randomUUID(),expectedCalculationId:prior.calculation_id,
+      orgId:host.orgId,policy:'frozen_prior',operationId:randomUUID(),expectedCalculationId:prior.calculation_id,
       expectedCalculationVersion:Number(prior.version),
     })
   }

@@ -78,7 +78,7 @@ describe.sequential('CALC14 actual first historical canonical import and frozen 
     // frozen_prior route must not try to read or reissue a source context.
     await native.pool.query('UPDATE attendance_rules SET rounding_minutes=rounding_minutes+1 WHERE org_id=$1 AND is_default=true',[ids.orgId])
     const response=await native.recomputeFrozen(day)
-    expect(response.status).toBe(200)
+    expect(response.status,response.raw).toBe(200)
     expect(await native.frozenBytes(originalCalculationId)).toEqual(originalBytes)
     const reused=await native.recordFor(day)
     expect(reused?.context_snapshot).toMatchObject({schemaVersion:2,selector:'group_effective',roundingMinutes:5,
