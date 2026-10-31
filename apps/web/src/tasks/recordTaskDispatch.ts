@@ -113,6 +113,7 @@ export function buildSourceLine(prefix: string, link: string): string {
 /** How a failed create reads in the dialog. Each kind has its own plain message. */
 export type DispatchFailure =
   | 'INACTIVE_ORG_MEMBER'
+  | 'ASSIGNEE_TASK_ACCESS_REQUIRED'
   | 'INVALID_ASSIGNEES'
   | 'LIMIT'
   | 'ORG_MISSING'
@@ -140,6 +141,8 @@ export function classifyDispatchFailure(result: Exclude<CreateTaskResult, { kind
       if (result.code === 'INACTIVE_ORG_MEMBER' || result.code === 'INVALID_ASSIGNEES' || result.code === 'LIMIT') {
         return result.code
       }
+      // An assignee who cannot use the task feature yet.
+      if (result.code === 'ASSIGNEE_TASK_ACCESS_REQUIRED') return 'ASSIGNEE_TASK_ACCESS_REQUIRED'
       if (result.code === 'INVALID_DATE' || result.code === 'INVALID_TIME_ZONE' || result.code === 'TIME_ZONE_REQUIRED') {
         return 'INVALID_DATE'
       }

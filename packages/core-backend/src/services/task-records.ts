@@ -44,6 +44,7 @@ import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
 import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers } from './task-org-members'
+import { assertTaskAccess } from './task-member-access'
 import { loadBadgeScope, loadRemindPolicy } from './task-user-settings'
 
 export type Row = Record<string, unknown>
@@ -139,6 +140,10 @@ export async function createTask(input: {
     // so a create that names only the creator, or nobody, sends no lookup (the helper sends nothing
     // for an empty list).
     await assertActiveOrgMembers(db, input.orgId, assignees.filter((userId) => userId !== input.creatorId))
+    // Then every assignee other than the creator must be able to use tasks (task-member-access.ts);
+    // any other id is 422 ASSIGNEE_TASK_ACCESS_REQUIRED and nothing is written. The creator is exempt
+    // on this call only.
+    await assertTaskAccess(db, assignees.filter((userId) => userId !== input.creatorId))
     const policy = needsDefaultRemindPolicy({ remindAt: remind.remindAt, dueDate: dates.next.dueDate })
       ? await loadRemindPolicy(db, { orgId: input.orgId, actorId: input.creatorId })
       : null

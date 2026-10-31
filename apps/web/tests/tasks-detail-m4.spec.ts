@@ -1868,6 +1868,7 @@ describe('FE-8 — the lists section: the add picker follows the member-manageme
 
 describe('FE-8 — 422 INACTIVE_ORG_MEMBER at the task member adds and the create form', () => {
   const INACTIVE = '该用户不在当前组织或已停用'
+  const TASK_ACCESS = '对方还不能使用任务功能，请管理员先为其开通任务权限。'
   const inactive = () => jsonResponse(422, { error: { code: 'INACTIVE_ORG_MEMBER' } })
 
   async function submitInto(el: HTMLElement, input: string, form: string, value: string): Promise<void> {
@@ -1924,6 +1925,29 @@ describe('FE-8 — 422 INACTIVE_ORG_MEMBER at the task member adds and the creat
     const el = await mountAt('/tasks')
     await submitInto(el, 'tasks-create-title', 'tasks-create-form', 'New task')
     expect(text(el, 'tasks-create-error')).toBe('创建任务失败，请稍后重试')
+  })
+
+  it('an assignee add answered ASSIGNEE_TASK_ACCESS_REQUIRED says the person needs task access, next to the assignee form', async () => {
+    h_.assigneeReply.mockImplementation(() => jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }))
+    h_.detailReply.mockImplementation(() => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true })))
+    const el = await mountAt('/tasks/t1')
+    await submitInto(el, 'tasks-detail-add-assignee-input', 'tasks-detail-add-assignee-form', 'u9')
+    expect(requests('POST', '/api/tasks/t1/assignees').map(([, init]) => init?.body)).toEqual(['{"userId":"u9"}'])
+    expect(text(el, 'tasks-detail-membership-error')).toBe(TASK_ACCESS)
+    expect(must(el, 'tasks-detail-membership-error').getAttribute('role')).toBe('alert')
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect((must(el, 'tasks-detail-add-assignee-input') as HTMLInputElement).value).toBe('u9')
+    expect(detailReads()).toBe(1)
+    expect(h_.notifyTasksChanged).not.toHaveBeenCalled()
+  })
+
+  it('a create answered ASSIGNEE_TASK_ACCESS_REQUIRED shows that code\'s copy under the create form', async () => {
+    h_.createReply.mockImplementation(() => jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }))
+    const el = await mountAt('/tasks')
+    await submitInto(el, 'tasks-create-title', 'tasks-create-form', 'New task')
+    expect(requests('POST', '/api/tasks')).toHaveLength(1)
+    expect(text(el, 'tasks-create-error')).toBe(TASK_ACCESS)
+    expect(h_.notifyTasksChanged).not.toHaveBeenCalled()
   })
 
   it('a later create failure without a code drops the previous code: a 500 after INACTIVE_ORG_MEMBER shows the generic copy', async () => {

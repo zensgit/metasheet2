@@ -51,6 +51,7 @@ import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskCommentId, newTaskEventId } from './task-ids-runtime'
 import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers } from './task-org-members'
+import { assertTaskAccess } from './task-member-access'
 import {
   assertRowAbility,
   assigneeIds,
@@ -343,6 +344,9 @@ export async function addAssignee(input: { orgId: string; actorId: string; taskI
       // direct-role check ([own-53]) and the id check above. ASSUMPTION(task-m4): [own-16] never for
       // the caller adding themselves.
       if (userId !== input.actorId) await assertActiveOrgMembers(db, input.orgId, [userId])
+      // Then the new assignee must be able to use tasks (task-member-access.ts), else 422
+      // ASSIGNEE_TASK_ACCESS_REQUIRED and nothing is written; never for the caller adding themselves.
+      if (userId !== input.actorId) await assertTaskAccess(db, [userId])
       await db.query(
         `INSERT INTO task_assignees (task_id, user_id, completed_at, assigned_by) VALUES ($1, $2, NULL, $3)
          ON CONFLICT (task_id, user_id) DO NOTHING`,
