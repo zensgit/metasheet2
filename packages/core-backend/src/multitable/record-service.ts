@@ -51,7 +51,15 @@ import {
   type YjsInvalidator,
 } from './post-commit-hooks'
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden, isFieldReadOnlyForPeople } from './permission-derivation'
-import { fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
+import { FIELD_READONLY_PLM_SYSTEM_CODE, fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
+import {
+  assertManualRowCreateInTransaction,
+  isMintedManualRowCreateExtension,
+  rewriteManualRowValidation,
+  type ManualRowCreateExtension,
+  type ManualRowsSheet,
+} from './stock-preparation-manual-rows-gate'
+import { manualRowKeyFor } from './stock-preparation-manual-rows'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
@@ -308,6 +316,14 @@ export type RecordCreateInput = {
   oapiAudit?: OapiWriteAuditContext
   /** Copy-sheet write context (ADR §7.3). Present ONLY on the copy-sheet path; see {@link RecordCopyWriteContext}. */
   copy?: RecordCopyWriteContext
+  /**
+   * 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2 「实现」): present ONLY on the two manual-row routes, and
+   * only as an extension object minted by stock-preparation-manual-rows-gate.ts (any other object is refused before
+   * any read). It turns the manual-row branch ON — the in-transaction re-check, the lock exemption for the six
+   * fillable columns, the stamps, the required rewrite — and NOTHING else: `capabilities` stays the actor's own and
+   * canCreateRecord is checked as on every create.
+   */
+  manualRow?: ManualRowCreateExtension
 }
 
 export type RecordCreateResult = {
@@ -649,6 +665,13 @@ export class RecordService {
     if (copy && (!Number.isInteger(copy.ordinal) || copy.ordinal < 0 || !(copy.startedAt instanceof Date) || !copy.batchId)) {
       throw new RecordValidationError('Copy-sheet write context is malformed', 'COPY_CONTEXT_INVALID')
     }
+    // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2): the extension is honoured only as an object the gate
+    // module minted, for THIS sheet, and never together with the copy-sheet context. Refused before any read. It is
+    // not a capability: `capabilities` below is still the actor's own and canCreateRecord is still checked.
+    const manualRow = input.manualRow ?? null
+    if (manualRow && (!isMintedManualRowCreateExtension(manualRow) || manualRow.sheetId !== sheetId || copy)) {
+      throw new RecordPermissionError('Manual-row writes require the server-minted manual-row extension for this sheet')
+    }
 
     const sheetRes = await this.pool.query(
       'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
@@ -701,6 +724,14 @@ export class RecordService {
         throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
       }
 
+      // 人工补充行: conditions 3, 4 and 6 again, on the fields just re-read and the plugin registry row read on THIS
+      // transaction's query, after the fence (ADR §3.2). Refuses before any write; the stamps come from here.
+      const manualSheet: ManualRowsSheet | null = manualRow
+        ? await assertManualRowCreateInTransaction(query, manualRow, fieldRes.rows as Array<{ id?: unknown; property?: unknown }>)
+        : null
+      const manualFillableFieldIds = new Set(manualSheet?.derived.fillable ?? [])
+      const manualNeverWrittenFieldIds = manualSheet?.derived.neverWritten ?? new Set<string>()
+
       const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
@@ -732,8 +763,14 @@ export class RecordService {
           throw new RecordValidationError(`Unknown fieldId: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
         }
 
+        // 人工补充行: the stamps, the identity / RUN columns and the lineage pair are the server's on a manual row — a
+        // submitted value is refused with the closed code whether or not the column carries its lock.
+        if (manualNeverWrittenFieldIds.has(fieldId)) {
+          throw new RecordFieldForbiddenError(`Field is written by the server on a manual row: ${fieldId}`, fieldId, FIELD_READONLY_PLM_SYSTEM_CODE)
+        }
         const humanLockKind = humanLockKindByFieldId.get(fieldId)
-        if (humanLockKind) {
+        // The lock exemption: ONLY the six fillable columns derived for this sheet, and only on the manual-row branch.
+        if (humanLockKind && !manualFillableFieldIds.has(fieldId)) {
           throw new RecordFieldForbiddenError(`Field is read-only (system-written): ${fieldId}`, fieldId, humanWriteLockRefusalCode(humanLockKind))
         }
 
@@ -868,11 +905,22 @@ export class RecordService {
         patch[fieldId] = value
       }
 
+      // 人工补充行 stamps (ADR §3.2 盖章): 项目号 from the plugin registry row, the key `manual:v1:<this id>` (the id the
+      // server minted above), 有效 = true — in the SAME INSERT as created_by. Identity and RUN columns stay empty.
+      if (manualSheet) {
+        patch[manualSheet.derived.projectNo] = manualSheet.projectNo
+        patch[manualSheet.derived.key] = manualRowKeyFor(recordId)
+        patch[manualSheet.derived.active] = true
+      }
+
       // CS-21: the copy path skips `property.validation` (required / min / max / regex …) — the source rows
       // are grandfathered facts and a snapshot must not do the source table's homework.
       if (!copy) {
+        const validationFields = buildDirectValidationFields(fieldRes.rows)
         const directValidationResult = validateRecord(
-          buildDirectValidationFields(fieldRes.rows),
+          // 人工补充行: the required rewrite applies to THIS create only — componentSourceId / path lose `required`,
+          // 名称 gains it (ADR §3.2).
+          manualSheet ? rewriteManualRowValidation(validationFields, manualSheet) : validationFields,
           patch,
         )
         if (!directValidationResult.valid) {
@@ -1055,12 +1103,15 @@ export class RecordService {
     // R-66 ① (owner 2026-10-28「管理员也不能删 PLM 行」, plm-row-delete-guard.ts): a PLM row on a stock-preparation
     // template sheet is refused for EVERY actor — no admin branch. After the capability / row-policy / lock checks
     // above (an actor who may not delete anyway learns nothing new), before the fence and any write. Serves the
-    // session route, mst_ API tokens (same route) and the web's bulk delete (N single deletes).
+    // session route, mst_ API tokens (same route) and the web's bulk delete (N single deletes). The ROW IDENTITY
+    // (this record's id and the `created_by` read above) is what lets the amended ① exempt a `manual:`-keyed row that
+    // has a creator (ADR adr-stock-prep-manual-rows-20261030 §3.5, exemption E).
     await assertPlmRowDeletable(
       this.pool.query.bind(this.pool),
       sheetId,
       await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId),
       normalizeJson(recordRow.data),
+      { id: recordId, createdBy },
     )
 
     const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(

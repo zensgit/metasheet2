@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from '../../../../scripts/ops/plugin-tests-workflow-contract.mjs'
 /**
  * W1-3 GW7 — durable structural guard: every write path that reaches the record-write surface is
  * enumerated against a FROZEN, disposition-tagged allowlist ("has a layer-3 per-subject
@@ -537,6 +538,15 @@ const WRITE_PORTS: Record<PortId, Port> = {
             "(\"FIELD_POLICY_DENIED\") before patchRecords' internal write. Not the shared isFieldWriteForbidden " +
             'helper (a different, narrower per-op shape), but a genuine per-subject field_permissions check.',
         },
+        {
+          disposition: 'GATED',
+          reason:
+            '人工补充行 PATCH /records/:recordId/manual-fields (ADR adr-stock-prep-manual-rows-20261030 §3.4) — ' +
+            'manualEditFieldPermissions = deriveFieldPermissions over the fields with the human write lock lifted from ' +
+            'the six fillable columns ONLY, with the per-subject fieldScopeMap (loadFieldPermissionScopeMap), then the ' +
+            'isFieldWriteForbidden pre-check and sendForbidden BEFORE patchRecords. Only the six fillable columns are ' +
+            'accepted at all, on a row that satisfies M (re-checked in the transaction by the preWriteGuard).',
+        },
       ],
       'routes/multitable-ai.ts': [
         { disposition: 'GATED', reason: 'AI shortcut run (single target field) — targetPermission pre-check via buildRecordPatchContext.fieldPermissions (pre-existing #2106 F3 enforcement point)' },
@@ -618,6 +628,18 @@ const WRITE_PORTS: Record<PortId, Port> = {
             'map loaded by loadFieldPermissionScopeMap, skipping any field whose perm is !visible || readOnly. ' +
             'This is the proof that the create-time layer-3 question was known and answered at exactly one ' +
             'of the three create sites.',
+        },
+        {
+          disposition: 'GATED',
+          reason:
+            '人工补充行 create — createManualSupplementRow, the ONE createRecord call shared by POST ' +
+            '/sheets/:sheetId/manual-rows and POST /records/:recordId/manual-copy (ADR ' +
+            'adr-stock-prep-manual-rows-20261030 §3.2/§3.3). assertManualRowCreateFieldsWritable runs the layer-3 ' +
+            'per-subject gate (loadFieldPermissionScopeMap + deriveFieldPermissions(allowCreateOnly) + ' +
+            'isFieldWriteForbidden) over EVERY submitted field before the create, on fields whose human write lock is ' +
+            'lifted for the six fillable columns only; the copy payload is additionally built from columns the actor ' +
+            'can read AND write. The create runs on the actor\'s own capabilities with a minted manual-row extension. ' +
+            'Session-only routes.',
         },
       ],
       'multitable/copy-sheet-service.ts': [
@@ -1017,6 +1039,30 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     )
   })
 
+  test('smoke: the manual-row create site (univer-meta.ts) gates every submitted field per subject BEFORE recordService.createRecord', () => {
+    const univerMeta = read('routes/univer-meta.ts')
+    const gateAt = univerMeta.indexOf('function assertManualRowCreateFieldsWritable(')
+    const createAt = univerMeta.indexOf('async function createManualSupplementRow(')
+    const copyAt = univerMeta.indexOf('async function buildManualRowCopyData(')
+    expect(gateAt, 'the manual-row field gate is gone or renamed').toBeGreaterThan(-1)
+    expect(createAt, 'createManualSupplementRow is gone or renamed').toBeGreaterThan(gateAt)
+    expect(copyAt).toBeGreaterThan(createAt)
+    const gate = univerMeta.slice(gateAt, createAt)
+    expect(gate).toContain('deriveFieldPermissions(')
+    expect(gate).toContain('allowCreateOnly: true')
+    expect(gate).toContain('isFieldWriteForbidden(manualCreateFieldPermissions[fid])')
+    expect(univerMeta.slice(createAt, copyAt)).toMatch(
+      /loadFieldPermissionScopeMap\([\s\S]{0,300}assertManualRowCreateFieldsWritable\([\s\S]{0,800}recordService\.createRecord\(\{/,
+    )
+  })
+
+  test('smoke: PATCH /records/:recordId/manual-fields gates per subject BEFORE recordWriteService.patchRecords', () => {
+    const univerMeta = read('routes/univer-meta.ts')
+    expect(univerMeta).toMatch(
+      /isFieldWriteForbidden\(manualEditFieldPermissions\[fid\]\)[\s\S]{0,400}sendForbidden\(res, `Field\(s\) not writable[\s\S]{0,2500}recordWriteService\.patchRecords\(\{/,
+    )
+  })
+
   /**
    * THE CHARACTERIZATION SMOKE — the counterpart of the real-DB golden, runnable with no database.
    *
@@ -1325,13 +1371,14 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     // turn a red into a wall of YAML.
     const coreStepShown = coreStep.split('\n').slice(0, 40).join('\n')
 
-    //    3a. The step lives inside the `test` job — the job the r2 review's "which job runs it?" question
+    //    3a. The step lives inside the `unit` dependency of the required `test` job — the job the r2 review's "which job runs it?" question
     //        was about. Bounded by the next TOP-LEVEL job key (two-space indent), so a step that moved to
     //        another job cannot keep this green.
-    const testJobAt = workflow.indexOf('\n  test:\n')
+    requiredSuiteJob(workflow, 'unit')
+    const testJobAt = workflow.indexOf('\n  unit:\n')
     expect(
       testJobAt,
-      'plugin-tests.yml no longer declares a top-level `test:` job — the job this guard rides in is gone or renamed.',
+      'plugin-tests.yml no longer declares a top-level `unit:` job — the job this guard rides in is gone or renamed.',
     ).toBeGreaterThanOrEqual(0)
     const nextTopLevelJob = /\n {2}[A-Za-z_][A-Za-z0-9_-]*:\n/g
     nextTopLevelJob.lastIndex = testJobAt + 1
@@ -1339,7 +1386,7 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     const testJobEnd = nextJobMatch === null ? workflow.length : nextJobMatch.index
     expect(
       coreStepAt > testJobAt && coreStepAt < testJobEnd,
-      'the "Run core-backend tests" step is no longer inside plugin-tests.yml\'s `test` job (the job that runs ' +
+      'the "Run core-backend tests" step is no longer inside plugin-tests.yml\'s required `unit` job (the job that runs ' +
         'on every pull_request with no `paths:` filter). It may now sit in a job with its own trigger or ' +
         `condition — re-verify what executes this guard. The step slice read was:\n${coreStepShown}`,
     ).toBe(true)

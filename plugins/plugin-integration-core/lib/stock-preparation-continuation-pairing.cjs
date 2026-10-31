@@ -46,10 +46,12 @@ const {
 const { __internals: expansionInternals } = require('./stock-preparation-bom-expansion.cjs')
 
 const {
+  CHANGE_PLAN_UPDATE_TYPE,
   DECISIONS,
   DENORMALIZED_PLM_FIELD_IDS,
   EXISTING_ROW_RECORD_REF,
   LINEAGE_FIELD_IDS,
+  RUN_FIELD_IDS,
   derivePackAwarePlmWritableFields,
 } = planner
 const {
@@ -72,6 +74,9 @@ const SCHEMES = Object.freeze({
   holdBody: 'stock-preparation/refresh-hold-body/v1',
   subject: 'stock-preparation/refresh-subject/v1',
   sheetMachine: 'stock-preparation/sheet-machine/v1',
+  // Step 5 PR-8: the change plan's binding (record set + source content) and the reviewed content.
+  changePlan: 'stock-preparation/change-plan/v1',
+  changeContent: 'stock-preparation/change-content/v1',
 })
 
 const CONTINUATION_ERROR_CODES = Object.freeze({
@@ -182,6 +187,9 @@ const CONTINUATION_INPUT_KEYS = Object.freeze([
   'specSlotDeclared',
   'persistedHolds',
   'changePlan',
+  // Step 5 PR-8 review fix N3 (C06): the content the reviews (round 2: the reviewed-cell register) and the pending written
+  // plan left on the sheet.
+  'expectedContent',
 ])
 
 // The persisted-hold key set (PHK, defined once; the lane's `pickPersistedHold` and this validation both
@@ -203,6 +211,12 @@ const PERSISTED_HOLD_KEYS = Object.freeze([
   'runbookOnly',
   'continuationRoots',
 ])
+
+// Step 5 PR-8 review fix N3 (C06): the `detail.reason` of a content_change hold opened because a cell a review (or the
+// pending written plan) left under a record key is no longer on the sheet while the source agrees with the sheet — the
+// source and a host-side write moved together — or (round 2, N3-a) because the row under that key is gone while the
+// source moved off the reviewed value. Detected for those keys pilot or not, so it is never re-emitted.
+const REVIEWED_CONTENT_MOVED_REASON = 'reviewed_content_moved'
 
 // Re-emission (AMB-1 / TD-10): the kinds only pilot DETECTION produces. After the pilot marker is cleared
 // detection stops, so a persisted hold of one of these kinds is re-emitted VERBATIM (stored fingerprint)
@@ -604,6 +618,39 @@ function evidenceFingerprintOf({ projectNo, pairs, comparison, demandFacts }) {
   })
 }
 
+// ── the post-change pair (batch-refresh step 5 PR-8; design §10.3 (1), C04 / C11) ────────────────────
+//
+// What a relationship's comparison and evidence fingerprints WILL be once the controlled update has written the new
+// side's values for every field the seven items say `differs` (and, for the subtree root, the derived root total into
+// its single-level usage too — the S-root rule; the root's usage is outside both fingerprints anyway). A confirm stamps
+// THIS pair on the relationship: before the write the next computation's content change is then the confirmed one
+// (covered, no hold); after it the relationship verifies `valid` instead of `evidence_changed`. Same pairs, same
+// normalisation and the same demand facts as the comparison it is derived from — so it equals what the verification
+// computes after the write (pinned by the planner suite).
+function postChangePairsOf(pairs, comparison) {
+  const itemsByPath = new Map(comparison.items.map((item) => [JSON.stringify(item.relativePath), item]))
+  return pairs.map((pair) => {
+    const item = itemsByPath.get(JSON.stringify(pair.relativePath))
+    const after = {}
+    if (item && isPlainObject(item.fields)) {
+      for (const [fieldId, cell] of Object.entries(item.fields)) {
+        if (isPlainObject(cell) && cell.status === 'differs') after[fieldId] = pair.newRow[fieldId]
+      }
+    }
+    if (pair.root && Object.prototype.hasOwnProperty.call(after, 'totalQuantity')) after.rawQuantity = pair.newRow.totalQuantity
+    return { ...pair, oldRow: { ...pair.oldRow, ...after } }
+  })
+}
+
+function postChangeFingerprintsOf({ projectNo, pairs, comparison, demandFacts, templateFields, specSlotDeclared, nameAndSpecDeclared }) {
+  const postPairs = postChangePairsOf(pairs, comparison)
+  const post = compareSevenItems({ pairs: postPairs, templateFields, specSlotDeclared, nameAndSpecDeclared })
+  return Object.freeze({
+    comparisonFingerprint: post.comparisonFingerprint,
+    evidenceFingerprint: evidenceFingerprintOf({ projectNo, pairs: postPairs, comparison: post, demandFacts }),
+  })
+}
+
 // ── demand facts (design §6.4, from the #6502 recorder) ────────────────────────────────────────────
 
 function evidenceUsability(demandEvidence) {
@@ -866,13 +913,35 @@ function buildContinuationProjection(continuations, members) {
  * compared as its BASE key (TD-14, O-4). Separate from the consumers on purpose, so removing a consumer
  * cannot also remove the check.
  */
-function assertContinuationPostCondition(decisions, { projection, candidateSuppressAddKeys = new Map(), candidateOccupiedKeys = new Map(), candidateProtectKeys = new Map() }) {
+// Step 5 PR-8 (design §10.3 (2); plan §3.4 「这是对『沿用行不执行 patch』的唯一例外」): a change-plan UPDATE is admitted
+// ONLY as the confirmed plan authorizes it — an UPDATE (never ADD / INACTIVE), naming the authorized plan, on a key
+// whose record the plan binds, patching nothing but that record's WRITE fields and the RUN stamps (never a key, a
+// path, a parent, `active` or a human column). Fail closed, separate from the builders.
+function assertAuthorizedChangePlanUpdate(decision, key, authorization) {
+  const violated = (reason) => new StockPreparationContinuationError(500, CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED, 'a change-plan update is not what the confirmed plan authorizes', { decision: decision.decision, reason })
+  if (!authorization) throw violated('no_authorization')
+  if (decision.decision !== DECISIONS.UPDATE) throw violated('not_update')
+  if (!isPlainObject(decision.conflictSummary) || decision.conflictSummary.changePlanId !== authorization.changePlanId) throw violated('plan_id')
+  const entry = authorization.byKey.get(key)
+  if (!entry) throw violated('key_not_authorized')
+  const allowed = new Set([...Object.keys(entry.writeFields), ...RUN_FIELD_IDS])
+  const patch = isPlainObject(decision.patch) ? decision.patch : {}
+  for (const fieldId of Object.keys(patch)) {
+    if (!allowed.has(fieldId)) throw violated('field_not_authorized')
+  }
+}
+
+function assertContinuationPostCondition(decisions, { projection, candidateSuppressAddKeys = new Map(), candidateOccupiedKeys = new Map(), candidateProtectKeys = new Map(), authorization = null }) {
   const writes = new Set([DECISIONS.ADD, DECISIONS.UPDATE, DECISIONS.INACTIVE])
   for (const decision of Array.isArray(decisions) ? decisions : []) {
     if (!isPlainObject(decision) || !nonBlankString(decision.idempotencyKey)) continue
     const key = baseKeyOf(decision.idempotencyKey)
+    const changePlanUpdate = isPlainObject(decision.conflictSummary) && decision.conflictSummary.type === CHANGE_PLAN_UPDATE_TYPE
+    if (changePlanUpdate) assertAuthorizedChangePlanUpdate(decision, key, authorization)
     const continued = projection && (projection.suppressAddKeys.has(key) || projection.protectInactiveKeys.has(key))
-    if (continued && writes.has(decision.decision)) {
+    // The ONE exemption: an authorized change-plan UPDATE on a continued relationship's OLD (protected) key.
+    const authorizedOldKey = changePlanUpdate && authorization && authorization.continuedOldKeys.has(key)
+    if (continued && writes.has(decision.decision) && !authorizedOldKey) {
       throw new StockPreparationContinuationError(500, CONTINUATION_ERROR_CODES.POSTCONDITION_VIOLATED, 'a continued key received a write decision', { decision: decision.decision })
     }
     const candidatePosition = candidateSuppressAddKeys.has(key) || candidateOccupiedKeys.has(key)
@@ -948,7 +1017,8 @@ function normalizeContinuationInput(input) {
   }
   if (typeof input.specSlotDeclared !== 'boolean') throw inputInvalid('continuation.specSlotDeclared must be a boolean', 'continuation.specSlotDeclared')
   const persistedHolds = normalizePersistedHolds(input.persistedHolds)
-  if (input.changePlan !== undefined && input.changePlan !== null) throw inputInvalid('continuation.changePlan is step 5 and not supported yet', 'continuation.changePlan')
+  const changePlan = normalizeChangePlanInput(input.changePlan)
+  const expectedContent = normalizeExpectedContent(input.expectedContent)
   return Object.freeze({
     storeState: 'ok',
     pilot: input.pilot,
@@ -963,6 +1033,68 @@ function normalizeContinuationInput(input) {
     }),
     specSlotDeclared: input.specSlotDeclared,
     persistedHolds,
+    changePlan,
+    expectedContent,
+  })
+}
+
+// Step 5 PR-8 review fix N3 (C06) — the content the project's REVIEWS (round 2, N3-b: the reviewed-cell register, every
+// cell any review bound) and its pending WRITTEN plan left on the sheet (the consult's private `expectedContent`, built
+// by the continuation store): `[]` when absent (nothing reviewed or written — the lane always passes it, RL-02 / SL-G8),
+// else exactly `[{ recordId, key, fields: { [fieldId]: { after, afterCanonical } } }]` with DISTINCT KEYS (round 2,
+// N3-a: the record key is the identity; `recordId` names the record the latest review / the written plan bound under
+// that key, and one record reviewed under two keys over time may appear twice). A closed shape, refused 500 otherwise
+// (a lane defect).
+const EXPECTED_CONTENT_KEYS = Object.freeze(['recordId', 'key', 'fields'])
+
+function normalizeExpectedContent(input) {
+  if (input === undefined || input === null) return Object.freeze([])
+  if (!Array.isArray(input)) throw inputInvalid('continuation.expectedContent must be an array', 'continuation.expectedContent')
+  const seen = new Set()
+  return Object.freeze(input.map((entry, index) => {
+    const field = `continuation.expectedContent[${index}]`
+    if (!isPlainObject(entry)) throw inputInvalid('an expected-content entry must be an object', field)
+    for (const entryKey of Object.keys(entry)) {
+      if (!EXPECTED_CONTENT_KEYS.includes(entryKey)) throw inputInvalid(`${field}.${entryKey} is not a recognized key`, `${field}.${entryKey}`)
+    }
+    if (!nonBlankString(entry.recordId) || !nonBlankString(entry.key) || !isPlainObject(entry.fields)) throw inputInvalid('an expected-content entry needs recordId, key and fields', field)
+    if (seen.has(entry.key)) throw inputInvalid('an expected-content key repeats', field)
+    seen.add(entry.key)
+    const fields = {}
+    for (const [fieldId, cell] of Object.entries(entry.fields)) {
+      if (!isPlainObject(cell) || !Object.prototype.hasOwnProperty.call(cell, 'after') || !Object.prototype.hasOwnProperty.call(cell, 'afterCanonical')) {
+        throw inputInvalid('an expected-content cell needs after and afterCanonical', `${field}.fields.${fieldId}`)
+      }
+      fields[fieldId] = Object.freeze({ after: cell.after, afterCanonical: cell.afterCanonical })
+    }
+    return Object.freeze({ recordId: entry.recordId, key: entry.key, fields: Object.freeze(fields) })
+  }))
+}
+
+// Step 5 PR-8 — the CONFIRMED change plan a governed computation plans with (design §10.3 (2); the lane builds it from
+// the consult's values-free summary and THIS computation's source content digest): `null` (none), or exactly
+// `{ id, planFingerprint, currentSourceContentDigest, recordIds }`. `recordIds` (record-id handles the plan writes)
+// keep content detection ON for those records whatever the pilot marker says (refutation M4: after a pilot exit the
+// confirmed change is still found, so it is executed and reviewed — plan §3.4 「退出试点…未完成的变更复核…继续生效」).
+const CHANGE_PLAN_INPUT_KEYS = Object.freeze(['id', 'planFingerprint', 'currentSourceContentDigest', 'recordIds'])
+
+function normalizeChangePlanInput(input) {
+  if (input === undefined || input === null) return null
+  if (!isPlainObject(input)) throw inputInvalid('continuation.changePlan must be null or an object', 'continuation.changePlan')
+  for (const entryKey of Object.keys(input)) {
+    if (!CHANGE_PLAN_INPUT_KEYS.includes(entryKey)) throw inputInvalid(`continuation.changePlan.${entryKey} is not a recognized key`, `continuation.changePlan.${entryKey}`)
+  }
+  for (const field of ['id', 'planFingerprint', 'currentSourceContentDigest']) {
+    if (!nonBlankString(input[field])) throw inputInvalid(`continuation.changePlan.${field} is required`, `continuation.changePlan.${field}`)
+  }
+  if (!Array.isArray(input.recordIds) || !input.recordIds.every(nonBlankString)) {
+    throw inputInvalid('continuation.changePlan.recordIds must be an array of record ids', 'continuation.changePlan.recordIds')
+  }
+  return Object.freeze({
+    id: input.id,
+    planFingerprint: input.planFingerprint,
+    currentSourceContentDigest: input.currentSourceContentDigest,
+    recordIds: Object.freeze(input.recordIds.slice()),
   })
 }
 
@@ -1026,9 +1158,30 @@ function normalizePersistedHolds(input) {
 
 // ── holds ─────────────────────────────────────────────────────────────────────────────────────────
 
+// Batch-refresh step 5 PR-8 (refutation M2; plan §4 「人工填写不属于关系内容指纹，不因普通人工填写变更就重新询问」):
+// the per-computation OBSERVATIONS a content hold carries for the page — the record version the computation read and
+// which human columns hold a value — say nothing about WHAT changed, and a person filling any cell of the row moves
+// both. They stay in the stored `detail` (the store refreshes them every time a computation keeps the hold) but are
+// EXCLUDED from the hold's body digest, so a person's edit never re-keys the hold (a new id / fingerprint would void
+// the puller's read receipt and the change-plan confirm's echo). Only the content_change body carries them.
+const VOLATILE_DETAIL_KEYS = Object.freeze({
+  content_change: Object.freeze(['recordVersion', 'humanColumnsPresent']),
+})
+
+function fingerprintedDetail(kind, detail) {
+  const volatile = VOLATILE_DETAIL_KEYS[kind]
+  if (!volatile || !isPlainObject(detail)) return detail
+  const out = {}
+  for (const [entryKey, value] of Object.entries(detail)) {
+    if (!volatile.includes(entryKey)) out[entryKey] = value
+  }
+  return out
+}
+
 /**
  * Same hold content => same fingerprint across computations (design §4.2 `fingerprint`): kind, subject
- * handles, confirmability and the body digest. Deterministic: no clock, no run id, no lane.
+ * handles, confirmability and the body digest (the kind's volatile observations excluded, PR-8 M2).
+ * Deterministic: no clock, no run id, no lane.
  */
 function holdFingerprint(hold) {
   const { kind, subject, confirmable, notConfirmableReason, shapeToken, detail, evidenceFingerprint, comparisonFingerprint, pairingFingerprint, continuationId } = hold
@@ -1042,7 +1195,7 @@ function holdFingerprint(hold) {
     evidenceFingerprint: evidenceFingerprint || null,
     comparisonFingerprint: comparisonFingerprint || null,
     pairingFingerprint: pairingFingerprint || null,
-    bodyDigest: fingerprintOf(SCHEMES.holdBody, detail === undefined ? null : detail),
+    bodyDigest: fingerprintOf(SCHEMES.holdBody, detail === undefined ? null : fingerprintedDetail(kind, detail)),
   })
 }
 
@@ -1137,6 +1290,7 @@ function verifyContinuation(context, continuation, members) {
   let comparison = null
   let demandFacts = null
   let fingerprints = null
+  let postChange = null
   if (!oldRootTokens || !newRootTokens) {
     // F-15 (design §23.8): a root key the parser refuses — the planner's `::duplicate:` suffix included — is
     // structure, deliberately and by construction (TD-14's claim maps are base-keyed, so a stripped root would
@@ -1182,6 +1336,8 @@ function verifyContinuation(context, continuation, members) {
         steps.content = 'evidence_incomplete'
       } else if (comparison.outcome === 'content_change') {
         steps.content = 'content_changed'
+        // Step 5 PR-8: the pair a change-plan confirm stamps (see postChangeFingerprintsOf).
+        postChange = postChangeFingerprintsOf({ projectNo: input.projectNo, pairs: pairing.pairs, comparison, demandFacts, templateFields, specSlotDeclared: input.specSlotDeclared, nameAndSpecDeclared })
       } else {
         // Both sides moved together (a host-side write on the old rows AND a source change): the
         // relationship no longer describes what was confirmed.
@@ -1199,7 +1355,7 @@ function verifyContinuation(context, continuation, members) {
   if (verdict === 'source_scope_changed') reconfirmable = othersValid
   else if (verdict === 'evidence_changed') reconfirmable = true
   else if (verdict === 'valid' && continuation.status === 'needs_reconfirmation') reconfirmable = RECONFIRMABLE_REASONS.includes(continuation.statusReason)
-  return { verdict, steps, reconfirmable, pairing, comparison, demandFacts, fingerprints, componentNewPositionCount }
+  return { verdict, steps, reconfirmable, pairing, comparison, demandFacts, fingerprints, componentNewPositionCount, postChange }
 }
 
 function verificationHold(continuation, result) {
@@ -1220,6 +1376,12 @@ function verificationHold(continuation, result) {
     // PR-4 (§8.4 end admissibility): N(c) of the old root's component in this read — see verifyContinuation.
     componentNewPositionCount: result.componentNewPositionCount === undefined ? null : result.componentNewPositionCount,
   }
+  // Step 5 PR-8: a content change the change-plan confirm can resolve carries the post-change pair it would stamp
+  // (two digests — never a version or a human-column observation, so a person's edit never re-keys it; M2).
+  const changePlanResolvable = verdict === 'content_changed'
+    && (continuation.status === 'active' || RECONFIRMABLE_REASONS.includes(continuation.statusReason))
+    && isPlainObject(result.postChange)
+  if (changePlanResolvable) detail.postChange = { ...result.postChange }
   const fingerprints = result.fingerprints || {}
   if (verdict === 'content_changed' && continuation.status === 'active') {
     return makeHold({
@@ -1236,7 +1398,10 @@ function verificationHold(continuation, result) {
   if (!result.reconfirmable) {
     if (verdict === 'demand_changed') reason = 'customer_rule_pending'
     else if (verdict === 'evidence_incomplete') reason = 'evidence_incomplete'
-    else if (verdict === 'content_changed') reason = 'needs_step5'
+    // Step 5 PR-8 (refutation M3): a relationship that needs reconfirmation AND whose content changed is resolved
+    // by the change-plan confirm (which re-activates it) only when its stored reason is one a re-confirm admits;
+    // otherwise neither path admits it and the token says so (never a promise of step 5 it cannot keep).
+    else if (verdict === 'content_changed') reason = changePlanResolvable ? 'needs_step5' : 'reconfirm_not_admissible'
     else reason = 'reconfirm_not_admissible'
   }
   return makeHold({
@@ -1419,8 +1584,12 @@ function detectCandidates(context) {
             evidenceFingerprint: evidenceFingerprintOf({ projectNo: input.projectNo, pairs: pairing.pairs, comparison, demandFacts }),
           }
           if (demandFacts.classification === 'incomplete' || comparison.outcome === 'incomplete') kind = 'candidate_incomplete_evidence'
-          else if (comparison.outcome === 'content_change') kind = 'candidate_content_differs'
-          else kind = 'continuation_candidate'
+          else if (comparison.outcome === 'content_change') {
+            kind = 'candidate_content_differs'
+            // Step 5 PR-8 (design §10.3 (5)): the combined confirm creates the relationship stamped with the pair it
+            // will verify with once the change-plan update has written the new side (see postChangeFingerprintsOf).
+            detail.postChange = { ...postChangeFingerprintsOf({ projectNo: input.projectNo, pairs: pairing.pairs, comparison, demandFacts, templateFields, specSlotDeclared: input.specSlotDeclared, nameAndSpecDeclared }) }
+          } else kind = 'continuation_candidate'
         }
       }
       subject.oldRootRecordId = (recordRefOf(root.row) || {}).id || null
@@ -1629,6 +1798,9 @@ function prepareGovernedPlanning(args) {
     parentIndex,
     declaredExtensionFieldIds,
     humanFields,
+    // Step 5 PR-8: the confirmed change plan's AUTHORIZATION — present only on the planner's second pass, after its
+    // first pass found exactly the plan's change set (`authorizationFromRecords`); never part of the closed input.
+    authorization = null,
   } = args
   const templateFields = fieldMapForTemplate(template)
   const projection = buildContinuationProjection(input.continuations, input.members)
@@ -1655,7 +1827,11 @@ function prepareGovernedPlanning(args) {
   for (const continuation of input.continuations.slice().sort((left, right) => compareStrings(left.id, right.id))) {
     const result = verifyContinuation(context, continuation, projection.byContinuation.get(continuation.id))
     verdicts[continuation.id] = result.verdict
-    const hold = verificationHold(continuation, result)
+    // Step 5 PR-8: the content change of a relationship the confirmed plan covers is the AUTHORIZED one (the first
+    // pass proved its post-change pair is the relationship's stamp): no hold — its old rows get the plan's UPDATEs.
+    // The verdict is still reported (`content_changed`, which never moves the relationship's status).
+    const covered = authorization && result.verdict === 'content_changed' && authorization.coveredContinuationIds.has(continuation.id)
+    const hold = covered ? null : verificationHold(continuation, result)
     if (hold) holds.push(hold)
     if (hold && result.verdict !== 'valid') failedVerifications.push({ oldRootKey: continuation.oldRootKey, fingerprint: hold.fingerprint })
   }
@@ -1704,6 +1880,47 @@ function prepareGovernedPlanning(args) {
     const ref = recordRefOf(existingRow)
     return ref ? { recordId: ref.id } : { keyDigest: subjectDigest(key) }
   }
+  // Step 5 PR-8 (refutation M4): the records a confirmed plan writes stay under content detection on EVERY pass,
+  // pilot or not — after a pilot exit the confirmed change is still found (so it matches, is executed and reviewed).
+  const forcedRecordIds = input.changePlan ? new Set(input.changePlan.recordIds) : null
+  // Review fix N3 (C06 「复核前后再发生相关变化，旧复核不再有效，重新挂起」): the content the reviews and the pending written
+  // plan left on the sheet. Those rows stay under content detection on every pass (pilot or not), and a cell of them the
+  // sheet no longer carries is held even when the source moved to exactly that value. Round 2 (N3-a): indexed by record
+  // KEY as well as by record id — a row under a reviewed / written key is compared whatever its record id (the reviewed
+  // row deleted and re-created under its key carries a new id, V8D-03), and a key whose row is gone is held when the
+  // source no longer carries the reviewed value (V8D-04, `noteMissingReviewedRow`).
+  const expectedEntries = Array.isArray(input.expectedContent) ? input.expectedContent : []
+  const expectedByRecordId = new Map(expectedEntries.map((entry) => [entry.recordId, entry]))
+  const expectedByKey = new Map(expectedEntries.map((entry) => [entry.key, entry]))
+  // The expected content of the row under `key`: the entry its record id names when that entry is under the same key,
+  // else (N3-a) the entry of the KEY itself.
+  function expectedEntryFor(existingRow, key) {
+    const ref = recordRefOf(existingRow)
+    const byId = ref ? expectedByRecordId.get(ref.id) : null
+    if (byId && byId.key === key) return byId
+    return expectedByKey.get(key) || null
+  }
+  // The trigger cells of `existingRow` that differ from what the reviews / the written plan left under its key
+  // (canonical, the writer's normalisation). Sorted.
+  function reviewedContentMovesOf(existingRow, key) {
+    const entry = expectedEntryFor(existingRow, key)
+    if (!entry) return []
+    const moved = []
+    for (const [fieldId, cell] of Object.entries(entry.fields)) {
+      if (!triggerFieldIds.includes(fieldId)) continue
+      const current = canonicalChangeValue(existingRow[fieldId], templateFields.get(fieldId))
+      if (canonicalJson(current === undefined ? null : current) !== canonicalJson(cell.afterCanonical === undefined ? null : cell.afterCanonical)) moved.push(fieldId)
+    }
+    return moved.sort(compareStrings)
+  }
+  // The authorized entry a record id names, only when the row is the one the plan bound (same id AND same key).
+  function authorizedEntryFor(existingRow) {
+    if (!authorization) return null
+    const ref = recordRefOf(existingRow)
+    if (!ref) return null
+    const entry = authorization.records.get(ref.id)
+    return entry && entry.key === keyOf(existingRow) ? entry : null
+  }
   return {
     pilot: input.pilot === true,
     projection,
@@ -1711,6 +1928,36 @@ function prepareGovernedPlanning(args) {
     candidateOccupiedKeys,
     candidateProtectKeys,
     triggerFieldIds,
+    authorization,
+    // Content detection for this existing row on a governed plan: the pilot marker, a record the confirmed plan writes
+    // (M4), or a row whose content the reviews / the pending written plan left (review fix N3) — by its KEY (round 2,
+    // N3-a: whatever its record id, and before the record-ref check: a re-created row is still the reviewed position).
+    detectsContentOf(existingRow) {
+      if (input.pilot === true) return true
+      if (expectedByKey.has(keyOf(existingRow))) return true
+      const ref = recordRefOf(existingRow)
+      if (!ref) return false
+      return Boolean((forcedRecordIds && forcedRecordIds.has(ref.id)) || expectedByRecordId.has(ref.id))
+    },
+    // Review fix N3-a (round 2, the inactive sibling): a row under a reviewed / written KEY stays under content detection
+    // even while INACTIVE (the source dropped it and the sweep marked it inactive). The step-4 rule "a revive is not a
+    // content change" would otherwise let the source bring the row back with content nobody reviewed, unheld. Keys with
+    // no reviewed / written content keep that rule.
+    isReviewedKey(existingRow) {
+      return expectedByKey.has(keyOf(existingRow))
+    },
+    // Step 5 PR-8: the authorized change of a NOT-continued row (null otherwise).
+    authorizedChangeFor(existingRow) {
+      const entry = authorizedEntryFor(existingRow)
+      return entry && !entry.inContinuation ? entry : null
+    },
+    // Step 5 PR-8: the authorized change of a continued relationship's OLD (protected) row, by BASE key and record id.
+    authorizedContinuedUpdateFor(key, existingRow) {
+      if (!authorization) return null
+      const entry = authorization.continuedOldKeys.get(baseKeyOf(key))
+      const ref = recordRefOf(existingRow)
+      return entry && ref && ref.id === entry.recordId ? entry : null
+    },
     // Which continuation (if any) claims a key, and from which end. BASE key (TD-14).
     continuedRefFor(key) {
       const base = baseKeyOf(key)
@@ -1735,9 +1982,19 @@ function prepareGovernedPlanning(args) {
     noteContentChange(row, existingRow, { reason }) {
       const key = keyOf(existingRow)
       if (!key || rowHolds.has(key)) return
+      // Step 5 PR-8: the confirmed plan's own change of this row is authorized (the planner emits its UPDATE).
+      if (authorizedEntryFor(existingRow)) return
       const fields = contentTriggerChanges(row, existingRow, { triggerFieldIds, templateFields })
-      if (fields.length === 0) return
+      // Review fix N3 (C06; design §10.3 (4) "any later relevant change invalidates"): the source did not change against
+      // the sheet, but a cell a review (or the pending written plan) left under this row's key is no longer there — the
+      // source and a host-side write moved it TOGETHER (pg lens V8PG-15), so no ordinary detection fires and the old review
+      // would stay "valid" over content nobody reviewed. It is held like any content change: from the reviewed / written
+      // value (`before`, the C06 baseline the review chain continues from) to the source value (`after`, which the sheet
+      // already holds — the controlled update rewrites it), reason `reviewed_content_moved`.
+      const moved = fields.length === 0 ? reviewedContentMovesOf(existingRow, key) : []
+      if (fields.length === 0 && moved.length === 0) return
       const ref = recordRefOf(existingRow)
+      const expected = moved.length > 0 ? expectedEntryFor(existingRow, key) : null
       rowHolds.set(key, makeHold({
         kind: 'content_change',
         confirmable: false,
@@ -1747,15 +2004,61 @@ function prepareGovernedPlanning(args) {
           recordId: ref ? ref.id : null,
           recordVersion: ref ? ref.version : null,
           key,
-          reason,
-          fields: Object.fromEntries(fields.map((fieldId) => [fieldId, {
-            before: existingRow[fieldId] === undefined ? null : existingRow[fieldId],
-            after: row[fieldId] === undefined ? null : row[fieldId],
-          }])),
+          reason: moved.length > 0 ? REVIEWED_CONTENT_MOVED_REASON : reason,
+          fields: moved.length > 0
+            ? Object.fromEntries(moved.map((fieldId) => [fieldId, {
+              before: expected.fields[fieldId].after === undefined ? null : expected.fields[fieldId].after,
+              after: row[fieldId] === undefined ? null : row[fieldId],
+            }]))
+            : Object.fromEntries(fields.map((fieldId) => [fieldId, {
+              before: existingRow[fieldId] === undefined ? null : existingRow[fieldId],
+              after: row[fieldId] === undefined ? null : row[fieldId],
+            }])),
           inContinuation: null,
           humanColumnsPresent: Object.fromEntries(humanFieldIds.map((fieldId) => [fieldId, !isBlank(existingRow[fieldId])])),
         },
       }))
+    },
+    // Review fix N3-a (round 2; delta probe V8D-04): the expansion carries `key`, the sheet has NO row under it, and the
+    // reviews / the pending written plan left content there (the reviewed row was deleted — a person's action the PLM
+    // column lock does not cover). When a trigger cell of the source differs (canonically) from what was reviewed /
+    // written, the ADD would bring back content nobody reviewed: the key is HELD, a content_change with reason
+    // `reviewed_content_moved`, before = the reviewed / written value, after = the source. There is no record to bind, so
+    // a change-plan confirm answers `record_unbound` until a row is back under the key (its content is then compared by
+    // key, `expectedEntryFor`). The planner's ADD decision stays as computed; the suspension dominates (no token is
+    // minted), as for every content hold. A source that still carries the reviewed value is re-ADDed (nothing
+    // unreviewed). Returns whether the key was held.
+    noteMissingReviewedRow(row, key) {
+      if (!key || rowHolds.has(key)) return false
+      const entry = expectedByKey.get(key)
+      if (!entry) return false
+      const moved = []
+      for (const [fieldId, cell] of Object.entries(entry.fields)) {
+        if (!triggerFieldIds.includes(fieldId)) continue
+        const source = canonicalChangeValue(row[fieldId], templateFields.get(fieldId))
+        if (canonicalJson(source === undefined ? null : source) !== canonicalJson(cell.afterCanonical === undefined ? null : cell.afterCanonical)) moved.push(fieldId)
+      }
+      if (moved.length === 0) return false
+      moved.sort(compareStrings)
+      rowHolds.set(key, makeHold({
+        kind: 'content_change',
+        confirmable: false,
+        notConfirmableReason: 'needs_step5',
+        subject: subjectFor(null, key),
+        detail: {
+          recordId: null,
+          recordVersion: null,
+          key,
+          reason: REVIEWED_CONTENT_MOVED_REASON,
+          fields: Object.fromEntries(moved.map((fieldId) => [fieldId, {
+            before: entry.fields[fieldId].after === undefined ? null : entry.fields[fieldId].after,
+            after: row[fieldId] === undefined ? null : row[fieldId],
+          }])),
+          inContinuation: null,
+          humanColumnsPresent: Object.fromEntries(humanFieldIds.map((fieldId) => [fieldId, false])),
+        },
+      }))
+      return true
     },
     // D-4: a legacy lineage_mismatch on a governed project is a STRUCTURE hold (never acknowledgeable,
     // and never the content path — C07).
@@ -1801,6 +2104,265 @@ function prepareGovernedPlanning(args) {
   }
 }
 
+// ── change plans (batch-refresh step 5 PR-8; design §10.3 (1)-(5), plan §3.4) ──────────────────────
+//
+// PURE. The ONE derivation of a change plan's record set from content-class holds — the planner's pass 1 (in-memory
+// hold bodies) and the store's confirm transaction (hold rows read under the state-row lock, i.e. after a JSONB round
+// trip) both call it, so the plan fingerprint they each compute is the same function of the same holds.
+
+// The holds a change-plan confirm resolves (and a confirmed plan authorizes): CONTENT changes only. A
+// `relationship_reconfirm` whose current verdict is `content_changed` belongs here only when its own reason token is
+// `needs_step5` — the planner emits that token only for a relationship whose stored status reason is re-confirmable
+// (refutation M3); the store re-checks the relationship row under the lock.
+const CONTENT_CLASS_HOLD_KINDS = Object.freeze(['content_change', 'relationship_content_change', 'candidate_content_differs'])
+// C07 (plan §9.3): a STRUCTURE change anywhere on the project refuses the change-plan confirm (换物料 ID、子件增删、改挂
+// 或配对变化与内容变化同时出现 ⇒ 整次保持挂起). The relationship verdicts that name a structure fact.
+const STRUCTURE_VERDICTS = Object.freeze([
+  'structure_changed',
+  'new_position_removed',
+  'new_position_occupied',
+  'old_record_missing',
+  'old_record_inactive',
+  'old_record_replaced',
+  'old_subtree_duplicate',
+])
+const STRUCTURE_CLASS_HOLD_KINDS = Object.freeze(['structure_change', 'candidate_structure_differs'])
+
+function isReconfirmContentHold(hold) {
+  return isPlainObject(hold) && hold.kind === 'relationship_reconfirm'
+    && isPlainObject(hold.detail) && hold.detail.verdict === 'content_changed'
+    && hold.notConfirmableReason === 'needs_step5'
+}
+
+function isContentClassHold(hold) {
+  if (!isPlainObject(hold)) return false
+  return CONTENT_CLASS_HOLD_KINDS.includes(hold.kind) || isReconfirmContentHold(hold)
+}
+
+function isStructureClassHold(hold) {
+  if (!isPlainObject(hold)) return false
+  if (STRUCTURE_CLASS_HOLD_KINDS.includes(hold.kind)) return true
+  return hold.kind === 'relationship_reconfirm' && isPlainObject(hold.detail) && STRUCTURE_VERDICTS.includes(hold.detail.verdict)
+}
+
+function changePlanInputInvalid(reason, field) {
+  return new StockPreparationContinuationError(500, CONTINUATION_ERROR_CODES.INPUT_INVALID, 'a content hold does not carry what a change plan needs', { reason, ...(field ? { field } : {}) })
+}
+
+function cellValue(value) {
+  return value === undefined ? null : value
+}
+
+// One relationship / candidate content hold's records: every pair whose seven-item comparison says `differs`
+// (design §6.4). The OLD side is the existing row the controlled update patches (its record id, its key); the after
+// value is the new position's. THE S-ROOT RULE (plan §3.4 实施细则 2, design §6.4; register R-63 ⑥): the root's
+// single-level usage keeps meaning "root demand" — when the root total changes, the root's `rawQuantity` receives the
+// derived root total too, never the new parent edge (which `compareSevenItems` excludes from the comparison).
+function pairRecordsOf(hold) {
+  const detail = hold.detail
+  if (!Array.isArray(detail.pairs) || detail.pairs.length === 0) throw changePlanInputInvalid('pairs_missing')
+  if (!isPlainObject(detail.comparison) || !Array.isArray(detail.comparison.items)) throw changePlanInputInvalid('comparison_missing')
+  const itemsByPath = new Map()
+  for (const item of detail.comparison.items) {
+    if (!isPlainObject(item) || !Array.isArray(item.relativePath) || !isPlainObject(item.fields)) throw changePlanInputInvalid('comparison_item_malformed')
+    itemsByPath.set(JSON.stringify(item.relativePath), item)
+  }
+  const out = []
+  for (const pair of detail.pairs) {
+    if (!isPlainObject(pair) || !Array.isArray(pair.relativePath)) throw changePlanInputInvalid('pair_malformed')
+    const item = itemsByPath.get(JSON.stringify(pair.relativePath))
+    if (!item) throw changePlanInputInvalid('comparison_item_missing')
+    const fields = {}
+    for (const [fieldId, cell] of Object.entries(item.fields)) {
+      if (!isPlainObject(cell) || cell.status !== 'differs') continue
+      fields[fieldId] = { before: cellValue(cell.old), after: cellValue(cell.new) }
+    }
+    const root = pair.relativePath.length === 0
+    if (root && fields.totalQuantity) {
+      const raw = isPlainObject(item.fields.rawQuantity) ? item.fields.rawQuantity : {}
+      fields.rawQuantity = { before: cellValue(raw.old), after: fields.totalQuantity.after }
+    }
+    if (Object.keys(fields).length === 0) continue
+    out.push({
+      recordId: nonBlankString(pair.oldRecordId) ? pair.oldRecordId : null,
+      key: nonBlankString(pair.oldKey) ? pair.oldKey : null,
+      root,
+      inContinuation: hold.kind === 'candidate_content_differs' ? null : (nonBlankString(hold.continuationId) ? hold.continuationId : null),
+      fields,
+    })
+  }
+  return out
+}
+
+function contentChangeRecordsOf(hold) {
+  const detail = hold.detail
+  if (!isPlainObject(detail.fields)) throw changePlanInputInvalid('fields_missing')
+  const fields = {}
+  for (const [fieldId, cell] of Object.entries(detail.fields)) {
+    if (!isPlainObject(cell)) throw changePlanInputInvalid('field_malformed')
+    fields[fieldId] = { before: cellValue(cell.before), after: cellValue(cell.after) }
+  }
+  if (Object.keys(fields).length === 0) return []
+  return [{
+    recordId: nonBlankString(detail.recordId) ? detail.recordId : null,
+    key: nonBlankString(detail.key) ? detail.key : null,
+    root: false,
+    inContinuation: null,
+    fields,
+  }]
+}
+
+/**
+ * The record set a change plan binds, from the content-class holds it resolves: `[{ recordId, key, root,
+ * inContinuation, fields: { [fieldId]: { before, after } } }]`, sorted by record id. Refuses (500
+ * STOCK_PREP_CONTINUATION_INPUT_INVALID, `details.reason`): a hold that is not content-class (`not_content_class`), a
+ * record without a record id (`record_unbound` — the reader could not bind the row), a record two holds describe
+ * differently (`record_conflict`). Values are raw (as the holds carry them); the fingerprint and the digests below
+ * canonicalise.
+ */
+function changePlanRecordsFromHolds(holds) {
+  const byRecordId = new Map()
+  for (const hold of Array.isArray(holds) ? holds : []) {
+    if (!isContentClassHold(hold) || !isPlainObject(hold.detail)) throw changePlanInputInvalid('not_content_class')
+    const records = hold.kind === 'content_change' ? contentChangeRecordsOf(hold) : pairRecordsOf(hold)
+    for (const record of records) {
+      if (!record.recordId || !record.key) throw changePlanInputInvalid('record_unbound')
+      const existing = byRecordId.get(record.recordId)
+      if (existing) {
+        if (canonicalJson({ key: existing.key, fields: existing.fields }) !== canonicalJson({ key: record.key, fields: record.fields })) {
+          throw changePlanInputInvalid('record_conflict')
+        }
+        continue
+      }
+      byRecordId.set(record.recordId, record)
+    }
+  }
+  return Array.from(byRecordId.values()).sort((left, right) => compareStrings(left.recordId, right.recordId))
+}
+
+// The WRITE fields of a record (a field absorbed from a superseded written plan is review-only: shown and reviewed,
+// never patched again and never part of the plan fingerprint).
+function writeFieldsOf(record) {
+  const out = {}
+  for (const [fieldId, cell] of Object.entries(isPlainObject(record.fields) ? record.fields : {})) {
+    if (isPlainObject(cell) && cell.reviewOnly !== true) out[fieldId] = cell
+  }
+  return out
+}
+
+/**
+ * THE PLAN FINGERPRINT (design §4.3 as corrected, register R-63 ②): the WRITE fields' raw before / after per record
+ * (record id + key) + the source content digest of the computation that opened the holds + the project. NO record
+ * version (a person's edit never revokes the plan — A12, E-4) and NO generation token (the mandatory re-preview after
+ * the confirm bumps it — D12): a computation whose change set equals the plan's authorizes it, any other does not.
+ */
+function changePlanFingerprintOf({ projectNo, records, sourceContentDigest }) {
+  const body = []
+  for (const record of Array.isArray(records) ? records : []) {
+    const fields = {}
+    for (const [fieldId, cell] of Object.entries(writeFieldsOf(record))) fields[fieldId] = { before: cellValue(cell.before), after: cellValue(cell.after) }
+    if (Object.keys(fields).length === 0) continue
+    body.push({ recordId: record.recordId, key: record.key, fields })
+  }
+  body.sort((left, right) => compareStrings(left.recordId, right.recordId))
+  return fingerprintOf(SCHEMES.changePlan, { projectNo, sourceContentDigest: sourceContentDigest || null, records: body })
+}
+
+/** The template-normalized form of one cell — what the writer would send (the comparison normalisation mirrors it). */
+function canonicalChangeValue(value, field) {
+  return normalizeComparableValueForField(isBlank(value) ? null : value, field)
+}
+
+function contentDigestOf(entries) {
+  entries.sort((left, right) => compareStrings(left[0], right[0]) || compareStrings(left[1], right[1]))
+  return fingerprintOf(SCHEMES.changeContent, { rows: entries })
+}
+
+/**
+ * The content a plan WRITES and asks a person to review, over EVERY field (write + review-only), from the canonical
+ * after values the store recorded at confirm time (`afterCanonical`). `written_content_digest` is this; a review binds
+ * it to the sheet through `currentContentDigestOf`.
+ */
+function plannedContentDigestOf(records) {
+  const entries = []
+  for (const record of Array.isArray(records) ? records : []) {
+    for (const [fieldId, cell] of Object.entries(isPlainObject(record.fields) ? record.fields : {})) {
+      entries.push([record.recordId, fieldId, isPlainObject(cell) && cell.afterCanonical !== undefined ? cell.afterCanonical : null])
+    }
+  }
+  return contentDigestOf(entries)
+}
+
+/**
+ * The same digest over what the SHEET holds now for the plan's records and fields (`rowsByRecordId`: logical rows from
+ * the project-scoped reader, keyed by record id). A record that is gone digests as missing (never as "unchanged").
+ */
+function currentContentDigestOf({ records, rowsByRecordId, templateFields = new Map() }) {
+  const entries = []
+  for (const record of Array.isArray(records) ? records : []) {
+    const row = rowsByRecordId instanceof Map ? rowsByRecordId.get(record.recordId) : undefined
+    for (const fieldId of Object.keys(isPlainObject(record.fields) ? record.fields : {})) {
+      entries.push([record.recordId, fieldId, row ? canonicalChangeValue(row[fieldId], templateFields.get(fieldId)) : { missing: true }])
+    }
+  }
+  return contentDigestOf(entries)
+}
+
+/**
+ * Step 5 PR-8 — THE VERDICT ON A CONFIRMED CHANGE PLAN, from the planner's FIRST pass (the governed plan computed
+ * exactly as without a plan, content detection kept on for the plan's records): `matches` iff the content-class holds
+ * of that pass describe EXACTLY the plan's change set (the plan fingerprint over the same record set + THIS
+ * computation's source content digest) and every relationship content hold among them carries, as its post-change
+ * pair, the stamp the confirm wrote on that relationship (C04 / C11). Anything else — an extra / missing / different
+ * change, a moved source, an unstamped relationship, a candidate content hold still open — is `stale` (the plan is
+ * invalidated by the reconciliation and the holds of the first pass stand). `matches` answers the AUTHORIZATION the
+ * second pass plans with: the observed records by record id and by base key, the continued relationships' OLD keys,
+ * the relationships whose content change it covers. Pure; values stay in-process.
+ */
+function changePlanAuthorizationOf({ input, holds }) {
+  const plan = input && input.changePlan
+  if (!plan) return Object.freeze({ verdict: null, reason: null, observedRecordCount: 0, authorization: null })
+  const stale = (reason, observedRecordCount = 0) => Object.freeze({ verdict: 'stale', reason, observedRecordCount, authorization: null })
+  const content = (Array.isArray(holds) ? holds : []).filter(isContentClassHold)
+  if (content.some((hold) => hold.kind === 'candidate_content_differs')) return stale('candidate_open')
+  let observed
+  try {
+    observed = changePlanRecordsFromHolds(content)
+  } catch (error) {
+    return stale('records_unbound')
+  }
+  if (observed.length === 0) return stale('no_change')
+  if (changePlanFingerprintOf({ projectNo: input.projectNo, records: observed, sourceContentDigest: plan.currentSourceContentDigest }) !== plan.planFingerprint) {
+    return stale('change_set_moved', observed.length)
+  }
+  const stamps = new Map(input.continuations.map((continuation) => [continuation.id, continuation]))
+  const covered = new Set()
+  for (const hold of content) {
+    if (hold.kind !== 'relationship_content_change' && hold.kind !== 'relationship_reconfirm') continue
+    const stamp = stamps.get(hold.continuationId)
+    const post = isPlainObject(hold.detail) ? hold.detail.postChange : null
+    if (!stamp || !isPlainObject(post) || post.comparisonFingerprint !== stamp.comparisonFingerprint || post.evidenceFingerprint !== stamp.evidenceFingerprint) {
+      return stale('relationship_not_stamped', observed.length)
+    }
+    covered.add(hold.continuationId)
+  }
+  const records = new Map()
+  const byKey = new Map()
+  const continuedOldKeys = new Map()
+  for (const record of observed) {
+    const entry = Object.freeze({ ...record, writeFields: record.fields })
+    records.set(entry.recordId, entry)
+    byKey.set(baseKeyOf(entry.key), entry)
+    if (entry.inContinuation) continuedOldKeys.set(baseKeyOf(entry.key), entry)
+  }
+  return Object.freeze({
+    verdict: 'matches',
+    reason: null,
+    observedRecordCount: observed.length,
+    authorization: Object.freeze({ changePlanId: plan.id, records, byKey, continuedOldKeys, coveredContinuationIds: covered }),
+  })
+}
+
 module.exports = {
   SCHEMES,
   CONTINUATION_ERROR_CODES,
@@ -1809,11 +2371,29 @@ module.exports = {
   CONTINUATION_INPUT_KEYS,
   CONTINUATION_SKIP_TYPES,
   PERSISTED_HOLD_KEYS,
+  // Review fix N3.
+  EXPECTED_CONTENT_KEYS,
+  REVIEWED_CONTENT_MOVED_REASON,
   RECONFIRMABLE_REASONS,
   HOLD_KINDS,
   SHAPE_TOKENS,
   NOT_CONFIRMABLE_REASONS,
   NON_TRIGGER_PACK_FIELD_IDS,
+  // Step 5 PR-8: the change-plan vocabulary and the pure derivations shared by the planner and the store.
+  CONTENT_CLASS_HOLD_KINDS,
+  STRUCTURE_CLASS_HOLD_KINDS,
+  STRUCTURE_VERDICTS,
+  VOLATILE_DETAIL_KEYS,
+  isContentClassHold,
+  isStructureClassHold,
+  changePlanRecordsFromHolds,
+  changePlanFingerprintOf,
+  canonicalChangeValue,
+  plannedContentDigestOf,
+  currentContentDigestOf,
+  changePlanAuthorizationOf,
+  postChangeFingerprintsOf,
+  CHANGE_PLAN_INPUT_KEYS,
   StockPreparationContinuationError,
   assertContinuationPostCondition,
   buildContinuationProjection,

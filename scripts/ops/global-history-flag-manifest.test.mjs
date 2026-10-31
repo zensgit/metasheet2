@@ -414,8 +414,12 @@ function globalHistoryFlagsInSource() {
   // new env flag is registered here; the ADR §8 names this manifest explicitly). One family by name
   // shape, scanned in the plugin's lib — the two keys are the switch and the G1 role list. Every
   // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
-  const stockPrepProjectSheets = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*')
-    .filter((t) => !t.endsWith('_'))
+  // 人工补充行 B2 (ADR adr-stock-prep-manual-rows-20261030 §3.2 condition 5, §8 「B2 主机」 7): the HOST now reads the
+  // switch too (multitable/stock-preparation-manual-rows-gate.ts), so both trees are scanned — the members-page precedent.
+  const stockPrepProjectSheets = [
+    ...grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
+    ...grepFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
+  ].filter((t) => !t.endsWith('_'))
   // 备料「成员与权限」(S5b, R-39): read by the plugin routes AND the host port, so both trees are scanned;
   // `_ENABLED` only, so the refusal code STOCK_PREP_MEMBERS_PAGE_DISABLED is not mistaken for a flag.
   const stockPrepMembersPage = [
@@ -828,6 +832,15 @@ test('stock-prep project-sheets switch (ADR adr-stock-prep-project-sheets-202610
   assert.equal(isActivated(spec, ' true'), false)
   assert.equal(isActivated(spec, '1'), false)
   assert.equal(isActivated(spec, undefined), false)
+  // 人工补充行 B2: the host reads the same switch for the manual-row create routes and /context. Both readers spell the
+  // exact-literal comparison against the same env name, and the purpose names the host reader.
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs'), 'utf8')
+  assert.match(plugin, /PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'/)
+  assert.match(plugin, /env\[PROJECT_SHEETS_ENABLED_ENV\] === 'true'/)
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/multitable/stock-preparation-manual-rows-gate.ts'), 'utf8')
+  assert.match(host, /STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'/)
+  assert.match(host, /env\[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV\] === 'true'/)
+  assert.match(spec.purpose, /stock-preparation-manual-rows-gate\.ts#stockPrepProjectSheetsEnabledForManualRows/)
 })
 
 test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, sourced from its exported parser, not a dependsOn of the switch', () => {

@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -235,14 +236,7 @@ async function withHarness(t) {
 
 test('test matrix retains the worker-drain CI wiring guard', async () => {
   const workflow = await readFile(path.join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-  const marker = '\n  test:\n'
-  const start = workflow.indexOf(marker)
-  assert.notEqual(start, -1, 'missing workflow job test')
-  const bodyStart = start + marker.length
-  const nextJob = workflow.slice(bodyStart).search(/\n  [a-z0-9_-]+:\n/)
-  const testJob = nextJob === -1
-    ? workflow.slice(bodyStart)
-    : workflow.slice(bodyStart, bodyStart + nextJob)
+  const testJob = requiredSuiteJobBody(workflow, 'contracts')
   assert.match(
     testJob,
     /node --test scripts\/ops\/dingtalk-worker-drain-ci-wiring\.test\.mjs/,

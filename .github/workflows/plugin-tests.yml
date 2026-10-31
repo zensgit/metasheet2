@@ -124,26 +124,16 @@ jobs:
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
-  test:
-    # Public-repository CI runs on an isolated GitHub-hosted VM, not a persistent development host.
+  contracts:
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
     # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
     # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
     runs-on: ubuntu-22.04
-    # Leave headroom for the full integration suite without using the six-hour default timeout.
-    timeout-minutes: 150
-
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Node 18 reached end-of-life on 2025-04-30 and everything this repo ships runs on Node 20
-        # (Dockerfile.backend / Dockerfile.frontend are node:20-slim; the on-prem runbooks require
-        # Node 20). The 18.x leg cost ~27 runner-minutes per run and was never a required check;
-        # `test (20.x)` is. It stays a one-entry matrix on purpose: the produced check name must
-        # remain exactly `test (20.x)` (branch protection names it), and a plain job would be
-        # reported as `test`. Dropped 2026-10-07 when the repository went private and Actions
-        # minutes started to bill.
         node-version: [20.x]
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -159,6 +149,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+
+      - name: Parallel test inventory and required-gate contract
+        run: node --test scripts/ops/plugin-tests-parallel-contract.test.mjs
 
       - name: GitHub-hosted runner routing contract
         run: node --test scripts/ops/github-hosted-runner-routing.test.mjs
@@ -689,6 +682,103 @@ jobs:
           # job, now in .github/workflows/stock-prep-powershell51.yml.
           ./scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
 
+  permissions:
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-${{ matrix.node-version }}-permissions
+          path: install.log
+
+      - name: Admin write-route inventory and permission preflight
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/admin-mounts-write-gate-guard.test.ts \
+            tests/unit/admin-directory-routes.test.ts \
+            tests/unit/admin-directory-5xx-values-free.test.ts
+
+  unit:
+    needs: [contracts, permissions]
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -1178,6 +1268,79 @@ jobs:
             tests/elearning-paths.test.ts \
             --watch=false
 
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.node-version }}
+          path: |
+            packages/core-backend/coverage/
+            packages/core-backend/test-results/
+
+  checkpoint:
+    needs: [contracts, permissions]
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-${{ matrix.node-version }}-checkpoint
+          path: install.log
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
@@ -1232,6 +1395,94 @@ jobs:
         run: |
           TM_TEST_PG_BIN="$(pg_config --bindir)" node scripts/ops/run-recovery-manual-checkpoint.mjs
 
+      - name: Upload checkpoint test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-checkpoint-${{ matrix.node-version }}
+          path: |
+            packages/core-backend/coverage/
+            packages/core-backend/test-results/
+
+  runtime-db:
+    needs: [contracts, permissions]
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-${{ matrix.node-version }}-runtime-db
+          path: install.log
+
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 14
+          user: postgres
+      - name: Create test database
+        run: |
+          # A self-hosted runner keeps its PostgreSQL service and databases between jobs (a GitHub-hosted
+          # runner is a fresh VM). Recreate the test database so every run migrates from empty.
+          dropdb -U postgres --if-exists metasheet_test
+          createdb -U postgres metasheet_test || true
+
+      # #6032: mandatory real handlers -> token -> SERIALIZABLE core host proof.
+      # Reuses this job's PostgreSQL; the suite creates/drops only its own scratch DB
+      # and applies production attendance migrations. Missing DB is a hard failure.
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -1627,6 +1878,226 @@ jobs:
             tests/integration/snapshot-protection.test.ts \
             --reporter=verbose
 
+      - name: Run comment-reaction keystone (real wire, real PG)
+        # B6 emoji-reaction keystone (#2673 follow-up). Wired as a WHOLE FILE (not a
+        # `-t` name filter) so the gate is robust: a name filter that matches zero
+        # tests exits 0/green and would silently reintroduce the invisible debt this
+        # exists to kill, whereas a whole-file run fails if the file is empty/broken.
+        # comment-reactions.api.test.ts covers add / aggregate / idempotent re-add /
+        # self-scoped DELETE / reader-deny 403 / cascade against real Postgres, with a
+        # fail-loud beforeAll (missing PG/port → RED, not skipped-green). The sibling
+        # comments.api.test.ts is intentionally NOT wired: 8 of its tests have a
+        # pre-existing real-wire failure (CommentService.mapRowToComment drops
+        # containerId/targetId/targetFieldId), tracked separately under its own opt-in.
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for comment-reaction keystone}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/comment-reactions.api.test.ts --reporter=dot
+
+      - name: Start core backend (background)
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          HOST: 127.0.0.1
+          PORT: 8900
+        run: |
+          nohup pnpm -F @metasheet/core-backend dev:core > server.log 2>&1 & echo $! > server.pid
+          server_pid="$(cat server.pid)"
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8900/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "${server_pid}" 2>/dev/null; then
+              echo "Core backend exited before readiness"
+              cat server.log
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "${ready}" -ne 1 ]; then
+            echo "Core backend readiness timed out"
+            cat server.log
+            exit 1
+          fi
+          echo "Server PID: ${server_pid}"
+
+      - name: Run plugin smoke test
+        env:
+          API_ORIGIN: http://127.0.0.1:8900
+        run: |
+          pnpm --filter @metasheet/core-backend smoke:plugins
+
+      - name: Config snapshot (non-blocking)
+        if: always()
+        run: |
+          curl -sf http://127.0.0.1:8900/metrics/config || true
+
+      - name: Admin KV list (non-blocking)
+        if: always()
+        env:
+          API_ORIGIN: http://127.0.0.1:8900
+        run: |
+          set +e
+          curl -sf "${API_ORIGIN}/api/admin/plugin-kv?plugin=@metasheet/plugin-test-a" || true
+
+      - name: Dump server log on failure
+        if: failure()
+        run: |
+          cat server.log || true
+
+      - name: Stop core backend
+        if: always()
+        run: |
+          kill $(cat server.pid) || true
+
+      - name: Upload runtime-db test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-runtime-db-${{ matrix.node-version }}
+          path: |
+            packages/core-backend/coverage/
+            packages/core-backend/test-results/
+
+  multitable-db:
+    needs: [contracts, permissions]
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-${{ matrix.node-version }}-multitable-db
+          path: install.log
+
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 14
+          user: postgres
+      - name: Create test database
+        run: |
+          # A self-hosted runner keeps its PostgreSQL service and databases between jobs (a GitHub-hosted
+          # runner is a fresh VM). Recreate the test database so every run migrates from empty.
+          dropdb -U postgres --if-exists metasheet_test
+          createdb -U postgres metasheet_test || true
+
+      # #6032: mandatory real handlers -> token -> SERIALIZABLE core host proof.
+      # Reuses this job's PostgreSQL; the suite creates/drops only its own scratch DB
+      # and applies production attendance migrations. Missing DB is a hard failure.
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # T8 (migration-exclusion docs+guard hardening) note: this MIGRATION_EXCLUDE is the
+          # CI per-PR gate's list, a DIFFERENT mechanism from migration-replay.yml's own subset
+          # (narrower job: run db:migrate twice, assert idempotency) and from
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS in packages/core-backend/src/db/migration-provider.ts
+          # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
+          # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
+          # cross-list picture. #4162 follow-up (2026-07-13): the views/view_states migration
+          # and the three snapshot-cluster migrations are re-enabled below (in all five
+          # workflow lists at once), so their up() bodies now DO get per-PR green CI runs.
+          # Remaining asymmetry: production/on-prem db:migrate runs with no exclude at all,
+          # so the STILL-excluded items (008/048/049, 042a, gantt, 20250925) keep that gap.
+          # Exclude problematic migrations (see migration-replay.yml for the per-item detail
+          # this workflow shares):
+          # 008_plugin_infrastructure.sql - has idempotency issue with scope column
+          # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
+          # 042a_core_model_views.sql - References non-existent last_accessed column
+          # Re-enabled per #4162 (2026-07-13): 20250924120000_create_views_view_states.ts and the three
+          # snapshot-cluster migrations (20251117000001_add_snapshot_labels, 20251117000002_create_protection_rules,
+          # 20251201000001_create_change_management_tables) now RUN here. Their old per-item exclusion reasons were
+          # re-tested and are stale (same class as the 20250925 one #3627 fixed): fresh-DB migrate, second-pass
+          # replay, and the snapshot-protection E2E (21/21) all pass with them applied.
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
+          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
+          #   this exclusion in #3632 (verified passing there); this workflow was never
+          #   re-verified/updated to match, so this exclusion may now be stale rather than still
+          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # NOTE: zzzz20260114110000_create_user_orgs_table.ts is intentionally NOT in this
+          #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml, which
+          #   all exclude it because it hits a legacy user_orgs is_active replay incompatibility
+          #   there): this job's attendance integration step needs the user_orgs table applied,
+          #   so it was deliberately removed from here in b1fc1e19d1
+          #   ("ci(attendance): run integration gate against postgres") — "Include the user_orgs
+          #   migration in plugin-test database setup because attendance auto-absence now
+          #   depends on that table."
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: |
+          pnpm --filter @metasheet/core-backend db:migrate
+
+      # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates
+      # plus watch, direct-assignment, course-publish, exam, learner-courses,
+      # normalized scope/access, and media-playback service gates.
+      # Migrations above must already have applied the zzzz20260824*,
+      # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
+      # mutate kysely_migration.
+      # elearning-role-templates.db.test.ts also carries the S5a stock-prep role-template
+      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39), and the
+      # owner-2026-10-12 cases: the frontline display-name migration (zzzz20261012090000) and the
+      # move script's option-1 split step (effective permissions through rbac/service.ts, routed
+      # to the test transaction by a db/pg mock local to that file); every one of them runs inside
+      # a transaction it rolls back.
+      # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + notification-center retention sweep (env-gated, batched, sheet-scoped survivors) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard + AI-fields S1 write-provenance/batch-grouping goldens + A6-3-3a automation branch-local-wait suspend/resume goldens + Phase C2 cross-base automation governed DELETE/LOCK goldens + C1 automation real-time fan-out goldens + duplicate/clone record route security goldens + T3-6 approval-record multitable projection goldens — six previously skip-green DB-gated specs now actually executing + D-1c §0.6 HISTORY_INCOMPLETE fail-closed precheck goldens G-HI-1..4 + D-1c W0 slice ① form-submit CREATE/EDIT public-form revision goldens, incl. zero-row concurrent-delete fail-closed + D-1c W0 slice ② plugin-SDK createRecord/patchRecord revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ③ automation create_record/update_record revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ④ approval resultWriteback revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ⑤ (FINAL) attachment-delete cell-strip revision goldens, incl. zero-row concurrent-delete fail-closed + W0 tail field-undelete rehydration revision goldens (version-bump + emit-at-new-version, W0-1 contiguity/content-projection positive control, zero-row concurrent-delete fail-closed — un-pends the last OD-6 KNOWN_REVISION_GAPS entry) + W0-1 L4 all-writer canonical fence goldens (module fence-before-check/durable-block claim-reclaim-refuse/CHECK closed-set, per-fenced-family production-wiring refusal for REST create/patch/delete + bulk + plugin patch + plugin recoverable delete, partial-fence gap exposure for plugin create + auto-number backfill, flag-off parity, constructed TOCTOU race via pg_blocking_pids, exact-bigint synthetic-seq ordering) + W0-1 v3.7 L5 trust-checkpoint schema goldens (building→active state machine, partial-unique one-active guard + concurrent double-activation race, seq-based + display-T totally-ordered selection across the 2^53 boundary, floor-clamped retention prune, non-forgeable server-owned system_kind, P3-2 fail-closed strict-enablement precondition) + W0-1 L6-a sealed operation-endpoint ledger goldens (endpoint-last exact count/max validation, DEFERRABLE-FK write-events-but-never-seal fails at COMMIT, append-after-seal refusal, endpoint-before-events refusal, legacy-NULL exemption, exact-bigint 2^53 neighbours, G-BATCH-ENDPOINT bulk multi-row anchor + REST create/patch mint-under-fence wiring, G-MULTIOP one-commit-N-transactions batch↔operation decouple, §F2 UPDATE-immutability, §H1 DELETE-immutability + retention-only deletion, §H2 whole-operation atomic retention prune, §H3 fail-closed schema probe, flag-off parity))
         id: multitable-real-db-integration
         if: matrix.node-version == '20.x'
@@ -1907,6 +2378,150 @@ jobs:
             tests/integration/b2a-operation-claim-078-realdb.test.ts \
             --reporter=dot
 
+      - name: Upload multitable-db test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-multitable-db-${{ matrix.node-version }}
+          path: |
+            packages/core-backend/coverage/
+            packages/core-backend/test-results/
+
+  approval-db:
+    needs: [contracts, permissions]
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-${{ matrix.node-version }}-approval-db
+          path: install.log
+
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 14
+          user: postgres
+      - name: Create test database
+        run: |
+          # A self-hosted runner keeps its PostgreSQL service and databases between jobs (a GitHub-hosted
+          # runner is a fresh VM). Recreate the test database so every run migrates from empty.
+          dropdb -U postgres --if-exists metasheet_test
+          createdb -U postgres metasheet_test || true
+
+      # #6032: mandatory real handlers -> token -> SERIALIZABLE core host proof.
+      # Reuses this job's PostgreSQL; the suite creates/drops only its own scratch DB
+      # and applies production attendance migrations. Missing DB is a hard failure.
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # T8 (migration-exclusion docs+guard hardening) note: this MIGRATION_EXCLUDE is the
+          # CI per-PR gate's list, a DIFFERENT mechanism from migration-replay.yml's own subset
+          # (narrower job: run db:migrate twice, assert idempotency) and from
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS in packages/core-backend/src/db/migration-provider.ts
+          # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
+          # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
+          # cross-list picture. #4162 follow-up (2026-07-13): the views/view_states migration
+          # and the three snapshot-cluster migrations are re-enabled below (in all five
+          # workflow lists at once), so their up() bodies now DO get per-PR green CI runs.
+          # Remaining asymmetry: production/on-prem db:migrate runs with no exclude at all,
+          # so the STILL-excluded items (008/048/049, 042a, gantt, 20250925) keep that gap.
+          # Exclude problematic migrations (see migration-replay.yml for the per-item detail
+          # this workflow shares):
+          # 008_plugin_infrastructure.sql - has idempotency issue with scope column
+          # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
+          # 042a_core_model_views.sql - References non-existent last_accessed column
+          # Re-enabled per #4162 (2026-07-13): 20250924120000_create_views_view_states.ts and the three
+          # snapshot-cluster migrations (20251117000001_add_snapshot_labels, 20251117000002_create_protection_rules,
+          # 20251201000001_create_change_management_tables) now RUN here. Their old per-item exclusion reasons were
+          # re-tested and are stale (same class as the 20250925 one #3627 fixed): fresh-DB migrate, second-pass
+          # replay, and the snapshot-protection E2E (21/21) all pass with them applied.
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
+          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
+          #   this exclusion in #3632 (verified passing there); this workflow was never
+          #   re-verified/updated to match, so this exclusion may now be stale rather than still
+          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # NOTE: zzzz20260114110000_create_user_orgs_table.ts is intentionally NOT in this
+          #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml, which
+          #   all exclude it because it hits a legacy user_orgs is_active replay incompatibility
+          #   there): this job's attendance integration step needs the user_orgs table applied,
+          #   so it was deliberately removed from here in b1fc1e19d1
+          #   ("ci(attendance): run integration gate against postgres") — "Include the user_orgs
+          #   migration in plugin-test database setup because attendance auto-absence now
+          #   depends on that table."
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: |
+          pnpm --filter @metasheet/core-backend db:migrate
+
+      # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates
+      # plus watch, direct-assignment, course-publish, exam, learner-courses,
+      # normalized scope/access, and media-playback service gates.
+      # Migrations above must already have applied the zzzz20260824*,
+      # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
+      # mutate kysely_migration.
+      # elearning-role-templates.db.test.ts also carries the S5a stock-prep role-template
+      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39), and the
+      # owner-2026-10-12 cases: the frontline display-name migration (zzzz20261012090000) and the
+      # move script's option-1 split step (effective permissions through rbac/service.ts, routed
+      # to the test transaction by a db/pg mock local to that file); every one of them runs inside
+      # a transaction it rolls back.
+      # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens + cancel-round Q-A census/creation/redemption/seat-guards/FK-migration/outlet-guards/node-timeout/seed-template-visibility/attendance-entry)
         id: approval-real-db-integration
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
@@ -2042,82 +2657,150 @@ jobs:
             tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
             --reporter=dot
 
-      - name: Run comment-reaction keystone (real wire, real PG)
-        # B6 emoji-reaction keystone (#2673 follow-up). Wired as a WHOLE FILE (not a
-        # `-t` name filter) so the gate is robust: a name filter that matches zero
-        # tests exits 0/green and would silently reintroduce the invisible debt this
-        # exists to kill, whereas a whole-file run fails if the file is empty/broken.
-        # comment-reactions.api.test.ts covers add / aggregate / idempotent re-add /
-        # self-scoped DELETE / reader-deny 403 / cascade against real Postgres, with a
-        # fail-loud beforeAll (missing PG/port → RED, not skipped-green). The sibling
-        # comments.api.test.ts is intentionally NOT wired: 8 of its tests have a
-        # pre-existing real-wire failure (CommentService.mapRowToComment drops
-        # containerId/targetId/targetFieldId), tracked separately under its own opt-in.
-        if: matrix.node-version == '20.x'
-        env:
-          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
-        run: |
-          : "${DATABASE_URL:?DATABASE_URL is required for comment-reaction keystone}"
-          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
-            tests/integration/comment-reactions.api.test.ts --reporter=dot
-
-      - name: Start core backend (background)
-        env:
-          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
-          HOST: 127.0.0.1
-          PORT: 8900
-        run: |
-          nohup pnpm -F @metasheet/core-backend dev:core > server.log 2>&1 & echo $! > server.pid
-          server_pid="$(cat server.pid)"
-          ready=0
-          for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8900/health >/dev/null 2>&1; then
-              ready=1
-              break
-            fi
-            if ! kill -0 "${server_pid}" 2>/dev/null; then
-              echo "Core backend exited before readiness"
-              cat server.log
-              exit 1
-            fi
-            sleep 1
-          done
-          if [ "${ready}" -ne 1 ]; then
-            echo "Core backend readiness timed out"
-            cat server.log
-            exit 1
-          fi
-          echo "Server PID: ${server_pid}"
-
-      - name: Run plugin smoke test
-        env:
-          API_ORIGIN: http://127.0.0.1:8900
-        run: |
-          pnpm --filter @metasheet/core-backend smoke:plugins
-
-      - name: Config snapshot (non-blocking)
+      - name: Upload approval-db test results
         if: always()
-        run: |
-          curl -sf http://127.0.0.1:8900/metrics/config || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-approval-db-${{ matrix.node-version }}
+          path: |
+            packages/core-backend/coverage/
+            packages/core-backend/test-results/
 
-      - name: Admin KV list (non-blocking)
-        if: always()
-        env:
-          API_ORIGIN: http://127.0.0.1:8900
-        run: |
-          set +e
-          curl -sf "${API_ORIGIN}/api/admin/plugin-kv?plugin=@metasheet/plugin-test-a" || true
+  attendance-db:
+    needs: [contracts, permissions]
+    # Preserve the original test VM while splitting its suites; no runner upgrade in this change.
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
 
-      - name: Dump server log on failure
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
         if: failure()
-        run: |
-          cat server.log || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-${{ matrix.node-version }}-attendance-db
+          path: install.log
 
-      - name: Stop core backend
-        if: always()
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 14
+          user: postgres
+      - name: Create test database
         run: |
-          kill $(cat server.pid) || true
+          # A self-hosted runner keeps its PostgreSQL service and databases between jobs (a GitHub-hosted
+          # runner is a fresh VM). Recreate the test database so every run migrates from empty.
+          dropdb -U postgres --if-exists metasheet_test
+          createdb -U postgres metasheet_test || true
 
+      # #6032: mandatory real handlers -> token -> SERIALIZABLE core host proof.
+      # Reuses this job's PostgreSQL; the suite creates/drops only its own scratch DB
+      # and applies production attendance migrations. Missing DB is a hard failure.
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # T8 (migration-exclusion docs+guard hardening) note: this MIGRATION_EXCLUDE is the
+          # CI per-PR gate's list, a DIFFERENT mechanism from migration-replay.yml's own subset
+          # (narrower job: run db:migrate twice, assert idempotency) and from
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS in packages/core-backend/src/db/migration-provider.ts
+          # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
+          # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
+          # cross-list picture. #4162 follow-up (2026-07-13): the views/view_states migration
+          # and the three snapshot-cluster migrations are re-enabled below (in all five
+          # workflow lists at once), so their up() bodies now DO get per-PR green CI runs.
+          # Remaining asymmetry: production/on-prem db:migrate runs with no exclude at all,
+          # so the STILL-excluded items (008/048/049, 042a, gantt, 20250925) keep that gap.
+          # Exclude problematic migrations (see migration-replay.yml for the per-item detail
+          # this workflow shares):
+          # 008_plugin_infrastructure.sql - has idempotency issue with scope column
+          # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
+          # 042a_core_model_views.sql - References non-existent last_accessed column
+          # Re-enabled per #4162 (2026-07-13): 20250924120000_create_views_view_states.ts and the three
+          # snapshot-cluster migrations (20251117000001_add_snapshot_labels, 20251117000002_create_protection_rules,
+          # 20251201000001_create_change_management_tables) now RUN here. Their old per-item exclusion reasons were
+          # re-tested and are stale (same class as the 20250925 one #3627 fixed): fresh-DB migrate, second-pass
+          # replay, and the snapshot-protection E2E (21/21) all pass with them applied.
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
+          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
+          #   this exclusion in #3632 (verified passing there); this workflow was never
+          #   re-verified/updated to match, so this exclusion may now be stale rather than still
+          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # NOTE: zzzz20260114110000_create_user_orgs_table.ts is intentionally NOT in this
+          #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml, which
+          #   all exclude it because it hits a legacy user_orgs is_active replay incompatibility
+          #   there): this job's attendance integration step needs the user_orgs table applied,
+          #   so it was deliberately removed from here in b1fc1e19d1
+          #   ("ci(attendance): run integration gate against postgres") — "Include the user_orgs
+          #   migration in plugin-test database setup because attendance auto-absence now
+          #   depends on that table."
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: |
+          pnpm --filter @metasheet/core-backend db:migrate
+
+      # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates
+      # plus watch, direct-assignment, course-publish, exam, learner-courses,
+      # normalized scope/access, and media-playback service gates.
+      # Migrations above must already have applied the zzzz20260824*,
+      # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
+      # mutate kysely_migration.
+      # elearning-role-templates.db.test.ts also carries the S5a stock-prep role-template
+      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39), and the
+      # owner-2026-10-12 cases: the frontline display-name migration (zzzz20261012090000) and the
+      # move script's option-1 split step (effective permissions through rbac/service.ts, routed
+      # to the test transaction by a db/pg mock local to that file); every one of them runs inside
+      # a transaction it rolls back.
+      # DATABASE_URL is required (bash :? and each suite throws).
       - name: Build web app
         run: |
           pnpm --filter @metasheet/web build
@@ -2326,14 +3009,45 @@ jobs:
         if: always()
         run: dropdb --host=localhost --username=postgres --if-exists attendance_timezone_ci
 
-      - name: Upload test results
+      - name: Upload attendance-db test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.node-version }}
+          name: test-results-attendance-db-${{ matrix.node-version }}
           path: |
             packages/core-backend/coverage/
             packages/core-backend/test-results/
+
+  test:
+    # Keep the exact required context test (20.x), including merge-queue runs.
+    needs: [contracts, permissions, unit, checkpoint, runtime-db, multitable-db, approval-db, attendance-db]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Require every parallel suite to succeed
+        env:
+          PLUGIN_TEST_RESULTS: ${{ toJSON(needs) }}
+        run: node scripts/ops/plugin-tests-required-gate.mjs
 
   after-sales-integration:
     name: after-sales integration

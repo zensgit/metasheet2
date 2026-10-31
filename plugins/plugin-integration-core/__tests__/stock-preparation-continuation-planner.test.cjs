@@ -695,8 +695,10 @@ function underPath(prefix) {
 }
 
 test('PC-RE-0 persistedHolds is a REQUIRED planner key (absent / not an array => 500), each entry closed to the 13-key PHK set and validated like a stored hold', async () => {
-  assert.equal(pairingCore.CONTINUATION_INPUT_KEYS.length, 10)
+  // Step 5 PR-8: `changePlan`; its review fix N3: `expectedContent` (both optional at the core, always passed by the lane).
+  assert.equal(pairingCore.CONTINUATION_INPUT_KEYS.length, 11)
   assert.ok(pairingCore.CONTINUATION_INPUT_KEYS.includes('persistedHolds'))
+  assert.ok(pairingCore.CONTINUATION_INPUT_KEYS.includes('expectedContent'))
   assert.deepEqual(pairingCore.PERSISTED_HOLD_KEYS.slice().sort(), ['comparisonFingerprint', 'confirmable', 'continuationId', 'continuationRoots', 'detail', 'evidenceFingerprint', 'fingerprint', 'kind', 'notConfirmableReason', 'pairingFingerprint', 'runbookOnly', 'shapeToken', 'subject'])
   const valid = F.continuationInput()
   const { persistedHolds: omitted, ...withoutKey } = valid

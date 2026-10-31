@@ -6,7 +6,7 @@
 //
 // It holds:
 //   1. a FAITHFUL fake of the scoped db helper (lib/db.cjs) over the FIVE step-4 tables of migrations 102 /
-//      103 (plus the registry table of 087 / 101, columns only, so PR B's pilot reads can run on the consult's
+//      103 and the step-5 change-plan table of migration 104 (PR-8) (plus the registry table of 087 / 101, columns only, so PR B's pilot reads can run on the consult's
 //      snapshot handle — review X-1; `registryPilotColumns: false` is a database without migration 101):
 //      equality WHERE with null meaning IS NULL, ORDER BY one column, LIMIT / OFFSET, SELECT *, PRIMARY
 //      KEY and every UNIQUE index of the two migrations modelled EXACTLY (name, columns, partial predicate ->
@@ -40,6 +40,9 @@ const MIGRATION_FILES = Object.freeze({
   // PR-4: the sheet write lock's row (migration 100), so ONE fake db can serve the store AND the lock — the
   // decision transactions bump the generation on the store's transaction handle (`bumpGenerationWithin`).
   lock: path.join(MIGRATIONS, '100_create_integration_stock_prep_project_write_lock.sql'),
+  // Step 5 PR-8: the change-plan ledger (migration 104), modelled like 102 / 103 (enums parsed, shape CHECKs and the two
+  // partial unique indexes by hand, cross-checked against the SQL by the change-plan store suite).
+  changePlan: path.join(MIGRATIONS, '104_create_integration_stock_prep_change_plan.sql'),
 })
 const REGISTRY_TABLE = 'integration_stock_prep_project_target'
 
@@ -138,7 +141,7 @@ function parseSchema(sql) {
 }
 
 /**
- * The five step-4 tables (102 / 103) and the registry table. The registry is 087's columns plus — unless
+ * The five step-4 tables (102 / 103), the step-5 change-plan table (104) and the registry table. The registry is 087's columns plus — unless
  * `registryPilotColumns: false` (a database where migration 101 has not run) — the columns 101 ADDs, parsed from
  * its `ADD COLUMN IF NOT EXISTS` lines. The registry's CHECKs and unique indexes are NOT modelled (later
  * migrations re-list its CHECKs; the suites only read it through PR B's pilot reads).
@@ -159,6 +162,7 @@ function loadSchema({ registryPilotColumns = true, lockTable = false } = {}) {
   return {
     ...parseSchema(readMigrationText(MIGRATION_FILES.continuation)),
     ...parseSchema(readMigrationText(MIGRATION_FILES.refreshState)),
+    ...parseSchema(readMigrationText(MIGRATION_FILES.changePlan)),
     ...registry,
     ...lock,
   }
@@ -176,6 +180,11 @@ const UNIQUE_INDEXES = Object.freeze([
   { table: T.member, name: 'uniq_integration_stock_prep_continuation_member_new_key', columns: ['sheet_id', 'new_key_digest'], where: claimActive },
   { table: T.state, name: 'uniq_integration_stock_prep_refresh_state_sheet_project', columns: ['sheet_id', 'project_no'] },
   { table: T.hold, name: 'uniq_integration_stock_prep_refresh_hold_open', columns: ['sheet_id', 'project_no', 'fingerprint'], where: (row) => row.status === 'open' },
+  // Step 5 PR-8 (migration 104): one plan awaiting its controlled update, one written plan awaiting review.
+  { table: T.changePlan, name: 'uniq_integration_stock_prep_change_plan_confirmed', columns: ['sheet_id', 'project_no'], where: (row) => row.status === 'confirmed' },
+  { table: T.changePlan, name: 'uniq_integration_stock_prep_change_plan_written', columns: ['sheet_id', 'project_no'], where: (row) => row.status === 'written' },
+  // PR-8 review fix N3-b (migration 104): ONE reviewed-cell register row per (sheet, project, record key digest, field).
+  { table: T.reviewedCell, name: 'uniq_integration_stock_prep_reviewed_cell', columns: ['sheet_id', 'project_no', 'record_key_digest', 'field_id'] },
 ])
 
 const isNull = (value) => value === null || value === undefined
@@ -197,6 +206,14 @@ const SHAPE_CHECKS = Object.freeze([
   { table: T.execution, name: 'integration_stock_prep_refresh_execution_counts_check', test: (r) => (isNull(r.written) || r.written >= 0) && (isNull(r.attempted_writes) || r.attempted_writes >= 0) },
   { table: T.execution, name: 'integration_stock_prep_refresh_execution_finished_shape_check', test: (r) => (r.status === 'running') === isNull(r.finished_at) },
   { table: T.execution, name: 'integration_stock_prep_refresh_execution_verified_shape_check', test: (r) => (r.status === 'verified_closed') === !isNull(r.verified_at) },
+  // Step 5 PR-8 (migration 104).
+  { table: T.changePlan, name: 'integration_stock_prep_change_plan_counts_check', test: (r) => Number.isInteger(r.write_record_count) && r.write_record_count >= 1 && Number.isInteger(r.record_count) && r.record_count >= r.write_record_count },
+  { table: T.changePlan, name: 'integration_stock_prep_change_plan_generation_check', test: (r) => r.confirmed_generation >= 0 && r.confirmed_fencing_epoch >= 0 },
+  { table: T.changePlan, name: 'integration_stock_prep_change_plan_review_notes_check', test: (r) => isNull(r.review_notes) || r.review_notes.length <= 2000 },
+  { table: T.changePlan, name: 'integration_stock_prep_change_plan_written_shape_check', test: (r) => (isNull(r.written_at) === isNull(r.written_content_digest)) && (!['written', 'reviewed'].includes(r.status) || (!isNull(r.written_at) && !isNull(r.execution_id))) },
+  { table: T.changePlan, name: 'integration_stock_prep_change_plan_reviewed_shape_check', test: (r) => ((r.status === 'reviewed') === !isNull(r.reviewed_at)) && (isNull(r.reviewed_at) === isNull(r.reviewed_by)) && (isNull(r.reviewed_at) === isNull(r.review_conclusion)) && (isNull(r.reviewed_at) === isNull(r.reviewed_content_digest)) },
+  { table: T.changePlan, name: 'integration_stock_prep_change_plan_invalidated_shape_check', test: (r) => ((r.status === 'invalidated') === !isNull(r.invalidated_at)) && (isNull(r.invalidated_at) === isNull(r.invalidated_reason)) && (r.invalidated_reason !== 'execution_failed' || !isNull(r.execution_id)) },
+  { table: T.changePlan, name: 'integration_stock_prep_change_plan_superseded_shape_check', test: (r) => ((r.status === 'superseded') === !isNull(r.superseded_at)) && (isNull(r.superseded_at) === isNull(r.superseded_by)) },
 ])
 
 // ---------------------------------------------------------------------------------------------------
@@ -488,6 +505,13 @@ function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotCo
 // ---------------------------------------------------------------------------------------------------
 // 2. A controllable clock and the fake lock bump
 // ---------------------------------------------------------------------------------------------------
+
+// PR-8 review fix N1-b: a relationship confirm re-reads the pilot marker on its own transaction handle (`pilotWithin`,
+// required by the store). Suites that SEED a relationship — the pilot decision is not what they test — hand this stub;
+// the pilot fact itself is pinned with the REAL reader (CP-S17, CR-N1b, S8-19).
+async function seedPilotWithin() {
+  return Object.freeze({ enabled: true })
+}
 
 function createClock(startIso = '2026-10-24T00:00:00.000Z') {
   let ms = Date.parse(startIso)
@@ -884,6 +908,7 @@ module.exports = {
   rerecordedTakeoverHold,
   registryRow,
   sameNewPositionHold,
+  seedPilotWithin,
   sqlError,
   writeLockedError,
 }
