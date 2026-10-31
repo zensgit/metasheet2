@@ -7,7 +7,8 @@
  *      replay through the same route, an entry that can no longer take it is dropped (never replayed to /patch), an
  *      edit whose undo would clear a required column never enters the stack, the returned version is reported;
  *   G  MetaGridTable: the 「人工补充」 row label for every reader; single-cell editing of the fillable columns of a manual
- *      row only when the workbench names them (never on the row mark alone); range fill keeps skipping them.
+ *      row only when the workbench names them (never on the row mark alone); range fill and paste (the focused cell
+ *      included) keep treating them as read-only.
  *
  * Collected by the required web gate through the existing `multitable-grid` token (a vitest path-substring filter).
  * Every value is synthetic.
@@ -437,5 +438,35 @@ describe('G — MetaGridTable on a project sheet with manual rows', () => {
     const sent = grid.commitRange.mock.calls[0][0] as RangeChange[]
     expect(sent.length).toBeGreaterThan(0)
     expect(sent.every((change) => change.fieldId === F.notes)).toBe(true)
+  })
+
+  // ADR §3.4 / §8 B3.4: 「区域填充和粘贴仍按只读处理」 — a paste onto the FOCUSED cell included, although single-cell editing
+  // of the same cell is open (G-02). Native paste event; the range fill flag is off, so this is the focused-cell path.
+  function pasteEvent(text: string): Event {
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { getData: (type: string) => (type === 'text/plain' ? text : '') } })
+    return event
+  }
+
+  it('G-07 a paste onto the focused fillable cell of a manual row writes nothing (paste stays read-only)', async () => {
+    const grid = await mountGrid()
+    grid.cell(0, 1).click()
+    const gridEl = grid.root.querySelector<HTMLElement>('.meta-grid')!
+    gridEl.focus()
+    await flushUi()
+    gridEl.dispatchEvent(pasteEvent('PASTED'))
+    await flushUi()
+    expect(grid.patchCell).not.toHaveBeenCalled()
+  })
+
+  it('G-08 control: the same paste onto 备注 of the same manual row IS written (the paste reaches the grid)', async () => {
+    const grid = await mountGrid()
+    grid.cell(0, 2).click()
+    const gridEl = grid.root.querySelector<HTMLElement>('.meta-grid')!
+    gridEl.focus()
+    await flushUi()
+    gridEl.dispatchEvent(pasteEvent('PASTED'))
+    await flushUi()
+    expect(grid.patchCell).toHaveBeenCalledWith('rec_mr_manual', F.notes, 'PASTED', 3)
   })
 })

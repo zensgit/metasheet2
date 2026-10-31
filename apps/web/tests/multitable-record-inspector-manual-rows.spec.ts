@@ -106,6 +106,18 @@ describe('MetaRecordInspector on a project sheet with manual rows', () => {
     expect(document.querySelector('[data-testid="record-inspector-manual-supplement-tag"]')).toBeNull()
   })
 
+  it('I-03b the label reaches a pure READER too (no edit, delete or create — OQ3: every actor who can read the row)', async () => {
+    useLocale().setLocale('zh-CN')
+    mountInspector({
+      canEdit: false,
+      canDelete: false,
+      canCreate: false,
+      rowActions: { canEdit: false, canDelete: false, canComment: false, manualSupplement: true },
+    })
+    await flushUi()
+    expect(document.querySelector('[data-testid="record-inspector-manual-supplement-tag"]')?.textContent?.trim()).toBe('人工补充')
+  })
+
   it('I-04 the lifted fillable column renders an editor and emits patch; the unlifted locked column stays plain text', async () => {
     const onPatch = vi.fn()
     mountInspector({

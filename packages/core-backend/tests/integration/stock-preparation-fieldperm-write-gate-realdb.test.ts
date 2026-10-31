@@ -1325,8 +1325,9 @@ describeIfDatabase('备料 列权限墙不在插件写路径上 — 特征化 go
 //   * THE ROLLOUT: a sheet shaped like the demo's A/B (created before the lock: markers absent) is editable by
 //     people, the repair marking locks it, a second run writes nothing, and no row changes;
 //   * 人工补充行 B3 (PB-05b, ADR adr-stock-prep-manual-rows-20261030 §3.1): on a project sheet that is also REGISTERED
-//     in the plugin's own registry (migration 087), generic create (POST /records, the xlsx import) is refused by the
-//     manual-rows state before any row, in every state; A / B stay only provisioned and keep PB-05's answers.
+//     in the plugin's own registry (migration 087), generic create (POST /records — session and mst_ token requests —
+//     and the xlsx import) is refused by the manual-rows state before any row, in every state; A / B stay only
+//     provisioned and keep PB-05's answers.
 // Synthetic identifiers only; everything it creates is deleted in afterAll.
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 const pbRequire = createRequire(import.meta.url)
@@ -1579,7 +1580,7 @@ describeIfDatabase('备料 option B — PLM columns of a project sheet: read-onl
     expect((await sheetData(a.sheetId)).length).toBe(countBefore)
   })
 
-  test('PB-05b a REGISTERED project sheet (P_reg: the plugin registry row of migration 087): generic create — POST /records and the xlsx import — is refused by the manual-rows state before any row, in every state of ADR adr-stock-prep-manual-rows-20261030 §3.1', async () => {
+  test('PB-05b a REGISTERED project sheet (P_reg: the plugin registry row of migration 087): generic create — POST /records (session and mst_ token) and the xlsx import — is refused by the manual-rows state before any row, in every state of ADR adr-stock-prep-manual-rows-20261030 §3.1', async () => {
     const switchBefore = process.env[PB_SWITCH]
     process.env[PB_SWITCH] = 'true'
     // c: provisioned exactly like a (the PLM lock included), then registered through the plugin's own registry store.
@@ -1614,6 +1615,26 @@ describeIfDatabase('备料 option B — PLM columns of a project sheet: read-onl
       await expectRefused('allowed', 409, 'STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW', { state: 'allowed' })
       const allowedRes = await request(pbApp).post('/api/multitable/records').send({ sheetId: c.sheetId, data: { [phys(c, 'notes')]: 'x' } })
       expect(allowedRes.body.error.message).toContain('新增人工补充行')
+      // An `mst_` API token request lands in the SAME POST /records handler and is refused the same way, before any row.
+      {
+        const { ApiTokenService } = await import('../../src/multitable/api-token-service')
+        const { db: tokenDb } = await import('../../src/db/db')
+        const minted = await new ApiTokenService(tokenDb).createToken(PB_FRONTLINE, { name: 'pb05b-token', scopes: ['records:write'] })
+        try {
+          const before = (await sheetData(c.sheetId)).length
+          const viaToken = await request(pbApp)
+            .post('/api/multitable/records')
+            .set('Authorization', `Bearer ${minted.plainTextToken}`)
+            .send({ sheetId: c.sheetId, data: { [phys(c, 'notes')]: 'x' } })
+          expect(viaToken.status, `mst_ token POST /records: ${JSON.stringify(viaToken.body).slice(0, 300)}`).toBe(409)
+          expect(viaToken.body.error.code).toBe('STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW')
+          expect(viaToken.body.error.details).toEqual({ state: 'allowed' })
+          expect((await sheetData(c.sheetId)).length, 'mst_ token: nothing written').toBe(before)
+        } finally {
+          await q('DELETE FROM oapi_write_audit WHERE token_id = $1', [minted.token.id]).catch(() => {})
+          await q('DELETE FROM multitable_api_tokens WHERE id = $1', [minted.token.id]).catch(() => {})
+        }
+      }
 
       // disabled — the switch written through the plugin's own provisioning port (a junk value reads as disabled).
       await setSwitch('nope')

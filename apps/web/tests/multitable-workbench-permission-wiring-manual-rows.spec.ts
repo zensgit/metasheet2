@@ -8,7 +8,8 @@ import type { ManualCellWrite } from '../src/multitable/composables/useMultitabl
 // the workbench wiring, with the REAL capabilities composable reading /context's `stockPreparationManualRows` block:
 //
 //   W-01 block present → EVERY generic create entry is off (toolbar add / import, grid "+ row" and footer, inspector
-//        duplicate, kanban, a new form submission), whatever the state; the R68 note gives way to the manual-rows note;
+//        duplicate, kanban / gallery / calendar / timeline / gantt / hierarchy), whatever the state; a new form-view
+//        submission keeps its pre-B3 gate (OQ7, the form route is unchanged); the R68 note gives way to the manual-rows note;
 //   W-02 the note per state (zh): 「新增人工补充行」 only in `allowed`, otherwise the state's reason (lock_missing →
 //        「需管理员修复本表」);
 //   W-03 block absent → exactly the old entries, no note, and a row's `manualSupplement` mark alone enables nothing
@@ -88,9 +89,11 @@ vi.mock('../src/multitable/components/RestoreBatchDialog.vue', () => ({ default:
 vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
 vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
 vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
-vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
-vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
-vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: stubComponent('MetaTimelineView') }))
+vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: capturingStub('MetaGalleryView') }))
+vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: capturingStub('MetaCalendarView') }))
+vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: capturingStub('MetaTimelineView') }))
+vi.mock('../src/multitable/components/MetaGanttView.vue', () => ({ default: capturingStub('MetaGanttView') }))
+vi.mock('../src/multitable/components/MetaHierarchyView.vue', () => ({ default: capturingStub('MetaHierarchyView') }))
 vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
 vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubComponent('MetaBasePicker') }))
 vi.mock('../src/multitable/components/MetaToast.vue', () => ({
@@ -239,9 +242,21 @@ describe('W-01 a P_reg sheet (block present): every generic create entry is off,
     expect(note(), 'the manual-rows note replaces the entries').not.toBeNull()
   })
 
-  it('kanban create follows the same gate', async () => {
-    await mount('kanban', withBlock())
-    expect(captured.MetaKanbanView!['can-create']).toBe(false)
+  it.each([
+    ['kanban', 'MetaKanbanView'],
+    ['gallery', 'MetaGalleryView'],
+    ['calendar', 'MetaCalendarView'],
+    ['timeline', 'MetaTimelineView'],
+    ['gantt', 'MetaGanttView'],
+    ['hierarchy', 'MetaHierarchyView'],
+  ])('%s create: off with the block present, on without it (ADR §3.7 「全部通用新建入口」)', async (viewType, stub) => {
+    await mount(viewType, withBlock())
+    expect(captured[stub], `${stub} rendered`).toBeTruthy()
+    expect(captured[stub]!['can-create']).toBe(false)
+    unmount()
+    for (const key of Object.keys(captured)) captured[key] = null
+    await mount(viewType, { ...WRITER_CAPS })
+    expect(captured[stub]!['can-create']).toBe(true)
   })
 
   it('OQ7 「表单不改」: a new form-view submission (the form route) keeps its pre-B3 gate — open on an unlocked registered sheet, closed by R68 on a locked one', async () => {
