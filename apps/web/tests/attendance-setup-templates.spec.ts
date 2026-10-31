@@ -81,12 +81,11 @@ vi.mock('../src/utils/api', () => ({
   apiFetch: vi.fn(),
 }))
 
-// AttendanceExperienceView seam suite only (AttendanceView imports NONE of these, so the mounted
-// §5.2 suite is unaffected): stub the four heavy tab children and the feature-flag store so the
-// shell mounts fast and tab swaps are observable via data-testid markers.
+// The shell seam enables its existing features; mounted template-prefill cases retain
+// the legacy OFF catalog-selection contract when AttendanceView imports the W6 bridge.
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
-    hasFeature: () => true,
+    hasFeature: (key: string) => key !== 'attendanceGroupEffectivePolicyPanel',
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
     isFeatureOverrideAllowed: () => false,
     setLocalFeatureOverride: vi.fn(),
