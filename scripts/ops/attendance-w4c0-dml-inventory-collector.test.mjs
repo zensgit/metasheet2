@@ -135,6 +135,31 @@ test('fixed-schedule shared config handler preserves seven downstream assignment
   }])
 })
 
+test('CALC14 onboarding P28 claim binds one assignment insert and rejects other writers', () => {
+  const relPath = 'packages/core-backend/src/routes/admin-users.ts'
+  const source = fs.readFileSync(path.join(rootDir, relPath), 'utf8')
+  const entry = CURATED_DEBT_ENTRIES.find(candidate => candidate.id === 'P28')
+  const claimed = scanFileForDmlSites(relPath, source).filter(site => entry.claims(site))
+  // Pin multiplicity as well as identity: a second write under the same local
+  // closure name must fail this current-source gate.
+  assert.deepEqual(claimed.map(({ enclosingSymbol, table, verb }) => ({ enclosingSymbol, table, verb })), [{
+    enclosingSymbol: 'flushSourceHistory', table: 'attendance_shift_assignments', verb: 'insert',
+  }])
+  const site = claimed[0]
+  assert.equal(entry.claims({ ...site, enclosingSymbol: 'body' }), true, 'retain the pinned baseline writer')
+  for (const change of [
+    { relPath: relPath + '.extra.ts' }, { enclosingSymbol: 'unreviewedOnboardingWriter' },
+    { table: 'attendance_records' }, { table: 'attendance_group_members' },
+    { verb: 'update' }, { verb: 'delete' },
+  ]) assert.equal(entry.claims({ ...site, ...change }), false)
+  const added = scanFileForDmlSites(relPath,
+    'async function unreviewedOnboardingWriter(client) { await client.query("INSERT INTO attendance_shift_assignments (id) VALUES ($1)") }')
+  assert.deepEqual(classifyTrackedSites(classifyCensus(added).trackedSites).unclaimed, [{
+    ...added[0], bucket: 'schedule_fact',
+    key: 'schedule_fact::' + relPath + '::attendance_shift_assignments::insert::unreviewedOnboardingWriter::b0',
+  }])
+})
+
 test('timezone configuration tables have explicit buckets without a prefix-wide exception', () => {
   assert.equal(TABLE_BUCKETS.attendance_timezone_policies, 'reference')
   assert.equal(TABLE_BUCKETS.attendance_employee_timezone_overrides, 'reference')
@@ -164,16 +189,21 @@ test('reviewed canonical grants bind exact site identity and multiplicity, never
   const raw = reviewedPaths.flatMap(file => scanFileForDmlSites(file, fs.readFileSync(path.join(rootDir, file), 'utf8')))
     .filter(site => TABLE_BUCKETS[site.table] === 'w4_canonical')
   assert.equal(raw.length, 7)
-  assert.equal(W4_EXACT_CANONICAL_SITES.length, 7)
-  const positive = classifyCensus(raw)
-  assert.equal(positive.canonicalSites.length, 7)
+  assert.equal(W4_EXACT_CANONICAL_SITES.length, 8)
+  const historyPath = 'packages/core-backend/src/db/migrations/zzzz20261030120000_create_attendance_calc14_source_versions.ts'
+  const history = scanFileForDmlSites(historyPath, fs.readFileSync(path.join(rootDir, historyPath), 'utf8'))
+    .filter(site => site.table === 'attendance_calc14_source_versions')
+  assert.equal(history.length, 3)
+  const complete = [...raw, ...history]
+  const positive = classifyCensus(complete)
+  assert.equal(positive.canonicalSites.length, 10)
   assert.deepEqual(positive.exactCanonicalCountDrift, [])
   assert.deepEqual(positive.outsideBoundarySites, [])
   for (const site of raw) {
-    const duplicate = classifyCensus([...raw, site])
+    const duplicate = classifyCensus([...complete, site])
     assert.equal(duplicate.exactCanonicalCountDrift.length, 1)
     assert.equal(duplicate.outsideBoundarySites.length, 2)
-    const missing = classifyCensus(raw.filter(candidate => candidate !== site))
+    const missing = classifyCensus(complete.filter(candidate => candidate !== site))
     assert.equal(missing.exactCanonicalCountDrift.length, 1)
     assert.equal(missing.exactCanonicalCountDrift[0].actual, 0)
     for (const change of [
@@ -181,10 +211,35 @@ test('reviewed canonical grants bind exact site identity and multiplicity, never
       { enclosingSymbol: 'unreviewedWriter' }, { relPath: relPath + '.extra.ts' },
       { relPath: 'packages/core-backend/src/attendance/w4c0-unreviewed.ts' },
     ]) {
-      const wrong = classifyCensus([...raw, { ...site, ...change }])
+      const wrong = classifyCensus([...complete, { ...site, ...change }])
       assert.equal(wrong.outsideBoundarySites.length, 1)
     }
   }
+})
+
+test('CALC14 history source authority admits exactly three reviewed migration inserts', () => {
+  const table = 'attendance_calc14_source_versions'
+  assert.equal(TABLE_BUCKETS[table], 'w4_canonical')
+  const { sites } = buildRawCensus(createWorktreeSource(rootDir))
+  const history = sites.filter(site => site.table === table)
+  const relPath = 'packages/core-backend/src/db/migrations/zzzz20261030120000_create_attendance_calc14_source_versions.ts'
+  assert.deepEqual(history.map(({ relPath, enclosingSymbol, table, verb }) => ({ relPath, enclosingSymbol, table, verb })),
+    Array.from({ length: 3 }, () => ({ relPath, enclosingSymbol: 'up', table, verb: 'insert' })))
+  const positive = classifyCensus(sites)
+  assert.deepEqual(positive.exactCanonicalCountDrift, [])
+  assert.equal(positive.canonicalSites.filter(site => site.table === table).length, 3)
+  assert.deepEqual(positive.outsideBoundarySites, [])
+  const site = history[0]
+  for (const changed of [
+    sites.filter(candidate => candidate !== site), [...sites, site],
+    ...[
+      { relPath: relPath + '.extra.ts' }, { enclosingSymbol: 'unreviewedWriter' },
+      { table: 'attendance_result_operations' }, { verb: 'update' }, { verb: 'delete' },
+    ].map(change => sites.map(candidate => candidate === site ? { ...site, ...change } : candidate)),
+  ]) assert.equal(classifyCensus(changed).exactCanonicalCountDrift.filter(site => site.table === table).length, 1)
+  const future = scanFileForDmlSites(relPath,
+    'async function unreviewedWriter(db) { await db.query("INSERT INTO attendance_calc14_unreviewed (id) VALUES ($1)") }')
+  assert.equal(classifyCensus(future).unclassifiedTableSites.length, 1)
 })
 
 test('ACP read decisions require each reviewed symbol and exact count', () => {
@@ -216,7 +271,7 @@ test('operator archive repair grants one companion append and refuses a neighbor
   const raw = [...new Set(W4_EXACT_CANONICAL_SITES.map(site => site.relPath))]
     .flatMap(file => scanFileForDmlSites(file, fs.readFileSync(path.join(rootDir, file), 'utf8')))
     .filter(site => TABLE_BUCKETS[site.table] === 'w4_canonical')
-  assert.equal(raw.length, W4_EXACT_CANONICAL_SITES.length)
+  assert.equal(raw.length, W4_EXACT_CANONICAL_SITES.reduce((sum, site) => sum + site.count, 0))
   assert.deepEqual(classifyCensus(raw).outsideBoundarySites, [])
   assert.deepEqual(classifyCensus(raw).exactCanonicalCountDrift, [])
   const neighbor = scanFileForDmlSites(relPath,
