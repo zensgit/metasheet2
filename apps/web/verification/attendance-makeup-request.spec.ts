@@ -81,6 +81,13 @@ async function mockAttendance(page: Page, withLeave = false, clock: { serverAt?:
         runtimeRule: { timezone: clock.timezone ?? 'Asia/Shanghai', ...(withLeave ? { workStartTime: '09:00', workEndTime: '18:00' } : {}) }, punchPolicy: { merge: {} }, warnings: [],
       } })
     }
+    if (path === '/api/attendance/correction-targets') {
+      // Fixture premise: this synthetic compatibility dataset is explicitly legacy-projection-only.
+      // This supplies no native/canonical proof and is not a fallback from an error or missing endpoint.
+      return reply({ ok: true, data: {
+        schemaVersion: 1, posture: 'legacy_projection_only', source: null, candidates: [],
+      } })
+    }
     if (path === '/api/attendance/timezone-context/me') {
       const workDate = new URL(request.url()).searchParams.get('workDate')
       if (!workDate || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
