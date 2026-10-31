@@ -2659,4 +2659,391 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       expect(await countRows('attendance_shift_assignments', orgS)).toBe(4)
     })
   })
+
+  // DB08_DURABLE_BEGIN
+  describe('DB08_DURABLE native durable-delete evidence', () => {
+    type Row = Record<string, unknown>
+    type Scope = Record<string, Row[]>
+    type Fixture = { orgId: string; userId: string; token: string; target: string; survivor: string }
+    const date = '2049-06-14'
+    const survivorName = 'DB08 surviving shift'
+
+    // Native PG whole rows; public BASE TABLEs only. This is an org-scoped
+    // committed-state comparison, not whole-DB/auth proof or SQL instrumentation.
+    async function snapshot(orgId: string): Promise<Scope> {
+      const tables = await pool.query<{ table_name: string }>(
+        `SELECT t.table_name FROM information_schema.tables t
+         JOIN information_schema.columns c
+           ON c.table_schema = t.table_schema AND c.table_name = t.table_name
+         WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND c.column_name = 'org_id'
+         ORDER BY t.table_name`,
+      )
+      const result: Scope = {}
+      for (const { table_name: table } of tables.rows) {
+        const identifier = '"' + table.replace(/"/g, '""') + '"'
+        const rows = await pool.query<{ row: Row }>(
+          'SELECT to_jsonb(t) AS row FROM public.' + identifier
+          + ' t WHERE org_id::text = $1 ORDER BY to_jsonb(t)::text', [orgId],
+        )
+        result[table] = rows.rows.map(({ row }) => row)
+      }
+      for (const table of [
+        'attendance_shifts', 'attendance_shift_segments', 'attendance_shift_assignments',
+        'attendance_rotation_rules', 'attendance_requests', 'attendance_shift_swap_requests',
+        'attendance_schedule_dispatch_requests', 'attendance_group_fixed_schedule_configs',
+        'attendance_auto_shift_auto_write_runs', 'attendance_auto_shift_auto_write_run_items',
+      ]) expect(Object.prototype.hasOwnProperty.call(result, table)).toBe(true)
+      return result
+    }
+
+    async function fixture(arm: string): Promise<Fixture> {
+      const orgId = org('DB08_DURABLE-' + arm)
+      const userId = orgId + '-requester'
+      const token = await mintToken(userId, orgId)
+      async function shift(name: string) {
+        const res = await createShiftViaApi(token, orgId, {
+          name, timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00',
+        })
+        expect(res.status).toBe(201)
+        return res.body.data.id as string
+      }
+      return { orgId, userId, token, target: await shift('DB08 delete target'), survivor: await shift(survivorName) }
+    }
+
+    function assertOnlyBlocker(scope: Scope, f: Fixture, blocker: string | null) {
+      expect(scope.attendance_shifts.filter(row => row.id === f.target)).toHaveLength(1)
+      const segments = scope.attendance_shift_segments.filter(row => row.shift_id === f.target)
+      expect(segments).toHaveLength(1)
+      expect(segments[0].org_id).toBe(f.orgId)
+      const pending = new Set(scope.attendance_requests.filter(row => row.status === 'pending').map(row => row.id))
+      const counts = {
+        shift_assignments: scope.attendance_shift_assignments.filter(row => row.shift_id === f.target).length,
+        fixed_schedule_configs: scope.attendance_group_fixed_schedule_configs.filter(row => row.shift_id === f.target).length,
+        rotation_rules: scope.attendance_rotation_rules.filter(row => {
+          expect(Array.isArray(row.shift_sequence)).toBe(true)
+          return (row.shift_sequence as string[]).some(ref => ref === f.target || ref === 'DB08 delete target')
+        }).length,
+        shift_swap_requests: scope.attendance_shift_swap_requests.filter(row =>
+          pending.has(row.request_id) && (row.requester_shift_id === f.target || row.counterparty_shift_id === f.target),
+        ).length,
+        schedule_dispatch_requests: scope.attendance_schedule_dispatch_requests.filter(row =>
+          row.target_shift_id === f.target && ['pending', 'published'].includes(String(row.publish_status)),
+        ).length,
+      }
+      expect(counts).toEqual({
+        shift_assignments: blocker === 'shift_assignments' ? 1 : 0,
+        fixed_schedule_configs: blocker === 'fixed_schedule_configs' ? 1 : 0,
+        rotation_rules: blocker === 'rotation_rules' ? 1 : 0,
+        shift_swap_requests: blocker === 'shift_swap_requests' ? 1 : 0,
+        schedule_dispatch_requests: blocker === 'schedule_dispatch_requests' ? 1 : 0,
+      })
+    }
+
+    async function deleteTarget(f: Fixture) {
+      return requestJson(baseUrl + '/api/attendance/shifts/' + f.target, {
+        method: 'DELETE', headers: authHeaders(f.token, f.orgId),
+      })
+    }
+
+    function receipt(arm: string, status: 200 | 409, blocker: string | null, redaction: boolean) {
+      console.info(JSON.stringify({
+        prefix: 'DB08_DURABLE', arm, outcome: status === 409 ? 'blocked' : 'deleted',
+        status, blockerClass: blocker, count: blocker ? 1 : 0,
+        zeroCommittedScopeChange: status === 409, evidenceExact: true, redaction,
+      }))
+    }
+
+    // Legal persisted snapshot facts, distinct from public producer reachability:
+    // assignment FKs point at the survivor; only one snapshot side names target.
+    async function seedSwap(f: Fixture, side: 'requester' | 'counterparty', status: 'pending' | 'rejected') {
+      const other = f.orgId + '-counterparty'
+      const a = await seedPublishedAssignment(f.orgId, f.userId, f.survivor, date)
+      const b = await seedPublishedAssignment(f.orgId, other, f.survivor, '2049-06-15')
+      const id = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_requests (id, user_id, org_id, work_date, request_type, reason, status)
+         VALUES ($1, $2, $3, $4, 'shift_swap', 'DB08 durable snapshot', $5)`,
+        [id, f.userId, f.orgId, date, status],
+      )
+      await pool.query(
+        `INSERT INTO attendance_shift_swap_requests
+         (request_id, org_id, requester_user_id, counterparty_user_id,
+          requester_assignment_id, counterparty_assignment_id, requester_work_date, counterparty_work_date,
+          requester_shift_id, counterparty_shift_id, requester_slot_index, counterparty_slot_index,
+          requester_start_date, requester_end_date, counterparty_start_date, counterparty_end_date,
+          requester_publish_status, counterparty_publish_status, requester_assignment_kind, counterparty_assignment_kind,
+          counterparty_status, source_key)
+         VALUES ($1, $2, $3, $4, $5, $6, '2049-06-14', '2049-06-15', $7, $8, 0, 0,
+                 '2049-06-14', '2049-06-14', '2049-06-15', '2049-06-15',
+                 'published', 'published', 'regular', 'regular', $9, $10)`,
+        [id, f.orgId, f.userId, other, a, b,
+          side === 'requester' ? f.target : f.survivor,
+          side === 'counterparty' ? f.target : f.survivor,
+          status === 'rejected' ? 'rejected' : 'pending', 'DB08_DURABLE:' + randomUUID()],
+      )
+      const rows = await pool.query(
+        'SELECT requester_shift_id, counterparty_shift_id FROM attendance_shift_swap_requests WHERE request_id = $1', [id],
+      )
+      expect(rows.rows).toEqual([{
+        requester_shift_id: side === 'requester' ? f.target : f.survivor,
+        counterparty_shift_id: side === 'counterparty' ? f.target : f.survivor,
+      }])
+      return id
+    }
+
+    async function seedDispatch(f: Fixture, status: 'pending' | 'published' | 'cancelled') {
+      const group = await seedScheduleGroup(f.orgId)
+      const id = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_requests (id, user_id, org_id, work_date, request_type, reason, status, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', 'DB08 durable snapshot', $5, $6::jsonb)`,
+        [id, f.userId, f.orgId, date, status === 'published' ? 'approved' : status,
+          JSON.stringify({ scheduleDispatch: { targetShiftId: f.target, target_shift_id: f.target } })],
+      )
+      await pool.query(
+        `INSERT INTO attendance_schedule_dispatch_requests
+         (request_id, org_id, user_id, target_schedule_group_id, target_shift_id, start_date, end_date, publish_status, source_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)`,
+        [id, f.orgId, f.userId, group, f.target, date, status, 'DB08_DURABLE:' + randomUUID()],
+      )
+      const rows = await pool.query(
+        'SELECT target_shift_id, publish_status, assignment_ids FROM attendance_schedule_dispatch_requests WHERE request_id = $1', [id],
+      )
+      expect(rows.rows).toEqual([{ target_shift_id: f.target, publish_status: status, assignment_ids: [] }])
+      return id
+    }
+
+    const blockedArms = [
+      ['assignment-active-published', 'shift_assignments'],
+      ['assignment-active-draft', 'shift_assignments'],
+      ['assignment-ended-inactive', 'shift_assignments'],
+      ['rotation-id-active', 'rotation_rules'],
+      ['rotation-id-inactive', 'rotation_rules'],
+      ['rotation-name-active', 'rotation_rules'],
+      ['rotation-name-inactive', 'rotation_rules'],
+      ['pending-swap-requester-only', 'shift_swap_requests'],
+      ['pending-swap-counterparty-only', 'shift_swap_requests'],
+      ['dispatch-pending-no-assignment', 'schedule_dispatch_requests'],
+      ['dispatch-published-no-assignment', 'schedule_dispatch_requests'],
+      ['fixed-schedule-desired-config', 'fixed_schedule_configs'],
+    ] as const
+
+    for (const [arm, blocker] of blockedArms) {
+      it('DB08_DURABLE ' + arm, async () => {
+        const f = await fixture(arm)
+        if (blocker === 'shift_assignments') {
+          const id = await seedPublishedAssignment(f.orgId, f.userId, f.target, date)
+          if (arm === 'assignment-active-draft') {
+            await pool.query("UPDATE attendance_shift_assignments SET publish_status = 'draft' WHERE id = $1", [id])
+          } else if (arm === 'assignment-ended-inactive') {
+            await pool.query(
+              "UPDATE attendance_shift_assignments SET is_active = false, start_date = '2020-01-01', end_date = '2020-01-02' WHERE id = $1", [id],
+            )
+          }
+          const rows = await pool.query(
+            'SELECT is_active, publish_status, end_date::text FROM attendance_shift_assignments WHERE id = $1', [id],
+          )
+          expect(rows.rows).toEqual([{
+            is_active: arm !== 'assignment-ended-inactive',
+            publish_status: arm === 'assignment-active-draft' ? 'draft' : 'published',
+            end_date: arm === 'assignment-ended-inactive' ? '2020-01-02' : date,
+          }])
+        } else if (blocker === 'rotation_rules') {
+          await pool.query(
+            `INSERT INTO attendance_rotation_rules (id, org_id, name, timezone, shift_sequence, is_active)
+             VALUES ($1, $2, 'DB08 rotation', 'UTC', $3::jsonb, $4)`,
+            [randomUUID(), f.orgId, JSON.stringify([arm.includes('-name-') ? 'DB08 delete target' : f.target]),
+              !arm.endsWith('-inactive')],
+          )
+        } else if (blocker === 'shift_swap_requests') {
+          await seedSwap(f, arm === 'pending-swap-requester-only' ? 'requester' : 'counterparty', 'pending')
+        } else if (blocker === 'schedule_dispatch_requests') {
+          await seedDispatch(f, arm === 'dispatch-pending-no-assignment' ? 'pending' : 'published')
+        } else {
+          const group = randomUUID()
+          await pool.query(
+            `INSERT INTO attendance_groups (id, org_id, name, timezone, attendance_type)
+             VALUES ($1, $2, 'DB08 fixed group', 'UTC', 'fixed_shift')`, [group, f.orgId],
+          )
+          await pool.query(
+            `INSERT INTO attendance_group_fixed_schedule_configs
+             (id, org_id, group_id, shift_id, start_date, end_date, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $5, $6)`,
+            [randomUUID(), f.orgId, group, f.target, date, f.userId],
+          )
+        }
+        const before = await snapshot(f.orgId)
+        assertOnlyBlocker(before, f, blocker)
+        const res = await deleteTarget(f)
+        expect(res.status).toBe(409)
+        expect(res.body).toEqual({
+          ok: false,
+          error: {
+            code: DELETE_BLOCKED_CODE,
+            message: 'Shift is still referenced by scheduling records and cannot be deleted; historical evidence is preserved',
+            details: [{ field: blocker, message: blocker + ': 1 reference(s)' }],
+          },
+        })
+        expect(await snapshot(f.orgId)).toEqual(before)
+        receipt(arm, 409, blocker, false)
+      }, 120000)
+    }
+
+    // Only target/segments removal and the ratified dispatch FK SET NULL are
+    // allowed. Request parents, run/items and every other scoped row stay exact.
+    async function expectDeleted(f: Fixture, before: Scope, dispatchId?: string) {
+      const res = await deleteTarget(f)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ ok: true, data: { id: f.target } })
+      const after = await snapshot(f.orgId)
+      expect(after.attendance_shifts.filter(row => row.id === f.target)).toEqual([])
+      expect(after.attendance_shift_segments.filter(row => row.shift_id === f.target)).toEqual([])
+      const expected: Scope = {
+        ...before,
+        attendance_shifts: before.attendance_shifts.filter(row => row.id !== f.target),
+        attendance_shift_segments: before.attendance_shift_segments.filter(row => row.shift_id !== f.target),
+        attendance_schedule_dispatch_requests: before.attendance_schedule_dispatch_requests.map(row =>
+          row.request_id === dispatchId ? { ...row, target_shift_id: null } : row,
+        ),
+      }
+      expect(after).toEqual(expected)
+      return after
+    }
+
+    async function read(f: Fixture, pathname: string) {
+      const res = await requestJson(baseUrl + '/api/attendance' + pathname, { headers: authHeaders(f.token, f.orgId) })
+      expect(res.status).toBe(200)
+      expect(res.raw).not.toContain(f.target)
+      return res.body.data
+    }
+
+    for (const side of ['requester', 'counterparty'] as const) {
+      it('DB08_DURABLE rejected-swap-' + side + '-history', async () => {
+        const f = await fixture('rejected-swap-' + side)
+        const id = await seedSwap(f, side, 'rejected')
+        const before = await snapshot(f.orgId)
+        expect(before.attendance_requests).toHaveLength(1)
+        expect(before.attendance_shift_swap_requests).toHaveLength(1)
+        assertOnlyBlocker(before, f, null)
+        await expectDeleted(f, before)
+        const list = await read(f, '/shift-swap-requests')
+        const detail = await read(f, '/shift-swap-requests/' + id)
+        expect(list.items).toHaveLength(1)
+        for (const item of [list.items[0], detail.shiftSwap]) {
+          expect(item.requestId).toBe(id)
+          expect(item[side + 'ShiftId']).toBeNull()
+          expect(item[side + '_shift_id']).toBeNull()
+          expect(item[side + 'ShiftLabel']).toBe(DELETED_LABEL)
+          expect(item[side + 'ShiftStatus']).toBe('deleted')
+          const live = side === 'requester' ? 'counterparty' : 'requester'
+          expect(item[live + 'ShiftId']).toBe(f.survivor)
+          expect(item[live + '_shift_id']).toBe(f.survivor)
+          expect(item[live + 'ShiftLabel']).toBe(survivorName)
+          expect(item[live + 'ShiftStatus']).toBe('available')
+        }
+        // Generic requests have no swap shift-reference enrichment.
+        const requests = await read(f, '/requests?from=' + date + '&to=' + date)
+        expect(requests.items.map((row: { id: string }) => row.id)).toEqual([id])
+        const request = await read(f, '/requests/' + id)
+        expect(request.request.id).toBe(id)
+        receipt('rejected-swap-' + side + '-history', 200, null, true)
+      }, 120000)
+    }
+
+    it('DB08_DURABLE cancelled-dispatch-history', async () => {
+      const f = await fixture('cancelled-dispatch')
+      const id = await seedDispatch(f, 'cancelled')
+      const before = await snapshot(f.orgId)
+      expect(before.attendance_requests).toHaveLength(1)
+      expect(before.attendance_schedule_dispatch_requests).toHaveLength(1)
+      assertOnlyBlocker(before, f, null)
+      await expectDeleted(f, before, id)
+      const list = await read(f, '/schedule-dispatch-requests')
+      const detail = await read(f, '/schedule-dispatch-requests/' + id)
+      expect(list.items).toHaveLength(1)
+      for (const item of [list.items[0], detail.scheduleDispatch]) {
+        expect(item.requestId).toBe(id)
+        expect(item.targetShiftId).toBeNull()
+        expect(item.targetShiftLabel).toBe(DELETED_LABEL)
+        expect(item.targetShiftStatus).toBe('deleted')
+        expect(item.request.metadata.scheduleDispatch).toEqual({ targetShiftId: null, target_shift_id: null })
+      }
+      const requests = await read(f, '/requests?from=' + date + '&to=' + date)
+      const request = await read(f, '/requests/' + id)
+      expect(requests.items).toHaveLength(1)
+      for (const item of [requests.items[0], request.request]) {
+        expect(item.id).toBe(id)
+        expect(item.metadata.scheduleDispatch).toEqual({
+          targetShiftId: null, target_shift_id: null, targetShiftLabel: DELETED_LABEL, targetShiftStatus: 'deleted',
+        })
+      }
+      receipt('cancelled-dispatch-history', 200, null, true)
+    }, 120000)
+
+    it('DB08_DURABLE auto-write-candidate-history', async () => {
+      const f = await fixture('auto-write-candidate')
+      const run = randomUUID()
+      const item = randomUUID()
+      const timestamp = '2049-06-14T00:00:00.000Z'
+      await pool.query(
+        `INSERT INTO attendance_auto_shift_auto_write_runs
+         (id, org_id, source, status, target_from, target_to, config_snapshot,
+          scanned_count, candidate_count, applied_count, skipped_count, error_count, started_at, finished_at, created_at)
+         VALUES ($1, $2, 'scheduler', 'succeeded', $3, $3, '{}'::jsonb, 1, 1, 0, 1, 0, $4, $4, $4)`,
+        [run, f.orgId, date, timestamp],
+      )
+      await pool.query(
+        `INSERT INTO attendance_auto_shift_auto_write_run_items
+         (id, run_id, org_id, user_id, work_date, candidate_shift_id, confidence, status, reason, evidence_event_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, 'low', 'skipped', 'candidate_below_confidence', '[]'::jsonb)`,
+        [item, run, f.orgId, f.userId, date, f.target],
+      )
+      const before = await snapshot(f.orgId)
+      expect(before.attendance_auto_shift_auto_write_runs).toHaveLength(1)
+      expect(before.attendance_auto_shift_auto_write_run_items).toHaveLength(1)
+      expect(before.attendance_auto_shift_auto_write_run_items[0].candidate_shift_id).toBe(f.target)
+      assertOnlyBlocker(before, f, null)
+      const after = await expectDeleted(f, before)
+      expect(after.attendance_auto_shift_auto_write_run_items[0].candidate_shift_id).toBe(f.target)
+      // Existing public history is aggregate-only; no candidate field or label.
+      expect(await read(f, '/auto-shift-matching/auto-write-runs')).toEqual({
+        items: [{
+          id: run, orgId: f.orgId, source: 'scheduler', status: 'succeeded',
+          targetFrom: date, targetTo: date, configSnapshot: {},
+          scannedCount: 1, candidateCount: 1, appliedCount: 0, skippedCount: 1, errorCount: 0,
+          errorMessage: null, startedAt: timestamp, finishedAt: timestamp, createdAt: timestamp,
+          skipReasons: [{ reason: 'candidate_below_confidence', count: 1 }],
+        }],
+        total: 1, page: 1, pageSize: 5,
+      })
+      receipt('auto-write-candidate-history', 200, null, true)
+    }, 120000)
+
+    it('DB08_DURABLE foreign-org-pending-snapshot-scope', async () => {
+      const f = await fixture('scope-target')
+      const foreign = await fixture('scope-foreign')
+      // Snapshot has no shift FK; foreign assignment FKs remain local.
+      const id = await seedSwap({ ...foreign, target: f.target }, 'requester', 'pending')
+      const foreignBefore = await snapshot(foreign.orgId)
+      expect(foreignBefore.attendance_shift_swap_requests).toHaveLength(1)
+      expect(foreignBefore.attendance_shift_swap_requests[0]).toMatchObject({
+        request_id: id, requester_shift_id: f.target, counterparty_shift_id: foreign.survivor,
+      })
+      expect(foreignBefore.attendance_requests[0].status).toBe('pending')
+      const before = await snapshot(f.orgId)
+      assertOnlyBlocker(before, f, null)
+      await expectDeleted(f, before)
+      expect(await snapshot(foreign.orgId)).toEqual(foreignBefore)
+      receipt('foreign-org-pending-snapshot-scope', 200, null, false)
+    }, 120000)
+
+    it('DB08_DURABLE free-target-positive-control', async () => {
+      const f = await fixture('free-target')
+      const before = await snapshot(f.orgId)
+      assertOnlyBlocker(before, f, null)
+      await expectDeleted(f, before)
+      receipt('free-target-positive-control', 200, null, false)
+    }, 120000)
+  })
+  // DB08_DURABLE_END
 })
