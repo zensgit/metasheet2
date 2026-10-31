@@ -1079,8 +1079,8 @@ function maybeKickWhenNotScrollable() {
 // Keep the focused row inside the mounted window during keyboard navigation so arrow-keys never land on
 // an un-rendered row. No-op when windowing is off or no row is focused.
 // stickyBands (the footer row jump): row offsets start below the in-flow header, and the sticky aggregation footer
-// covers the bottom, so a row below the view is scrolled until its bottom clears both. Keyboard navigation keeps
-// the plain arithmetic.
+// covers the bottom, so a row below the view is scrolled until its bottom clears both. A keyboard move that changes
+// the focused row goes through scrollJumpedRowIntoView too; a move within the row keeps the plain arithmetic.
 function scrollFocusedRowIntoWindow(opts: { stickyBands?: boolean } = {}) {
   if (!tableWrap.value || focusRow.value < 0) return
   let rowTop = 0
@@ -2201,6 +2201,7 @@ function onKeydown(e: KeyboardEvent) {
   // the same check, right here; collapsed into the single top-of-handler
   // gate — see that call site's doc comment for why a second copy would
   // have made some P3-4/P3-5 mutations non-discriminating.)
+  const rowBefore = focusRow.value
   switch (e.key) {
     case 'ArrowDown': e.preventDefault(); if (focusRow.value < maxR) { focusRow.value++; if (focusCol.value < 0) focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) } break
     case 'ArrowUp': e.preventDefault(); if (focusRow.value > 0) { focusRow.value--; emit('select-record', navRows[focusRow.value].id) } break
@@ -2226,9 +2227,13 @@ function onKeydown(e: KeyboardEvent) {
   }
   // A1: after a vertical move, keep the focused row inside the rendered window so arrow-keys never land
   // on an un-mounted row (no-op when windowing is off / no focus).
+  // R78 known limitation e: a move that changes the focused row (Up/Down, and Left/Right/Tab wrapping to another row)
+  // scrolls exactly like the footer row jump, so the row ends fully inside the band between the sticky header (or
+  // frozen top rows) and the aggregation footer, windowed or not. A move within the row keeps the plain arithmetic.
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'Tab') {
     range.select({ row: focusRow.value, col: focusCol.value })
-    scrollFocusedRowIntoWindow()
+    if (focusRow.value !== rowBefore && focusRow.value >= 0) scrollJumpedRowIntoView()
+    else scrollFocusedRowIntoWindow()
   }
 }
 </script>
