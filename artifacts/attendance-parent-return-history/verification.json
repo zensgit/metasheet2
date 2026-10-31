@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "status": "local-qualified-Draft-CI-pending",
+  "original": {
+    "ReturnAndBackMatchingFailures": 2,
+    "excluded": 13,
+    "invalidFirstNavigationHarnessRetained": true
+  },
+  "local": {
+    "metadataAndHistoryInitialActualPassed": 49,
+    "skip": 0,
+    "canonicalTabCorrectionNewCases": 2,
+    "canonicalTabGreenSelected": 4,
+    "canonicalTabGreenExcluded": 25,
+    "notFreshWhole51": true,
+    "affectedEditorNeighbors": {
+      "files": 7,
+      "actualPassed": 214,
+      "skip": 0
+    },
+    "globalValidateAllExit": 0,
+    "finalWebTypecheckExit": 0,
+    "finalWebBuildExit": 0,
+    "productionHelperStrictLintExit": 0,
+    "historyMockFixtureLint": {
+      "errors": 0,
+      "warnings": 7,
+      "strictExtraProbeFailedRetained": true
+    },
+    "mutations": [
+      {
+        "id": "nonce",
+        "counts": {
+          "skipped": 18,
+          "failed": 4
+        },
+        "restored": true
+      },
+      {
+        "id": "response-scope",
+        "counts": {
+          "skipped": 23,
+          "failed": 4
+        },
+        "restored": true
+      },
+      {
+        "id": "automatic-neutral",
+        "counts": {
+          "skipped": 25,
+          "failed": 2
+        },
+        "restored": true
+      },
+      {
+        "id": "explicit-tab-exit",
+        "counts": {
+          "skipped": 25,
+          "failed": 2
+        },
+        "restored": true
+      },
+      {
+        "id": "matching-row",
+        "counts": {
+          "skipped": 25,
+          "passed": 1,
+          "failed": 1
+        },
+        "restored": true
+      },
+      {
+        "id": "catalog-draft",
+        "counts": {
+          "skipped": 146,
+          "failed": 1
+        },
+        "restored": true
+      }
+    ]
+  },
+  "browser": {
+    "actualScenarios": [
+      {
+        "id": "return-history-1440-en",
+        "status": "passed",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "return-403",
+        "status": "passed-probe-state",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "return-404",
+        "status": "passed-probe-state",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "return-500",
+        "status": "passed-probe-state",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "return-wrongrow",
+        "status": "passed-probe-state",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "hold-storage-scope",
+        "status": "passed-scope-unavailable",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "hold-late-scope",
+        "status": "passed-scope-unavailable",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "canonical-reports-association",
+        "status": "passed",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "mobile-375-blocked",
+        "status": "passed-mobile-blocked",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "return-history-768-zh",
+        "status": "passed",
+        "managementHomeClaim": null,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      },
+      {
+        "id": "parent-management-home",
+        "status": "passed",
+        "managementHomeClaim": false,
+        "caseScope": "synthetic actual-main, not server/live acceptance"
+      }
+    ],
+    "count": 11,
+    "executionPhases": 3,
+    "noFreshWholeMatrixClaim": true,
+    "runtimeSourcesUnchangedAcrossPhases": true,
+    "harnessOnlyCorrectionsRecorded": true,
+    "appWriteAttempts": 0,
+    "externalForwarded": 0,
+    "pageErrors": 0,
+    "humanAT": false,
+    "mobile375": "original canonical-route mobile/touch gate preserved",
+    "explicitAdminTabIsNotManagementHomeProof": true,
+    "servicesStoppedPortsClosed": true
+  },
+  "independentReview": {
+    "model": "gpt-6-astra",
+    "effort": "ultra",
+    "confirmedOpenP1P2": 0,
+    "closedP2": 3,
+    "sourceReviewNotRuntimeProof": true
+  },
+  "screenshots": [
+    {
+      "path": "artifacts/attendance-parent-return-history/canonical-return-1440-en.png",
+      "sha256": "aaad521ba79b52c4e87123c3a921c4560c8411b12e6ca44a081dc5f9f79f4e56"
+    },
+    {
+      "path": "artifacts/attendance-parent-return-history/draft-retention-1440-en.png",
+      "sha256": "e3357eb888edf0070a2349ba034ce486989fd05aae3ef977a2f544e2a14fbdc3"
+    },
+    {
+      "path": "artifacts/attendance-parent-return-history/restored-768-zh.png",
+      "sha256": "7eda59ef69b23912a9786b07e2aa2e3eaa5b583fc37a071e4908533ef910c7bf"
+    },
+    {
+      "path": "artifacts/attendance-parent-return-history/mobile-gate-375-zh.png",
+      "sha256": "9d091216193162146fe2ae4d83a30f876f0c785227e8fc369193a07b19703362"
+    }
+  ],
+  "runtimeSourceHashes": {
+    "apps/web/src/views/attendance/AttendanceExperienceView.vue": "59a8e2fa336c374435434fe46defc8454c47733aee2b679278c97067d08e79e3",
+    "apps/web/src/views/attendance/attendanceGroupReturnNavigation.ts": "ede91f378b722912e434cff4b161250d670aafc23cfd848a511497ff18ad19d1",
+    "apps/web/src/views/attendance/AttendanceAdminCenter.vue": "7143b63758cae70ff831d2aeb7020ab746faeba64384a06c9decbd981dfeffd3",
+    "apps/web/src/views/attendance/AttendanceGroupContextHost.vue": "d194dad3aa871d19084df8cc49d2f4d70fc7fbd3caed9371060e983f0ab97824",
+    "apps/web/src/views/AttendanceView.vue": "9962e209469563b362fb1ed908370f054b6b4abdc50b2fde37731878372dc02d",
+    "apps/web/src/composables/authPrincipal.ts": "c87dc1103844b7d1f599ef51d6618ac418a9f02925958cda203262c45810cd37",
+    "apps/web/src/composables/useAuth.ts": "6c98e91cbdcb0c081ef6b353043de977e596dd283e2aa220efed1cdd9a45f145",
+    "apps/web/src/composables/useAttendanceSessionGuard.ts": "9fb05f39d77605f8a5ca79f04a733952ee6c700070157dca36d84a570c543c88",
+    "apps/web/src/utils/explicitSessionOrg.ts": "53f6bd3a9564ac4460305f943905d4307936c67296a5b14bad1ca2e86b4528fc",
+    "apps/web/src/utils/api.ts": "c6e2e99738a914e6a074b7a03b2de80c7762cbe3b36de6293ab61bc0634e4d3e",
+    "apps/web/src/router/attendanceGroupContextRoute.ts": "fc5aea56866206380c19cc1592e36ce3082b855d6d238fc1df1894b35fcba378",
+    "apps/web/src/views/attendance/useAttendanceGroupRouteContext.ts": "7293ff26abca0dd15909d6712f93a708930f8f6e4e96cdb9b2681ea006540fa0"
+  },
+  "boundaries": {
+    "allPRDraftHOLD": true,
+    "merged": false,
+    "deployed": false,
+    "R71Changed": false,
+    "streamLifecycle": "OFF",
+    "realUAT": "EXCLUDED",
+    "business50004": "EXCLUDED",
+    "historical08PUT": "INCONCLUSIVE",
+    "private17IncludesThisChange": false,
+    "fullParentAcceptance": false
+  },
+  "requiredCI": "pending-new-public-head",
+  "CI_single_fork_fixture_followup": {
+    "parentHead": "78a33669f419eec516172e00d539153b37b35d9a",
+    "failedJob": 121296437129,
+    "actualReproduction": {
+      "passed": 47,
+      "matchingFailed": 8
+    },
+    "afterOneOwnedHistoryTeardownLine": {
+      "passed": 55,
+      "failed": 0,
+      "skip": 0,
+      "exit": 0
+    },
+    "runtimeSourceChanged": false,
+    "originalAssertionsAndBudgetsUnchanged": true,
+    "fullPassingSuitesNotRepeated": true,
+    "newExactHeadCI": "pending-after-normal-push",
+    "fixtureLint": {
+      "errors": 0,
+      "warnings": 7,
+      "exit": 0
+    }
+  }
+}
