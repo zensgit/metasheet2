@@ -341,17 +341,17 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
     control: 'stock-prep-project-pilot-enable',
   }),
-  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §8 「B4」; OQ6; register R-68) — THE PER-SHEET SWITCH
-  // 「允许人工补充行」. Both ADMIN (OQ6: the 备料主管理员 flips it; the read carries the switch and the last pull's
-  // reminder with its record handles, read by the same person who acts on it). Their controls live on the project
-  // sync panel (StockPreparationProjectTargetManualRows.vue, mounted in StockPreparationProjectSyncPanel.vue): the
-  // switch-state line, read only for a holder and rendered once the server answered for a registered sheet, and the
-  // typed-confirmation switch button, rendered only while the server says `may.set`. Both 404 DISABLED while the
-  // project-sheets switch is off, after the gate. The web suite StockPreparationProjectTargetManualRows.spec.ts
-  // (MR-ALIGN) asserts their alignment where they live.
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §8 「B4」; OQ4, OQ6; register R-68) — THE PER-SHEET
+  // SWITCH 「允许人工补充行」 and the last pull's reminder. The READ is the PULL tier (OQ4: the reminder is on the project
+  // sync panel for the people who pull, ADR §8 「B4」 6), the SET is ADMIN (OQ6: the 备料主管理员 flips it). Their
+  // controls live on the project sync panel (StockPreparationProjectTargetManualRows.vue, mounted in
+  // StockPreparationProjectSyncPanel.vue): the switch-state line (with the reminder), read only for a holder and rendered
+  // once the server answered for a registered sheet, and the typed-confirmation switch button, rendered only for an
+  // ADMIN while the server says `may.set`. Both 404 DISABLED while the project-sheets switch is off, after the gate. The
+  // web suite StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN) asserts their alignment where they live.
   Object.freeze({
     capability: 'projectTarget.manualRowsRead',
-    code: STOCK_PREP_ADMIN,
+    code: STOCK_PREP_PULL,
     method: 'GET',
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-status',

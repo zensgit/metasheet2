@@ -7,34 +7,52 @@
   >
     <h4 class="sp-mr__title">{{ bi(text('title').zh, text('title').en) }}</h4>
 
-    <!-- The projectTarget.manualRowsRead control (ADMIN, manifest): the switch-state line. Rendered only once the
-         server's read answered for a registered sheet, and only for a holder — the read is never asked otherwise. -->
+    <!-- The projectTarget.manualRowsRead control (PULL, manifest — OQ4: the reminder is for the people who pull): the
+         switch-state line. Rendered only once the server's read answered for a registered sheet, and only for a holder —
+         the read is never asked otherwise. On an adopted older sandbox sheet (`manualRowsSupported` false) it says that
+         the host never offers manual rows there instead of a switch state that would change nothing. -->
     <p
       class="sp-mr__status"
       data-testid="stock-prep-project-manual-rows-status"
       :data-policy="state.policy ?? 'none'"
       :data-policy-source="state.policySource ?? 'none'"
       :data-key-column="state.keyColumn ?? 'none'"
+      :data-supported="state.manualRowsSupported ? 'yes' : 'no'"
     >
-      <strong v-if="state.keyColumn === 'present'">{{ bi(statusEntry.zh, statusEntry.en) }}</strong>
+      <strong v-if="!state.manualRowsSupported">{{ bi(text('not_supported').zh, text('not_supported').en) }}</strong>
+      <strong v-else-if="state.keyColumn === 'present'">{{ bi(statusEntry.zh, statusEntry.en) }}</strong>
       <span v-else>{{ bi(text('key_column_missing').zh, text('key_column_missing').en) }}</span>
     </p>
-    <p class="sp-mr__hint">{{ bi(text('meaning').zh, text('meaning').en) }}</p>
-    <p v-if="state.keyLocked === false" class="sp-mr__hint" data-testid="stock-prep-project-manual-rows-lock-missing">
-      {{ bi(text('lock_missing').zh, text('lock_missing').en) }}
-      <span>{{ bi(text('lock_missing').zhNext ?? '', text('lock_missing').enNext ?? '') }}</span>
+    <p v-if="!state.manualRowsSupported" class="sp-mr__hint" data-testid="stock-prep-project-manual-rows-not-supported">
+      {{ bi(text('not_supported').zhNext ?? '', text('not_supported').enNext ?? '') }}
     </p>
-    <p v-if="state.keyColumn === 'missing'" class="sp-mr__hint" data-testid="stock-prep-project-manual-rows-key-missing">
-      {{ bi(text('key_column_missing').zhNext ?? '', text('key_column_missing').enNext ?? '') }}
-    </p>
+    <template v-else>
+      <p class="sp-mr__hint">{{ bi(text('meaning').zh, text('meaning').en) }}</p>
+      <p v-if="state.keyLocked === false" class="sp-mr__hint" data-testid="stock-prep-project-manual-rows-lock-missing">
+        {{ bi(text('lock_missing').zh, text('lock_missing').en) }}
+        <span>{{ bi(text('lock_missing').zhNext ?? '', text('lock_missing').enNext ?? '') }}</span>
+      </p>
+      <p v-if="state.keyColumn === 'missing'" class="sp-mr__hint" data-testid="stock-prep-project-manual-rows-key-missing">
+        {{ bi(text('key_column_missing').zhNext ?? '', text('key_column_missing').enNext ?? '') }}
+      </p>
+    </template>
     <p v-if="state.status === 'archived'" class="sp-mr__hint" data-testid="stock-prep-project-manual-rows-archived">
       {{ bi(text('archived').zh, text('archived').en) }}
       <span>{{ bi(text('archived').zhNext ?? '', text('archived').enNext ?? '') }}</span>
     </p>
 
+    <!-- R-11 (OQ6): a reader who does not hold the SET — the 拉取人员 — sees no switch, and the reason in words. -->
+    <p
+      v-if="!canSet && state.manualRowsSupported"
+      class="sp-mr__hint"
+      data-testid="stock-prep-project-manual-rows-set-admin-only"
+    >
+      {{ bi(text('set_admin_only').zh, text('set_admin_only').en) }}
+    </p>
+
     <!-- The projectTarget.manualRowsSet control (ADMIN, manifest): rendered only for its holder AND while the server
-         says `may.set` (an active sheet with a key column). The project number must be TYPED before anything is sent;
-         the server compares it again. -->
+         says `may.set` (an ADMIN caller, an active sheet the host offers manual rows on, with a key column). The project
+         number must be TYPED before anything is sent; the server compares it again. -->
     <button
       v-if="canOfferSet && !prompt"
       type="button"
@@ -151,7 +169,8 @@
     <code v-if="readRefused.code" class="sp-mr__token">{{ readRefused.code }}</code>
   </p>
   <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words — once this panel has
-       seen the project's own sheet (a project-sheet run), so a deployment without per-project sheets never shows it. -->
+       seen the project's own sheet (a project-sheet run), so a deployment without per-project sheets never shows it.
+       This is the reader below the PULL tier: who sees the reminder here, and who changes the switch. -->
   <p
     v-else-if="!canRead && projectSheetKnown && trimmedProjectNo"
     class="sp-mr__hint"
@@ -165,15 +184,18 @@
 // 人工补充行 B4 — the project sync panel's manual-rows section (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 /
 // §8 「B4」 3; OQ4 「提醒显示在项目同步面板」, OQ6 「开关由备料主管理员拨」; register R-68).
 //
-// WHAT IT SHOWS, to a holder of the ADMIN tier (`projectTarget.manualRowsRead`), for the project the panel is about:
+// WHAT IT SHOWS, to a holder of the PULL tier (`projectTarget.manualRowsRead`: the 拉取人员, stock-prep:admin and the
+// platform admin — OQ4, the reminder is for the people who pull), for the project the panel is about:
 //   * the switch 「允许人工补充行」 — allowed by default or set, off — and what turning it off means (新增 and 复制为新行
-//     stop; existing manual rows stay editable and deletable); a sheet whose PLM lock is not complete is said so;
-//   * the switch control (`projectTarget.manualRowsSet`, ADMIN), only while the server says `may.set`, behind a TYPED
-//     project-number confirmation;
+//     stop; existing manual rows stay editable and deletable); a sheet whose PLM lock is not complete is said so; an
+//     adopted older sandbox sheet, where the host never offers manual rows, is said so instead of a switch state;
+//   * the switch control (`projectTarget.manualRowsSet`, ADMIN — OQ6), only while the server says `may.set`, behind a
+//     TYPED project-number confirmation; a reader without it reads that only 备料主管理员 can change it;
 //   * the last small-lane pull's reminder (B1's persisted record): how many manual rows it read, how many of them are
 //     the same material as a row PLM newly added (it NEVER merges — the reader decides), and how many unbound
 //     `manual:` rows it set aside, with the ADR's handling guidance; 「查看这些行」 deep-links each record handle.
-// Anyone else sees no control and — once the panel has seen the project's sheet — one sentence saying who can.
+// Anyone below the PULL tier sees no control and — once the panel has seen the project's sheet — one sentence saying
+// who can.
 //
 // NO NEW WRITE AUTHORITY, NO ROUTING: every call is the plugin's own switch route with its own gate
 // (projectManualRows.ts); the links are plain hrefs to the multitable record route under the app's base.

@@ -46,6 +46,7 @@ export const STOCK_PREP_MANUAL_ROWS_ERROR_CODES: readonly string[] = Object.free
   'STOCK_PREP_MANUAL_ROWS_KEY_COLUMN_MISSING',
   'STOCK_PREP_MANUAL_ROWS_SWITCH_UNCONFIRMED',
   'STOCK_PREP_MANUAL_ROWS_HOST_UNSUPPORTED',
+  'STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED',
 ])
 
 /** The last small-lane pull's reminder, as the server answers it. */
@@ -62,19 +63,27 @@ export interface StockPrepManualRowsLastPull {
   unboundRecordIds: string[]
 }
 
-/** GET …/target/manual-rows (ADMIN): what the panel renders. */
+/** GET …/target/manual-rows (PULL tier — the reminder is for the people who pull): what the panel renders. */
 export interface StockPrepManualRowsState {
   status: StockPrepManualRowsSheetStatus
   sheetId: string | null
   /** The fill view's handle — the 「查看这些行」 deep links open the rows in it. */
   viewId: string | null
+  /**
+   * Whether the host offers manual rows on this sheet at all: false on an adopted older sandbox sheet (not the
+   * registered project-sheet shape), where the switch would change nothing. Null only while 'absent'.
+   */
+  manualRowsSupported: boolean | null
   keyColumn: 'present' | 'missing' | null
   policy: StockPrepManualRowsPolicy | null
   policySource: StockPrepManualRowsPolicySource | null
   /** Whether the key column carries the PLM human-write lock (a manual row can only be added once it does). */
   keyLocked: boolean | null
   lastPull: StockPrepManualRowsLastPull | null
-  /** Computed by the server (ADMIN tier): an ACTIVE sheet with a key column. Advisory — the route re-checks. */
+  /**
+   * Computed by the server: an ADMIN caller (the SET's tier), an ACTIVE sheet the host offers manual rows on, with a
+   * key column. Advisory — the route re-checks.
+   */
   may: { set: boolean }
 }
 
@@ -151,8 +160,10 @@ export function clampStockPrepManualRowsState(raw: unknown): StockPrepManualRows
   if (status !== 'absent' && status !== 'active' && status !== 'archived') return null
   const may = isRecord(raw.may) ? raw.may : {}
   if (status === 'absent') {
-    return { status, sheetId: null, viewId: null, keyColumn: null, policy: null, policySource: null, keyLocked: null, lastPull: null, may: { set: false } }
+    return { status, sheetId: null, viewId: null, manualRowsSupported: null, keyColumn: null, policy: null, policySource: null, keyLocked: null, lastPull: null, may: { set: false } }
   }
+  if (typeof raw.manualRowsSupported !== 'boolean') return null
+  const manualRowsSupported = raw.manualRowsSupported
   const keyColumn = raw.keyColumn === 'present' || raw.keyColumn === 'missing' ? raw.keyColumn : null
   if (keyColumn === null) return null
   const policy = policyOf(raw.policy)
@@ -164,12 +175,13 @@ export function clampStockPrepManualRowsState(raw: unknown): StockPrepManualRows
     status,
     sheetId: handleOf(raw.sheetId),
     viewId: handleOf(raw.viewId),
+    manualRowsSupported,
     keyColumn,
     policy: keyColumn === 'present' ? policy : null,
     policySource: keyColumn === 'present' ? policySource : null,
     keyLocked: keyColumn === 'present' ? raw.keyLocked === true : null,
     lastPull,
-    may: { set: may.set === true && status === 'active' && keyColumn === 'present' },
+    may: { set: may.set === true && status === 'active' && keyColumn === 'present' && manualRowsSupported },
   }
 }
 

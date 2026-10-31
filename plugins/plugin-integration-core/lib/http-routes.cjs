@@ -257,16 +257,20 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/pilot', 'stockPreparationProjectPilotGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pilot', 'stockPreparationProjectPilotEnable'],
   // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 / §8 「B4」; register R-68) — THE PER-SHEET SWITCH
-  // 「允许人工补充行」 of one project sheet. Both stock-prep:admin (OQ6; the platform admin through the ladder), both 404
-  // DISABLED after the gate while the project-sheets switch is off (the host refuses a manual-row create then too),
-  // the tenant from the host-vouched operator scope (never a header).
-  //   GET  target/manual-rows   — the switch (allowed / disabled, by default or set), whether the key column carries
-  //                  the PLM lock, and the last small-lane pull's persisted reminder (B1's plugin_kv record; NO record
-  //                  = all zeros). Answers on an archived project too.
-  //   POST target/manual-rows   — SET the switch, body `{ confirmProjectNo, policy }` (the typed number must repeat
-  //                  the path's; policy 'allowed' | 'disabled'): one field property of the key column, through the
-  //                  host's provisioning port only, read back after the write; an archived project is 409 ARCHIVED.
-  //                  Audited under 088's `project_fields_update` with mode manual_rows_allowed / manual_rows_disabled.
+  // 「允许人工补充行」 of one project sheet and the last pull's reminder. Both 404 DISABLED after the gate while the
+  // project-sheets switch is off (the host refuses a manual-row create then too), the tenant from the host-vouched
+  // operator scope (never a header).
+  //   GET  target/manual-rows   — PULL tier (OQ4: the reminder is on the project sync panel for the people who pull;
+  //                  stock-prep:admin and the platform admin through the ladder): the switch (allowed / disabled, by
+  //                  default or set), whether the key column carries the PLM lock, whether the host offers manual rows
+  //                  on this sheet at all, and the last small-lane pull's persisted reminder (B1's plugin_kv record; NO
+  //                  record = all zeros). `may.set` also needs the caller's ADMIN tier. Answers on an archived project.
+  //   POST target/manual-rows   — stock-prep:admin (OQ6: the 备料主管理员 flips it): SET the switch, body
+  //                  `{ confirmProjectNo, policy }` (the typed number must repeat the path's; policy 'allowed' |
+  //                  'disabled'): one field property of the key column, through the host's provisioning port only, read
+  //                  back after the write; an archived project is 409 ARCHIVED, a sheet the host never offers manual
+  //                  rows on 409 NOT_SUPPORTED. Audited under 088's `project_fields_update` with mode
+  //                  manual_rows_allowed / manual_rows_disabled.
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', 'stockPreparationProjectManualRowsGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', 'stockPreparationProjectManualRowsSet'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
@@ -643,6 +647,7 @@ const {
 // confirmed, through the host's provisioning port) and the reader of B1's persisted last-pull reminder.
 const {
   MANUAL_ROWS_POLICIES: STOCK_PREP_MANUAL_ROWS_POLICIES,
+  manualRowsSupportedOnObject,
   manualRowsSwitchUnconfirmedError,
   readManualRowsKeyColumn,
   readManualRowsLastPull,
@@ -2604,6 +2609,7 @@ function stockPreparationManualRowsAbsentResponse(projectNo) {
     status: 'absent',
     sheetId: null,
     viewId: null,
+    manualRowsSupported: null,
     keyColumn: null,
     policy: null,
     policySource: null,
@@ -2614,25 +2620,29 @@ function stockPreparationManualRowsAbsentResponse(projectNo) {
 }
 
 /**
- * 人工补充行 B4: what both switch routes answer for a registered project — the registry row's handles, the key
- * column's switch (`policy` the effect, `policySource` 'default' while nothing was ever set), whether the key column
- * carries the PLM human-write lock (a manual row can only be added once it does, ADR §3.2 condition 3), and the
- * persisted last-pull reminder. `viewId` is the fill view's derived handle (the panel's 「查看这些行」 deep links);
- * `may.set` is the state alone (the caller already passed the ADMIN gate). Values-free: closed tokens, booleans,
- * counts, handles and capped record ids.
+ * 人工补充行 B4: what both switch routes answer for a registered project — the registry row's handles, whether the
+ * host offers manual rows on this sheet at all (`manualRowsSupported`: the registered project-sheet object-id shape,
+ * host predicate (a); false on an adopted older sandbox sheet), the key column's switch (`policy` the effect,
+ * `policySource` 'default' while nothing was ever set), whether the key column carries the PLM human-write lock (a
+ * manual row can only be added once it does, ADR §3.2 condition 3), and the persisted last-pull reminder. `viewId` is
+ * the fill view's derived handle (the panel's 「查看这些行」 deep links). `may.set` is the state AND the caller:
+ * `callerMaySet` is the ADMIN tier the POST gate admits (the read itself is the PULL tier). Values-free: closed
+ * tokens, booleans, counts, handles and capped record ids.
  */
-function stockPreparationManualRowsResponse({ projectNo, row, key, lastPull, viewId }) {
+function stockPreparationManualRowsResponse({ projectNo, row, key, lastPull, viewId, callerMaySet }) {
+  const supported = manualRowsSupportedOnObject(row.objectId)
   return {
     projectNo,
     status: row.status,
     sheetId: row.sheetId,
     viewId: viewId || null,
+    manualRowsSupported: supported,
     keyColumn: key.present ? 'present' : 'missing',
     policy: key.present ? key.policy : null,
     policySource: key.present ? key.source : null,
     keyLocked: key.present ? key.locked === true : null,
     lastPull,
-    may: { set: row.status === 'active' && key.present },
+    may: { set: callerMaySet === true && supported && row.status === 'active' && key.present },
   }
 }
 // SOURCE preflight. `externalSystemId` is the ONE addition, and it is a REGISTERED-SYSTEM SELECTOR,
@@ -11399,14 +11409,17 @@ function requireStockPreparationAudit() {
     // ── 人工补充行 B4 — THE PER-SHEET SWITCH 「允许人工补充行」 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 / §8
     // 「B4」; OQ6; register R-68) ─────────────────────────────────────────────────────────────────────────────────────
     //
-    // GET: the switch of one project sheet and the last small-lane pull's persisted reminder. stock-prep:admin (OQ6:
-    // the 备料主管理员 flips it; the platform admin through the ladder), the project-sheets switch (404 DISABLED, zero
-    // IO — the host refuses a manual-row create then too, ADR §3.2 condition 5), the query allowlist, the host-vouched
-    // scope (never a header), the registry (ABSENT answers 200 absent), then two reads only: the key column through
-    // the host's provisioning port and B1's plugin_kv record (`readManualRowsLastPull`: no record = all zeros, an
-    // unreadable store = 'unavailable', never zeros). No write, no audit row. Answers an ARCHIVED project as well.
+    // GET: the switch of one project sheet and the last small-lane pull's persisted reminder. The PULL tier (OQ4: the
+    // reminder is on the project sync panel for the people who pull — ADR 「客户会看到什么 / 拉取」 and §8 「B4」 6;
+    // stock-prep:admin and the platform admin through the ladder); `may.set` additionally needs the ADMIN tier the POST
+    // gate admits (OQ6 governs who FLIPS it). The project-sheets switch (404 DISABLED, zero IO — the host refuses a
+    // manual-row create then too, ADR §3.2 condition 5), the query allowlist, the host-vouched scope (never a header),
+    // the registry (ABSENT answers 200 absent), then two reads only: the key column through the host's provisioning
+    // port and B1's plugin_kv record (`readManualRowsLastPull`: no record = all zeros, an unreadable store =
+    // 'unavailable', never zeros). No write, no audit row. Answers an ARCHIVED project as well. Values-free: states,
+    // counts and record handles only.
     async stockPreparationProjectManualRowsGet(req, res) {
-      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      const user = requireAccess(req, STOCK_PREP_PULL)
       requireProjectSheetsEnabled()
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
@@ -11429,7 +11442,9 @@ function requireStockPreparationAudit() {
       const key = await readManualRowsKeyColumn({ provisioning, projectId: targetProjectId, objectId: row.objectId })
       const lastPull = await readManualRowsLastPull({ store: context.storage, sheetId: row.sheetId })
       const handles = projectSheetViewHandles({ provisioning, projectId: targetProjectId, objectId: row.objectId })
-      return sendOk(res, stockPreparationManualRowsResponse({ projectNo, row, key, lastPull, viewId: handles.viewId }))
+      return sendOk(res, stockPreparationManualRowsResponse({
+        projectNo, row, key, lastPull, viewId: handles.viewId, callerMaySet: hasPermission(user, STOCK_PREP_ADMIN),
+      }))
     },
 
     // POST: SET the switch. THE SEQUENCE, pinned by the switch route suite and the call-site guard (C-14):
@@ -11438,8 +11453,9 @@ function requireStockPreparationAudit() {
     //      the typed number must repeat the path's, the policy one of the two closed values);
     //   2. the host-vouched operator scope (never `user.tenantId`), the registry (501 without its lock), the 088
     //      vocabulary probe;
-    //   3. the registry row: ABSENT → 409, ARCHIVED → 409 STOCK_PREPARATION_PROJECT_ARCHIVED (nothing read or written
-    //      on the sheet);
+    //   3. the registry row: ABSENT → 409, ARCHIVED → 409 STOCK_PREPARATION_PROJECT_ARCHIVED, a sheet the host never
+    //      offers manual rows on (an adopted older sandbox sheet: not the registered project-sheet object-id shape) →
+    //      409 STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED (nothing read or written on the sheet);
     //   4. under the registry's per-tenant lock with the row re-read ACTIVE (an archive that commits meanwhile → the
     //      same 409): `setManualRowsPolicy` — the key column read, ONE field property patched through the host's
     //      provisioning port (`patchObjectFieldProperty`: the host's sanitizer and per-key merge; never a raw SQL
@@ -11474,6 +11490,11 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
       }
       if (registered.status !== 'active') throw archivedRefusal()
+      // An adopted older sandbox sheet: the host answers every manual-row route `not_project_sheet` there, so a switch
+      // on it would change nothing the host reads — refused before the sheet is touched (B4 fix round 1).
+      if (!manualRowsSupportedOnObject(registered.objectId)) {
+        throw new HttpRouteError(409, 'STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED', 'manual supplementary rows are not offered on this project sheet (an adopted older sandbox sheet), so its switch cannot be set', { reason: 'not_project_sheet' })
+      }
       const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
       // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
       const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
@@ -11513,7 +11534,8 @@ function requireStockPreparationAudit() {
       const lastPull = await readManualRowsLastPull({ store: context.storage, sheetId: row.sheetId })
       const handles = projectSheetViewHandles({ provisioning, projectId: targetProjectId, objectId: row.objectId })
       return sendOk(res, {
-        ...stockPreparationManualRowsResponse({ projectNo, row, key: change.after, lastPull, viewId: handles.viewId }),
+        // The caller passed the ADMIN gate, so `may.set` is the state alone here.
+        ...stockPreparationManualRowsResponse({ projectNo, row, key: change.after, lastPull, viewId: handles.viewId, callerMaySet: true }),
         written: change.written === true,
         changed: change.before.policy !== change.after.policy,
       })

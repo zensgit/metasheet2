@@ -379,6 +379,17 @@ function manualRowsPolicyOfProperty(property) {
 }
 
 /**
+ * Does the host offer manual rows on a registered sheet with this object id at all? The host's predicate (a) requires
+ * the registered project-sheet shape `plm_stock_preparation_sandbox_p_<24 hex>` (the same rule as M′ (a′) above). An
+ * ADOPTED older sandbox sheet (the runbook's adopt path) carries another object id, so the host answers every
+ * manual-row route `not_project_sheet` there and the switch would have no effect: the switch route says so instead of
+ * offering it (B4 fix round 1). Its pulls still set prefix rows aside — every one of them counts as unbound there.
+ */
+function manualRowsSupportedOnObject(objectId) {
+  return isStockPreparationProjectSheetObjectId(objectId)
+}
+
+/**
  * What the switch route reads off the key column. `locked` is the host's own lock rule (`humanWriteLock` exactly
  * 'plm_system'; anything else is no lock, and the host's sanitizer drops it); `keyStanza` is predicate (b)'s marker
  * (`stockPreparation.key === true`). Both are compared before and after a write; neither is ever a value.
@@ -501,6 +512,7 @@ module.exports = {
   manualRowsLastPullRecord,
   manualRowsPolicyOfProperty,
   manualRowsPolicyValueOf,
+  manualRowsSupportedOnObject,
   manualRowsSwitchUnconfirmedError,
   normalizeManualRowsLastPull,
   persistManualRowsLastPull,

@@ -5,12 +5,14 @@
 // registry store on a memory db with its real per-tenant lock, a host whose provisioning records every call and —
 // opt-in here — offers the per-field read, the plugin's own durable storage).
 //
-//   MS-01 SWITCH OFF: GET / POST answer 404 DISABLED with ZERO IO for the admitted tiers; below ADMIN the gate refuses
-//         first; only the EXACT literal 'true' turns the project-sheets switch on (every near miss is off, the host's
-//         rule) — the same 404 the host answers a manual-row create with
-//   MS-02 THE TIERS (OQ6): anonymous, a bare login, read-only, the floor operator, the 拉取人员 and the two orphan
-//         grants are refused at the gate with ZERO IO, for both routes; stock-prep:admin and the platform admin read
-//         AND set
+//   MS-01 SWITCH OFF: GET / POST answer 404 DISABLED with ZERO IO for each route's admitted tiers (GET: the 拉取人员
+//         and both admins; POST: both admins); below a route's tier the gate refuses first; only the EXACT literal
+//         'true' turns the project-sheets switch on (every near miss is off, the host's rule) — the same 404 the host
+//         answers a manual-row create with
+//   MS-02 THE TIERS (OQ4 / OQ6; fix round 1): anonymous, a bare login, read-only, the floor operator and the two orphan
+//         grants are refused at the gate with ZERO IO, for both routes; the 拉取人员 READS (the reminder is for the
+//         people who pull) with `may.set` false and is refused the SET at the gate with ZERO IO; stock-prep:admin and
+//         the platform admin read (`may.set` true) AND set
 //   MS-03 GET: an unregistered project → 200 `absent` with no host read; a registered one → the switch (allowed BY
 //         DEFAULT), the PLM lock of the key column, the registry handles, `may.set` — exactly one host read, no write,
 //         no audit row; an unlocked key column says `keyLocked: false`
@@ -38,6 +40,10 @@
 //   MS-11 THE WIRING REFUSALS: a key column the sheet does not have → GET keyColumn missing / POST 409
 //         KEY_COLUMN_MISSING; a host without the field-read port → 501 HOST_UNSUPPORTED; no audit store → 501 before
 //         any IO; a database without 088's action → 503 before any read of the sheet
+//   MS-12 AN ADOPTED OLDER SANDBOX SHEET (fix round 1): the registry row names a sandbox object that is not the
+//         registered project-sheet shape — the host never offers manual rows there — so GET answers
+//         `manualRowsSupported: false` and never `may.set` (the reminder still answers), and POST is 409
+//         STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED with no field read, patch or audit row
 //
 // Synthetic values only.
 
@@ -129,23 +135,34 @@ function assertNoIo(h, label) {
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
-test('MS-01 switch OFF: 404 DISABLED with zero IO for the admitted tiers; below ADMIN the gate refuses first; only the exact literal is on', async () => {
+test('MS-01 switch OFF: 404 DISABLED with zero IO for each route\'s admitted tiers; below a route\'s tier the gate refuses first; only the exact literal is on', async () => {
   const h = mount({ switchOn: false })
   try {
     const { objectId } = seed(h)
-    for (const user of [WORKBENCH_ADMIN, PLATFORM_ADMIN]) {
-      for (const [label, run] of [['GET', () => read(h, user)], ['POST', () => setSwitch(h, user, 'disabled')]]) {
-        const res = await run()
-        assert.equal(res.statusCode, 404, `${label} as ${user.id}: ${JSON.stringify(res.body)}`)
-        assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')
-      }
+    // The READ admits the PULL tier (the puller and both admins); the SET admits the ADMIN tier only.
+    const admitted = [
+      ['GET', PULLER, () => read(h, PULLER)],
+      ['GET', WORKBENCH_ADMIN, () => read(h, WORKBENCH_ADMIN)],
+      ['GET', PLATFORM_ADMIN, () => read(h, PLATFORM_ADMIN)],
+      ['POST', WORKBENCH_ADMIN, () => setSwitch(h, WORKBENCH_ADMIN, 'disabled')],
+      ['POST', PLATFORM_ADMIN, () => setSwitch(h, PLATFORM_ADMIN, 'disabled')],
+    ]
+    for (const [label, user, run] of admitted) {
+      const res = await run()
+      assert.equal(res.statusCode, 404, `${label} as ${user.id}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')
     }
-    for (const user of [FLOOR, READ_ONLY, PULLER]) {
-      for (const run of [() => read(h, user), () => setSwitch(h, user, 'disabled')]) {
-        const res = await run()
-        assert.equal(res.statusCode, 403, `${user.id}: ${JSON.stringify(res.body)}`)
-        assert.equal(res.body.error.code, 'FORBIDDEN')
-      }
+    const refused = [
+      ['GET', FLOOR, () => read(h, FLOOR)],
+      ['GET', READ_ONLY, () => read(h, READ_ONLY)],
+      ['POST', FLOOR, () => setSwitch(h, FLOOR, 'disabled')],
+      ['POST', READ_ONLY, () => setSwitch(h, READ_ONLY, 'disabled')],
+      ['POST', PULLER, () => setSwitch(h, PULLER, 'disabled')],
+    ]
+    for (const [label, user, run] of refused) {
+      const res = await run()
+      assert.equal(res.statusCode, 403, `${label} as ${user.id}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'FORBIDDEN')
     }
     assertNoIo(h, 'switch off')
     assert.deepEqual(keyField(h, objectId).property, clone(KEY_PROPERTY), 'the key column is untouched')
@@ -168,8 +185,8 @@ test('MS-01 switch OFF: 404 DISABLED with zero IO for the admitted tiers; below 
   }
 })
 
-test('MS-02 the tiers (OQ6): every non-admin tier is refused at the gate with zero IO; stock-prep:admin and the platform admin read and set', async () => {
-  for (const user of [undefined, LOGGED_IN, READ_ONLY, FLOOR, PULLER, PULL_ORPHAN, OPERATE_ORPHAN]) {
+test('MS-02 the tiers (OQ4 / OQ6): below PULL nobody reads; the 拉取人员 reads (may.set false) but cannot set; stock-prep:admin and the platform admin read (may.set true) and set — every refusal at the gate with zero IO', async () => {
+  for (const user of [undefined, LOGGED_IN, READ_ONLY, FLOOR, PULL_ORPHAN, OPERATE_ORPHAN]) {
     const h = mount()
     try {
       const { objectId } = seed(h)
@@ -182,6 +199,26 @@ test('MS-02 the tiers (OQ6): every non-admin tier is refused at the gate with ze
       assert.deepEqual(keyField(h, objectId).property, clone(KEY_PROPERTY), 'the key column is untouched')
     } finally { h.restore() }
   }
+  // The 拉取人员: the read answers (OQ4 — the reminder is for the people who pull) without the offer to set; the set
+  // is refused at the gate, before any IO.
+  {
+    const h = mount()
+    try {
+      const { objectId } = seed(h)
+      const got = await read(h, PULLER)
+      assert.equal(got.statusCode, 200, JSON.stringify(got.body))
+      assert.equal(got.body.data.policy, 'allowed')
+      assert.equal(got.body.data.may.set, false, 'the puller is never offered the switch')
+      h.db.calls.length = 0
+      h.provisioning.calls.length = 0
+      h.tenantDirectoryCalls.length = 0
+      const set = await setSwitch(h, PULLER, 'disabled')
+      assert.equal(set.statusCode, 403, JSON.stringify(set.body))
+      assert.equal(set.body.error.code, 'FORBIDDEN')
+      assertNoIo(h, 'the puller\'s set')
+      assert.deepEqual(keyField(h, objectId).property, clone(KEY_PROPERTY), 'the key column is untouched')
+    } finally { h.restore() }
+  }
   for (const user of [WORKBENCH_ADMIN, PLATFORM_ADMIN]) {
     const h = mount()
     try {
@@ -189,6 +226,7 @@ test('MS-02 the tiers (OQ6): every non-admin tier is refused at the gate with ze
       const before = await read(h, user)
       assert.equal(before.statusCode, 200, JSON.stringify(before.body))
       assert.equal(before.body.data.policy, 'allowed')
+      assert.equal(before.body.data.may.set, true)
       const set = await setSwitch(h, user, 'disabled')
       assert.equal(set.statusCode, 200, JSON.stringify(set.body))
       assert.equal(set.body.data.policy, 'disabled')
@@ -204,7 +242,7 @@ test('MS-03 GET: absent → 200 absent, no host read; registered → the switch 
     const absent = await read(h, WORKBENCH_ADMIN)
     assert.equal(absent.statusCode, 200, JSON.stringify(absent.body))
     assert.deepEqual(absent.body.data, {
-      projectNo: PROJECT, status: 'absent', sheetId: null, viewId: null, keyColumn: null, policy: null, policySource: null, keyLocked: null, lastPull: null, may: { set: false },
+      projectNo: PROJECT, status: 'absent', sheetId: null, viewId: null, manualRowsSupported: null, keyColumn: null, policy: null, policySource: null, keyLocked: null, lastPull: null, may: { set: false },
     })
     assert.deepEqual(h.provisioning.calls, [], 'an unregistered project costs no host call')
 
@@ -216,6 +254,7 @@ test('MS-03 GET: absent → 200 absent, no host read; registered → the switch 
       status: 'active',
       sheetId,
       viewId: h.provisioning.getObjectViewId(h.staging, objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID),
+      manualRowsSupported: true,
       keyColumn: 'present',
       policy: 'allowed',
       policySource: 'default',
@@ -386,6 +425,7 @@ test('MS-07 the write: one one-key patch on the key column, read back, lock / st
       status: 'active',
       sheetId,
       viewId: h.provisioning.getObjectViewId(h.staging, objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID),
+      manualRowsSupported: true,
       keyColumn: 'present',
       policy: 'disabled',
       policySource: 'set',
@@ -674,6 +714,55 @@ test('MS-11 the wiring refusals: no key column, no field-read port, no audit sto
     assert.equal(res.body.error.code, 'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE')
     assert.deepEqual(h.provisioning.calls, [], 'no field read or patch')
     assert.deepEqual(keyField(h, objectId).property, clone(KEY_PROPERTY))
+  } finally { h.restore() }
+})
+
+// An ADOPTED older sandbox sheet (the runbook's adopt path): the registry row names a sandbox object of another shape
+// than the registered project sheet's `plm_stock_preparation_sandbox_p_<24 hex>`. The host answers every manual-row
+// route `not_project_sheet` there (predicate (a), packages/core-backend/src/multitable/stock-preparation-manual-rows.ts),
+// so a switch on it would change nothing the host reads. Synthetic id.
+const ADOPTED_OBJECT_ID = 'plm_stock_preparation_sandbox_adopted_syn'
+
+function seedAdopted(h) {
+  const seeded = seed(h)
+  const projectIdFor = `${TENANT}:integration-core`
+  const object = h.provisioning.objects.get(`${projectIdFor}/${seeded.objectId}`)
+  h.provisioning.objects.delete(`${projectIdFor}/${seeded.objectId}`)
+  h.provisioning.objects.set(`${projectIdFor}/${ADOPTED_OBJECT_ID}`, object)
+  const row = h.registryRows().find((entry) => entry.tenant_id === TENANT && entry.project_no === PROJECT)
+  row.object_id = ADOPTED_OBJECT_ID
+  h.provisioning.calls.length = 0
+  h.db.calls.length = 0
+  return { sheetId: seeded.sheetId, objectId: ADOPTED_OBJECT_ID }
+}
+
+test('MS-12 an adopted older sandbox sheet: GET says manual rows are not offered there and never offers the switch, the reminder still answers; POST 409 NOT_SUPPORTED with no field read, patch or audit', async () => {
+  const h = mount()
+  try {
+    const { sheetId, objectId } = seedAdopted(h)
+    // B1's own writer: on this sheet every prefix row is unbound (M′ (a′) never holds), so the reminder is all unbound.
+    const summary = { rowCount: 1, unboundKeyCount: 1, matchedManualCount: 0, matchedManualRecordIds: [], unboundRecordIds: ['rec_mr_b4_adopted'] }
+    assert.equal(await manualRows.persistManualRowsLastPull({ store: h.context.storage, sheetId, mode: 'apply', at: '2026-10-30T08:00:00.000Z', summary }), true)
+    for (const user of [WORKBENCH_ADMIN, PLATFORM_ADMIN, PULLER]) {
+      const got = await read(h, user)
+      assert.equal(got.statusCode, 200, JSON.stringify(got.body))
+      assert.equal(got.body.data.status, 'active')
+      assert.equal(got.body.data.manualRowsSupported, false, `${user.id}: the host never offers manual rows on this sheet`)
+      assert.equal(got.body.data.may.set, false, `${user.id}: the switch is not offered`)
+      assert.equal(got.body.data.lastPull.status, 'recorded', 'the reminder still answers')
+      assert.equal(got.body.data.lastPull.unboundKeyCount, 1)
+    }
+    h.provisioning.calls.length = 0
+    h.db.calls.length = 0
+    const before = clone(keyField(h, objectId).property)
+    const res = await setSwitch(h, WORKBENCH_ADMIN, 'disabled')
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED')
+    assert.deepEqual({ ...res.body.error.details }, { reason: 'not_project_sheet' }, 'values-free: a closed reason, no object id')
+    assert.ok(!JSON.stringify(res.body).includes(ADOPTED_OBJECT_ID), 'the refusal never echoes the object id')
+    assert.deepEqual(h.provisioning.calls, [], 'no field read or patch on the adopted sheet')
+    assert.deepEqual(h.auditAppends, [], 'nothing changed, nothing audited')
+    assert.deepEqual(keyField(h, objectId).property, before, 'the key column is untouched')
   } finally { h.restore() }
 })
 

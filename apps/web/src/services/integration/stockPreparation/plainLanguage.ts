@@ -739,6 +739,12 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '请联系平台管理员。',
     enNext: 'Ask the platform admin.',
   }),
+  STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED: Object.freeze({
+    zh: '这张表是早先接管过来的旧备料表,系统在它上面不提供人工补充行,所以「允许人工补充行」没法设置,什么都没有改动。',
+    en: 'This is an older stock-prep sheet that was taken over, and manual supplementary rows are not offered on it, so the switch cannot be set; nothing was changed.',
+    zhNext: '如果这个项目需要人工补充行,请联系负责人决定是否改用新的项目备料表。',
+    enNext: 'If this project needs manual supplementary rows, ask the owner whether to move it to a new project sheet.',
+  }),
   /**
    * 备料分批拉取第一期 step 3 PR B — the pilot marker's own codes (plugin stock-preparation-pilot-gate.cjs). The
    * large-lane refusal reads 「试点项目不走大 BOM 通道」 on every large route; the over-cap refusal on the dry run;
@@ -4086,9 +4092,25 @@ export const STOCK_PREP_MANUAL_ROWS_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'What to do: rows with a creator can simply be deleted; rows without one need their unique key changed before the lock is completed; once the lock is complete, only a database operation approved by the person in charge remains.',
   }),
   view_rows: Object.freeze({ zh: '查看这些行', en: 'See these rows' }),
+  /** For a reader below the PULL tier (B4 fix round 1, OQ4): who sees the reminder here, and who changes the switch. */
   admin_only: Object.freeze({
-    zh: '「允许人工补充行」开关和人工补充行的拉取提醒只对备料主管理员显示;需要调整请联系备料主管理员(或平台管理员)。',
-    en: 'The “Allow manual supplementary rows” switch and the pull reminder for manual rows are shown to stock-prep administrators only; to change something, contact a stock-prep administrator (or a platform administrator).',
+    zh: '人工补充行的拉取提醒和「允许人工补充行」开关的状态,拉取人员和备料主管理员在这里能看到;只有备料主管理员(或平台管理员)可以修改这个开关。',
+    en: 'Pull operators and stock-prep administrators see the manual-row pull reminder and the state of the “Allow manual supplementary rows” switch here; only a stock-prep administrator (or a platform administrator) can change the switch.',
+  }),
+  /** For a reader who sees the section but does not hold the SET (B4 fix round 1, OQ6; R-11: the reason in words). */
+  set_admin_only: Object.freeze({
+    zh: '只有备料主管理员(或平台管理员)可以修改这个开关;需要调整请联系备料主管理员。',
+    en: 'Only a stock-prep administrator (or a platform administrator) can change this switch; to change it, contact a stock-prep administrator.',
+  }),
+  /**
+   * An ADOPTED older sandbox sheet (B4 fix round 1): the host never offers manual rows on it, so the switch would change
+   * nothing and is not offered; every manual:-prefixed row a pull meets there is an unbound row.
+   */
+  not_supported: Object.freeze({
+    zh: '这张表是早先接管过来的旧备料表,系统在它上面不提供人工补充行,所以这里没有「允许人工补充行」开关。',
+    en: 'This is an older stock-prep sheet that was taken over; manual supplementary rows are not offered on it, so there is no “Allow manual supplementary rows” switch here.',
+    zhNext: '如果这个项目需要人工补充行,请联系负责人决定是否改用新的项目备料表。',
+    enNext: 'If this project needs manual supplementary rows, ask the owner whether to move it to a new project sheet.',
   }),
   read_failed: Object.freeze({
     zh: '人工补充行的设置暂时读不到。',

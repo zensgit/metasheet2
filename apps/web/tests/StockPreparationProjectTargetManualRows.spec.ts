@@ -14,11 +14,14 @@ import { join } from 'node:path'
 //   MR-PANEL  the section, for an ADMIN: the switch line (allowed by default / set / off), what turning it off means,
 //             the lock-missing / key-missing / archived notes, the typed-confirmation switch and its read-back, the
 //             reminder (no record = all zeros, unavailable said as that, the matched rows with "never merges" and
-//             「查看这些行」 deep links, the unbound rows with the ADR's handling guidance); a new run re-reads; another
-//             project re-reads and a stale answer is dropped
+//             「查看这些行」 deep links, the unbound rows with the ADR's handling guidance); a new run re-reads and a newer
+//             zero reminder REPLACES an older non-zero one; another project re-reads and a stale answer is dropped; an
+//             adopted older sandbox sheet says manual rows are not offered there and offers no switch
 //   MR-ALIGN  the two manifest controls render for EXACTLY the actors the SERVER grants (the plugin module, imported
-//             live); a non-holder asks no read and, once the panel has seen the sheet, reads who can; the client rows
-//             are byte-equal to the plugin's (F-01 for these rows) and sit right after the pilot rows
+//             live): the READ (the status line and the reminder) for the PULL tier — the 拉取人员 included (OQ4) — and
+//             the switch for ADMIN only (OQ6), a reader without it reading who can change it; a non-holder asks no read
+//             and, once the panel has seen the sheet, reads who can; the client rows are byte-equal to the plugin's
+//             (F-01 for these rows) and sit right after the pilot rows
 //   MR-COPY   every new refusal code has its own two-line zh + en sentence; the audit mode rows; the wording rules
 //   MR-MOUNT  the sync panel mounts the section ONCE with its five bindings; the section imports nothing from plugins/
 //
@@ -100,6 +103,7 @@ function wire(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     status: 'active',
     sheetId: SHEET,
     viewId: FILL_VIEW,
+    manualRowsSupported: true,
     keyColumn: 'present',
     policy: 'allowed',
     policySource: 'default',
@@ -136,6 +140,16 @@ function mount(component: Component, props: Record<string, unknown>): HTMLElemen
   return host
 }
 
+/** Mount the section through ONE wrapper whose render function reads `props()`: a reactive prop change re-renders it. */
+function mountReactive(props: () => Record<string, unknown>): HTMLElement {
+  const host = document.createElement('div')
+  document.body.appendChild(host)
+  const app = createApp({ render: () => vnode(StockPreparationProjectTargetManualRows as Component, props()) })
+  app.mount(host)
+  apps.push({ app, host })
+  return host
+}
+
 function unmountAll(): void {
   for (const { app, host } of apps) {
     app.unmount()
@@ -159,7 +173,10 @@ function serverGranted(roles: readonly string[], permissions: readonly string[])
   return backendAccess.grantedStockPrepCapabilities([...permissions, ...roles.map((role) => `role:${role}`)])
 }
 
-/** A client double that answers as the server would for THIS actor: ADMIN only (403 otherwise). */
+/**
+ * A client double that answers as the server would for THIS actor: the READ for the PULL tier, the SET for ADMIN (403
+ * otherwise), and the read's `may.set` only for an ADMIN caller — the server's `callerMaySet` rule.
+ */
 function gatedApi(state: Record<string, unknown>): StockPreparationManualRowsApi & { getCalls: string[]; setCalls: Array<[string, string, string]> } {
   const getCalls: string[] = []
   const setCalls: Array<[string, string, string]> = []
@@ -169,8 +186,10 @@ function gatedApi(state: Record<string, unknown>): StockPreparationManualRowsApi
     setCalls,
     get: vi.fn(async (projectNo: string) => {
       getCalls.push(projectNo)
-      if (!granted().includes('projectTarget.manualRowsRead')) throw new StockPreparationManualRowsCallError(403, 'gate', { code: 'FORBIDDEN' })
-      return clampStockPrepManualRowsState(state)!
+      const capabilities = granted()
+      if (!capabilities.includes('projectTarget.manualRowsRead')) throw new StockPreparationManualRowsCallError(403, 'gate', { code: 'FORBIDDEN' })
+      const may = (state.may ?? {}) as { set?: unknown }
+      return clampStockPrepManualRowsState({ ...state, may: { set: may.set === true && capabilities.includes('projectTarget.manualRowsSet') } })!
     }),
     set: vi.fn(async (projectNo: string, confirmProjectNo: string, policy: 'allowed' | 'disabled') => {
       setCalls.push([projectNo, confirmProjectNo, policy])
@@ -213,23 +232,26 @@ describe('MR-CLIENT — the two switch routes', () => {
   it('the clamp: the project number is never read back; a malformed answer is refused, not guessed', () => {
     const state = clampStockPrepManualRowsState(wire())!
     expect(state).toEqual({
-      status: 'active', sheetId: SHEET, viewId: FILL_VIEW, keyColumn: 'present', policy: 'allowed', policySource: 'default', keyLocked: true,
+      status: 'active', sheetId: SHEET, viewId: FILL_VIEW, manualRowsSupported: true, keyColumn: 'present', policy: 'allowed', policySource: 'default', keyLocked: true,
       lastPull: { ...NO_RECORD }, may: { set: true },
     })
     expect('projectNo' in state).toBe(false)
     expect(clampStockPrepManualRowsState({ status: 'absent', projectNo: PROJECT })).toEqual({
-      status: 'absent', sheetId: null, viewId: null, keyColumn: null, policy: null, policySource: null, keyLocked: null, lastPull: null, may: { set: false },
+      status: 'absent', sheetId: null, viewId: null, manualRowsSupported: null, keyColumn: null, policy: null, policySource: null, keyLocked: null, lastPull: null, may: { set: false },
     })
     for (const bad of [
       null, [], 'text', wire({ status: 'gone' }), wire({ policy: 'ALLOWED' }), wire({ policy: null }), wire({ policySource: 'maybe' }), wire({ keyLocked: 'yes' }),
+      wire({ manualRowsSupported: 'yes' }), wire({ manualRowsSupported: undefined }), wire({ manualRowsSupported: null }),
       wire({ keyColumn: 'perhaps' }), wire({ lastPull: null }), wire({ lastPull: { ...NO_RECORD, status: 'later' } }), wire({ lastPull: { ...NO_RECORD, rowCount: -1 } }),
       wire({ lastPull: { ...NO_RECORD, rowCount: 1.5 } }), wire({ lastPull: { ...NO_RECORD, matchedManualRecordIds: [7] } }),
       wire({ lastPull: { ...NO_RECORD, status: 'recorded' } }), wire({ lastPull: { ...NO_RECORD, status: 'recorded', at: 'not a time', mode: 'apply' } }),
     ]) {
       expect(clampStockPrepManualRowsState(bad), JSON.stringify(bad)).toBeNull()
     }
-    // `may.set` is the server's word AND the state's: an archived sheet never offers the switch.
+    // `may.set` is the server's word AND the state's: an archived sheet never offers the switch, and neither does a
+    // sheet the host never offers manual rows on (an adopted older sandbox sheet).
     expect(clampStockPrepManualRowsState(wire({ status: 'archived', may: { set: true } }))!.may.set).toBe(false)
+    expect(clampStockPrepManualRowsState(wire({ manualRowsSupported: false, may: { set: true } }))).toMatchObject({ manualRowsSupported: false, may: { set: false } })
     // A missing key column carries no switch.
     expect(clampStockPrepManualRowsState(wire({ keyColumn: 'missing', policy: null, policySource: null, keyLocked: null, may: { set: false } }))).toMatchObject({ keyColumn: 'missing', policy: null, may: { set: false } })
     // An unavailable reminder keeps NULL counts — it can never be read as zeros.
@@ -423,6 +445,43 @@ describe('MR-PANEL — the section for an ADMIN', () => {
     expect(testid(mounted.root, 'stock-prep-project-manual-rows-count')).toBeNull()
   })
 
+  it('a newer pull with nothing to say REPLACES an older non-zero reminder: the count reads 0 and the matched / unbound blocks are gone', async () => {
+    // B1 overwrites the record with zeros when a later pull reads no manual and no unbound row; the panel must say
+    // what the server holds NOW, never keep the older pull's counts (verifier mutation V06).
+    const older = {
+      status: 'recorded', at: '2026-10-31T01:02:03.000Z', mode: 'apply', rowCount: 3, unboundKeyCount: 2, matchedManualCount: 1,
+      matchedManualRecordIds: ['rec_syn_m1'], unboundRecordIds: ['rec_syn_u1', 'rec_syn_u2'],
+    }
+    const newer = { ...NO_RECORD, status: 'recorded', at: '2026-10-31T02:03:04.000Z', mode: 'dry_run' }
+    const answers = [wire({ lastPull: older }), wire({ lastPull: newer })]
+    let reads = 0
+    const api: StockPreparationManualRowsApi = {
+      get: vi.fn(async () => {
+        reads += 1
+        return clampStockPrepManualRowsState(answers[Math.min(reads, answers.length) - 1])!
+      }),
+      set: vi.fn(),
+    }
+    const props = ref<{ lastRun: unknown }>({ lastRun: null })
+    const host = mountReactive(() => ({ projectNo: PROJECT, lastRun: props.value.lastRun, scope: SCOPE, api }))
+    await flush()
+    expect(reads).toBe(1)
+    expect(testid(host, 'stock-prep-project-manual-rows-count')!.dataset.count).toBe('3')
+    expect(testid(host, 'stock-prep-project-manual-rows-matched')).not.toBeNull()
+    expect(testid(host, 'stock-prep-project-manual-rows-unbound')).not.toBeNull()
+    // The panel's next run: the server now answers the newer, all-zero record.
+    props.value = { lastRun: { run: 2 } }
+    await flush()
+    expect(reads).toBe(2)
+    expect(testid(host, 'stock-prep-project-manual-rows-reminder')!.dataset.lastPull).toBe('recorded')
+    const count = testid(host, 'stock-prep-project-manual-rows-count')!
+    expect(count.dataset.count, 'the newer record replaced the older counts').toBe('0')
+    expect(count.textContent).toContain('0 行人工补充行')
+    expect(testid(host, 'stock-prep-project-manual-rows-matched'), 'no same-material block from the older pull').toBeNull()
+    expect(testid(host, 'stock-prep-project-manual-rows-unbound'), 'no unbound block from the older pull').toBeNull()
+    expect(host.querySelectorAll('a').length, 'no deep link to an older pull\'s rows').toBe(0)
+  })
+
   it('archived: the line and the archived note, no switch; lock missing and key missing are said; set allowed offers the way back', async () => {
     let mounted = mountSection(wire({ status: 'archived', may: { set: false } }))
     await flush()
@@ -444,6 +503,25 @@ describe('MR-PANEL — the section for an ADMIN', () => {
     await flush()
     expect(testid(mounted.root, 'stock-prep-project-manual-rows-status')!.textContent).toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.status_disabled.zh)
     expect((testid(mounted.root, 'stock-prep-project-manual-rows-set') as HTMLButtonElement).textContent).toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.action_allow.zh)
+  })
+
+  it('an adopted older sandbox sheet: says manual rows are not offered there, no switch state and no switch even for an ADMIN; the reminder still shows', async () => {
+    const lastPull = {
+      status: 'recorded', at: '2026-10-31T01:02:03.000Z', mode: 'apply', rowCount: 1, unboundKeyCount: 1, matchedManualCount: 0,
+      matchedManualRecordIds: [], unboundRecordIds: ['rec_syn_u1'],
+    }
+    // The server answers `manualRowsSupported: false` and never `may.set` there; the clamp would refuse the offer anyway.
+    const { root } = mountSection(wire({ manualRowsSupported: false, may: { set: false }, lastPull }))
+    await flush()
+    const status = testid(root, 'stock-prep-project-manual-rows-status')!
+    expect(status.dataset.supported).toBe('no')
+    expect(status.textContent).toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.not_supported.zh)
+    expect(status.textContent).not.toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.status_allowed_default.zh)
+    expect(testid(root, 'stock-prep-project-manual-rows-not-supported')!.textContent).toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.not_supported.zhNext!)
+    expect(root.textContent).not.toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.meaning.zh)
+    expect(testid(root, 'stock-prep-project-manual-rows-set')).toBeNull()
+    expect(testid(root, 'stock-prep-project-manual-rows-set-admin-only'), 'not "ask an admin": nobody can set it here').toBeNull()
+    expect(testid(root, 'stock-prep-project-manual-rows-unbound')!.dataset.count).toBe('1')
   })
 
   it('the switch off (404 DISABLED) and an absent project render nothing; another refusal says it cannot read, with its code', async () => {
@@ -492,15 +570,8 @@ describe('MR-PANEL — the section for an ADMIN', () => {
       }),
       set: vi.fn(),
     }
-    const host = document.createElement('div')
-    document.body.appendChild(host)
-    // Drive the props reactively through a wrapper component's render function.
     const props = ref<{ projectNo: string; lastRun: unknown }>({ projectNo: PROJECT, lastRun: null })
-    const wrapper = createApp({
-      render: () => vnode(StockPreparationProjectTargetManualRows as Component, { projectNo: props.value.projectNo, lastRun: props.value.lastRun, scope: SCOPE, api }),
-    })
-    wrapper.mount(host)
-    apps.push({ app: wrapper, host })
+    const host = mountReactive(() => ({ projectNo: props.value.projectNo, lastRun: props.value.lastRun, scope: SCOPE, api }))
     await flush()
     expect(reads).toEqual([PROJECT])
     props.value = { ...props.value, lastRun: { run: 1 } }
@@ -547,8 +618,9 @@ describe('MR-ALIGN — the two manifest controls render for exactly the actors t
     const server = pick(backendAccess.STOCK_PREP_WORKBENCH_CAPABILITIES)
     expect(server.map((row: { capability: string }) => row.capability)).toEqual(MANUAL_ROWS_CAPABILITIES)
     expect(JSON.stringify(pick(STOCK_PREP_WORKBENCH_CAPABILITIES))).toBe(JSON.stringify(server))
+    // The READ is the PULL tier (OQ4: the reminder is for the people who pull); the SET is ADMIN (OQ6).
     expect(server.map((row: { code: string; method: string; control: string }) => [row.code, row.method, row.control])).toEqual([
-      ['stock-prep:admin', 'GET', 'stock-prep-project-manual-rows-status'],
+      ['stock-prep:pull', 'GET', 'stock-prep-project-manual-rows-status'],
       ['stock-prep:admin', 'POST', 'stock-prep-project-manual-rows-set'],
     ])
     const order = STOCK_PREP_WORKBENCH_CAPABILITIES.map((row) => row.capability)
@@ -557,38 +629,73 @@ describe('MR-ALIGN — the two manifest controls render for exactly the actors t
     expect(order).toEqual(backendAccess.STOCK_PREP_WORKBENCH_CAPABILITIES.map((row: { capability: string }) => row.capability))
   })
 
-  it('the switch line and the switch button render iff the SERVER grants them; a non-holder asks no read and reads who can', async () => {
+  it('the switch line (with the reminder) and the switch button render iff the SERVER grants them; a reader without the SET reads who can change it; a non-holder asks no read and reads who can', async () => {
+    // A reminder with something to say, so "the reader sees the reminder" is a rendered count, not an empty block.
+    const lastPull = {
+      status: 'recorded', at: '2026-10-31T01:02:03.000Z', mode: 'apply', rowCount: 2, unboundKeyCount: 1, matchedManualCount: 1,
+      matchedManualRecordIds: ['rec_syn_m1'], unboundRecordIds: ['rec_syn_u1'],
+    }
     let rendered = 0
+    let readersWithoutSet = 0
     for (const actor of ACTORS) {
       h.roles = actor.roles
       h.permissions = actor.permissions
       const granted = serverGranted(actor.roles, actor.permissions)
       expect(grantedStockPrepCapabilities({ roles: actor.roles, permissions: actor.permissions }).filter((id) => MANUAL_ROWS_CAPABILITIES.includes(id)), actor.name)
         .toEqual(granted.filter((id: string) => MANUAL_ROWS_CAPABILITIES.includes(id)))
-      const api = gatedApi(wire())
+      const api = gatedApi(wire({ lastPull }))
       const root = mount(StockPreparationProjectTargetManualRows as Component, { scope: SCOPE, projectNo: PROJECT, api, projectSheetKnown: true })
       await flush()
+      const reads = granted.includes('projectTarget.manualRowsRead')
+      const sets = granted.includes('projectTarget.manualRowsSet')
       const statusRendered = testid(root, 'stock-prep-project-manual-rows-status') !== null
       const setRendered = testid(root, 'stock-prep-project-manual-rows-set') !== null
-      expect(statusRendered, `${actor.name}: status line`).toBe(granted.includes('projectTarget.manualRowsRead'))
-      expect(setRendered, `${actor.name}: switch button`).toBe(granted.includes('projectTarget.manualRowsSet'))
-      if (!granted.includes('projectTarget.manualRowsRead')) {
+      expect(statusRendered, `${actor.name}: status line`).toBe(reads)
+      expect(setRendered, `${actor.name}: switch button`).toBe(sets)
+      if (!reads) {
         expect(api.getCalls, `${actor.name}: a non-holder asks no read (it would 403)`).toEqual([])
         expect(testid(root, 'stock-prep-project-manual-rows-admin-only')!.textContent).toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.admin_only.zh)
+        expect(testid(root, 'stock-prep-project-manual-rows-reminder'), `${actor.name}: no reminder without the read`).toBeNull()
       } else {
         expect(testid(root, 'stock-prep-project-manual-rows-admin-only')).toBeNull()
+        // OQ4: every reader sees the reminder — the count, the same-material block and the unbound block.
+        expect(testid(root, 'stock-prep-project-manual-rows-count')!.dataset.count, `${actor.name}: the reminder's count`).toBe('2')
+        expect(testid(root, 'stock-prep-project-manual-rows-matched'), `${actor.name}: the same-material block`).not.toBeNull()
+        expect(testid(root, 'stock-prep-project-manual-rows-unbound'), `${actor.name}: the unbound block`).not.toBeNull()
+        // R-11 / OQ6: a reader without the SET sees no switch and the reason in words; a holder of the SET does not.
+        const reason = testid(root, 'stock-prep-project-manual-rows-set-admin-only')
+        if (sets) {
+          expect(reason, `${actor.name}: no "ask an admin" line for an admin`).toBeNull()
+        } else {
+          expect(reason!.textContent, `${actor.name}: who can change it`).toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.set_admin_only.zh)
+          readersWithoutSet += 1
+        }
       }
       rendered += Number(statusRendered) + Number(setRendered)
       unmountAll()
     }
-    // Anti-vacuity: stock-prep:admin and the platform admin see both — 2 × 2.
-    expect(rendered).toBe(4)
+    // Anti-vacuity: the 拉取人员 sees the status line (1); stock-prep:admin and the platform admin see both (2 × 2).
+    expect(rendered).toBe(5)
+    expect(readersWithoutSet, 'the 拉取人员 is the one reader without the SET').toBe(1)
     // Without a seen sheet, a non-holder gets no sentence at all (a deployment without project sheets says nothing).
     h.roles = []
-    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
     const root = mount(StockPreparationProjectTargetManualRows as Component, { scope: SCOPE, projectNo: PROJECT, api: gatedApi(wire()) })
     await flush()
     expect(root.textContent!.trim()).toBe('')
+  })
+
+  it('the client mirror: a 拉取人员 is never offered the switch, even by an answer that says may.set', async () => {
+    h.roles = []
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
+    // A (misbehaving) answer that offers the switch to this caller: the client's own SET mirror still hides it.
+    const api: StockPreparationManualRowsApi = { get: vi.fn(async () => clampStockPrepManualRowsState(wire({ may: { set: true } }))!), set: vi.fn() }
+    const root = mount(StockPreparationProjectTargetManualRows as Component, { scope: SCOPE, projectNo: PROJECT, api, projectSheetKnown: true })
+    await flush()
+    expect(testid(root, 'stock-prep-project-manual-rows-status')).not.toBeNull()
+    expect(testid(root, 'stock-prep-project-manual-rows-set')).toBeNull()
+    expect(testid(root, 'stock-prep-project-manual-rows-set-admin-only')!.textContent).toContain(STOCK_PREP_MANUAL_ROWS_PLAIN.set_admin_only.zh)
+    expect(api.set).not.toHaveBeenCalled()
   })
 })
 

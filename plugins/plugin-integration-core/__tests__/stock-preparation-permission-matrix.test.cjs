@@ -382,9 +382,9 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // stock-preparation-pilot-routes.test.cjs; the read also joins M-12 below.
   'projectTarget.pilotRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   'projectTarget.pilotEnable': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
-  // 人工补充行 B4 (R-68): the switch read and the typed-confirmation set — ADMIN; past the gate they land on the same
-  // switch-off 404 (gate first, switch second), and the set carries a well-formed body so a 'pass' cell never meets
-  // a 400 that could mask the gate. Switch on, tier by tier, in stock-preparation-manual-rows-switch-routes.test.cjs;
+  // 人工补充行 B4 (R-68): the switch read (PULL) and the typed-confirmation set (ADMIN); past the gate they land on the
+  // same switch-off 404 (gate first, switch second), and the set carries a well-formed body so a 'pass' cell never
+  // meets a 400 that could mask the gate. Switch on, tier by tier, in stock-preparation-manual-rows-switch-routes.test.cjs;
   // the read also joins M-12 below.
   'projectTarget.manualRowsRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   'projectTarget.manualRowsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, policy: 'disabled' } }),
@@ -776,7 +776,8 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'pass',
     'projectTarget.pilotRead': 'gate',
     'projectTarget.pilotEnable': 'gate',
-    'projectTarget.manualRowsRead': 'gate',
+    // 人工补充行 B4 fix round 1 (OQ4): the 拉取人员 READS the switch and the last pull's reminder; only the SET is ADMIN.
+    'projectTarget.manualRowsRead': 'pass',
     'projectTarget.manualRowsSet': 'gate',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
@@ -1293,11 +1294,14 @@ async function orphanOperateGrantConfersNothing() {
       'refresh.changePlan',
       'refresh.changePlanConfirm',
       'refresh.reviewComplete',
+      // 人工补充行 B4 fix round 1 (OQ4): the puller reads the switch and the last pull's reminder (the SET stays ADMIN).
+      'projectTarget.manualRowsRead',
     ].sort(),
-    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore, projectOverview.ensure, the six refresh routes and the three change-plan routes to the operator tier',
+    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore / .manualRowsRead, projectOverview.ensure, the six refresh routes and the three change-plan routes to the operator tier',
   )
-  // …and the floor operator holds none of the four (archive / restore are the 拉取人员's, Q2).
-  for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore']) {
+  // …and the floor operator holds none of the five (archive / restore are the 拉取人员's, Q2; the reminder is for the
+  // people who pull, OQ4).
+  for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore', 'projectTarget.manualRowsRead']) {
     assert.ok(
       !grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]).includes(pullOnly),
       `M-05: the floor operator (read + operate) is not granted ${pullOnly}`,
@@ -1429,15 +1433,14 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       // ENABLING the pilot (set-once, no unset). Both manifest members (projectTarget.pilotRead /
       // .pilotEnable) with controls on 项目备料页; the enable additionally refuses unless every readiness
       // check passes, bumps the plan generation and holds the sheet write lease around the host stamp.
-      // 人工补充行 B4 (OQ6 / R-68): the per-sheet switch 「允许人工补充行」 — reading it (with the last pull's reminder)
-      // and SETTING it (typed confirmation, one key-column property through the host's provisioning port, read back).
-      // Both manifest members (projectTarget.manualRowsRead / .manualRowsSet) with controls on the project sync panel.
-      'stockPreparationProjectManualRowsGet',
+      // 人工补充行 B4 (OQ6 / R-68): SETTING the per-sheet switch 「允许人工补充行」 (typed confirmation, one key-column
+      // property through the host's provisioning port, read back) — manifest member projectTarget.manualRowsSet, its
+      // control on the project sync panel. Its READ is the PULL tier (below).
       'stockPreparationProjectManualRowsSet',
       'stockPreparationProjectPilotEnable',
       'stockPreparationProjectPilotGet',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the two manual-rows switch handlers and the two pilot handlers',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET and the two pilot handlers',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1451,6 +1454,10 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       /requireAccess\(req,\s*STOCK_PREP_PULL\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
     )).sort(),
     [
+      // 人工补充行 B4 fix round 1 (OQ4; R-68): READING the per-sheet switch and the last pull's reminder — the reminder is
+      // on the project sync panel for the people who pull (manifest member projectTarget.manualRowsRead); its `may.set`
+      // still needs the ADMIN tier the SET's gate admits.
+      'stockPreparationProjectManualRowsGet',
       'stockPreparationProjectOverviewEnsure',
       'stockPreparationProjectTargetArchive',
       'stockPreparationProjectTargetCreate',
@@ -1472,7 +1479,7 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       'stockPreparationRefreshHoldKeep',
       'stockPreparationRefreshHolds',
     ],
-    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the overview ensure, the six refresh routes and the three change-plan routes',
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the manual-rows switch READ, the overview ensure, the six refresh routes and the three change-plan routes',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
   for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
@@ -2234,9 +2241,9 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
     // step-4 stores and the continuation marker are later PRs), so its "served" leg is proven in
     // stock-preparation-pilot-routes.test.cjs over a mount whose every readiness input is satisfied.
     'projectTarget.pilotRead': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
-    // 人工补充行 B4 (R-68): the switch READ over an empty registry — 200 `status: 'absent'` (ADMIN only). The SET is
-    // deliberately not a shape here: it needs a registered sheet whose key column the host can read and write, so its
-    // "served" leg is proven in stock-preparation-manual-rows-switch-routes.test.cjs over a mount with field reads.
+    // 人工补充行 B4 (R-68): the switch READ over an empty registry — 200 `status: 'absent'` (PULL tier: the puller and
+    // both admins). The SET (ADMIN) is deliberately not a shape here: it needs a registered sheet whose key column the
+    // host can read and write, so its "served" leg is proven in stock-preparation-manual-rows-switch-routes.test.cjs.
     'projectTarget.manualRowsRead': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
   }
   let served = 0
@@ -2278,10 +2285,10 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
       }
     }
   }
-  // Anti-vacuity: puller is served the nine S1–S4 routes; workbench admin and platform admin those nine
-  // plus the PR B pilot read and the B4 switch read; the confirming operator the two reads plus the three S3
-  // OPERATE routes. 9 + 11 + 11 + 5.
-  assert.equal(served, 36, 'M-12: the served cells are exactly the matrix\'s pass cells for the eleven routes')
+  // Anti-vacuity: puller is served the nine S1–S4 routes plus the B4 switch read (PULL); workbench admin and platform
+  // admin those ten plus the PR B pilot read; the confirming operator the two reads plus the three S3 OPERATE routes.
+  // 10 + 11 + 11 + 5.
+  assert.equal(served, 37, 'M-12: the served cells are exactly the matrix\'s pass cells for the eleven routes')
 }
 
 async function main() {

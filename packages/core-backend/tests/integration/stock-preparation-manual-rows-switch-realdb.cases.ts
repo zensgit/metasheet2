@@ -19,7 +19,8 @@
  *   MR4-RD-02 the plugin SETS allowed: the host create goes through (the stamped manual row), /context `allowed`, a
  *             second audit row manual_rows_allowed; the same value again writes and audits nothing.
  *   MR4-RD-03 the reminder: no plugin_kv record = all zeros; the record B1's writer persists in the REAL plugin_kv is
- *             answered field for field.
+ *             answered field for field — to the 拉取人员 as well (OQ4; B4 fix round 1), who is never offered the switch
+ *             and whose SET is refused 403 with meta_fields and the audit untouched.
  *   MR4-RD-04 archived (the store's own transition): the plugin SET is 409 ARCHIVED with meta_fields untouched and no
  *             audit row; the GET still answers; the deployment switch not exactly 'true' → the plugin answers 404 and
  *             the host refuses the create `project_sheets_off` — the two sides agree.
@@ -98,9 +99,11 @@ export function defineStockPreparationManualRowsSwitchRealDbCases(): void {
     const tenantId = `tenant_mrb4_${TOKEN}`
     const projectId = `${tenantId}:integration-core`
     const projectNo = `SYN-MRB4-${TOKEN}`
-    // The host actor (the multitable writer who adds a manual row) and the plugin actor (the 备料主管理员, OQ6).
+    // The host actor (the multitable writer who adds a manual row), the plugin actor who flips the switch (the
+    // 备料主管理员, OQ6) and the one who reads the reminder without flipping it (the 拉取人员, OQ4; B4 fix round 1).
     const WRITER = { id: `u_mrb4_writer_${TOKEN}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
     const STOCK_PREP_ADMIN_USER = { id: `u_mrb4_admin_${TOKEN}`, tenantId, permissions: [access.STOCK_PREP_ADMIN] }
+    const PULLER_USER = { id: `u_mrb4_puller_${TOKEN}`, tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE, access.STOCK_PREP_PULL] }
     const switchBefore = process.env[SWITCH]
     const pinned = usePinnedServer()
     const http = () => request(pinned.url())
@@ -127,15 +130,15 @@ export function defineStockPreparationManualRowsSwitchRealDbCases(): void {
     const hostCreate = () => http().post(`/api/multitable/sheets/${sheetId}/manual-rows`).send({ data: { [phys('componentName')]: 'Synthetic manual part', [phys('totalQuantity')]: 2 } })
     const hostContextBlock = async () => (await http().get('/api/multitable/context').query({ sheetId })).body?.data?.capabilities?.stockPreparationManualRows
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const callPlugin = async (method: 'GET' | 'POST', req: Record<string, unknown>): Promise<any> => {
+    const callPlugin = async (method: 'GET' | 'POST', req: Record<string, unknown>, user: unknown = STOCK_PREP_ADMIN_USER): Promise<any> => {
       const handler = routes.get(`${method} ${SWITCH_PATH}`)
       if (!handler) throw new Error(`plugin route ${method} ${SWITCH_PATH} is not registered`)
       const res = routeResponse()
-      await handler({ user: STOCK_PREP_ADMIN_USER, body: req.body || {}, query: req.query || {}, params: { projectNo } }, res)
+      await handler({ user, body: req.body || {}, query: req.query || {}, params: { projectNo } }, res)
       return res
     }
-    const readSwitch = () => callPlugin('GET', { query: { tenantId } })
-    const setSwitch = (policy: string) => callPlugin('POST', { body: { confirmProjectNo: projectNo, policy } })
+    const readSwitch = (user?: unknown) => callPlugin('GET', { query: { tenantId } }, user)
+    const setSwitch = (policy: string, user?: unknown) => callPlugin('POST', { body: { confirmProjectNo: projectNo, policy } }, user)
     const withoutSwitch = (property: Record<string, unknown>) => {
       const { stockPreparationManualRows: _switch, ...rest } = property
       return rest
@@ -213,7 +216,7 @@ export function defineStockPreparationManualRowsSwitchRealDbCases(): void {
 
       const set = await setSwitch('disabled')
       expect(set.statusCode, JSON.stringify(set.body)).toBe(200)
-      expect(set.body.data).toMatchObject({ status: 'active', sheetId, keyColumn: 'present', policy: 'disabled', policySource: 'set', keyLocked: true, written: true, changed: true })
+      expect(set.body.data).toMatchObject({ status: 'active', sheetId, manualRowsSupported: true, keyColumn: 'present', policy: 'disabled', policySource: 'set', keyLocked: true, written: true, changed: true })
       const after = await keyProperty()
       expect(after.stockPreparationManualRows).toBe('disabled')
       expect(withoutSwitch(after), 'the lock, the stanza and every other key are exactly as before').toEqual(withoutSwitch(before))
@@ -271,6 +274,21 @@ export function defineStockPreparationManualRowsSwitchRealDbCases(): void {
       expect(stored, 'the record is in the real plugin_kv').toBeTruthy()
       const recorded = await readSwitch()
       expect(recorded.body.data.lastPull).toEqual({ status: 'recorded', at: '2026-10-31T01:02:03.000Z', mode: 'dry_run', ...summary })
+
+      // OQ4 (B4 fix round 1): the 拉取人员 reads the same reminder through the same real stack, never offered the switch;
+      // the SET stays the 备料主管理员's (OQ6) — refused at the gate with meta_fields and the audit untouched.
+      const asPuller = await readSwitch(PULLER_USER)
+      expect(asPuller.statusCode, JSON.stringify(asPuller.body)).toBe(200)
+      expect(asPuller.body.data.lastPull).toEqual(recorded.body.data.lastPull)
+      expect(asPuller.body.data).toMatchObject({ status: 'active', policy: recorded.body.data.policy, may: { set: false } })
+      expect(recorded.body.data.may).toEqual({ set: true })
+      const propertyBefore = await keyProperty()
+      const auditBefore = (await auditRows()).length
+      const refused = await setSwitch('disabled', PULLER_USER)
+      expect(refused.statusCode, JSON.stringify(refused.body)).toBe(403)
+      expect(refused.body.error.code).toBe('FORBIDDEN')
+      expect(await keyProperty()).toEqual(propertyBefore)
+      expect((await auditRows()).length).toBe(auditBefore)
     })
 
     test('MR4-RD-04 archived: the plugin SET is 409 with meta_fields untouched; the GET answers; the deployment switch not exactly true → plugin 404 and host project_sheets_off', async () => {

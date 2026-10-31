@@ -447,15 +447,17 @@ check('C-13 (S3 fix round 1) the four S3 routes: gate → switch before any IO; 
 // projectId); the SET's typed confirmation is pure and precedes the scope; the write happens ONLY inside the registry's
 // locked re-check, ONLY through the switch library (whose one host write is a one-key provisioning patch — never raw
 // SQL), and the one audit row (088's project_fields_update, a closed mode) follows it; the READ writes nothing.
-check('C-14 (B4) the switch routes: ADMIN gate → switch before any IO; scope-derived tenant and staging; the SET writes one key-column property through the provisioning port inside the locked re-check, then audits', () => {
+check('C-14 (B4) the switch routes: READ = PULL gate, SET = ADMIN gate → switch before any IO; scope-derived tenant and staging; the SET writes one key-column property through the provisioning port inside the locked re-check, then audits', () => {
   const bodyOf = (handler) => {
     const start = CODE.indexOf(`    async ${handler}(req, res) {`)
     assert.notEqual(start, -1, `${handler} exists`)
     return CODE.slice(start, CODE.indexOf('\n    },', start))
   }
-  for (const handler of ['stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet']) {
+  // B4 fix round 1 (OQ4): the READ is the PULL tier (the reminder is for the people who pull); the SET stays ADMIN (OQ6).
+  const GATES = { stockPreparationProjectManualRowsGet: 'STOCK_PREP_PULL', stockPreparationProjectManualRowsSet: 'STOCK_PREP_ADMIN' }
+  for (const [handler, gate] of Object.entries(GATES)) {
     const body = bodyOf(handler)
-    assert.match(body, /^ {4}async [A-Za-z]+\(req, res\) \{\n {6}const user = requireAccess\(req, STOCK_PREP_ADMIN\)\n {6}requireProjectSheetsEnabled\(\)\n/, `${handler}: the ADMIN gate is the first statement and the switch the second`)
+    assert.match(body, new RegExp(`^ {4}async [A-Za-z]+\\(req, res\\) \\{\\n {6}const user = requireAccess\\(req, ${gate}\\)\\n {6}requireProjectSheetsEnabled\\(\\)\\n`), `${handler}: the ${gate} gate is the first statement and the switch the second`)
     assert.ok(body.indexOf('await ') > body.indexOf('requireProjectSheetsEnabled()'), `${handler}: no IO before the switch`)
     assert.match(body, /resolveOperatorValueScope\(\{/, `${handler}: tenant from the host-vouched scope`)
     const staging = body.match(/resolveIntegrationStagingProjectId\([^)]*\)/g) || []
@@ -469,7 +471,10 @@ check('C-14 (B4) the switch routes: ADMIN gate → switch before any IO; scope-d
     assert.ok(!getBody.includes(forbidden), `the READ writes nothing (${forbidden})`)
   }
   assert.match(getBody, /readManualRowsLastPull\(\{ store: context\.storage, sheetId: row\.sheetId \}\)/, 'the reminder is read from the plugin\'s own storage, keyed by the REGISTRY row\'s sheet')
+  assert.match(getBody, /callerMaySet: hasPermission\(user, STOCK_PREP_ADMIN\)/, 'the READ offers `may.set` only to the caller the SET gate would admit')
   const setBody = bodyOf('stockPreparationProjectManualRowsSet')
+  const supportedAt = setBody.indexOf('if (!manualRowsSupportedOnObject(registered.objectId)) {')
+  assert.ok(supportedAt !== -1 && supportedAt < setBody.indexOf('store.withActiveRowLocked('), 'a sheet the host never offers manual rows on is refused before the sheet is touched')
   const requestAt = setBody.indexOf('stockPreparationManualRowsSwitchRequest(req)')
   const scopeAt = setBody.indexOf('resolveOperatorValueScope({')
   const lockAt = setBody.indexOf('store.withActiveRowLocked(')

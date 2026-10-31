@@ -388,14 +388,15 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
     control: 'stock-prep-project-pilot-enable',
   }),
-  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; OQ6; R-68) — byte-equal to the plugin manifest's two
-  // switch rows. Both ADMIN. Their controls live on the project sync panel (StockPreparationProjectTargetManualRows.vue):
-  // the switch-state line, rendered once the server's read answered for a registered sheet, and the typed-confirmation
-  // switch button, rendered only while the server says `may.set` — never on the confirmation-queue view;
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; OQ4, OQ6; R-68) — byte-equal to the plugin manifest's two
+  // switch rows. The READ is PULL (the reminder is for the people who pull), the SET is ADMIN (the 备料主管理员 flips it).
+  // Their controls live on the project sync panel (StockPreparationProjectTargetManualRows.vue): the switch-state line,
+  // rendered once the server's read answered for a registered sheet, and the typed-confirmation switch button, rendered
+  // only for an ADMIN while the server says `may.set` — never on the confirmation-queue view;
   // StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN) asserts their alignment where they live.
   Object.freeze({
     capability: 'projectTarget.manualRowsRead',
-    code: STOCK_PREP_ADMIN,
+    code: STOCK_PREP_PULL,
     method: 'GET',
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-status',
