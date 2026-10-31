@@ -4363,6 +4363,7 @@
                   />
                 </label>
               </div>
+              <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14Dates.rule" action="rule" :tr="tr" :disabled="ruleLoading" />
               <button class="attendance__btn attendance__btn--primary" :disabled="ruleLoading" @click="saveRule">
                 {{ ruleLoading ? tr('Saving...', '保存中...') : tr('Save rule', '保存规则') }}
               </button>
@@ -4846,6 +4847,7 @@
                   </label>
                 </section>
               </div>
+              <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14Dates.ruleSet" action="rule-set-save" :tr="tr" :disabled="ruleSetSaving" />
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="ruleSetSaving" @click="saveRuleSet">
                   {{ ruleSetSaving ? tr('Saving...', '保存中...') : ruleSetEditingId ? tr('Update rule set', '更新规则集') : tr('Create rule set', '创建规则集') }}
@@ -5116,6 +5118,7 @@
                         >
                           {{ attendanceGroupCopyingId === item.id ? tr('Copying...', '复制中...') : tr('Copy', '复制') }}
                         </button>
+                        <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14GroupDeletes[item.id]" action="group-delete" :tr="tr" :disabled="attendanceGroupDeletingId === item.id" />
                         <button
                           class="attendance__btn attendance__btn--compact attendance__btn--danger"
                           type="button"
@@ -5289,6 +5292,7 @@
                         <input id="attendance-group-description" v-model="attendanceGroupForm.description" type="text" />
                       </label>
                     </div>
+                    <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14Dates.group" action="group" :tr="tr" :disabled="attendanceGroupSaving" />
                     <div class="attendance__admin-actions attendance__group-sticky-actions">
                       <button
                         class="attendance__btn attendance__btn--primary"
@@ -5383,6 +5387,7 @@
                       >
                         {{ attendanceGroupMemberDuplicateNotice }}
                       </small>
+                      <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14Dates.members" action="member-add" :tr="tr" :disabled="attendanceGroupMemberSaving" />
                       <div class="attendance__admin-actions">
                         <button
                           class="attendance__btn"
@@ -5436,6 +5441,7 @@
                               </td>
                               <td>{{ formatDateTime(member.createdAt ?? null) }}</td>
                               <td class="attendance__table-actions">
+                                <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14MemberDeletes[member.userId]" action="member-remove" :tr="tr" :disabled="attendanceGroupMemberSaving" />
                                 <button
                                   class="attendance__btn attendance__btn--danger"
                                   type="button"
@@ -5960,6 +5966,7 @@
                         />
                       </label>
                     </div>
+                    <AttendanceBusinessEffectiveDate v-if="attendanceGroupFixedSchedule.effectiveDateAvailable.value" v-model="attendanceGroupFixedSchedule.effectiveDates.save" action="fixed-save" :label="tr('Save configuration', '保存配置')" :tr="tr" :disabled="attendanceGroupFixedScheduleFormBusy" />
                     <AttendanceGroupFixedScheduleConfig
                       :editor="attendanceGroupFixedSchedule.editor.value"
                       :load-state="attendanceGroupFixedSchedule.loadState.value"
@@ -5998,6 +6005,11 @@
                           <small>{{ day.timeLabel }}</small>
                         </div>
                       </div>
+                    </div>
+                    <div v-if="attendanceGroupFixedSchedule.effectiveDateAvailable.value" class="attendance__admin-grid">
+                      <AttendanceBusinessEffectiveDate v-if="attendanceGroupFixedSchedule.effectiveDateAvailable.value" v-model="attendanceGroupFixedSchedule.effectiveDates.apply" action="fixed-apply" :label="tr('Apply', '应用')" :tr="tr" :disabled="attendanceGroupFixedScheduleFormBusy" />
+                      <AttendanceBusinessEffectiveDate v-if="attendanceGroupFixedSchedule.effectiveDateAvailable.value" v-model="attendanceGroupFixedSchedule.effectiveDates.rebuild" action="fixed-rebuild" :label="tr('Rebuild', '重建')" :tr="tr" :disabled="attendanceGroupFixedScheduleFormBusy" />
+                      <AttendanceBusinessEffectiveDate v-if="attendanceGroupFixedSchedule.effectiveDateAvailable.value" v-model="attendanceGroupFixedSchedule.effectiveDates.clear" action="fixed-clear" :label="tr('Clear', '清除')" :tr="tr" :disabled="attendanceGroupFixedScheduleFormBusy" />
                     </div>
                     <div class="attendance__admin-actions">
                       <button
@@ -9183,6 +9195,7 @@
                 </button>
               </div>
               <div class="attendance__admin-actions attendance__admin-actions--wrap" data-attendance-schedule-publication-controls>
+                <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14Dates.publication" action="publication" :tr="tr" :disabled="schedulePublicationSaving" />
                 <span class="attendance__field-hint">
                   {{ tr(`Selected drafts: ${selectedScheduleDraftCount}`, `已选草稿：${selectedScheduleDraftCount}`) }}
                 </span>
@@ -9358,6 +9371,7 @@
                   />
                 </label>
               </div>
+              <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" :key="shiftEditingId ?? 'new-shift'" v-model="calc14Dates.shift" action="shift-save" :tr="tr" :disabled="shiftSaving" />
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="shiftSaving" @click="saveShift">
                   {{ shiftSaving ? tr('Saving...', '保存中...') : shiftEditingId ? tr('Update shift', '更新班次') : tr('Create shift', '创建班次') }}
@@ -9401,6 +9415,7 @@
                       <td>{{ shift.workingDays.join(',') }}</td>
                       <td class="attendance__table-actions">
                         <button class="attendance__btn" @click="editShift(shift)">{{ tr('Edit', '编辑') }}</button>
+                        <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14ShiftDeletes[shift.id]" action="shift-delete" :tr="tr" />
                         <button class="attendance__btn attendance__btn--danger" @click="deleteShift(shift.id)">
                           {{ tr('Delete', '删除') }}
                         </button>
@@ -9836,6 +9851,7 @@
                 </div>
               </div>
               <div class="attendance__admin-actions attendance__admin-actions--wrap" data-attendance-schedule-publication-controls>
+                <AttendanceBusinessEffectiveDate v-if="calc14DateAvailable" v-model="calc14Dates.publication" action="publication" :tr="tr" :disabled="schedulePublicationSaving" />
                 <span class="attendance__field-hint">
                   {{ tr(`Selected drafts: ${selectedScheduleDraftCount}`, `已选草稿：${selectedScheduleDraftCount}`) }}
                 </span>
@@ -10515,6 +10531,8 @@ import {
   type AttendanceShiftSegmentCapabilities,
   type AttendanceShiftSegmentDraft,
 } from './attendance/attendanceShiftSegments'
+import AttendanceBusinessEffectiveDate from './attendance/AttendanceBusinessEffectiveDate.vue'
+import { businessEffectiveDateError, withBusinessEffectiveDate } from './attendance/attendanceBusinessEffectiveDate'
 import { useAttendanceGroupFixedSchedule } from './attendance/useAttendanceGroupFixedSchedule'
 import AttendanceGroupFixedScheduleConfig from './attendance/AttendanceGroupFixedScheduleConfig.vue'
 import { attendanceSetupPrefillPending } from './attendance/attendanceSetupPrefillLeaveGuard'
@@ -11565,6 +11583,7 @@ interface HolidayPolicyOverrideForm {
 }
 
 interface AttendanceRule {
+  capabilities?: { businessEffectiveDateRequired?: unknown }
   id?: string
   orgId?: string
   name: string
@@ -15508,6 +15527,60 @@ const attendancePluginEntry = computed(() => {
   return plugins.value.find(plugin => attendancePluginNames.has(plugin.name)) ?? null
 })
 const attendancePluginActive = computed(() => attendancePluginEntry.value?.status === 'active')
+const calc14OrgCapability = ref<{ orgId: string; requestOrgId: string | undefined; required: true } | null>(null)
+let calc14RuleReadSequence = 0
+const calc14DateAvailable = computed(() => {
+  const capability = calc14OrgCapability.value
+  return !attendanceSessionStale.value && attendanceSessionGuard.isCurrent() && capability?.required === true
+    && capability.requestOrgId === normalizedOrgId()
+    && (!normalizedOrgId() || capability.orgId === normalizedOrgId())
+    && (!attendanceSessionGuard.orgId || capability.orgId === attendanceSessionGuard.orgId)
+})
+function withCalc14EffectiveDate<T extends object>(body: T, value: string | undefined) {
+  return withBusinessEffectiveDate(body, calc14DateAvailable.value ? value : '')
+}
+const calc14Dates = reactive({ shift: '', rule: '', ruleSet: '', group: '', members: '', publication: '' })
+const calc14ShiftDeletes = reactive<Record<string, string>>({})
+const calc14GroupDeletes = reactive<Record<string, string>>({})
+const calc14MemberDeletes = reactive<Record<string, string>>({})
+function clearCalc14Map(values: Record<string, string>) {
+  for (const key of Object.keys(values)) delete values[key]
+}
+function clearCalc14Dates() {
+  Object.assign(calc14Dates, { shift: '', rule: '', ruleSet: '', group: '', members: '', publication: '' })
+  clearCalc14Map(calc14ShiftDeletes)
+  clearCalc14Map(calc14GroupDeletes)
+  clearCalc14Map(calc14MemberDeletes)
+}
+watch(orgId, () => {
+  calc14RuleReadSequence += 1
+  calc14OrgCapability.value = null
+  clearCalc14Dates()
+}, { flush: 'sync' })
+watch(calc14DateAvailable, clearCalc14Dates, { flush: 'sync' })
+watch(shiftEditingId, () => { calc14Dates.shift = '' }, { flush: 'sync' })
+watch(ruleSetEditingId, () => { calc14Dates.ruleSet = '' }, { flush: 'sync' })
+watch(attendanceGroupEditingId, () => { calc14Dates.group = '' }, { flush: 'sync' })
+watch(attendanceGroupMemberGroupId, () => {
+  calc14Dates.members = ''
+  clearCalc14Map(calc14MemberDeletes)
+}, { flush: 'sync' })
+watch([attendanceGroupMemberSelectedUserId, attendanceGroupMemberUserIds], () => {
+  calc14Dates.members = ''
+}, { flush: 'sync' })
+watch(() => JSON.stringify([selectedDraftAssignmentIds.value, selectedDraftRotationAssignmentIds.value]), () => {
+  calc14Dates.publication = ''
+}, { flush: 'sync' })
+function calc14Message(payload: unknown, fallback: string): string {
+  const node = payload && typeof payload === 'object' && 'error' in payload ? payload.error : null
+  const code = node && typeof node === 'object' && 'code' in node ? node.code : null
+  return businessEffectiveDateError(code, tr) ?? readErrorMessage(payload, fallback)
+}
+function hasCalc14Error(payload: unknown): boolean {
+  const node = payload && typeof payload === 'object' && 'error' in payload ? payload.error : null
+  return Boolean(node && typeof node === 'object' && 'code' in node && businessEffectiveDateError(node.code, tr))
+}
+
 const attendanceGroupFixedScheduleHydratedShifts = ref<Record<string, AttendanceShift>>({})
 const attendanceGroupFixedScheduleShifts = computed(() => {
   const scope = normalizedOrgId() ?? ''
@@ -25986,6 +26059,9 @@ async function syncHolidaysForYears(years: number[]) {
 }
 
 async function loadRule() {
+  const capabilityOrgId = normalizedOrgId()
+  const capabilityRead = ++calc14RuleReadSequence
+  calc14OrgCapability.value = null
   ruleLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
@@ -25995,6 +26071,15 @@ async function loadRule() {
       throw new Error(readErrorMessage(data, tr('Failed to load rule', '加载规则失败')))
     }
     const rule: AttendanceRule = data.data
+    if (capabilityRead === calc14RuleReadSequence && capabilityOrgId === normalizedOrgId() && attendanceSessionGuard.isCurrent()) {
+      const capabilities = rule?.capabilities
+      calc14OrgCapability.value = typeof rule?.orgId === 'string' && Boolean(rule.orgId.trim())
+        && (!capabilityOrgId || rule.orgId === capabilityOrgId)
+        && (!attendanceSessionGuard.orgId || rule.orgId === attendanceSessionGuard.orgId)
+        && capabilities !== null && typeof capabilities === 'object' && !Array.isArray(capabilities)
+        && capabilities.businessEffectiveDateRequired === true
+        ? { orgId: rule.orgId, requestOrgId: capabilityOrgId, required: true } : null
+    }
     ruleForm.name = rule.name || 'Default'
     ruleForm.timezone = rule.timezone || defaultTimezone
     ruleForm.workStartTime = rule.workStartTime || '09:00'
@@ -26004,6 +26089,7 @@ async function loadRule() {
     ruleForm.roundingMinutes = rule.roundingMinutes ?? 5
     ruleForm.workingDays = Array.isArray(rule.workingDays) ? rule.workingDays.join(',') : '1,2,3,4,5'
   } catch (error: any) {
+    if (capabilityRead === calc14RuleReadSequence) calc14OrgCapability.value = null
     setStatusFromError(error, tr('Failed to load rule', '加载规则失败'), 'admin')
   } finally {
     ruleLoading.value = false
@@ -26026,15 +26112,17 @@ async function saveRule() {
     }
     const response = await apiFetchWithTimeout('/api/attendance/rules/default', {
       method: 'PUT',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(withCalc14EffectiveDate(payload, calc14Dates.rule)),
     }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
-    if (response.status === 403) {
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       throw createForbiddenError()
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, tr('Failed to save rule', '保存规则失败'))
+      const error = createApiError(response, data, tr('Failed to save rule', '保存规则失败'))
+      error.message = calc14Message(data, error.message)
+      throw error
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || ruleForm.name
@@ -26045,9 +26133,11 @@ async function saveRule() {
     ruleForm.earlyGraceMinutes = rule.earlyGraceMinutes ?? ruleForm.earlyGraceMinutes
     ruleForm.roundingMinutes = rule.roundingMinutes ?? ruleForm.roundingMinutes
     ruleForm.workingDays = Array.isArray(rule.workingDays) ? rule.workingDays.join(',') : ruleForm.workingDays
+    calc14Dates.rule = ''
     setStatus(tr('Rule updated.', '规则已更新。'))
   } catch (error: any) {
-    setStatusFromError(error, tr('Failed to save rule', '保存规则失败'), 'save-rule')
+    if (businessEffectiveDateError(error?.code, tr)) setStatus(error.message, 'error')
+    else setStatusFromError(error, tr('Failed to save rule', '保存规则失败'), 'save-rule')
   } finally {
     ruleLoading.value = false
   }
@@ -28455,6 +28545,7 @@ function shiftIsPreviewOnly(shift: AttendanceShift): boolean {
 }
 
 function resetShiftForm() {
+  calc14Dates.shift = ''
   // W4-2: a reset discards any template-prefilled shift content (save success also lands here) —
   // stop the unsaved-prefill leave warning for this form.
   clearSetupTemplatePrefillPending('shift')
@@ -28477,6 +28568,7 @@ function resetShiftForm() {
 }
 
 function editShift(shift: AttendanceShift) {
+  calc14Dates.shift = ''
   shiftEditingId.value = shift.id
   shiftForm.name = shift.name
   shiftForm.timezone = shift.timezone
@@ -28558,19 +28650,20 @@ async function saveShift() {
       : '/api/attendance/shifts'
     const response = await apiFetch(endpoint, {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(withCalc14EffectiveDate(payload, calc14Dates.shift)),
     })
-    if (response.status === 403) {
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to save shift', '保存班次失败')))
+      throw new Error(calc14Message(data, tr('Failed to save shift', '保存班次失败')))
     }
     adminForbidden.value = false
     await loadShifts()
     resetShiftForm()
+    calc14Dates.shift = ''
     setStatus(isEditing ? tr('Shift updated.', '班次已更新。') : tr('Shift created.', '班次已创建。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save shift', '保存班次失败')), 'error')
@@ -28585,16 +28678,17 @@ async function deleteShift(id: string) {
     '确认删除该班次吗？只要仍有分配、轮班规则、待处理换班，或待处理/已发布调度引用它，系统就会阻止删除。',
   ))) return
   try {
-    const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
-    if (response.status === 403) {
+    const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE', ...(calc14DateAvailable.value && calc14ShiftDeletes[id] ? { body: JSON.stringify(withCalc14EffectiveDate({}, calc14ShiftDeletes[id])) } : {}) })
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to delete shift', '删除班次失败')))
+      throw new Error(calc14Message(data, tr('Failed to delete shift', '删除班次失败')))
     }
     adminForbidden.value = false
+    delete calc14ShiftDeletes[id]
     await loadShifts()
     await loadAssignments()
     setStatus(tr('Shift deleted.', '班次已删除。'))
@@ -28833,15 +28927,15 @@ async function publishSelectedScheduleDrafts(preflightOnly: boolean) {
     if (rotationAssignmentIds.length > 0) payload.rotationAssignmentIds = rotationAssignmentIds
     const response = await apiFetch('/api/attendance/schedule-publications', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(preflightOnly ? payload : withCalc14EffectiveDate(payload, calc14Dates.publication)),
     })
-    if (response.status === 403) {
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to publish schedule drafts', '发布排班草稿失败')))
+      throw new Error(calc14Message(data, tr('Failed to publish schedule drafts', '发布排班草稿失败')))
     }
     adminForbidden.value = false
     if (!preflightOnly) {
@@ -29142,6 +29236,7 @@ async function deleteHoliday(id: string) {
 }
 
 function resetRuleSetForm() {
+  calc14Dates.ruleSet = ''
   ruleSetEditingId.value = null
   ruleSetForm.name = ''
   ruleSetForm.description = ''
@@ -29159,6 +29254,7 @@ function resetRuleSetForm() {
 }
 
 function editRuleSet(item: AttendanceRuleSet) {
+  calc14Dates.ruleSet = ''
   ruleSetEditingId.value = item.id
   ruleSetForm.name = item.name
   ruleSetForm.description = item.description ?? ''
@@ -29216,16 +29312,16 @@ async function saveRuleSet() {
       ruleSetEditingId.value ? `/api/attendance/rule-sets/${ruleSetEditingId.value}/update` : '/api/attendance/rule-sets',
       {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify(withCalc14EffectiveDate(payload, calc14Dates.ruleSet)),
       }
     )
-    if (response.status === 403) {
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to save rule set', '保存规则集失败')))
+      throw new Error(calc14Message(data, tr('Failed to save rule set', '保存规则集失败')))
     }
     adminForbidden.value = false
     resetRuleSetForm()
@@ -29259,6 +29355,7 @@ async function deleteRuleSet(id: string) {
 }
 
 function resetAttendanceGroupForm() {
+  calc14Dates.group = ''
   // W4-2: a reset discards any template-prefilled group content — stop the unsaved-prefill
   // leave warning for this form.
   clearSetupTemplatePrefillPending('group')
@@ -29286,6 +29383,7 @@ function resetAttendanceGroupFixedSchedulePreview() {
 }
 
 function editAttendanceGroup(item: AttendanceGroup, stage: AttendanceGroupWorkflowStage = 'basics') {
+  if (attendanceGroupEditingId.value !== item.id) calc14Dates.group = ''
   attendanceGroupActiveStage.value = stage
   const groupChanged = attendanceGroupMemberGroupId.value !== item.id
   attendanceGroupEditingId.value = item.id
@@ -29511,18 +29609,19 @@ async function saveAttendanceGroup() {
         : '/api/attendance/groups',
       {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify(withCalc14EffectiveDate(payload, calc14Dates.group)),
       }
     )
-    if (response.status === 403) {
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to save attendance group', '保存考勤分组失败')))
+      throw new Error(calc14Message(data, tr('Failed to save attendance group', '保存考勤分组失败')))
     }
     adminForbidden.value = false
+    calc14Dates.group = ''
     // W4-2: a successful group save persists the (possibly template-prefilled) content — the
     // unsaved-prefill leave warning for this form must stop (the group save path keeps the form
     // populated instead of resetting, so the reset-side clear never fires here).
@@ -29724,6 +29823,7 @@ async function resolveAttendanceAssignmentUserLabels() {
 }
 
 async function addAttendanceGroupMembers() {
+  const effectiveDate = calc14Dates.members
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId) {
     setStatus(tr('Select an attendance group first.', '请先选择考勤分组。'), 'error')
@@ -29749,17 +29849,18 @@ async function addAttendanceGroupMembers() {
   try {
     const response = await apiFetch(`/api/attendance/groups/${groupId}/members`, {
       method: 'POST',
-      body: JSON.stringify({ userIds }),
+      body: JSON.stringify(withCalc14EffectiveDate({ userIds }, effectiveDate)),
     })
-    if (response.status === 403) {
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       return
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to add group members', '添加分组成员失败')))
+      throw new Error(calc14Message(data, tr('Failed to add group members', '添加分组成员失败')))
     }
     adminForbidden.value = false
+    calc14Dates.members = ''
     attendanceGroupPendingMemberIds.value = []
     attendanceGroupPendingMemberLabels.value = {}
     attendanceGroupMemberDuplicateNotice.value = ''
@@ -29878,16 +29979,18 @@ async function removeAttendanceGroupMember(userId: string) {
   try {
     const response = await apiFetch(`/api/attendance/groups/${groupId}/members/${encodeURIComponent(userId)}`, {
       method: 'DELETE',
+      ...(calc14DateAvailable.value && calc14MemberDeletes[userId] ? { body: JSON.stringify(withCalc14EffectiveDate({}, calc14MemberDeletes[userId])) } : {}),
     })
-    if (response.status === 403) {
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       return
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to remove group member', '移除分组成员失败')))
+      throw new Error(calc14Message(data, tr('Failed to remove group member', '移除分组成员失败')))
     }
     adminForbidden.value = false
+    delete calc14MemberDeletes[userId]
     await loadAttendanceGroupMembers()
     setStatus(tr('Group member removed.', '分组成员已移除。'))
   } catch (error: any) {
@@ -29927,15 +30030,16 @@ async function deleteAttendanceGroup(id: string) {
   if (!window.confirm(tr('Delete this attendance group?', '确认删除该考勤分组吗？'))) return
   attendanceGroupDeletingId.value = id
   try {
-    const response = await apiFetch(`/api/attendance/groups/${id}`, { method: 'DELETE' })
-    if (response.status === 403) {
+    const response = await apiFetch(`/api/attendance/groups/${id}`, { method: 'DELETE', ...(calc14DateAvailable.value && calc14GroupDeletes[id] ? { body: JSON.stringify(withCalc14EffectiveDate({}, calc14GroupDeletes[id])) } : {}) })
+    const data = await response.json()
+    if (response.status === 403 && !hasCalc14Error(data)) {
       adminForbidden.value = true
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
-    const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to delete attendance group', '删除考勤分组失败')))
+      throw new Error(calc14Message(data, tr('Failed to delete attendance group', '删除考勤分组失败')))
     }
+    delete calc14GroupDeletes[id]
     adminForbidden.value = false
     if (props.routeGroupContext?.group.id === id) {
       setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))

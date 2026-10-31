@@ -817,6 +817,12 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
       // whole-file into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/attendance-work-date-resolver-w2.db.test.ts',
+      // These source-native suites run whole-file in attendance-db, never the no-DB lane.
+      'tests/integration/attendance-calc14-core-writers-native.db.test.ts',
+      'tests/integration/attendance-calc14-effective-source-history.db.test.ts',
+      'tests/integration/attendance-calc14-native-history.db.test.ts',
+      'tests/integration/attendance-calc14-r4-policy-window.db.test.ts',
+      'tests/integration/attendance-calc14-review-regressions.db.test.ts',
       // #4556 W4C-0 Stage A: durable-storage migration smoke (SQL UUIDv5 golden vector,
       // derived-ID/claimed-commit/immutability refusals, P07 V1 job shape, down()
       // fail-closed). DATABASE_URL-gated; excluded here so the no-DB job cannot

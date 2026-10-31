@@ -100,7 +100,7 @@
  * 4. routes/admin-users.ts (#6163). It serves /api/admin/users and its siblings but is mounted at the
  *    root (index.ts `this.app.use(adminUsersRouter())`), so the discovery in layer 3 never reaches it.
  *    It is scanned on its own at the foot of this file with the same scanner: the only sinks that may
- *    send text taken from an error are seven allowlisted by route and error code (text this code base
+ *    send text taken from an error are eight allowlisted by route and error code (text this code base
  *    writes itself), every sendAdminUsersServerFailure call must pass a literal sentence, and a
  *    memory-level self-proof rewrites every helper call site into seven echo shapes.
  *
@@ -1832,7 +1832,7 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
 // on /admin/users. Every 500 branch of the file now answers through sendAdminUsersServerFailure with a
 // fixed sentence; this block keeps it that way with the same scanner, plus two rules of its own:
 //   - EXACT allowlist, by route and error code (never by line number): the only sinks of the file
-//     that may send text taken from an error are the seven listed below, each of which sends text this
+//     that may send text taken from an error are the eight listed below, each of which sends text this
 //     code base wrote itself. A new echo anywhere in the file, or an allowlisted site that disappears,
 //     turns the guard red;
 //   - every sendAdminUsersServerFailure call passes a LITERAL sentence (a string literal, or a
@@ -1851,6 +1851,11 @@ const ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT: ReadonlyArray<{ route: string; code: 
     route: 'POST /api/admin/users',
     code: 'AttendanceDefaultShiftNotFoundError.code',
     reason: 'typed error class of admin-users.ts: status 404, code DEFAULT_SHIFT_NOT_FOUND, the fixed message "Default shift not found"',
+  },
+  {
+    route: 'POST /api/admin/users',
+    code: 'attendanceCalc14SourceWriteErrorV1().code',
+    reason: 'the mapper rebuilds only seven fixed code/message/status envelopes; typed status/message mismatches and unknown codes return null, and PG 23514 retains its four exact codes; attendance-calc14-source-write-context.test.ts pins the contract',
   },
   {
     route: 'POST /api/admin/users',
@@ -2034,10 +2039,28 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
     for (const entry of ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT) expect(entry.reason.length).toBeGreaterThan(20)
   })
 
-  it('the only sinks that send text taken from an error are exactly the seven allowlisted ones (by route and error code)', () => {
+  it('the only sinks that send text taken from an error are exactly the eight allowlisted ones (by route and error code)', () => {
     expect(adminUsersOffenderKeys(readRoute(ADMIN_USERS)).sort()).toEqual(
       ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT.map(allowlistKey).sort(),
     )
+  })
+
+  it('the CALC14 registered sink forwards only its normalized mapper envelope', () => {
+    const source = readRoute(ADMIN_USERS)
+    const sf = parseSource(ADMIN_USERS, source)
+    const args: string[][] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)
+        && enclosingRouteOf(node) === 'POST /api/admin/users'
+        && errorCodeOfSink(node) === 'attendanceCalc14SourceWriteErrorV1().code') {
+        args.push(node.arguments.map((arg) => arg.getText(sf)))
+      }
+      node.forEachChild(visit)
+    }
+    visit(sf)
+    expect(args).toEqual([[
+      'res', 'sourceWriteError.status', 'sourceWriteError.code', 'sourceWriteError.message',
+    ]])
   })
 
   it('every sendAdminUsersServerFailure call passes a literal sentence', () => {

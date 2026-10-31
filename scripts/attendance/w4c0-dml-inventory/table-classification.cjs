@@ -45,6 +45,8 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_report_projection_anchors: 'w4_canonical',
   // Multi-timezone immutable source/freeze authority, with exact reviewed writers below.
   attendance_timezone_context_companions: 'w4_canonical',
+  // CALC14 immutable input history is source authority; only its exact migration writers below.
+  attendance_calc14_source_versions: 'w4_canonical',
   attendance_business_trip_requests: 'w4_canonical',
   attendance_business_trip_arrangements: 'w4_canonical',
   // --- business: calculation source/effect/result -----------------------------------------
@@ -351,6 +353,9 @@ function classifyTable(tableName) {
 
 // Grant only these reviewed writes, not a new canonical path prefix.
 const W4_EXACT_CANONICAL_SITES = Object.freeze([
+  // Two capture branches and the global-rule invalidation branch; no path-wide grant.
+  Object.freeze({ relPath: 'packages/core-backend/src/db/migrations/zzzz20261030120000_create_attendance_calc14_source_versions.ts',
+    enclosingSymbol: 'up', table: 'attendance_calc14_source_versions', verb: 'insert', count: 3 }),
   // Operator-reviewed archive repair appends one immutable companion under
   // explicit source/plan approval, rollout/runtime locks and original-row CAS.
   // Neither this file nor neighboring symbols acquire a broader writer grant.

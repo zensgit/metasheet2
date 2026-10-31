@@ -45,6 +45,9 @@ const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const { createAttendanceGroupFixedScheduleEditorService } = require('./lib/attendance-group-fixed-schedule-editor-service.cjs')
+const { createAttendanceCalc14SourceHistory, createAttendanceCalc14CapabilityReader } = require('./lib/attendance-calc14-source-history.cjs')
+const { createAttendanceCalc14SourceReader } = require('./lib/attendance-calc14-source-reader.cjs')
+const { createAttendanceCalc14ImportPolicy } = require('./lib/attendance-calc14-import-policy.cjs')
 const {
   buildAttendanceReportManagedContentPlan,
 } = require('./lib/attendance-report-managed-content-drift.cjs')
@@ -8675,6 +8678,63 @@ function mapShiftRow(row) {
 // and for the reference-writer assignability guard. Lazy singleton: the factory deps
 // (HttpError, resolveShiftTiming, mapShiftRow, ...) are module-scope definitions that
 // must exist before first use; routes only call this at request time.
+const attendanceCalc14SourceReader = createAttendanceCalc14SourceReader({
+  HttpError, port:() => attendanceW4SegmentCalculationPortRef, pluginQueryAdapter,
+  mapShiftRow, mapHolidayRow, buildAttendanceGroupFixedScheduleProducerKey,
+  resolveAttributionTailMinutes:stored => {
+    const raw=typeof stored==='string' ? JSON.parse(stored) : stored ?? {}
+    const value=normalizeWorkDateAttributionSetting(raw.workDateAttribution ?? raw.work_date_attribution)
+    return clampAttributionTailMinutes(value.postShiftTailMinutes,DEFAULT_ATTRIBUTION_TAIL_MINUTES)
+  },
+  deriveFixedScheduleEffectiveness:attendanceGroupFixedScheduleEffectivenessServiceLib.deriveAttendanceGroupFixedScheduleEffectiveness,
+})
+
+const attendanceCalc14CapabilityReader = createAttendanceCalc14CapabilityReader({
+  HttpError,
+  resolveGroupArm: (trx, orgId) => {
+    if (typeof attendanceW4SegmentCalculationPortRef?.resolveAttendanceW7GroupArmSelectionV1 !== 'function') {
+      throw new HttpError(503, 'ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE', 'ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE')
+    }
+    return attendanceW4SegmentCalculationPortRef.resolveAttendanceW7GroupArmSelectionV1({ query: pluginQueryAdapter(trx) }, orgId)
+  },
+})
+
+const attendanceCalc14ImportPolicy = createAttendanceCalc14ImportPolicy({
+  HttpError,sourceReader:attendanceCalc14SourceReader,
+})
+
+let attendanceCalc14SourceHistory = null
+function getAttendanceCalc14SourceHistory() {
+  if (!attendanceCalc14SourceHistory) {
+    attendanceCalc14SourceHistory = createAttendanceCalc14SourceHistory({
+      HttpError, toWorkDate,
+      assertOrdinaryBusinessEffectiveDate:(value,today) => {
+        const validate=attendanceW4SegmentCalculationPortRef?.assertAttendanceCalc14OrdinaryBusinessEffectiveDateV1
+        if (typeof validate!=='function') throw new HttpError(503,'ATTENDANCE_CALC14_SOURCE_HISTORY_UNAVAILABLE','ATTENDANCE_CALC14_SOURCE_HISTORY_UNAVAILABLE')
+        try { return validate(value,today) }
+        catch (error) {
+          if (['ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED','ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID','ATTENDANCE_CALC14_HISTORICAL_AUTHORIZATION_REQUIRED'].includes(error?.code)) {
+            throw new HttpError(error.status,error.code,error.code)
+          }
+          throw error
+        }
+      },
+      loadDefaultRule:async (trx,orgId) => {
+        const rows = await trx.query('SELECT timezone FROM attendance_rules WHERE org_id=$1 AND is_default=true FOR SHARE',[orgId])
+        if (rows.length !== 1) throw new HttpError(422,'ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE','ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE')
+        return rows[0]
+      },
+      resolveGroupArm: async (trx, orgId) => {
+        if (typeof attendanceW4SegmentCalculationPortRef?.resolveAttendanceW7GroupArmSelectionV1 !== 'function') {
+          return { selectsGroupArm: false }
+        }
+        return attendanceW4SegmentCalculationPortRef.resolveAttendanceW7GroupArmSelectionV1({ query: pluginQueryAdapter(trx) }, orgId)
+      },
+    })
+  }
+  return attendanceCalc14SourceHistory
+}
+
 let attendanceShiftService = null
 async function prepareAttendanceTimezoneSourceChange(trx,input) {
   if (!attendanceTimezoneRuntime) {
@@ -8689,7 +8749,13 @@ async function prepareAttendanceTimezoneSourceChange(trx,input) {
     }
   }
   const verify = await guard(() => attendanceTimezoneRuntime.prepareSourceChange(trx,input))
-  return async () => guard(verify)
+  const capture = await getAttendanceCalc14SourceHistory().prepare(trx, {
+    ...input, actorId: input.sourceActorId ?? input.updatedBy,
+  })
+  return async () => {
+    await capture()
+    return guard(verify)
+  }
 }
 
 async function assertAttendanceTimezoneManage(trx,{orgId,actorId}) {
@@ -8730,7 +8796,7 @@ let attendanceGroupFixedScheduleConfigService = null
 function getAttendanceGroupFixedScheduleConfigService() {
   if (!attendanceGroupFixedScheduleConfigService) {
     attendanceGroupFixedScheduleConfigService = attendanceGroupFixedScheduleConfigServiceLib
-      .createAttendanceGroupFixedScheduleConfigService({ HttpError })
+      .createAttendanceGroupFixedScheduleConfigService({ HttpError, prepareSourceChange: prepareAttendanceTimezoneSourceChange })
   }
   return attendanceGroupFixedScheduleConfigService
 }
@@ -11687,7 +11753,7 @@ function respondAttendanceGroupFixedScheduleTransactionAbort(res, error) {
 }
 
 async function applyAttendanceGroupFixedSchedule(db, input) {
-  return withAttendanceTimezoneSourceChange(db,{orgId:input.orgId},async () => {
+  return withAttendanceTimezoneSourceChange(db,{orgId:input.orgId,businessEffectiveDate:input.businessEffectiveDate,sourceActorId:input.updatedBy},async () => {
   // FSER-3 (#4709): consume the desired config inside this transaction. Validation of
   // group/shift/date/targets and the config row lock (or first-create insert) happen
   // here, BEFORE any per-user target lock taken by the plan builder below; a failed
@@ -11753,7 +11819,7 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
 }
 
 async function rebuildAttendanceGroupFixedSchedule(db, input) {
-  return withAttendanceTimezoneSourceChange(db,{orgId:input.orgId},async () => {
+  return withAttendanceTimezoneSourceChange(db,{orgId:input.orgId,businessEffectiveDate:input.businessEffectiveDate,sourceActorId:input.updatedBy},async () => {
   // FSER-3 (#4709): same config-consumption contract as apply — the config row is
   // locked (or atomically first-created) before any target lock, and the reloaded row
   // is the only authoritative source of the materialized values.
@@ -11827,6 +11893,7 @@ async function rebuildAttendanceGroupFixedSchedule(db, input) {
 }
 
 async function clearAttendanceGroupFixedScheduleManagedRows(db, input) {
+  return withAttendanceTimezoneSourceChange(db,{orgId:input.orgId,businessEffectiveDate:input.businessEffectiveDate},async () => {
   const activeManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
   await acquireAttendanceScheduleAssignmentLocks(db, input.orgId, activeManagedRows.map(row => row.user_id))
   const lockedManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
@@ -11848,6 +11915,7 @@ async function clearAttendanceGroupFixedScheduleManagedRows(db, input) {
       cleared: true,
     },
   }
+  })
 }
 
 function respondAttendanceScheduleAssignmentConflict(res, conflict) {
@@ -13503,7 +13571,7 @@ function applyEngineOverrides(metrics, engineResult) {
   const base = {
     workMinutes: metrics.workMinutes,
     overtimeMinutes: metrics.overtimeMinutes,
-    requiredMinutes: metrics.requiredMinutes,
+    ...(metrics.requiredMinutes === undefined ? {} : { requiredMinutes: metrics.requiredMinutes }),
   }
   const overrides = {}
   const nextMetrics = { ...metrics }
@@ -16005,6 +16073,12 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
     : []
   if (!userId || dates.length === 0) return []
+
+  const coreTrx = { query: pluginQueryAdapter(db) }
+  const arm = await attendanceW4SegmentCalculationPortRef?.resolveAttendanceW7GroupArmSelectionV1?.(coreTrx,targetOrg)
+  if (arm?.selectsGroupArm === true) {
+    return attendanceCalc14SourceReader.loadPublishedCandidates(db,{orgId:targetOrg,userId,workDates:dates,explicitShiftId})
+  }
 
   if (lockScheduleFacts) {
     await acquireAttendanceScheduleAssignmentReadLock(db, targetOrg, userId)
@@ -26070,6 +26144,8 @@ module.exports = {
     const authorizedRequestTimezoneSubjects = new WeakMap()
     attendanceTimezoneRuntime = createAttendanceTimezoneRuntime({
       HttpError,
+      readCalc14Sources:(trx,input) => attendanceCalc14SourceReader.readIfGroup(trx,input),
+      prepareCalc14SourceChange:(trx,input) => getAttendanceCalc14SourceHistory().prepare(trx,{...input,actorId:input.sourceActorId}),
       authorizeRequestTarget: async (trx,{orgId,userId}) => {
         const authorization = authorizedRequestTimezoneSubjects.get(trx)
         if (!authorization || authorization.orgId !== orgId || authorization.userId !== userId) {
@@ -27580,6 +27656,7 @@ module.exports = {
       workingDays: z.array(z.number().int().min(0).max(6)).optional(),
       flexPolicy: shiftFlexPolicySchema.optional(),
       orgId: z.string().optional(),
+      businessEffectiveDate: z.string().optional(),
     }).strict()
     const shiftUpdateSchema = shiftCreateSchema.partial()
 
@@ -29360,8 +29437,11 @@ module.exports = {
 	        }
 	      }
 
+      const calc14ImportHistory = prepareOnly && (await attendanceW4SegmentCalculationPort
+        ?.resolveAttendanceW7GroupArmSelectionV1?.({ query: pluginQueryAdapter(transactionClient ?? db) },orgId))?.selectsGroupArm === true
+
 	      let ruleSetConfig = null
-	      if (payload.ruleSetId) {
+	      if (payload.ruleSetId && !calc14ImportHistory) {
 	        const rows = await db.query(
 	          'SELECT config FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
 	          [payload.ruleSetId, orgId]
@@ -29445,9 +29525,9 @@ module.exports = {
 	        engine: importEngine,
 	      })
 
-	      const baseRule = await loadDefaultRule(db, orgId)
-	      const settings = await getSettings(db)
-	      const groupRuleSetMap = payload.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
+	      const baseRule = calc14ImportHistory ? null : await loadDefaultRule(db, orgId)
+	      const settings = calc14ImportHistory ? null : await getSettings(db)
+	      const groupRuleSetMap = calc14ImportHistory || payload.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
 	      const groupWarnings = []
 	      if (groupNames.size && !groupSync?.autoCreate) {
 	        const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
@@ -29466,7 +29546,7 @@ module.exports = {
 	      }
 	      const engineCache = new Map()
 	      let payloadEngine = null
-	      if (payload.engine) {
+	      if (payload.engine && !calc14ImportHistory) {
 	        try {
 	          payloadEngine = createRuleEngine({ config: payload.engine, logger })
 	        } catch (error) {
@@ -30036,42 +30116,60 @@ module.exports = {
 	            }
 	          }
 
-	          let activeRuleSetId = payload.ruleSetId ?? null
-	          let activeRuleSetConfig = ruleSetConfig
-	          if (!activeRuleSetId && groupRuleSetMap.size) {
-	            if (groupKey && groupRuleSetMap.has(groupKey)) {
-	              activeRuleSetId = groupRuleSetMap.get(groupKey)
-	            }
-	          }
-	          if (!activeRuleSetConfig && activeRuleSetId) {
-	            if (ruleSetConfigCache.has(activeRuleSetId)) {
-	              activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
-	            } else {
-	              activeRuleSetConfig = await loadRuleSetConfigById(db, orgId, activeRuleSetId)
-	              ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
-	            }
-	          }
+	          const retainedImportPolicy = calc14ImportHistory
+            ? await attendanceCalc14ImportPolicy.load(trx,{orgId,userId:rowUserId,workDate,payload}) : null
+          let activeRuleSetId = retainedImportPolicy ? retainedImportPolicy.ruleSetId : payload.ruleSetId ?? null
+          let activeRuleSetConfig = retainedImportPolicy ? retainedImportPolicy.config : ruleSetConfig
+          let activeRuleSetCacheKey = retainedImportPolicy?.cacheKey ?? activeRuleSetId
+          if (retainedImportPolicy && activeRuleSetId) {
+            if (ruleSetConfigCache.has(activeRuleSetCacheKey)) activeRuleSetConfig=ruleSetConfigCache.get(activeRuleSetCacheKey)
+            else ruleSetConfigCache.set(activeRuleSetCacheKey,activeRuleSetConfig)
+          }
+          if (!retainedImportPolicy && !activeRuleSetId && groupRuleSetMap.size) {
+            if (groupKey && groupRuleSetMap.has(groupKey)) activeRuleSetId=groupRuleSetMap.get(groupKey)
+          }
+          if (!retainedImportPolicy) activeRuleSetCacheKey=activeRuleSetId
+          if (!retainedImportPolicy && !activeRuleSetConfig && activeRuleSetId) {
+            if (ruleSetConfigCache.has(activeRuleSetId)) activeRuleSetConfig=ruleSetConfigCache.get(activeRuleSetId)
+            else {
+              activeRuleSetConfig=await loadRuleSetConfigById(db,orgId,activeRuleSetId)
+              ruleSetConfigCache.set(activeRuleSetId,activeRuleSetConfig)
+            }
+          }
+          const rowBaseRule=retainedImportPolicy ? mapRuleRow(retainedImportPolicy.sources.rule) : baseRule
+          const storedSettings=retainedImportPolicy?.sources.rule.calc14_settings
+          const rowSettings=retainedImportPolicy ? normalizeSettings(typeof storedSettings==='string'
+            ? JSON.parse(storedSettings) : storedSettings ?? {}) : settings
 
-	          const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
+          if (retainedImportPolicy && activeRuleSetConfig!==null && !ruleSetConfigSchema.safeParse(activeRuleSetConfig).success) {
+            throw new HttpError(422,'ATTENDANCE_CALC14_RULE_SET_SOURCE_INVALID','ATTENDANCE_CALC14_RULE_SET_SOURCE_INVALID')
+          }
+          const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
 	          const ruleOverride = override
-	            ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-	            : baseRule
+	            ? { ...rowBaseRule, ...override, workingDays: override.workingDays ?? rowBaseRule.workingDays }
+	            : rowBaseRule
 
 	          let engine = payloadEngine
 	          if (!engine && activeRuleSetConfig?.engine) {
-	            if (activeRuleSetId && engineCache.has(activeRuleSetId)) {
-	              engine = engineCache.get(activeRuleSetId)
+	            if (activeRuleSetId && engineCache.has(activeRuleSetCacheKey)) {
+	              engine = engineCache.get(activeRuleSetCacheKey)
 	            } else {
 	              try {
 	                engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
-	                if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
+	                if (activeRuleSetId) engineCache.set(activeRuleSetCacheKey, engine)
 	              } catch (error) {
-	                logger.warn('Attendance rule engine config invalid (rule set)', error)
+	                if (retainedImportPolicy) throw new HttpError(422,'ATTENDANCE_CALC14_RULE_SET_SOURCE_INVALID','ATTENDANCE_CALC14_RULE_SET_SOURCE_INVALID')
+                logger.warn('Attendance rule engine config invalid (rule set)', error)
 	              }
 	            }
 	          }
 
-	          const context = resolveWorkContextFromPrefetch({
+	          const context = retainedImportPolicy ? await resolveWorkContext({
+            db:trx,orgId,userId:rowUserId,workDate,defaultRule:ruleOverride,
+            publishedProfile:{rule:retainedImportPolicy.candidate.rule,source:'shift',assignmentId:retainedImportPolicy.candidate.assignmentId},
+            holidayPrefetched:true,holidayOverride:retainedImportPolicy.candidate.calc14Holiday,
+            calendarOverrides:[],strictSources:true,referenceSegments:await resolveReferenceSegmentsPostureForWrite(trx,orgId),
+          }) : resolveWorkContextFromPrefetch({
 	            orgId,
 	            userId: rowUserId,
 	            workDate,
@@ -30085,7 +30183,11 @@ module.exports = {
 	            defaultRule: ruleOverride,
 	          })
 
-	          const mapped = applyFieldMappings(row.fields ?? {}, mapping)
+	          const rowMapping=retainedImportPolicy && payload.ruleSetId
+            ? payload.mapping?.columns ?? payload.mapping?.fields ?? (profileMapping.length ? profileMapping : undefined)
+              ?? activeRuleSetConfig?.mappings?.columns ?? activeRuleSetConfig?.mappings?.fields ?? [] : mapping
+
+          const mapped = applyFieldMappings(row.fields ?? {}, rowMapping)
 	          const valueFor = (key) => {
 	            if (mapped[key]?.value !== undefined) return mapped[key].value
 	            if (row.fields?.[key] !== undefined) return row.fields[key]
@@ -30229,7 +30331,7 @@ module.exports = {
 	          }
 	          const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
 	          const holidayPolicyResult = applyHolidayPolicy({
-	            settings,
+	            settings:rowSettings,
 	            holiday: context.holiday,
 	            holidayMeta,
 	            metrics: policyBaseMetrics,
@@ -30251,7 +30353,7 @@ module.exports = {
 	            },
 	            fieldValues,
 	            metrics: holidayPolicyResult.metrics,
-	            options: { skipRules: resolvePolicySkipRules(settings) },
+	            options: { skipRules: resolvePolicySkipRules(rowSettings) },
 	          })
 	          const effective = policyResult.metrics
 	          let engineResult = null
@@ -30279,7 +30381,7 @@ module.exports = {
 	                holiday_name: holidayMeta.name ?? undefined,
 	                holiday_day_index: holidayMeta.dayIndex ?? undefined,
 	                holiday_first_day: holidayMeta.isFirstDay,
-	                holiday_policy_enabled: Boolean(settings?.holidayPolicy?.firstDayEnabled),
+	                holiday_policy_enabled: Boolean(rowSettings?.holidayPolicy?.firstDayEnabled),
 	                overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
 	                actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
 	              },
@@ -30472,9 +30574,9 @@ module.exports = {
 	                  : null,
 	              })).context
 	            }
-	            const ruleVersion = activeRuleSetId
+	            const ruleVersion = retainedImportPolicy?.ruleVersion ?? (activeRuleSetId
 	              ? `rule-set:${activeRuleSetId}`
-	              : 'org-default-rule'
+	              : 'org-default-rule')
 	            const engineVersion = engineResult ? 'attendance-rule-engine@1' : null
 	            const appliedPolicyRules = Array.isArray(policyResult?.appliedRules)
 	              ? policyResult.appliedRules
@@ -41249,7 +41351,7 @@ module.exports = {
           // check and the write. Multi-segment sequence members fail closed with a
           // typed 422 and zero writes while segment calculation is OFF.
           const rows = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
               shiftRefs: payload.shiftSequence,
@@ -41350,7 +41452,7 @@ module.exports = {
           // shift lock protocol; multi-segment sequence members fail closed with a
           // typed 422 and zero writes while segment calculation is OFF.
           const rows = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
               shiftRefs: payload.shiftSequence,
@@ -41447,7 +41549,7 @@ module.exports = {
         }
 
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             'DELETE FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2 RETURNING id',
             [ruleId, orgId]
           )))
@@ -41617,7 +41719,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -41768,7 +41870,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -41895,7 +41997,7 @@ module.exports = {
           })
           if (!access) return
 
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             'DELETE FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2 AND publish_status = $3 RETURNING id',
             [assignmentId, orgId, 'draft']
           )))
@@ -41973,7 +42075,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -42132,7 +42234,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -42269,7 +42371,7 @@ module.exports = {
           })
           if (!access) return
 
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             `DELETE FROM attendance_rotation_assignments
              WHERE id = $1 AND org_id = $2
                AND COALESCE(publish_status, 'published') = 'published'
@@ -42313,8 +42415,10 @@ module.exports = {
           if (!routeActorAccess) return
           const orgId = routeActorAccess.orgId
           const rule = await loadDefaultRule(db, orgId)
-          res.json({ ok: true, data: rule })
+          const data = await attendanceCalc14CapabilityReader.decorateOrgData(db, { orgId, data: rule })
+          res.json({ ok: true, data })
         } catch (error) {
+          if (error instanceof HttpError) { res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } }); return }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -42392,7 +42496,7 @@ module.exports = {
             await lockAttendanceTimezoneOrg(pluginQueryAdapter(trx),orgId)
             await assertAttendanceTimezoneManage(trx,{orgId,actorId:actorAccess.userId})
             const verifyTripChange = await prepareAttendanceTimezoneSourceChange(trx,{
-              orgId,userIds:null,mutation:{kind:'default_rule_create',timezone:parsed.data.timezone},
+              orgId,userIds:null,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:actorAccess.userId,mutation:{kind:'default_rule_create',timezone:parsed.data.timezone},
             })
             await trx.query('UPDATE attendance_rules SET is_default = false WHERE is_default = true AND org_id = $1', [orgId])
 
@@ -42799,6 +42903,7 @@ module.exports = {
 
         try {
           const ruleSet = await db.transaction(async (trx) => {
+            const verify = await prepareAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:actorAccess.userId})
             if (payload.isDefault) {
               await trx.query('UPDATE attendance_rule_sets SET is_default = false WHERE org_id = $1', [orgId])
             }
@@ -42818,6 +42923,7 @@ module.exports = {
                 payload.isDefault,
               ]
             )
+            await verify()
             return rows[0]
           })
 
@@ -42825,6 +42931,7 @@ module.exports = {
           emitEvent('attendance.ruleSet.created', { orgId, ruleSetId: mapped.id })
           res.status(201).json({ ok: true, data: mapped })
         } catch (error) {
+          if (error instanceof HttpError) { res.status(error.status).json({ok:false,error:{code:error.code}}); return }
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Rule set already exists' } })
             return
@@ -42894,6 +43001,7 @@ module.exports = {
           }
 
           const updated = await db.transaction(async (trx) => {
+            const verify = await prepareAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:actorAccess.userId})
             if (payload.isDefault) {
               await trx.query('UPDATE attendance_rule_sets SET is_default = false WHERE org_id = $1', [orgId])
             }
@@ -42919,6 +43027,7 @@ module.exports = {
                 payload.isDefault,
               ]
             )
+            await verify()
             return rows[0]
           })
 
@@ -42926,6 +43035,7 @@ module.exports = {
           emitEvent('attendance.ruleSet.updated', { orgId, ruleSetId: mapped.id })
           res.json({ ok: true, data: mapped })
         } catch (error) {
+          if (error instanceof HttpError) { res.status(error.status).json({ok:false,error:{code:error.code}}); return }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -42950,10 +43060,12 @@ module.exports = {
         }
 
         try {
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{
+            orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:actorAccess.userId,
+          },() => trx.query(
             'DELETE FROM attendance_rule_sets WHERE id = $1 AND org_id = $2 RETURNING id',
             [ruleSetId, orgId]
-          )
+          )))
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
             return
@@ -42961,6 +43073,7 @@ module.exports = {
           emitEvent('attendance.ruleSet.deleted', { orgId, ruleSetId })
           res.json({ ok: true, data: { id: ruleSetId } })
         } catch (error) {
+          if (error instanceof HttpError) { res.status(error.status).json({ok:false,error:{code:error.code}}); return }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -46668,6 +46781,7 @@ module.exports = {
         startDate: z.string().min(1),
         endDate: z.string().min(1),
         orgId: z.string().optional(),
+        businessEffectiveDate: z.string().optional(),
         expectedConfigRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
       }).strict()
       const parsed = schema.safeParse(req.body ?? {})
@@ -46712,6 +46826,7 @@ module.exports = {
           endDate,
           updatedBy: access.userId,
           expectedConfigRevision: parsed.data.expectedConfigRevision,
+          businessEffectiveDate: parsed.data.businessEffectiveDate,
         }))
         res.json({ ok: true, data: config })
       } catch (error) {
@@ -46917,10 +47032,11 @@ module.exports = {
               [orgId, pageSize, offset]
             )
 
+          const items = await attendanceCalc14CapabilityReader.decorateItems(db, { orgId, items: rows.map(mapAttendanceGroupRow) })
           res.json({
             ok: true,
             data: {
-              items: rows.map(mapAttendanceGroupRow),
+              items,
               total,
               page,
               pageSize,
@@ -46928,6 +47044,7 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (error instanceof HttpError) { res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } }); return }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -47051,7 +47168,7 @@ module.exports = {
         const description = parsed.data.description?.trim() || null
 
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,mutation:{kind:'empty_group_create'}},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req),mutation:{kind:'empty_group_create'}},async () => trx.query(
             `INSERT INTO attendance_groups (org_id, name, code, timezone, rule_set_id, description, attendance_type, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
              RETURNING *`,
@@ -47153,7 +47270,7 @@ module.exports = {
         const description = parsed.data.description?.trim() || null
 
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             `UPDATE attendance_groups
              SET name = $3,
                  code = $4,
@@ -47203,7 +47320,7 @@ module.exports = {
           return
         }
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             'DELETE FROM attendance_groups WHERE id = $1 AND org_id = $2 RETURNING id',
             [groupId, orgId]
           )))
@@ -47308,7 +47425,7 @@ module.exports = {
         try {
           const created = []
           await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx, { orgId }, async () => {
+            return withAttendanceTimezoneSourceChange(trx, { orgId, businessEffectiveDate:req.body?.businessEffectiveDate, sourceActorId:getAuthenticatedUserId(req) }, async () => {
               // All-or-nothing: reject the whole batch before any INSERT when any id is not an
               // active member of this org. A throw rolls the transaction back.
               const acceptedUserIds = await assertActiveOrgMemberUserIds(trx, orgId, userIds)
@@ -47360,7 +47477,7 @@ module.exports = {
         }
         const userId = req.params.userId
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             'DELETE FROM attendance_group_members WHERE org_id = $1 AND group_id = $2 AND user_id = $3 RETURNING id',
             [orgId, groupId, userId]
           )))
@@ -47681,7 +47798,11 @@ module.exports = {
             getEffectiveness: (trx, input) => getAttendanceGroupFixedScheduleEffectivenessService().getEffectiveness(trx, input),
             resolveReferenceSegments: resolveReferenceSegmentsPostureForWrite,
           })
-          const editor = await db.transaction(trx => service.getEditor(trx, { orgId: actorAccess.orgId, groupId, shiftId }))
+          const editor = await db.transaction(async trx => {
+            const result = await service.getEditor(trx, { orgId: actorAccess.orgId, groupId, shiftId })
+            const required = await attendanceCalc14CapabilityReader.requirementForOrg(trx, actorAccess.orgId)
+            return required ? { ...result, capabilities: { ...result.capabilities, businessEffectiveDateRequired: true } } : result
+          })
           res.json({ ok: true, data: editor })
         } catch (error) {
           if (error instanceof HttpError) {
@@ -47809,6 +47930,7 @@ module.exports = {
           startDate: z.string().min(1),
           endDate: z.string().min(1),
           orgId: z.string().optional(),
+          businessEffectiveDate: z.string().optional(),
           expectedConfigRevision: z.number().int().min(1).optional(),
         }).strict()
 
@@ -47857,6 +47979,7 @@ module.exports = {
             startDate,
             endDate,
             expectedConfigRevision: parsed.data.expectedConfigRevision,
+            businessEffectiveDate: parsed.data.businessEffectiveDate,
             updatedBy: access.userId,
           }))
           for (const assignment of result.data.created) {
@@ -47888,6 +48011,7 @@ module.exports = {
           startDate: z.string().min(1),
           endDate: z.string().min(1),
           orgId: z.string().optional(),
+          businessEffectiveDate: z.string().optional(),
           expectedConfigRevision: z.number().int().min(1).optional(),
         }).strict()
 
@@ -47936,6 +48060,7 @@ module.exports = {
             startDate,
             endDate,
             expectedConfigRevision: parsed.data.expectedConfigRevision,
+            businessEffectiveDate: parsed.data.businessEffectiveDate,
             updatedBy: access.userId,
           }))
           for (const assignment of result.data.created) {
@@ -47970,6 +48095,7 @@ module.exports = {
           startDate: z.string().min(1),
           endDate: z.string().min(1),
           orgId: z.string().optional(),
+          businessEffectiveDate: z.string().optional(),
         }).strict()
 
         const parsed = schema.safeParse(req.body ?? {})
@@ -48016,12 +48142,14 @@ module.exports = {
             shiftId,
             startDate,
             endDate,
+            businessEffectiveDate: parsed.data.businessEffectiveDate,
           }))
           for (const assignment of result.data.deactivated) {
             emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
           }
           res.json({ ok: true, data: result.data })
         } catch (error) {
+          if (error instanceof HttpError) { res.status(error.status).json({ok:false,error:{code:error.code}}); return }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -49175,8 +49303,10 @@ module.exports = {
         try {
           // W3: parent-first pagination, then one batched segment hydration for the page.
           const data = await getAttendanceShiftService().listShifts(db, { orgId, page, pageSize, offset })
-          res.json({ ok: true, data })
+          const items = await attendanceCalc14CapabilityReader.decorateItems(db, { orgId, items: data.items })
+          res.json({ ok: true, data: items === data.items ? data : { ...data, items } })
         } catch (error) {
+          if (error instanceof HttpError) { res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } }); return }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -49241,7 +49371,7 @@ module.exports = {
           // W3: one canonical writer — segments (validated) or a synthesized segment 0
           // from the legacy envelope are persisted together with the shift row in one
           // transaction; the legacy envelope is always derived from the segments.
-          const shift = await getAttendanceShiftService().createShift(db, { orgId, input: parsed.data })
+          const shift = await getAttendanceShiftService().createShift(db, { orgId, input: parsed.data, actorId:actorAccess.userId })
           emitEvent('attendance.shift.created', { orgId, shiftId: shift.id })
           res.status(201).json({ ok: true, data: shift })
         } catch (error) {
@@ -49286,7 +49416,7 @@ module.exports = {
           // re-derives the envelope; legacy start/end fields update the envelope and
           // segment 0 together (rejected on multi-segment shifts); a metadata-only
           // PUT preserves the persisted segments and envelope.
-          const shift = await getAttendanceShiftService().updateShift(db, { orgId, shiftId, patch: parsed.data })
+          const shift = await getAttendanceShiftService().updateShift(db, { orgId, shiftId, patch: parsed.data, actorId:actorAccess.userId })
           emitEvent('attendance.shift.updated', { orgId, shiftId: shift.id })
           res.json({ ok: true, data: shift })
         } catch (error) {
@@ -49322,7 +49452,7 @@ module.exports = {
           // and pending/published dispatch targets. Historical evidence rows
           // (rejected swaps, cancelled dispatches, auto-write candidates) never block
           // and remain stored.
-          const result = await getAttendanceShiftService().deleteShift(db, { orgId, shiftId })
+          const result = await getAttendanceShiftService().deleteShift(db, { orgId, shiftId, businessEffectiveDate:req.body?.businessEffectiveDate, actorId:actorAccess.userId })
           emitEvent('attendance.shift.deleted', { orgId, shiftId })
           res.json({ ok: true, data: result })
         } catch (error) {
@@ -49735,7 +49865,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes when a multi-segment shift is
             // referenced while authoritative segment calculation is OFF for the org.
@@ -49931,7 +50061,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
             await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
@@ -50061,7 +50191,7 @@ module.exports = {
           })
           if (!access) return
 
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             'DELETE FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2 AND publish_status = $3 RETURNING id',
             [assignmentId, orgId, 'draft']
           )))
@@ -50157,7 +50287,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
             await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
@@ -50344,7 +50474,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
             await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
@@ -50489,7 +50619,7 @@ module.exports = {
 
           if (isPublishedTemporaryAssignment) {
             const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
               await acquireAttendanceScheduleAssignmentLock(trx, orgId, existing.user_id)
               const rows = await trx.query(
                 `UPDATE attendance_shift_assignments
@@ -50516,7 +50646,7 @@ module.exports = {
             return
           }
 
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => trx.query(
             `DELETE FROM attendance_shift_assignments
              WHERE id = $1 AND org_id = $2
                AND COALESCE(publish_status, 'published') = 'published'
@@ -50552,6 +50682,7 @@ module.exports = {
     )
 
     const schedulePublicationSchema = z.object({
+      businessEffectiveDate: z.string().optional(),
       assignmentIds: z.array(z.string().min(1)).optional(),
       rotationAssignmentIds: z.array(z.string().min(1)).optional(),
       preflightOnly: z.boolean().optional(),
@@ -50731,7 +50862,7 @@ module.exports = {
 
           const initialSnapshots = new Map(initialRows.map(row => [`${row.kind}:${row.id}`, attendanceSchedulePublishSnapshot(row)]))
           const result = await db.transaction(async (trx) => {
-            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req)},async () => {
             await acquireAttendanceScheduleAssignmentLocks(
               trx,
               orgId,
@@ -51658,7 +51789,7 @@ module.exports = {
 
         try {
           const payload = resolveHolidayWritePayload(parsed.data)
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,userIds:null,actorId:actorAccess.userId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req),userIds:null,actorId:actorAccess.userId},async () => trx.query(
             `INSERT INTO attendance_holidays
              (id, org_id, holiday_date, name, is_working_day, origin)
              VALUES ($1, $2, $3, $4, $5, 'manual')
@@ -51713,7 +51844,7 @@ module.exports = {
         }
 
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,userIds:null,actorId:actorAccess.userId},async () => {
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req),userIds:null,actorId:actorAccess.userId},async () => {
           const existingRows = await trx.query(
             'SELECT id, org_id, holiday_date, name, is_working_day, origin FROM attendance_holidays WHERE id = $1 AND org_id = $2 FOR UPDATE',
             [holidayId, orgId]
@@ -51773,7 +51904,7 @@ module.exports = {
         }
 
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,userIds:null,actorId:actorAccess.userId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:getAuthenticatedUserId(req),userIds:null,actorId:actorAccess.userId},async () => trx.query(
             'DELETE FROM attendance_holidays WHERE id = $1 AND org_id = $2 RETURNING id',
             [holidayId, orgId]
           )))

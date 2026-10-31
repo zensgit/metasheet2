@@ -43,7 +43,7 @@ import { randomUUID } from 'crypto'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
-import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
+import { captureAttendanceW7SyntheticSourceHistoryV1, seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import type { MetaSheetServer } from '../../src/index'
 import {
   createAttendanceLiveScheduledBoundaryV1,
@@ -287,10 +287,9 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
         scheduled.buildW4ShadowFrozenContextV1(trx, args),
       // THE REAL SEAM — not a stub. Deps mirror the production wrapper in
       // `plugins/plugin-attendance/index.cjs` (`issueW4FrozenContextViaW7SeamV1`).
-      // `loadOrgRuleFacts` reproduces the production wrapper's DEFAULT_RULE
-      // fallback for an org with no attendance-rule row (these fixture orgs
-      // seed none) — the same 30/60 thresholds the legacy builder freezes for
-      // rule-less orgs, asserted by the context-parity leg rather than assumed.
+      // The synthetic org rule retains the same DEFAULT_RULE scalars that this
+      // fixture previously obtained through the fallback. Context parity still
+      // checks the served legacy and retained group inputs against each other.
       issueFrozenContext: (pluginTrx: { query: (s: string, p?: unknown[]) => Promise<unknown[]> }, args: Record<string, unknown>) => {
         const coreTrx = {
           query: async (sqlText: string, params?: unknown[]) => ({
@@ -508,6 +507,35 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
     await insertRolloutRow(degradedOrg, 'shadow')
     await setW7Posture(degradedOrg, 'group_shadow')
 
+    // Trusted synthetic evidence at the declared scheduled/live business date.
+    // Only W7 comparison orgs get retained inputs; the OFF baseline stays unchanged.
+    for (const [orgId, groupId, shiftId, userIds] of [
+      [shadowOrg, shadowGroupId, shadowShift, [groupUser, punchShadowUser, gapUser]],
+      [authOrg, authGroupId, authShift, [authUser, punchAuthUser]],
+      [wedgeOrg, wedgeGroupId, wedgeShift, [wedgeUser]],
+      [degradedOrg, degradedGroupId, degradedShift, [degradedUser]],
+    ] as const) {
+      const legacyTrx = { query: async (text: string, values?: unknown[]) => (await pool.query(text, values)).rows }
+      const legacyInput = { orgId, userId: userIds[0], shiftId, workDate: WORK_DATE, timezone: TZ, isWorkday: true, holidayKind: null }
+      const legacyBefore = await scheduled.buildW4ShadowFrozenContextV1(legacyTrx, legacyInput)
+      expect(legacyBefore, 'the prior legacy input must produce a context').not.toBeNull()
+      // Materialize the existing code-default rule, not a cross-org fallback row.
+      await pool.query(
+        `INSERT INTO attendance_rules
+           (org_id, name, timezone, timezone_version, work_start_time, work_end_time,
+            late_grace_minutes, early_grace_minutes, rounding_minutes, working_days,
+            severe_late_threshold_minutes, absence_late_threshold_minutes, is_default)
+         VALUES ($1, 'W7-2 retained default fixture', 'UTC', 1, '09:00', '18:00',
+                 10, 10, 5, '[1,2,3,4,5]'::jsonb, 30, 60, true)`,
+        [orgId],
+      )
+      await captureAttendanceW7SyntheticSourceHistoryV1(pool, {
+        orgId, businessEffectiveDate: WORK_DATE, groupIds: [groupId], userIds,
+      })
+      expect(await scheduled.buildW4ShadowFrozenContextV1(legacyTrx, legacyInput),
+        'retaining the rule must not change the served legacy context').toEqual(legacyBefore)
+    }
+
     // ---- the three baseline PRODUCING runs, one per org ----
     const boundary = makeBoundary()
     await boundary.executeScheduledRun(scheduledInput(shadowOrg, [groupUser, gapUser]))
@@ -537,6 +565,7 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
       'attendance_groups',
       'attendance_shift_segments',
       'attendance_shifts',
+      'attendance_rules',
       'attendance_calculation_rollout_state',
     ]) {
       await pool?.query(`DELETE FROM ${table} WHERE org_id = ANY($1::text[])`, [orgs]).catch(() => undefined)

@@ -7,7 +7,7 @@ const { createAttendanceTimezoneContextLoader } = require('./attendance-timezone
 const { buildCalendarTimezoneDay, calendarCandidateKey } = require('./attendance-timezone-calendar-day.cjs')
 
 function createAttendanceTimezoneRuntime({
-  HttpError, loadPublishedCandidates, resolveLocalWallTime, validateIanaTimezone,
+  HttpError, loadPublishedCandidates, resolveLocalWallTime, validateIanaTimezone, readCalc14Sources, prepareCalc14SourceChange,
   addDaysToDateKey, normalizeTimeString, readApprovedTrips, mapRuleRow, mapHolidayRow, resolveRuleContext: resolveBaseRuleContext, authorizeRequestTarget, prepareRuleContextBatch, loadShiftById, toWorkDate, resolveOvernightFlag,
   loadAttributionTail, loadApprovedOvertime, resolveScheduledCandidate, acquireRuntimeLocks, serverNow, lockOrgPolicy, prepareTripSourceChange, loadCalendarOverrides, selectCalendarCandidates, readCalculationDefinition, validateFrozenContext, validateFrozenAttribution,
 }) {
@@ -55,7 +55,7 @@ function createAttendanceTimezoneRuntime({
       requestTargetFacts.delete(scopedTrx)
     }
   }
-  function loaderFor(trx, { excludeTripRequestId, policyProjection } = {}) {
+  function loaderFor(trx, { excludeTripRequestId, policyProjection, sourceCache } = {}) {
     const query = queryFor(trx)
     const policyStore = createAttendanceTimezonePolicyStore({
       query, transaction: work => work(query), authorizeManage: async () => false,
@@ -81,6 +81,13 @@ function createAttendanceTimezoneRuntime({
     }
     return createAttendanceTimezoneContextLoader({
       query, policyStore:sourceStore,
+      readCalc14Sources:readCalc14Sources && (async input => {
+        if (!sourceCache) return readCalc14Sources(trx,input)
+        const key = JSON.stringify([input.orgId,input.userId,input.workDate])
+        if (!sourceCache.has(key)) sourceCache.set(key,await readCalc14Sources(trx,input))
+        return sourceCache.get(key)
+      }),
+      useRetainedPolicy:policyProjection === undefined,
       readApprovedTrips: readApprovedTrips && (async args => {
         const trips = await readApprovedTrips(args)
         return excludeTripRequestId === undefined ? trips
@@ -106,7 +113,7 @@ function createAttendanceTimezoneRuntime({
     if (result.posture !== 'unique') fail('ATTENDANCE_TIMEZONE_WALL_INVALID')
     return new Date(result.epochMs)
   }
-  async function readPublishedTimezoneWindows(trx, input, batch) {
+  async function readPublishedTimezoneWindows(trx, input, batch, loadContext) {
     const { orgId, userId, from, to, timezone, excludeTripRequestId, fullPeriod = false, targetWorkDates, includeRestDay = false, policyProjection } = input || {}
     if (!orgId || !userId || !(from instanceof Date) || !(to instanceof Date)
       || !Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || to <= from) {
@@ -118,7 +125,7 @@ function createAttendanceTimezoneRuntime({
         try { explicitZone = validateIanaTimezone(timezone) }
         catch (_) { fail('ATTENDANCE_TIMEZONE_INVALID_ZONE') }
       }
-      const load = loaderFor(trx, { excludeTripRequestId,policyProjection })
+      const load = loadContext ?? loaderFor(trx, { excludeTripRequestId,policyProjection })
       const contexts = new Map()
       const calendarOverrides = batch?.calendarOverrides ?? await loadCalendarOverrides(trx)
       let workDates = boundaryDates(from, to)
@@ -187,17 +194,18 @@ function createAttendanceTimezoneRuntime({
         if (!profile) fail('ATTENDANCE_TIMEZONE_INVALID_REFERENCE')
         const rule = { ...profile, timezone: zone }
         const sourceContext = candidate.sourceContext ?? await (batch?.resolveRuleContext ?? resolveRuleContext)({
-          db:trx,orgId,userId,workDate:candidate.workDate,defaultRule:mapRuleRow(defaultRows[0]),
+          db:trx,orgId,userId,workDate:candidate.workDate,defaultRule:mapRuleRow(candidate.calc14Sources?.rule ?? defaultRows[0]),
           timezoneContext:{...contexts.get(candidate.workDate),timezone:zone},calendarOverrides,strictSources:true,
           publishedProfile:{rule,source:candidate.source,assignmentId:candidate.assignmentId,rotationRuleId:candidate.rotationRuleId},
           ...(batch ? {holidayPrefetched:true,holidayOverride:batch.holidays.get(candidate.workDate) ?? null} : {}),
+          ...(candidate.calc14Sources ? {holidayPrefetched:true,holidayOverride:candidate.calc14Holiday} : {}),
         })
         const calculationDefinition = candidate.shiftId === null ? {
           kind:'rule',isWorkday:sourceContext.isWorkingDay === true,holidayKind:sourceContext.holiday?.kind ?? null,
           rule:canonicalRuleProfile(rule),
         } : await readCalculationDefinition(trx,{
           orgId,userId,workDate:candidate.workDate,shiftId:candidate.shiftId,timezone:zone,
-          isWorkday:sourceContext.isWorkingDay === true,holidayKind:sourceContext.holiday?.isWorkingDay === false ? 'holiday' : null,defaultRule:mapRuleRow(defaultRows[0]),
+          isWorkday:sourceContext.isWorkingDay === true,holidayKind:sourceContext.holiday?.isWorkingDay === false ? 'holiday' : null,defaultRule:mapRuleRow(candidate.calc14Sources?.rule ?? defaultRows[0]),
         })
         const relevantDates = new Set([from, to].flatMap(instant => {
           const localDate = toWorkDate(instant, zone)
@@ -335,7 +343,7 @@ function createAttendanceTimezoneRuntime({
           buildZonedDate: uniqueWallInstant, addDaysToDateKey,
         })
         const attributionWindow = buildAttributionWindow(absoluteWindow, {
-          attributionTailMinutes: tail, approvedOvertimeWindows: overtime, orgId, userId,
+          attributionTailMinutes: candidate.attributionTailMinutes ?? tail, approvedOvertimeWindows: overtime, orgId, userId,
           workDate: candidate.workDate, shiftId: candidate.shiftId,
         })
         return { ...candidate, absoluteWindow, attributionWindow }
@@ -375,9 +383,11 @@ function createAttendanceTimezoneRuntime({
           && candidate.assignmentId === resolution.fullWinner?.assignmentId) : null
       if (resolution.kind === 'resolved' && !selected) fail('ATTENDANCE_TIMEZONE_INVALID_REFERENCE')
       const publishedRule = resolution.kind === 'resolved'
-        ? { ...await loadShiftById(trx, orgId, resolution.shiftId), timezone } : null
+        ? { ...(selected?.rule ?? await loadShiftById(trx, orgId, resolution.shiftId)), timezone } : null
+      const retainedDefaultRule = selected?.calc14Sources ? mapRuleRow(selected.calc14Sources.rule) : defaultRule
       const baseContext = await resolveRuleContext({ db: trx, orgId, userId, workDate,
-        defaultRule, timezoneContext, calendarOverrides, strictSources:true,
+        defaultRule:retainedDefaultRule, timezoneContext, calendarOverrides, strictSources:true,
+        ...(selected?.calc14Sources ? {holidayPrefetched:true,holidayOverride:selected.calc14Holiday} : {}),
         ...(selected ? { publishedProfile: {
           rule:publishedRule,source:selected.source,assignmentId:selected.assignmentId,rotationRuleId:selected.rotationRuleId,
         } } : {}),
@@ -390,7 +400,7 @@ function createAttendanceTimezoneRuntime({
         isOvernight: rule.isOvernight === true, buildZonedDate: uniqueWallInstant, addDaysToDateKey,
       })
       const attributionWindow = selected?.attributionWindow ?? buildAttributionWindow(absoluteWindow, {
-        attributionTailMinutes: tail, approvedOvertimeWindows: overtime, orgId, userId,
+        attributionTailMinutes: selected?.attributionTailMinutes ?? tail, approvedOvertimeWindows: overtime, orgId, userId,
         workDate, shiftId: resolution.kind === 'resolved' ? resolution.shiftId : null,
       })
       if (!absoluteWindow || !attributionWindow) fail('ATTENDANCE_TIMEZONE_WINDOW_INVALID')
@@ -400,7 +410,7 @@ function createAttendanceTimezoneRuntime({
       } : await readCalculationDefinition(trx,{
         orgId,userId,workDate,shiftId:resolution.shiftId,timezone,
         isWorkday:baseContext.isWorkingDay,holidayKind:baseContext.holiday?.isWorkingDay === false ? 'holiday' : null,
-        defaultRule,
+        defaultRule:retainedDefaultRule,
       })
       const identity = {
         workDate, shiftId: resolution.kind === 'resolved' ? resolution.shiftId : null,
@@ -602,7 +612,11 @@ function createAttendanceTimezoneRuntime({
     const store = createAttendanceTimezonePolicyStore({
       query:q,transaction:work=>work(q),authorizeManage:async()=>false,
     })
-    const policy = batch?.policy ?? await store.readPolicy({orgId})
+    // This cache belongs only to this read (or its batch), never a source-change
+    // transaction across its before/after verification. OFF caches null sources.
+    const load = batch?.loadTimezoneContext ?? loaderFor(trx,{policyProjection,sourceCache:new Map()})
+    const policy = batch ? batch.policiesByWorkDate.get(workDate)
+      : await load.readEffectivePolicy({orgId,userId,workDate})
     if (!batch) await store.readDefault({orgId})
     const from = new Date(midnight.getTime()-2*86400_000)
     const to = new Date(midnight.getTime()+3*86400_000)
@@ -628,7 +642,7 @@ function createAttendanceTimezoneRuntime({
       const windows = await readPublishedTimezoneWindows(trx,{
         orgId,userId,from:probe,to:new Date(start+1),targetWorkDates:[workDate],includeRestDay:true,
         ...(policyProjection === undefined ? {} : {policyProjection}),
-      },batch)
+      },batch,load)
       for (const window of windows) {
         if (window.startAt.getTime()<end && start<window.endAt.getTime()) {
           contexts.set(window.contextFingerprint,window)
@@ -723,7 +737,7 @@ function createAttendanceTimezoneRuntime({
       for (const row of priorRows) priorDates.set(row.work_date,[...(priorDates.get(row.work_date) ?? []),row])
       const freshDates = dates.filter(date=>!companions.has(date) && !legacy.has(date))
       // Pre-companion dates are decided per date, after the fresh reading exists.
-      const batch = {members,companions,legacy,priorDates,candidates:[],cuts:[],policy:null,holidays:new Map(),calendarOverrides:[]}
+      const batch = {members,companions,legacy,priorDates,candidates:[],cuts:[],policiesByWorkDate:new Map(),loadTimezoneContext:null,holidays:new Map(),calendarOverrides:[]}
       let batchTrx = trx
       if (freshDates.length) {
         const fixedReads = new Map()
@@ -760,7 +774,10 @@ function createAttendanceTimezoneRuntime({
         }
         const q = queryFor(batchTrx)
         const store = createAttendanceTimezonePolicyStore({query:q,transaction:work=>work(q),authorizeManage:async()=>false})
-        batch.policy = await store.readPolicy({orgId})
+        batch.loadTimezoneContext = loaderFor(batchTrx,{sourceCache:new Map()})
+        for (const workDate of freshDates) {
+          batch.policiesByWorkDate.set(workDate,await batch.loadTimezoneContext.readEffectivePolicy({orgId,userId,workDate}))
+        }
         await store.readDefault({orgId})
         batch.calendarOverrides = await loadCalendarOverrides(batchTrx)
         batch.candidates = await loadPublishedCandidates(batchTrx,{orgId,userId,workDates:freshDates,strictSources:true})
@@ -778,7 +795,7 @@ function createAttendanceTimezoneRuntime({
           }
           batch.holidays.set(row.holiday_date,mapHolidayRow(row))
         }
-        if (batch.policy.enabled) {
+        if ([...batch.policiesByWorkDate.values()].some(policy => policy.enabled)) {
           const from = new Date(addDaysToDateKey(freshDates[0],-2)+'T00:00:00.000Z')
           const to = new Date(addDaysToDateKey(freshDates[freshDates.length-1],3)+'T00:00:00.000Z')
           employees = await trx.query(`SELECT id,timezone,version,effective_from,effective_to
@@ -1013,7 +1030,7 @@ function createAttendanceTimezoneRuntime({
       fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
     }
   }
-  async function prepareTimezoneSourceChange({ query, orgId, userIds = null, now, mutation }) {
+  async function prepareTimezoneSourceChange({ query, orgId, userIds = null, now, mutation, businessEffectiveDate, sourceActorId }) {
     const trx = { query: async (text, values) => {
       const result = await query(text, values)
       if (!result || !Array.isArray(result.rows)) fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
@@ -1027,7 +1044,9 @@ function createAttendanceTimezoneRuntime({
       }
     }
     const verify = await protectedSource(() => prepareSourceChange(trx,{orgId,userIds,mutation,...(now === undefined ? {} : {now})}))
-    return async () => protectedSource(verify)
+    const capture=prepareCalc14SourceChange
+      ? await protectedSource(() => prepareCalc14SourceChange(trx,{orgId,businessEffectiveDate,sourceActorId})) : async () => {}
+    return async () => protectedSource(async () => {await capture();await verify()})
   }
   const readFrozenTimezoneWindows = require('./attendance-timezone-frozen-windows.cjs').createAttendanceTimezoneFrozenWindowReader({ HttpError })
   return { readLegacyRepairRequestTarget, acceptScheduledIssued, acquireScheduledLocks, prepareScheduledContext, resolveScheduledMembers, scheduledFrameFor, prepareRelatedRecordContext, bindRelatedRecordContext, previewPolicyChange, readCalendarSourceFactsFor, requestTargetFactsFor, readRequestTimezoneContext, readTargetTimezoneContext, readTargetTimezoneContexts, prepareSourceChange, prepareTimezoneSourceChange, readPublishedTimezoneWindows, readFrozenTimezoneWindows, loaderFor, uniqueWallInstant, prepareLivePunch, frameFor, assertLiveTarget, bindLiveContext }

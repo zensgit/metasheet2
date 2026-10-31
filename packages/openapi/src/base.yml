@@ -1420,6 +1420,14 @@ components:
     AttendanceRule:
       type: object
       properties:
+        capabilities:
+          type: object
+          description: Advisory source-date metadata; existing capability properties are retained.
+          properties:
+            businessEffectiveDateRequired:
+              type: boolean
+              enum: [true]
+              description: Optional exact true for an active existing W7 state including suspended; omitted in OFF. Grants no permission.
         id:
           type: string
         orgId:
@@ -1467,6 +1475,14 @@ components:
     AttendanceGroup:
       type: object
       properties:
+        capabilities:
+          type: object
+          description: Advisory source-date metadata; existing capability properties are retained.
+          properties:
+            businessEffectiveDateRequired:
+              type: boolean
+              enum: [true]
+              description: Optional exact true for an active existing W7 state including suspended; omitted in OFF. Grants no permission.
         id:
           type: string
         orgId:
@@ -2841,6 +2857,10 @@ components:
         authoritative segment calculation is disabled by default; while disabled,
         multi-segment authoring is preview-only.
       properties:
+        businessEffectiveDateRequired:
+          type: boolean
+          enum: [true]
+          description: Optional exact true on list items for an active existing W7 state including suspended; omitted in OFF. Existing segmentCalculation metadata is retained; grants no permission.
         segmentCalculation:
           type: object
           properties:
@@ -8658,11 +8678,46 @@ components:
             - type: 'null'
         duplicate:
           type: boolean
+    AttendanceBusinessEffectiveDate:
+      type: string
+      format: date
+      pattern: '^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+      description: >-
+        Explicit valid calendar date (year 0001-9999), not an instant or recording timestamp.
+        OFF ignores this optional input. Existing non-OFF W7 source mutations require it only when
+        source facts actually change; omission is not a default date. Ordinary date must be at least the
+        current business day from the trusted default rule timezone. Past dates require a separately
+        authorized validated path; no such public endpoint is added by this schema. No-op save creates no version.
+    AttendanceFixedScheduleMaterialize:
+      type: object
+      additionalProperties: false
+      required: [shiftId, startDate, endDate]
+      properties:
+        shiftId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        orgId: { type: string, description: Must equal the authenticated organization when supplied. }
+        businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
+        expectedConfigRevision:
+          type: integer
+          minimum: 1
+          description: Existing saved revision OCC; omitted retains existing matching-candidate handling.
+    AttendanceFixedScheduleClear:
+      type: object
+      additionalProperties: false
+      required: [shiftId, startDate, endDate]
+      properties:
+        shiftId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        orgId: { type: string, description: Must equal the authenticated organization when supplied. }
+        businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
     AttendanceFixedScheduleConfigSave:
       type: object
       additionalProperties: false
       required: [shiftId, startDate, endDate]
       properties:
+        businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
         shiftId: { type: string, format: uuid }
         startDate: { type: string, format: date }
         endDate: { type: string, format: date }
@@ -8702,6 +8757,13 @@ components:
       additionalProperties: false
       required: [groupId, state, reasonCodes, desired, drift, referenceEligibility]
       properties:
+        capabilities:
+          type: object
+          additionalProperties: false
+          required: [businessEffectiveDateRequired]
+          description: Present only for the existing effective non-OFF W7 arm; absent preserves the OFF editor shape. This hint grants no write permission.
+          properties:
+            businessEffectiveDateRequired: { type: boolean, enum: [true] }
         groupId: { type: string, format: uuid }
         state: { type: string, enum: [not_configured, configuration_changed, pending_apply, effective] }
         reasonCodes:

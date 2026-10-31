@@ -3,7 +3,7 @@
 const CONFIG_CHANGED_ERROR_CODE = 'ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED'
 const CONFIG_CHANGED_ERROR_MESSAGE = 'Fixed schedule desired configuration changed; reload the configuration and retry'
 
-function createAttendanceGroupFixedScheduleConfigService({ HttpError }) {
+function createAttendanceGroupFixedScheduleConfigService({ HttpError, prepareSourceChange }) {
   function formatDateOnly(value) {
     if (value instanceof Date) {
       return [value.getFullYear(), value.getMonth() + 1, value.getDate()]
@@ -30,7 +30,7 @@ function createAttendanceGroupFixedScheduleConfigService({ HttpError }) {
     }
   }
 
-  async function upsertConfig(trx, input) {
+  async function upsertConfigSource(trx, input) {
     const groupRows = await trx.query(
       'SELECT id FROM attendance_groups WHERE id = $1 AND org_id = $2 LIMIT 1',
       [input.groupId, input.orgId],
@@ -112,6 +112,14 @@ function createAttendanceGroupFixedScheduleConfigService({ HttpError }) {
       [input.orgId, input.groupId, input.shiftId, input.startDate, input.endDate, input.updatedBy],
     )
     return mapConfigRow(rows[0])
+  }
+
+  async function upsertConfig(trx, input) {
+    const verify = typeof prepareSourceChange === 'function'
+      ? await prepareSourceChange(trx, input) : async () => {}
+    const config = await upsertConfigSource(trx, input)
+    await verify()
+    return config
   }
 
   function throwConfigChanged() {

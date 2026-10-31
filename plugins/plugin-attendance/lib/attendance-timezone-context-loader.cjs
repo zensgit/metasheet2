@@ -46,7 +46,7 @@ function groupRevision(value) {
  * implemented, not a claim that a future trip database is empty. A failed
  * reader never becomes absence; trip authority is never supplied in load input.
  */
-function createAttendanceTimezoneContextLoader({ query, policyStore, readApprovedTrips }) {
+function createAttendanceTimezoneContextLoader({ query, policyStore, readApprovedTrips, readCalc14Sources, useRetainedPolicy = true }) {
   if (typeof query !== 'function'
     || !policyStore
     || !['readPolicy', 'readDefault', 'readEmployeeOverride'].every(key => typeof policyStore[key] === 'function')
@@ -58,19 +58,27 @@ function createAttendanceTimezoneContextLoader({ query, policyStore, readApprove
     if (!result || !Array.isArray(result.rows)) fail('SOURCE_UNAVAILABLE', 503)
     return result.rows
   }
-  return async function loadAttendanceTimezoneContext(input) {
+  async function effectivePolicy(input, retained) {
+    const policy = retained && useRetainedPolicy ? retained.rule.calc14_timezone_policy : await policyStore.readPolicy({ orgId: input.orgId })
+    if (!policy || typeof policy.enabled !== 'boolean') fail('INVALID_ENABLED')
+    if (!Number.isSafeInteger(policy.version) || policy.version < (policy.enabled ? 1 : 0)) {
+      fail('INVALID_REVISION')
+    }
+    return policy
+  }
+  const loadAttendanceTimezoneContext = async function (input) {
     const { orgId, userId, occurredAt, workDate } = input || {}
     if (!identifier(orgId) || !identifier(userId)) fail('INVALID_REFERENCE')
     if (!instant(occurredAt)) fail('INVALID_INSTANT')
     if (!dateKey(workDate)) fail('INVALID_WORK_DATE')
     const at = new Date(occurredAt.getTime())
     try {
-      const policy = await policyStore.readPolicy({ orgId })
-      if (!policy || typeof policy.enabled !== 'boolean') fail('INVALID_ENABLED')
-      if (!Number.isSafeInteger(policy.version) || policy.version < (policy.enabled ? 1 : 0)) {
-        fail('INVALID_REVISION')
-      }
-      const systemDefault = await policyStore.readDefault({ orgId })
+      const retained = readCalc14Sources ? await readCalc14Sources(input) : null
+      const policy = await effectivePolicy(input, retained)
+      const systemDefault = retained ? {
+        orgId,referenceId:String(retained.rule.__calc14_version),version:retained.rule.__calc14_version,
+        timezone:retained.rule.timezone,
+      } : await policyStore.readDefault({ orgId })
       const base = { orgId, userId, systemDefault }
       const defaultResult = select({ ...base, enabled: false })
       function context(result, membership) {
@@ -95,12 +103,24 @@ function createAttendanceTimezoneContextLoader({ query, policyStore, readApprove
       // W1 membership is a closed DATE interval, unlike employee/trip UTC [from,to).
       // Keep membership id/bounds separately: the group counter does not govern
       // membership timeline mutations.
-      const memberships = await rows(
-        'SELECT id, org_id, user_id, group_id, effective_from::text AS effective_from, effective_to::text AS effective_to '
-          + 'FROM attendance_calculation_group_memberships WHERE org_id = $1 AND user_id = $2 '
-          + 'AND effective_from <= $3::date AND (effective_to IS NULL OR effective_to >= $3::date)',
-        [orgId, userId, workDate],
-      )
+      const retainedMemberships = retained?.userPublication?.memberships
+      if (retained && (!Array.isArray(retainedMemberships) || retainedMemberships.some(row =>
+        !row || !identifier(row.id) || !identifier(row.group_id) || !dateKey(row.effective_from)
+        || (row.effective_to !== null && (!dateKey(row.effective_to) || row.effective_to < row.effective_from))))) {
+        fail('INVALID_REFERENCE')
+      }
+      // Retained user-publication rows are already scoped by the core reader to
+      // this org/user. Current W1 deletion must not erase the historical interval.
+      const memberships = retained ? retainedMemberships
+        .filter(row => row.effective_from <= workDate && (row.effective_to === null || row.effective_to >= workDate))
+        .map(row => ({ id: row.id, org_id: orgId, user_id: userId, group_id: row.group_id,
+          effective_from: row.effective_from, effective_to: row.effective_to }))
+        : await rows(
+          'SELECT id, org_id, user_id, group_id, effective_from::text AS effective_from, effective_to::text AS effective_to '
+            + 'FROM attendance_calculation_group_memberships WHERE org_id = $1 AND user_id = $2 '
+            + 'AND effective_from <= $3::date AND (effective_to IS NULL OR effective_to >= $3::date)',
+          [orgId, userId, workDate],
+        )
       if (memberships.length > 1) fail('MULTIPLE_CALCULATION_GROUPS', 409)
       let membership = null
       const groups = []
@@ -111,12 +131,13 @@ function createAttendanceTimezoneContextLoader({ query, policyStore, readApprove
           || (row.effective_to !== null && (!dateKey(row.effective_to) || row.effective_to < workDate))) {
           fail('INVALID_REFERENCE')
         }
-        const groupRows = await rows('SELECT id, org_id, timezone FROM attendance_groups WHERE id = $1 AND org_id = $2',
+        const groupRows = retained ? [retained.group] : await rows('SELECT id, org_id, timezone FROM attendance_groups WHERE id = $1 AND org_id = $2',
           [row.group_id, orgId])
         if (groupRows.length !== 1) fail('GROUP_REQUIRED')
         const group = groupRows[0]
         if (group.id !== row.group_id || group.org_id !== orgId) fail('INVALID_REFERENCE')
-        const revisions = await rows('SELECT revision FROM attendance_group_effect_revisions WHERE org_id = $1', [orgId])
+        const revisions = retained ? [{revision:retained.group.__calc14_version}]
+          : await rows('SELECT revision FROM attendance_group_effect_revisions WHERE org_id = $1', [orgId])
         if (revisions.length !== 1) fail('GROUP_REVISION_REQUIRED')
         const version = groupRevision(revisions[0].revision)
         groups.push({ orgId, userId, referenceId: group.id, version, timezone: group.timezone })
@@ -144,6 +165,16 @@ function createAttendanceTimezoneContextLoader({ query, policyStore, readApprove
       fail('SOURCE_UNAVAILABLE', 503)
     }
   }
+  // Internal window-preload seam: use the same dated policy and validation as
+  // the instant selector before deciding which optional intervals to fetch.
+  loadAttendanceTimezoneContext.readEffectivePolicy = async input => {
+    const { orgId, userId, workDate } = input || {}
+    if (!identifier(orgId) || !identifier(userId)) fail('INVALID_REFERENCE')
+    if (!dateKey(workDate)) fail('INVALID_WORK_DATE')
+    const retained = readCalc14Sources ? await readCalc14Sources(input) : null
+    return effectivePolicy(input, retained)
+  }
+  return loadAttendanceTimezoneContext
 }
 
 module.exports = { createAttendanceTimezoneContextLoader }

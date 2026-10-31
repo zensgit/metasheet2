@@ -1,3 +1,5 @@
+import { isAttendanceCalc14BusinessDateV1, assertAttendanceCalc14OrdinaryBusinessEffectiveDateV1 } from './attendance/attendance-calc14-source-write-context'
+import { readAttendanceCalc14GroupSourcesV1, readAttendanceCalc14UserPublicationV1 } from './attendance/attendance-calc14-source-history'
 /**
  * MetaSheet Backend Core
  * 后端核心服务器入口
@@ -3258,6 +3260,14 @@ export class MetaSheetServer {
                 // W7-1b — the ARM-SELECTION rule without issuance. The mirror's
                 // W7 disjunct and OD-W7-10's `currentProducer` both need to ask
                 // "group or legacy" WITHOUT minting a context as a side effect.
+                isAttendanceCalc14BusinessDateV1,
+                assertAttendanceCalc14OrdinaryBusinessEffectiveDateV1,
+                readAttendanceCalc14UserPublicationV1: (trx: unknown, input: {orgId:string;userId:string;workDate:string}) =>
+                  readAttendanceCalc14UserPublicationV1(trx as Parameters<typeof readAttendanceCalc14UserPublicationV1>[0],input),
+                readAttendanceCalc14GroupSourcesV1: (trx: unknown, input: {orgId: string; groupId: string; workDate: string}) =>
+                  readAttendanceCalc14GroupSourcesV1(
+                    trx as Parameters<typeof readAttendanceCalc14GroupSourcesV1>[0], input,
+                  ),
                 resolveAttendanceW7GroupArmSelectionV1: async (trx: unknown, orgId: string) => {
                   try {
                     return await resolveAttendanceW7GroupArmSelectionV1(
