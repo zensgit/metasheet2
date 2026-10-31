@@ -8697,6 +8697,92 @@ components:
         updatedBy: { type: string, nullable: true }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    AttendanceFixedScheduleEffectivenessState:
+      type: string
+      enum: [not_configured, configuration_changed, pending_apply, effective]
+      description: Canonical server-derived group state; clients do not derive a replacement state or map errors to one.
+    AttendanceFixedScheduleEffectivenessReasonCodes:
+      type: array
+      uniqueItems: true
+      description: >-
+        De-duplicated canonical server reasons, in the enum order below. Clients preserve this order.
+        EFFECTIVE may coexist with UNPUBLISHED_MANAGED_ROW when eligible coverage is complete.
+      items:
+        type: string
+        enum: [NO_DESIRED_CONFIG, NO_TARGET_MEMBERS, DIFFERENT_MANAGED_KEY_ACTIVE, TARGET_MEMBER_MISSING, NON_MEMBER_TARGET_ACTIVE, DUPLICATE_MATCHING_ASSIGNMENT, ASSIGNMENT_VALUE_MISMATCH, UNPUBLISHED_MANAGED_ROW, EFFECTIVE]
+    AttendanceFixedScheduleEffectivenessCoverage:
+      type: object
+      additionalProperties: false
+      required: [targetMembers, matchingMembers, missingMembers, nonMemberTargets, differentKeyRows]
+      properties:
+        targetMembers: { type: integer, minimum: 0 }
+        matchingMembers:
+          type: integer
+          minimum: 0
+          description: Members with at least one eligible exact-value desired-key row; duplicates are reported separately by reason code.
+        missingMembers: { type: integer, minimum: 0 }
+        nonMemberTargets:
+          type: integer
+          minimum: 0
+          description: Eligible desired-key rows targeting non-members, counted as rows.
+        differentKeyRows: { type: integer, minimum: 0 }
+    AttendanceFixedScheduleEffectivenessManagedSet:
+      type: object
+      additionalProperties: false
+      required: [shiftId, startDate, endDate, producerKey, rowCount]
+      properties:
+        shiftId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate:
+          type: string
+          format: date
+          nullable: true
+          description: Existing managed assignment end date; may be null for historical open-ended rows.
+        producerKey: { type: string }
+        rowCount: { type: integer, minimum: 1 }
+    AttendanceFixedScheduleEffectivenessDrift:
+      type: object
+      additionalProperties: false
+      required: [unconfiguredManagedRows, unpublishedManagedRows, managedSets]
+      properties:
+        unconfiguredManagedRows: { type: integer, minimum: 0 }
+        unpublishedManagedRows: { type: integer, minimum: 0 }
+        managedSets:
+          type: array
+          description: >-
+            Without desired configuration, all active managed rows are grouped; with desired
+            configuration, only eligible different-key rows are grouped. Each set retains the
+            existing exact-key clear identity and row count, without user identifiers.
+          items: { $ref: '#/components/schemas/AttendanceFixedScheduleEffectivenessManagedSet' }
+    AttendanceFixedScheduleEffectiveness:
+      type: object
+      additionalProperties: false
+      required: [groupId, state, reasonCodes, desired, coverage, drift, evaluatedAt]
+      properties:
+        groupId: { type: string, format: uuid }
+        state: { $ref: '#/components/schemas/AttendanceFixedScheduleEffectivenessState' }
+        reasonCodes: { $ref: '#/components/schemas/AttendanceFixedScheduleEffectivenessReasonCodes' }
+        desired: { $ref: '#/components/schemas/AttendanceFixedScheduleDesired' }
+        coverage: { $ref: '#/components/schemas/AttendanceFixedScheduleEffectivenessCoverage' }
+        drift: { $ref: '#/components/schemas/AttendanceFixedScheduleEffectivenessDrift' }
+        evaluatedAt: { type: string, format: date-time }
+    AttendanceFixedScheduleSelfEffectiveness:
+      type: object
+      additionalProperties: false
+      required: [groupId, state, reasonCodes, desired, applicability, evaluatedAt]
+      properties:
+        groupId: { type: string, format: uuid }
+        state: { $ref: '#/components/schemas/AttendanceFixedScheduleEffectivenessState' }
+        reasonCodes: { $ref: '#/components/schemas/AttendanceFixedScheduleEffectivenessReasonCodes' }
+        desired: { $ref: '#/components/schemas/AttendanceFixedScheduleDesired' }
+        applicability:
+          type: string
+          enum: [not_configured, matching, non_matching]
+          description: >-
+            not_configured when desired configuration is absent; matching only when the authenticated
+            subject has exactly one eligible managed row matching the desired producer key and
+            assignment values; non_matching otherwise. No user identifier or producer key is returned.
+        evaluatedAt: { type: string, format: date-time }
     AttendanceFixedScheduleEditor:
       type: object
       additionalProperties: false
