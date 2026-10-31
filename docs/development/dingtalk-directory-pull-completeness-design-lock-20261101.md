@@ -20,6 +20,9 @@ cursors keep the pull running.
 - If hasMore is true, nextCursor must be a non-negative safe integer not used in
   that department. Detect immediate repeats and longer cycles before fetching
   that invalid page's user details.
+- A user/get detail must resolve the requested user ID. Reject mismatches and
+  malformed ID/name types; retain the requested-ID fallback for omitted identity
+  and preserve optional profile/manager fields.
 - Cursor sets are per department. Do not require monotonic cursors. An explicitly
   final page may omit its cursor. Keep unique-user detail deduplication and
   multi-department membership merging.

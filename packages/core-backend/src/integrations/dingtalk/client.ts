@@ -704,10 +704,13 @@ export async function getDingTalkUserDetail(
     ? result.dept_id_list.map((item) => String(item ?? '').trim()).filter(Boolean)
     : []
 
-  const resolvedUserId = String(result.userid ?? result.userId ?? userId).trim()
-  const name = String(result.name ?? '').trim()
-  if (!resolvedUserId || !name) {
-    throw new Error('Failed to resolve DingTalk user detail')
+  const rawUserId = result.userid ?? result.userId ?? userId
+  const resolvedUserId = typeof rawUserId === 'string'
+    ? rawUserId.trim()
+    : typeof rawUserId === 'number' && Number.isSafeInteger(rawUserId) && rawUserId >= 0 ? String(rawUserId) : ''
+  const name = typeof result.name === 'string' ? result.name.trim() : ''
+  if (!resolvedUserId || resolvedUserId !== userId.trim() || !name) {
+    throw new DingTalkIncompleteResponseError('Failed to resolve DingTalk user detail', payload)
   }
 
   return {
