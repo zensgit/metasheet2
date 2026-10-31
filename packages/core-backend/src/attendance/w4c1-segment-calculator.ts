@@ -38,6 +38,7 @@
  * bounded approved overtime, clipped to that exact approved interval. There is
  * no first-in/last-out envelope arithmetic and no planned break ever counts.
  */
+import { normalizeAttendanceCorrectionTargetV1, type AttendanceCorrectionCellV1 } from './approved-correction-target-contract'
 import type {
   ApprovedAttendanceFactV1,
   AttendanceAttributionSnapshotV1,
@@ -625,6 +626,8 @@ interface ValidatedFacts {
   boundedOvertimeIntervals: IntervalMs[]
   supersededEvidenceRefs: Set<string>
   hasUnboundedMinutesFact: boolean
+  correctionChanges: Array<{ target: import('./approved-correction-target-contract').AttendanceCorrectionTargetV1;
+    occurredAt: string; adjustmentEvidenceRef: string }>
 }
 
 type FactsCheck =
@@ -673,6 +676,7 @@ function validateApprovedFacts(facts: unknown): FactsCheck {
   const boundedLeaveIntervals: IntervalMs[] = []
   const boundedOvertimeIntervals: IntervalMs[] = []
   const supersededEvidenceRefs = new Set<string>()
+  const correctionChanges: ValidatedFacts['correctionChanges'] = []
   let hasUnboundedMinutesFact = false
   const seen = new Set<string>()
   for (const item of facts) {
@@ -696,6 +700,29 @@ function validateApprovedFacts(facts: unknown): FactsCheck {
       if (!coverage) return { kind: 'invalid' }
       if (coverage.unbounded) hasUnboundedMinutesFact = true
       else if (coverage.bounded) boundedOvertimeIntervals.push(coverage.bounded)
+    } else if (kind === 'correction' && item.schemaVersion === 2) {
+      if (!hasExactKeys(item, [...FACT_BASE_KEYS, 'schemaVersion', 'changes'])
+        || !Array.isArray(item.changes) || item.changes.length < 1 || item.changes.length > 2) return { kind: 'invalid' }
+      const directions = new Set<string>()
+      for (const change of item.changes) {
+        if (!hasExactKeys(change, ['target', 'occurredAt', 'adjustmentEvidenceRef'])
+          || parseStrictInstantOrNull(change.occurredAt) === null
+          || !isNonEmptyString(change.adjustmentEvidenceRef)) return { kind: 'invalid' }
+        const direction = (change.target as { direction?: unknown } | null)?.direction
+        if (direction !== 'check_in' && direction !== 'check_out') return { kind: 'invalid' }
+        if (directions.has(direction)) return { kind: 'invalid' }
+        directions.add(direction)
+        try {
+          const target = normalizeAttendanceCorrectionTargetV1(change.target, direction)
+          if (target === null) return { kind: 'invalid' }
+          if (target.kind === 'replacement') {
+            if (supersededEvidenceRefs.has(target.evidenceRef)) return { kind: 'invalid' }
+            supersededEvidenceRefs.add(target.evidenceRef)
+          }
+          correctionChanges.push({ target, occurredAt: change.occurredAt as string,
+            adjustmentEvidenceRef: change.adjustmentEvidenceRef as string })
+        } catch { return { kind: 'invalid' } }
+      }
     } else if (kind === 'correction') {
       if (
         !hasExactKeys(item, [...FACT_BASE_KEYS, 'direction', 'occurredAt', 'supersededEvidenceRef'])
@@ -725,6 +752,7 @@ function validateApprovedFacts(facts: unknown): FactsCheck {
       boundedOvertimeIntervals,
       supersededEvidenceRefs,
       hasUnboundedMinutesFact,
+      correctionChanges,
     },
   }
 }
@@ -886,6 +914,35 @@ function cellIndexFor(cells: readonly DirectionCell[], epochMs: number): number 
   return null
 }
 
+/**
+ * Verified capture cells for exact correction selection. Reuses the calculator's
+ * closed input, timezone, ordering and frozen-window guards; never issues context.
+ */
+export function inspectAttendanceCorrectionCellsV1(
+  input: AttendanceSegmentCalculationInputV1,
+): readonly AttendanceCorrectionCellV1[] | null {
+  const baseline = calculateAttendanceSegmentsV1({ ...input, evidence: [], approvedFacts: [] })
+  if (baseline.outcome !== 'completed' || input.context === null) return null
+  const attribution = checkAttribution(input.attribution)
+  const evidence = validateEvidence(input.evidence)
+  const approved = validateApprovedFacts(input.approvedFacts)
+  if (attribution.kind !== 'resolved' || !evidence || approved.kind !== 'ok') return null
+  const anchors = resolveAnchors(input.context as FrozenAttendanceContextV1, attribution.windows)
+  if (anchors.kind !== 'ok') return null
+  const output: AttendanceCorrectionCellV1[] = []
+  for (const direction of ['check_in', 'check_out'] as const) {
+    const cells = buildDirectionCells(direction === 'check_in' ? anchors.starts : anchors.ends, attribution.windows.attribution)
+    const effective = evidence.timed.filter(item => item.direction === direction
+      && !approved.facts.supersededEvidenceRefs.has(item.ref))
+    if (effective.some(item => cellIndexFor(cells, item.occurredAtMs) === null)) return null
+    for (const cell of cells) output.push(Object.freeze({ ...cell, direction,
+      evidenceRefs: Object.freeze(effective.filter(item => cellIndexFor(cells, item.occurredAtMs) === cell.segmentIndex)
+        .map(item => item.ref)),
+    }))
+  }
+  return Object.freeze(output)
+}
+
 // ---------------------------------------------------------------------------
 // The calculator.
 // ---------------------------------------------------------------------------
@@ -956,6 +1013,29 @@ export function calculateAttendanceSegmentsV1(
   // Effective evidence: approved corrections supersede their named evidence
   // ref BEFORE window/matching checks (correcting an out-of-window punch must
   // not strand the day in review).
+  // v2 facts carry two independent directional changes under ONE request/approval
+  // identity. Their evidence and exact original reference must agree with frozen
+  // capture cells. Empty-boundary authority is checked at request/approval time
+  // against the pinned source, not reconstructed from subsequent corrections.
+  for (const change of facts.correctionChanges) {
+    const cells = buildDirectionCells(change.target.direction === 'check_in' ? starts : ends, windows.attribution)
+    const replacement = validatedEvidence.timed.find(item => item.ref === change.adjustmentEvidenceRef)
+    if (!replacement || replacement.kind !== 'approved_adjustment'
+      || replacement.direction !== change.target.direction
+      || replacement.occurredAtMs !== parseStrictInstantOrNull(change.occurredAt)
+      || cellIndexFor(cells, replacement.occurredAtMs) !== change.target.segmentIndex) {
+      return review('approved_fact_conflict')
+    }
+    if (change.target.kind === 'replacement') {
+      const originalRef = change.target.evidenceRef
+      const original = validatedEvidence.timed.find(item => item.ref === originalRef)
+      if (!original || original.direction !== change.target.direction
+        || original.ref === replacement.ref
+        || cellIndexFor(cells, original.occurredAtMs) !== change.target.segmentIndex) {
+        return review('approved_fact_conflict')
+      }
+    }
+  }
   const effective = validatedEvidence.timed.filter((item) => !facts.supersededEvidenceRefs.has(item.ref))
   const supersededPresent = validatedEvidence.timed.filter((item) =>
     facts.supersededEvidenceRefs.has(item.ref),

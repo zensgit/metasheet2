@@ -28,6 +28,15 @@ const permissionStep = {
   run: 'pnpm --filter @metasheet/core-backend exec vitest run \\\n  tests/unit/admin-mounts-write-gate-guard.test.ts \\\n  tests/unit/admin-directory-routes.test.ts \\\n  tests/unit/admin-directory-5xx-values-free.test.ts\n',
 }
 
+// Only these explicit attendance additions are removed before the frozen baseline comparison.
+const attendanceUnitStep = {
+  name: 'Run approved correction exact target contracts',
+  run: 'pnpm --filter @metasheet/core-backend exec vitest run \\\n  tests/unit/attendance-approved-correction-target-contract.test.ts \\\n  tests/unit/attendance-approved-correction-target-source.test.ts \\\n  tests/unit/attendance-approved-correction-plugin-contract.test.ts \\\n  tests/unit/attendance-approved-correction-write-admission.test.ts \\\n  tests/unit/attendance-approved-correction-authority-admission.test.ts \\\n  tests/unit/attendance-approved-correction-source-history.test.ts \\\n  tests/unit/attendance-approved-correction-group-v2.test.ts \\\n  tests/unit/attendance-approved-correction-async-input.test.ts \\\n  tests/unit/attendance-approved-correction-carry-execution.test.ts \\\n  --reporter=dot\n',
+}
+const attendanceDbLines = [
+  '  tests/integration/attendance-approved-correction-targets.db.test.ts \\',
+]
+
 function resultUpload(suite) {
   return {
     name: `Upload ${suite} test results`, if: 'always()', uses: 'actions/upload-artifact@v4',
@@ -63,6 +72,30 @@ function assertParallelWorkflow(doc) {
       if (suite !== 'unit' && step.name === 'Upload install log on failure') {
         assert.equal(step.with.name, `install-log-${nodeMatrix}-${suite}`)
         step.with.name = `install-log-${nodeMatrix}`
+      }
+    }
+    if (suite === 'unit') {
+      assert.equal(actual.filter(step => step.name === attendanceUnitStep.name).length, 1)
+      const index = actual.findIndex(step => step.name === attendanceUnitStep.name)
+      assert.equal(actual[index - 1]?.name, 'Run attendance shift segments W3 unit')
+      assert.equal(actual[index + 1]?.name, 'Run attendance W4C-4 calculation detail and diff contracts')
+      assert.deepEqual(actual.splice(index, 1), [attendanceUnitStep])
+    }
+    if (suite === 'attendance-db') {
+      const matches = actual.filter(step => step.id === 'attendance-real-db-integration')
+      assert.equal(matches.length, 1)
+      const step = matches[0]
+      // The frozen remainder pins these original neighbors to the first Vitest invocation.
+      const block = [
+        '  tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts \\',
+        '  tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \\',
+        ...attendanceDbLines,
+        '  tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \\',
+      ].join('\n') + '\n'
+      assert.equal(step.run.split('\n' + block).length, 2)
+      for (const line of attendanceDbLines) {
+        assert.equal(step.run.split('\n').filter(candidate => candidate === line).length, 1)
+        step.run = step.run.replace(line + '\n', '')
       }
     }
     assert.deepEqual(actual.map(digest), originals.map(step => step.sha256),
@@ -132,6 +165,58 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     const candidate = structuredClone(parseYamlDocument(workflow))
     mutate(candidate)
     assert.throws(() => assertParallelWorkflow(candidate))
+  }
+})
+
+test('explicit attendance additions reject removal, reordering, filtering and changed DB files', () => {
+  const doc = parseYamlDocument(workflow)
+  assertParallelWorkflow(doc)
+  const unitIndex = doc.jobs.unit.steps.findIndex(step => step.name === attendanceUnitStep.name)
+  const mutations = [
+    candidate => { candidate.jobs.unit.steps.splice(unitIndex, 1) },
+    candidate => {
+      const steps = candidate.jobs.unit.steps
+      const [step] = steps.splice(unitIndex, 1)
+      steps.splice(unitIndex + 1, 0, step)
+    },
+    candidate => { candidate.jobs.unit.steps[unitIndex].run += ' -t selected' },
+    candidate => { candidate.jobs.unit.steps[unitIndex].run += ' --passWithNoTests' },
+    candidate => { candidate.jobs.unit.steps[unitIndex].if = false },
+    candidate => { candidate.jobs.unit.steps[unitIndex]['continue-on-error'] = true },
+    candidate => { candidate.jobs.unit.steps.push(structuredClone(attendanceUnitStep)) },
+  ]
+  for (const mutate of mutations) {
+    const candidate = structuredClone(doc)
+    mutate(candidate)
+    assert.throws(() => assertParallelWorkflow(candidate))
+  }
+  for (const line of attendanceDbLines) {
+    for (const replacement of ['', line.replace('.db.test.ts', '.changed.db.test.ts') + '\n', line + '\n' + line + '\n']) {
+      const candidate = structuredClone(doc)
+      const step = candidate.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration')
+      step.run = step.run.replace(line + '\n', replacement)
+      assert.throws(() => assertParallelWorkflow(candidate))
+    }
+  }
+})
+
+test('attendance DB additions stay ordered in the original first Vitest invocation', () => {
+  const doc = parseYamlDocument(workflow)
+  assertParallelWorkflow(doc)
+  const originalRun = doc.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').run
+  const timezoneLine = '  tests/integration/attendance-timezone-policy-routes.db.test.ts \\\n'
+  assert.equal(originalRun.split(timezoneLine).length, 2)
+  for (const line of attendanceDbLines) {
+    const withoutLine = originalRun.replace(line + '\n', '')
+    for (const run of [
+      withoutLine.replace(timezoneLine, line + '\n' + timezoneLine),
+      withoutLine + line + '\n',
+    ]) {
+      const candidate = structuredClone(doc)
+      assert.notEqual(run, originalRun)
+      candidate.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').run = run
+      assert.throws(() => assertParallelWorkflow(candidate))
+    }
   }
 })
 

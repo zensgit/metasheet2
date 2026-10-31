@@ -990,6 +990,7 @@ async function classifyAttendanceRequestSnapshotDefectsV1(
         minutes: liveMetadataFields.minutes,
         leaveTypeCode: liveMetadataFields.leaveTypeCode,
         outdoorPunch: liveMetadataFields.outdoorPunch,
+        correctionTargets: liveMetadataFields.correctionTargets,
       })
       const liveFingerprint = computeAttendanceRequestPayloadFingerprintV1(livePayload)
       const storedFingerprint = String(snapshotRow.payloadFingerprint ?? '')

@@ -1823,6 +1823,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/correction-targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read exact correction candidates for the authenticated requester
+         * @description Self-only; attendance:read and matching authenticated subject are required. workDate is the only accepted query field. Organization comes from existing server-side membership authority. Only a successful legacy_projection_only result permits the legacy flow. Unsupported, stale or blocked canonical sources refuse; they never authorize fallback. display is read-only presentation.
+         */
+        get: {
+            parameters: {
+                query: {
+                    workDate: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Canonical exact candidates or explicit legacy projection posture */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceCorrectionTargetResultV1"];
+                        };
+                    };
+                };
+                /** @description ATTENDANCE_CORRECTION_TARGET_INVALID; malformed or extra query fields. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CORRECTION_TARGET_STALE or ATTENDANCE_CORRECTION_SOURCE_MISMATCH. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CORRECTION_SOURCE_UNSUPPORTED or existing organization-stamp refusal. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CORRECTION_POSTURE_BLOCKED or ATTENDANCE_CORRECTION_UNAVAILABLE. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/requests": {
         parameters: {
             query?: never;
@@ -1877,6 +1952,12 @@ export interface paths {
          *     The server resolves and freezes the target shift context; a client fingerprint is an optional
          *     optimistic concurrency check, never an authority to select a timezone.
          *     Existing sealed idempotent requests replay before fresh-input validation.
+         *     Explicit correctionTargets is supported only for missed_check_in, missed_check_out and time_correction.
+         *     Source identity, current evidence and empty-boundary eligibility are revalidated by the server;
+         *     client objects and metadata never grant authority. Send candidate.target only, without display.
+         *     Null on a requested side may resolve only a unique verified candidate; ambiguous selection returns 422.
+         *     Stale source returns 409 and requires refresh and a new explicit selection.
+         *     Inputs without correctionTargets retain their existing payload/version and legacy handling.
          */
         post: {
             parameters: {
@@ -1888,6 +1969,17 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        correctionTargets?: components["schemas"]["AttendanceCorrectionTargetsV1"];
+                        /**
+                         * Format: uuid
+                         * @description Stable UUID per explicit command; required for explicit correction targets, retained for retries.
+                         */
+                        operationId?: string;
+                        /**
+                         * Format: uuid
+                         * @description Compatibility alias for operationId.
+                         */
+                        operation_id?: string;
                         /**
                          * Format: date
                          * @description Work date in YYYY-MM-DD format.
@@ -1999,7 +2091,14 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
-                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                /** @description Existing request conflicts; ATTENDANCE_CORRECTION_TARGET_STALE, ATTENDANCE_CORRECTION_TARGET_NOT_EMPTY or ATTENDANCE_CORRECTION_SOURCE_MISMATCH. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Correction refusals include ATTENDANCE_CORRECTION_TARGET_SELECTION_REQUIRED, ATTENDANCE_CORRECTION_SOURCE_UNSUPPORTED, ATTENDANCE_CORRECTION_TARGET_MISMATCH and ATTENDANCE_CORRECTION_REQUEST_TYPE_INVALID. Malformed targets return 400 ATTENDANCE_CORRECTION_TARGET_INVALID; stale or nonempty targets return 409. All refusals are values-free: the response carries no org id, membership count, or user id. */
                 422: {
                     headers: {
                         [name: string]: unknown;
@@ -2008,7 +2107,7 @@ export interface paths {
                         "application/json": {
                             error: {
                                 /** @enum {string} */
-                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED" | "ATTENDANCE_CORRECTION_TARGET_SELECTION_REQUIRED" | "ATTENDANCE_CORRECTION_SOURCE_UNSUPPORTED" | "ATTENDANCE_CORRECTION_TARGET_MISMATCH" | "ATTENDANCE_CORRECTION_REQUEST_TYPE_INVALID";
                                 message: string;
                             };
                         };
@@ -2060,7 +2159,10 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
-        /** Update a pending attendance request */
+        /**
+         * Update a pending attendance request
+         * @description Explicit correctionTargets is supported only for missed_check_in, missed_check_out and time_correction. Source identity, current evidence and empty-boundary eligibility are revalidated by the server; client objects and metadata never grant authority. Send candidate.target only, without display. Null on a requested side may resolve only a unique verified candidate; ambiguous selection returns 422. Stale source returns 409 and requires refresh and a new explicit selection. Inputs without correctionTargets retain their existing payload/version and legacy handling.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -2073,6 +2175,25 @@ export interface paths {
             requestBody?: {
                 content: {
                     "application/json": {
+                        /** @description Displayed immutable request snapshot version; required with operationId on edit. */
+                        expectedSnapshotVersion?: number;
+                        /** @description Compatibility alias for expectedSnapshotVersion. */
+                        expected_snapshot_version?: number;
+                        /** @description Displayed immutable request snapshot fingerprint; required with operationId on edit. */
+                        expectedSnapshotFingerprint?: string;
+                        /** @description Compatibility alias for expectedSnapshotFingerprint. */
+                        expected_snapshot_fingerprint?: string;
+                        correctionTargets?: components["schemas"]["AttendanceCorrectionTargetsV1"];
+                        /**
+                         * Format: uuid
+                         * @description Stable UUID per explicit command; required for explicit correction targets, retained for retries.
+                         */
+                        operationId?: string;
+                        /**
+                         * Format: uuid
+                         * @description Compatibility alias for operationId.
+                         */
+                        operation_id?: string;
                         /** Format: date */
                         workDate?: string;
                         /** Format: date */
@@ -2125,7 +2246,7 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
-                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Correction refusals include ATTENDANCE_CORRECTION_TARGET_SELECTION_REQUIRED, ATTENDANCE_CORRECTION_SOURCE_UNSUPPORTED, ATTENDANCE_CORRECTION_TARGET_MISMATCH and ATTENDANCE_CORRECTION_REQUEST_TYPE_INVALID. Malformed targets return 400 ATTENDANCE_CORRECTION_TARGET_INVALID; stale or nonempty targets return 409. All refusals are values-free: the response carries no org id, membership count, or user id. */
                 422: {
                     headers: {
                         [name: string]: unknown;
@@ -2134,7 +2255,7 @@ export interface paths {
                         "application/json": {
                             error: {
                                 /** @enum {string} */
-                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED" | "ATTENDANCE_CORRECTION_TARGET_SELECTION_REQUIRED" | "ATTENDANCE_CORRECTION_SOURCE_UNSUPPORTED" | "ATTENDANCE_CORRECTION_TARGET_MISMATCH" | "ATTENDANCE_CORRECTION_REQUEST_TYPE_INVALID";
                                 message: string;
                             };
                         };
@@ -2192,7 +2313,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Approve attendance request */
+        /**
+         * Approve attendance request
+         * @description Targeted correction decisions use this attendance route with a stable operationId and the displayed decisionContext approval and request-snapshot OCC fields. The server rechecks organization, node assignment, immutable binding and target freshness in the existing transaction. Context is an OCC token, not permission. Missing correction context returns 400 ATTENDANCE_CORRECTION_DECISION_CONTEXT_REQUIRED; stale snapshot returns 409 ATTENDANCE_CORRECTION_SNAPSHOT_CHANGED. Legacy decisions retain existing handling.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -2202,11 +2326,29 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody: {
+            requestBody?: {
                 content: {
                     "application/json": {
-                        /** @description Required rejection note shown back to the requester. */
-                        comment: string;
+                        /**
+                         * Format: uuid
+                         * @description Stable command UUID retained for retry.
+                         */
+                        operationId?: string;
+                        /**
+                         * Format: uuid
+                         * @description Compatibility alias for operationId.
+                         */
+                        operation_id?: string;
+                        expectedApprovalVersion?: number;
+                        /** @description Compatibility alias for expectedApprovalVersion. */
+                        expected_approval_version?: number;
+                        expectedApprovalNode?: string;
+                        /** @description Compatibility alias for expectedApprovalNode. */
+                        expected_approval_node?: string;
+                        expectedSnapshotVersion?: number;
+                        expectedSnapshotFingerprint?: string;
+                        /** @description Optional approval note; omission or an empty string is accepted. */
+                        comment?: string;
                         metadata?: Record<string, never>;
                     };
                 };
@@ -2230,8 +2372,23 @@ export interface paths {
                         };
                     };
                 };
+                400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Existing approval/request conflicts; ATTENDANCE_CORRECTION_SNAPSHOT_CHANGED, ATTENDANCE_CORRECTION_TARGET_STALE or ATTENDANCE_CORRECTION_TARGET_NOT_EMPTY. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CORRECTION_SOURCE_UNSUPPORTED or ATTENDANCE_CORRECTION_TARGET_MISMATCH; final approval refuses without terminal writes. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2249,7 +2406,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reject attendance request */
+        /**
+         * Reject attendance request
+         * @description Targeted correction decisions use this attendance route with a stable operationId and the displayed decisionContext approval and request-snapshot OCC fields. The server rechecks organization, node assignment, immutable binding and target freshness in the existing transaction. Context is an OCC token, not permission. Missing correction context returns 400 ATTENDANCE_CORRECTION_DECISION_CONTEXT_REQUIRED; stale snapshot returns 409 ATTENDANCE_CORRECTION_SNAPSHOT_CHANGED. Legacy decisions retain existing handling.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -2259,10 +2419,29 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: {
+            requestBody: {
                 content: {
                     "application/json": {
-                        comment?: string;
+                        /**
+                         * Format: uuid
+                         * @description Stable command UUID retained for retry.
+                         */
+                        operationId?: string;
+                        /**
+                         * Format: uuid
+                         * @description Compatibility alias for operationId.
+                         */
+                        operation_id?: string;
+                        expectedApprovalVersion?: number;
+                        /** @description Compatibility alias for expectedApprovalVersion. */
+                        expected_approval_version?: number;
+                        expectedApprovalNode?: string;
+                        /** @description Compatibility alias for expectedApprovalNode. */
+                        expected_approval_node?: string;
+                        expectedSnapshotVersion?: number;
+                        expectedSnapshotFingerprint?: string;
+                        /** @description Required nonblank rejection note shown back to the requester. */
+                        comment: string;
                         metadata?: Record<string, never>;
                     };
                 };
@@ -2289,6 +2468,13 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Existing approval/request conflicts; ATTENDANCE_CORRECTION_SNAPSHOT_CHANGED, ATTENDANCE_CORRECTION_TARGET_STALE or ATTENDANCE_CORRECTION_TARGET_NOT_EMPTY. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -19343,6 +19529,87 @@ export interface components {
             critical: boolean;
             count: number;
         };
+        /** @description Immutable source token; server revalidates identity, fingerprints and current evidence. This token grants no authority. */
+        AttendanceCorrectionSourceV1: {
+            /** Format: uuid */
+            recordId: string;
+            /** Format: uuid */
+            calculationId: string;
+            calculationVersion: number;
+            semanticInputFingerprint: string;
+        };
+        /** @description Closed target. Replacement names exact evidence; insertion names a server-verified empty boundary and forbids evidenceRef. Neither accepts display. */
+        AttendanceCorrectionTargetV1: {
+            /** @enum {string} */
+            kind: "replacement";
+            segmentIndex: number;
+            /** @enum {string} */
+            direction: "check_in" | "check_out";
+            evidenceRef: string;
+        } | {
+            /** @enum {string} */
+            kind: "insertion";
+            segmentIndex: number;
+            /** @enum {string} */
+            direction: "check_in" | "check_out";
+        };
+        /** @description Explicit targeting only. Null requested side is resolved only for a unique verified candidate; ambiguous selection returns 422. Unrequested sides must be null. */
+        AttendanceCorrectionTargetsV1: {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            source: components["schemas"]["AttendanceCorrectionSourceV1"];
+            checkIn: (components["schemas"]["AttendanceCorrectionTargetV1"] & {
+                /** @enum {string} */
+                direction?: "check_in";
+            }) | (never | null);
+            checkOut: (components["schemas"]["AttendanceCorrectionTargetV1"] & {
+                /** @enum {string} */
+                direction?: "check_out";
+            }) | (never | null);
+        };
+        AttendanceCorrectionTargetCandidateV1: {
+            target: components["schemas"]["AttendanceCorrectionTargetV1"];
+            /** @description Presentation only; submit target alone. Server does not trust displayed text or client metadata. */
+            readonly display: {
+                timezone: string;
+                /** Format: date-time */
+                expectedStartAt: string;
+                /** Format: date-time */
+                expectedEndAt: string;
+                /** Format: date-time */
+                originalOccurredAt: string | null;
+                /** @enum {string} */
+                source: "attendance_event" | "outdoor_approval" | "import" | "correction" | "empty_boundary";
+            };
+        };
+        AttendanceCorrectionTargetResultV1: {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            /** @enum {string} */
+            posture: "canonical";
+            source: components["schemas"]["AttendanceCorrectionSourceV1"];
+            candidates: components["schemas"]["AttendanceCorrectionTargetCandidateV1"][];
+        } | {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            /** @enum {string} */
+            posture: "legacy_projection_only";
+            /** @enum {object|null} */
+            source: never | null;
+            candidates: components["schemas"]["AttendanceCorrectionTargetCandidateV1"][];
+        };
+        /** @description Emitted only for already-authorized matching pending v2 rows. Copy OCC fields from the displayed row; existing transaction authorization remains authoritative. */
+        AttendanceCorrectionDecisionContextV1: {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            /** Format: uuid */
+            requestId: string;
+            approvalInstanceId: string;
+            expectedApprovalVersion: number;
+            expectedApprovalNode: string;
+            expectedSnapshotVersion: number;
+            expectedSnapshotFingerprint: string;
+        };
         AttendanceRequest: {
             id?: string;
             user_id?: string;
@@ -19362,7 +19629,11 @@ export interface components {
             resolved_by?: string | null;
             /** Format: date-time */
             resolved_at?: string | null;
-            metadata?: Record<string, never>;
+            /** @description Server-produced metadata; never a client permission grant. Legacy metadata properties are preserved. */
+            metadata?: {
+                correctionTargets?: components["schemas"]["AttendanceCorrectionTargetsV1"];
+            };
+            decisionContext?: components["schemas"]["AttendanceCorrectionDecisionContextV1"];
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */

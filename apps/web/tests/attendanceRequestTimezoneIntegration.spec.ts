@@ -14,7 +14,7 @@ if (!prefill) throw new Error('REAL_PREFILL_CALLER_REQUIRED')
 const code = ts.transpileModule(prefill.getText(ast), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 }).outputText
-const build = new Function('clearRequestSubmitStatus', 'requestForm', 'recordRequestPrefill', 'requestTimezone',
+const build = new Function('correctionEdit', 'clearRequestSubmitStatus', 'requestForm', 'recordRequestPrefill', 'requestTimezone',
   'attendanceSessionGuard', 'setStatus', 'tr', 'formatRecordRequestTime', 'scrollToOverviewSection',
   'ATTENDANCE_OVERVIEW_SECTION_IDS', code + '; return applyRecordRequestPrefill') as (...args: unknown[]) => (draft: Draft) => Promise<void>
 type Draft = { workDate: string; requestType: string; requestedInAt: string; requestedOutAt: string }
@@ -26,6 +26,8 @@ function pending() {
   return { promise, resolve }
 }
 function fixture() {
+  const correctionEdit = { active: { value: false }, cancel: vi.fn() }
+  correctionEdit.cancel.mockImplementation(() => { correctionEdit.active.value = false })
   const form = { workDate: '', requestType: '', requestedInAt: '', requestedOutAt: '' }
   const record = { value: null as Draft | null }
   const target = { value: null as { workDate: string; timezone: string } | null }
@@ -35,14 +37,16 @@ function fixture() {
   const refresh = vi.fn(() => waits[index++].promise)
   const status = vi.fn()
   const scroll = vi.fn(async () => {})
-  const apply = build(vi.fn(), form, record, { refresh, target, ready },
+  const apply = build(correctionEdit, vi.fn(), form, record, { refresh, target, ready },
     { isCurrent: () => true }, status, (_en: string, zh: string) => zh,
     formatRecordRequestTime, scroll, { anomalies: 'anomalies' })
-  return { form, record, target, waits, status, scroll, apply }
+  return { correctionEdit, form, record, target, waits, status, scroll, apply }
 }
 describe('actual request target prefill caller', () => {
   it('fills the target timezone and retains historical precision on an unchanged draft', async () => {
-    const f = fixture();const task = f.apply(draft('2026-01-07'))
+    const f = fixture();f.correctionEdit.active.value = true
+    const task = f.apply(draft('2026-01-07'))
+    expect(f.correctionEdit.cancel).toHaveBeenCalledOnce()
     f.target.value = { workDate: '2026-01-07', timezone: 'Asia/Tokyo' };f.waits[0].resolve();await task
     expect(f.form).toEqual({ workDate: '2026-01-07', requestType: 'time_correction',
       requestedInAt: '2026-01-07T10:00:30.123', requestedOutAt: '2026-01-07T19:00:40.456' })

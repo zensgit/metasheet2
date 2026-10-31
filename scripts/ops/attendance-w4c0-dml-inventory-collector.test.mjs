@@ -327,6 +327,74 @@ test('scheduled existing-parent read is one exact base-table precondition and do
   assert.equal(classifyAttendanceRecordReadSites([...sites, ...neighbor], decisions).unclassified.length, 1)
 })
 
+test('approved correction read registrations pin exact roles and counts and reject neighboring reads', () => {
+  const applyPath = 'packages/core-backend/src/attendance/approved-correction-apply.ts'
+  const sourcePath = 'packages/core-backend/src/attendance/approved-correction-target-source.ts'
+  const paths = [applyPath, sourcePath]
+  const recordDecisions = [
+    { relPath: applyPath, enclosingSymbol: 'appendApprovedCorrectionCalculationV1', count: 1, role: 'write_response_echo' },
+    { relPath: sourcePath, enclosingSymbol: 'loadResolvedAttendanceCorrectionSourceV1', count: 1, role: 'correction_frozen_source_precondition' },
+    { relPath: sourcePath, enclosingSymbol: 'readRetainedAttendanceCorrectionsV1', count: 1, role: 'retained_correction_carry_precondition' },
+  ]
+  const calculationDecisions = [
+    [applyPath, 'appendApprovedCorrectionCalculationV1', 'attendance_record_calculations', 'version_allocation'],
+    [sourcePath, 'loadResolvedAttendanceCorrectionSourceV1', 'attendance_record_calculations', 'correction_frozen_source_precondition'],
+    [sourcePath, 'verifyFrozenCorrectionSourceV1', 'attendance_record_segments', 'correction_frozen_segment_precondition'],
+    [sourcePath, 'readRetainedAttendanceCorrectionsV1', 'attendance_record_calculations', 'retained_correction_carry_precondition'],
+    // Scanner attribution only: the original-source SQL is in readRetainedAttendanceCorrectionsV1,
+    // after its local `instant` helper. This symbol is not semantic ownership proof.
+    [sourcePath, 'instant', 'attendance_record_calculations', 'retained_correction_original_source_history'],
+  ].map(([relPath, enclosingSymbol, table, role]) => ({
+    relPath, enclosingSymbol, table, count: 1, posture: 'history', role, requiredPredicateFingerprint: null,
+  }))
+
+  for (const [scan, classify, entries, expected, posture] of [
+    [scanFileForAttendanceRecordReadSites, classifyAttendanceRecordReadSites,
+      ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS, recordDecisions, 'historical'],
+    [scanFileForAttendanceCalculationReadSites, classifyAttendanceCalculationReadSites,
+      ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS, calculationDecisions, 'history'],
+  ]) {
+    const decisions = entries.filter(entry => paths.includes(entry.relPath))
+    // Pin roles/postures/fingerprints too: relabeling internal history as current is not review.
+    assert.deepEqual(decisions, expected)
+    const sites = paths.flatMap(relPath => scan(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8')))
+    assert.equal(sites.length, expected.length)
+    const accepted = classify(sites, decisions)
+    assert.deepEqual(accepted.unclassified, [])
+    assert.deepEqual(accepted.countDrift, [])
+    assert.deepEqual(accepted.stale, [])
+    if (accepted.predicateDrift) assert.deepEqual(accepted.predicateDrift, [])
+    assert.deepEqual(accepted.classifiedSites.map(({ role, posture }) => ({ role, posture })),
+      expected.map(({ role }) => ({ role, posture })))
+    if (scan === scanFileForAttendanceCalculationReadSites) {
+      assert.deepEqual(sites.map(site => site.requiredPredicateFingerprint), expected.map(() => null))
+    }
+    for (const decision of decisions) {
+      const subset = sites.filter(site => site.relPath === decision.relPath
+        && site.enclosingSymbol === decision.enclosingSymbol
+        && (!decision.table || site.table === decision.table))
+      assert.equal(subset.length, 1)
+      const site = subset[0]
+      assert.deepEqual(classify(sites, decisions.filter(entry => entry !== decision)).unclassified, subset)
+      assert.deepEqual(classify(sites.filter(candidate => candidate !== site), decisions).stale, [decision])
+      assert.deepEqual(classify([...sites, site], decisions).countDrift, [{ ...decision, actual: 2 }])
+      for (const change of [
+        { relPath: decision.relPath + '.neighbor.ts' },
+        { enclosingSymbol: 'unreviewedCorrectionRead' },
+        ...(decision.table ? [{ table: decision.table === 'attendance_record_calculations'
+          ? 'attendance_record_segments' : 'attendance_record_calculations' }] : []),
+      ]) {
+        const neighbor = { ...site, ...change }
+        assert.deepEqual(classify([...sites, neighbor], decisions).unclassified, [neighbor])
+      }
+      const neighbor = scan(decision.relPath,
+        `async function unreviewedCorrectionRead(db) { return db.query('SELECT id FROM ${site.table}') }`)
+      assert.equal(neighbor.length, 1)
+      assert.deepEqual(classify([...sites, ...neighbor], decisions).unclassified, neighbor)
+    }
+  }
+})
+
 test('W4C-3a: generated SELECT inventory classifies every attendance-record read', () => {
   const source = createWorktreeSource(rootDir)
   const { sites } = buildAttendanceRecordReadCensus(source)

@@ -945,6 +945,113 @@ components:
         label: { type: string }
         critical: { type: boolean }
         count: { type: integer, minimum: 1 }
+    AttendanceCorrectionSourceV1:
+      type: object
+      additionalProperties: false
+      required: [recordId, calculationId, calculationVersion, semanticInputFingerprint]
+      description: Immutable source token; server revalidates identity, fingerprints and current evidence. This token grants no authority.
+      properties:
+        recordId: { type: string, format: uuid }
+        calculationId: { type: string, format: uuid }
+        calculationVersion: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        semanticInputFingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+    AttendanceCorrectionTargetV1:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, segmentIndex, direction, evidenceRef]
+          properties:
+            kind: { type: string, enum: [replacement] }
+            segmentIndex: { type: integer, minimum: 0, maximum: 2 }
+            direction: { type: string, enum: [check_in, check_out] }
+            evidenceRef: { type: string, minLength: 1, maxLength: 512 }
+        - type: object
+          additionalProperties: false
+          required: [kind, segmentIndex, direction]
+          properties:
+            kind: { type: string, enum: [insertion] }
+            segmentIndex: { type: integer, minimum: 0, maximum: 2 }
+            direction: { type: string, enum: [check_in, check_out] }
+      description: Closed target. Replacement names exact evidence; insertion names a server-verified empty boundary and forbids evidenceRef. Neither accepts display.
+    AttendanceCorrectionTargetsV1:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, source, checkIn, checkOut]
+      description: Explicit targeting only. Null requested side is resolved only for a unique verified candidate; ambiguous selection returns 422. Unrequested sides must be null.
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        source: { $ref: '#/components/schemas/AttendanceCorrectionSourceV1' }
+        checkIn:
+          oneOf:
+            - allOf:
+                - { $ref: '#/components/schemas/AttendanceCorrectionTargetV1' }
+                - type: object
+                  properties:
+                    direction: { type: string, enum: [check_in] }
+            - { type: object, nullable: true, enum: [null] }
+        checkOut:
+          oneOf:
+            - allOf:
+                - { $ref: '#/components/schemas/AttendanceCorrectionTargetV1' }
+                - type: object
+                  properties:
+                    direction: { type: string, enum: [check_out] }
+            - { type: object, nullable: true, enum: [null] }
+    AttendanceCorrectionTargetCandidateV1:
+      type: object
+      additionalProperties: false
+      required: [target, display]
+      properties:
+        target: { $ref: '#/components/schemas/AttendanceCorrectionTargetV1' }
+        display:
+          type: object
+          readOnly: true
+          additionalProperties: false
+          required: [timezone, expectedStartAt, expectedEndAt, originalOccurredAt, source]
+          description: Presentation only; submit target alone. Server does not trust displayed text or client metadata.
+          properties:
+            timezone: { type: string }
+            expectedStartAt: { type: string, format: date-time }
+            expectedEndAt: { type: string, format: date-time }
+            originalOccurredAt: { type: string, format: date-time, nullable: true }
+            source: { type: string, enum: [attendance_event, outdoor_approval, import, correction, empty_boundary] }
+    AttendanceCorrectionTargetResultV1:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [schemaVersion, posture, source, candidates]
+          properties:
+            schemaVersion: { type: integer, enum: [1] }
+            posture: { type: string, enum: [canonical] }
+            source: { $ref: '#/components/schemas/AttendanceCorrectionSourceV1' }
+            candidates:
+              type: array
+              items: { $ref: '#/components/schemas/AttendanceCorrectionTargetCandidateV1' }
+        - type: object
+          additionalProperties: false
+          required: [schemaVersion, posture, source, candidates]
+          properties:
+            schemaVersion: { type: integer, enum: [1] }
+            posture: { type: string, enum: [legacy_projection_only] }
+            source: { type: object, nullable: true, enum: [null] }
+            candidates:
+              type: array
+              maxItems: 0
+              items: { $ref: '#/components/schemas/AttendanceCorrectionTargetCandidateV1' }
+    AttendanceCorrectionDecisionContextV1:
+      type: object
+      readOnly: true
+      additionalProperties: false
+      required: [schemaVersion, requestId, approvalInstanceId, expectedApprovalVersion, expectedApprovalNode, expectedSnapshotVersion, expectedSnapshotFingerprint]
+      description: Emitted only for already-authorized matching pending v2 rows. Copy OCC fields from the displayed row; existing transaction authorization remains authoritative.
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        requestId: { type: string, format: uuid }
+        approvalInstanceId: { type: string }
+        expectedApprovalVersion: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        expectedApprovalNode: { type: string, minLength: 1 }
+        expectedSnapshotVersion: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedSnapshotFingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
     AttendanceRequest:
       type: object
       properties:
@@ -986,6 +1093,10 @@ components:
           nullable: true
         metadata:
           type: object
+          description: Server-produced metadata; never a client permission grant. Legacy metadata properties are preserved.
+          properties:
+            correctionTargets: { $ref: '#/components/schemas/AttendanceCorrectionTargetsV1' }
+        decisionContext: { $ref: '#/components/schemas/AttendanceCorrectionDecisionContextV1' }
         created_at:
           type: string
           format: date-time
