@@ -3310,6 +3310,108 @@ describe('Attendance admin regressions', () => {
     expect(payrollCyclesSection!.textContent).toContain('9600')
   })
 
+  async function mountRuleLinkSummary(ruleSetId: string | null): Promise<HTMLElement> {
+    attendanceGroupsData = [{
+      id: 'group-a',
+      name: 'Ops Team',
+      code: 'ops-team',
+      timezone: 'Asia/Shanghai',
+      ruleSetId,
+      attendanceType: 'fixed_shift',
+      description: 'Synthetic policy summary',
+      memberCount: 1,
+    }]
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-groups')!
+    section.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="policies"]')!.click()
+    await flushUi(2)
+    return section
+  }
+
+  it('shows an unloaded rule link neutrally in its card instead of default inheritance', async () => {
+    const section = await mountRuleLinkSummary('unloaded-rule-link')
+    const card = section.querySelector<HTMLElement>('[data-attendance-group-summary-card="rule-policy"]')!
+    expect(card.querySelector(':scope > span')?.textContent?.trim()).toBe('Linked rule set is not loaded')
+    expect(card.querySelector('[data-attendance-group-policy-line="rule-set"] .attendance__group-summary-policy-value')?.textContent?.trim()).toBe('Linked rule set is not loaded')
+    const technical = card.querySelector('[data-attendance-group-policy-line="rule-set-id"]')
+    expect(technical?.textContent).toContain('Rule set ID')
+    expect(technical?.textContent).toContain('unloaded-rule-link')
+    expect(card.querySelector('[data-attendance-group-policy-line="status"]')?.textContent).toContain('Linked rule set is not loaded')
+  })
+
+  it('keeps an unloaded rule ID as labelled metadata rather than the drawer primary name', async () => {
+    const section = await mountRuleLinkSummary('unloaded-rule-link')
+    const beforeCalls = vi.mocked(apiFetch).mock.calls.length
+    section.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-rule-policy-drawer"]')!.click()
+    await flushUi(2)
+    const drawer = section.querySelector<HTMLElement>('[data-attendance-group-rule-policy-drawer]')!
+    expect(drawer.querySelector('[data-attendance-group-rule-policy-line="rule-set"]')?.textContent?.trim()).toBe('Rule set: Linked rule set is not loaded')
+    expect(drawer.querySelector('[data-attendance-group-rule-policy-line="rule-set-id"]')?.textContent?.trim()).toBe('Rule set ID: unloaded-rule-link')
+    expect(drawer.querySelectorAll('input, select, textarea')).toHaveLength(0)
+    expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toEqual([])
+  })
+
+  it.each([
+    [null, 'Default', 'Default workspace rule'],
+    ['rule-set-1', 'Ops Rules', 'Ops Rules'],
+  ] as const)('preserves loaded or absent rule-link naming for %s', async (ruleSetId, title, primary) => {
+    const section = await mountRuleLinkSummary(ruleSetId)
+    const card = section.querySelector<HTMLElement>('[data-attendance-group-summary-card="rule-policy"]')!
+    expect(card.querySelector(':scope > span')?.textContent?.trim()).toBe(title)
+    expect(card.querySelector('[data-attendance-group-policy-line="rule-set"] .attendance__group-summary-policy-value')?.textContent?.trim()).toBe(primary)
+    expect(card.querySelector('[data-attendance-group-policy-line="rule-set-id"]')).toBeNull()
+  })
+
+  it('keeps unloaded rule naming consistent in local search and the CSV policy cell', async () => {
+    const section = await mountRuleLinkSummary('unloaded-rule-link')
+    const list = section.querySelector<HTMLElement>('[data-attendance-group-list]')!
+    const beforeCalls = vi.mocked(apiFetch).mock.calls.length
+    setInput(section, '#attendance-group-search', 'Linked rule set is not loaded')
+    await flushUi(2)
+    expect(list.querySelectorAll('[data-attendance-group-row]')).toHaveLength(1)
+    setInput(section, '#attendance-group-search', 'Default')
+    await flushUi(2)
+    expect(list.querySelectorAll('[data-attendance-group-row]')).toHaveLength(0)
+    setInput(section, '#attendance-group-search', '')
+    await flushUi(2)
+    const originalCreate = URL.createObjectURL
+    const originalRevoke = URL.revokeObjectURL
+    let exported: Blob | undefined
+    const anchor = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: (blob: Blob) => {
+      exported = blob
+      return 'blob:synthetic-unloaded-rule'
+    } })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    try {
+      section.querySelector<HTMLButtonElement>('[data-attendance-group-list-tools] .attendance__btn')!.click()
+      expect(anchor).toHaveBeenCalledTimes(1)
+      expect(exported).toBeInstanceOf(Blob)
+      const csv = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.onerror = () => reject(reader.error)
+        reader.readAsText(exported!)
+      })
+      const rows = csv.replace(/^\uFEFF/, '').trim().split(/\r?\n/).map(line =>
+        line.split(',').map(cell => cell.replace(/^"|"$/g, '')),
+      )
+      expect(rows).toEqual([
+        ['Name', 'Code', 'Type', 'Member count', 'Rule policy', 'Timezone', 'Description', 'Created at', 'Updated at'],
+        ['Ops Team', 'ops-team', 'Fixed shift', '1', 'Linked rule set is not loaded', 'Asia/Shanghai', 'Synthetic policy summary', '', ''],
+      ])
+      expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toEqual([])
+    } finally {
+      anchor.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreate })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevoke })
+    }
+  })
+
   it('renders attendance groups as a list-detail manager with people inside the selected group', async () => {
     app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
