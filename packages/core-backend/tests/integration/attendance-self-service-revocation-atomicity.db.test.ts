@@ -40,7 +40,7 @@ vi.mock('../../src/auth/login-alias-service', () => ({
 }))
 
 import { AuthService, USER_ROLE_ASSIGNMENT_RETRY_LIMIT } from '../../src/auth/AuthService'
-import { unassignUserRoles } from '../../src/rbac/role-assignment'
+import { assignUserRoles, unassignUserRoles } from '../../src/rbac/role-assignment'
 import {
   disableNamespaceAdmissionsWithoutRoles,
   filterPermissionCodesByNamespaceAdmission,
@@ -267,6 +267,32 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
     expect(registered).not.toBeNull()
     const roles = await pool.query('SELECT role_id FROM user_roles WHERE user_id = $1', [registered?.id])
     expect(roles.rows).toEqual([{ role_id: 'attendance_employee' }])
+  })
+
+  it('a steady-state user keeps the merged codes on every authentication but invalidates only on the first insert', async () => {
+    const merged = ['workflow:read', 'attendance:read', 'attendance:write']
+    expect((await verify())?.permissions).toEqual(merged)
+    expect(await persistedState()).toEqual({ roles: ['attendance_employee'], admission: [] })
+    expect(io.invalidate.mock.calls).toEqual([[userId]])
+    io.invalidate.mockClear()
+
+    // Role held, no attendance admission row: every authentication still runs the locked backfill, and its
+    // ON CONFLICT insert now commits nothing, so the permission cache generation must not move.
+    expect((await verify())?.permissions).toEqual(merged)
+    expect((await auth.login('subject@r2r3.invalid', password))?.user.permissions).toEqual(merged)
+    expect((await auth.login('subject@r2r3.invalid', password))?.user.permissions).toEqual(merged)
+    expect(insertAttempts).toBe(4)
+    expect(io.invalidate).not.toHaveBeenCalled()
+    expect(await persistedState()).toEqual({ roles: ['attendance_employee'], admission: [] })
+
+    // The driver contract the backfill relies on: the same boundary insert reports rowCount 0 for a held role.
+    const again = await assignUserRoles({
+      userIds: [userId],
+      roleId: 'attendance_employee',
+      scope: { kind: 'fixed', roleIds: ['attendance_employee'] },
+      executor: { query: (sql, params) => pool.query(sql, params) },
+    })
+    expect(again).toMatchObject({ affectedUserIds: [], rowCount: 0 })
   })
 
   it.each([false, true])('a completed revoke wins before a pending bootstrap lock (admission existed=%s)', async (existing) => {
