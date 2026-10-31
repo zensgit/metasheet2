@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
-import { Kysely, PostgresDialect } from 'kysely'
+import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
 import {
   computeLegacyImportAsyncJobSummaryDigestV1,
@@ -23,6 +23,10 @@ import {
   up as memberSourcesUp,
   down as memberSourcesDown,
 } from '../../src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals'
+
+import { up as punchPreviewUp, down as punchPreviewDown } from '../../src/db/migrations/zzzz20261028103000_attendance_punch_preview_records'
+import { buildAttendancePunchDetailPreviewRecordV1, verifyAttendancePunchDetailPreviewRecordV1 } from '../../src/attendance/w4c3a-punch-detail-preview-record'
+import { punchDetailPreparationFixture } from '../../src/attendance/__tests__/helpers/punch-detail-plan-fixture'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -1411,4 +1415,205 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       await destroyScratch(adminPool, emptyName, empty)
     }
   })
+  describe('PUNCH_PREVIEW_STORAGE_NATIVE', () => {
+    async function withPreviewStorage(label: string, runCase: (scratch: ScratchDatabase) => Promise<void>) {
+      const name = `ms2_punch_preview_${label}_${run}`
+      const scratch = await createScratch(adminPool, name)
+      try {
+        await w4c0Up(scratch.db)
+        await up(scratch.db)
+        await scratch.db.transaction().execute((trx) => punchPreviewUp(trx))
+        await runCase(scratch)
+      } finally { await destroyScratch(adminPool, name, scratch) }
+    }
+
+    function frozenPreview() {
+      const preparation = punchDetailPreparationFixture('fold_start')
+      const jobId = newId()
+      const stored = buildAttendancePunchDetailPreviewRecordV1({ jobId, preparation, previewLimit: 4 })
+      return { ...stored, jobId, preparation }
+    }
+
+    const jobSql = `INSERT INTO attendance_import_jobs
+      (id,org_id,batch_id,created_by,status,payload,punch_preview_version,punch_preview_request_fingerprint,punch_preview_snapshot_digest,
+        punch_preview_actor_posture,punch_preview_token_subject_user_id)
+      VALUES ($1,$2,$3,$4,'queued','{"__jobType":"preview"}',1,$5,$6,$7,$8)`
+    const recordSql = `INSERT INTO attendance_import_punch_preview_records
+      (job_id,org_id,batch_id,created_by,request_fingerprint,snapshot_digest,snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`
+    function recordValues(value: ReturnType<typeof frozenPreview>) {
+      return [value.jobId, value.preparation.scope.orgId, value.preparation.batchId,
+        value.preparation.scope.actorId, value.record.requestFingerprint, value.snapshotDigest]
+    }
+
+    function jobValues(value: ReturnType<typeof frozenPreview>) {
+      return [...recordValues(value), value.preparation.scope.actorPosture, value.preparation.scope.tokenSubjectUserId]
+    }
+
+    it('atomically binds real frozen records, survives a new reader and rolls back missing or mismatched bindings', async () => {
+      await withPreviewStorage('atomic', async ({ pool }) => {
+        for (const recordFirst of [false, true]) {
+          const value = frozenPreview()
+          const writer = await pool.connect()
+          try {
+            await writer.query('BEGIN')
+            const insertJob = () => writer.query(jobSql, jobValues(value))
+            const insertRecord = () => writer.query(recordSql, [...recordValues(value), JSON.stringify(value.record)])
+            if (recordFirst) { await insertRecord(); await insertJob() } else { await insertJob(); await insertRecord() }
+            await writer.query('COMMIT')
+          } finally { await writer.query('ROLLBACK'); writer.release() }
+          const reader = await pool.connect()
+          try {
+            const result = await reader.query(`SELECT r.snapshot,j.id,j.batch_id,j.org_id,j.created_by,
+              j.punch_preview_request_fingerprint,j.punch_preview_snapshot_digest,j.w4_contract_version,
+              j.punch_preview_actor_posture,j.punch_preview_token_subject_user_id
+              FROM attendance_import_jobs j JOIN attendance_import_punch_preview_records r ON r.job_id=j.id WHERE j.id=$1`, [value.jobId])
+            expect(result.rows).toHaveLength(1)
+            const row = result.rows[0]
+            expect(row.w4_contract_version).toBeNull()
+            const verified = verifyAttendancePunchDetailPreviewRecordV1(row.snapshot, {
+              jobId: row.id, batchId: row.batch_id,
+              scope: { orgId: row.org_id, actorId: row.created_by,
+                actorPosture: row.punch_preview_actor_posture, tokenSubjectUserId: row.punch_preview_token_subject_user_id },
+              requestFingerprint: row.punch_preview_request_fingerprint, snapshotDigest: row.punch_preview_snapshot_digest,
+            })
+            expect(verified).toEqual(value.record)
+            expect(verified.preview.targets[0].dailyProjection?.workedMinutes).toBe(165)
+            expect(verified.preview.items).toHaveLength(4)
+          } finally { reader.release() }
+        }
+        for (const variant of ['missing-record', 'missing-job', 'org', 'creator', 'batch', 'fingerprint', 'digest', 'posture', 'token']) {
+          const value = frozenPreview()
+          const writer = await pool.connect()
+          try {
+            await writer.query('BEGIN')
+            const values = jobValues(value)
+            if (variant !== 'missing-job') {
+              const changed = [...values]
+              if (variant === 'org') changed[1] = newId()
+              if (variant === 'creator') changed[3] = 'other-actor'
+              if (variant === 'batch') changed[2] = newId()
+              if (variant === 'fingerprint') changed[4] = hex('a')
+              if (variant === 'digest') changed[5] = hex('b')
+              if (variant === 'posture') changed[6] = 'operator'
+              if (variant === 'token') changed[7] = 'other-token-subject'
+              await writer.query(jobSql, changed)
+            }
+            if (variant !== 'missing-record') await writer.query(recordSql, [...recordValues(value), JSON.stringify(value.record)])
+            await expect(writer.query('COMMIT')).rejects.toThrow(variant === 'missing-job'
+              ? /foreign key constraint|ATTENDANCE_PUNCH_PREVIEW_BINDING_MISMATCH/
+              : 'ATTENDANCE_PUNCH_PREVIEW_BINDING_MISMATCH')
+          } finally { await writer.query('ROLLBACK'); writer.release() }
+          expect((await pool.query('SELECT id FROM attendance_import_jobs WHERE id=$1', [value.jobId])).rows).toEqual([])
+          expect((await pool.query('SELECT job_id FROM attendance_import_punch_preview_records WHERE job_id=$1', [value.jobId])).rows).toEqual([])
+        }
+        const rolledBack = frozenPreview()
+        const writer = await pool.connect()
+        try {
+          await writer.query('BEGIN')
+          await writer.query(jobSql, jobValues(rolledBack))
+          await writer.query(recordSql, [...recordValues(rolledBack), JSON.stringify(rolledBack.record)])
+          await writer.query('ROLLBACK')
+        } finally { writer.release() }
+        expect((await pool.query('SELECT id FROM attendance_import_jobs WHERE id=$1', [rolledBack.jobId])).rows).toEqual([])
+        expect((await pool.query('SELECT job_id FROM attendance_import_punch_preview_records WHERE job_id=$1', [rolledBack.jobId])).rows).toEqual([])
+      })
+    }, 90000)
+
+    it('freezes preview identity and terminal history while preserving ordinary daily job updates', async () => {
+      await withPreviewStorage('guards', async ({ pool, db }) => {
+        const value = frozenPreview()
+        const writer = await pool.connect()
+        try {
+          await writer.query('BEGIN')
+          await writer.query(jobSql, jobValues(value))
+          await writer.query(recordSql, [...recordValues(value), JSON.stringify(value.record)])
+          await writer.query('COMMIT')
+        } finally { await writer.query('ROLLBACK'); writer.release() }
+        for (const assignment of ["org_id='changed'", "created_by='changed'", `batch_id='${newId()}'`,
+          "punch_preview_actor_posture='operator'", "punch_preview_token_subject_user_id='changed'",
+          "idempotency_key='changed'", "payload='{}'", 'punch_preview_version=NULL',
+          `punch_preview_request_fingerprint='${hex('c')}'`, `punch_preview_snapshot_digest='${hex('d')}'`]) {
+          await expect(pool.query(`UPDATE attendance_import_jobs SET ${assignment} WHERE id=$1`, [value.jobId]))
+            .rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_JOB_IMMUTABLE')
+        }
+        await expect(pool.query('DELETE FROM attendance_import_jobs WHERE id=$1', [value.jobId])).rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_JOB_IMMUTABLE')
+        for (const statement of ["UPDATE attendance_import_punch_preview_records SET snapshot=jsonb_set(snapshot,'{preview,targets,0,dailyProjection,workedMinutes}','999') WHERE job_id=$1",
+          'DELETE FROM attendance_import_punch_preview_records WHERE job_id=$1']) {
+          await expect(pool.query(statement, [value.jobId])).rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_RECORD_IMMUTABLE')
+        }
+        await expect(pool.query('TRUNCATE attendance_import_punch_preview_records')).rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_RECORD_IMMUTABLE')
+        await pool.query("UPDATE attendance_import_jobs SET status='running',started_at=now() WHERE id=$1", [value.jobId])
+        await pool.query("UPDATE attendance_import_jobs SET status='completed',progress=4,total=4,finished_at=now() WHERE id=$1", [value.jobId])
+        for (const assignment of ["status='queued'", 'progress=0', 'total=0', "error='changed'", 'started_at=NULL', 'finished_at=NULL']) {
+          await expect(pool.query(`UPDATE attendance_import_jobs SET ${assignment} WHERE id=$1`, [value.jobId]))
+            .rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_TERMINAL_IMMUTABLE')
+        }
+        await expect(db.transaction().execute((trx) => punchPreviewDown(trx))).rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_DOWN_RETAINED_HISTORY')
+        expect((await pool.query('SELECT snapshot FROM attendance_import_punch_preview_records WHERE job_id=$1', [value.jobId])).rows).toEqual([{ snapshot: value.record }])
+        const legacy = newId()
+        await pool.query("INSERT INTO attendance_import_jobs(id,org_id,batch_id,created_by,status,payload) VALUES($1,'legacy',$2,'actor','queued','{}')", [legacy, newId()])
+        await pool.query(`UPDATE attendance_import_jobs SET status='running',payload='{"oldDaily":true}' WHERE id=$1`, [legacy])
+        await expect(pool.query(`UPDATE attendance_import_jobs SET punch_preview_version=1,
+          punch_preview_request_fingerprint=$2,punch_preview_snapshot_digest=$3,payload='{"__jobType":"preview"}' WHERE id=$1`,
+        [legacy, value.record.requestFingerprint, value.snapshotDigest])).rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_JOB_IMMUTABLE')
+        await pool.query('DELETE FROM attendance_import_jobs WHERE id=$1', [legacy])
+      })
+    }, 90000)
+
+    it('PUNCH_PREVIEW_DOWN_SNAPSHOT refuses repeatable-read stale history after another transaction commits', async () => {
+      await withPreviewStorage('snapshot', async ({ pool, db }) => {
+        const value = frozenPreview()
+        await expect(db.transaction().setIsolationLevel('repeatable read').execute(async (trx) => {
+          const before = await sql`SELECT job_id FROM attendance_import_punch_preview_records`.execute(trx)
+          expect(before.rows).toEqual([])
+          const writer = await pool.connect()
+          try {
+            await writer.query('BEGIN')
+            await writer.query(jobSql, jobValues(value))
+            await writer.query(recordSql, [...recordValues(value), JSON.stringify(value.record)])
+            await writer.query('COMMIT')
+          } finally { await writer.query('ROLLBACK'); writer.release() }
+          await punchPreviewDown(trx)
+        })).rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_DOWN_ISOLATION_REQUIRED')
+        expect((await pool.query('SELECT snapshot FROM attendance_import_punch_preview_records WHERE job_id=$1', [value.jobId])).rows)
+          .toEqual([{ snapshot: value.record }])
+      })
+    }, 90000)
+
+    it('rejects malformed inserts and safely rolls back or removes only empty preview storage', async () => {
+      await withPreviewStorage('down', async ({ pool, db }) => {
+        const value = frozenPreview()
+        await expect(pool.query(jobSql.replace("',1,$5", "',2,$5"), jobValues(value)))
+          .rejects.toMatchObject({ code: '23514', constraint: 'chk_aij_punch_preview_shape' })
+        await expect(pool.query(jobSql.replace("'queued'", "'completed'"), jobValues(value)))
+          .rejects.toThrow('ATTENDANCE_PUNCH_PREVIEW_INITIAL_STATUS')
+        for (const position of [4, 5, 6, 7]) {
+          const malformed = jobValues(value)
+          malformed[position] = ''
+          await expect(pool.query(jobSql, malformed)).rejects.toMatchObject({ code: '23514', constraint: 'chk_aij_punch_preview_shape' })
+        }
+        for (const changed of [{ ...value.record, extra: true }, { ...value.record, schemaVersion: 2 },
+          { ...value.record, scope: { ...value.record.scope, actorId: 'other-actor' } }]) {
+          const writer = await pool.connect()
+          try {
+            await writer.query('BEGIN')
+            await writer.query(jobSql, jobValues(value))
+            await expect(writer.query(recordSql, [...recordValues(value), JSON.stringify(changed)]))
+              .rejects.toMatchObject({ code: '23514', constraint: 'chk_punch_preview_record_shape' })
+          } finally { await writer.query('ROLLBACK'); writer.release() }
+        }
+        await db.transaction().execute((trx) => punchPreviewDown(trx))
+        expect((await pool.query("SELECT to_regclass('attendance_import_punch_preview_records')::text AS name")).rows).toEqual([{ name: null }])
+        await expect(db.transaction().execute(async (trx) => {
+          await punchPreviewUp(trx)
+          throw new Error('PREVIEW_STORAGE_INJECTED_ROLLBACK')
+        })).rejects.toThrow('PREVIEW_STORAGE_INJECTED_ROLLBACK')
+        expect((await pool.query("SELECT to_regclass('attendance_import_punch_preview_records')::text AS name")).rows).toEqual([{ name: null }])
+        expect((await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name='attendance_import_jobs' AND column_name LIKE 'punch_preview_%'")).rows).toEqual([])
+        await db.transaction().execute((trx) => punchPreviewUp(trx))
+        await db.transaction().execute((trx) => punchPreviewDown(trx))
+      })
+    }, 90000)
+  })
+
 })
