@@ -1973,6 +1973,8 @@ export default defineConfig({
       'tests/integration/task-m4-realtime.db.test.ts',
       // G2-core status filter on GET /api/tasks: real DB, same lane as the files above.
       'tests/integration/task-g2-status-filter.db.test.ts',
+      // The todo center's task source under the production wiring: real DB, same lane.
+      'tests/integration/task-todo-source.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml
