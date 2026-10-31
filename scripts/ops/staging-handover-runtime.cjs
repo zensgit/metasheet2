@@ -1,3 +1,4 @@
+const { writeReceipt } = require('./staging-candidate-result.cjs')
 const assert = require('node:assert/strict')
 
 async function main() {
@@ -37,9 +38,9 @@ async function main() {
       assert(todo.items.every(i => i.actionable))
     }
   }
-  console.log('QA_RESULT=' + JSON.stringify({ revision: build.commit, directAndProxiedDirectory: true,
+  writeReceipt({ revision: build.commit, directAndProxiedDirectory: true,
     integrationCount: 3, mismatchPreserved: true, nonAdminDenied: true, passwordLoginUsers: 3, todoCounts: [5,4],
-    adminToken: sessions['candidate-admin'] }))
+    adminToken: sessions['candidate-admin'] })
   process.exit(0)
 }
 main().catch(() => { console.error('SYNTHETIC_RUNTIME_FAILED'); process.exit(1) })

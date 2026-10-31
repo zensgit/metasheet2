@@ -1,3 +1,4 @@
+const { writeReceipt } = require('./staging-candidate-result.cjs')
 const { Client } = require('pg')
 const bcrypt = require('bcryptjs')
 const { randomUUID } = require('node:crypto')
@@ -70,7 +71,7 @@ async function main() {
           VALUES($1,'user',$2,'approve',1,true)`, [instance, user])
       }
     }
-    console.log('QA_RESULT=' + JSON.stringify({ sourceIntegrationId: integrations[0], targetIntegrationId: integrations[1], actorId: users[0] }))
+    writeReceipt({ sourceIntegrationId: integrations[0], targetIntegrationId: integrations[1], actorId: users[0] })
   } else if (process.env.FIXTURE_ACTION === 'graph') {
     const result = {}
     for (const [table, key] of [['users','id'], ['user_roles','user_id'], ['user_permissions','user_id'], ['user_orgs','user_id'], ['user_external_identities','local_user_id'], ['user_external_auth_grants','local_user_id']]) {
@@ -87,7 +88,7 @@ async function main() {
       const items = await approvalPendingSource.listPendingForUser({ actorId: user, roles, permissions })
       result.todo.push({ roles, permissions: permissions.sort(), items: items.map(i => ({ id: i.id, actionable: i.actionable })).sort((a,b) => a.id.localeCompare(b.id)) })
     }
-    console.log('QA_RESULT=' + JSON.stringify(result))
+    writeReceipt(result)
   } else throw Error('UNKNOWN_FIXTURE_ACTION')
   await db.end()
   process.exit(0)

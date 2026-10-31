@@ -1,4 +1,5 @@
 import os, json, subprocess, pathlib, secrets, time, hashlib, shutil, re
+from staging_candidate_receipt import read_receipt
 
 SOURCE = 'e94c982b66a0d41a2eeb7e49a1a367934f39a2b6'
 TAG = 'staging-directory-handover-e94c982b66'
@@ -14,6 +15,7 @@ PRIVATE.mkdir(mode=0o700)
 owned = []
 network_id = None
 counter = 0
+receipt_transport = []
 result = {'source': SOURCE, 'passed': False, 'publicationAllowed': False, 'syntheticOnly': True,
           'realBackupRestored': False, 'macMiniUsed': False}
 
@@ -62,7 +64,7 @@ def environment(database, extra=None):
     path.chmod(0o600)
     return path
 
-def task(image, database, command, extra=None, entry='node', mounts=(), timeout=300, check=True):
+def task(image, database, command, extra=None, entry='node', mounts=(), timeout=300, check=True, decode=True):
     global counter
     counter += 1
     name = SCOPE + '-task-' + str(counter)
@@ -74,15 +76,37 @@ def task(image, database, command, extra=None, entry='node', mounts=(), timeout=
         if check and (p.returncode or code):
             (PRIVATE / 'last-task.log').write_bytes(p.stdout + p.stderr)
             raise RuntimeError('ISOLATED_TASK_FAILED')
-        return p.stdout.decode(), code
+        return (p.stdout.decode() if decode else p.stdout), code
     finally:
         remove(name)
 
 def node(image, database, code, extra=None, **kw):
-    return task(image, database, ['-e', code], extra=extra, **kw)[0]
+    # Only used for bounded module paths, not JSON receipts.
+    out = task(image, database, ['-e', code], extra=extra, **kw)[0]
+    if len(out.encode()) > 4096:
+        raise ValueError('TEXT_RESULT_TOO_LARGE')
+    return out
 
-def payload(out):
-    return json.loads(next(l.split('QA_RESULT=', 1)[1] for l in out.splitlines() if l.startswith('QA_RESULT=')))
+def receipt_task(image, database, command, extra=None, label='result', mounts=(), timeout=300):
+    nonce = secrets.token_hex(16)
+    directory = PRIVATE / ('result-' + nonce)
+    directory.mkdir(mode=0o700)
+    values = dict(extra or {}, QA_RESULT_PATH='/candidate-results/result.json', QA_RESULT_NONCE=nonce,
+                  QA_RESULT_UID=str(os.getuid()), QA_RESULT_GID=str(os.getgid()))
+    task(image, database, command, extra=values, mounts=[*mount_scripts,
+         '--mount', 'type=bind,source='+str(directory)+',target=/candidate-results', *mounts], timeout=timeout, decode=False)
+    try:
+        value = read_receipt(directory / 'result.json', nonce)
+    except (ValueError, OSError) as error:
+        receipt_transport.append({'label':label,'passed':False,'error':str(error)[:100]})
+        raise
+    meta = json.loads((directory / 'result.json.meta').read_text())
+    receipt_transport.append({'label':label,'passed':True,'bytes':meta['bytes'],'sha256':meta['sha256']})
+    return value
+
+def node_receipt(image, database, code, extra=None, label='node', **kw):
+    code = "const {writeReceipt}=require('/candidate-scripts/staging-candidate-result.cjs');\n" + code
+    return receipt_task(image, database, ['-e', code], extra=extra, label=label, **kw)
 
 def sql(database, query):
     return docker('exec', SCOPE + '-pg', 'psql', '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=1',
@@ -97,20 +121,19 @@ const {createCoreBackendMigrationProvider}=require('/app/packages/core-backend/d
 (async()=>{const m=new Migrator({db,provider:createCoreBackendMigrationProvider(),allowUnorderedMigrations:true});
 const before=await m.getMigrations();const first=await m.migrateToLatest();if(first.error)throw first.error;
 const replay=await m.migrateToLatest();if(replay.error)throw replay.error;
-console.log('QA_RESULT='+JSON.stringify({before:before.map(x=>({name:x.name,applied:!!x.executedAt})),
-first:first.results||[],replay:replay.results||[],after:(await m.getMigrations()).map(x=>({name:x.name,applied:!!x.executedAt}))}));
+writeReceipt({before:before.map(x=>({name:x.name,applied:!!x.executedAt})),
+first:first.results||[],replay:replay.results||[],after:(await m.getMigrations()).map(x=>({name:x.name,applied:!!x.executedAt}))});
 await db.destroy();process.exit(0)})().catch(()=>process.exit(1))
 """
 
 def migrate(image, database):
-    return payload(node(image, database, MIGRATE, timeout=900))
+    return node_receipt(image, database, MIGRATE, label='migrate-'+database, timeout=900)
 
 mount_scripts = ['--mount', 'type=bind,source=' + str(CONTROL) + ',target=/candidate-scripts,readonly']
 
 def fixture(database, action):
-    out, _ = task(BACK, database, ['/candidate-scripts/staging-handover-fixture.cjs'],
-                  extra={'FIXTURE_ACTION': action}, mounts=mount_scripts)
-    return payload(out)
+    return receipt_task(BACK, database, ['/candidate-scripts/staging-handover-fixture.cjs'],
+                        extra={'FIXTURE_ACTION': action}, label='fixture-'+action)
 
 def graph(database):
     return fixture(database, 'graph')
@@ -138,7 +161,9 @@ def cli(database, action, data, success=True):
     if not success:
         assert code != 0
         return None
-    return json.loads(out.strip().splitlines()[-1])
+    line = out.strip().splitlines()[-1]
+    if len(line.encode()) > 4096: raise ValueError('CLI_RESULT_TOO_LARGE')
+    return json.loads(line)
 
 def runtime(phase, backend, web, revision):
     bn, wn = SCOPE + '-backend', SCOPE + '-web'
@@ -153,9 +178,9 @@ def runtime(phase, backend, web, revision):
             if p.returncode == 0: break
             time.sleep(2)
         else: raise RuntimeError('ISOLATED_BACKEND_BOOT_FAILED')
-        out, _ = task(BACK, 'baseline', ['/candidate-scripts/staging-handover-runtime.cjs'],
-                      extra={'EXPECTED_REVISION': revision}, mounts=mount_scripts)
-        check = payload(out); token = check.pop('adminToken')
+        check = receipt_task(BACK, 'baseline', ['/candidate-scripts/staging-handover-runtime.cjs'],
+                             extra={'EXPECTED_REVISION': revision}, label='runtime-'+phase)
+        token = check.pop('adminToken')
         ip = inspect(wn)['NetworkSettings']['Networks'][SCOPE]['IPAddress']
         browser_env = dict(os.environ, SYNTHETIC_ORIGIN='http://' + ip, SYNTHETIC_TOKEN=token,
                            SYNTHETIC_PHASE=phase, CHROME_PATH=shutil.which('google-chrome') or '/opt/google/chrome/chrome')
@@ -204,8 +229,8 @@ try:
         for f in (ROOT / 'source' / parent).rglob('*'):
             if f.is_file() and f.suffix in ['.ts','.sql']:
                 expected_hashes[str(f.relative_to(ROOT / 'source'))] = hashlib.sha256(f.read_bytes()).hexdigest()
-    hashcode = "const fs=require('fs'),p=require('path'),c=require('crypto');let out={};function walk(d){for(const x of fs.readdirSync(d,{withFileTypes:true})){const f=p.join(d,x.name);if(x.isDirectory())walk(f);else if(/\\.(ts|sql)$/.test(f))out[f.slice(5)]=c.createHash('sha256').update(fs.readFileSync(f)).digest('hex')}};walk('/app/packages/core-backend/src/db/migrations');walk('/app/packages/core-backend/migrations');console.log('QA_RESULT='+JSON.stringify(out));process.exit(0)"
-    actual_hashes = payload(node(BACK, 'baseline', hashcode))
+    hashcode = "const fs=require('fs'),p=require('path'),c=require('crypto');let out={};function walk(d){for(const x of fs.readdirSync(d,{withFileTypes:true})){const f=p.join(d,x.name);if(x.isDirectory())walk(f);else if(/\\.(ts|sql)$/.test(f))out[f.slice(5)]=c.createHash('sha256').update(fs.readFileSync(f)).digest('hex')}};walk('/app/packages/core-backend/src/db/migrations');walk('/app/packages/core-backend/migrations');writeReceipt(out);process.exit(0)"
+    actual_hashes = node_receipt(BACK, 'baseline', hashcode, label='migration-source-hashes')
     assert actual_hashes == expected_hashes
     (ROOT / 'candidate-source-migration-hashes.json').write_text(json.dumps({'source': SOURCE, 'fileCount': len(actual_hashes), 'allEqual': True, 'sha256': actual_hashes}, indent=2))
 
@@ -229,8 +254,8 @@ try:
        'localUsers':2,'roles':[2,1],'actionableTodos':[5,4],'rollbackExactDigest':True,'wrongConfirmationRejected':True,'finalizedRollbackRejected':True},indent=2))
     backup_empty = dump_restore('baseline', 'restored')
     backup_active = dump_restore('fresh', 'handover_restored')
-    frozen_code = "const {syncDirectoryIntegration}=require('/app/packages/core-backend/dist/src/directory/directory-sync.js');const {db}=require('/app/packages/core-backend/dist/src/db/db.js');const {down}=require('/app/packages/core-backend/dist/src/db/migrations/zzzz20261101090000_create_directory_handovers.js');let calls=0;global.fetch=async()=>{calls++;throw Error('FORBIDDEN')};(async()=>{let frozen=false,downRefused=false;try{await syncDirectoryIntegration(process.env.SYNTHETIC_SOURCE_ID)}catch(e){frozen=e.code==='DIRECTORY_SYNC_FROZEN_BY_TRANSFER'};try{await down(db)}catch(e){downRefused=e.message.includes('history must be retained')};if(!frozen||!downRefused||calls)throw Error('RESTORE_GUARD_FAILED');console.log('QA_RESULT='+JSON.stringify({sourceFrozen:true,historyDownRefused:true,providerCalls:calls}));await db.destroy();process.exit(0)})().catch(()=>process.exit(1))"
-    frozen = payload(node(BACK,'handover_restored',frozen_code,extra={'SYNTHETIC_SOURCE_ID':fixtures['sourceIntegrationId']}))
+    frozen_code = "const {syncDirectoryIntegration}=require('/app/packages/core-backend/dist/src/directory/directory-sync.js');const {db}=require('/app/packages/core-backend/dist/src/db/db.js');const {down}=require('/app/packages/core-backend/dist/src/db/migrations/zzzz20261101090000_create_directory_handovers.js');let calls=0;global.fetch=async()=>{calls++;throw Error('FORBIDDEN')};(async()=>{let frozen=false,downRefused=false;try{await syncDirectoryIntegration(process.env.SYNTHETIC_SOURCE_ID)}catch(e){frozen=e.code==='DIRECTORY_SYNC_FROZEN_BY_TRANSFER'};try{await down(db)}catch(e){downRefused=e.message.includes('history must be retained')};if(!frozen||!downRefused||calls)throw Error('RESTORE_GUARD_FAILED');writeReceipt({sourceFrozen:true,historyDownRefused:true,providerCalls:calls});await db.destroy();process.exit(0)})().catch(()=>process.exit(1))"
+    frozen = node_receipt(BACK,'handover_restored',frozen_code,extra={'SYNTHETIC_SOURCE_ID':fixtures['sourceIntegrationId']},label='restored-freeze')
     (ROOT / 'candidate-backup-restore.json').write_text(json.dumps({'passed':True,'emptyJournal':backup_empty,'finalizedJournal':backup_active,'restoredFreeze':frozen},indent=2))
 
     createdb('dbtests'); migrate(BACK,'dbtests')
@@ -239,9 +264,14 @@ try:
              'dingtalk-identity-boundaries.db.test.ts','directory-controlled-handover.db.test.ts',
              'directory-dingtalk-openid-grant-path.db.test.ts','directory-org-transfer-source-freeze.db.test.ts',
              'directory-source-freeze-lock-correctness.db.test.ts','provider-org-transfer-t1.api.test.ts']
-    task(BACK,'dbtests',[vitest,'run','--root','/app/packages/core-backend','--config','/app/packages/core-backend/vitest.integration.config.ts',
-         *['/app/packages/core-backend/tests/integration/'+f for f in files],'--reporter=json','--outputFile=/receipts/candidate-db-tests.json'],
-         extra={'EXPECT_DB':'1'},mounts=['--mount','type=bind,source='+str(ROOT)+',target=/receipts'],timeout=600)
+    test_dir = PRIVATE / 'db-tests'; test_dir.mkdir(mode=0o700)
+    try:
+        task(BACK,'dbtests',[vitest,'run','--root','/app/packages/core-backend','--config','/app/packages/core-backend/vitest.integration.config.ts',
+             *['/app/packages/core-backend/tests/integration/'+f for f in files],'--reporter=json','--outputFile=/receipts/candidate-db-tests.json'],
+             extra={'EXPECT_DB':'1'},mounts=['--mount','type=bind,source='+str(test_dir)+',target=/receipts'],timeout=600,decode=False)
+    finally:
+        report = test_dir/'candidate-db-tests.json'
+        if report.exists(): shutil.copyfile(report,ROOT/'candidate-db-tests.json')
     tests=json.loads((ROOT/'candidate-db-tests.json').read_text())
     assert tests['success'] and tests['numPassedTests']==185 and tests['numFailedTests']==0 and tests['numPendingTests']==0
 
@@ -269,7 +299,9 @@ finally:
         for value in [password, *[env[k] for k in ['JWT_SECRET','ENCRYPTION_KEY','ENCRYPTION_SALT']]]:
             safe = safe.replace(value, '[REDACTED]')
         safe = re.sub(r'[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}', '[REDACTED_JWT]', safe)
+        safe = re.sub(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', '[REDACTED_IP]', safe)
         (ROOT/'candidate-error-sanitized.log').write_text(safe[-100000:])
+    (ROOT/'candidate-receipt-transport.json').write_text(json.dumps({'protocol':'atomic-private-file-v1','checks':receipt_transport},indent=2))
     shutil.rmtree(PRIVATE)
     result['ownedContainersRemaining']=len(owned)
     (ROOT/'candidate-rehearsal.json').write_text(json.dumps(result,indent=2))

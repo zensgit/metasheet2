@@ -36,7 +36,9 @@ jobs:
         with:
           node-version: 20
       - name: Controller safety tests
-        run: node --test controller/scripts/ops/staging-directory-candidate.test.mjs
+        run: |
+          node --test controller/scripts/ops/staging-directory-candidate.test.mjs
+          python3 controller/scripts/ops/staging_candidate_receipt_test.py
       - name: Frozen source and publication preflight
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,6 +91,7 @@ jobs:
             publication-receipt.json
             candidate-provider-names.json
             candidate-rehearsal.json
+            candidate-receipt-transport.json
             candidate-ledger-reconciliation.json
             candidate-db-tests.json
             candidate-cli-receipt.json
