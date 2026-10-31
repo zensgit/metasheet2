@@ -18,7 +18,14 @@ export function createAttendanceCalc14NativeFixture() {
   let admin:Awaited<ReturnType<typeof host.start>>
   let subject:Awaited<ReturnType<typeof host.user>>
   const dates={a:'2026-09-01',t:'2026-09-15',d:'2026-10-01',control:'2026-10-15',withdrawal:'2026-10-20'}
-  const engine=(version:'A'|'B')=>({rules:[{name:`calc14-source-${version}`,when:{userIds:[subject.userId]},then:{addWarning:`CALC14_SOURCE_${version}`}}]})
+  const engine=(version:'A'|'B')=>({templates:[{
+    name:'CALC14 retained source marker',
+    rules:[{
+      id:`calc14-source-${version}`,
+      when:{userId:subject.userId},
+      then:{warning:`CALC14_SOURCE_${version}`},
+    }],
+  }]})
   async function sourceTransaction(date:string,work:(query:(text:string,values?:unknown[])=>Promise<unknown>)=>Promise<void>) {
     const client=await host.pool.connect()
     try {
