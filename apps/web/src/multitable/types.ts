@@ -335,6 +335,46 @@ export interface MetaRowActions {
   /** R-66: set by the server only where `canDelete` is false because the row is a PLM row the stock-preparation
    *  pull maintains (nobody may delete it). The delete entry is then shown disabled with the reason. */
   deleteBlockedReason?: 'plm_row'
+  /** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3): set by GET /view and GET /records/:id only on a
+   *  manual supplementary row, for every actor who can read it — the grid's 「人工补充」 label. A DISPLAY mark only:
+   *  no editing control is ever gated on it alone (#6664 note N2); they read /context's `stockPreparationManualRows`. */
+  manualSupplement?: true
+}
+
+/** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): the state of a registered project sheet's manual rows. */
+export type MetaManualRowsState = 'allowed' | 'disabled' | 'unavailable'
+/** The closed reasons the host sends with `unavailable` (ADR §3.1). */
+export type MetaManualRowsUnavailableReason =
+  | 'lock_missing'
+  | 'project_archived'
+  | 'project_sheets_off'
+  | 'contract_mismatch'
+  | 'registry_unreadable'
+
+/**
+ * /context `capabilities.stockPreparationManualRows` as the host sends it (multitable/stock-preparation-manual-rows-gate.ts
+ * ManualRowsContextBlock): only on a registered project sheet (P_reg), only to an actor who can create, edit or delete.
+ * Every id list is SHEET-level; the web narrows them by the actor's field permissions (utils/manual-rows.ts, N5).
+ */
+export interface MetaManualRowsContextBlock {
+  state: MetaManualRowsState
+  /** Only with `unavailable`. */
+  reason?: string
+  /** The six fillable columns (physical ids) PATCH /records/:recordId/manual-fields may write on a manual row. */
+  editableFieldIds: string[]
+  /** The columns a manual-row create needs a value for (名称, then every column whose own validation requires it). */
+  requiredFieldIds: string[]
+  /** The 新增人工补充行 dialog's columns in its order (名称, 总用量, 图号, 规格, 材料, 用量, 备注 — the present ones). */
+  dialogFieldIds?: string[]
+}
+
+/** The block as the web reads it (utils/manual-rows.ts readManualRowsBlock): every list present, malformed → unavailable. */
+export interface MetaManualRowsBlock {
+  state: MetaManualRowsState
+  reason?: string
+  editableFieldIds: string[]
+  requiredFieldIds: string[]
+  dialogFieldIds: string[]
 }
 
 export interface MetaScopedPermissions {
@@ -601,6 +641,14 @@ export interface MetaCapabilities {
    * Display only: every create route keeps its own refusal.
    */
   recordCreateBlockedByLock?: boolean
+  /**
+   * 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): set by /context ONLY on a registered project sheet, to an
+   * actor who can create, edit or delete. While it is present — whatever its state — the workbench hides EVERY generic
+   * create entry and shows either 「新增人工补充行」 (state `allowed`) or the state's reason; the drawer offers
+   * 「复制为新行」 (`allowed`); the six fillable cells of a manual row write through PATCH …/manual-fields. Absent ⇒
+   * unchanged. Display only: every route re-gates on its own (generic create answers 409 / 503 by state).
+   */
+  stockPreparationManualRows?: MetaManualRowsContextBlock
   /**
    * 备料分批拉取第一期 step 3: set by /context ONLY on a sheet the host stamped closed for generic grid export
    * (a stock-preparation pilot project sheet; `canExport` is then already false for everyone). The workbench
@@ -1122,6 +1170,14 @@ export interface PatchRecordsInput {
   sheetId?: string
   partialSuccess?: boolean
   changes: CellChange[]
+}
+
+/** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.4): PATCH /records/:recordId/manual-fields — the six fillable
+ *  columns of ONE manual row; the answer has the /patch shape (`updated` carries the new version). */
+export interface PatchManualRowFieldsInput {
+  sheetId?: string
+  expectedVersion?: number
+  data: Record<string, unknown>
 }
 
 export interface FormSubmitInput {

@@ -215,6 +215,16 @@ export const MANUAL_ROW_TEMPLATE_CLASSES: Readonly<Record<ManualRowTemplateClass
 /** The classes a manual-row route may never write a value into (the server stamps or leaves them empty). */
 export const MANUAL_ROW_NEVER_WRITTEN_CLASSES: readonly ManualRowTemplateClass[] = Object.freeze(['lineage', 'identity_run', 'stamp'] as const)
 
+/**
+ * 「新增人工补充行」's columns, in the dialog's order (ADR §8 B3.3: 名称*、总用量*、图号、规格、材质、用量、备注). Logical ids;
+ * /context sends the physical ones (`dialogFieldIds`, slice B3) — the web cannot derive a physical id (it is a hash of the
+ * host registry row's project and object, provisioning.ts getObjectFieldId) and the field stanza carries no logical id.
+ * Six fillable columns plus 备注 (a human column, writable on any row).
+ */
+export const MANUAL_ROW_DIALOG_FIELD_IDS = Object.freeze([
+  'componentName', 'totalQuantity', 'componentCode', 'componentSpec', 'material', 'rawQuantity', 'notes',
+] as const)
+
 /** A value the edit route treats as CLEARING a not-clearable column. */
 export function isClearingManualRowValue(value: unknown): boolean {
   return value === null || value === undefined || (typeof value === 'string' && value.trim() === '')

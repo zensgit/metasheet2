@@ -38,6 +38,10 @@
  * actor's own resolved capabilities and still checks canCreateRecord (unlike the copy-sheet path, which hands the
  * server constant COPY_SHEET_RECORD_CAPABILITIES as its capability object; that precedent is deliberately NOT copied).
  *
+ * GENERIC CREATE (slice B3, ADR §3.1). POST /records and the xlsx import refuse a generic create on a P_reg sheet before
+ * RecordService.createRecord, by the same verdict /context reports (`resolveGenericCreateRefusal`, below the /context
+ * section); every other sheet keeps its old answer.
+ *
  * VALUES-FREE. Refusals carry a closed code, a fixed message and a closed reason token — never a sheet, project number,
  * key or value. Their reader already holds create / edit capability on the sheet.
  */
@@ -45,10 +49,12 @@ import { humanWriteLockKindOfProperty, stripHumanWriteLockKey } from './human-wr
 import { fieldsCarryExactStockPreparationStanza, resolvePlmKeyFieldIds } from './plm-row-delete-guard'
 import { getObjectFieldId } from './provisioning'
 import { normalizeProperty } from './record-duplicate-guard'
+import { isStockPreparationOverviewSheetIdCandidate } from './stock-preparation-overview-contract'
 import { isStockPreparationProjectSheetObjectId } from './stock-preparation-project-sheet-grant-contract'
 import { STOCK_PREPARATION_PROJECT_SHEET_PLUGIN } from './stock-preparation-project-sheet-schema-clamp'
 import {
   MANUAL_ROW_ACTIVE_FIELD_ID,
+  MANUAL_ROW_DIALOG_FIELD_IDS,
   MANUAL_ROW_FILLABLE_FIELD_IDS,
   MANUAL_ROW_KEY_FIELD_ID,
   MANUAL_ROW_NEVER_WRITTEN_CLASSES,
@@ -367,6 +373,8 @@ export type ManualRowsContextBlock = {
   reason?: ManualRowsUnavailableReason
   editableFieldIds: string[]
   requiredFieldIds: string[]
+  /** Slice B3: the 新增人工补充行 dialog's columns in its order (MANUAL_ROW_DIALOG_FIELD_IDS, the present ones). */
+  dialogFieldIds: string[]
 }
 
 function explicitlyRequired(property: unknown): boolean {
@@ -397,8 +405,11 @@ export function manualRowsContextBlockOf(verdict: ManualRowsVerdict, fields: Rea
   const present = new Set(fields.map((field) => field?.id).filter((id): id is string => typeof id === 'string'))
   const editableFieldIds = sheet ? sheet.derived.fillable.filter((id) => present.has(id)) : []
   const requiredFieldIds = sheet ? manualRowRequiredFieldIds(fields, sheet) : []
-  if (verdict.kind === 'unavailable') return { state: 'unavailable', reason: verdict.reason, editableFieldIds, requiredFieldIds }
-  return { state: verdict.kind, editableFieldIds, requiredFieldIds }
+  const dialogFieldIds = sheet
+    ? MANUAL_ROW_DIALOG_FIELD_IDS.map((logical) => sheet.derived.byLogical[logical]).filter((id): id is string => typeof id === 'string' && present.has(id))
+    : []
+  if (verdict.kind === 'unavailable') return { state: 'unavailable', reason: verdict.reason, editableFieldIds, requiredFieldIds, dialogFieldIds }
+  return { state: verdict.kind, editableFieldIds, requiredFieldIds, dialogFieldIds }
 }
 
 /**
@@ -413,6 +424,70 @@ export async function resolveManualRowsContextBlock(
 ): Promise<ManualRowsContextBlock | null> {
   const verdict = await loadManualRowsVerdict(query, sheetId, fields, 'create', stockPrepProjectSheetsEnabledForManualRows(env))
   return manualRowsContextBlockOf(verdict, fields)
+}
+
+// ── generic create on a P_reg sheet (ADR §3.1, slice B3) ─────────────────────────────────────────────
+//
+// POST /records (session and `mst_` tokens share that route) and POST /sheets/:sheetId/import-xlsx refuse a generic
+// create on a P_reg sheet BEFORE RecordService.createRecord, by the SAME verdict /context's block reports (one
+// `loadManualRowsVerdict(…, 'create', flag)` — so the refusal and the web's hidden entries can never disagree about a
+// sheet's state): 409, or 503 when a registry cannot be read, with the §3.1 code and text. Only `allowed` points at
+// 「新增人工补充行」. Every other sheet keeps its old answer (an ordinary sheet's 200 / 422 / 403; a sheet only provisioned
+// without a plugin registry row — PB-05 — keeps its 403 / 422).
+
+/** §3.1 row `allowed`: rows on this sheet are added through 「新增人工补充行」 (PLM rows come from the pull). */
+export const STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW_CODE = 'STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW'
+export const GENERIC_CREATE_USE_MANUAL_ROW_MESSAGE = '备料项目表上请用「新增人工补充行」新增行；PLM 行由拉取写入。'
+
+/** Values-free details: the block's own state (and, except for `allowed`, the reason token the manual-row routes use). */
+export type GenericCreateRefusalDetails =
+  | Readonly<{ state: 'allowed' }>
+  | Readonly<{ state: 'disabled'; reason: 'disabled' }>
+  | Readonly<{ state: 'unavailable'; reason: ManualRowsUnavailableReason }>
+
+export class StockPrepGenericCreateRefusedError extends Error {
+  readonly status: number
+  readonly code: string
+  constructor(readonly details: GenericCreateRefusalDetails) {
+    super(details.state === 'allowed' ? GENERIC_CREATE_USE_MANUAL_ROW_MESSAGE : MANUAL_ROWS_REFUSAL_MESSAGES[details.reason])
+    this.name = 'StockPrepGenericCreateRefusedError'
+    this.code = details.state === 'allowed'
+      ? STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW_CODE
+      : details.state === 'disabled' ? STOCK_PREP_MANUAL_ROWS_DISABLED_CODE : STOCK_PREP_MANUAL_ROWS_UNAVAILABLE_CODE
+    this.status = details.state === 'unavailable' && details.reason === 'registry_unreadable' ? 503 : 409
+  }
+
+  body(): { ok: false; error: { code: string; message: string; details: GenericCreateRefusalDetails } } {
+    return { ok: false, error: { code: this.code, message: this.message, details: this.details } }
+  }
+}
+
+/** Pure. The §3.1 refusal for a P_reg sheet's generic create; null for every other sheet (the old behaviour stays). */
+export function genericCreateRefusalOf(verdict: ManualRowsVerdict): StockPrepGenericCreateRefusedError | null {
+  if (verdict.kind === 'not_project_sheet') return null
+  if (verdict.kind === 'allowed') return new StockPrepGenericCreateRefusedError(Object.freeze({ state: 'allowed' as const }))
+  if (verdict.kind === 'disabled') return new StockPrepGenericCreateRefusedError(Object.freeze({ state: 'disabled' as const, reason: 'disabled' as const }))
+  return new StockPrepGenericCreateRefusedError(Object.freeze({ state: 'unavailable' as const, reason: verdict.reason }))
+}
+
+/**
+ * The two generic-create routes' one call. `fields` is the route's own fresh field read, or a loader for a route that
+ * has none before the create (POST /records). A sheet id outside the plugin-derived shape (`sheet_` + 24 hex) can never
+ * be a registered project sheet — the R-66 ② lookup drops it the same way before its statement
+ * (stock-preparation-project-sheet-schema-clamp.ts loadStockPreparationProjectSheetIds, the lookup (a) is defined by) —
+ * so such a sheet (every sheet a person creates) costs no statement here; a sheet without the exact stanza costs none
+ * beyond the field read. Never throws on a registry read (unreadable → 503 registry_unreadable).
+ */
+export async function resolveGenericCreateRefusal(
+  query: ManualRowsQueryFn,
+  sheetId: string,
+  fields: ReadonlyArray<GateFieldLike> | (() => Promise<ReadonlyArray<GateFieldLike>>),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<StockPrepGenericCreateRefusedError | null> {
+  if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) return null
+  const loaded = typeof fields === 'function' ? await fields() : fields
+  const verdict = await loadManualRowsVerdict(query, sheetId, loaded, 'create', stockPrepProjectSheetsEnabledForManualRows(env))
+  return genericCreateRefusalOf(verdict)
 }
 
 // ── the create extension (ADR §3.2 「实现」) ───────────────────────────────────────────────────────────

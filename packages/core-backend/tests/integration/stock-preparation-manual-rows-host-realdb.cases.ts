@@ -391,6 +391,8 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         state: 'allowed',
         editableFieldIds: ['componentCode', 'componentName', 'componentSpec', 'material', 'rawQuantity', 'totalQuantity'].map((l) => phys(main, l)),
         requiredFieldIds: [phys(main, 'componentName'), phys(main, 'totalQuantity')],
+        // Slice B3: the 新增人工补充行 dialog's columns (ADR §8 B3.3).
+        dialogFieldIds: ['componentName', 'totalQuantity', 'componentCode', 'componentSpec', 'material', 'rawQuantity', 'notes'].map((l) => phys(main, l)),
       })
       await setSwitch(main, 'disabled')
       try {
