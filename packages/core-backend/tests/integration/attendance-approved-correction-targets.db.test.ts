@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import type { approvedCorrectionGroupV2Fixture } from '../utils/attendance-approved-correction-group-v2-fixture'
 import { readNativeCorrectionParentPosture, seedNativeApprovedCorrectionSource } from '../utils/attendance-approved-correction-native-source-fixture'
+import { captureCorrectionTimezoneProducer, correctionPastSameDayTiming } from '../utils/attendance-correction-timezone-producer-fixture'
 import type { MetaSheetServer } from '../../src/index'
 import {
   restoreAttendanceSettingsRow,
@@ -66,6 +67,7 @@ function rawRequestJson(
 // Dynamic src/index import follows exact false RBAC flags; token claims grant no authority.
 describe('attendance approved correction targets (real W53 source server and database)', () => {
   let server: MetaSheetServer | undefined
+  let timezoneProducer: Awaited<ReturnType<typeof captureCorrectionTimezoneProducer>>
   let pool: Pool
   const seededDefaultRuleIds: string[] = []
   const seededPermissionUserIds: string[] = []
@@ -106,6 +108,7 @@ describe('attendance approved correction targets (real W53 source server and dat
   async function seedOrg(
     state: 'legacy' | 'shadow',
     permission = 'attendance:admin',
+    timezone = 'UTC',
   ) {
     const orgId = randomUUID()
     const userId = randomUUID()
@@ -139,7 +142,7 @@ describe('attendance approved correction targets (real W53 source server and dat
        SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
        WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
        RETURNING id`,
-      [randomUUID(), orgId, 'UTC'],
+      [randomUUID(), orgId, timezone],
     )
     seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
     return { orgId, userId, token: await mintToken(userId, orgId) }
@@ -259,22 +262,22 @@ describe('attendance approved correction targets (real W53 source server and dat
     } finally { client.release() }
   }
 
-  async function loadCorrectionTargets(fixture: Awaited<ReturnType<typeof seedOrg>>) {
-    return requestJson(baseUrl + '/api/attendance/correction-targets?workDate=2049-08-21', {
+  async function loadCorrectionTargets(fixture: Awaited<ReturnType<typeof seedOrg>>, workDate = '2049-08-21') {
+    return requestJson(baseUrl + '/api/attendance/correction-targets?workDate=' + workDate, {
       headers: { Authorization: 'Bearer ' + fixture.token },
     })
   }
-  async function createExactCorrection(fixture: Awaited<ReturnType<typeof seedOrg>>) {
-    const candidate = await loadCorrectionTargets(fixture)
+  async function createExactCorrection(fixture: Awaited<ReturnType<typeof seedOrg>>, workDate = '2049-08-21') {
+    const candidate = await loadCorrectionTargets(fixture, workDate)
     expect(candidate.status, candidate.raw).toBe(200)
     const data = candidate.body!.data
     expect(data.posture).toBe('canonical')
     const target = (segmentIndex: number, direction: string) => data.candidates.find(
       (item: { target: { segmentIndex: number; direction: string } }) =>
         item.target.segmentIndex === segmentIndex && item.target.direction === direction).target
-    const body = { operationId: randomUUID(), orgId: fixture.orgId, workDate: '2049-08-21',
-      requestType: 'time_correction', requestedInAt: '2049-08-21T09:00:00.000Z',
-      requestedOutAt: '2049-08-21T18:00:00.000Z', reason: 'approved correction A',
+    const body = { operationId: randomUUID(), orgId: fixture.orgId, workDate,
+      requestType: 'time_correction', requestedInAt: workDate + 'T09:00:00.000Z',
+      requestedOutAt: workDate + 'T18:00:00.000Z', reason: 'approved correction A',
       correctionTargets: { schemaVersion: 1, source: data.source, checkIn: target(0, 'check_in'), checkOut: target(1, 'check_out') } }
     const headers = { Authorization: 'Bearer ' + fixture.token, 'x-org-id': fixture.orgId }
     const created = await requestJson(baseUrl + '/api/attendance/requests', { method: 'POST', headers, body })
@@ -289,13 +292,16 @@ describe('attendance approved correction targets (real W53 source server and dat
     process.env.RBAC_TOKEN_TRUST = 'false'
     process.env.SKIP_PLUGINS = 'false'
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
-    const loaded = await import('../../src/index')
-    server = new loaded.MetaSheetServer({
-      port: 0,
-      host: '127.0.0.1',
-      pluginDirs: [path.join(repoRoot, 'plugins', 'plugin-attendance')],
-    })
-    await server.start()
+    timezoneProducer = await captureCorrectionTimezoneProducer()
+    try {
+      const loaded = await import('../../src/index')
+      server = new loaded.MetaSheetServer({
+        port: 0,
+        host: '127.0.0.1',
+        pluginDirs: [path.join(repoRoot, 'plugins', 'plugin-attendance')],
+      })
+      await server.start()
+    } finally { timezoneProducer.restore() }
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('attendance server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
@@ -357,17 +363,17 @@ describe('attendance approved correction targets (real W53 source server and dat
 
     it('requires explicit multisegment selection and rejects display/foreign-source/foreign-user targets atomically', async () => {
       const fixture = await seedOrg('shadow')
-      await seedNativeApprovedCorrectionSource(pool, fixture)
+      await seedNativeApprovedCorrectionSource(pool, fixture, { workDate: '2026-02-02', executeLivePunch: timezoneProducer.executeLivePunch })
       const before = await counts(fixture.orgId)
       expect({ requests: before.requests, snapshots: before.snapshots }).toEqual({ requests: 0, snapshots: 0 })
-      const candidate = await loadCorrectionTargets(fixture)
+      const candidate = await loadCorrectionTargets(fixture, '2026-02-02')
       expect(candidate.status, candidate.raw).toBe(200)
       const data = candidate.body!.data
-      expect(data.candidates[0].display).toEqual({ timezone: 'UTC', expectedStartAt: '2049-08-21T09:00:00.000Z',
-        expectedEndAt: '2049-08-21T12:00:00.000Z', originalOccurredAt: '2049-08-21T09:15:00.000Z', source: 'attendance_event' })
+      expect(data.candidates[0].display).toEqual({ timezone: 'UTC', expectedStartAt: '2026-02-02T09:00:00.000Z',
+        expectedEndAt: '2026-02-02T12:00:00.000Z', originalOccurredAt: '2026-02-02T09:15:00.000Z', source: 'attendance_event' })
       const headers = { Authorization: 'Bearer ' + fixture.token }
-      const base = { operationId: randomUUID(), orgId: fixture.orgId, workDate: '2049-08-21', requestType: 'missed_check_in',
-        requestedInAt: '2049-08-21T09:00:00.000Z',
+      const base = { operationId: randomUUID(), orgId: fixture.orgId, workDate: '2026-02-02', requestType: 'missed_check_in',
+        requestedInAt: '2026-02-02T09:00:00.000Z',
         correctionTargets: { schemaVersion: 1, source: data.source, checkIn: null, checkOut: null } }
       const ambiguous = await requestJson(baseUrl + '/api/attendance/requests', { method: 'POST', headers, body: base })
       expect(ambiguous.status, ambiguous.raw).toBe(422)
@@ -393,8 +399,8 @@ describe('attendance approved correction targets (real W53 source server and dat
 
     it('retains targets on edit/replay, binds displayed snapshot OCC, and appends two-sided canonical shadow facts once', async () => {
       const fixture = await seedOrg('shadow')
-      const source = await seedNativeApprovedCorrectionSource(pool, fixture)
-      const made = await createExactCorrection(fixture)
+      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { workDate: '2026-02-02', executeLivePunch: timezoneProducer.executeLivePunch })
+      const made = await createExactCorrection(fixture, '2026-02-02')
       const { headers, requestId } = made
       const replay = await requestJson(baseUrl + '/api/attendance/requests', { method: 'POST', headers, body: made.body })
       expect(replay.body).toEqual(made.created.body)
@@ -473,14 +479,14 @@ describe('attendance approved correction targets (real W53 source server and dat
 
     it('rejects an intervening punch before terminal writes with zero decision residue', async () => {
       const fixture = await seedOrg('shadow')
-      await seedNativeApprovedCorrectionSource(pool, fixture)
-      const made = await createExactCorrection(fixture)
+      await seedNativeApprovedCorrectionSource(pool, fixture, { workDate: '2026-02-02', executeLivePunch: timezoneProducer.executeLivePunch })
+      const made = await createExactCorrection(fixture, '2026-02-02')
       const read = await requestJson(baseUrl + '/api/attendance/requests/' + made.requestId, { headers: made.headers })
       expect(read.status, read.raw).toBe(200)
       const shown = read.body!.data.request.decisionContext
       await pool.query(
         'INSERT INTO attendance_events (id,org_id,user_id,work_date,event_type,occurred_at,source,timezone) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-        [randomUUID(), fixture.orgId, fixture.userId, '2049-08-21', 'check_out', '2049-08-21T18:00:00.000Z', 'api', 'UTC'])
+        [randomUUID(), fixture.orgId, fixture.userId, '2026-02-02', 'check_out', '2026-02-02T18:00:00.000Z', 'api', 'UTC'])
       const response = await requestJson(baseUrl + '/api/attendance/requests/' + made.requestId + '/approve', {
         method: 'POST', headers: made.headers, body: { ...shown, operationId: randomUUID() } })
       expect(response.status, response.raw).toBe(409)
@@ -491,7 +497,7 @@ describe('attendance approved correction targets (real W53 source server and dat
     })
     it('retains an explicit group_effective frozenV2 source through the real correction route', async () => {
       const fixture = await seedOrg('shadow')
-      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { groupV2: true })
+      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { groupV2: true, workDate: '2026-02-02', executeLivePunch: timezoneProducer.executeLivePunch })
       expect(source.context).toEqual(source.preparedContext)
       const frozenSource = () => pool.query(
         `SELECT to_jsonb(c) AS calculation,
@@ -501,10 +507,10 @@ describe('attendance approved correction targets (real W53 source server and dat
         [source.calculationId, fixture.orgId])
       const sourcePreimage = (await frozenSource()).rows
       expect(sourcePreimage).toHaveLength(1)
-      const candidate = await loadCorrectionTargets(fixture)
+      const candidate = await loadCorrectionTargets(fixture, '2026-02-02')
       expect(candidate.status, candidate.raw).toBe(200)
       expect(candidate.body!.data.posture).toBe('canonical')
-      const made = await createExactCorrection(fixture)
+      const made = await createExactCorrection(fixture, '2026-02-02')
       const read = await requestJson(baseUrl + '/api/attendance/requests/' + made.requestId, { headers: made.headers })
       expect(read.status, read.raw).toBe(200)
       const shown = read.body!.data.request.decisionContext
@@ -535,13 +541,13 @@ describe('attendance approved correction targets (real W53 source server and dat
     it('source04: keeps approval audit out of later live punch evidence and retains the approved correction', async () => {
       expect(process.env.RBAC_BYPASS).toBe('false')
       expect(process.env.RBAC_TOKEN_TRUST).toBe('false')
-      const fixture = await seedOrg('shadow')
-      const workDate = new Date().toISOString().slice(0, 10)
-      const startAt = workDate + 'T00:00:00.000Z'
-      const endAt = new Date(Date.parse(startAt) + 86_400_000).toISOString()
+      const timing = correctionPastSameDayTiming()
+      const fixture = await seedOrg('shadow', 'attendance:admin', timing.timezone)
+      const { workDate, startAt, endAt } = timing
+      expect(Date.parse(timing.instant('18:00'))).toBeLessThan(Date.now())
       await pool.query("UPDATE attendance_calculation_rollout_state SET state='eligible',prior_state='shadow',version=3 WHERE org_id=$1", [fixture.orgId])
       await pool.query("UPDATE attendance_calculation_rollout_state SET state='authoritative',prior_state='eligible',version=4 WHERE org_id=$1", [fixture.orgId])
-      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { mode: 'authoritative', workDate, singleSegment: true })
+      const source = await seedNativeApprovedCorrectionSource(pool, fixture, { mode: 'authoritative', singleSegment: true, timing, executeLivePunch: timezoneProducer.executeLivePunch })
       expect(source.context).toEqual(source.preparedContext)
       const genuineInRef = source.evidence[0].ref
       const headers = { Authorization: 'Bearer ' + fixture.token, 'x-org-id': fixture.orgId }
@@ -612,7 +618,7 @@ describe('attendance approved correction targets (real W53 source server and dat
       const checkedOut = await requestJson(baseUrl + '/api/attendance/punch', {
         method: 'POST', headers, body: {
           orgId: fixture.orgId, operationId: checkoutOperationId,
-          eventType: 'check_out', timezone: 'UTC', occurredAt: checkoutAt,
+          eventType: 'check_out', timezone: timing.timezone, occurredAt: checkoutAt,
         } })
       expect(checkedOut.status, checkedOut.raw).toBe(200)
       const checkoutRows = await pool.query(

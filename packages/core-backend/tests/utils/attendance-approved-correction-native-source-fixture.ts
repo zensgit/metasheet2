@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import type { Pool } from 'pg'
 import { expect } from 'vitest'
+import type { AttendanceW4LiveScheduledBoundaryV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
+import type { correctionPastSameDayTiming } from './attendance-correction-timezone-producer-fixture'
 
 type Subject = { orgId: string; userId: string }
 
@@ -21,7 +23,8 @@ export async function readNativeCorrectionParentPosture(pool: Pool, orgId: strin
 export async function seedNativeApprovedCorrectionSource(
   pool: Pool,
   subject: Subject,
-  options: { mode?: 'shadow' | 'authoritative'; workDate?: string; singleSegment?: boolean; groupV2?: boolean } = {},
+  options: { mode?: 'shadow' | 'authoritative'; workDate?: string; singleSegment?: boolean; groupV2?: boolean;
+    executeLivePunch?: AttendanceW4LiveScheduledBoundaryV1['executeLivePunch']; timing?: ReturnType<typeof correctionPastSameDayTiming> } = {},
 ) {
   // Load runtime dependencies only after the native harness has installed its DB/RBAC environment.
   const { createLegacyLivePunchBoundaryDriver } = await import('./attendance-legacy-live-punch-boundary-driver')
@@ -30,17 +33,18 @@ export async function seedNativeApprovedCorrectionSource(
   const mode = options.mode ?? 'shadow'
   const rollout = await pool.query('SELECT state FROM attendance_calculation_rollout_state WHERE org_id=$1', [orgId])
   expect(rollout.rows).toEqual([{ state: mode }])
-  const workDate = options.workDate ?? '2049-08-21'
-  const instant = (time: string) => workDate + 'T' + time + ':00.000Z'
+  const workDate = options.timing?.workDate ?? options.workDate ?? '2049-08-21'
+  const timezone = options.timing?.timezone ?? 'UTC'
+  const instant = options.timing?.instant ?? ((time: string) => workDate + 'T' + time + ':00.000Z')
   const shiftId = randomUUID()
   const groupId = options.groupV2 ? randomUUID() : null
   await pool.query(
     `INSERT INTO attendance_shifts
        (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight,
         working_days, late_grace_minutes, early_grace_minutes, rounding_minutes, flex_mode)
-     VALUES ($1, $2, 'correction A native source', 'UTC', '09:00', '18:00', false,
+     VALUES ($1, $2, 'correction A native source', $3, '09:00', '18:00', false,
              '[0,1,2,3,4,5,6]'::jsonb, 0, 0, 1, 'strict')`,
-    [shiftId, orgId],
+    [shiftId, orgId, timezone],
   )
   const segments = options.singleSegment ? [['09:00', '18:00']] : [['09:00', '12:00'], ['13:00', '18:00']]
   for (const [index, [start, end]] of segments.entries()) {
@@ -103,12 +107,16 @@ export async function seedNativeApprovedCorrectionSource(
     : [['check_in', '09:15'], ['check_out', '12:00'], ['check_in', '13:00']]
   let preparedContext: unknown
   let producedCalculationId: string | null = null
+  let firstProducedCalculationId: string | null = null
   for (const [eventType, time] of punches) {
-    const prepared = await driver.prepare({ orgId, userId, eventType, occurredAt: instant(time), timezone: 'UTC', operationId: randomUUID() })
-    const result = await driver.execute(prepared)
+    const prepared = await driver.prepare({ orgId, userId, eventType, occurredAt: instant(time), timezone, operationId: randomUUID() })
+    const result = options.executeLivePunch
+      ? await options.executeLivePunch(prepared.input)
+      : await driver.execute(prepared)
     if (result.kind !== 'w4') throw new Error('CORRECTION_A_NATIVE_BOUNDARY_REQUIRED')
     expect({ outcome: result.shadow.outcome, reason: result.shadow.outcomeReasonCode })
       .toEqual({ outcome: 'completed', reason: 'calculated' })
+    firstProducedCalculationId ??= result.shadow.calculationId
     producedCalculationId = result.shadow.calculationId
     preparedContext = JSON.parse(JSON.stringify(prepared.outerContext))
   }
@@ -118,6 +126,13 @@ export async function seedNativeApprovedCorrectionSource(
     const selected = await loadAttendanceCorrectionSourceV1(client, { orgId, userId, workDate })
     expect(selected.source.calculationId).toBe(producedCalculationId)
     expect(selected.input.context).toEqual(preparedContext)
+    if (options.executeLivePunch) {
+      const companion = await client.query(
+        `SELECT record_id::text, timezone, original_calculation_id::text FROM attendance_timezone_context_companions
+          WHERE org_id=$1 AND user_id=$2 AND work_date=$3`, [orgId, userId, workDate])
+      expect(companion.rows).toEqual([{ record_id: selected.source.recordId, timezone,
+        original_calculation_id: firstProducedCalculationId }])
+    }
     expect({ mode: selected.prior.mode, outcome: selected.prior.outcome, segments: selected.prior.expected_segment_count })
       .toEqual({ mode, outcome: 'completed', segments: segments.length })
     await client.query('COMMIT')
