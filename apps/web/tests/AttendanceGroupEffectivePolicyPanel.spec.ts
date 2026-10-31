@@ -5,12 +5,17 @@ import { apiFetch } from '../src/utils/api'
 import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 
 const pushSpy = vi.fn()
+const openGroupStageSpy = vi.fn()
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
-  return {
-    ...actual,
-    useRouter: () => ({ push: pushSpy }),
-  }
+  const router = actual.createRouter({
+    history: actual.createMemoryHistory(),
+    routes: (['schedule', 'calendar', 'rules'] as const).map(step => ({
+      path: '/attendance/admin/groups/:groupId/' + step,
+      component: { template: '<div />' },
+    })),
+  })
+  return { ...actual, useRouter: () => ({ ...router, push: pushSpy }) }
 })
 
 vi.mock('../src/utils/api', () => ({ apiFetch: vi.fn() }))
@@ -135,7 +140,11 @@ describe('AttendanceGroupEffectivePolicyPanel', () => {
   })
 
   function mount(guard = createAttendanceSessionGuard('synthetic-org', () => 'synthetic-epoch')): void {
-    app = createApp(AttendanceGroupEffectivePolicyPanel, { groupId: GROUP_ID, returnTo: RETURN_TO })
+    app = createApp(AttendanceGroupEffectivePolicyPanel, {
+      groupId: GROUP_ID,
+      returnTo: RETURN_TO,
+      onOpenGroupStage: openGroupStageSpy,
+    })
     app.provide(attendanceSessionGuardKey, guard)
     app.mount(container!)
   }
@@ -281,16 +290,166 @@ describe('AttendanceGroupEffectivePolicyPanel', () => {
     )
   })
 
-  it('navigates to the existing groups-list section for a group_stage editorRef (conflict row)', async () => {
-    vi.mocked(apiFetch).mockResolvedValueOnce(response(200, fullFixture()))
+  it.each([
+    ['basics', 'conflict'],
+    ['people', 'domain'],
+    ['people', 'conflict'],
+  ] as const)('emits the exact group and %s stage from a %s action', async (stage, source) => {
+    const fixture = fullFixture()
+    if (stage === 'basics') {
+      fixture.data.conflicts[0] = {
+        ...fixture.data.conflicts[0],
+        code: 'TIMEZONE_MISSING',
+        domain: 'basics',
+        editorRef: { kind: 'group_stage', stage },
+      }
+    }
+    vi.mocked(apiFetch).mockResolvedValueOnce(response(200, fixture))
     mount()
-    await flushUi()
     click('[data-attendance-w6-effective-policy-open]')
     await flushUi()
 
+    click(source === 'domain'
+      ? '[data-attendance-w6-effective-policy-domain-nav="membership"]'
+      : '[data-attendance-w6-effective-policy-conflict-nav="0"]')
+    await flushUi()
+
+    expect(openGroupStageSpy.mock.calls).toEqual([[{ groupId: GROUP_ID, stage }]])
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(vi.mocked(apiFetch).mock.calls).toEqual([[`/api/attendance/groups/${GROUP_ID}/effective-policy`]])
+  })
+
+  it.each([
+    ['schedule', 'schedule', 'domain'],
+    ['schedule', 'schedule', 'conflict'],
+    ['policies', 'rules', 'domain'],
+    ['policies', 'rules', 'conflict'],
+  ] as const)('routes group_stage %s to /%s from a %s action', async (stage, step, source) => {
+    const fixture = fullFixture()
+    const payload = {
+      ...fixture,
+      data: {
+        ...fixture.data,
+        domains: {
+          ...fixture.data.domains,
+          schedule: { ...fixture.data.domains.schedule, editorRef: { kind: 'group_stage', stage: 'schedule' } },
+        },
+        conflicts: [{
+          ...fixture.data.conflicts[0],
+          code: stage === 'schedule' ? 'FIXED_SCHEDULE_PENDING_APPLY' : 'RULE_SOURCE_MISSING',
+          domain: stage === 'schedule' ? 'schedule' : 'rules',
+          editorRef: { kind: 'group_stage', stage },
+        }],
+      },
+    }
+    vi.mocked(apiFetch).mockResolvedValueOnce(response(200, payload))
+    mount()
+    click('[data-attendance-w6-effective-policy-open]')
+    await flushUi()
+
+    click(source === 'conflict'
+      ? '[data-attendance-w6-effective-policy-conflict-nav="0"]'
+      : `[data-attendance-w6-effective-policy-domain-nav="${stage === 'schedule' ? 'schedule' : 'punchMethod'}"]`)
+    await flushUi()
+
+    expect(pushSpy.mock.calls).toEqual([[
+      `/attendance/admin/groups/${GROUP_ID}/${step}?returnTo=${encodeURIComponent(RETURN_TO)}`,
+    ]])
+    expect(openGroupStageSpy).not.toHaveBeenCalled()
+    expect(vi.mocked(apiFetch).mock.calls).toEqual([[`/api/attendance/groups/${GROUP_ID}/effective-policy`]])
+  })
+
+
+  it('retains canonical group_context_route navigation for a conflict action', async () => {
+    const fixture = fullFixture()
+    const payload = {
+      ...fixture,
+      data: {
+        ...fixture.data,
+        conflicts: [{
+          ...fixture.data.conflicts[0],
+          code: 'RULE_SOURCE_MISSING',
+          domain: 'rules',
+          editorRef: { kind: 'group_context_route', step: 'rules', surface: 'rule-sets' },
+        }],
+      },
+    }
+    vi.mocked(apiFetch).mockResolvedValueOnce(response(200, payload))
+    mount()
+    click('[data-attendance-w6-effective-policy-open]')
+    await flushUi()
     click('[data-attendance-w6-effective-policy-conflict-nav="0"]')
     await flushUi()
-    expect(pushSpy).toHaveBeenCalledWith('/attendance?tab=admin&section=attendance-admin-groups')
+
+    expect(pushSpy.mock.calls).toEqual([[
+      `/attendance/admin/groups/${GROUP_ID}/rules?surface=rule-sets&returnTo=${encodeURIComponent(RETURN_TO)}`,
+    ]])
+    expect(openGroupStageSpy).not.toHaveBeenCalled()
+  })
+
+  it('renders no domain or conflict action for an unknown group stage', async () => {
+    const fixture = fullFixture()
+    fixture.data.domains.membership.editorRef.stage = 'archived'
+    fixture.data.conflicts[0].editorRef.stage = 'archived'
+    vi.mocked(apiFetch).mockResolvedValueOnce(response(200, fixture))
+    mount()
+    click('[data-attendance-w6-effective-policy-open]')
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-content]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-domain-nav="membership"]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-conflict-nav="0"]')).toBeNull()
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(openGroupStageSpy).not.toHaveBeenCalled()
+    expect(vi.mocked(apiFetch).mock.calls).toEqual([[`/api/attendance/groups/${GROUP_ID}/effective-policy`]])
+  })
+
+  it.each([403, 404])('rejects a held action after refresh makes the group unavailable (%d)', async (status) => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(response(200, fullFixture()))
+      .mockResolvedValueOnce(response(status))
+    mount()
+    click('[data-attendance-w6-effective-policy-open]')
+    await flushUi()
+    const held = container!.querySelector<HTMLButtonElement>('[data-attendance-w6-effective-policy-domain-nav="membership"]')!
+    click('[data-attendance-w6-effective-policy-refresh]')
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-unavailable]')).toBeTruthy()
+    held.click()
+    await flushUi()
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(openGroupStageSpy).not.toHaveBeenCalled()
+    expect(apiFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects an aggregate naming a different group before offering editor actions', async () => {
+    const fixture = fullFixture()
+    fixture.data.groupId = '66666666-7777-4888-8999-000000000000'
+    vi.mocked(apiFetch).mockResolvedValueOnce(response(200, fixture))
+    mount()
+    click('[data-attendance-w6-effective-policy-open]')
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-error]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-content]')).toBeNull()
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(openGroupStageSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['domain', 'conflict'] as const)('does not dispatch an old %s action after session invalidation', async (source) => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(response(200, fullFixture()))
+    const guard = createAttendanceSessionGuard('synthetic-org', () => 'synthetic-epoch')
+    mount(guard)
+    click('[data-attendance-w6-effective-policy-open]')
+    await flushUi()
+    const action = container!.querySelector<HTMLButtonElement>(source === 'domain'
+      ? '[data-attendance-w6-effective-policy-domain-nav="membership"]'
+      : '[data-attendance-w6-effective-policy-conflict-nav="0"]')!
+    guard.invalidate()
+    action.click()
+    await flushUi()
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(openGroupStageSpy).not.toHaveBeenCalled()
+    expect(apiFetch).toHaveBeenCalledTimes(1)
   })
 
   it('renders "No conflicts." when the conflicts array is empty', async () => {

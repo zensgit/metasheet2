@@ -5583,6 +5583,16 @@
                     </template>
                   </section>
 
+                  <AttendanceGroupPolicyWorkspace
+                    :enabled="attendanceGroupPolicyWorkspaceEnabled"
+                    :visible="attendanceGroupActiveStage === 'policies'"
+                    :canonical="Boolean(props.routeGroupContext)"
+                    :source="attendanceGroupPolicyWorkspaceSource"
+                    :return-to="props.routeGroupContext?.returnTo ?? '/attendance?tab=admin&section=attendance-admin-groups'"
+                    @navigate="navigateAttendanceGroupPolicyWorkspace"
+                    @tool="handleAttendanceGroupSummaryAction"
+                  >
+                    <template #legacy>
                   <section v-show="attendanceGroupActiveStage === 'policies'" id="attendance-group-stage-policies" class="attendance__group-summary-grid" data-attendance-group-summaries>
                     <div
                       v-for="card in attendanceGroupSummaryCards"
@@ -5623,6 +5633,32 @@
                       </div>
                     </div>
                   </section>
+                    </template>
+                    <template #tools="{ openTool }">
+                      <div class="attendance__group-summary-grid" data-attendance-group-policy-tools>
+                        <div
+                          v-for="card in attendanceGroupSummaryCards.filter(card => card.actions.length > 0)"
+                          :key="card.key"
+                          class="attendance__group-summary"
+                          :data-attendance-group-policy-tool="card.key"
+                        >
+                          <strong>{{ card.title }}</strong>
+                          <div class="attendance__group-summary-actions">
+                            <button
+                              v-for="action in card.actions"
+                              :key="action.key"
+                              class="attendance__btn attendance__btn--inline"
+                              type="button"
+                              :data-attendance-group-summary-action="action.key"
+                              @click="openTool(action)"
+                            >
+                              {{ action.label }}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </AttendanceGroupPolicyWorkspace>
 
                   <div
                     v-if="attendanceGroupRulePolicyDrawerOpen"
@@ -10677,8 +10713,10 @@ import {
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
 import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../router/attendanceGroupContextRoute'
+import AttendanceGroupPolicyWorkspace, { useAttendanceGroupPolicyWorkspace } from './attendance/AttendanceGroupPolicyWorkspace'
 import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupRouteContext'
-import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
+import { hydrateAttendanceGroupRoute, type AttendanceGroupRouteWorkflowStage } from './attendance/attendanceGroupRouteHydration'
+import type { AttendanceGroupEffectivePolicyStageActionV1 } from './attendance/attendanceGroupEffectivePolicyLabels'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
   deriveAdminTaskHomeGroupStatus,
@@ -10861,6 +10899,8 @@ const props = withDefaults(
     mode?: AttendancePageMode
     initialSectionId?: string
     initialRequestId?: string
+    groupStageRequest?: AttendanceGroupEffectivePolicyStageActionV1 | null
+    returnGroupContext?: { group: AttendanceAuthorizedGroup; stage: AttendanceGroupRouteWorkflowStage } | null
     routeGroupContext?: {
       group: AttendanceAuthorizedGroup
       step: AttendanceGroupRouteStep
@@ -10872,6 +10912,8 @@ const props = withDefaults(
     mode: 'overview',
     initialSectionId: '',
     initialRequestId: '',
+    groupStageRequest: null,
+    returnGroupContext: null,
     routeGroupContext: null,
   }
 )
@@ -10882,6 +10924,7 @@ const emit = defineEmits<{
     groupId: string
     step: AttendanceGroupRouteStep
     surface: AttendanceGroupRouteSurface | null
+    originStage?: AttendanceGroupRouteWorkflowStage
   }): void
 }>()
 
@@ -12602,7 +12645,13 @@ const ruleTemplateLoading = ref(false)
 const ruleTemplateSaving = ref(false)
 const ruleTemplateRestoring = ref(false)
 const attendanceGroupLoading = ref(false)
+let attendanceGroupEditorReadActive = true
 let attendanceGroupLoadGeneration = 0
+let attendanceGroupStageActionRevision = 0
+onUnmounted(() => {
+  attendanceGroupEditorReadActive = false
+  attendanceGroupLoadGeneration += 1
+})
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
@@ -14990,7 +15039,8 @@ function openAttendanceGroupRoute(
     )
     return
   }
-  emit('open-group-route', { groupId, step, surface })
+  if (!attendanceSessionGuard.isCurrent()) return
+  emit('open-group-route', { groupId, step, surface, originStage: attendanceGroupActiveStage.value })
 }
 
 function attendanceGroupSummaryRouteTarget(actionKey: string): {
@@ -15448,6 +15498,24 @@ const importPreviewSummaryCards = computed(() => [
 const initialAuthHeaders = typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders() : {}
 const orgId = ref(String(initialAuthHeaders['x-tenant-id'] || '').trim())
 const {
+  enabled: attendanceGroupPolicyWorkspaceEnabled,
+  source: attendanceGroupPolicyWorkspaceSource,
+  navigate: navigateAttendanceGroupPolicyWorkspace,
+} = useAttendanceGroupPolicyWorkspace({
+  groupId: () => attendanceGroupEditingId.value ?? '',
+  orgId: () => normalizedOrgId() ?? '',
+  canonical: () => Boolean(props.routeGroupContext),
+  stale: () => attendanceSessionGuard.stale.value,
+  isCurrent: attendanceSessionGuard.isCurrent,
+  openRoute: openAttendanceGroupRoute,
+  openStage: target => {
+    if (target.groupId !== attendanceGroupEditingId.value) return
+    attendanceGroupStageActionRevision += 1
+    selectAttendanceGroupStage(target.stage)
+    selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)
+  },
+})
+const {
   loading: sessionOrgLoading, switching: sessionOrgSwitching,
   errorMessage: sessionOrgError, orgs: sessionOrgIds, currentOrgId: sessionOrgId,
   loadSessionOrgs, switchSessionOrg,
@@ -15680,7 +15748,7 @@ const {
 // gates hash-restore/scroll-spy/keyboard-nav so a hidden workspace doesn't
 // silently mutate `adminActiveSectionId` or scroll behind the task home.
 function hasExplicitAdminSectionTarget(): boolean {
-  if (props.routeGroupContext) return true
+  if (props.routeGroupContext || props.returnGroupContext) return true
   if (isKnownAdminSectionId(props.initialSectionId.trim())) return true
   if (typeof window === 'undefined') return false
   return isKnownAdminSectionId(window.location.hash.replace(/^#/, '').trim())
@@ -16453,7 +16521,20 @@ function openHolidayCalendarPolicyFromSettings(): void {
   })
 }
 
+let parentReturnHydrated = false
 async function focusInitialAttendanceSection(): Promise<void> {
+  if (showAdmin.value && props.returnGroupContext) {
+    if (!parentReturnHydrated && attendanceSessionGuard.isCurrent()) {
+      const { group, stage } = props.returnGroupContext
+      if (stage !== 'basics' && stage !== 'people' && stage !== 'schedule' && stage !== 'policies') return
+      parentReturnHydrated = true
+      attendanceGroups.value = [group, ...attendanceGroups.value.filter(item => item.id !== group.id)]
+      attendanceGroupsTotal.value = Math.max(attendanceGroupsTotal.value, attendanceGroups.value.length)
+      editAttendanceGroup(group, stage)
+      selectAdminSection('attendance-admin-groups')
+    }
+    return
+  }
   if (showAdmin.value && props.routeGroupContext) {
     hydrateAttendanceGroupFromRoute(props.routeGroupContext)
     return
@@ -29331,6 +29412,20 @@ function hydrateAttendanceGroupFromRoute(context: NonNullable<typeof props.route
   selectAdminSection(hydration.section)
 }
 
+function openAttendanceGroupStage(target: AttendanceGroupEffectivePolicyStageActionV1): void {
+  const context = props.routeGroupContext
+  if (!attendanceSessionGuard.isCurrent() || !context || target.groupId !== context.group.id
+    || (target.stage !== 'basics' && target.stage !== 'people'
+      && target.stage !== 'schedule' && target.stage !== 'policies')) return
+  if (attendanceGroupEditingId.value !== context.group.id) {
+    const group = attendanceGroups.value.find(item => item.id === context.group.id) ?? context.group
+    hydrateAttendanceGroupFromRoute(context, group)
+  }
+  attendanceGroupStageActionRevision += 1
+  selectAttendanceGroupStage(target.stage)
+  selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)
+}
+
 function selectAttendanceGroupStage(stage: AttendanceGroupWorkflowStage): void {
   attendanceGroupActiveStage.value = stage
 }
@@ -29437,6 +29532,7 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
 }
 
 async function loadAttendanceGroups() {
+  if (!attendanceGroupEditorReadActive || !attendanceSessionGuard.isCurrent()) return
   const generation = ++attendanceGroupLoadGeneration
   attendanceGroupLoading.value = true
   try {
@@ -29445,14 +29541,14 @@ async function loadAttendanceGroups() {
       : undefined
     const query = buildQuery({ orgId: normalizedOrgId(), pageSize: '200' })
     const response = await apiFetch(`/api/attendance/groups?${query.toString()}`)
-    if (generation !== attendanceGroupLoadGeneration) return
+    if (generation !== attendanceGroupLoadGeneration || !attendanceSessionGuard.isCurrent()) return
     if (response.status === 403) {
       adminForbidden.value = true
       attendanceGroupCatalogScope.value = 'unknown'
       return
     }
     const data = await response.json()
-    if (generation !== attendanceGroupLoadGeneration) return
+    if (generation !== attendanceGroupLoadGeneration || !attendanceSessionGuard.isCurrent()) return
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
@@ -29463,14 +29559,38 @@ async function loadAttendanceGroups() {
     attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
     if (props.routeGroupContext) {
       const listedGroup = attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
-      hydrateAttendanceGroupFromRoute(
-        props.routeGroupContext,
-        listedGroup
-          ? { ...props.routeGroupContext.group, ...listedGroup }
-          : previousRouteGroup ?? props.routeGroupContext.group,
-      )
+      const group = listedGroup
+        ? { ...props.routeGroupContext.group, ...listedGroup }
+        : previousRouteGroup ?? props.routeGroupContext.group
+      if (attendanceGroupStageActionRevision > 0
+        && attendanceGroupEditingId.value === props.routeGroupContext.group.id) {
+        // Reconcile the catalog, preserving the existing editor's explicit stage and unsaved fields.
+        const hydration = hydrateAttendanceGroupRoute({
+          groups: attendanceGroups.value,
+          total: attendanceGroupsTotal.value,
+          group,
+          step: props.routeGroupContext.step,
+          surface: props.routeGroupContext.surface,
+          currentStage: attendanceGroupActiveStage.value,
+        })
+        attendanceGroups.value = hydration.groups
+        attendanceGroupsTotal.value = hydration.total
+      } else {
+        hydrateAttendanceGroupFromRoute(props.routeGroupContext, group)
+      }
       return
     }
+    if (props.returnGroupContext) {
+      // Selection was initialized after a fresh probe. Do not replay it over an edited form.
+      const group = props.returnGroupContext.group
+      if (attendanceGroupEditingId.value === group.id && !attendanceGroups.value.some(item => item.id === group.id)) {
+        attendanceGroups.value.unshift(group)
+        attendanceGroupsTotal.value = Math.max(attendanceGroupsTotal.value, attendanceGroups.value.length)
+      }
+      return
+    }
+    // W6 ON: catalog reads update the list, never replay selection over a local draft.
+    if (attendanceGroupPolicyWorkspaceEnabled.value) return
     const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     const selected = selectedId ? attendanceGroups.value.find(item => item.id === selectedId) : null
     if (selected) {
@@ -29481,10 +29601,10 @@ async function loadAttendanceGroups() {
       resetAttendanceGroupForm()
     }
   } catch (error: any) {
-    if (generation !== attendanceGroupLoadGeneration) return
+    if (generation !== attendanceGroupLoadGeneration || !attendanceSessionGuard.isCurrent()) return
     setStatus(readErrorMessage(error, tr('Failed to load attendance groups', '加载考勤分组失败')), 'error')
   } finally {
-    if (generation === attendanceGroupLoadGeneration) {
+    if (generation === attendanceGroupLoadGeneration && attendanceSessionGuard.isCurrent()) {
       attendanceGroupLoading.value = false
     }
   }
@@ -29545,6 +29665,7 @@ async function saveAttendanceGroup() {
 }
 
 async function loadAttendanceGroupMembers() {
+  if (!attendanceGroupEditorReadActive || !attendanceSessionGuard.isCurrent()) return
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId) {
     attendanceGroupMembers.value = []
@@ -29598,6 +29719,7 @@ function normalizeAttendanceGroupManagerRow(value: any): AttendanceGroupManager 
 }
 
 async function loadAttendanceGroupManagers() {
+  if (!attendanceGroupEditorReadActive || !attendanceSessionGuard.isCurrent()) return
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId) {
     attendanceGroupManagers.value = []
@@ -31080,11 +31202,16 @@ watch(
     () => props.routeGroupContext?.surface,
   ],
   () => {
+    attendanceGroupStageActionRevision = 0
     if (!props.routeGroupContext) return
     void focusInitialAttendanceSection()
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
+
+watch(() => props.groupStageRequest, (target) => {
+  if (target) openAttendanceGroupStage(target)
+}, { flush: 'sync' })
 
 watch(
   () => props.initialRequestId,

@@ -21,11 +21,13 @@
       <span>{{ state.group.name }}</span>
       <span aria-hidden="true">/</span>
       <span>{{ stepLabel }}</span>
+      <button type="button" data-attendance-group-return @click="emit('return')">{{ tr('Return', '返回') }}</button>
     </header>
     <AttendanceGroupEffectivePolicyPanel
       v-if="showEffectivePolicyPanel"
       :group-id="state.group.id"
       :return-to="state.returnTo"
+      @open-group-stage="openGroupStage"
     />
     <slot
       :group="state.group"
@@ -38,7 +40,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, toRef } from 'vue'
+import { computed, onScopeDispose, toRef } from 'vue'
 import type { AttendanceGroupRouteContext } from '../../router/attendanceGroupContextRoute'
 import { useLocale } from '../../composables/useLocale'
 import { useAuth } from '../../composables/useAuth'
@@ -47,6 +49,7 @@ import { apiFetch } from '../../utils/api'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useAttendanceGroupRouteContext } from './useAttendanceGroupRouteContext'
 import AttendanceGroupEffectivePolicyPanel from './AttendanceGroupEffectivePolicyPanel.vue'
+import type { AttendanceGroupEffectivePolicyStageActionV1 } from './attendanceGroupEffectivePolicyLabels'
 
 const props = defineProps<{
   context: AttendanceGroupRouteContext | null
@@ -54,6 +57,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'return'): void
+  (event: 'open-group-stage', target: AttendanceGroupEffectivePolicyStageActionV1, source: AttendanceGroupRouteContext): void
 }>()
 
 const auth = useAuth()
@@ -73,6 +77,20 @@ const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 // rendered here, matching the pre-W6-3 DOM/network behavior byte-for-byte.
 const { hasFeature } = useFeatureFlags()
 const showEffectivePolicyPanel = computed(() => hasFeature('attendanceGroupEffectivePolicyPanel'))
+
+let active = true
+onScopeDispose(() => { active = false })
+
+function openGroupStage(target: AttendanceGroupEffectivePolicyStageActionV1): void {
+  if (!active || !showEffectivePolicyPanel.value || !sessionGuard.isCurrent()
+    || state.value.kind !== 'ready'
+    || state.value.group.id !== props.context?.groupId
+    || target.groupId !== state.value.group.id
+    || (target.stage !== 'basics' && target.stage !== 'people'
+      && target.stage !== 'schedule' && target.stage !== 'policies')) return
+  const source = props.context
+  if (source) emit('open-group-stage', { groupId: target.groupId, stage: target.stage }, source)
+}
 
 const stepLabel = computed(() => {
   if (state.value.kind !== 'ready') return ''
