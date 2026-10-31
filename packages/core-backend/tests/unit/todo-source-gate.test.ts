@@ -190,6 +190,21 @@ describe('todo center per-source door', () => {
       expect(task.countPendingForUser).not.toHaveBeenCalled()
     })
 
+    it('a readable named source settles the answer without evaluating the other codes', async () => {
+      state.granted = new Set(['approvals:read'])
+      const count = await request(pinned.url()).get(`${COUNT}?sources=approval`)
+      expect(count.status).toBe(200)
+      expect(count.body).toEqual({ count: 1, sources: { approval: 'ok' } })
+      expect(vi.mocked(requestHasPermission).mock.calls.map((call) => call[1])).toEqual(['approvals:read'])
+    })
+
+    it('a named source the viewer may not read evaluates the others to tell an empty answer from a refusal', async () => {
+      state.granted = new Set(['approvals:read'])
+      await request(pinned.url()).get(`${COUNT}?sources=task`)
+      const codes = vi.mocked(requestHasPermission).mock.calls.map((call) => call[1]).sort()
+      expect(codes).toEqual(['approvals:read', 'tasks:read'])
+    })
+
     it('an unknown name is dropped', async () => {
       const count = await request(pinned.url()).get(`${COUNT}?sources=approval,bogus`)
       expect(count.body).toEqual({ count: 1, sources: { approval: 'ok' } })

@@ -61,7 +61,7 @@ function parseRequestedSources(raw: unknown): ReadonlySet<string> | null {
 /**
  * Decides which registered sources this request may read. Answers 401 / 403 / 500 with the same bodies
  * as `rbacGuard`; otherwise leaves the effective source names (registration order) in
- * `res.locals.todoSources`. Each distinct permission code is evaluated once per request.
+ * `res.locals.todoSources`. Each distinct permission code is evaluated at most once per request.
  */
 async function todoSourceDoor(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -72,15 +72,34 @@ async function todoSourceDoor(req: Request, res: Response, next: NextFunction): 
     }
 
     const requested = parseRequestedSources(req.query.sources)
+    const entries = pendingSourceRegistry.sourceEntries()
     const decisions = new Map<string, boolean>()
-    const allowed: string[] = []
-    for (const { name, permission } of pendingSourceRegistry.sourceEntries()) {
+    const mayRead = async (permission: string): Promise<boolean> => {
       let decision = decisions.get(permission)
       if (decision === undefined) {
         decision = await requestHasPermission(req, permission)
         decisions.set(permission, decision)
       }
-      if (decision) allowed.push(name)
+      return decision
+    }
+
+    // A named source the viewer may read settles the answer. The other codes are only needed to tell an
+    // empty answer from a refusal.
+    if (requested) {
+      const named: string[] = []
+      for (const { name, permission } of entries) {
+        if (requested.has(name) && (await mayRead(permission))) named.push(name)
+      }
+      if (named.length > 0) {
+        res.locals.todoSources = named
+        next()
+        return
+      }
+    }
+
+    const allowed: string[] = []
+    for (const { name, permission } of entries) {
+      if (await mayRead(permission)) allowed.push(name)
     }
 
     if (allowed.length === 0) {
