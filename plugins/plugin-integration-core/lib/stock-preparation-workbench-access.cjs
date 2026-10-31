@@ -393,6 +393,31 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
     control: 'stock-prep-refresh-end',
   }),
+  // 备料分批拉取第一期 step 5 PR-8 (design §10.3, §13; register R-63) — THE CHANGE PLAN: the private page (the proposal
+  // the open content holds make + the pending plan, a written plan's current diff), the confirm and the review. PULL
+  // tier like the six above (D-14: the puller confirms AND reviews — two separate operations, C11). `control: null`
+  // until PR-9 lands the page (the PR-4 precedent).
+  Object.freeze({
+    capability: 'refresh.changePlan',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.changePlanConfirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.reviewComplete',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
+    control: null,
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from '../../../../scripts/ops/plugin-tests-workflow-contract.mjs'
 /**
  * W1-3 GW7 — durable structural guard: every write path that reaches the record-write surface is
  * enumerated against a FROZEN, disposition-tagged allowlist ("has a layer-3 per-subject
@@ -1325,13 +1326,14 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     // turn a red into a wall of YAML.
     const coreStepShown = coreStep.split('\n').slice(0, 40).join('\n')
 
-    //    3a. The step lives inside the `test` job — the job the r2 review's "which job runs it?" question
+    //    3a. The step lives inside the `unit` dependency of the required `test` job — the job the r2 review's "which job runs it?" question
     //        was about. Bounded by the next TOP-LEVEL job key (two-space indent), so a step that moved to
     //        another job cannot keep this green.
-    const testJobAt = workflow.indexOf('\n  test:\n')
+    requiredSuiteJob(workflow, 'unit')
+    const testJobAt = workflow.indexOf('\n  unit:\n')
     expect(
       testJobAt,
-      'plugin-tests.yml no longer declares a top-level `test:` job — the job this guard rides in is gone or renamed.',
+      'plugin-tests.yml no longer declares a top-level `unit:` job — the job this guard rides in is gone or renamed.',
     ).toBeGreaterThanOrEqual(0)
     const nextTopLevelJob = /\n {2}[A-Za-z_][A-Za-z0-9_-]*:\n/g
     nextTopLevelJob.lastIndex = testJobAt + 1
@@ -1339,7 +1341,7 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     const testJobEnd = nextJobMatch === null ? workflow.length : nextJobMatch.index
     expect(
       coreStepAt > testJobAt && coreStepAt < testJobEnd,
-      'the "Run core-backend tests" step is no longer inside plugin-tests.yml\'s `test` job (the job that runs ' +
+      'the "Run core-backend tests" step is no longer inside plugin-tests.yml\'s required `unit` job (the job that runs ' +
         'on every pull_request with no `paths:` filter). It may now sit in a job with its own trigger or ' +
         `condition — re-verify what executes this guard. The step slice read was:\n${coreStepShown}`,
     ).toBe(true)

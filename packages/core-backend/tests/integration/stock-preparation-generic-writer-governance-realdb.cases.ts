@@ -255,7 +255,7 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
       const main0 = await sheetState(st.sheetId)
       const afterExit = await settle(st.adapter().upsert({ object: 'main', records: [st.record('a')] }))
       const holdRow = (await q(`SELECT id FROM ${RT.hold} WHERE sheet_id = $1 AND status = 'open'`, [st.sheetId])).rows[0]
-      await st.store.confirmContinuation({ ...st.scope, holdId: holdRow.id, echo: refreshKit.echoOf(st.fixture.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: 'u_s6_puller', sourceIdentity: st.fixture.sourceIdentity }, { bumpWithin: testBumpWithin })
+      await st.store.confirmContinuation({ ...st.scope, holdId: holdRow.id, echo: refreshKit.echoOf(st.fixture.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: 'u_s6_puller', sourceIdentity: st.fixture.sourceIdentity }, { bumpWithin: testBumpWithin, pilotWithin: refreshKit.seedPilotWithin })
       // The relationship's END (the one SQL step: the end transaction's row shape, CHECK-enforced) and no other row.
       await q(`UPDATE ${RT.member} SET claim_active = false WHERE sheet_id = $1`, [st.sheetId])
       await q(`UPDATE ${RT.continuation} SET status = 'ended', claim_active = false, status_reason = 'source_scope_changed', ended_at = now(), ended_outcome = 'release_to_normal_refresh', ended_by = 'u_s6_puller' WHERE sheet_id = $1`, [st.sheetId])

@@ -12,6 +12,7 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const {
   DECISIONS,
+  RUN_FIELD_IDS,
   derivePackAwarePlmWritableFields,
 } = require('./stock-preparation-conflict-planner.cjs')
 const { isTenantExtensionField } = require('./stock-preparation-extension-namespace.cjs')
@@ -20,8 +21,12 @@ const {
   StockPreparationProjectWriteLockError,
   isHostWriteFenceError,
 } = require('./stock-preparation-project-write-lock.cjs')
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §5.2): the reserved `manual:` namespace.
+const { isManualPrefixKey } = require('./stock-preparation-manual-rows.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
+// The ONE decision a key in the reserved namespace refuses (ADR §5.2): an ADD. Its per-decision code.
+const APPLY_MANUAL_KEY_RESERVED = 'APPLY_MANUAL_KEY_RESERVED'
 const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
   'create_record_failed',
   'duplicate_target_key',
@@ -608,6 +613,17 @@ async function callFencedRecordsApi(operation, writeFence, callback) {
 
 async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
   const key = decisionKey(decision, target)
+  // 人工补充行 B1 (ADR §5.2): an ADD never mints a key in the reserved `manual:` namespace (a PLM key starts with `{`,
+  // so only a defect or a forged plan gets here). Refused HERE, right after the key is taken and before any lookup or
+  // write, so this one decision fails APPLY_MANUAL_KEY_RESERVED and the run goes on. Deliberately NOT inside the shared
+  // `decisionKey`: the batch prefetch, the UPDATE / INACTIVE path, the result rows and the failure bookkeeping all
+  // call it, and putting the refusal there would fail every UPDATE / INACTIVE of such a key one by one.
+  if (isManualPrefixKey(key)) {
+    throw new StockPreparationApplyWriterError('an add decision must not carry a key in the reserved manual: namespace', {
+      code: APPLY_MANUAL_KEY_RESERVED,
+      decision: DECISIONS.ADD,
+    })
+  }
   let record = copyPayload(decision.record, 'decision.record')
   if (!Object.prototype.hasOwnProperty.call(record, target.keyField)) record[target.keyField] = key
   assertNoHumanFields(record, 'add record', humanFields)
@@ -638,7 +654,151 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
   return { status: 'created', recordId }
 }
 
-async function applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
+// ── batch-refresh step 5 PR-8: THE VERSION FENCE ON A PLANNED PATCH (design §10.3 (2) last sentence, D-2; the
+// generic F15 hazard; plan §3.4 实施细则 / §5.1 「普通人工填写可继续；机器写入不得覆盖它…把仅人工字段变化与机器字段
+// 变化区别处理」, A12 「必要的版本重试不写旧人工值」「机器字段改变则拒绝旧批准」).
+//
+// WHY. The host's patchRecord is a read-modify-write: it reads the record, merges the patch into what it read and
+// writes the merged `data` back (packages/core-backend/src/multitable/records.ts `patchRecord`). Without an
+// `expectedVersion` the UPDATE carries no version predicate, so a person's edit that commits between the host's read
+// and its UPDATE is LOST (overwritten from the stale read). With one, the UPDATE is `... AND version = $n` and the
+// host refuses with MultitableRecordVersionConflictError instead.
+//
+// WHERE THE VERSION COMES FROM. The caller's IN-LEASE recompute (`expectedRecords`, a Map keyed by idempotency key:
+// `{ id, version, row }` of the one existing row the plan was computed against) — never a token, a preview or a stored
+// artifact (O-10). A key without an entry is patched exactly as before (byte-identical host call). The small lane's
+// apply passes the map for its UPDATE / INACTIVE decisions; the large chunk and an ADD that finds an existing row pass
+// none (PR-8 correction of design D-2 / §17: those two keep the pre-PR-8 host call, stated as a residual).
+//
+// THE ONE-RE-READ RULE. A version conflict re-reads THAT key ONCE through a fresh per-key query (never the prefetch
+// index), and compares the columns THE PLUGIN WRITES (the pack-aware plm_system band plus the RUN stamps — the same
+// derivation the human wall uses) between the re-read row and the row the plan was computed against:
+//   * only columns the plugin does NOT write moved (a person filled a human column) => the patch is sent ONCE more with
+//     the fresh version — the patch itself is never rebuilt from the re-read row, so it never carries a human value;
+//   * a plugin-written column moved, the row is gone / replaced / doubled, or the second attempt conflicts again =>
+//     the WHOLE RUN STOPS (409 STOCK_PREP_CHANGE_PLAN_STALE with a closed reason and the partial counts) — no blind
+//     retry, nothing after it is written.
+// A stop is reported like a fenced stop (`status: 'aborted'`): the caller rethrows it with its partial outcome.
+const CHANGE_PLAN_STALE_CODE = 'STOCK_PREP_CHANGE_PLAN_STALE'
+const WRITER_STOP_REASONS = Object.freeze([
+  'record_replaced',
+  'record_missing',
+  'duplicate_target_key',
+  'machine_columns_moved',
+  'version_conflict_repeated',
+])
+
+// The records service's optimistic-concurrency refusal (multitable/record-errors.ts MultitableRecordVersionConflictError:
+// `code = 'VERSION_CONFLICT'`, name set in its constructor) — matched on BOTH handles, exactly as the carry confirm
+// does (stock-preparation-confirm-writes.cjs `isRecordVersionConflict`), BEFORE the generic wrapping.
+function isRecordVersionConflict(error) {
+  if (!error) return false
+  return error.code === 'VERSION_CONFLICT' || error.name === 'MultitableRecordVersionConflictError'
+}
+
+function writerStop(reason, decision) {
+  const error = new StockPreparationProjectWriteLockError(409, CHANGE_PLAN_STALE_CODE, 'a row this plan was computed against changed while it was being written; preview again', {
+    reason,
+    decision: decision || null,
+    partial: false,
+  })
+  error.stopsRun = true
+  return error
+}
+
+function normalizeExpectedRecords(value) {
+  if (value === undefined || value === null) return null
+  if (!(value instanceof Map)) {
+    throw new StockPreparationApplyWriterError('expectedRecords must be a Map keyed by idempotency key', { field: 'expectedRecords' })
+  }
+  for (const [key, entry] of value.entries()) {
+    if (typeof key !== 'string' || key.trim() === '' || !isPlainObject(entry)
+      || typeof entry.id !== 'string' || entry.id.trim() === ''
+      || !Number.isSafeInteger(entry.version) || entry.version < 1
+      || !isPlainObject(entry.row)) {
+      throw new StockPreparationApplyWriterError('expectedRecords entries must be { id, version, row }', { field: 'expectedRecords' })
+    }
+  }
+  return value
+}
+
+// A record as the plugin reads it, in LOGICAL field ids (the inverse of the target's fieldIdMap — the same unmapping
+// the project-scoped reader applies, stock-preparation-table-actions.cjs `unmapRecordFields`).
+function logicalRowOf(record, target) {
+  const data = isPlainObject(record && record.data) ? record.data : {}
+  const inverse = {}
+  for (const [logical, physical] of Object.entries(target.fieldIdMap || {})) inverse[physical] = logical
+  const out = {}
+  for (const [field, value] of Object.entries(data)) out[inverse[field] || field] = value
+  return out
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return `[${value.map(stableValue).join(',')}]`
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableValue(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value === undefined ? null : value)
+}
+
+// The plugin-written band of a logical row: [field, present, value] per band field (an absent cell and an explicit
+// null are told apart, so a write of null into a never-set machine column reads as a move — fail closed).
+function writtenBandDigest(row, band) {
+  return stableValue(band.map((field) => {
+    const present = Object.prototype.hasOwnProperty.call(row, field)
+    return [field, present, present ? row[field] : null]
+  }))
+}
+
+async function patchOnce({ recordsApi, target, recordId, patch, writeFence, expectedVersion }) {
+  return callFencedRecordsApi('patchRecord', writeFence, async () => {
+    try {
+      return {
+        updated: await recordsApi.patchRecord({
+          sheetId: target.sheetId,
+          recordId,
+          changes: mapRecordFields(patch, target.fieldIdMap),
+          expectedVersion,
+          ...hostFenceInput(writeFence),
+        }),
+      }
+    } catch (error) {
+      // Recognised BEFORE `wrapTargetWriteError` would turn it into a generic row failure.
+      if (isRecordVersionConflict(error)) return { versionConflict: true }
+      throw error
+    }
+  })
+}
+
+// One fresh per-key read (never the prefetch index): exactly one record, the planned id.
+async function rereadExpectedRecord({ recordsApi, target, key, expected, decision }) {
+  const records = await queryRecordsForKey(recordsApi, target, key)
+  if (!Array.isArray(records)) {
+    throw new StockPreparationApplyWriterError('queryRecords must return an array', { field: 'recordsApi.queryRecords' })
+  }
+  if (records.length > 1) throw writerStop('duplicate_target_key', decision)
+  if (records.length === 0 || !records[0] || !records[0].id) throw writerStop('record_missing', decision)
+  if (records[0].id !== expected.id) throw writerStop('record_replaced', decision)
+  return records[0]
+}
+
+async function patchWithVersionFence({ recordsApi, target, key, patch, existing, expected, band, writeFence, index, decision }) {
+  const first = await patchOnce({ recordsApi, target, recordId: existing.id, patch, writeFence, expectedVersion: expected.version })
+  if (!first.versionConflict) return first.updated
+  const fresh = await rereadExpectedRecord({ recordsApi, target, key, expected, decision })
+  if (!Number.isSafeInteger(fresh.version) || fresh.version < 1) throw writerStop('record_missing', decision)
+  if (writtenBandDigest(logicalRowOf(fresh, target), band) !== writtenBandDigest(expected.row, band)) {
+    throw writerStop('machine_columns_moved', decision)
+  }
+  // Only columns the plugin does not write moved: the SAME patch once more, against the fresh version, behind the
+  // fence again (the lease may have moved while this row was re-read).
+  await fenceBeforeWrite(writeFence, { index, decision, operation: 'patchRecord' })
+  const second = await patchOnce({ recordsApi, target, recordId: fresh.id, patch, writeFence, expectedVersion: fresh.version })
+  if (second.versionConflict) throw writerStop('version_conflict_repeated', decision)
+  return second.updated
+}
+
+async function applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index, expectedRecords, writtenBand }) {
   const key = decisionKey(decision, target)
   let patch = copyPayload(decision.patch, 'decision.patch')
   assertNoHumanFields(patch, `${decision.decision} patch`, humanFields)
@@ -652,13 +812,19 @@ async function applyPatchDecision({ recordsApi, target, decision, humanFields, t
     })
   }
 
+  const expected = expectedRecords ? expectedRecords.get(key) : undefined
+  // The row the lookup found is not the row the plan was computed against (deleted and re-created under the same
+  // key since the recompute): nothing of this decision is written, and the run stops.
+  if (expected && existing.id !== expected.id) throw writerStop('record_replaced', decision.decision)
   await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'patchRecord' })
-  const updated = await callFencedRecordsApi('patchRecord', writeFence, () => recordsApi.patchRecord({
-    sheetId: target.sheetId,
-    recordId: existing.id,
-    changes: mapRecordFields(patch, target.fieldIdMap),
-    ...hostFenceInput(writeFence),
-  }))
+  const updated = expected
+    ? await patchWithVersionFence({ recordsApi, target, key, patch, existing, expected, band: writtenBand, writeFence, index, decision: decision.decision })
+    : await callFencedRecordsApi('patchRecord', writeFence, () => recordsApi.patchRecord({
+      sheetId: target.sheetId,
+      recordId: existing.id,
+      changes: mapRecordFields(patch, target.fieldIdMap),
+      ...hostFenceInput(writeFence),
+    }))
   const recordId = updated && updated.id ? updated.id : existing.id
   rememberWrittenRow(keyIndex, key, recordId)
   return { status: 'updated', recordId }
@@ -833,10 +999,16 @@ async function applyStockPreparationPlan(input = {}) {
   // and this is byte-identical to the template-only wall it replaces. The wall only
   // ever GROWS — derivePackAwarePlmWritableFields is fail-closed, so an unclassified
   // pack column never leaves the wall and never becomes writable either.
-  const humanFields = derivePackAwarePlmWritableFields({
+  const ownership = derivePackAwarePlmWritableFields({
     templateFields: template.fields,
     installedFieldProperties: input.installedFieldProperties,
-  }).humanPreservedFieldIds
+  })
+  const humanFields = ownership.humanPreservedFieldIds
+  // PR-8: the columns THE PLUGIN WRITES (the pack-aware plm_system band + the RUN stamps), from the SAME derivation
+  // as the human wall above — what the one-re-read rule compares (see patchWithVersionFence).
+  const writtenBand = Array.from(new Set([...ownership.plmWritableFieldIds, ...RUN_FIELD_IDS])).sort()
+  // PR-8: optional; validated before any IO (a malformed map is a caller defect, never a skipped fence).
+  const expectedRecords = normalizeExpectedRecords(input.expectedRecords)
   const templateFields = fieldMapForTemplate(template)
   const counts = {
     created: 0,
@@ -898,7 +1070,7 @@ async function applyStockPreparationPlan(input = {}) {
           continue
         }
         if (decision.decision === DECISIONS.UPDATE || decision.decision === DECISIONS.INACTIVE) {
-          const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index })
+          const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index, expectedRecords, writtenBand })
           incrementCounts(counts, decision.decision, applied.status)
           results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
           continue
@@ -912,6 +1084,13 @@ async function applyStockPreparationPlan(input = {}) {
         // landed and every decision before it is in `results`. Stop here: writing the next row after
         // the lease is gone is exactly what the fence exists to prevent.
         if (writeFence && error && error.fence === true) {
+          abort = { index, error }
+          break
+        }
+        // PR-8: the version fence's stop (a plugin-written column moved, the planned row is gone / replaced / doubled,
+        // or a second conflict) stops the run exactly like a fenced stop — fenced or not. Nothing of decision
+        // `index` landed (the host refused on the version predicate, or the lookup refused before the call).
+        if (error && error.stopsRun === true) {
           abort = { index, error }
           break
         }
@@ -1048,6 +1227,11 @@ function summarizeApplyResultForEvidence(result = {}) {
 
 module.exports = {
   APPLY_PERMISSIONS,
+  // 人工补充行 B1: the per-decision code of an ADD refused for a `manual:` key.
+  APPLY_MANUAL_KEY_RESERVED,
+  // PR-8: the version fence's stop code (the lanes / store / decisions spell the same literal).
+  CHANGE_PLAN_STALE_CODE,
+  WRITER_STOP_REASONS,
   StockPreparationApplyWriterError,
   applyStockPreparationPlan,
   assertHostFencedWriteSupported,
@@ -1058,6 +1242,10 @@ module.exports = {
   countAttemptedHostWrites,
   __internals: {
     assertNoHumanFields,
+    isRecordVersionConflict,
+    logicalRowOf,
+    normalizeExpectedRecords,
+    writtenBandDigest,
     batchKeyLookupDisabled,
     decisionKey,
     findExistingRecord,

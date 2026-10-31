@@ -66,7 +66,10 @@ const crypto = require('node:crypto')
 const { REFRESH_STORE_ERROR_CODES, StockPreparationRefreshStoreError, END_OUTCOMES, EVIDENCE_HISTORY_STATUSES } = require('./stock-preparation-continuation-store.cjs')
 const { REFRESH_LANE_ERROR_CODES, previewRecoveryOf, refreshSourceIdentity } = require('./stock-preparation-refresh-lanes.cjs')
 const { readProjectRefreshState } = require('./stock-preparation-refresh-state.cjs')
-const { PROJECT_WRITE_ERROR_CODES } = require('./stock-preparation-project-write-lock.cjs')
+const { PROJECT_WRITE_ERROR_CODES, sheetWriteScopeKey } = require('./stock-preparation-project-write-lock.cjs')
+const pairing = require('./stock-preparation-continuation-pairing.cjs')
+const { derivePackAwarePlmWritableFields, __internals: plannerInternals } = require('./stock-preparation-conflict-planner.cjs')
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require('./stock-preparation-templates.cjs')
 
 const REFRESH_DECISION_ERROR_CODES = Object.freeze({
   REQUEST_INVALID: 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID',
@@ -75,6 +78,10 @@ const REFRESH_DECISION_ERROR_CODES = Object.freeze({
   HOLD_NOT_FOUND: 'STOCK_PREP_REFRESH_HOLD_NOT_FOUND',
   CONTINUATION_NOT_FOUND: 'STOCK_PREP_CONTINUATION_NOT_FOUND',
   RECEIPT_STORE_UNAVAILABLE: 'STOCK_PREP_REFRESH_READ_RECEIPT_STORE_UNAVAILABLE',
+  // Step 5 PR-8: a change plan of this project by id (404, never an existence oracle across scopes) and the review's
+  // own receipt refusal (the review needs every page of the CURRENT diff it binds).
+  CHANGE_PLAN_NOT_FOUND: 'STOCK_PREP_CHANGE_PLAN_NOT_FOUND',
+  CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE: 'STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE',
   // The store's and the lanes' own codes, re-exported so a caller reads one vocabulary.
   CONFIRM_STALE: REFRESH_STORE_ERROR_CODES.CONFIRM_STALE,
   CONFIRM_NOT_ALLOWED: REFRESH_STORE_ERROR_CODES.CONFIRM_NOT_ALLOWED,
@@ -84,6 +91,12 @@ const REFRESH_DECISION_ERROR_CODES = Object.freeze({
   STORE_FAILED: REFRESH_STORE_ERROR_CODES.STORE_FAILED,
   STORE_UNAVAILABLE: REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE,
   WRITE_LOCKED: PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED,
+  CHANGE_PLAN_STALE: REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_STALE,
+  CHANGE_PLAN_NOT_ALLOWED: REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_NOT_ALLOWED,
+  CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT: REFRESH_STORE_ERROR_CODES.CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT,
+  CHANGE_REVIEW_STALE: REFRESH_STORE_ERROR_CODES.CHANGE_REVIEW_STALE,
+  CHANGE_REVIEW_BLOCKED: REFRESH_STORE_ERROR_CODES.CHANGE_REVIEW_BLOCKED,
+  REVIEW_PENDING: REFRESH_LANE_ERROR_CODES.REVIEW_PENDING,
 })
 
 // Audit (design §4.5, D9: existing actions, closed `mode` subtypes; no vocabulary migration).
@@ -100,6 +113,12 @@ const REFRESH_DECISION_AUDIT = Object.freeze({
     reconfirmed: 'continuation_reconfirmed',
     ended: 'continuation_ended',
     kept: 'continuation_hold_kept',
+    // Step 5 PR-8 (register R-63 ⑨): the private plan read, the confirm, the review, and the SYSTEM invalidation a
+    // computation's reconciliation appends on its own transaction (C08 「每一步的…审计可见」, refutation m2).
+    changePlanRead: 'change_plan_read',
+    changePlanConfirmed: 'change_plan_confirmed',
+    changeReviewCompleted: 'change_review_completed',
+    changePlanInvalidated: 'change_plan_invalidated',
   }),
 })
 
@@ -302,6 +321,9 @@ function createReadReceiptStore({ storage, now, idGenerator } = {}) {
       }
     }
     for (const page of pages) {
+      // A page index outside the hold's page count is never recorded (step 5 PR-8: the change-plan page pages on past a
+      // written plan's last page while the proposal is longer): only an in-range page can count toward completeness.
+      if (!Number.isInteger(page.pairPageIndex) || page.pairPageIndex < 0 || page.pairPageIndex >= page.pairPageCount) continue
       const existing = current.holds[page.holdId]
       const sameHold = existing && existing.fingerprint === page.fingerprint && existing.comparisonFingerprint === page.comparisonFingerprint && existing.evidenceFingerprint === page.evidenceFingerprint && existing.pairPageCount === page.pairPageCount
       const served = sameHold ? new Set(existing.pairPagesServed) : new Set()
@@ -801,8 +823,12 @@ async function confirm(ctx, body) {
       holdCount: 1,
     }),
   })
+  // PR-8 review fix N1-b (round 2): the candidate confirm creates a relationship, so the store re-reads the pilot marker
+  // on its own transaction handle under the state-row lock (the route hands the governance reader's `readPilotWithin`,
+  // bound to this scope); `assertPilot(consult)` above stays the fast, earlier picture. Without the hook the store
+  // refuses 501 `pilot_read_within` before any statement.
   const decided = mode === 'confirm'
-    ? await ctx.store.confirmContinuation({ ...ctx.scope, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, basis: input.basis, sourceIdentity }, hooks)
+    ? await ctx.store.confirmContinuation({ ...ctx.scope, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, basis: input.basis, sourceIdentity }, { ...hooks, pilotWithin: ctx.readPilotWithin })
     : await ctx.store.reconfirmContinuation({ ...ctx.scope, continuationId: input.continuation.id, revision: input.continuation.revision, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, sourceIdentity }, hooks)
   return Object.freeze({
     continuationId: decided.continuationId,
@@ -926,9 +952,473 @@ async function end(ctx, continuationId, body) {
   })
 }
 
+// ── step 5 PR-8: the change plan (design §10.3 (1)-(5), §13; plan §3.4 steps 2 and 5; register R-63) ────────────────
+//
+//   readChangePlanCurrent  GET  …/refresh/change-plans/current      the PROPOSAL the open content holds make (what a
+//                                                                   confirm binds: hold ids, hold-set fingerprint, plan
+//                                                                   fingerprint, source digest, the records paged) and
+//                                                                   the CURRENT pending plan (its records with
+//                                                                   baseline / before / after; for a written plan the
+//                                                                   values the sheet holds NOW and their digest) —
+//                                                                   audited before the receipt and the body
+//   confirmChangePlan      POST …/refresh/change-plans/confirm      the whole open content-class hold set as ONE plan
+//   completeChangeReview   POST …/refresh/change-reviews/complete   the review of the written plan, bound to the
+//                                                                   content the sheet holds (the receipt over the
+//                                                                   current diff + the digest echo)
+// Same server-held context, receipts and hooks as the continuation decisions. Pull tier (D-14): the reviewer is the
+// puller (plan §10); the same person may confirm and review — two operations, two audit rows (C11).
+
+const RECORD_PAGE_LIMIT_DEFAULT = 100
+const RECORD_PAGE_LIMIT_MAX = 200
+
+function changePlanNotFound() {
+  return new StockPreparationRefreshDecisionError(404, REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_NOT_FOUND, 'no change plan of this project answers to that id', { field: 'changePlanId' })
+}
+
+function changePlanDecisionError(code, reason, extra = {}) {
+  const messages = {
+    [REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE]: 'the change plan is no longer what the server computes; read the page again',
+    [REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_NOT_ALLOWED]: 'this change cannot be confirmed as a change plan',
+    [REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT]: 'a structure change is open on this project; a content change plan is not confirmed while it is',
+    [REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_STALE]: 'the change being reviewed is no longer what the sheet holds; read the page again',
+    [REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_BLOCKED]: 'something else on this project is still open; the review completes after it',
+  }
+  return new StockPreparationRefreshDecisionError(409, code, messages[code] || 'refused', { ...(reason ? { reason } : {}), partial: false, ...extra })
+}
+
+function templateOf(ctx) {
+  return normalizeStockPreparationTemplate(ctx.action && ctx.action.template ? ctx.action.template : STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+}
+
+// The human columns a record's presence booleans name (the template's human band; values never leave as values).
+function humanFieldIdsOf(template) {
+  return derivePackAwarePlmWritableFields({ templateFields: template.fields }).humanPreservedFieldIds
+}
+
+function isBlankCell(value) {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+}
+
+// The consult's OPEN holds by class (the confirm's set is EXACTLY the content-class ones).
+function holdClassesOf(consult) {
+  const open = consult.holds.filter((hold) => hold.status === 'open')
+  return {
+    open,
+    content: open.filter(pairing.isContentClassHold),
+    structure: open.filter(pairing.isStructureClassHold),
+    runbook: open.filter((hold) => hold.runbookOnly === true),
+  }
+}
+
+// THE PROPOSAL: the record set the open content holds describe and the fingerprint a confirm must echo (the same pure
+// derivation the store repeats under the lock). `blocked` names why no confirm can succeed right now (a values-free
+// token), so the page shows it instead of offering a control that is refused.
+function proposalOf(ctx) {
+  const { consult } = ctx
+  const classes = holdClassesOf(consult)
+  const state = consult.state || {}
+  const sourceContentDigest = state.lastComputationSourceContentDigest || null
+  let records = []
+  let recordsBlocked = null
+  try {
+    records = pairing.changePlanRecordsFromHolds(classes.content)
+  } catch (error) {
+    recordsBlocked = error && error.details && error.details.reason === 'record_unbound' ? 'record_unbound' : 'records_malformed'
+  }
+  // The token names what the confirm would refuse FIRST (confirmChangePlan's own order: recovery, S25, C07, the empty
+  // set, the record binding, then the echoes), so the page never offers a control the server refuses for another reason.
+  let blocked = null
+  if (previewRecoveryOf(consult)) blocked = 'recovery_pending'
+  else if (classes.runbook.length > 0) blocked = 'runbook_only_hold_open'
+  else if (classes.structure.length > 0) blocked = 'structure_change_present'
+  else if (classes.content.length === 0) blocked = 'no_content_hold'
+  else if (recordsBlocked) blocked = recordsBlocked
+  else if (!sourceContentDigest) blocked = 'source_unknown'
+  return {
+    classes,
+    records,
+    blocked,
+    holdSetFingerprint: state.holdSetFingerprint || null,
+    sourceContentDigest,
+    planFingerprint: records.length > 0 && sourceContentDigest
+      ? pairing.changePlanFingerprintOf({ projectNo: ctx.scope.projectNo, records, sourceContentDigest })
+      : null,
+  }
+}
+
+// One page of a record list (the proposal and each plan page on the SAME cursor; a list shorter than the cursor answers
+// an empty page — the caller refuses a cursor past EVERY list).
+function recordPage(records, { cursor, limit }) {
+  const pageCount = Math.max(1, Math.ceil(records.length / limit))
+  const start = cursor * limit
+  return { slice: cursor < pageCount ? records.slice(start, start + limit) : [], page: Object.freeze({ index: cursor, count: pageCount, size: limit, next: cursor + 1 < pageCount ? cursor + 1 : null }) }
+}
+
+/**
+ * GET …/refresh/change-plans/current (PRIVATE, pull tier). `query`: `{ recordCursor?, recordLimit?, receipt? }`, already
+ * allow-listed. One audited read of the sheet (the table-action ownership wall runs first, in the context's
+ * `readSheetRows`) whenever there is a record to show: per record which human columns hold a value (C01 「既有人工填写可
+ * 见」, never the value) and, for a WRITTEN plan, the value the sheet holds now and the digest the review binds. Order
+ * (PR-4 note 0): the audit row, then the receipt (a written plan's current diff, recorded as a pseudo-hold page:
+ * id = plan id, fingerprint = plan fingerprint, comparison = written digest, evidence = current digest), then the body.
+ * No receipt for a not-governed project (N4).
+ */
+async function readChangePlanCurrent(ctx, query = {}) {
+  assertContext(ctx)
+  if (!ctx.receipts || typeof ctx.receipts.record !== 'function') throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.RECEIPT_STORE_UNAVAILABLE, 'read receipts are not wired; the change-plan page is not served without them', { reason: 'receipts' })
+  if (typeof ctx.store.readChangePlan !== 'function') throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.STORE_UNAVAILABLE, 'the continuation store cannot read change plans', { reason: 'decision_store' })
+  const limit = boundedInteger(query.recordLimit, { field: 'recordLimit', fallback: RECORD_PAGE_LIMIT_DEFAULT, min: 1, max: RECORD_PAGE_LIMIT_MAX })
+  const cursor = boundedInteger(query.recordCursor, { field: 'recordCursor', fallback: 0, min: 0, max: 1000000 })
+  const receiptId = trimmed(query.receipt)
+  if (query.receipt !== undefined && query.receipt !== null && query.receipt !== '' && !/^[0-9a-f]{32}$/.test(String(query.receipt))) throw requestInvalid('receipt')
+  const template = templateOf(ctx)
+  const templateFields = plannerInternals.fieldMapForTemplate(template)
+  const humanFieldIds = humanFieldIdsOf(template)
+  const refresh = refreshSummary(ctx.consult)
+  const proposal = proposalOf(ctx)
+  const pending = Array.isArray(ctx.consult.changePlans) ? ctx.consult.changePlans : []
+  const plans = []
+  for (const summary of pending.slice().sort((left, right) => compareStrings(left.status, right.status))) {
+    let plan
+    try {
+      plan = await ctx.store.readChangePlan({ ...ctx.scope, changePlanId: summary.id })
+    } catch (error) {
+      throw translateByIdRead(error, changePlanNotFound)
+    }
+    if (plan) plans.push(plan)
+  }
+  const written = plans.find((plan) => plan.status === 'written') || null
+  const confirmed = plans.find((plan) => plan.status === 'confirmed') || null
+  const longest = Math.max(1, Math.ceil(proposal.records.length / limit), ...plans.map((plan) => Math.ceil(plan.recordSet.length / limit)))
+  if (cursor >= longest) throw requestInvalid('recordCursor', 'recordCursor is past the last page')
+  // ONE sheet read for everything this page shows (the wall first, inside the context's reader).
+  const needsSheet = proposal.records.length > 0 || plans.length > 0
+  let rowsById = new Map()
+  if (needsSheet) {
+    if (typeof ctx.readSheetRows !== 'function') throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.STORE_UNAVAILABLE, 'the sheet reader is not wired for the change-plan page', { reason: 'sheet_reader' })
+    const rows = await ctx.readSheetRows()
+    rowsById = new Map(rows.map((row) => [pairing.recordRefOf(row) ? pairing.recordRefOf(row).id : null, row]).filter(([id]) => id))
+  }
+  const presenceOf = (recordId) => {
+    const row = rowsById.get(recordId)
+    return row ? Object.fromEntries(humanFieldIds.map((fieldId) => [fieldId, !isBlankCell(row[fieldId])])) : null
+  }
+  const currentContentDigest = written ? pairing.currentContentDigestOf({ records: written.recordSet, rowsByRecordId: rowsById, templateFields }) : null
+  const proposalPage = recordPage(proposal.records, { cursor, limit })
+  const planView = (plan) => {
+    const paged = recordPage(plan.recordSet, { cursor, limit })
+    return {
+      id: plan.id,
+      status: plan.status,
+      recordCount: plan.recordCount,
+      writeRecordCount: plan.writeRecordCount,
+      planFingerprint: plan.planFingerprint,
+      reviewBaselineDigest: plan.reviewBaselineDigest,
+      absorbedChangePlanIds: plan.absorbedChangePlanIds,
+      confirmedAt: plan.confirmedAt,
+      confirmedBySelf: plan.confirmedBy === ctx.actorId,
+      writtenAt: plan.writtenAt,
+      writtenContentDigest: plan.writtenContentDigest,
+      ...(plan.status === 'written' ? { currentContentDigest, contentMatchesWrite: currentContentDigest === plan.writtenContentDigest } : {}),
+      recordPage: paged.page,
+      records: paged.slice.map((record) => {
+        const row = rowsById.get(record.recordId)
+        return {
+          recordId: record.recordId,
+          key: record.key,
+          root: record.root === true,
+          inContinuation: record.inContinuation || null,
+          present: Boolean(row),
+          humanColumnsPresent: presenceOf(record.recordId),
+          fields: Object.fromEntries(Object.entries(record.fields || {}).map(([fieldId, cell]) => [fieldId, {
+            baseline: cell.baseline !== undefined ? cell.baseline : cell.before,
+            before: cell.before,
+            after: cell.after,
+            reviewOnly: cell.reviewOnly === true,
+            ...(plan.status === 'written' ? { current: row ? (row[fieldId] === undefined ? null : row[fieldId]) : null } : {}),
+          }])),
+        }
+      }),
+    }
+  }
+  const body = {
+    refresh,
+    proposal: {
+      blocked: proposal.blocked,
+      holdIds: proposal.classes.content.map((hold) => hold.id).sort(),
+      holdSetFingerprint: proposal.holdSetFingerprint,
+      planFingerprint: proposal.planFingerprint,
+      sourceContentDigest: proposal.sourceContentDigest,
+      recordCount: proposal.records.length,
+      structureHoldOpen: proposal.classes.structure.length > 0,
+      runbookHoldOpen: proposal.classes.runbook.length > 0,
+      candidates: proposal.classes.content.filter((hold) => hold.kind === 'candidate_content_differs').map((hold) => ({ holdId: hold.id, candidateId: hold.pairingFingerprint || null, history: holdHistory(hold.detail) })),
+      recordPage: proposalPage.page,
+      records: proposalPage.slice.map((record) => ({ ...record, present: rowsById.has(record.recordId), humanColumnsPresent: presenceOf(record.recordId) })),
+    },
+    current: {
+      confirmed: confirmed ? planView(confirmed) : null,
+      written: written ? planView(written) : null,
+    },
+  }
+  // The audit row FIRST (PR-4 note 0), then the receipt, then the body.
+  await ctx.audit.append(auditReadRow(ctx, REFRESH_DECISION_AUDIT.modes.changePlanRead, {
+    operation: 'change_plan_read',
+    page: cursor,
+    proposalRecords: proposal.records.length,
+    proposalHolds: proposal.classes.content.length,
+    pendingPlans: plans.length,
+    writtenPlan: Boolean(written),
+  }))
+  const readReceipt = refresh.status === 'not_governed' || !written
+    ? null
+    : await ctx.receipts.record({
+      receiptId,
+      scope: ctx.scope,
+      actorId: ctx.actorId,
+      pages: [{
+        holdId: written.id,
+        fingerprint: written.planFingerprint,
+        comparisonFingerprint: written.writtenContentDigest,
+        evidenceFingerprint: currentContentDigest,
+        pairPageCount: Math.max(1, Math.ceil(written.recordSet.length / limit)),
+        pairPageIndex: cursor,
+      }],
+    })
+  return Object.freeze({ ...body, readReceipt })
+}
+
+function normalizeChangePlanConfirmBody(body) {
+  if (!isPlainObject(body)) throw requestInvalid('body', 'request must be an object')
+  if (!Array.isArray(body.holdIds) || body.holdIds.length === 0 || !body.holdIds.every(nonBlankString)) throw requestInvalid('holdIds', 'holdIds must name every open content hold of the proposal')
+  const holdIds = body.holdIds.map((id) => id.trim())
+  if (new Set(holdIds).size !== holdIds.length) throw requestInvalid('holdIds', 'a hold is named twice')
+  const echo = {}
+  for (const field of ['holdSetFingerprint', 'planFingerprint', 'sourceContentDigest']) {
+    const value = trimmed(body[field])
+    if (!value) throw requestInvalid(field, `${field} is required: a change plan binds to what the server last computed`)
+    echo[field] = value
+  }
+  const readReceipt = trimmed(body.readReceipt)
+  if (!readReceipt) throw requestInvalid('readReceipt', 'readReceipt is required: a confirm needs the pages it read')
+  let candidates = []
+  if (body.candidates !== undefined && body.candidates !== null) {
+    if (!Array.isArray(body.candidates)) throw requestInvalid('candidates')
+    candidates = body.candidates.map((entry, index) => {
+      if (!isPlainObject(entry) || !trimmed(entry.holdId) || !trimmed(entry.candidateId)) throw requestInvalid(`candidates[${index}]`, 'a candidate decision needs { holdId, candidateId, basis }')
+      if (!isPlainObject(entry.basis) || !DEMAND_BASES.includes(entry.basis.kind)) throw requestInvalid(`candidates[${index}].basis.kind`, 'basis.kind must be a phase-1 demand basis token')
+      if (entry.basis.note !== undefined && entry.basis.note !== null && typeof entry.basis.note !== 'string') throw requestInvalid(`candidates[${index}].basis.note`)
+      if (entry.acknowledge !== undefined && entry.acknowledge !== null && (!isPlainObject(entry.acknowledge) || (entry.acknowledge.historyUnknown !== undefined && typeof entry.acknowledge.historyUnknown !== 'boolean'))) {
+        throw requestInvalid(`candidates[${index}].acknowledge`)
+      }
+      return Object.freeze({
+        holdId: entry.holdId.trim(),
+        candidateId: entry.candidateId.trim(),
+        basis: { kind: entry.basis.kind, ...(typeof entry.basis.note === 'string' ? { note: entry.basis.note } : {}) },
+        historyUnknownAcknowledged: Boolean(entry.acknowledge && entry.acknowledge.historyUnknown === true),
+      })
+    })
+  }
+  return Object.freeze({ holdIds, echo, readReceipt, candidates })
+}
+
+/**
+ * POST …/refresh/change-plans/confirm (pull tier; register R-63 ②-⑤). The FAST PATH (the consult's picture — it
+ * never takes the state row): RECOVERY_PENDING, S25, C07, the named set equal to the open content-class set, the
+ * echoes (hold-set fingerprint, source digest, plan fingerprint recomputed from the consult's holds), the combined
+ * candidates (pilot only, the pairing fingerprint, the history acknowledgement), the read receipt over EVERY page of
+ * EVERY named hold. Then the store's transaction decides it all again under the lock, with the lock's in-transaction
+ * bump (`change_plan_confirm`) and the audit row on the same handle. Answers 201's body.
+ */
+async function confirmChangePlan(ctx, body) {
+  assertDecisionContext(ctx)
+  if (typeof ctx.store.confirmChangePlan !== 'function') throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.STORE_UNAVAILABLE, 'the continuation store cannot confirm change plans', { reason: 'decision_store' })
+  if (!ctx.receipts || typeof ctx.receipts.verify !== 'function') throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.RECEIPT_STORE_UNAVAILABLE, 'read receipts are not wired; nothing is confirmed without them', { reason: 'receipts' })
+  const input = normalizeChangePlanConfirmBody(body)
+  const { consult } = ctx
+  assertNoRecoveryPending(consult)
+  const proposal = proposalOf(ctx)
+  const { classes } = proposal
+  if (classes.runbook.length > 0) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_NOT_ALLOWED, 'runbook_only_hold_open', { holdCount: classes.runbook.length })
+  if (classes.structure.length > 0) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT, null, { holdCount: classes.structure.length })
+  if (classes.content.length === 0) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'no_content_hold')
+  const contentIds = new Set(classes.content.map((hold) => hold.id))
+  if (input.holdIds.length !== contentIds.size || input.holdIds.some((id) => !contentIds.has(id))) {
+    throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'hold_set_incomplete', { openContentHolds: contentIds.size, named: input.holdIds.length })
+  }
+  if (proposal.blocked === 'record_unbound') throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_NOT_ALLOWED, 'record_unbound')
+  if (input.echo.holdSetFingerprint !== proposal.holdSetFingerprint) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'hold_set_moved')
+  if (input.echo.sourceContentDigest !== proposal.sourceContentDigest) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'source_moved')
+  if (input.echo.planFingerprint !== proposal.planFingerprint) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'plan_fingerprint')
+  // The combined confirm (§10.3 (5)): it creates a relationship, so it needs the pilot marker (register ⑤). This is the
+  // consult's picture (fast, precise); the store re-reads the marker on its transaction handle under the state-row lock
+  // and refuses the same NOT_PILOT (review fix N1 — a marker cleared between this consult and the lock).
+  const candidateHolds = classes.content.filter((hold) => hold.kind === 'candidate_content_differs')
+  const decisions = new Map(input.candidates.map((entry) => [entry.holdId, entry]))
+  if (candidateHolds.length > 0) assertPilot(consult)
+  if (decisions.size !== candidateHolds.length || candidateHolds.some((hold) => !decisions.has(hold.id))) {
+    throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'candidate_set', { openCandidates: candidateHolds.length, named: decisions.size })
+  }
+  for (const hold of candidateHolds) {
+    const decision = decisions.get(hold.id)
+    if (decision.candidateId !== (hold.pairingFingerprint || null)) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_PLAN_STALE, 'candidate')
+    if (holdHistory(hold.detail) === 'history_unknown' && !decision.historyUnknownAcknowledged) {
+      throw requestInvalid('candidates.acknowledge.historyUnknown', 'the history of this demand is unknown; the confirm must acknowledge it')
+    }
+  }
+  // U04: the receipt covers every page of every named hold (served by GET holds), with each hold's CURRENT fingerprints.
+  for (const hold of classes.content.slice().sort((left, right) => compareStrings(left.id, right.id))) {
+    const receipt = await ctx.receipts.verify({ receiptId: input.readReceipt, scope: ctx.scope, actorId: ctx.actorId, hold })
+    if (!receipt.ok) {
+      throw new StockPreparationRefreshDecisionError(409, REFRESH_DECISION_ERROR_CODES.READ_RECEIPT_INCOMPLETE, 'the read receipt does not cover every page of every hold this plan resolves; read them all, then confirm', {
+        reason: receipt.reason,
+        holdId: hold.id,
+        pagesServed: receipt.pagesServed,
+        pageCount: receipt.pageCount,
+        partial: false,
+      })
+    }
+  }
+  const hooks = decisionHooks(ctx, {
+    mode: REFRESH_DECISION_AUDIT.modes.changePlanConfirmed,
+    subjectIdOf: (event) => event.changePlanId,
+    detailOf: (event) => ({
+      operation: event.operation,
+      recordCount: Number.isInteger(event.recordCount) ? event.recordCount : 0,
+      holdCount: Number.isInteger(event.holdCount) ? event.holdCount : 0,
+      continuationCount: Number.isInteger(event.continuationCount) ? event.continuationCount : 0,
+      createdContinuationCount: Number.isInteger(event.createdContinuationCount) ? event.createdContinuationCount : 0,
+      supersededCount: Number.isInteger(event.supersededCount) ? event.supersededCount : 0,
+    }),
+  })
+  const decided = await ctx.store.confirmChangePlan({
+    ...ctx.scope,
+    confirmedBy: ctx.actorId,
+    holds: classes.content.map((hold) => ({ id: hold.id, fingerprint: hold.fingerprint })),
+    echo: input.echo,
+    candidates: input.candidates.map((entry) => ({ holdId: entry.holdId, candidateId: entry.candidateId, basis: entry.basis })),
+    sourceIdentity: refreshSourceIdentity({ action: ctx.action, tenantId: ctx.scope.tenantId }),
+    template: templateOf(ctx),
+  }, {
+    ...hooks,
+    // Review fix N1: the store re-reads the pilot marker on its own transaction handle for a combined confirm (the route
+    // hands the governance reader's `readPilotWithin`, bound to this scope); without it a combined confirm is 501.
+    ...(typeof ctx.readPilotWithin === 'function' ? { pilotWithin: ctx.readPilotWithin } : {}),
+  })
+  return Object.freeze({
+    changePlanId: decided.changePlanId,
+    recordCount: decided.recordCount,
+    holdCount: decided.holdCount,
+    continuationIds: decided.continuationIds,
+    decisionVersion: decided.decisionVersion,
+    generation: decided.generation ? decided.generation.generation : null,
+    state: 'confirmed_pending_execution',
+    nextStep: 'preview_again',
+  })
+}
+
+function normalizeReviewBody(body) {
+  if (!isPlainObject(body)) throw requestInvalid('body', 'request must be an object')
+  const changePlanId = trimmed(body.changePlanId)
+  if (!changePlanId) throw requestInvalid('changePlanId')
+  const contentDigest = trimmed(body.contentDigest)
+  if (!contentDigest) throw requestInvalid('contentDigest', 'contentDigest is required: the review binds the content the page showed')
+  if (!['handled', 'handled_with_notes'].includes(body.conclusion)) throw requestInvalid('conclusion', 'conclusion must be handled or handled_with_notes')
+  if (body.notes !== undefined && body.notes !== null && typeof body.notes !== 'string') throw requestInvalid('notes')
+  const readReceipt = trimmed(body.readReceipt)
+  if (!readReceipt) throw requestInvalid('readReceipt', 'readReceipt is required: a review needs every page of the current diff')
+  return Object.freeze({ changePlanId, contentDigest, conclusion: body.conclusion, notes: typeof body.notes === 'string' ? body.notes : null, readReceipt })
+}
+
+/**
+ * POST …/refresh/change-reviews/complete (pull tier; C05 / C06 / C11 / C12; register R-63 ⑦). The fast path: the
+ * WRITTEN plan by id (another scope's = an unknown id's 404), nothing else open (C12: any hold / a confirmed plan /
+ * recovery). Then the CURRENT diff: no live writer (`assertNoLiveWriter`), ONE audited read of the sheet through the
+ * table-action wall, the current content digest — and the read receipt must cover every page of THAT diff (the
+ * pseudo-hold GET current recorded, its evidence = this digest: a sheet that moved since the page refuses here). Then
+ * the store's transaction re-decides everything under the state-row lock (no bump) with the audit row on its handle.
+ */
+async function completeChangeReview(ctx, body) {
+  assertContext(ctx)
+  if (typeof ctx.store.completeChangeReview !== 'function' || typeof ctx.store.readChangePlan !== 'function') {
+    throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.STORE_UNAVAILABLE, 'the continuation store cannot complete reviews', { reason: 'decision_store' })
+  }
+  if (typeof ctx.audit.appendWithin !== 'function') throw new StockPreparationRefreshDecisionError(501, 'AUDIT_STORE_UNAVAILABLE', 'the audit store cannot append inside a transaction; nothing is reviewed without it', { reason: 'append_within' })
+  if (!ctx.receipts || typeof ctx.receipts.verify !== 'function') throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.RECEIPT_STORE_UNAVAILABLE, 'read receipts are not wired; nothing is reviewed without them', { reason: 'receipts' })
+  if (!ctx.projectWriteLock || typeof ctx.projectWriteLock.assertNoLiveWriter !== 'function') throw new StockPreparationRefreshDecisionError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the sheet write lock is not wired for the review', { reason: 'assert_no_live_writer' })
+  if (typeof ctx.readSheetRows !== 'function') throw new StockPreparationRefreshDecisionError(501, REFRESH_DECISION_ERROR_CODES.STORE_UNAVAILABLE, 'the sheet reader is not wired for the review', { reason: 'sheet_reader' })
+  const input = normalizeReviewBody(body)
+  const { consult } = ctx
+  let plan
+  try {
+    plan = await ctx.store.readChangePlan({ ...ctx.scope, changePlanId: input.changePlanId })
+  } catch (error) {
+    throw translateByIdRead(error, changePlanNotFound)
+  }
+  if (!plan) throw changePlanNotFound()
+  if (plan.status !== 'written') {
+    throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_STALE, plan.status === 'superseded' ? 'plan_replaced' : (plan.status === 'reviewed' ? 'already_reviewed' : 'not_written'), { status: plan.status })
+  }
+  assertNoRecoveryPending(consult)
+  const openHolds = consult.holds.filter((hold) => hold.status === 'open')
+  if (openHolds.length > 0) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_BLOCKED, 'hold_open', { holdCount: openHolds.length })
+  if ((consult.changePlans || []).some((summary) => summary.status === 'confirmed')) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_BLOCKED, 'change_plan_pending')
+  await ctx.projectWriteLock.assertNoLiveWriter(sheetWriteScopeKey(ctx.scope.sheetId))
+  const template = templateOf(ctx)
+  const rows = await ctx.readSheetRows()
+  const rowsById = new Map(rows.map((row) => [pairing.recordRefOf(row) ? pairing.recordRefOf(row).id : null, row]).filter(([id]) => id))
+  const currentContentDigest = pairing.currentContentDigestOf({ records: plan.recordSet, rowsByRecordId: rowsById, templateFields: plannerInternals.fieldMapForTemplate(template) })
+  const receipt = await ctx.receipts.verify({
+    receiptId: input.readReceipt,
+    scope: ctx.scope,
+    actorId: ctx.actorId,
+    hold: { id: plan.id, fingerprint: plan.planFingerprint, comparisonFingerprint: plan.writtenContentDigest, evidenceFingerprint: currentContentDigest },
+  })
+  if (!receipt.ok) {
+    throw new StockPreparationRefreshDecisionError(409, REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE, 'the read receipt does not cover every page of the current change; read the page again, then review', {
+      reason: receipt.reason,
+      pagesServed: receipt.pagesServed,
+      pageCount: receipt.pageCount,
+      partial: false,
+    })
+  }
+  if (input.contentDigest !== plan.writtenContentDigest) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_STALE, 'echo_moved')
+  if (currentContentDigest !== plan.writtenContentDigest) throw changePlanDecisionError(REFRESH_DECISION_ERROR_CODES.CHANGE_REVIEW_STALE, 'content_moved')
+  const hooks = decisionHooks(ctx, {
+    mode: REFRESH_DECISION_AUDIT.modes.changeReviewCompleted,
+    subjectIdOf: (event) => event.changePlanId,
+    detailOf: (event) => ({
+      operation: event.operation,
+      recordCount: Number.isInteger(event.recordCount) ? event.recordCount : 0,
+      conclusion: nonBlankString(event.conclusion) ? event.conclusion : 'handled',
+      notesPresent: event.notesPresent === true,
+      sameActorAsConfirm: event.sameActorAsConfirm === true,
+    }),
+  })
+  const reviewed = await ctx.store.completeChangeReview({
+    ...ctx.scope,
+    changePlanId: plan.id,
+    reviewedBy: ctx.actorId,
+    echoDigest: input.contentDigest,
+    currentContentDigest,
+    conclusion: input.conclusion,
+    notes: input.notes,
+  }, { auditWithin: hooks.auditWithin })
+  return Object.freeze({
+    changePlanId: reviewed.changePlanId,
+    status: reviewed.status,
+    recordCount: reviewed.recordCount,
+    reviewedContentDigest: reviewed.reviewedContentDigest,
+    decisionVersion: reviewed.decisionVersion,
+    nextStep: 'preview_again',
+  })
+}
+
 module.exports = {
   HOLD_PAGE_LIMIT_DEFAULT,
   HOLD_PAGE_LIMIT_MAX,
+  RECORD_PAGE_LIMIT_DEFAULT,
+  RECORD_PAGE_LIMIT_MAX,
   PAIR_PAGE_LIMIT_DEFAULT,
   PAIR_PAGE_LIMIT_MAX,
   READ_RECEIPT_KEY_PREFIX,
@@ -937,6 +1427,10 @@ module.exports = {
   REFRESH_DECISION_ERROR_CODES,
   StockPreparationRefreshDecisionError,
   confirm,
+  // Step 5 PR-8.
+  completeChangeReview,
+  confirmChangePlan,
+  readChangePlanCurrent,
   createReadReceiptStore,
   end,
   keepHold,
@@ -944,6 +1438,9 @@ module.exports = {
   readContinuation,
   readHoldEvidence,
   __internals: {
+    normalizeChangePlanConfirmBody,
+    normalizeReviewBody,
+    proposalOf,
     holdPayload,
     normalizeConfirmBody,
     normalizeEndBody,

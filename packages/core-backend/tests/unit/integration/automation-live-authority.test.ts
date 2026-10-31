@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from '../../../../../scripts/ops/plugin-tests-workflow-contract.mjs'
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -30,7 +31,7 @@ it('registers the whole real-PG proof in an EXPECT_DB lane and excludes it from 
   const workflow = yaml.load(readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8')) as {
     jobs: { test: { steps: Array<{ id?: string; if?: string; env?: Record<string, string>; run?: string; 'continue-on-error'?: unknown }> } }
   }
-  const step = workflow.jobs.test.steps.find(entry => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
+  const step = requiredSuiteJob(workflow, 'runtime-db').steps.find(entry => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
   expect(step?.env?.EXPECT_DB).toBe('1')
   expect(step?.env?.DATABASE_URL).toBeTruthy()
   expect(step?.if).toBe("matrix.node-version == '20.x'")

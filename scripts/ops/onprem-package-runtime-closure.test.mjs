@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -71,14 +72,14 @@ for (const [kind, requiredFiles] of Object.entries(closures)) {
 
 test('runtime closure regression executes in the required Node 20 job', () => {
   const workflow = fs.readFileSync(path.join(repo, '.github/workflows/plugin-tests.yml'), 'utf8')
-  const requiredJob = workflow.split('\n  test:\n')[1].split(/\n  [a-z][\w-]*:/)[0]
+  const requiredJob = requiredSuiteJobBody(workflow, 'contracts')
   assert.match(requiredJob, /node-version: \[20\.x\]/)
   assert.match(requiredJob, /run: node --test scripts\/ops\/attendance-onprem-package-verify-migrations\.test\.mjs scripts\/ops\/onprem-package-runtime-closure\.test\.mjs/)
 })
 
 test('compiled YiDa bootstrap CLI smoke runs after a core-backend build in the required Node 20 job', () => {
   const workflow = fs.readFileSync(path.join(repo, '.github/workflows/plugin-tests.yml'), 'utf8')
-  const requiredJob = workflow.split('\n  test:\n')[1].split(/\n  [a-z][\w-]*:/)[0]
+  const requiredJob = requiredSuiteJobBody(workflow, 'unit')
   const steps = requiredJob.split('\n      - name: ').filter(step => step.includes('scripts/ops/yida-bootstrap-cli-compiled-smoke.test.mjs'))
   assert.equal(steps.length, 1, 'exactly one required step runs the compiled CLI smoke')
   const build = steps[0].indexOf('\n          pnpm --filter @metasheet/core-backend build\n')

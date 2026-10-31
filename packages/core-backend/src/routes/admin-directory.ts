@@ -32,6 +32,7 @@ import {
   testDirectoryIntegration,
   unbindDirectoryAccount,
   updateDirectoryIntegration,
+  updateDirectoryIntegrationIdentity,
 } from '../directory/directory-sync'
 import { getDirectoryInactiveLinkedMetric, getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
 import { classifyDirectoryFailureText, type FixedSentenceErrorClass } from '../directory/directory-failure-text'
@@ -573,6 +574,27 @@ export function adminDirectoryRouter(): Router {
         return
       }
       sendDirectoryFailure(res, error, 'DIRECTORY_UPDATE_FAILED', 'Failed to update directory integration')
+    }
+  })
+
+  router.put('/integrations/:integrationId/identity', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
+    try {
+      const integration = await updateDirectoryIntegrationIdentity(req.params.integrationId, req.body, adminUserId)
+      if (!integration) {
+        jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
+        return
+      }
+      await auditLog({
+        actorId: adminUserId, actorType: 'user', action: 'update',
+        resourceType: 'directory-integration-identity', resourceId: integration.id,
+        meta: { identityStatus: integration.config.identityStatus },
+      })
+      jsonOk(res, { integration })
+    } catch (error) {
+      sendDirectoryFailure(res, error, 'DIRECTORY_IDENTITY_UPDATE_FAILED', 'Failed to save directory identity metadata')
     }
   })
 

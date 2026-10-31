@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 // dingtalk-production-readiness-inventory-contract.test.mjs
 //
 // Contract for the manual-only, values-free, READ-ONLY DingTalk production
@@ -364,14 +365,11 @@ test('values-free artifacts exclude SSH transport logs', () => {
 
 test('inventory contract is wired into required plugin-tests test (20.x) lane', () => {
   const raw = read(pluginTestsPath)
-  const requiredJobStart = raw.indexOf('\n  test:\n')
-  const requiredJobEnd = raw.indexOf('\n  after-sales-integration:\n')
-  assert.ok(requiredJobStart >= 0 && requiredJobEnd > requiredJobStart, 'required test job bounds')
-  const requiredJob = raw.slice(requiredJobStart, requiredJobEnd)
+  const requiredJob = requiredSuiteJobBody(raw, 'contracts')
 
   const stepMarker = 'DingTalk production-readiness inventory contract (required lane)'
   const stepStart = requiredJob.indexOf(stepMarker)
-  assert.ok(stepStart >= 0, 'required-lane step must exist in test job')
+  assert.ok(stepStart >= 0, 'required-lane step must exist in contracts')
   // Grab from the step name line through the next step.
   const nameIdx = requiredJob.lastIndexOf('\n      - name:', stepStart)
   const stepEnd = requiredJob.indexOf('\n      - name:', stepStart + 1)

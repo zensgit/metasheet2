@@ -96,6 +96,9 @@ node __tests__/stock-preparation-continuation-pairing.test.cjs
 node __tests__/stock-preparation-continuation-planner.test.cjs
 node __tests__/stock-preparation-refresh-state.test.cjs
 node __tests__/stock-preparation-continuation-store.test.cjs
+node __tests__/stock-preparation-change-plan-store.test.cjs
+node __tests__/stock-preparation-change-plan-planner.test.cjs
+node __tests__/stock-preparation-change-plan-lanes.test.cjs
 node __tests__/stock-preparation-refresh-governance.test.cjs
 node __tests__/stock-preparation-refresh-lanes.test.cjs
 node __tests__/stock-preparation-refresh-small-lane.test.cjs
@@ -107,6 +110,7 @@ node __tests__/stock-preparation-refresh-egress.test.cjs
 node __tests__/stock-preparation-refresh-scan.test.cjs
 node __tests__/stock-preparation-refresh-decisions.test.cjs
 node __tests__/stock-preparation-refresh-decision-routes.test.cjs
+node __tests__/stock-preparation-change-plan-routes.test.cjs
 node __tests__/stock-preparation-governed-sheet-probe.test.cjs
 node __tests__/metasheet-multitable-governed-sheet.test.cjs
 node __tests__/erp-feedback-governed-sheet.test.cjs
@@ -151,6 +155,7 @@ node __tests__/stock-preparation-carry-hardening.test.cjs
 node __tests__/stock-preparation-carry-target-binding.test.cjs
 node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
+node __tests__/stock-preparation-apply-writer-version.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs
 node __tests__/stock-preparation-project-write-lock.test.cjs
 node __tests__/stock-preparation-pilot-gate.test.cjs
@@ -308,6 +313,9 @@ node __tests__/yida-send-authority-primitives.test.cjs
 node __tests__/yida-static-plan.test.cjs
 node __tests__/yida-token-client.test.cjs
 node __tests__/yida-token-exchange.test.cjs
+node __tests__/stock-preparation-manual-rows.test.cjs
+node __tests__/stock-preparation-manual-rows-pull.test.cjs
+node __tests__/stock-preparation-manual-rows-export.test.cjs
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---
