@@ -2183,6 +2183,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts',
   'tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts',
   'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
+  'tests/integration/attendance-approved-correction-targets.db.test.ts',
   'tests/integration/attendance-business-trip.db.test.ts',
   'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
   'tests/integration/attendance-comp-time-expiry-reminder.test.ts',

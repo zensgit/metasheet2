@@ -34,6 +34,45 @@ describe('correction target projection', () => {
 })
 
 describe('correction target session isolation', () => {
+  it('admits only explicit legacy through the real composable and refuses errors or unverified sources', async () => {
+    const guard = createAttendanceSessionGuard('org-a', () => 'principal-a')
+    const pending: Array<(value: Response) => void> = []
+    const fetch = vi.fn(() => new Promise<Response>(resolve => pending.push(resolve)))
+    const scope = effectScope()
+    const state = scope.run(() => useAttendanceCorrectionTargets({
+      workDate: () => '2026-10-30', userId: () => 'user-a', orgId: () => 'org-a', requestType: () => 'missed_check_in',
+      inAt: () => '2026-10-30T09:00', outAt: () => '', enabled: () => true, guard,
+      fetch: fetch as unknown as typeof import('../src/utils/api').apiFetch,
+    }))!
+    const legacy = { ok: true, data: { schemaVersion: 1, posture: 'legacy_projection_only', source: null, candidates: [] } }
+    try {
+      pending[0]({ ok: true, json: async () => legacy } as Response)
+      const refresh = state.refresh()
+      pending[1]({ ok: true, json: async () => legacy } as Response)
+      await refresh
+      expect(state.result.value).toEqual({ posture: 'legacy_projection_only' })
+      expect(state.ready.value).toBe(true)
+      expect(state.payload.value).toBeNull()
+
+      for (const [ok, responseBody, error] of [
+        [false, { ok: false, error: { code: 'NOT_FOUND' } }, 'NOT_FOUND'],
+        [true, { ok: true, data: { schemaVersion: 1, posture: 'unknown', source: null, candidates: [] } }, 'ATTENDANCE_CORRECTION_TARGET_INVALID'],
+        [true, { ok: true, data: { schemaVersion: 1, posture: 'canonical', source: null, candidates: [] } }, 'ATTENDANCE_CORRECTION_TARGET_INVALID'],
+      ] as const) {
+        const refresh = state.refresh()
+        expect(state.ready.value).toBe(false)
+        expect(state.payload.value).toBeNull()
+        pending[pending.length - 1]({ ok, json: async () => responseBody } as Response)
+        await refresh
+        expect(state.result.value).toBeNull()
+        expect(state.ready.value).toBe(false)
+        expect(state.payload.value).toBeNull()
+        expect(state.error.value).toBe(error)
+      }
+    } finally {
+      scope.stop()
+    }
+  })
   it('discards late responses after date, request type, org and principal changes', async () => {
     let identity = 'principal-a'
     const guard = createAttendanceSessionGuard('org-a', () => identity)
