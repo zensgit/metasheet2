@@ -1,3 +1,4 @@
+import { DirectoryUserPaginationError, getNextDirectoryUserCursor } from './directory-user-pagination'
 import { readDirectoryIdentityVerification, type DirectoryIdentityVerification } from './integration-identity'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
@@ -3315,6 +3316,7 @@ export async function fetchAllUsers(
 
   for (const departmentId of departmentMap.keys()) {
     let cursor = 0
+    const seenCursors = new Set<number>([cursor])
     let hasMore = true
     while (hasMore) {
       if (apiCalls) apiCalls.userListPageCalls += 1
@@ -3325,6 +3327,7 @@ export async function fetchAllUsers(
         pageSize,
         { baseUrl: config.baseUrl },
       )
+      const nextCursor = getNextDirectoryUserCursor(response, seenCursors)
       for (const summary of response.users) {
         const existing = users.get(summary.userId)
         if (!existing) {
@@ -3343,10 +3346,11 @@ export async function fetchAllUsers(
           departmentIds: mergeDepartmentIds(existing.departmentIds, summary.departmentIds),
         })
       }
-      if (!response.hasMore || response.nextCursor === null) {
+      if (nextCursor === null) {
         hasMore = false
       } else {
-        cursor = response.nextCursor
+        cursor = nextCursor
+        seenCursors.add(cursor)
       }
     }
   }
@@ -3996,6 +4000,7 @@ const DIRECTORY_FAILURE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
   DirectoryConflictError,
   DirectoryTenantChangeBlockedError,
   DirectorySyncLeaseLostError,
+  DirectoryUserPaginationError,
   RecoveryConflictError,
   LoginNameRuleError,
   PasswordPolicyError,
