@@ -220,8 +220,10 @@ function sendError(res: Response, error: unknown) {
   const code = ownErrors.get(error as object) ?? yidaOwnerRuntimeErrorCode(error) ?? yidaSendApprovalErrorCode(error)
     ?? yidaConnectionTestErrorCode(error)
   const initializationCode = yidaInitializationErrorCode(error)
+  // ENCRYPTION_NOT_READY is 503 like INACTIVE/UNAVAILABLE: a host-configuration readiness refusal,
+  // not a conflict with the slot's state (409 here means CONFLICT/CANCELLED of the command).
   const initializationStatus: Readonly<Record<string, number>> = { INPUT: 400, DENIED: 403, CONFLICT: 409, CANCELLED: 409,
-    INACTIVE: 503, UNAVAILABLE: 503 }
+    INACTIVE: 503, UNAVAILABLE: 503, ENCRYPTION_NOT_READY: 503 }
   const initialSuffix = initializationCode?.replace(/^YIDA_INITIALIZATION_/u, '')
   const isInitialization = initialSuffix !== undefined && Object.hasOwn(initializationStatus, initialSuffix)
   const safe = isInitialization ? initializationCode! : code !== undefined && Object.hasOwn(statuses, code) ? code : 'YIDA_OWNER_HTTP_UNAVAILABLE'

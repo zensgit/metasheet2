@@ -231,6 +231,24 @@ describe('Yida initialization explicit local management UI', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(3)
   })
 
+  it('503 ENCRYPTION_NOT_READY shows its code and the plain Chinese hint, clears material and needs a manual GET before a retry', async () => {
+    mountPanel(); await observeReady(); await fill()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 503)); await click('submit'); noSecrets()
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY')
+    const hint = q('error-hint').textContent ?? ''
+    for (const part of ['本机加密密钥未配置或仍是默认值', '初始化未执行，未写入任何内容', 'docker\\app.env', 'ENCRYPTION_KEY / ENCRYPTION_SALT', '重启后端', '手动 GET'])
+      expect(hint.includes(part)).toBe(true)
+    // Values-free: neither the pasted material nor the review identifiers appear in the hint.
+    for (const value of [...Object.values(material), 'SYN-REVIEW', 'SYN-ORG']) expect(hint.includes(value)).toBe(false)
+    expect(absent('initialized')).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    expect(q<HTMLButtonElement>('refresh').disabled).toBe(false)
+    await click('submit'); expect(fetchSpy).toHaveBeenCalledTimes(2)
+    fetchSpy.mockResolvedValueOnce(json(ready())); await click('refresh')
+    expect(absent('error-hint')).toBe(true)
+    await fill(); fetchSpy.mockResolvedValueOnce(json(initialized(), 201)); await click('submit')
+    expect(q('initialized').textContent).toContain('canSend=false'); expect(fetchSpy).toHaveBeenCalledTimes(4)
+  })
+
   it.each(['YIDA_INITIALIZATION_DENIED', 'YIDA_OWNER_HTTP_DENIED'])('a server %s shows its own code and keeps the panel closed', async code => {
     mountPanel(); await fill()
     fetchSpy.mockResolvedValueOnce(error(code, 403)); await click('refresh')
@@ -270,6 +288,14 @@ describe('Yida initialization actual service boundaries', () => {
   ])('does not read or accept foreign error detail/status (%#)', async envelope => {
     fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(envelope), { status: 503, headers: { 'Content-Type': 'application/json' } }))
     await expect(client().observe()).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
+  })
+  it('decodes ENCRYPTION_NOT_READY only with its own status 503', async () => {
+    const value = client(); fetchSpy.mockResolvedValueOnce(json(ready())); await value.observe()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 503))
+    await expect(value.initialize(payload())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY' })
+    const other = client(); fetchSpy.mockResolvedValueOnce(json(ready())); await other.observe()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 409))
+    await expect(other.initialize(payload())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
   })
   it('uses original reader and rejects a response at EOF after cancellation, even if transport ignores signal', async () => {
     const end = deferred<ReadableStreamReadResult<Uint8Array>>(), release = vi.fn(), caller = new AbortController()
