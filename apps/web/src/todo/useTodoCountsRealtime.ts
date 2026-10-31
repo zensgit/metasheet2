@@ -28,6 +28,7 @@
 import { onBeforeUnmount, onMounted } from 'vue'
 import { io, type Socket } from 'socket.io-client'
 import { useAuth } from '../composables/useAuth'
+import { TASKS_COUNTS_UPDATED_EVENT } from '../tasks/useTasksCountsRealtime'
 import { getApiBase } from '../utils/api'
 import type { PendingSourceStatus } from './api'
 
@@ -135,7 +136,7 @@ export function useTodoCountsRealtime(options: UseTodoCountsRealtimeOptions) {
 
         const onTasksCountsUpdated = options.onTasksCountsUpdated
         if (onTasksCountsUpdated) {
-          nextSocket.on('tasks:counts-updated', () => onTasksCountsUpdated())
+          nextSocket.on(TASKS_COUNTS_UPDATED_EVENT, () => onTasksCountsUpdated())
         }
 
         socket = nextSocket
