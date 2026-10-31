@@ -102,7 +102,7 @@ vi.mock('../src/composables/useLocale', () => ({
 
 import TasksView from '../src/views/tasks/TasksView.vue'
 import { formatViewerInstant } from '../src/tasks/tasksDateDisplay'
-import { TASK_SEARCH_DEBOUNCE_MS, TASK_SEARCH_MAX_LENGTH, titleHoldsTaskSearch } from '../src/tasks/tasksSearch'
+import { TASK_SEARCH_DEBOUNCE_MS, TASK_SEARCH_MAX_LENGTH, taskSearchTerm, titleHoldsTaskSearch } from '../src/tasks/tasksSearch'
 
 let app: App | null = null
 let host: HTMLElement | null = null
@@ -988,6 +988,31 @@ describe('title search on the list page', () => {
     expect(h.listTasks).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    ['leading U+200B', '\u200Balpha'],
+    ['trailing U+200D', 'alpha\u200D'],
+    ['leading U+FEFF', '\uFEFFalpha'],
+    ['leading U+0085', '\u0085alpha'],
+  ])('search|fe|a %s is not part of the term: the read carries the text, and a change only in it reads nothing', async (_label, pasted) => {
+    const el = await mountReady()
+    await search(el, pasted)
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+    await search(el, 'alpha')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  it('search|fe|nothing but zero-width marks reads as no search: no read when unsearched, the whole list otherwise', async () => {
+    const el = await mountReady()
+    await search(el, '\u200B')
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    await search(el, 'alpha')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    await type(el, '\u200B\uFEFF')
+    expect(h.listTasks).toHaveBeenCalledTimes(3)
+    expect(h.listTasks.mock.calls.at(-1)).toEqual(['assigned', undefined, 'open'])
+  })
+
   it('search|fe|clearing restores the whole list at once, with the three-argument read', async () => {
     h.listTasks.mockImplementation(async (_view: string, _page: unknown, _status: unknown, q?: string) => ({
       kind: 'ok',
@@ -1045,14 +1070,6 @@ describe('title search on the list page', () => {
     expect(titles(el)).toEqual(['Whole List'])
   })
 
-  it('search|fe|every read starts at the first row: a new query sends no offset', async () => {
-    const el = await mountReady()
-    await search(el, 'a')
-    await search(el, 'ab')
-    await search(el, 'abc')
-    expect(h.listTasks.mock.calls.map((call) => call[1])).toEqual([undefined, undefined, undefined, undefined])
-  })
-
   it('search|fe|the text stays across view and status switches, and those reads carry it', async () => {
     const el = await mountReady()
     await search(el, 'alpha')
@@ -1104,13 +1121,39 @@ describe('title search on the list page', () => {
     expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('暂无未完成任务')
   })
 
+  it('search|fe|the no-match text changes inside a live region that stays on the page', async () => {
+    const pending = deferred<{ kind: 'ok'; items: never[] }>()
+    const el = await mountReady()
+    const live = shown(el, 'tasks-list-empty-live')
+    expect(live?.getAttribute('role')).toBe('status')
+    h.listTasks.mockReturnValueOnce(pending.promise)
+    await search(el, 'nothing')
+    expect(shown(el, 'tasks-list-loading')).not.toBeNull()
+    expect(shown(el, 'tasks-list-empty')).toBeNull()
+    expect(shown(el, 'tasks-list-empty-live')).toBe(live)
+    expect(live?.textContent?.trim()).toBe('')
+    pending.resolve({ kind: 'ok', items: [] })
+    await flush()
+    expect(shown(el, 'tasks-list-empty-live')).toBe(live)
+    expect(shown(el, 'tasks-list-empty')?.closest('[role="status"]')).toBe(live)
+    expect(live?.textContent?.trim()).toBe('当前筛选下没有标题匹配的任务')
+  })
+
   it('search|fe|a refused text reads as such; any other failure keeps the generic line', async () => {
     const el = await mountReady()
     h.listTasks.mockResolvedValue({ kind: 'error', status: 422 })
-    await search(el, '​')
+    await search(el, 'refused')
     expect(shown(el, 'tasks-list-error')?.textContent?.trim()).toBe('搜索内容无效，请修改后重试')
+    expect(shown(el, 'tasks-list-error')?.getAttribute('role')).toBe('alert')
     h.listTasks.mockResolvedValue({ kind: 'error', status: 500 })
     await search(el, 'alpha')
+    expect(shown(el, 'tasks-list-error')?.textContent?.trim()).toBe('加载任务失败，请稍后重试')
+  })
+
+  it('search|fe|a 422 answered to an unsearched read keeps the ordinary load-failed message', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'error', status: 422 })
+    const el = await mountReady()
+    expect(h.listTasks.mock.calls).toEqual([['assigned', undefined, 'open']])
     expect(shown(el, 'tasks-list-error')?.textContent?.trim()).toBe('加载任务失败，请稍后重试')
   })
 
@@ -1157,6 +1200,62 @@ describe('title search on the list page', () => {
       expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
     })
 
+    it.each([
+      ['assigned', 'open'],
+      ['created', 'all'],
+      ['any_role', 'open'],
+    ] as const)('search|fe|hidden|in the %s view under %s, where only the search leaves it out, the notice names the search; clearing the search ends it', async (view, status) => {
+      window.localStorage.setItem(KEY, status)
+      const el = await mountReady()
+      ;(shown(el, `tasks-view-switch-${view}`) as HTMLButtonElement).click()
+      await flush()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前搜索条件下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+      await type(el, '')
+      expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
+    })
+
+    it.each(['open', 'done'] as const)('search|fe|hidden|in 我委派的 under %s the view\'s copy stands over the search\'s, and clearing the search keeps it', async (status) => {
+      window.localStorage.setItem(KEY, status)
+      const el = await mountReady()
+      ;(shown(el, 'tasks-view-switch-delegated') as HTMLButtonElement).click()
+      await flush()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前视图和筛选下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+      await type(el, '')
+      expect(h.listTasks.mock.calls.at(-1)).toEqual(['delegated', undefined, status])
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前视图和筛选下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+      expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+    })
+
+    it('search|fe|hidden|under 已完成 a title without the text keeps the status copy and its switch, and clearing the search keeps them', async () => {
+      window.localStorage.setItem(KEY, 'done')
+      const el = await mountReady()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      const statusCopy = '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。'
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(statusCopy)
+      expect(shown(el, 'tasks-create-hidden-show-open')).not.toBeNull()
+      await type(el, '')
+      expect(h.listTasks.mock.calls.at(-1)).toEqual(['assigned', undefined, 'done'])
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(statusCopy)
+      expect(shown(el, 'tasks-create-hidden-show-open')).not.toBeNull()
+      expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+    })
+
+    it('search|fe|hidden|a pasted leading zero-width mark in the box does not make the notice contradict the list', async () => {
+      const el = await mountReady()
+      await search(el, '\u200Balpha')
+      await create(el, 'Alpha plan')
+      expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+      expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
+    })
+
     it('search|fe|hidden|a title holding the text, in any case, gets no notice', async () => {
       const el = await mountReady()
       await search(el, 'alpha')
@@ -1187,6 +1286,8 @@ describe('title search on the list page', () => {
       expect(titleHoldsTaskSearch('café menu', 'café')).toBe(true)
       expect(titleHoldsTaskSearch('100% done', '%')).toBe(true)
       expect(titleHoldsTaskSearch('snakeXcase', '_')).toBe(false)
+      expect(titleHoldsTaskSearch('\u200BAlpha plan', '\u200Balpha\u0085')).toBe(true)
+      expect(taskSearchTerm(' \u200B\uFEFF\u0085 ')).toBe('')
     })
   })
 })
