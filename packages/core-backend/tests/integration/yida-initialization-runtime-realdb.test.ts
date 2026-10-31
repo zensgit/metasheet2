@@ -29,7 +29,7 @@ const tables = ['integration_yida_credential_materials', 'integration_yida_crede
 const sendTables = ['integration_yida_send_approvals', 'integration_yida_send_admissions', 'integration_yida_send_revocations',
   'integration_yida_send_approval_audit', 'integration_yida_delivery_ledger', 'integration_yida_delivery_audit'] as const
 const ident = (value: string) => { if (!/^[a-z][a-z0-9_]*$/u.test(value)) throw new Error('OWNED_SCHEMA_REQUIRED'); return `"${value}"` }
-const material = () => ({ appKey: ' synthetic-local-app ', appSecret: ' synthetic-local-secret ', systemToken: ' synthetic-local-token ', userId: 'synthetic-local-user' })
+const material = () => ({ appKey: 'synthetic-local-app', appSecret: 'synthetic-local-secret', systemToken: 'synthetic-local-token', userId: 'synthetic-local-user' })
 const attestation = () => ({ kind: 'owner-reviewed-target', reviewRef: 'synthetic-local-review', organizationId: 'synthetic-local-org', executionIdentity: material().userId })
 function deferred() {
   let resolve!: () => void

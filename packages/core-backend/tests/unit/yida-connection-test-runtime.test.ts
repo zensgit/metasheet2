@@ -25,7 +25,7 @@ const secondAdmin = Object.freeze({ ...actor, actorId: 'synthetic-second-admin' 
 const commandId = '00000000-0000-4000-8000-000000000001'
 const otherCommand = '00000000-0000-4000-8000-000000000009'
 const input = (overrides: Partial<Row> = {}): YidaConnectionTestInput => ({ commandId, mode: 'candidate',
-  material: { appKey: ' synthetic-app ', appSecret: ' synthetic-secret ' }, ...overrides } as YidaConnectionTestInput)
+  material: { appKey: 'synthetic app', appSecret: 'synthetic secret' }, ...overrides } as YidaConnectionTestInput)
 const tokenResponse = () => new Response(JSON.stringify({ accessToken: 'synthetic-access-token', expireIn: 7200 }), { status: 200 })
 function deferred<T = void>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void
@@ -121,7 +121,7 @@ describe('YiDa connection test host runtime — order, authority and limiter', (
     expect(f.fetchCalls[0].init?.method).toBe('POST'); expect(f.fetchCalls[0].init?.redirect).toBe('error')
     const body = JSON.parse(String(f.fetchCalls[0].init?.body))
     expect(Object.keys(body)).toEqual(['appKey', 'appSecret'])
-    expect(body.appKey === ' synthetic-app ' && body.appSecret === ' synthetic-secret ').toBe(true)
+    expect(body.appKey === 'synthetic app' && body.appSecret === 'synthetic secret').toBe(true)
     expect(JSON.stringify(result).includes('synthetic-access-token')).toBe(false)
     expect(f.sql.some(text => /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/u.test(text))).toBe(false)
     expect(f.sql.findIndex(text => text.includes('FROM users'))).toBeLessThan(f.sql.findIndex(text => text.includes('pg_advisory_xact_lock')))
@@ -403,6 +403,18 @@ describe('YiDa connection test host runtime — receipts, deadline and lifetime'
     }
     await rejected(f.runtime.test({ ...actor, workspaceId: 'synthetic' } as never, input()), 'INPUT')
     expect([f.transactions, f.fetchCalls.length]).toEqual([0, 0])
+  })
+  // The tested pair must be one L4 would seal unchanged: padding or a control character is refused, never trimmed.
+  it.each([
+    ['appKey', 'a trailing CR/LF', 'synthetic app\r\n'], ['appKey', 'a leading space', ' synthetic app'],
+    ['appKey', 'a leading NBSP', '\u00a0synthetic app'], ['appKey', 'an inner BEL', 'synthetic\u0007app'],
+    ['appSecret', 'a trailing LF', 'synthetic secret\n'], ['appSecret', 'a trailing space', 'synthetic secret '],
+    ['appSecret', 'a leading TAB', '\tsynthetic secret'], ['appSecret', 'a trailing ideographic space', 'synthetic secret\u3000'],
+    ['appSecret', 'an inner C1 control', 'synthetic\u0085secret'],
+  ] as const)('refuses %s with %s as INPUT before any transaction or fetch', async (key, _label, value) => {
+    const { f } = await active()
+    await rejected(f.runtime.test(actor, input({ material: { appKey: 'synthetic app', appSecret: 'synthetic secret', [key]: value } })), 'INPUT')
+    expect([f.transactions, f.fetchCalls.length, f.sql.length]).toEqual([0, 0, 0])
   })
   it('inactive until registered; one registration only; the decoder reads only its own errors', async () => {
     const f = fixture()
