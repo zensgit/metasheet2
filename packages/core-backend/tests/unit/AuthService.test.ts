@@ -130,6 +130,30 @@ function stubPoolForAuthReads(options: {
   return { roleInsertParams, admissionParams }
 }
 
+/**
+ * Records the backfill's commit boundary. The NEXT `pool.transaction` call logs `transaction:start`, runs
+ * the handler on the same query mock, and logs `transaction:committed` only after the handler's promise
+ * resolved, which is where the real pool issues COMMIT (integration/db/connection-pool.ts `transaction`).
+ * Every `invalidateUserPerms` call logs `invalidate:<userId>`, so the order shows whether the permission
+ * cache was invalidated after the commit or while the transaction was still open.
+ */
+function recordBackfillCommitOrder(): { order: string[]; transactionsStarted: () => number } {
+  const order: string[] = []
+  const callsBefore = poolMocks.transaction.mock.calls.length
+  poolMocks.transaction.mockImplementationOnce(
+    async (handler: (client: { query: typeof poolMocks.query }) => Promise<unknown>) => {
+      order.push('transaction:start')
+      const result = await handler({ query: poolMocks.query })
+      order.push('transaction:committed')
+      return result
+    },
+  )
+  rbacMocks.invalidateUserPerms.mockImplementation((userId: string) => {
+    order.push(`invalidate:${userId}`)
+  })
+  return { order, transactionsStarted: () => poolMocks.transaction.mock.calls.length - callsBefore }
+}
+
 describe('AuthService.verifyToken', () => {
   beforeEach(() => {
     process.env.NODE_ENV = 'test'
@@ -404,6 +428,7 @@ describe('AuthService.verifyToken', () => {
       .mockResolvedValueOnce({ rows: [{ user_id: 'u5' }], rowCount: 1 })
     rbacMocks.isAdmin.mockResolvedValue(false)
     rbacMocks.listUserPermissions.mockResolvedValue([])
+    const commit = recordBackfillCommitOrder()
 
     const auth = new AuthService()
     const user = await auth.verifyToken('platform-user-token')
@@ -430,6 +455,11 @@ describe('AuthService.verifyToken', () => {
     )
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('u5')
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledTimes(1)
+    // One transaction (the backfill), and the cache is invalidated only after it committed: never while
+    // its handler was still running, where a concurrent read could refill the cache from a state the
+    // commit then supersedes.
+    expect(commit.transactionsStarted()).toBe(1)
+    expect(commit.order).toEqual(['transaction:start', 'transaction:committed', 'invalidate:u5'])
   })
 
   it('does not merge attendance permissions when a non-recovery INSERT fails', async () => {
@@ -1020,6 +1050,7 @@ describe('AuthService.login', () => {
         iat: Math.floor(new Date('2026-04-18T00:00:00.000Z').getTime() / 1000),
         sid: 'session-eligible',
       })
+      const commit = recordBackfillCommitOrder()
 
       const auth = new AuthService()
       const result = await auth.login('logineligible', 'WelcomePass9A')
@@ -1029,6 +1060,9 @@ describe('AuthService.login', () => {
       expect(tracked.roleInsertParams).toEqual([[['user-login-eligible'], 'attendance_employee']])
       expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-login-eligible')
       expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledTimes(1)
+      // Same commit-boundary witness on the fresh-login path.
+      expect(commit.transactionsStarted()).toBe(1)
+      expect(commit.order).toEqual(['transaction:start', 'transaction:committed', 'invalidate:user-login-eligible'])
     } finally {
       if (previousMode === undefined) delete process.env.PRODUCT_MODE
       else process.env.PRODUCT_MODE = previousMode
