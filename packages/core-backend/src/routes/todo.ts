@@ -108,13 +108,15 @@ export function todoRouter(): Router {
   const r = Router()
 
   r.get('/api/todo/items', authenticate, todoSourceDoor, async (req: Request, res: Response) => {
+    const allowedSources = res.locals.todoSources
+    if (!Array.isArray(allowedSources)) return res.status(403).json({ error: 'Insufficient permissions' })
     if (!resolveApprovalActorId(req)) return todoUserRequiredResponse(res)
 
     try {
       const viewer = await resolveTodoViewer(req)
       if (!viewer) return todoUserRequiredResponse(res)
       const { items, sources } = await pendingSourceRegistry.listPendingForUser(viewer, {
-        sources: res.locals.todoSources as string[],
+        sources: allowedSources,
       })
       res.json({ items, sources })
     } catch (error) {
@@ -128,13 +130,15 @@ export function todoRouter(): Router {
   })
 
   r.get('/api/todo/count', authenticate, todoSourceDoor, async (req: Request, res: Response) => {
+    const allowedSources = res.locals.todoSources
+    if (!Array.isArray(allowedSources)) return res.status(403).json({ error: 'Insufficient permissions' })
     if (!resolveApprovalActorId(req)) return todoUserRequiredResponse(res)
 
     try {
       const viewer = await resolveTodoViewer(req)
       if (!viewer) return todoUserRequiredResponse(res)
       const { count, sources } = await pendingSourceRegistry.countPendingForUser(viewer, {
-        sources: res.locals.todoSources as string[],
+        sources: allowedSources,
       })
       res.json({ count, sources })
     } catch (error) {

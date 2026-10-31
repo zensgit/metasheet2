@@ -51,8 +51,8 @@ function db() {
   return poolManager.get()
 }
 
-async function actor(label: string, codes: string[], admission: boolean, orgId = ORG_A): Promise<SeededTaskActor> {
-  const seeded = await seedTaskActor({ label, stamp, orgId, codes, admission })
+async function actor(label: string, codes: string[], taskAccess: boolean, orgId = ORG_A): Promise<SeededTaskActor> {
+  const seeded = await seedTaskActor({ label, stamp, orgId, codes, admission: taskAccess })
   seededUsers.push(seeded.userId)
   seededRoles.push(seeded.roleId)
   return seeded

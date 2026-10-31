@@ -2,7 +2,7 @@
  * 待办中心 v1 首切片 — `PendingSourceRegistry` (todo-center-design-lock §3/§4).
  *
  * The todo center is a pure projection: it does not own a table and does not judge visibility
- * itself. Each domain (approval today; comment / task / e-learning in later slices, per the lock's
+ * itself. Each domain (approval and task today; comment / e-learning in later slices, per the lock's
  * §2 accession table) registers ONE source exposing its own "what is pending for this viewer" and
  * "how many" queries; the registry only aggregates.
  *
@@ -33,7 +33,8 @@ export interface PendingItem {
   workflowKey?: string | null
 }
 
-/** The three-input viewer contract §3.0 pins for the approval source; used as the ONE shape every
+/** The three required identity fields §3.0 pins for the approval source, plus optional session
+ *  fields (see the amendment record in the phase-1 design); used as the ONE shape every
  *  registered source is handed today. A future source needing a different projection of the viewer
  *  widens this type rather than each source inventing its own — see the lock's §3 "不得自行判断可见
  *  性,也不得自己拼第二份 pending 谓词" constraint. */

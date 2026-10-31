@@ -120,7 +120,7 @@ DTO / 内存契约(本切片新增,均为纯投影,不落表):
 **已知局限,记录不修**(`routes/todo.ts:11-17` 文件顶部注释原文如此,不是事后补记):两个路由用
 `rbacGuard('approvals','read')` 单一权限门槛。今天只注册了审批源,门槛与数据暴露面重合;一旦注册第二
 个源(评论/任务/…),这个门槛会**错误地**对不持 `approvals:read` 的 viewer 隐藏非审批的待办项——必须
-在那之前改为按源判权限或 `rbacGuardAny`。见 §6。
+在那之前改为按源判权限或 `rbacGuardAny`。见 §6。(2026-11-01 起已改为按来源判权限,见本文修订记录。)
 
 `rbacGuard` 本身对 401/403 的响应不带专用码(`res.status(401).json({ error: 'Authentication required'
 })` / `res.status(403).json({ error: 'Insufficient permissions' })`,`packages/core-backend/src/rbac/
