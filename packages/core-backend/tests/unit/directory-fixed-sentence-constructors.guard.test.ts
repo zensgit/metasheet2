@@ -146,6 +146,7 @@ const EXPECTED_CONSTRUCTION_COUNTS: Readonly<Record<string, number>> = {
   DirectoryNotFoundError: 10,
   DirectorySyncLeaseLostError: 1,
   DirectoryTenantChangeBlockedError: 1,
+  DirectoryUserPaginationError: 1,
   DirectoryValidationError: 41,
   EncryptionMaterialError: 1,
   LoginAliasClaimError: 2,
