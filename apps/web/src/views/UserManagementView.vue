@@ -138,13 +138,19 @@
         <div class="user-admin__section-head">
           <div>
             <h2>邀请用户</h2>
-            <p class="user-admin__hint">一次邀请一名成员：填写邮箱和角色后创建账号。邀请文案可复制，并在「待处理邀请」里重发或撤销。</p>
-            <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。</p>
-            <p class="user-admin__hint" data-create-user-rule="login-name">{{ createUserRuleHints.loginName }}</p>
-            <p class="user-admin__hint" data-create-user-rule="password">{{ createUserRuleHints.password }}</p>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint">一次邀请一名成员：填写邮箱和角色后创建账号。邀请文案可复制，并在「待处理邀请」里重发或撤销。</p>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。</p>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint" data-create-user-rule="login-name">{{ createUserRuleHints.loginName }}</p>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint" data-create-user-rule="password">{{ createUserRuleHints.password }}</p>
           </div>
           <button class="user-admin__button user-admin__button--secondary" type="button" @click="closeInvite()">关闭</button>
         </div>
+        <div class="user-admin__tabs" role="tablist" aria-label="邀请方式">
+          <button class="user-admin__tab" :class="{ 'user-admin__tab--active': inviteTab === 'single' }" type="button" @click="inviteTab = 'single'">单个邀请</button>
+          <button class="user-admin__tab" :class="{ 'user-admin__tab--active': inviteTab === 'import' }" type="button" data-testid="batch-import-tab" @click="inviteTab = 'import'">批量导入</button>
+          <button class="user-admin__tab" :class="{ 'user-admin__tab--active': inviteTab === 'paste' }" type="button" data-testid="paste-emails-tab" @click="inviteTab = 'paste'">粘贴邮箱</button>
+        </div>
+      <div v-show="inviteTab === 'single'">
       <div class="user-admin__create-grid">
         <input v-model.trim="createForm.name" class="user-admin__search" type="text" placeholder="姓名" />
         <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱（可选）" />
@@ -299,6 +305,46 @@
             aria-label="邀请附言（可选）"
           />
         </label>
+      </div>
+      <div v-show="inviteTab === 'import'" data-testid="batch-import-panel">
+        <p class="user-admin__hint">下载模板，填好姓名、邮箱、角色 ID 和部门后上传。先预览校验，再确认创建。一次最多 100 行。</p>
+        <div class="user-admin__role-actions">
+          <button class="user-admin__button user-admin__button--secondary" type="button" @click="downloadImportTemplate('csv')">下载 CSV 模板</button>
+          <button class="user-admin__button user-admin__button--secondary" type="button" @click="void downloadImportTemplate('xlsx')">下载 Excel 模板</button>
+          <label class="user-admin__button user-admin__button--secondary user-admin__file">
+            上传文件
+            <input type="file" accept=".csv,.xlsx,text/csv" data-testid="batch-import-file" @change="void onImportFile($event)" />
+          </label>
+          <button class="user-admin__button" type="button" :disabled="bulkBusy || importPreview.every((row) => !row.ok)" @click="void submitImport()">确认导入</button>
+        </div>
+        <p v-if="importPreview.length" class="user-admin__hint">可导入 {{ importPreview.filter((row) => row.ok).length }} 行，有问题 {{ importPreview.filter((row) => !row.ok).length }} 行。</p>
+        <div v-if="importPreview.length" class="user-admin__table">
+          <div class="user-admin__preview-row user-admin__preview-row--head"><span>邮箱</span><span>姓名</span><span>角色</span><span>结果</span></div>
+          <div v-for="row in importPreview" :key="row.index" class="user-admin__preview-row">
+            <span>{{ row.email || '—' }}</span>
+            <span>{{ row.name || '—' }}</span>
+            <span>{{ row.roleId || 'user' }}</span>
+            <span>{{ row.message }}</span>
+          </div>
+        </div>
+        <div v-if="batchReport" class="user-admin__preset" data-testid="batch-import-report">
+          <strong>导入结果：成功 {{ batchReport.successCount }}，失败 {{ batchReport.failureCount }}</strong>
+          <p v-for="item in batchReport.results" :key="`${item.index}-${item.email}`">{{ item.email || '—' }}：{{ item.message }}<template v-if="item.temporaryPassword">，临时密码 {{ item.temporaryPassword }}</template></p>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="batchReport.failureCount === 0" @click="downloadFailedRows()">下载失败行</button>
+        </div>
+      </div>
+      <div v-show="inviteTab === 'paste'" data-testid="paste-emails-panel">
+        <p class="user-admin__hint">把多个邮箱粘贴在这里，用逗号、分号或换行分开。他们会使用同一个角色。</p>
+        <textarea v-model="pasteEmails" class="user-admin__search user-admin__note" rows="5" aria-label="粘贴多个邮箱" placeholder="a@example.com, b@example.com" />
+        <select v-model="pasteRoleId" class="user-admin__select" aria-label="粘贴邀请角色">
+          <option value="">不指定角色（普通成员）</option>
+          <option v-for="role in roleCatalog" :key="role.id" :value="role.id">{{ role.name }} ({{ role.id }})</option>
+        </select>
+        <div class="user-admin__role-actions">
+          <button class="user-admin__button" type="button" :disabled="bulkBusy || pastedEmailList.length === 0" @click="void submitPastedEmails()">邀请这些邮箱</button>
+        </div>
+        <p v-if="pastedEmailList.length" class="user-admin__hint">将邀请 {{ pastedEmailList.length }} 个邮箱。</p>
+      </div>
       </section>
     </div>
 
@@ -464,7 +510,47 @@
             <router-link class="user-admin__button user-admin__button--secondary" :to="buildDingTalkGovernanceAuditLocation()">
               查看钉钉治理审计
             </router-link>
+            <select v-model="bulkRoleId" class="user-admin__select" aria-label="批量角色" :disabled="selectedUserIds.length === 0">
+              <option value="">修改角色</option>
+              <option v-for="role in roleCatalog" :key="role.id" :value="role.id">{{ role.name }}</option>
+            </select>
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || !bulkRoleId" @click="openBulkConfirm('role')">应用角色</button>
+            <input v-model.trim="bulkDepartment" class="user-admin__search" type="text" placeholder="修改部门" aria-label="批量部门" :disabled="selectedUserIds.length === 0" />
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || !bulkDepartment" @click="openBulkConfirm('department')">应用部门</button>
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('enable')">批量启用</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('disable')">批量停用</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="displayedUsers.length === 0" @click="exportUsersForUpdate()">导出以便修改</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="reimportOpen = true">导入更新</button>
           </div>
+          <div v-if="bulkConfirm" class="user-admin__confirm" role="dialog" aria-label="确认批量操作" data-testid="bulk-confirm">
+            <strong>{{ bulkConfirmTitle }}</strong>
+            <p>将影响 {{ selectedUserIds.length }} 人：{{ selectedUserLabels }}</p>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" data-testid="bulk-confirm-submit" @click="void submitBulkConfirm()">确认</button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" @click="bulkConfirm = null">取消</button>
+            </div>
+          </div>
+          <details class="user-admin__danger">
+            <summary>永久删除</summary>
+            <p class="user-admin__hint">默认请用「批量停用」：停用可恢复，并保留考勤、审计和目录历史。永久删除尚未开放（没有回收站，账号被多处引用）。确认后服务器会拒绝删除并留下审计。</p>
+            <p v-if="selectedUserIds.length">将列出：{{ selectedUserLabels }}</p>
+            <input v-model.trim="hardDeletePhrase" class="user-admin__search" type="text" aria-label="永久删除确认" placeholder="输入「永久删除」" />
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== '永久删除'" @click="void submitHardDelete()">确认永久删除</button>
+          </details>
+        </div>
+        <div v-if="reimportOpen" class="user-admin__confirm" role="dialog" aria-label="导入更新" data-testid="reimport-dialog">
+          <strong>导入更新</strong>
+          <p class="user-admin__hint">按用户 ID 或邮箱匹配。先看差异，再写入。部门是文本字段；考勤组不在这里改。</p>
+          <input type="file" accept=".csv,.xlsx,text/csv" data-testid="reimport-file" @change="void onReimportFile($event)" />
+          <div v-for="row in reimportPreview" :key="row.index" class="user-admin__hint">
+            {{ row.email || row.userId }}：{{ row.message }}<template v-if="row.changes.length">（{{ row.changes.map((change) => `${change.field} ${change.before || '空'} → ${change.after || '空'}`).join('；') }}）</template>
+          </div>
+          <div class="user-admin__role-actions">
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || reimportPreview.length === 0" @click="void submitReimport(true)">预览差异</button>
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || !reimportReady" @click="void submitReimport(false)">确认更新</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="reimportOpen = false">取消</button>
+          </div>
+          <p v-if="batchReport" class="user-admin__hint">成功 {{ batchReport.successCount }}，失败 {{ batchReport.failureCount }}</p>
         </div>
         <div v-if="loading && users.length === 0" class="user-admin__empty">正在加载成员…</div>
         <div v-else-if="displayedUsers.length === 0" class="user-admin__empty">暂无用户数据</div>
@@ -1102,6 +1188,17 @@
 </template>
 
 <script setup lang="ts">
+import {
+  ADMIN_USER_BATCH_LIMIT,
+  buildImportTemplateCsv,
+  buildUpdateExportCsv,
+  parseCsv,
+  parsePastedEmails,
+  previewUpdateRows,
+  validateImportRows,
+  type ImportPreviewRow,
+  type UpdatePreviewRow,
+} from './adminUserBatch'
 import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
@@ -1425,7 +1522,19 @@ const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
 const surface = ref<'members' | 'invites'>('members')
 const inviteOpen = ref(false)
+const inviteTab = ref<'single' | 'import' | 'paste'>('single')
 const inviteNote = ref('')
+const pasteEmails = ref('')
+const pasteRoleId = ref('')
+const importPreview = ref<ImportPreviewRow[]>([])
+const reimportOpen = ref(false)
+const reimportPreview = ref<UpdatePreviewRow[]>([])
+const reimportReady = ref(false)
+const bulkRoleId = ref('')
+const bulkDepartment = ref('')
+const bulkConfirm = ref<null | 'role' | 'department' | 'enable' | 'disable'>(null)
+const hardDeletePhrase = ref('')
+const batchReport = ref<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>> } | null>(null)
 const inviteStatusFilter = ref<'pending' | 'all'>('pending')
 const detailOpen = ref(false)
 const rowMenuUserId = ref('')
@@ -1665,6 +1774,17 @@ const pagedUsers = computed(() => {
   return displayedUsers.value.slice(start, start + pageSize)
 })
 const pendingInviteCount = computed(() => inviteRecords.value.filter((record) => record.status === 'pending').length)
+const knownRoleIds = computed(() => new Set(roleCatalog.value.map((role) => role.id)))
+const pastedEmailList = computed(() => parsePastedEmails(pasteEmails.value))
+const selectedUsers = computed(() => users.value.filter((user) => selectedUserIdSet.value.has(user.id)))
+const selectedUserLabels = computed(() => selectedUsers.value.map((user) => user.name || user.email || user.id).join('、'))
+const bulkConfirmTitle = computed(() => {
+  if (bulkConfirm.value === 'role') return `确认把所选用户的角色改为 ${bulkRoleId.value}？`
+  if (bulkConfirm.value === 'department') return `确认把所选用户的部门改为 ${bulkDepartment.value}？`
+  if (bulkConfirm.value === 'enable') return '确认启用所选用户？'
+  if (bulkConfirm.value === 'disable') return '确认停用所选用户？停用可恢复，历史会保留。'
+  return ''
+})
 const visibleInviteRecords = computed(() => {
   if (inviteStatusFilter.value === 'all') return inviteRecords.value
   return inviteRecords.value.filter((record) => record.status === 'pending' || record.status === 'expired')
@@ -3608,6 +3728,220 @@ async function saveUserProfile(): Promise<void> {
   }
 }
 
+function openBulkConfirm(kind: 'role' | 'department' | 'enable' | 'disable'): void {
+  bulkConfirm.value = kind
+}
+
+async function readBatchPayload(response: Response): Promise<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>>; dryRun?: boolean }> {
+  const payload = await readJson(response)
+  const data = (payload.data || {}) as { successCount?: number; failureCount?: number; results?: Array<Record<string, unknown>>; dryRun?: boolean }
+  if (!response.ok || payload.ok !== true) {
+    const error = payload.error as { message?: string; details?: { results?: Array<Record<string, unknown>>; successCount?: number; failureCount?: number } } | undefined
+    if (error?.details?.results) {
+      return {
+        successCount: error.details.successCount || 0,
+        failureCount: error.details.failureCount || error.details.results.length,
+        results: error.details.results,
+      }
+    }
+    throw new Error(error?.message || '批量操作失败')
+  }
+  return {
+    successCount: data.successCount || 0,
+    failureCount: data.failureCount || 0,
+    results: data.results || [],
+    dryRun: data.dryRun,
+  }
+}
+
+async function rowsFromUpload(file: File): Promise<Array<Record<string, string>>> {
+  if (file.name.toLowerCase().endsWith('.xlsx')) {
+    const xlsx = await import('xlsx')
+    const book = xlsx.read(await file.arrayBuffer(), { type: 'array' })
+    const sheet = book.Sheets[book.SheetNames[0] || '']
+    const matrix = xlsx.utils.sheet_to_json<(string | number | null)[]>(sheet, { header: 1, raw: false }) 
+    if (!matrix.length) return []
+    const headers = (matrix[0] || []).map((cell) => String(cell || '').trim())
+    return matrix.slice(1).filter((line) => line.some((cell) => String(cell || '').trim())).map((line) => {
+      const record: Record<string, string> = {}
+      headers.forEach((header, index) => {
+        record[header] = String(line[index] ?? '').trim()
+      })
+      return record
+    })
+  }
+  return parseCsv(await file.text())
+}
+
+function downloadImportTemplate(kind: 'csv' | 'xlsx'): void {
+  if (kind === 'csv') {
+    downloadText('user-import-template.csv', buildImportTemplateCsv(), 'text/csv;charset=utf-8')
+    return
+  }
+  void import('xlsx').then((xlsx) => {
+    const sheet = xlsx.utils.aoa_to_sheet([
+      ['name', 'email', 'roleId', 'department'],
+      ['林岚', 'linlan@example.com', 'user', '装配车间'],
+    ])
+    const book = xlsx.utils.book_new()
+    xlsx.utils.book_append_sheet(book, sheet, 'users')
+    xlsx.writeFile(book, 'user-import-template.xlsx')
+  }).catch(() => {
+    downloadText('user-import-template.csv', buildImportTemplateCsv(), 'text/csv;charset=utf-8')
+    setStatus('Excel 模板暂不可用，已改为下载 CSV', 'error')
+  })
+}
+
+async function onImportFile(event: Event): Promise<void> {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
+  const rows = await rowsFromUpload(input.files[0])
+  importPreview.value = validateImportRows(rows, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  batchReport.value = null
+  input.value = ''
+}
+
+async function submitBatchCreate(items: Array<Record<string, unknown>>): Promise<void> {
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/batch/create', {
+      method: 'POST',
+      body: JSON.stringify({ items: items.slice(0, ADMIN_USER_BATCH_LIMIT) }),
+    })
+    batchReport.value = await readBatchPayload(response)
+    await loadUsers()
+    setStatus(`批量邀请完成：成功 ${batchReport.value.successCount}，失败 ${batchReport.value.failureCount}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量邀请失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function submitImport(): Promise<void> {
+  const items = importPreview.value.filter((row) => row.ok).map((row) => ({
+    name: row.name || undefined,
+    email: row.email,
+    roleId: row.roleId || undefined,
+    department: row.department || undefined,
+  }))
+  await submitBatchCreate(items)
+}
+
+async function submitPastedEmails(): Promise<void> {
+  const items = pastedEmailList.value.slice(0, ADMIN_USER_BATCH_LIMIT).map((email) => ({
+    email,
+    roleId: pasteRoleId.value || undefined,
+  }))
+  await submitBatchCreate(items)
+}
+
+function downloadFailedRows(): void {
+  const failed = (batchReport.value?.results || []).filter((item) => item.ok !== true)
+  const lines = ['email,code,message', ...failed.map((item) => [item.email, item.code, item.message].map((value) => `"${String(value || '').replaceAll('"', '""')}"`).join(','))]
+  downloadText('user-import-failed.csv', `\ufeff${lines.join('\n')}\n`, 'text/csv;charset=utf-8')
+}
+
+async function submitBulkConfirm(): Promise<void> {
+  const kind = bulkConfirm.value
+  bulkConfirm.value = null
+  if (!kind || selectedUserIds.value.length === 0) return
+  bulkBusy.value = true
+  try {
+    if (kind === 'enable' || kind === 'disable') {
+      const response = await apiFetch('/api/admin/users/batch/disable', {
+        method: 'POST',
+        body: JSON.stringify({ userIds: selectedUserIds.value, isActive: kind === 'enable' }),
+      })
+      batchReport.value = await readBatchPayload(response)
+    } else {
+      const items = selectedUsers.value.map((user) => ({
+        userId: user.id,
+        email: user.email,
+        roleId: kind === 'role' ? bulkRoleId.value : undefined,
+        department: kind === 'department' ? bulkDepartment.value : undefined,
+      }))
+      const response = await apiFetch('/api/admin/users/batch/update', {
+        method: 'POST',
+        body: JSON.stringify({ items }),
+      })
+      batchReport.value = await readBatchPayload(response)
+    }
+    await loadUsers()
+    setStatus(`批量操作完成：成功 ${batchReport.value?.successCount || 0}，失败 ${batchReport.value?.failureCount || 0}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量操作失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+function exportUsersForUpdate(): void {
+  const source = selectedUsers.value.length > 0 ? selectedUsers.value : displayedUsers.value
+  downloadText('user-update.csv', buildUpdateExportCsv(source), 'text/csv;charset=utf-8')
+  setStatus(`已导出 ${source.length} 名用户，可修改后重新导入`)
+}
+
+async function onReimportFile(event: Event): Promise<void> {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
+  const rows = await rowsFromUpload(input.files[0])
+  reimportPreview.value = previewUpdateRows(rows, users.value, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  reimportReady.value = false
+  batchReport.value = null
+  input.value = ''
+}
+
+async function submitReimport(dryRun: boolean): Promise<void> {
+  const items = reimportPreview.value.filter((row) => row.ok && (row.userId || row.email)).map((row) => ({
+    userId: row.userId || undefined,
+    email: row.email || undefined,
+    name: row.name || undefined,
+    roleId: row.roleId || undefined,
+    department: row.department,
+    isActive: row.isActive === 'true' ? true : row.isActive === 'false' ? false : undefined,
+  }))
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/batch/update', {
+      method: 'POST',
+      body: JSON.stringify({ items, dryRun }),
+    })
+    batchReport.value = await readBatchPayload(response)
+    reimportReady.value = dryRun && (batchReport.value.failureCount === 0 || batchReport.value.successCount > 0)
+    if (!dryRun) {
+      await loadUsers()
+      reimportOpen.value = false
+    }
+    setStatus(dryRun ? '已生成差异预览，确认后才会写入' : `更新完成：成功 ${batchReport.value.successCount}，失败 ${batchReport.value.failureCount}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '导入更新失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function submitHardDelete(): Promise<void> {
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/batch/delete', {
+      method: 'POST',
+      body: JSON.stringify({
+        userIds: selectedUserIds.value,
+        mode: 'hard',
+        confirmText: hardDeletePhrase.value,
+      }),
+    })
+    batchReport.value = await readBatchPayload(response)
+    setStatus(batchReport.value.results[0]?.message as string || '永久删除未执行', 'error')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '永久删除未执行', 'error')
+  } finally {
+    bulkBusy.value = false
+    hardDeletePhrase.value = ''
+  }
+}
+
 watch([userListFilter, roleFilter, accountStatusFilter, search], () => {
   page.value = 1
 })
@@ -4293,6 +4627,47 @@ onUnmounted(() => {
   gap: 6px;
   color: var(--ms-text-2);
   font-size: 13px;
+}
+
+.user-admin__file {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.user-admin__file input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.user-admin__preview-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--ms-border-light);
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.user-admin__preview-row--head {
+  color: var(--ms-text-3);
+  font-weight: 600;
+}
+
+.user-admin__danger {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ms-border-light);
+}
+
+.user-admin__danger summary {
+  color: var(--ms-color-danger);
+  cursor: pointer;
+  font-weight: 600;
 }
 
 .user-admin__note {
