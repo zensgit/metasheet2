@@ -1051,6 +1051,8 @@ describe('Attendance admin regressions', () => {
   it('CALC14 unknown posture keeps the exact old shift body despite stale date state', async () => {
     const writes = installShiftSegmentApi([attendanceShiftFixture()])
     const section = await mountShiftAdmin()
+    setInput(section, '#attendance-shift-timezone', 'Asia/Shanghai')
+    await flushUi()
     const state = app!._instance!.setupState as { calc14Dates: { shift: string } }
     state.calc14Dates.shift = '2026-12-01'
     section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
@@ -1073,6 +1075,8 @@ describe('Attendance admin regressions', () => {
     installCalc14RuleCapability(capability, responseOrg)
     const writes = installShiftSegmentApi([attendanceShiftFixture({ orgId: calc14OrgFixture })])
     const section = await mountShiftAdmin()
+    setInput(section, '#attendance-shift-timezone', 'Asia/Shanghai')
+    await flushUi()
     expect(container!.querySelectorAll('[data-calc14-date]')).toHaveLength(0)
     const state = app!._instance!.setupState as { calc14Dates: { shift: string } }
     state.calc14Dates.shift = '2026-12-01'
