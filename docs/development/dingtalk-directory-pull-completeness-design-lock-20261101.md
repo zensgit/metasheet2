@@ -15,6 +15,9 @@ cursors keep the pull running.
   accepted department list shapes and explicit empty arrays.
 - The user pagination flag must be an explicit boolean. Missing/invalid flags reject the page.
 - IDs accept nonempty strings or non-negative safe integers; names must be nonempty strings.
+- Supplied department memberships must be arrays of valid ID scalars; malformed lists
+  or elements reject the pull before apply. Preserve omitted/null fallbacks, explicit
+  empty arrays, ordering and well-formed IDs outside the selected department map.
 - A row lacking its identity or name rejects the whole page instead of being
   silently filtered out. Valid rows keep their current field mapping.
 - If hasMore is true, nextCursor must be a non-negative safe integer not used in

@@ -1,4 +1,5 @@
 import { assertDingTalkCorpAllowed } from './runtime-policy'
+import { parseDingTalkDepartmentIds } from './directory-response-ids'
 import {
   DingTalkBusinessError,
   DingTalkIncompleteResponseError,
@@ -650,9 +651,10 @@ export async function listDingTalkDepartmentUsers(
     if (!userId || !name) {
       throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
     }
-    const departmentIds = Array.isArray(entry.dept_id_list)
-      ? entry.dept_id_list.map((item) => String(item ?? '').trim()).filter(Boolean)
-      : [departmentId]
+    const departmentIds = parseDingTalkDepartmentIds(entry.dept_id_list, [departmentId])
+    if (departmentIds === null) {
+      throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+    }
 
     return {
       userId,
@@ -700,9 +702,10 @@ export async function getDingTalkUserDetail(
   )
 
   const result = readNestedPayload(payload)
-  const departmentIds = Array.isArray(result.dept_id_list)
-    ? result.dept_id_list.map((item) => String(item ?? '').trim()).filter(Boolean)
-    : []
+  const departmentIds = parseDingTalkDepartmentIds(result.dept_id_list, [])
+  if (departmentIds === null) {
+    throw new DingTalkIncompleteResponseError('Failed to resolve DingTalk user detail', payload)
+  }
 
   const rawUserId = result.userid ?? result.userId ?? userId
   const resolvedUserId = typeof rawUserId === 'string'
