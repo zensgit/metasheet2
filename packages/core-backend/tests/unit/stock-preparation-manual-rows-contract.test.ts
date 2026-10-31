@@ -16,7 +16,9 @@
  *   K-08 the deployment switch reads with the plugin's exact-literal rule;
  *   K-09 the physical ids the gate derives are provisioning's;
  *   K-10 (B4) the per-sheet switch: the plugin's reader (the switch route's) answers exactly as the host's, value for
- *        value, and what the plugin writes survives the host sanitizer with the lock and the key stanza kept.
+ *        value, and what the plugin writes survives the host sanitizer with the lock and the key stanza kept; the switch
+ *        route's 「manual rows offered on this sheet」 rule (manualRowsSupportedOnObject) answers exactly as the host's
+ *        predicate (a), id for id.
  */
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
@@ -32,6 +34,7 @@ import {
   MANUAL_ROWS_PROJECT_TARGET_TABLE,
   deriveManualRowsFieldIds,
   evaluateManualRowsGate,
+  isManualRowsProjectSheetHost,
   readManualRowsHostRegistry,
   readManualRowsProjectTarget,
   stockPrepProjectSheetsEnabledForManualRows,
@@ -311,6 +314,29 @@ describe('K-10 (B4) the per-sheet switch: the plugin reader answers exactly as t
       expect(pluginRows.manualRowsKeyColumnState({ property: sanitized })).toEqual({
         present: true, policy, source: 'set', stored: policy, locked: true, keyStanza: true,
       })
+    }
+  })
+  it('manualRowsSupportedOnObject answers exactly as the host predicate (a), id for id', () => {
+    const P = truth.PROJECT_OBJECT_ID as string
+    const HEX = P.slice('plm_stock_preparation_sandbox_p_'.length)
+    const IDS: Array<[string, unknown, boolean]> = [
+      ['the registered project-sheet shape', P, true],
+      ['uppercase hex', `plm_stock_preparation_sandbox_p_${HEX.toUpperCase()}`, false],
+      ['uppercase prefix', `PLM_STOCK_PREPARATION_SANDBOX_P_${HEX}`, false],
+      ['a 23-hex digest', P.slice(0, -1), false],
+      ['a 25-hex digest', `${P}0`, false],
+      ['a trailing suffix', `${P}_x`, false],
+      ['a trailing newline', `${P}\n`, false],
+      ['a trailing space', `${P} `, false],
+      ['a leading space', ` ${P}`, false],
+      ['a leading prefix', `x_${P}`, false],
+      ['an adopted older sandbox sheet', 'plm_stock_preparation_sandbox_adopted_syn', false],
+      ['the env main sheet', 'plm_stock_preparation_main', false],
+      ['empty', '', false], ['null', null, false], ['undefined', undefined, false], ['a number', 1, false],
+    ]
+    for (const [label, objectId, expected] of IDS) {
+      expect(isManualRowsProjectSheetHost({ kind: 'present', row: { projectId: 'p', objectId, pluginName: 'plugin-integration-core' } }), `host: ${label}`).toBe(expected)
+      expect(pluginRows.manualRowsSupportedOnObject(objectId), `plugin: ${label}`).toBe(expected)
     }
   })
 })
