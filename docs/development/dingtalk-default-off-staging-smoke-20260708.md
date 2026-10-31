@@ -15,7 +15,7 @@ off the release.
 
 ## 1. E1 container login (`DINGTALK_CONTAINER_LOGIN_ENABLED`)
 
-- [ ] With the flag unset/`false`: `POST /auth/dingtalk/container` returns
+- [ ] With the flag unset/`false`: `POST /api/auth/login/dingtalk/container` returns
   `404 container_login_disabled`.
 - [ ] With the flag `true` and a real in-container `authCode`: the route
   exchanges it for a session JWT via the same `resolveLocalUser` policy
