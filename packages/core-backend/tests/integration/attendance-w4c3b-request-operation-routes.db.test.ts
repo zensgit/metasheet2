@@ -1,5 +1,19 @@
+import { registerEp01DstReviewCallerNativeCases } from '../utils/attendance-ep01-dst-review-callers-native'
+import { registerPunchReviewPublicNativeCases } from '../utils/attendance-punch-review-public-native'
+import { registerPunchDetailRealAuthNativeCases } from '../utils/attendance-punch-detail-real-auth-native'
+import { registerPunchPreviewDurabilityNativeCases } from '../utils/attendance-punch-preview-durability-native'
+import { EP01_DST_READY_CASES, expectedDstReadyCallerResult } from '../utils/attendance-ep01-dst-ready-callers'
+import { __computeAttendanceOuterAttributionValueForTestsV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
+import { ATTENDANCE_W4C2_ATTRIBUTION_RESOLVER_VERSION_V1, computeAttendanceWindowEvidenceFingerprintV1 } from '../../src/attendance/w4c2-frozen-attribution'
+import { EP01_READY_CASES, EP01_NON_UTC_READY_CASES, expectedReadyCallerResult, expectedCheckoutOnlyResult } from '../utils/attendance-ep01-ready-callers'
+import { computeAttendanceSemanticInputFingerprintV1 } from '../../src/attendance/w4c0-fingerprints'
+import { calculateAttendanceSegmentsV1, ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1 } from '../../src/attendance/w4c1-segment-calculator'
+import {
+  clearAttendanceW7ContextSourcePostureV1,
+  seedAttendanceW7ContextSourcePostureV1,
+} from '../utils/w7-context-source-posture-fixture'
 import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
@@ -7,7 +21,7 @@ import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Pool } from 'pg'
+import { Pool, Client } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
 import {
   restoreAttendanceSettingsRow,
@@ -89,9 +103,11 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
   async function seedOrg(
     state: 'legacy' | 'shadow' | 'suspended',
     permission = 'attendance:admin',
+    orgTimezone = 'UTC',
+    identity?: { orgId: string; userId: string },
   ) {
-    const orgId = randomUUID()
-    const userId = randomUUID()
+    const orgId = identity?.orgId ?? randomUUID()
+    const userId = identity?.userId ?? randomUUID()
     await pool.query(
       `INSERT INTO users
        (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
@@ -148,7 +164,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
        SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
        WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
        RETURNING id`,
-      [randomUUID(), orgId, 'UTC'],
+      [randomUUID(), orgId, orgTimezone],
     )
     seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
     return { orgId, userId, token: await mintToken(userId, orgId) }
@@ -336,6 +352,1517 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       else process.env[key] = value
     }
   })
+
+  async function seedCanonicalDay(
+    workDate: string,
+    segments: Array<{ startTime: string; endTime: string; startDayOffset?: 0; endDayOffset?: 1 }>,
+    timezone = 'UTC',
+    identity?: { orgId: string; userId: string },
+  ) {
+    const fixture = await seedOrg('shadow', 'attendance:admin', timezone, identity)
+    await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+    // Existing RBAC_BYPASS fixture posture; this is not a real-auth proof.
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+      [fixture.userId, ['attendance:read', 'attendance:write']],
+    )
+    const headers = { Authorization: `Bearer ${fixture.token}` }
+    const shift = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST', headers,
+      body: {
+        name: 'canonical day synthetic', timezone,
+        lateGraceMinutes: 0, earlyGraceMinutes: 0, roundingMinutes: 1,
+        workingDays: [0, 1, 2, 3, 4, 5, 6], segments,
+      },
+    })
+    expect(shift.status, 'PARENT_CALC_DAY_SHIFT_HTTP_STATUS').toBe(201)
+    const shiftId: unknown = shift.body?.data?.id
+    expect(typeof shiftId).toBe('string')
+    if (typeof shiftId !== 'string') throw new Error('PARENT_CALC_DAY_SHIFT_ID_REQUIRED')
+    for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+      await pool.query(
+        `UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1`,
+        [fixture.orgId, state, prior, version],
+      )
+    }
+    expect(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED === fixture.orgId).toBe(true)
+    const assigned = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST', headers,
+      body: { userId: fixture.userId, shiftId, startDate: workDate, endDate: workDate },
+    })
+    expect(assigned.status, 'PARENT_CALC_DAY_ASSIGNMENT_HTTP_STATUS').toBe(201)
+    return { ...fixture, headers, shiftId, workDate }
+  }
+
+  async function frozenCanonicalCalculation(orgId: string, calculationId: string) {
+    const rows = await pool.query(
+      `SELECT to_jsonb(c) AS calculation,
+              (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.segment_index) FROM attendance_record_segments s
+                WHERE s.org_id = c.org_id AND s.record_id = c.attendance_record_id AND s.calculation_id = c.id) AS children
+         FROM attendance_record_calculations c WHERE c.org_id = $1 AND c.id = $2`,
+      [orgId, calculationId],
+    )
+    expect(rows.rows).toHaveLength(1)
+    return rows.rows[0]
+  }
+
+  // Date-scoped native reads support both w4_group live and w4 recompute.
+  async function readNativeProofDay(fixture: { orgId: string; userId: string; workDate: string }) {
+    const current = await pool.query(
+      `SELECT c.*, to_jsonb(r) AS parent, r.work_date::text AS record_work_date,
+              r.work_date AS record_http_work_date
+         FROM attendance_records r JOIN attendance_record_calculations c
+           ON c.id = r.current_calculation_id AND c.org_id = r.org_id AND c.attendance_record_id = r.id
+        WHERE r.org_id = $1 AND r.user_id = $2 AND r.work_date = $3::date`,
+      [fixture.orgId, fixture.userId, fixture.workDate],
+    )
+    expect(current.rows, 'NATIVE_DATE_CURRENT_POINTER_JOIN').toHaveLength(1)
+    const row = current.rows[0]
+    const children = await pool.query(
+      `SELECT segment_index, expected_start_at, expected_end_at, actual_in_at, actual_out_at,
+              work_minutes, late_minutes, early_leave_minutes, status, status_reasons
+         FROM attendance_record_segments
+        WHERE org_id = $1 AND record_id = $2 AND calculation_id = $3 ORDER BY segment_index`,
+      [fixture.orgId, row.parent.id, row.id],
+    )
+    const events = await pool.query<{ id: string; work_date: string; event_type: string; occurred_at: Date }>(
+      `SELECT id::text, work_date::text, event_type, occurred_at FROM attendance_events
+        WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date ORDER BY occurred_at, id`,
+      [fixture.orgId, fixture.userId, fixture.workDate],
+    )
+    return { row, children: children.rows, events: events.rows }
+  }
+
+  function assertNativeProofDay(
+    day: Awaited<ReturnType<typeof readNativeProofDay>>,
+    fixture: { orgId: string; userId: string; workDate: string; shiftId: string },
+    startTime: string,
+    endTime: string,
+    minutes: number,
+    groupId: string | null,
+    entrypoint: 'live' | 'recompute' = 'live',
+  ) {
+    const { row, children, events } = day
+    const start = `${fixture.workDate}T${startTime}:00.000Z`
+    const end = `${fixture.workDate}T${endTime}:00.000Z`
+    expect(row).toMatchObject({
+      org_id: fixture.orgId, attendance_record_id: row.parent.id, record_work_date: fixture.workDate,
+      calculation_kind: 'calculation', mode: 'authoritative', entrypoint,
+      outcome: 'completed', outcome_reason_code: 'calculated', projection_effect: 'set_active',
+      expected_segment_count: 1, projected_status: 'normal', projected_work_minutes: minutes,
+      projected_late_minutes: 0, projected_early_leave_minutes: 0,
+    })
+    expect(row.parent).toMatchObject({
+      org_id: fixture.orgId, user_id: fixture.userId, work_date: fixture.workDate,
+      current_calculation_id: row.id, projection_owner: groupId === null ? 'w4' : 'w4_group',
+      visibility_state: 'active', status: 'normal', work_minutes: minutes, late_minutes: 0, early_leave_minutes: 0,
+    })
+    expect([row.projected_first_in_at, row.projected_last_out_at]).toEqual([new Date(start), new Date(end)])
+    expect([new Date(row.parent.first_in_at), new Date(row.parent.last_out_at)]).toEqual([new Date(start), new Date(end)])
+    expect(row.parent.timezone).toBe('UTC')
+    expect(row.attribution_snapshot).toMatchObject({
+      posture: 'resolved_v2',
+      value: { orgId: fixture.orgId, userId: fixture.userId, workDate: fixture.workDate, shiftId: fixture.shiftId },
+    })
+    expect(row.context_snapshot).toMatchObject({
+      schemaVersion: groupId === null ? 1 : 2, selector: groupId === null ? 'legacy' : 'group_effective',
+      orgId: fixture.orgId, userId: fixture.userId, workDate: fixture.workDate,
+      shiftId: fixture.shiftId, calculationGroupId: groupId, timezone: 'UTC', roundingMinutes: 1,
+    })
+    expect(row.context_snapshot.segments).toEqual([{
+      index: 0, startTime, endTime, startDayOffset: 0, endDayOffset: 0,
+      lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0,
+    }])
+    expect(row.segment_snapshot).toEqual(row.context_snapshot.segments)
+    expect(row.approved_facts_snapshot).toEqual([])
+    expect(events.map(event => [event.work_date, event.event_type, event.occurred_at.toISOString()])).toEqual([
+      [fixture.workDate, 'check_in', start], [fixture.workDate, 'check_out', end],
+    ])
+    expect(row.evidence_snapshot).toEqual(events.map(event => ({
+      kind: 'punch', ref: event.id, direction: event.event_type,
+      occurredAt: event.occurred_at.toISOString(), source: 'attendance_event',
+    })))
+    expect(children).toEqual([{
+      segment_index: 0, expected_start_at: new Date(start), expected_end_at: new Date(end),
+      actual_in_at: new Date(start), actual_out_at: new Date(end), work_minutes: minutes,
+      late_minutes: 0, early_leave_minutes: 0, status: 'normal', status_reasons: ['within_window'],
+    }])
+  }
+
+  async function readFrozenProofTarget(fixture: { orgId: string; userId: string; workDate: string }) {
+    const rows = await pool.query(
+      `SELECT to_jsonb(r) AS parent,
+              (SELECT jsonb_agg(to_jsonb(e) ORDER BY e.occurred_at, e.id) FROM attendance_events e
+                WHERE e.org_id = r.org_id AND e.user_id = r.user_id AND e.work_date = r.work_date) AS events,
+              (SELECT count(*)::int FROM attendance_records p
+                WHERE p.org_id = r.org_id AND p.user_id = r.user_id AND p.work_date = r.work_date) AS records,
+              (SELECT count(*)::int FROM attendance_record_calculations c
+                WHERE c.org_id = r.org_id AND c.attendance_record_id = r.id) AS calculations,
+              (SELECT count(*)::int FROM attendance_record_segments s
+                WHERE s.org_id = r.org_id AND s.record_id = r.id) AS children,
+              (SELECT count(*)::int FROM attendance_events e
+                WHERE e.org_id = r.org_id AND e.user_id = r.user_id AND e.work_date = r.work_date) AS event_count
+         FROM attendance_records r WHERE r.org_id = $1 AND r.user_id = $2 AND r.work_date = $3::date`,
+      [fixture.orgId, fixture.userId, fixture.workDate],
+    )
+    expect(rows.rows).toHaveLength(1)
+    return rows.rows[0]
+  }
+
+  async function readProofShift(fixture: { orgId: string; shiftId: string }) {
+    const rows = await pool.query(
+      `SELECT to_jsonb(s) AS shift, left(s.work_start_time::text, 5) AS start_time,
+              left(s.work_end_time::text, 5) AS end_time,
+              (SELECT jsonb_agg(to_jsonb(seg) ORDER BY seg.segment_index) FROM attendance_shift_segments seg
+                WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS segments,
+              (SELECT jsonb_agg(jsonb_build_object(
+                'index', seg.segment_index, 'start', left(seg.start_time::text, 5),
+                'end', left(seg.end_time::text, 5), 'startOffset', seg.start_day_offset,
+                'endOffset', seg.end_day_offset) ORDER BY seg.segment_index)
+                 FROM attendance_shift_segments seg WHERE seg.org_id = s.org_id AND seg.shift_id = s.id) AS timing
+         FROM attendance_shifts s WHERE s.org_id = $1 AND s.id = $2`,
+      [fixture.orgId, fixture.shiftId],
+    )
+    expect(rows.rows).toHaveLength(1)
+    return rows.rows[0]
+  }
+
+
+  it.each([...EP01_READY_CASES, ...EP01_NON_UTC_READY_CASES])('EP01_READY_$id: same timed inputs across four ready production callers', async (scenario) => {
+    const ownedEnv = {
+      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
+      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    }
+    const wire = (value: unknown) => JSON.parse(JSON.stringify(value))
+    type Fixture = Awaited<ReturnType<typeof seedCanonicalDay>>
+    const checkpoints: string[] = []
+    const plugin = pluginRequire('../../../../plugins/plugin-attendance/index.cjs') as {
+      __setAttendanceW4LivePunchPreBoundarySeamForTests(callback: ((input: {
+        outerResolution: Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['resolution']
+        outerContext: Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['context']
+      }) => Promise<void>) | null): void
+    }
+    async function nativeResult(fixture: Fixture, entrypoint: string, refs: [string, string]) {
+      const day = await readNativeProofDay(fixture)
+      const row = day.row
+      expect(row).toMatchObject({
+        org_id: fixture.orgId, attendance_record_id: row.parent.id, record_work_date: scenario.workDate,
+        calculation_kind: 'calculation', mode: 'authoritative', entrypoint,
+        outcome: 'completed', outcome_reason_code: 'calculated', projection_effect: 'set_active',
+        expected_segment_count: 1, projected_status: 'normal', projected_work_minutes: 540,
+        projected_late_minutes: 0, projected_early_leave_minutes: 0,
+      })
+      expect(row.parent).toMatchObject({
+        org_id: fixture.orgId, user_id: fixture.userId, work_date: scenario.workDate,
+        current_calculation_id: row.id, projection_owner: 'w4', visibility_state: 'active',
+        status: 'normal', timezone: scenario.timezone, work_minutes: 540, late_minutes: 0, early_leave_minutes: 0,
+      })
+      expect([new Date(row.parent.first_in_at).toISOString(), new Date(row.parent.last_out_at).toISOString()], 'EP01_READY_LITERAL_PARENT_INSTANTS')
+        .toEqual([scenario.startAt, scenario.endAt])
+      expect([row.projected_first_in_at, row.projected_last_out_at]).toEqual([
+        new Date(scenario.startAt), new Date(scenario.endAt),
+      ])
+      expect(row.attribution_snapshot).toMatchObject({
+        posture: 'resolved_v2', value: { orgId: fixture.orgId, userId: fixture.userId,
+          workDate: scenario.workDate, shiftId: fixture.shiftId },
+      })
+      expect(row.context_snapshot).toMatchObject({
+        schemaVersion: 1, selector: 'legacy', orgId: fixture.orgId, userId: fixture.userId,
+        workDate: scenario.workDate, shiftId: fixture.shiftId, calculationGroupId: null,
+        timezone: scenario.timezone, roundingMinutes: 1,
+      })
+      expect(row.context_snapshot.segments).toEqual([{
+        index: 0, startTime: scenario.startTime, endTime: scenario.endTime, startDayOffset: 0,
+        endDayOffset: scenario.endDayOffset, lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0,
+      }])
+      expect(row.segment_snapshot).toEqual(row.context_snapshot.segments)
+      expect(row.evidence_snapshot).toEqual([
+        { kind: 'punch', ref: refs[0], direction: 'check_in', occurredAt: scenario.startAt,
+          source: entrypoint === 'live' ? 'attendance_event' : 'import' },
+        { kind: 'punch', ref: refs[1], direction: 'check_out', occurredAt: scenario.endAt,
+          source: entrypoint === 'live' ? 'attendance_event' : 'import' },
+      ])
+      expect(row.manual_override_snapshot).toBeNull()
+      const result = calculateAttendanceSegmentsV1({
+        attribution: row.attribution_snapshot, context: row.context_snapshot,
+        evidence: row.evidence_snapshot, approvedFacts: row.approved_facts_snapshot,
+      })
+      expect(result, 'EP01_READY_LITERAL_SEGMENT_AND_DAILY_RESULT').toEqual(expectedReadyCallerResult(scenario, refs))
+      const children = await pool.query(
+        `SELECT org_id, record_id, calculation_id, segment_index, expected_start_at, expected_end_at,
+                actual_in_at, actual_out_at, work_minutes, late_minutes, early_leave_minutes,
+                status, status_reasons, matched_evidence_refs, unmatched_evidence_refs
+           FROM attendance_record_segments WHERE org_id=$1 AND record_id=$2 AND calculation_id=$3
+          ORDER BY segment_index`, [fixture.orgId, row.parent.id, row.id],
+      )
+      expect(children.rows).toEqual([{
+        org_id: fixture.orgId, record_id: row.parent.id, calculation_id: row.id, segment_index: 0,
+        expected_start_at: new Date(scenario.startAt), expected_end_at: new Date(scenario.endAt),
+        actual_in_at: new Date(scenario.startAt), actual_out_at: new Date(scenario.endAt),
+        work_minutes: 540, late_minutes: 0, early_leave_minutes: 0, status: 'normal',
+        status_reasons: ['within_window'], matched_evidence_refs: refs, unmatched_evidence_refs: [],
+      }])
+      expect((await pool.query(
+        'SELECT work_date::text, current_calculation_id::text FROM attendance_records WHERE org_id=$1 AND user_id=$2 ORDER BY work_date',
+        [fixture.orgId, fixture.userId],
+      )).rows).toEqual([{ work_date: scenario.workDate, current_calculation_id: row.id }])
+      expect(row.semantic_input_fingerprint).toBe(computeAttendanceSemanticInputFingerprintV1({
+        attribution: row.attribution_snapshot, context: row.context_snapshot, evidence: row.evidence_snapshot,
+        approvedFacts: row.approved_facts_snapshot, manualOverride: null, mergePolicy: row.merge_policy,
+        calculationTier: 'segment_authoritative', engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+        snapshotSchemaVersion: 1,
+      }))
+      return row
+    }
+    async function recompute(fixture: Fixture, prior: Awaited<ReturnType<typeof nativeResult>>, refs: [string, string], checkpoint: string) {
+      const frozen = await frozenCanonicalCalculation(fixture.orgId, prior.id)
+      const operationId = randomUUID()
+      const trace: string[] = []
+      const originalQuery = Client.prototype.query
+      const spy = vi.spyOn(Client.prototype, 'query').mockImplementation(function (this: Client, ...args: Parameters<Client['query']>) {
+        const carrier: unknown = args[0]
+        const text = typeof carrier === 'string' ? carrier : carrier && typeof carrier === 'object' && 'text' in carrier ? String(carrier.text) : ''
+        trace.push(text.replace(/\s+/g, ' ').trim())
+        return Reflect.apply(originalQuery, this, args)
+      })
+      let response: JsonResponse
+      try {
+        response = await requestJson(`${baseUrl}/api/attendance/records/${prior.parent.id}/recompute`, {
+          method: 'POST', headers: { ...fixture.headers, 'X-Org-Id': fixture.orgId },
+          body: { policy: 'frozen_prior', operationId, expectedCalculationId: prior.id, expectedCalculationVersion: prior.version },
+        })
+      } finally { spy.mockRestore() }
+      expect(response.status, 'EP01_READY_RECOMPUTE_HTTP_STATUS').toBe(200)
+      const next = await nativeResult(fixture, 'recompute', refs)
+      expect(response.body).toEqual({ ok: true, data: { alreadyApplied: false, calculationId: next.id,
+        policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen', projectedStatus: 'normal' } })
+      expect(next).toMatchObject({ supersedes_calculation_id: prior.id, version: prior.version + 1,
+        operation_id: operationId, merge_policy: prior.merge_policy,
+        input_provenance: { policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen', priorCalculationId: prior.id } })
+      for (const key of ['attribution_snapshot', 'context_snapshot', 'segment_snapshot', 'evidence_snapshot',
+        'approved_facts_snapshot', 'manual_override_snapshot', 'source_definition_fingerprint', 'semantic_input_fingerprint']) {
+        expect(next[key], 'EP01_READY_FROZEN_PRIOR:' + key).toEqual(prior[key])
+      }
+      expect(await frozenCanonicalCalculation(fixture.orgId, prior.id)).toEqual(frozen)
+      expect(trace.some(sql => /\bFROM attendance_records\b/i.test(sql))).toBe(true)
+      expect(trace.some(sql => /\bINSERT INTO attendance_record_calculations\b/i.test(sql))).toBe(true)
+      const liveTables = ['attendance_calculation_group_memberships', 'attendance_groups', 'attendance_group_members',
+        'attendance_group_fixed_schedule_configs', 'attendance_shift_assignments', 'attendance_shifts',
+        'attendance_shift_segments', 'attendance_rotation_rules', 'attendance_rotation_assignments']
+      expect(liveTables.filter(name => trace.some(sql => new RegExp('\\b' + name + '\\b', 'i').test(sql)))).toEqual([])
+      checkpoints.push(checkpoint)
+      return next
+    }
+    try {
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = 'false'
+      const segments = [{ startTime: scenario.startTime, endTime: scenario.endTime, startDayOffset: 0 as const,
+        ...(scenario.endDayOffset === 1 ? { endDayOffset: 1 as const } : {}) }]
+      const live = await seedCanonicalDay(scenario.workDate, segments, scenario.timezone)
+      let liveOut: JsonResponse | undefined
+      let liveOutBody: Record<string, unknown> | undefined
+      let liveResolution: Record<string, unknown> | undefined
+      let liveSource: Record<string, unknown> | null = null
+      let liveContext: unknown
+      let captureClockMs = 0
+      let completedClockMs = 0
+      for (const [eventType, occurredAt] of [['check_in', scenario.startAt], ['check_out', scenario.endAt]] as const) {
+        plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async input => {
+          captureClockMs = Date.now()
+          liveResolution = wire(input.outerResolution)
+          liveContext = wire(input.outerContext)
+          liveSource = __computeAttendanceOuterAttributionValueForTestsV1({
+            orgId: live.orgId, userId: live.userId, source: 'live_resolution', nowIso: new Date(captureClockMs).toISOString(),
+            resolution: input.outerResolution, context: input.outerContext,
+          })
+        })
+        const body = { orgId: live.orgId, eventType, operationId: randomUUID(), occurredAt, timezone: scenario.timezone }
+        const response = await requestJson(baseUrl + '/api/attendance/punch', { method: 'POST', headers: live.headers, body })
+        completedClockMs = Date.now()
+        expect(response.status, 'EP01_READY_LIVE_HTTP_STATUS; code=' + String(response.body?.error?.code ?? 'none')).toBe(200)
+        if (eventType === 'check_out') { liveOut = response; liveOutBody = body }
+      }
+      plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
+      const physical = (await pool.query('SELECT * FROM attendance_events WHERE org_id=$1 AND user_id=$2 ORDER BY occurred_at,id', [live.orgId, live.userId])).rows
+      expect(physical.map(row => [row.event_type, row.occurred_at.toISOString()])).toEqual([
+        ['check_in', scenario.startAt], ['check_out', scenario.endAt],
+      ])
+      const liveRefs: [string, string] = [physical[0].id, physical[1].id]
+      const l0 = await nativeResult(live, 'live', liveRefs)
+      expect(l0.approved_facts_snapshot).toEqual([])
+      const expectedSource = {
+        schemaVersion: 2, resolverVersion: ATTENDANCE_W4C2_ATTRIBUTION_RESOLVER_VERSION_V1,
+        orgId: live.orgId, userId: live.userId, workDate: scenario.workDate, shiftId: live.shiftId,
+        reasonCode: 'CURRENT_DAY_CONTAINING_SHIFT', resolvedAt: new Date(captureClockMs).toISOString(),
+        absoluteWindow: { startAt: scenario.startAt, endAt: scenario.endAt },
+        attributionWindow: { startAt: scenario.startAt, endAt: new Date(Date.parse(scenario.endAt) + 120 * 60000).toISOString() },
+        attributionTailMinutes: 120, extendedByApprovedOvertime: false,
+        windowEvidenceFingerprint: computeAttendanceWindowEvidenceFingerprintV1({ attributionTailMinutes: 120, approvedOvertimeWindows: [] }),
+        source: 'live_resolution',
+      }
+      expect(liveSource, 'EP01_READY_CAPTURED_SOURCE_LITERAL').toEqual(expectedSource)
+      // Business clock supplies punch time; source metadata records the actual core build clock.
+      const storedResolvedAt = l0.attribution_snapshot.value.resolvedAt
+      const storedResolvedAtMs = Date.parse(storedResolvedAt)
+      expect(new Date(storedResolvedAtMs).toISOString(), 'EP01_READY_SOURCE_CLOCK_ISO').toBe(storedResolvedAt)
+      expect(storedResolvedAtMs, 'EP01_READY_SOURCE_CLOCK_AFTER_CAPTURE').toBeGreaterThanOrEqual(captureClockMs)
+      expect(storedResolvedAtMs, 'EP01_READY_SOURCE_CLOCK_BEFORE_RESPONSE').toBeLessThanOrEqual(completedClockMs)
+      expect(l0.attribution_snapshot, 'EP01_READY_COMPLETE_LIVE_SOURCE').toEqual({
+        posture: 'resolved_v2', value: { ...expectedSource, resolvedAt: storedResolvedAt },
+      })
+      expect(l0.context_snapshot, 'EP01_READY_COMPLETE_LIVE_CONTEXT').toEqual(liveContext)
+
+      expect(liveResolution).toMatchObject({ kind: 'resolved', workDate: scenario.workDate, shiftId: live.shiftId, segmentIndex: null })
+      const wireResolution = { ...liveResolution! }
+      delete wireResolution.fullWinner
+      delete wireResolution.attributionTailMinutes
+      delete wireResolution.approvedOvertimeWindows
+      const rawLiveParent = (await pool.query('SELECT * FROM attendance_records WHERE org_id=$1 AND id=$2', [live.orgId, l0.parent.id])).rows[0]
+      expect(liveOut!.body).toEqual({ ok: true, data: { event: wire(physical[1]), record: wire(rawLiveParent), workDateResolution: wireResolution } })
+      const replay = await requestJson(baseUrl + '/api/attendance/punch', { method: 'POST', headers: live.headers, body: liveOutBody })
+      expect(replay.status).toBe(200)
+      expect(replay.body).toEqual(liveOut!.body)
+      checkpoints.push('L0')
+
+      const importedFixture = await seedCanonicalDay(scenario.workDate, segments, scenario.timezone)
+      const prepared = await requestJson(baseUrl + '/api/attendance/import/prepare', {
+        method: 'POST', headers: importedFixture.headers, body: { orgId: importedFixture.orgId },
+      })
+      expect(prepared.status, 'EP01_READY_IMPORT_PREPARE_HTTP_STATUS').toBe(200)
+      expect(Object.keys(prepared.body!.data).sort()).toEqual(['commitToken', 'expiresAt', 'ttlSeconds'])
+      expect(prepared.body!.data.ttlSeconds).toBe(600)
+      expect(typeof prepared.body!.data.commitToken).toBe('string')
+      const imported = await requestJson(baseUrl + '/api/attendance/import/commit', {
+        method: 'POST', headers: importedFixture.headers, body: {
+          orgId: importedFixture.orgId, userId: importedFixture.userId, timezone: scenario.timezone, mode: 'override',
+          idempotencyKey: randomUUID(), commitToken: prepared.body!.data.commitToken,
+          rows: [{ workDate: scenario.workDate, fields: { firstInAt: scenario.startAt, lastOutAt: scenario.endAt } }],
+        },
+      })
+      expect(imported.status, 'EP01_READY_IMPORT_COMMIT_HTTP_STATUS').toBe(200)
+      expect(imported.body).toMatchObject({ ok: true, success: true, data: {
+        imported: 1, processedRows: 1, failedRows: 0, itemsTruncated: false, skipped: [], csvWarnings: [], groupWarnings: [],
+      } })
+      expect(Object.keys(imported.body!.data).sort()).toEqual([
+        'batchId', 'imported', 'processedRows', 'failedRows', 'elapsedMs', 'engine', 'recordUpsertStrategy',
+        'items', 'itemsTruncated', 'skipped', 'csvWarnings', 'groupWarnings', 'meta',
+      ].sort())
+      const importRefs: [string, string] = [`import:${imported.body!.data.batchId}:0:check_in`, `import:${imported.body!.data.batchId}:0:check_out`]
+      const i0 = await nativeResult(importedFixture, 'legacy_import', importRefs)
+      expect(i0.approved_facts_snapshot).toEqual([])
+      expect(imported.body!.data.items).toHaveLength(1)
+      expect(imported.body!.data.items[0]).toMatchObject({ id: i0.parent.id, userId: importedFixture.userId, workDate: scenario.workDate })
+      expect((await pool.query("SELECT id FROM attendance_events WHERE org_id=$1 AND user_id=$2", [importedFixture.orgId, importedFixture.userId])).rows).toEqual([])
+      checkpoints.push('I0')
+      const r0 = await recompute(importedFixture, i0, importRefs, 'R0')
+
+      const prior = await frozenCanonicalCalculation(importedFixture.orgId, r0.id)
+      const overtimeRuleId = randomUUID()
+      await pool.query('INSERT INTO attendance_overtime_rules (id,org_id,name,rounding_minutes) VALUES ($1,$2,$3,1)',
+        [overtimeRuleId, importedFixture.orgId, 'EP01_READY_' + overtimeRuleId])
+      const created = await requestJson(baseUrl + '/api/attendance/requests', {
+        method: 'POST', headers: importedFixture.headers, body: {
+          operationId: randomUUID(), orgId: importedFixture.orgId, workDate: scenario.workDate, requestType: 'overtime',
+          overtimeRuleId, requestedInAt: scenario.otStart, requestedOutAt: scenario.otEnd, minutes: scenario.otMinutes,
+          reason: 'EP01 ready caller synthetic bounded interval',
+        },
+      })
+      expect(created.status, 'EP01_READY_OVERTIME_CREATE_HTTP_STATUS').toBe(201)
+      const requestId = created.body!.data.request.id
+      const cursor = await loadApprovalCursor(requestId)
+      await assignApprovalUser(cursor, importedFixture.userId)
+      const snapshot = (await pool.query(
+        'SELECT * FROM attendance_request_calculation_snapshots WHERE org_id=$1 AND request_id=$2 ORDER BY version',
+        [importedFixture.orgId, requestId],
+      )).rows
+      expect(snapshot).toHaveLength(1)
+      expect(created.body!.data.requestSnapshot).toEqual({ version: snapshot[0].version, fingerprint: snapshot[0].payload_fingerprint })
+      const operationId = randomUUID()
+      const approved = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST', headers: importedFixture.headers, body: { operationId, expectedApprovalVersion: cursor.version,
+          expectedApprovalNode: cursor.node, comment: 'EP01 ready caller synthetic decision' },
+      })
+      expect(approved.status, 'EP01_READY_OVERTIME_APPROVE_HTTP_STATUS').toBe(200)
+      const o1 = await nativeResult(importedFixture, 'approved_overtime', importRefs)
+      const request = (await pool.query('SELECT *,work_date::text AS request_work_date_text FROM attendance_requests WHERE org_id=$1 AND id=$2', [importedFixture.orgId, requestId])).rows[0]
+      const binding = request.metadata.w4RequestSnapshotTerminalBinding
+      const terminal = (await pool.query(
+        `SELECT ar.id::text, ar.instance_id, ar.actor_id, ar.action, ar.from_version, ar.to_version,
+                ar.to_status, ai.status AS instance_status, ai.version AS instance_version
+           FROM approval_records ar JOIN approval_instances ai ON ai.id=ar.instance_id
+          WHERE ar.instance_id=$1 AND ar.to_version=$2 AND ar.action='approve' AND ar.to_status='approved'`,
+        [cursor.approvalId, cursor.version + 1],
+      )).rows
+      expect(terminal, 'EP01_READY_ACTUAL_TERMINAL_APPROVAL').toHaveLength(1)
+      expect(terminal[0]).toEqual({ id: terminal[0].id, instance_id: cursor.approvalId, actor_id: importedFixture.userId,
+        action: 'approve', from_version: cursor.version, to_version: cursor.version + 1, to_status: 'approved',
+        instance_status: 'approved', instance_version: cursor.version + 1 })
+      expect(terminal[0].id).toMatch(/^[1-9][0-9]*$/)
+      expect(binding, 'EP01_READY_INDEPENDENT_TERMINAL_BINDING').toEqual({
+        schemaVersion: 1, kind: 'w4c3b_request_snapshot_terminal_binding', orgId: importedFixture.orgId,
+        requestId, requestType: 'overtime', subjectUserId: importedFixture.userId,
+        requestSnapshotVersion: snapshot[0].version, requestSnapshotFingerprint: snapshot[0].payload_fingerprint,
+        approvalVersion: terminal[0].to_version, approvalRecordId: terminal[0].id,
+        action: 'approve', bindingPosture: 'bound',
+      })
+      expect(request.metadata.approvalFlow?.steps ?? []).toEqual([])
+
+      expect(request.status).toBe('approved')
+      expect(request.request_work_date_text).toBe(scenario.workDate)
+      expect(o1.attribution_snapshot).toEqual(snapshot[0].attribution_snapshot)
+      expect(o1.context_snapshot).toEqual(snapshot[0].context_snapshot)
+      expect(o1.evidence_snapshot).toEqual(r0.evidence_snapshot)
+      expect(o1.approved_facts_snapshot).toEqual([{ kind: 'overtime', requestId,
+        requestSnapshotVersion: snapshot[0].version, requestSnapshotFingerprint: snapshot[0].payload_fingerprint,
+        approvalVersion: terminal[0].to_version, approvalRecordId: terminal[0].id,
+        coverage: { kind: 'bounded_interval', startAt: scenario.otStart, endAt: scenario.otEnd, minutes: scenario.otMinutes } }])
+      expect(await frozenCanonicalCalculation(importedFixture.orgId, r0.id)).toEqual(prior)
+      const approvedParent = (await pool.query('SELECT * FROM attendance_records WHERE org_id=$1 AND id=$2', [importedFixture.orgId, o1.parent.id])).rows[0]
+      expect(approved.body).toEqual({ ok: true, data: { requestId, status: 'approved', record: wire(approvedParent),
+        orgId: null, userId: importedFixture.userId, approvalStep: { index: 0, total: 0 } } })
+      const sealed = await pool.query(
+        'SELECT state,resolved_record_id::text,resolved_calculation_id::text,resolved_request_id::text,result_semantic_fingerprint,result_provenance_fingerprint FROM attendance_result_operations WHERE org_id=$1 AND operation_id=$2',
+        [importedFixture.orgId, operationId],
+      )
+      expect(sealed.rows).toEqual([{ state: 'completed', resolved_record_id: o1.parent.id, resolved_calculation_id: o1.id,
+        resolved_request_id: requestId, result_semantic_fingerprint: o1.semantic_input_fingerprint,
+        result_provenance_fingerprint: o1.provenance_fingerprint }])
+      checkpoints.push('O1')
+      await recompute(importedFixture, o1, importRefs, 'R1')
+      expect(checkpoints).toEqual(['L0', 'I0', 'R0', 'O1', 'R1'])
+      console.log('EP01_READY_CALLER_RECEIPT ' + JSON.stringify({ case: scenario.id, checkpoints,
+        readyCallerCount: 4, correction: 'OPEN', resultMinutes: 540, physicalSegmentCount: 1,
+        sameRawTransportFingerprintClaimed: false, fullEP01: false }))
+    } finally {
+      plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
+      for (const [key, value] of Object.entries(ownedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }, 120000)
+
+  registerPunchReviewPublicNativeCases({ pool: () => pool, baseUrl: () => baseUrl, seedDay: seedCanonicalDay, request: requestJson })
+  registerEp01DstReviewCallerNativeCases({ pool: () => pool, baseUrl: () => baseUrl, seedDay: seedCanonicalDay, request: requestJson,
+    loadApprovalCursor, assignApprovalUser, frozenCanonicalCalculation })
+  registerPunchPreviewDurabilityNativeCases(() => pool)
+  registerPunchDetailRealAuthNativeCases({ pool: () => pool, baseUrl: () => baseUrl, server: () => server,
+    seedDay: () => {
+      const scenario = EP01_DST_READY_CASES[0]
+      return seedCanonicalDay(scenario.workDate, scenario.segments.map(segment => ({ ...segment })), scenario.timezone)
+    },
+  }, requestJson)
+
+  it('PUNCH_DETAIL_ASYNC_PREVIEW_NATIVE: public route retains raw key, frozen result and current admission without business effects', async () => {
+    const oldSource = process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+    const oldRollout = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    const scenario = EP01_DST_READY_CASES[0]
+    const actors: string[] = []
+    try {
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = 'false'
+      const fixture = await seedCanonicalDay(scenario.workDate, scenario.segments.map(segment => ({ ...segment })), scenario.timezone)
+      const admittedActor = async () => {
+        const actor = await seedOrgActor(fixture.orgId, 'attendance:admin')
+        actors.push(actor.userId)
+        const roleId = 'punch-preview-' + actor.userId
+        await pool.query('INSERT INTO roles (id, name) VALUES ($1, $1)', [roleId])
+        await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'attendance:import')", [roleId])
+        await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [actor.userId, roleId])
+        await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', true)", [actor.userId])
+        await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [actor.userId])
+        seededAdminPermissionUserIds.push(actor.userId)
+        const { inspectPermissionCodesByNamespaceAdmission } = await import('../../src/rbac/namespace-admission')
+        expect(await inspectPermissionCodesByNamespaceAdmission(actor.userId, ['attendance:import'],
+          (sql, params) => pool.query(sql, params)), 'PUNCH_PREVIEW_FIXTURE_NAMESPACE_ADMITTED')
+          .toEqual({ codes: ['attendance:import'], unavailable: false })
+        return actor
+      }
+      const actor = await admittedActor()
+      const headers = { Authorization: 'Bearer ' + actor.token }
+      const command = {
+        inputKind: 'punch_events_v1', orgId: fixture.orgId, userId: fixture.userId,
+        workDate: scenario.workDate, timezone: scenario.timezone, mode: 'override', idempotencyKey: 'preview:', previewLimit: 2,
+        punches: scenario.punches.map(([direction, occurredAt]) => ({ direction, occurredAt })),
+      }
+      const effects = async () => {
+        const rows = []
+        for (const table of ['attendance_records', 'attendance_import_batches', 'attendance_import_items',
+          'attendance_result_operations', 'attendance_result_event_outbox']) {
+          rows.push((await pool.query(`SELECT to_jsonb(t) AS row FROM ${table} t WHERE org_id=$1 ORDER BY to_jsonb(t)::text`, [fixture.orgId])).rows)
+        }
+        return rows
+      }
+      const before = await effects()
+      const prepared = await requestJson(baseUrl + '/api/attendance/import/prepare', { method: 'POST', headers, body: { orgId: fixture.orgId } })
+      expect(prepared.status).toBe(200)
+      const preview = (body: Record<string, unknown> = command) =>
+        requestJson(baseUrl + '/api/attendance/import/preview-async', { method: 'POST', headers, body })
+      const first = await preview({ ...command, commitToken: prepared.body!.data.commitToken })
+      expect(first.status, 'PUNCH_PREVIEW_PUBLIC_DISPATCH; code=' + String(first.body?.error?.code ?? 'NONE')).toBe(200)
+      const jobId: unknown = first.body?.data?.job?.id
+      expect(typeof jobId).toBe('string')
+      if (typeof jobId !== 'string') throw new Error('PUNCH_PREVIEW_JOB_REQUIRED')
+      const rawJob = (await pool.query('SELECT punch_preview_version,payload FROM attendance_import_jobs WHERE id=$1', [jobId])).rows
+      expect(rawJob, 'PUNCH_PREVIEW_PUBLIC_NAMED_JOB').toEqual([{ punch_preview_version: 1, payload: { __jobType: 'preview' } }])
+      expect(first.body!.data.job.idempotencyKey, 'PUNCH_PREVIEW_ORIGINAL_KEY').toBe(command.idempotencyKey)
+      let status: string | undefined
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        status = (await pool.query('SELECT status FROM attendance_import_jobs WHERE id=$1', [jobId])).rows[0]?.status
+        if (status === 'completed' || status === 'failed') break
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      expect(status, 'PUNCH_PREVIEW_WORKER_TERMINAL').toBe('completed')
+      const stored = (await pool.query('SELECT snapshot FROM attendance_import_punch_preview_records WHERE job_id=$1', [jobId])).rows[0].snapshot
+      expect(stored.envelope.__punchDetailInput.punches).toEqual(command.punches)
+      expect(stored.preview).toMatchObject({ inputKind: 'punch_events_v1', eventCount: 4, targetCount: 1, previewLimit: 2, truncated: true })
+      expect(stored.preview.items).toEqual(command.punches.slice(0, 2).map((p, sourceOrdinal) => ({ sourceOrdinal, ...p })))
+      expect(stored.preview.targets[0]).toMatchObject({ userId: fixture.userId, workDate: scenario.workDate, outcome: 'completed',
+        dailyProjection: { workedMinutes: scenario.total } })
+      const get = (token = actor.token, orgId = fixture.orgId) => requestJson(baseUrl + '/api/attendance/import/jobs/' + jobId + '?orgId=' + encodeURIComponent(orgId), {
+        headers: { Authorization: 'Bearer ' + token },
+      })
+      const receipt = async () => (await pool.query('SELECT to_jsonb(j) AS job,to_jsonb(r) AS record FROM attendance_import_jobs j '
+        + 'JOIN attendance_import_punch_preview_records r ON r.job_id=j.id WHERE j.id=$1', [jobId])).rows
+      const frozen = await receipt()
+      const read = await get()
+      expect(read.status).toBe(200)
+      expect(read.body?.data).toMatchObject({ id: jobId, kind: 'preview', status: 'completed', idempotencyKey: command.idempotencyKey,
+        total: 4, processedRows: 4, failedRows: 0, preview: stored.preview })
+      const retry = await preview()
+      expect(retry.status).toBe(200)
+      expect(retry.body).toEqual({ ok: true, data: { job: read.body!.data, idempotent: true } })
+      const viewer = await admittedActor()
+      expect((await get(viewer.token)).body).toEqual(read.body)
+      const foreign = await seedOrg('shadow')
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+      expect((await get(foreign.token, foreign.orgId)).status).toBe(404)
+      const conflict = await preview({ ...command, previewLimit: 3 })
+      expect(conflict.status).toBe(409)
+      expect(conflict.body).toEqual({ ok: false, error: {
+        code: 'ATTENDANCE_IMPORT_IDEMPOTENCY_INPUT_CONFLICT', message: 'ATTENDANCE_IMPORT_IDEMPOTENCY_INPUT_CONFLICT',
+      } })
+      await pool.query("UPDATE user_namespace_admissions SET enabled=false WHERE user_id=$1 AND namespace='attendance'", [actor.userId])
+      try {
+        const deniedCreate = await preview()
+        const deniedRead = await get()
+        expect(deniedCreate.status, 'PUNCH_PREVIEW_CURRENT_NAMESPACE_CREATE').toBe(403)
+        expect(deniedRead.status, 'PUNCH_PREVIEW_CURRENT_NAMESPACE_READ').toBe(403)
+        for (const denied of [deniedCreate, deniedRead]) expect(denied.body).toEqual({ ok: false, error: {
+          code: 'ATTENDANCE_WRITE_NOT_AUTHORIZED', message: 'ATTENDANCE_WRITE_NOT_AUTHORIZED',
+        } })
+      } finally {
+        await pool.query("UPDATE user_namespace_admissions SET enabled=true WHERE user_id=$1 AND namespace='attendance'", [actor.userId])
+      }
+      await pool.query('UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id=$2', [fixture.userId, fixture.orgId])
+      try { expect((await get()).status, 'PUNCH_PREVIEW_CURRENT_TARGET').toBe(403) }
+      finally { await pool.query('UPDATE user_orgs SET is_active=true WHERE user_id=$1 AND org_id=$2', [fixture.userId, fixture.orgId]) }
+      expect((await get()).body).toEqual(read.body)
+      expect(await receipt()).toEqual(frozen)
+      expect(await effects()).toEqual(before)
+      console.log('PUNCH_DETAIL_ASYNC_PREVIEW_RECEIPT ' + JSON.stringify({ actualPhysicalEvents: 4, visibleItems: 2,
+        retainedMinutes: scenario.total, currentAdmissionRefusals: 3, foreignOrgRefusals: 1, conflictRefusals: 1,
+        permittedDifferentViewer: true, originalKeyPreserved: true, immutableSnapshotAndCompletedJobUnchanged: true,
+        businessEffectsUnchanged: true, fixtureAuthBypass: true, restartProof: false }))
+    } finally {
+      for (const userId of actors) {
+        await pool.query("DELETE FROM user_namespace_admissions WHERE user_id=$1 AND namespace='attendance'", [userId])
+        const roleId = 'punch-preview-' + userId
+        await pool.query('DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2', [userId, roleId])
+        await pool.query('DELETE FROM role_permissions WHERE role_id=$1', [roleId])
+        await pool.query('DELETE FROM roles WHERE id=$1', [roleId])
+      }
+      if (oldSource === undefined) delete process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+      else process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = oldSource
+      if (oldRollout === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = oldRollout
+    }
+  }, 120000)
+
+  it('PUNCH_DETAIL_ASYNC_COMMIT_NATIVE: durable commit keeps four events and current-admission job replay', async () => {
+    const oldSource = process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+    const oldRollout = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    const scenario = EP01_DST_READY_CASES[0]
+    let actorId: string | undefined
+    try {
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = 'false'
+      const fixture = await seedCanonicalDay(scenario.workDate, scenario.segments.map(segment => ({ ...segment })), scenario.timezone)
+      const actor = await seedOrgActor(fixture.orgId, 'attendance:admin')
+      actorId = actor.userId
+      await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'attendance')", [actor.userId])
+      await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', true)", [actor.userId])
+      await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [actor.userId])
+      seededAdminPermissionUserIds.push(actor.userId)
+      const headers = { Authorization: 'Bearer ' + actor.token }
+      const prepared = await requestJson(baseUrl + '/api/attendance/import/prepare', {
+        method: 'POST', headers, body: { orgId: fixture.orgId },
+      })
+      expect(prepared.status).toBe(200)
+      const command = {
+        inputKind: 'punch_events_v1', orgId: fixture.orgId, userId: fixture.userId,
+        workDate: scenario.workDate, timezone: scenario.timezone, mode: 'override', idempotencyKey: randomUUID(),
+        punches: scenario.punches.map(([direction, occurredAt]) => ({ direction, occurredAt })),
+      }
+      const commit = (body: Record<string, unknown> = command) =>
+        requestJson(baseUrl + '/api/attendance/import/commit-async', { method: 'POST', headers, body })
+      const first = await commit({ ...command, commitToken: prepared.body!.data.commitToken })
+      expect(first.status, 'PUNCH_DETAIL_ASYNC_CREATE; code=' + String(first.body?.error?.code ?? 'NONE')).toBe(200)
+      const jobId: unknown = first.body?.data?.job?.id
+      expect(typeof jobId).toBe('string')
+      if (typeof jobId !== 'string') throw new Error('PUNCH_DETAIL_ASYNC_JOB_REQUIRED')
+      let terminal: { status: string; w4_execution_reason_code: string | null } | undefined
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        terminal = (await pool.query('SELECT status, w4_execution_reason_code FROM attendance_import_jobs WHERE id=$1 AND org_id=$2', [jobId, fixture.orgId])).rows[0]
+        if (terminal?.status === 'completed' || terminal?.status === 'failed') break
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      expect(terminal, 'PUNCH_DETAIL_ASYNC_WORKER_TERMINAL').toEqual({ status: 'completed', w4_execution_reason_code: null })
+      const day = await readNativeProofDay(fixture)
+      expect(day.row).toMatchObject({ projected_work_minutes: scenario.total, outcome: 'completed',
+        entrypoint: 'legacy_import', expected_segment_count: 2, projection_effect: 'set_active' })
+      const batchId = first.body!.data.job.batchId
+      const items = await pool.query(
+        "SELECT user_id, work_date::text AS work_date, (preview_snapshot->>'sourceOrdinal')::int AS ordinal, "
+        + "preview_snapshot->>'direction' AS direction, preview_snapshot->>'occurredAt' AS occurred_at "
+        + 'FROM attendance_import_items WHERE batch_id=$1 AND org_id=$2 ORDER BY ordinal', [batchId, fixture.orgId],
+      )
+      expect(items.rows, 'PUNCH_DETAIL_ASYNC_ALL_PHYSICAL_EVENTS').toEqual(scenario.punches.map(([direction, occurredAt], ordinal) => ({
+        user_id: fixture.userId, work_date: scenario.workDate, ordinal, direction, occurred_at: occurredAt,
+      })))
+      const receipt = async () => (await pool.query(
+        'SELECT to_jsonb(j) AS job, to_jsonb(p) AS plan, to_jsonb(t) AS terminal FROM attendance_import_jobs j '
+        + 'JOIN attendance_import_legacy_execution_plans p ON p.job_id=j.id AND p.org_id=j.org_id '
+        + 'JOIN attendance_import_legacy_terminal_responses t ON t.job_id=j.id AND t.org_id=j.org_id '
+        + 'WHERE j.id=$1 AND j.org_id=$2', [jobId, fixture.orgId],
+      )).rows
+      const prior = await receipt()
+      const frozen = await frozenCanonicalCalculation(fixture.orgId, day.row.id)
+      const trace: string[] = []
+      const originalQuery = Client.prototype.query
+      const spy = vi.spyOn(Client.prototype, 'query').mockImplementation(function (this: Client, ...args: Parameters<Client['query']>) {
+        const carrier: unknown = args[0]
+        const sql = typeof carrier === 'string' ? carrier : carrier && typeof carrier === 'object' && 'text' in carrier ? String(carrier.text) : ''
+        trace.push(sql.replace(/\s+/g, ' ').trim())
+        return Reflect.apply(originalQuery, this, args)
+      })
+      let retry: JsonResponse
+      try { retry = await commit() } finally { spy.mockRestore() }
+      expect(retry.status).toBe(200)
+      expect(retry.body).toMatchObject({ ok: true, data: { idempotent: true, job: {
+        id: jobId, batchId, status: 'completed', kind: 'commit', total: 4, processedRows: 4, failedRows: 0,
+      } } })
+      expect(trace.some(sql => /\bFROM user_roles\b/.test(sql))).toBe(true)
+      expect(trace.some(sql => /\bFROM attendance_import_legacy_execution_plans\b/.test(sql))).toBe(true)
+      for (const table of ['attendance_import_tokens', 'attendance_shift_assignments', 'attendance_shifts', 'attendance_shift_segments']) {
+        expect(trace.some(sql => new RegExp('\\b' + table + '\\b').test(sql)), 'PUNCH_DETAIL_ASYNC_NO_REFREEZE_' + table).toBe(false)
+      }
+      expect(await receipt()).toEqual(prior)
+      const changed = { ...command, punches: command.punches.map((p, i) => i === 2 ? { ...p, occurredAt: '2025-11-02T05:31:00.000Z' } : p) }
+      expect((await commit(changed)).status).toBe(409)
+      await pool.query('UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id=$2', [fixture.userId, fixture.orgId])
+      try {
+        const refused = await commit()
+        expect(refused.status).toBe(403)
+        expect(refused.body).toEqual({ ok: false, error: {
+          code: 'ATTENDANCE_WRITE_NOT_AUTHORIZED', message: 'ATTENDANCE_WRITE_NOT_AUTHORIZED',
+        } })
+      } finally {
+        await pool.query('UPDATE user_orgs SET is_active=true WHERE user_id=$1 AND org_id=$2', [fixture.userId, fixture.orgId])
+      }
+      await pool.query("UPDATE user_namespace_admissions SET enabled=false WHERE user_id=$1 AND namespace='attendance'", [actor.userId])
+      try {
+        const refused = await commit()
+        expect(refused.status, 'PUNCH_DETAIL_ASYNC_CURRENT_FULL_IMPORT').toBe(403)
+        expect(refused.body).toEqual({ ok: false, error: {
+          code: 'ATTENDANCE_WRITE_NOT_AUTHORIZED', message: 'ATTENDANCE_WRITE_NOT_AUTHORIZED',
+        } })
+      } finally {
+        await pool.query("UPDATE user_namespace_admissions SET enabled=true WHERE user_id=$1 AND namespace='attendance'", [actor.userId])
+      }
+      expect((await commit()).body).toEqual(retry.body)
+      expect(await receipt()).toEqual(prior)
+      expect(await frozenCanonicalCalculation(fixture.orgId, day.row.id)).toEqual(frozen)
+      console.log('PUNCH_DETAIL_ASYNC_COMMIT_RECEIPT ' + JSON.stringify({
+        actualPhysicalEvents: 4, retainedMinutes: scenario.total, durableWorkerCompleted: true,
+        currentMembershipRefusals: 1, currentFullImportRefusals: 1, inputConflictRefusals: 1, congruentRetries: 2,
+        replayRefreezeQueries: 0, frozenJobPlanTerminalUnchanged: true, fixtureAuthBypass: true,
+        realAuthProof: false, restartProof: false, asyncPreviewProof: false,
+      }))
+    } finally {
+      if (actorId) {
+        await pool.query("DELETE FROM user_namespace_admissions WHERE user_id=$1 AND namespace='attendance'", [actorId])
+        await pool.query("DELETE FROM user_roles WHERE user_id=$1 AND role_id='attendance'", [actorId])
+      }
+      if (oldSource === undefined) delete process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+      else process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = oldSource
+      if (oldRollout === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = oldRollout
+    }
+  }, 120000)
+
+  it('PUNCH_DETAIL_REPLAY_NATIVE: committed retry rechecks subject and posture without a new freeze or business effect', async () => {
+    const oldSource = process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+    const oldRollout = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    const scenario = EP01_DST_READY_CASES[0]
+    let fixture: Awaited<ReturnType<typeof seedCanonicalDay>> | undefined
+    try {
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = 'false'
+      fixture = await seedCanonicalDay(scenario.workDate, scenario.segments.map(segment => ({ ...segment })), scenario.timezone)
+      const actor = await seedOrgActor(fixture.orgId, 'attendance:admin')
+      await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [actor.userId])
+      seededAdminPermissionUserIds.push(actor.userId)
+      const headers = { Authorization: `Bearer ${actor.token}` }
+      const prepared = await requestJson(baseUrl + '/api/attendance/import/prepare', {
+        method: 'POST', headers, body: { orgId: fixture.orgId },
+      })
+      expect(prepared.status, 'PUNCH_DETAIL_REPLAY_PREPARE_STATUS').toBe(200)
+      const command = {
+        inputKind: 'punch_events_v1', orgId: fixture.orgId, userId: fixture.userId,
+        workDate: scenario.workDate, timezone: scenario.timezone, mode: 'override', idempotencyKey: randomUUID(),
+        punches: scenario.punches.map(([direction, occurredAt]) => ({ direction, occurredAt })),
+      }
+      const commit = (body: Record<string, unknown> = command) =>
+        requestJson(baseUrl + '/api/attendance/import/commit', { method: 'POST', headers, body })
+      const first = await commit({ ...command, commitToken: prepared.body!.data.commitToken })
+      expect(first.status, 'PUNCH_DETAIL_REPLAY_INITIAL_STATUS; code=' + String(first.body?.error?.code ?? 'NONE')).toBe(200)
+      expect(first.body!.data).toMatchObject({ imported: 4, eventCount: 4, targetCount: 1 })
+      const day = await readNativeProofDay(fixture)
+      expect(day.row.projected_work_minutes).toBe(scenario.total)
+      const frozen = await frozenCanonicalCalculation(fixture.orgId, day.row.id)
+      const target = await readFrozenProofTarget(fixture)
+      const batchId = first.body!.data.batchId
+      const receipt = async () => (await pool.query(
+        `SELECT to_jsonb(b) AS batch,
+                (SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM attendance_import_items i WHERE i.batch_id = b.id) AS items,
+                (SELECT count(*)::int FROM attendance_result_operations o WHERE o.org_id = b.org_id) AS operations,
+                (SELECT count(*)::int FROM attendance_result_event_outbox o WHERE o.org_id = b.org_id) AS outbox,
+                (SELECT count(*)::int FROM attendance_import_jobs j WHERE j.org_id = b.org_id) AS jobs
+           FROM attendance_import_batches b WHERE b.id = $1 AND b.org_id = $2`,
+        [batchId, fixture!.orgId],
+      )).rows
+      const priorReceipt = await receipt()
+      expect(priorReceipt).toHaveLength(1)
+      const trace: string[] = []
+      const originalQuery = Client.prototype.query
+      const spy = vi.spyOn(Client.prototype, 'query').mockImplementation(function (this: Client, ...args: Parameters<Client['query']>) {
+        const carrier: unknown = args[0]
+        const text = typeof carrier === 'string' ? carrier : carrier && typeof carrier === 'object' && 'text' in carrier ? String(carrier.text) : ''
+        trace.push(text.replace(/\s+/g, ' ').trim())
+        return Reflect.apply(originalQuery, this, args)
+      })
+      let retry: JsonResponse
+      try { retry = await commit() } finally { spy.mockRestore() }
+      expect(retry.status).toBe(200)
+      expect(retry.body).toEqual({ ok: true, data: {
+        inputKind: 'punch_events_v1', eventCount: 4, targetCount: 1, batchId,
+        imported: 4, processedRows: 4, failedRows: 0, elapsedMs: 0,
+        engine: first.body!.data.engine, recordUpsertStrategy: first.body!.data.recordUpsertStrategy,
+        items: [], skipped: [], csvWarnings: [], groupWarnings: [], meta: first.body!.data.meta, idempotent: true,
+      } })
+      for (const table of ['user_orgs', 'attendance_calculation_rollout_state', 'attendance_import_batches']) {
+        expect(trace.some(sql => new RegExp('\\bFROM ' + table + '\\b', 'i').test(sql)), 'PUNCH_DETAIL_REPLAY_CURRENT_READ_' + table).toBe(true)
+      }
+      for (const table of ['attendance_import_tokens', 'attendance_shift_assignments', 'attendance_shifts',
+        'attendance_shift_segments', 'attendance_group_fixed_schedule_configs', 'attendance_calculation_group_memberships']) {
+        expect(trace.some(sql => new RegExp('\\b' + table + '\\b', 'i').test(sql)), 'PUNCH_DETAIL_REPLAY_NO_REFREEZE_' + table).toBe(false)
+      }
+      const refused = async (status: number, code: string) => {
+        const response = await commit()
+        expect(response.status, 'PUNCH_DETAIL_REPLAY_REFUSAL_STATUS').toBe(status)
+        expect(response.body).toEqual({ ok: false, error: { code, message: code } })
+        expect(await receipt()).toEqual(priorReceipt)
+        expect(await readFrozenProofTarget(fixture!)).toEqual(target)
+        expect(await frozenCanonicalCalculation(fixture!.orgId, day.row.id)).toEqual(frozen)
+      }
+      await pool.query('UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2', [fixture.userId, fixture.orgId])
+      try { await refused(403, 'ATTENDANCE_WRITE_NOT_AUTHORIZED') }
+      finally { await pool.query('UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2', [fixture.userId, fixture.orgId]) }
+      await pool.query('UPDATE users SET is_active = false WHERE id = $1', [fixture.userId])
+      try { await refused(403, 'ATTENDANCE_WRITE_NOT_AUTHORIZED') }
+      finally { await pool.query('UPDATE users SET is_active = true WHERE id = $1', [fixture.userId]) }
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ''
+      try { await refused(409, 'ATTENDANCE_PUNCH_DETAIL_CANONICAL_POSTURE_REQUIRED') }
+      finally { process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId }
+      expect((await commit()).body).toEqual(retry.body)
+      await pool.query("UPDATE attendance_calculation_rollout_state SET state = 'suspended', prior_state = 'authoritative', version = version + 1 WHERE org_id = $1", [fixture.orgId])
+      await refused(409, 'ATTENDANCE_PUNCH_DETAIL_CANONICAL_POSTURE_REQUIRED')
+      console.log('PUNCH_DETAIL_REPLAY_RECEIPT ' + JSON.stringify({ committedEvents: 4,
+        retainedMinutes: scenario.total, currentMembershipRefusals: 2, postureRefusals: 2,
+        congruentRetries: 2, refreezeQueries: 0, businessEffectSnapshotUnchanged: true,
+        fixtureAuthBypass: true, realAuthProof: false }))
+    } finally {
+      if (oldSource === undefined) delete process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+      else process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = oldSource
+      if (oldRollout === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = oldRollout
+    }
+  }, 120000)
+
+  it.each(EP01_DST_READY_CASES)('EP01_DST_READY_$id: same timed inputs across four ready production callers', async (scenario) => {
+    const ownedEnv = {
+      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
+      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    }
+    const wire = (value: unknown) => JSON.parse(JSON.stringify(value))
+    type Fixture = Awaited<ReturnType<typeof seedCanonicalDay>>
+    const checkpoints: string[] = []
+    const plugin = pluginRequire('../../../../plugins/plugin-attendance/index.cjs') as {
+      __setAttendanceW4LivePunchPreBoundarySeamForTests(callback: ((input: {
+        outerResolution: Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['resolution']
+        outerContext: Parameters<typeof __computeAttendanceOuterAttributionValueForTestsV1>[0]['context']
+      }) => Promise<void>) | null): void
+    }
+    async function nativeResult(fixture: Fixture, entrypoint: string, refs: readonly string[]) {
+      const day = await readNativeProofDay(fixture)
+      const row = day.row
+      expect(row).toMatchObject({
+        org_id: fixture.orgId, attendance_record_id: row.parent.id, record_work_date: scenario.workDate,
+        calculation_kind: 'calculation', mode: 'authoritative', entrypoint,
+        outcome: 'completed', outcome_reason_code: 'calculated', projection_effect: 'set_active',
+        expected_segment_count: 2, projected_status: 'normal', projected_work_minutes: scenario.total,
+        projected_late_minutes: 0, projected_early_leave_minutes: 0,
+      })
+      expect(row.parent).toMatchObject({
+        org_id: fixture.orgId, user_id: fixture.userId, work_date: scenario.workDate,
+        current_calculation_id: row.id, projection_owner: 'w4', visibility_state: 'active',
+        status: 'normal', timezone: scenario.timezone, work_minutes: scenario.total, late_minutes: 0, early_leave_minutes: 0,
+      })
+      expect([new Date(row.parent.first_in_at).toISOString(), new Date(row.parent.last_out_at).toISOString()], 'EP01_DST_LITERAL_PARENT_INSTANTS')
+        .toEqual([scenario.startAt, scenario.endAt])
+      expect([row.projected_first_in_at, row.projected_last_out_at]).toEqual([
+        new Date(scenario.startAt), new Date(scenario.endAt),
+      ])
+      expect(row.attribution_snapshot).toMatchObject({
+        posture: 'resolved_v2', value: { orgId: fixture.orgId, userId: fixture.userId,
+          workDate: scenario.workDate, shiftId: fixture.shiftId },
+      })
+      expect(row.context_snapshot).toMatchObject({
+        schemaVersion: 1, selector: 'legacy', orgId: fixture.orgId, userId: fixture.userId,
+        workDate: scenario.workDate, shiftId: fixture.shiftId, calculationGroupId: null,
+        timezone: scenario.timezone, roundingMinutes: 1,
+      })
+      expect(row.context_snapshot.segments).toEqual(scenario.segments.map((segment, index) => ({
+        index, ...segment, startDayOffset: 0, endDayOffset: 0, lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0,
+      })))
+      expect(row.segment_snapshot).toEqual(row.context_snapshot.segments)
+      expect(row.evidence_snapshot).toEqual(scenario.punches.map(([direction, occurredAt], index) => ({
+        kind: 'punch', ref: refs[index], direction, occurredAt,
+        source: entrypoint === 'live' ? 'attendance_event' : 'import',
+      })))
+      expect(row.manual_override_snapshot).toBeNull()
+      const result = calculateAttendanceSegmentsV1({
+        attribution: row.attribution_snapshot, context: row.context_snapshot,
+        evidence: row.evidence_snapshot, approvedFacts: row.approved_facts_snapshot,
+      })
+      expect(result, 'EP01_DST_LITERAL_SEGMENT_AND_DAILY_RESULT').toEqual(expectedDstReadyCallerResult(scenario, refs))
+      const children = await pool.query(
+        `SELECT org_id, record_id, calculation_id, segment_index, expected_start_at, expected_end_at,
+                actual_in_at, actual_out_at, work_minutes, late_minutes, early_leave_minutes,
+                status, status_reasons, matched_evidence_refs, unmatched_evidence_refs
+           FROM attendance_record_segments WHERE org_id=$1 AND record_id=$2 AND calculation_id=$3
+          ORDER BY segment_index`, [fixture.orgId, row.parent.id, row.id],
+      )
+      expect(children.rows).toEqual(scenario.expected.map((segment, index) => ({
+        org_id: fixture.orgId, record_id: row.parent.id, calculation_id: row.id, segment_index: index,
+        expected_start_at: new Date(segment.start), expected_end_at: new Date(segment.end),
+        actual_in_at: new Date(segment.start), actual_out_at: new Date(segment.end),
+        work_minutes: segment.minutes, late_minutes: 0, early_leave_minutes: 0, status: 'normal',
+        status_reasons: [...segment.reasons], matched_evidence_refs: refs.slice(index * 2, index * 2 + 2),
+        unmatched_evidence_refs: [],
+      })))
+      expect((await pool.query(
+        'SELECT work_date::text, current_calculation_id::text FROM attendance_records WHERE org_id=$1 AND user_id=$2 ORDER BY work_date',
+        [fixture.orgId, fixture.userId],
+      )).rows).toEqual([{ work_date: scenario.workDate, current_calculation_id: row.id }])
+      expect(row.semantic_input_fingerprint).toBe(computeAttendanceSemanticInputFingerprintV1({
+        attribution: row.attribution_snapshot, context: row.context_snapshot, evidence: row.evidence_snapshot,
+        approvedFacts: row.approved_facts_snapshot, manualOverride: null, mergePolicy: row.merge_policy,
+        calculationTier: 'segment_authoritative', engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+        snapshotSchemaVersion: 1,
+      }))
+      return row
+    }
+    async function recompute(fixture: Fixture, prior: Awaited<ReturnType<typeof nativeResult>>, refs: readonly string[], checkpoint: string) {
+      const frozen = await frozenCanonicalCalculation(fixture.orgId, prior.id)
+      const operationId = randomUUID()
+      const trace: string[] = []
+      const originalQuery = Client.prototype.query
+      const spy = vi.spyOn(Client.prototype, 'query').mockImplementation(function (this: Client, ...args: Parameters<Client['query']>) {
+        const carrier: unknown = args[0]
+        const text = typeof carrier === 'string' ? carrier : carrier && typeof carrier === 'object' && 'text' in carrier ? String(carrier.text) : ''
+        trace.push(text.replace(/\s+/g, ' ').trim())
+        return Reflect.apply(originalQuery, this, args)
+      })
+      let response: JsonResponse
+      try {
+        response = await requestJson(`${baseUrl}/api/attendance/records/${prior.parent.id}/recompute`, {
+          method: 'POST', headers: { ...fixture.headers, 'X-Org-Id': fixture.orgId },
+          body: { policy: 'frozen_prior', operationId, expectedCalculationId: prior.id, expectedCalculationVersion: prior.version },
+        })
+      } finally { spy.mockRestore() }
+      expect(response.status, 'EP01_DST_RECOMPUTE_HTTP_STATUS').toBe(200)
+      const next = await nativeResult(fixture, 'recompute', refs)
+      expect(response.body).toEqual({ ok: true, data: { alreadyApplied: false, calculationId: next.id,
+        policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen', projectedStatus: 'normal' } })
+      expect(next).toMatchObject({ supersedes_calculation_id: prior.id, version: prior.version + 1,
+        operation_id: operationId, merge_policy: prior.merge_policy,
+        input_provenance: { policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen', priorCalculationId: prior.id } })
+      for (const key of ['attribution_snapshot', 'context_snapshot', 'segment_snapshot', 'evidence_snapshot',
+        'approved_facts_snapshot', 'manual_override_snapshot', 'source_definition_fingerprint', 'semantic_input_fingerprint']) {
+        expect(next[key], 'EP01_DST_FROZEN_PRIOR:' + key).toEqual(prior[key])
+      }
+      expect(await frozenCanonicalCalculation(fixture.orgId, prior.id)).toEqual(frozen)
+      expect(trace.some(sql => /\bFROM attendance_records\b/i.test(sql))).toBe(true)
+      expect(trace.some(sql => /\bINSERT INTO attendance_record_calculations\b/i.test(sql))).toBe(true)
+      const liveTables = ['attendance_calculation_group_memberships', 'attendance_groups', 'attendance_group_members',
+        'attendance_group_fixed_schedule_configs', 'attendance_shift_assignments', 'attendance_shifts',
+        'attendance_shift_segments', 'attendance_rotation_rules', 'attendance_rotation_assignments']
+      expect(liveTables.filter(name => trace.some(sql => new RegExp('\\b' + name + '\\b', 'i').test(sql)))).toEqual([])
+      checkpoints.push(checkpoint)
+      return next
+    }
+    try {
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = 'false'
+      const segments = scenario.segments.map(segment => ({ ...segment }))
+      const live = await seedCanonicalDay(scenario.workDate, segments, scenario.timezone)
+      let liveOut: JsonResponse | undefined
+      let liveOutBody: Record<string, unknown> | undefined
+      let liveResolution: Record<string, unknown> | undefined
+      let liveSource: Record<string, unknown> | null = null
+      let liveContext: unknown
+      let captureClockMs = 0
+      let completedClockMs = 0
+      for (const [eventType, occurredAt] of scenario.punches) {
+        plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async input => {
+          captureClockMs = Date.now()
+          liveResolution = wire(input.outerResolution)
+          liveContext = wire(input.outerContext)
+          liveSource = __computeAttendanceOuterAttributionValueForTestsV1({
+            orgId: live.orgId, userId: live.userId, source: 'live_resolution', nowIso: new Date(captureClockMs).toISOString(),
+            resolution: input.outerResolution, context: input.outerContext,
+          })
+        })
+        const body = { orgId: live.orgId, eventType, operationId: randomUUID(), occurredAt, timezone: scenario.timezone }
+        const response = await requestJson(baseUrl + '/api/attendance/punch', { method: 'POST', headers: live.headers, body })
+        completedClockMs = Date.now()
+        expect(response.status, 'EP01_DST_LIVE_HTTP_STATUS; code=' + String(response.body?.error?.code ?? 'none')).toBe(200)
+        if (eventType === 'check_out') { liveOut = response; liveOutBody = body }
+      }
+      plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
+      const physical = (await pool.query('SELECT * FROM attendance_events WHERE org_id=$1 AND user_id=$2 ORDER BY occurred_at,id', [live.orgId, live.userId])).rows
+      expect(physical.map(row => [row.event_type, row.occurred_at.toISOString()])).toEqual(scenario.punches)
+      const liveRefs = physical.map(row => String(row.id))
+      const l0 = await nativeResult(live, 'live', liveRefs)
+      expect(l0.approved_facts_snapshot).toEqual([])
+      const expectedSource = {
+        schemaVersion: 2, resolverVersion: ATTENDANCE_W4C2_ATTRIBUTION_RESOLVER_VERSION_V1,
+        orgId: live.orgId, userId: live.userId, workDate: scenario.workDate, shiftId: live.shiftId,
+        reasonCode: 'CURRENT_DAY_CONTAINING_SHIFT', resolvedAt: new Date(captureClockMs).toISOString(),
+        absoluteWindow: { startAt: scenario.startAt, endAt: scenario.endAt },
+        attributionWindow: { startAt: scenario.startAt, endAt: new Date(Date.parse(scenario.endAt) + 120 * 60000).toISOString() },
+        attributionTailMinutes: 120, extendedByApprovedOvertime: false,
+        windowEvidenceFingerprint: computeAttendanceWindowEvidenceFingerprintV1({ attributionTailMinutes: 120, approvedOvertimeWindows: [] }),
+        source: 'live_resolution',
+      }
+      expect(liveSource, 'EP01_DST_CAPTURED_SOURCE_LITERAL').toEqual(expectedSource)
+      // Business clock supplies punch time; source metadata records the actual core build clock.
+      const storedResolvedAt = l0.attribution_snapshot.value.resolvedAt
+      const storedResolvedAtMs = Date.parse(storedResolvedAt)
+      expect(new Date(storedResolvedAtMs).toISOString(), 'EP01_DST_SOURCE_CLOCK_ISO').toBe(storedResolvedAt)
+      expect(storedResolvedAtMs, 'EP01_DST_SOURCE_CLOCK_AFTER_CAPTURE').toBeGreaterThanOrEqual(captureClockMs)
+      expect(storedResolvedAtMs, 'EP01_DST_SOURCE_CLOCK_BEFORE_RESPONSE').toBeLessThanOrEqual(completedClockMs)
+      expect(l0.attribution_snapshot, 'EP01_DST_COMPLETE_LIVE_SOURCE').toEqual({
+        posture: 'resolved_v2', value: { ...expectedSource, resolvedAt: storedResolvedAt },
+      })
+      expect(l0.context_snapshot, 'EP01_DST_COMPLETE_LIVE_CONTEXT').toEqual(liveContext)
+
+      expect(liveResolution).toMatchObject({ kind: 'resolved', workDate: scenario.workDate, shiftId: live.shiftId, segmentIndex: null })
+      const wireResolution = { ...liveResolution! }
+      delete wireResolution.fullWinner
+      delete wireResolution.attributionTailMinutes
+      delete wireResolution.approvedOvertimeWindows
+      const rawLiveParent = (await pool.query('SELECT * FROM attendance_records WHERE org_id=$1 AND id=$2', [live.orgId, l0.parent.id])).rows[0]
+      expect(liveOut!.body).toEqual({ ok: true, data: { event: wire(physical[3]), record: wire(rawLiveParent), workDateResolution: wireResolution } })
+      const replay = await requestJson(baseUrl + '/api/attendance/punch', { method: 'POST', headers: live.headers, body: liveOutBody })
+      expect(replay.status).toBe(200)
+      expect(replay.body).toEqual(liveOut!.body)
+      checkpoints.push('L0')
+
+      const importedFixture = await seedCanonicalDay(scenario.workDate, segments, scenario.timezone)
+      const prepared = await requestJson(baseUrl + '/api/attendance/import/prepare', {
+        method: 'POST', headers: importedFixture.headers, body: { orgId: importedFixture.orgId },
+      })
+      expect(prepared.status, 'EP01_DST_IMPORT_PREPARE_HTTP_STATUS').toBe(200)
+      expect(Object.keys(prepared.body!.data).sort()).toEqual(['commitToken', 'expiresAt', 'ttlSeconds'])
+      expect(prepared.body!.data.ttlSeconds).toBe(600)
+      expect(typeof prepared.body!.data.commitToken).toBe('string')
+      const imported = await requestJson(baseUrl + '/api/attendance/import/commit', {
+        method: 'POST', headers: importedFixture.headers, body: {
+          inputKind: 'punch_events_v1', orgId: importedFixture.orgId,
+          userId: importedFixture.userId, workDate: scenario.workDate, timezone: scenario.timezone, mode: 'override',
+          idempotencyKey: randomUUID(), commitToken: prepared.body!.data.commitToken,
+          punches: scenario.punches.map(([direction, occurredAt]) => ({ direction, occurredAt })),
+        },
+      })
+      const diagnosticCode = imported.body?.error?.code ?? imported.body?.code ?? imported.body?.error
+      const boundedCode = typeof diagnosticCode === 'string' && /^[A-Z][A-Z0-9_]{1,100}$/.test(diagnosticCode)
+        ? diagnosticCode : 'NO_ENUM_CODE'
+      expect(imported.status, 'EP01_DST_IMPORT_COMMIT_HTTP_STATUS; code=' + boundedCode).toBe(200)
+      expect(imported.body).toMatchObject({ ok: true, success: true, data: {
+        inputKind: 'punch_events_v1', eventCount: 4, targetCount: 1, imported: 4, processedRows: 4, failedRows: 0, itemsTruncated: false, skipped: [], csvWarnings: [], groupWarnings: [],
+      } })
+      expect(Object.keys(imported.body!.data).sort()).toEqual([
+        'batchId', 'imported', 'processedRows', 'failedRows', 'elapsedMs', 'engine', 'recordUpsertStrategy',
+        'items', 'itemsTruncated', 'skipped', 'csvWarnings', 'groupWarnings', 'meta', 'inputKind', 'eventCount', 'targetCount',
+      ].sort())
+      const importRefs = scenario.punches.map(([direction], ordinal) =>
+        `import:${imported.body!.data.batchId}:${ordinal}:${direction}`)
+      const i0 = await nativeResult(importedFixture, 'legacy_import', importRefs)
+      expect(i0.approved_facts_snapshot).toEqual([])
+      expect(imported.body!.data.items).toHaveLength(4)
+      expect(imported.body!.data.items[0]).toMatchObject({ id: i0.parent.id, userId: importedFixture.userId, workDate: scenario.workDate })
+      expect((await pool.query("SELECT id FROM attendance_events WHERE org_id=$1 AND user_id=$2", [importedFixture.orgId, importedFixture.userId])).rows).toEqual([])
+      checkpoints.push('I0')
+      const r0 = await recompute(importedFixture, i0, importRefs, 'R0')
+
+      const prior = await frozenCanonicalCalculation(importedFixture.orgId, r0.id)
+      const overtimeRuleId = randomUUID()
+      await pool.query('INSERT INTO attendance_overtime_rules (id,org_id,name,rounding_minutes) VALUES ($1,$2,$3,1)',
+        [overtimeRuleId, importedFixture.orgId, 'EP01_DST_' + overtimeRuleId])
+      const created = await requestJson(baseUrl + '/api/attendance/requests', {
+        method: 'POST', headers: importedFixture.headers, body: {
+          operationId: randomUUID(), orgId: importedFixture.orgId, workDate: scenario.workDate, requestType: 'overtime',
+          overtimeRuleId, requestedInAt: scenario.otStart, requestedOutAt: scenario.otEnd, minutes: scenario.otMinutes,
+          reason: 'EP01 ready caller synthetic bounded interval',
+        },
+      })
+      expect(created.status, 'EP01_DST_OVERTIME_CREATE_HTTP_STATUS').toBe(201)
+      const requestId = created.body!.data.request.id
+      const cursor = await loadApprovalCursor(requestId)
+      await assignApprovalUser(cursor, importedFixture.userId)
+      const snapshot = (await pool.query(
+        'SELECT * FROM attendance_request_calculation_snapshots WHERE org_id=$1 AND request_id=$2 ORDER BY version',
+        [importedFixture.orgId, requestId],
+      )).rows
+      expect(snapshot).toHaveLength(1)
+      expect(created.body!.data.requestSnapshot).toEqual({ version: snapshot[0].version, fingerprint: snapshot[0].payload_fingerprint })
+      const operationId = randomUUID()
+      const approved = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+        method: 'POST', headers: importedFixture.headers, body: { operationId, expectedApprovalVersion: cursor.version,
+          expectedApprovalNode: cursor.node, comment: 'EP01 ready caller synthetic decision' },
+      })
+      expect(approved.status, 'EP01_DST_OVERTIME_APPROVE_HTTP_STATUS').toBe(200)
+      const o1 = await nativeResult(importedFixture, 'approved_overtime', importRefs)
+      const request = (await pool.query('SELECT *,work_date::text AS request_work_date_text FROM attendance_requests WHERE org_id=$1 AND id=$2', [importedFixture.orgId, requestId])).rows[0]
+      const binding = request.metadata.w4RequestSnapshotTerminalBinding
+      const terminal = (await pool.query(
+        `SELECT ar.id::text, ar.instance_id, ar.actor_id, ar.action, ar.from_version, ar.to_version,
+                ar.to_status, ai.status AS instance_status, ai.version AS instance_version
+           FROM approval_records ar JOIN approval_instances ai ON ai.id=ar.instance_id
+          WHERE ar.instance_id=$1 AND ar.to_version=$2 AND ar.action='approve' AND ar.to_status='approved'`,
+        [cursor.approvalId, cursor.version + 1],
+      )).rows
+      expect(terminal, 'EP01_DST_ACTUAL_TERMINAL_APPROVAL').toHaveLength(1)
+      expect(terminal[0]).toEqual({ id: terminal[0].id, instance_id: cursor.approvalId, actor_id: importedFixture.userId,
+        action: 'approve', from_version: cursor.version, to_version: cursor.version + 1, to_status: 'approved',
+        instance_status: 'approved', instance_version: cursor.version + 1 })
+      expect(terminal[0].id).toMatch(/^[1-9][0-9]*$/)
+      expect(binding, 'EP01_DST_INDEPENDENT_TERMINAL_BINDING').toEqual({
+        schemaVersion: 1, kind: 'w4c3b_request_snapshot_terminal_binding', orgId: importedFixture.orgId,
+        requestId, requestType: 'overtime', subjectUserId: importedFixture.userId,
+        requestSnapshotVersion: snapshot[0].version, requestSnapshotFingerprint: snapshot[0].payload_fingerprint,
+        approvalVersion: terminal[0].to_version, approvalRecordId: terminal[0].id,
+        action: 'approve', bindingPosture: 'bound',
+      })
+      expect(request.metadata.approvalFlow?.steps ?? []).toEqual([])
+
+      expect(request.status).toBe('approved')
+      expect(request.request_work_date_text).toBe(scenario.workDate)
+      expect(o1.attribution_snapshot).toEqual(snapshot[0].attribution_snapshot)
+      expect(o1.context_snapshot).toEqual(snapshot[0].context_snapshot)
+      expect(o1.evidence_snapshot).toEqual(r0.evidence_snapshot)
+      expect(o1.approved_facts_snapshot).toEqual([{ kind: 'overtime', requestId,
+        requestSnapshotVersion: snapshot[0].version, requestSnapshotFingerprint: snapshot[0].payload_fingerprint,
+        approvalVersion: terminal[0].to_version, approvalRecordId: terminal[0].id,
+        coverage: { kind: 'bounded_interval', startAt: scenario.otStart, endAt: scenario.otEnd, minutes: scenario.otMinutes } }])
+      expect(await frozenCanonicalCalculation(importedFixture.orgId, r0.id)).toEqual(prior)
+      const approvedParent = (await pool.query('SELECT * FROM attendance_records WHERE org_id=$1 AND id=$2', [importedFixture.orgId, o1.parent.id])).rows[0]
+      expect(approved.body).toEqual({ ok: true, data: { requestId, status: 'approved', record: wire(approvedParent),
+        orgId: null, userId: importedFixture.userId, approvalStep: { index: 0, total: 0 } } })
+      const sealed = await pool.query(
+        'SELECT state,resolved_record_id::text,resolved_calculation_id::text,resolved_request_id::text,result_semantic_fingerprint,result_provenance_fingerprint FROM attendance_result_operations WHERE org_id=$1 AND operation_id=$2',
+        [importedFixture.orgId, operationId],
+      )
+      expect(sealed.rows).toEqual([{ state: 'completed', resolved_record_id: o1.parent.id, resolved_calculation_id: o1.id,
+        resolved_request_id: requestId, result_semantic_fingerprint: o1.semantic_input_fingerprint,
+        result_provenance_fingerprint: o1.provenance_fingerprint }])
+      checkpoints.push('O1')
+      await recompute(importedFixture, o1, importRefs, 'R1')
+      expect(checkpoints).toEqual(['L0', 'I0', 'R0', 'O1', 'R1'])
+      console.log('EP01_DST_CALLER_RECEIPT ' + JSON.stringify({ case: scenario.id, checkpoints,
+        readyCallerCount: 4, correction: 'OPEN', resultMinutes: scenario.total, physicalSegmentCount: 2,
+        sameRawTransportFingerprintClaimed: false, fullEP01: false }))
+    } finally {
+      plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
+      for (const [key, value] of Object.entries(ownedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }, 120000)
+
+
+
+  it.each([EP01_READY_CASES[0], ...EP01_NON_UTC_READY_CASES])('EP01_IMPORT_CHECKOUT_ONLY_$id: first-available-instant calendar fallback discriminates the origin day', async (scenario) => {
+    const ownedEnv = {
+      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
+      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    }
+    try {
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = 'false'
+      const fixture = await seedCanonicalDay(scenario.workDate, [{ startTime: '21:00', endTime: '06:00', startDayOffset: 0, endDayOffset: 1 }], scenario.timezone)
+      const prepared = await requestJson(baseUrl + '/api/attendance/import/prepare', {
+        method: 'POST', headers: fixture.headers, body: { orgId: fixture.orgId },
+      })
+      expect(prepared.status).toBe(200)
+      const imported = await requestJson(baseUrl + '/api/attendance/import/commit', {
+        method: 'POST', headers: fixture.headers, body: { orgId: fixture.orgId, userId: fixture.userId, timezone: scenario.timezone,
+          mode: 'override', idempotencyKey: randomUUID(), commitToken: prepared.body!.data.commitToken,
+          rows: [{ workDate: scenario.workDate, fields: { lastOutAt: scenario.endAt } }] },
+      })
+      expect(imported.status, 'EP01_IMPORT_CHECKOUT_ONLY_HTTP_STATUS; code=' + String(imported.body?.error?.code ?? 'none')).toBe(200)
+      expect(imported.body).toMatchObject({ ok: true, success: true, data: { imported: 1, processedRows: 1, failedRows: 0, skipped: [] } })
+      const day = await readNativeProofDay(fixture)
+      const ref = `import:${imported.body!.data.batchId}:0:check_out`
+      expect(day.row).toMatchObject({ entrypoint: 'legacy_import', mode: 'authoritative', outcome: 'completed',
+        outcome_reason_code: 'calculated', expected_segment_count: 1, projected_status: 'partial', projected_work_minutes: 0 })
+      expect(day.row.parent).toMatchObject({ work_date: scenario.workDate, projection_owner: 'w4', visibility_state: 'active',
+        current_calculation_id: day.row.id, status: 'partial', work_minutes: 0, first_in_at: null })
+      expect(new Date(day.row.parent.last_out_at).toISOString(), 'EP01_IMPORT_CHECKOUT_ONLY_LAST_INSTANT').toBe(scenario.endAt)
+      expect(day.row.evidence_snapshot).toEqual([{ kind: 'punch', ref, direction: 'check_out', source: 'import', occurredAt: scenario.endAt }])
+      expect(calculateAttendanceSegmentsV1({ attribution: day.row.attribution_snapshot, context: day.row.context_snapshot,
+        evidence: day.row.evidence_snapshot, approvedFacts: day.row.approved_facts_snapshot })).toEqual(expectedCheckoutOnlyResult(ref, scenario))
+      expect(day.children).toEqual([{ segment_index: 0, expected_start_at: new Date(scenario.startAt), expected_end_at: new Date(scenario.endAt),
+        actual_in_at: null, actual_out_at: new Date(scenario.endAt), work_minutes: 0, late_minutes: 0, early_leave_minutes: 0,
+        status: 'missing_check_in', status_reasons: ['missing_check_in'] }])
+      expect(day.events).toEqual([])
+      expect((await pool.query('SELECT work_date::text FROM attendance_records WHERE org_id=$1 AND user_id=$2 ORDER BY work_date',
+        [fixture.orgId, fixture.userId])).rows).toEqual([{ work_date: scenario.workDate }])
+      console.log('EP01_IMPORT_CHECKOUT_ONLY_RECEIPT ' + JSON.stringify({ input: 'check_out_only', expected: 'partial',
+        minutes: 0, originDayRetained: true, full540ParityClaimed: false, correction: 'OPEN' }))
+    } finally {
+      for (const [key, value] of Object.entries(ownedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }, 120000)
+
+  it('CALC12_HTTP_PG: same user switches calculation groups at the inclusive effective-date boundary', async () => {
+    const ownedEnv = {
+      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
+      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    }
+    let ownedOrg: string | undefined
+    try {
+      const fixture = await seedOrg('shadow')
+      ownedOrg = fixture.orgId
+      await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+        [fixture.userId, ['attendance:read', 'attendance:write']],
+      )
+      const headers = { Authorization: `Bearer ${fixture.token}` }
+      const { buildAttendanceGroupFixedScheduleProducerKey } = pluginRequire(
+        '../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+      ) as { buildAttendanceGroupFixedScheduleProducerKey(input: {
+        groupId: string; shiftId: string; startDate: string; endDate: string
+      }): string }
+      const days = [
+        { workDate: '2026-07-01', effectiveFrom: '2026-06-01', effectiveTo: '2026-07-01', start: '09:00', end: '17:00', minutes: 480 },
+        { workDate: '2026-07-02', effectiveFrom: '2026-07-02', effectiveTo: null, start: '10:00', end: '16:00', minutes: 360 },
+      ].map(day => ({ ...day, groupId: randomUUID(), shiftId: '' }))
+      for (const day of days) {
+        const shift = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+          method: 'POST', headers,
+          body: {
+            name: 'bounded group cutover synthetic', timezone: 'UTC',
+            lateGraceMinutes: 0, earlyGraceMinutes: 0, roundingMinutes: 1,
+            workingDays: [0, 1, 2, 3, 4, 5, 6], flexPolicy: { mode: 'strict' },
+            segments: [{ startTime: day.start, endTime: day.end }],
+          },
+        })
+        expect(shift.status, 'CALC12_SHIFT_HTTP_STATUS').toBe(201)
+        expect(shift.body?.ok).toBe(true)
+        const shiftId: unknown = shift.body?.data?.id
+        expect(typeof shiftId).toBe('string')
+        if (typeof shiftId !== 'string') throw new Error('CALC12_SHIFT_ID_REQUIRED')
+        day.shiftId = shiftId
+        await pool.query(
+          `INSERT INTO attendance_groups (id, org_id, name, attendance_type, timezone)
+           VALUES ($1, $2, $3, 'fixed_shift', 'UTC')`,
+          [day.groupId, fixture.orgId, 'bounded cutover ' + day.workDate],
+        )
+        await pool.query(
+          `INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ($1, $2, $3)`,
+          [fixture.orgId, day.groupId, fixture.userId],
+        )
+        await pool.query(
+          `INSERT INTO attendance_calculation_group_memberships
+             (org_id, user_id, group_id, effective_from, effective_to, assigned_by, assigned_reason, assigned_correlation_id)
+           VALUES ($1, $2, $3, $4::date, $5::date, $2, 'bounded native proof', $6)`,
+          [fixture.orgId, fixture.userId, day.groupId, day.effectiveFrom, day.effectiveTo, randomUUID()],
+        )
+        await pool.query(
+          `INSERT INTO attendance_group_fixed_schedule_configs
+             (org_id, group_id, shift_id, start_date, end_date, revision, updated_by)
+           VALUES ($1, $2, $3, $4::date, $4::date, 1, $5)`,
+          [fixture.orgId, day.groupId, day.shiftId, day.workDate, fixture.userId],
+        )
+        const producerKey = buildAttendanceGroupFixedScheduleProducerKey({
+          groupId: day.groupId, shiftId: day.shiftId, startDate: day.workDate, endDate: day.workDate,
+        })
+        await pool.query(
+          `INSERT INTO attendance_shift_assignments
+             (org_id, user_id, shift_id, start_date, end_date, is_active, slot_index,
+              producer_type, producer_ref_id, producer_key, producer_run_id, publish_status)
+           VALUES ($1, $2, $3, $4::date, $4::date, true, 0,
+                   'attendance_group_fixed_schedule', $5, $6, $7, 'published')`,
+          [fixture.orgId, fixture.userId, day.shiftId, day.workDate, day.groupId, producerKey, randomUUID()],
+        )
+      }
+      for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+        await pool.query(
+          `UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1`,
+          [fixture.orgId, state, prior, version],
+        )
+      }
+      await seedAttendanceW7ContextSourcePostureV1(pool, fixture.orgId, 'group_authoritative', { scope: 'synthetic_staging' })
+      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = fixture.orgId
+      expect(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED).toBe(fixture.orgId)
+      expect(process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED).toBe(fixture.orgId)
+      // Verify both complete static source tuples before any punch is issued.
+      for (const day of days) {
+        const members = await pool.query(
+          `SELECT group_id FROM attendance_calculation_group_memberships
+            WHERE org_id = $1 AND user_id = $2 AND effective_from <= $3::date
+              AND (effective_to IS NULL OR effective_to >= $3::date) ORDER BY group_id`,
+          [fixture.orgId, fixture.userId, day.workDate],
+        )
+        expect(members.rows).toEqual([{ group_id: day.groupId }])
+        const source = await pool.query(
+          `SELECT g.attendance_type, g.timezone, m.user_id, c.shift_id,
+                  c.start_date::text, c.end_date::text, c.revision,
+                  a.shift_id AS assigned_shift, a.start_date::text AS assigned_start,
+                  a.end_date::text AS assigned_end, a.is_active, a.slot_index,
+                  a.producer_type, a.producer_ref_id, a.producer_key, a.publish_status,
+                  s.flex_mode, s.late_grace_minutes, s.early_grace_minutes, s.rounding_minutes
+             FROM attendance_groups g JOIN attendance_group_members m ON m.org_id = g.org_id AND m.group_id = g.id
+             JOIN attendance_group_fixed_schedule_configs c ON c.org_id = g.org_id AND c.group_id = g.id
+             JOIN attendance_shift_assignments a ON a.org_id = g.org_id AND a.producer_ref_id = g.id AND a.user_id = m.user_id
+             JOIN attendance_shifts s ON s.org_id = g.org_id AND s.id = c.shift_id
+            WHERE g.org_id = $1 AND g.id = $2`,
+          [fixture.orgId, day.groupId],
+        )
+        expect(source.rows).toEqual([{
+          attendance_type: 'fixed_shift', timezone: 'UTC', user_id: fixture.userId,
+          shift_id: day.shiftId, start_date: day.workDate, end_date: day.workDate, revision: 1,
+          assigned_shift: day.shiftId, assigned_start: day.workDate, assigned_end: day.workDate,
+          is_active: true, slot_index: 0, producer_type: 'attendance_group_fixed_schedule',
+          producer_ref_id: day.groupId, producer_key: buildAttendanceGroupFixedScheduleProducerKey({
+            groupId: day.groupId, shiftId: day.shiftId, startDate: day.workDate, endDate: day.workDate,
+          }), publish_status: 'published', flex_mode: 'strict',
+          late_grace_minutes: 0, early_grace_minutes: 0, rounding_minutes: 1,
+        }])
+      }
+      for (const day of days) {
+        const target = { ...fixture, ...day }
+        for (const [eventType, time] of [['check_in', day.start], ['check_out', day.end]] as const) {
+          const response = await requestJson(`${baseUrl}/api/attendance/punch`, {
+            method: 'POST', headers,
+            body: { orgId: fixture.orgId, eventType, operationId: randomUUID(), occurredAt: `${day.workDate}T${time}:00.000Z`, timezone: 'UTC' },
+          })
+          expect(response.status, 'CALC12_PUNCH_HTTP_STATUS').toBe(200)
+          expect(response.body?.ok).toBe(true)
+          const current = await readNativeProofDay(target)
+          expect(response.body?.data?.record).toMatchObject({
+            id: current.row.parent.id, work_date: JSON.parse(JSON.stringify(current.row.record_http_work_date)),
+            current_calculation_id: current.row.id, projection_owner: 'w4_group', visibility_state: 'active',
+            status: current.row.parent.status, work_minutes: current.row.parent.work_minutes,
+          })
+        }
+      }
+      const parents = await pool.query(
+        `SELECT work_date::text FROM attendance_records WHERE org_id = $1 AND user_id = $2 ORDER BY work_date`,
+        [fixture.orgId, fixture.userId],
+      )
+      expect(parents.rows).toEqual(days.map(day => ({ work_date: day.workDate })))
+      const nativeMinutes: number[] = []
+      const nativeOwners: string[] = []
+      for (const day of days) {
+        const target = { ...fixture, ...day }
+        const native = await readNativeProofDay(target)
+        assertNativeProofDay(native, target, day.start, day.end, day.minutes, day.groupId)
+        nativeMinutes.push(Number(native.row.projected_work_minutes))
+        nativeOwners.push(String(native.row.parent.projection_owner))
+      }
+      const events = await pool.query(
+        `SELECT count(*)::int AS count FROM attendance_events WHERE org_id = $1 AND user_id = $2`,
+        [fixture.orgId, fixture.userId],
+      )
+      expect(events.rows).toEqual([{ count: 4 }])
+      console.log('PARENT_CALC12_CUTOVER_HTTP_RECEIPT ' + JSON.stringify({
+        clause: 'CALC12', dateParents: parents.rows.length, groups: days.length,
+        eventCount: Number(events.rows[0].count), nativeWorkMinutes: nativeMinutes,
+        nativeProjectionOwners: nativeOwners, selector: 'group_effective',
+        membershipBoundaryAssertions: true, exactNativeSnapshotsAndEvidence: true,
+      }))
+    } finally {
+      for (const [key, value] of Object.entries(ownedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      if (ownedOrg) await clearAttendanceW7ContextSourcePostureV1(pool, ownedOrg)
+    }
+  }, 120000)
+
+  it('CALC13_HTTP_PG: actual shift edits preserve a historical frozen target and frozen_prior inputs', async () => {
+    const ownedEnv = {
+      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED,
+      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED,
+    }
+    try {
+      delete process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+      const fixture = await seedCanonicalDay('2026-07-03', [{ startTime: '09:00', endTime: '17:00' }])
+      for (const [eventType, time] of [['check_in', '09:00'], ['check_out', '17:00']] as const) {
+        const response = await requestJson(`${baseUrl}/api/attendance/punch`, {
+          method: 'POST', headers: fixture.headers,
+          body: { orgId: fixture.orgId, eventType, operationId: randomUUID(), occurredAt: `${fixture.workDate}T${time}:00.000Z`, timezone: 'UTC' },
+        })
+        expect(response.status, 'CALC13_PUNCH_HTTP_STATUS').toBe(200)
+        expect(response.body?.ok).toBe(true)
+        const current = await readNativeProofDay(fixture)
+        expect(response.body?.data?.record).toMatchObject({
+          id: current.row.parent.id, work_date: JSON.parse(JSON.stringify(current.row.record_http_work_date)),
+          current_calculation_id: current.row.id, projection_owner: 'w4', visibility_state: 'active',
+          status: current.row.parent.status, work_minutes: current.row.parent.work_minutes,
+        })
+      }
+      const before = await readNativeProofDay(fixture)
+      assertNativeProofDay(before, fixture, '09:00', '17:00', 480, null)
+      const c0 = before.row
+      expect(typeof c0.id).toBe('string')
+      expect(Number.isInteger(c0.version)).toBe(true)
+      const frozen = await frozenCanonicalCalculation(fixture.orgId, c0.id)
+      const targetBefore = await readFrozenProofTarget(fixture)
+      expect(targetBefore).toMatchObject({ records: 1, event_count: 2 })
+      const liveBefore = await readProofShift(fixture)
+      expect(liveBefore).toMatchObject({
+        start_time: '09:00', end_time: '17:00',
+        shift: { late_grace_minutes: 0, early_grace_minutes: 0, rounding_minutes: 1 },
+        timing: [{ index: 0, start: '09:00', end: '17:00', startOffset: 0, endOffset: 0 }],
+      })
+      const edited = await requestJson(`${baseUrl}/api/attendance/shifts/${fixture.shiftId}`, {
+        method: 'PUT', headers: fixture.headers,
+        body: { segments: [{ startTime: '10:00', endTime: '16:00' }], lateGraceMinutes: 30, earlyGraceMinutes: 20, roundingMinutes: 5 },
+      })
+      expect(edited.status, 'CALC13_SHIFT_EDIT_HTTP_STATUS').toBe(200)
+      expect(edited.body).toMatchObject({ ok: true, data: { id: fixture.shiftId } })
+      const liveEdited = await readProofShift(fixture)
+      expect(liveEdited).not.toEqual(liveBefore)
+      expect(liveEdited).toMatchObject({
+        start_time: '10:00', end_time: '16:00',
+        shift: { late_grace_minutes: 30, early_grace_minutes: 20, rounding_minutes: 5 },
+      })
+      expect(liveEdited.timing).toEqual([{ index: 0, start: '10:00', end: '16:00', startOffset: 0, endOffset: 0 }])
+      expect(await frozenCanonicalCalculation(fixture.orgId, c0.id)).toEqual(frozen)
+      expect(await readFrozenProofTarget(fixture)).toEqual(targetBefore)
+      assertNativeProofDay(await readNativeProofDay(fixture), fixture, '09:00', '17:00', 480, null)
+      const operationId = randomUUID()
+      const recomputed = await requestJson(`${baseUrl}/api/attendance/records/${c0.parent.id}/recompute`, {
+        method: 'POST', headers: { ...fixture.headers, 'X-Org-Id': fixture.orgId },
+        body: { policy: 'frozen_prior', operationId, expectedCalculationId: c0.id, expectedCalculationVersion: c0.version },
+      })
+      if (recomputed.status !== 200) {
+        const denial = recomputed.body?.error?.message
+        const reason = denial === 'Record operation requires active org membership' ? 'ORG_MEMBERSHIP_REQUIRED'
+          : denial === 'Record operation requires attendance admin permission' ? 'DB_ADMIN_REQUIRED' : 'OTHER'
+        const code = recomputed.body?.error?.code
+        console.log('CALC13_RECOMPUTE_DENIAL_DIAGNOSTIC ' + JSON.stringify({
+          status: recomputed.status, reason,
+          code: typeof code === 'string' && /^[A-Z0-9_]{1,80}$/.test(code) ? code : 'UNCLASSIFIED',
+        }))
+      }
+      expect(recomputed.status, 'CALC13_FROZEN_PRIOR_HTTP_STATUS').toBe(200)
+      // Explicit read: the canonical-day live helper is not valid after recompute.
+      const after = await readNativeProofDay(fixture)
+      const c1 = after.row
+      expect(c1.id).not.toBe(c0.id)
+      expect(recomputed.body).toEqual({
+        ok: true, data: {
+          alreadyApplied: false, calculationId: c1.id, policy: 'frozen_prior',
+          contextDecision: 'prior_calculation_frozen', projectedStatus: 'normal',
+        },
+      })
+      assertNativeProofDay(after, fixture, '09:00', '17:00', 480, null, 'recompute')
+      expect(c1).toMatchObject({
+        supersedes_calculation_id: c0.id, version: c0.version + 1, operation_id: operationId,
+        input_provenance: { policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen', priorCalculationId: c0.id },
+      })
+      // Only frozen inputs/fingerprints compare C1 to C0; identities and operation provenance differ.
+      for (const key of [
+        'attribution_snapshot', 'context_snapshot', 'segment_snapshot', 'evidence_snapshot',
+        'approved_facts_snapshot', 'manual_override_snapshot',
+        'source_definition_fingerprint',
+      ] as const) {
+        expect(c1[key], `CALC13_FROZEN_INPUT_EQUAL:${key}`).toEqual(c0[key])
+      }
+      // frozen_prior retains the persisted prior merge policy. Recompute the
+      // complete semantic inputs independently; never copy the prior hash.
+      const semanticForPolicy = (mergePolicy: 'append' | 'merge') => computeAttendanceSemanticInputFingerprintV1({
+        attribution: c0.attribution_snapshot, context: c0.context_snapshot, evidence: c0.evidence_snapshot,
+        approvedFacts: c0.approved_facts_snapshot, manualOverride: c0.manual_override_snapshot,
+        mergePolicy, calculationTier: 'segment_authoritative',
+        engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1, snapshotSchemaVersion: 1,
+      })
+      expect(c0.merge_policy, 'CALC13_PRIOR_APPEND_POLICY').toBe('append')
+      expect(c0.semantic_input_fingerprint, 'CALC13_LIVE_APPEND_SEMANTIC_DOMAIN').toBe(semanticForPolicy('append'))
+      expect(c1.merge_policy, 'CALC13_RECOMPUTE_PRESERVES_PRIOR_POLICY').toBe(c0.merge_policy)
+      expect(c1.semantic_input_fingerprint, 'CALC13_RECOMPUTE_FROZEN_PRIOR_SEMANTIC_DOMAIN').toBe(semanticForPolicy(c0.merge_policy))
+      expect(c1.semantic_input_fingerprint).toBe(c0.semantic_input_fingerprint)
+      const preservedC0 = await frozenCanonicalCalculation(fixture.orgId, c0.id)
+      expect(preservedC0).toEqual(frozen)
+      expect(await readProofShift(fixture)).toEqual(liveEdited)
+      const targetAfter = await readFrozenProofTarget(fixture)
+      expect(targetAfter.events).toEqual(targetBefore.events)
+      expect({
+        records: targetAfter.records, calculations: targetAfter.calculations,
+        children: targetAfter.children, event_count: targetAfter.event_count,
+      }).toEqual({
+        records: targetBefore.records, calculations: targetBefore.calculations + 1,
+        children: targetBefore.children + 1, event_count: targetBefore.event_count,
+      })
+      console.log('PARENT_CALC13_FROZEN_HTTP_RECEIPT ' + JSON.stringify({
+        clause: 'CALC13', editHTTP: edited.status, recomputeHTTP: recomputed.status,
+        policy: 'frozen_prior', contextDecision: 'prior_calculation_frozen',
+        sourceWindowChanged: liveEdited.start_time !== liveBefore.start_time
+          && liveEdited.end_time !== liveBefore.end_time,
+        originalCalculationUnchanged: JSON.stringify(preservedC0) === JSON.stringify(frozen),
+        sourceFingerprintEqual: c1.source_definition_fingerprint === c0.source_definition_fingerprint,
+        semanticPolicyDomainsVerified: true,
+        semanticMergePolicyChanged: c1.semantic_input_fingerprint !== c0.semantic_input_fingerprint,
+        frozenSnapshotKeysCompared: 6, priorWorkMinutes: Number(c0.projected_work_minutes),
+        currentWorkMinutes: Number(c1.projected_work_minutes),
+        versionAdvancedByOne: c1.version === c0.version + 1, nativeProjectionOwner: c1.parent.projection_owner,
+        eventCount: Number(targetAfter.event_count),
+      }))
+    } finally {
+      for (const [key, value] of Object.entries(ownedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }, 120000)
 
   it('replays shadow create and edit without duplicate source, snapshot, operation, or outbox rows', async () => {
     const fixture = await seedOrg('shadow')
