@@ -740,4 +740,68 @@ describe('MetaGridTable keyboard row moves use the row-jump band rule (R78 e)', 
       ;(Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView = original
     }
   })
+
+  // Same stubbed geometry as the paged case above. The rule keys on the row change, not on the key: ArrowLeft at
+  // column 0 wraps to the previous row's last column, Tab at the last column wraps to the next row's first column.
+  async function withPagedBand(run: (ctx: {
+    root: HTMLDivElement
+    wrap: HTMLElement
+    rows: NodeListOf<Element>
+    moved: () => number
+    clickCell: (ri: number, ci: number) => Promise<void>
+  }) => Promise<void>): Promise<void> {
+    const original = (Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView
+    ;(Element.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = function () { /* geometry stubbed below */ }
+    try {
+      const root = mountGrid(makeRows(30), {
+        totalRows: 30,
+        pageSize: 50,
+        aggregationConfig: { title: 'count' },
+        aggregates: { title: { fn: 'count', value: 30 } },
+      })
+      const wrap = setViewport(root, 436)
+      window.dispatchEvent(new Event('resize'))
+      await nextTick()
+      stubRect(wrap, 100, 436)
+      stubRect(root.querySelector('thead tr th') as Element, 100, 36)
+      const footCell = root.querySelector('tfoot.meta-grid__foot tr > td:first-child') as Element
+      expect(footCell).not.toBeNull()
+      stubRect(footCell, 500, 36)
+      const clickCell = async (ri: number, ci: number) => {
+        ;(root.querySelector(`td[data-ri="${ri}"][data-ci="${ci}"]`) as HTMLElement).click()
+        await nextTick()
+      }
+      await run({ root, wrap, rows: root.querySelectorAll('tbody tr.meta-grid__row'), moved: () => wrap.scrollTop - 300, clickCell })
+    } finally {
+      ;(Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView = original
+    }
+  }
+
+  it('paged (not windowed): ArrowLeft at column 0 wrapping up to a row under the sticky header is corrected into the band', async () => {
+    await withPagedBand(async ({ root, wrap, rows, moved, clickCell }) => {
+      // Row 6, column 0 → row 5, last column; row 5's top is at the scrollport top (100), 36px under the header.
+      wrap.scrollTop = 300
+      await clickCell(5, 0)
+      stubRect(rows[4], 100, 36, moved)
+      press(root, 'ArrowLeft')
+      await settle()
+      expect(focusedRowNumber(root)).toBe('5')
+      expect(root.querySelector(`td[data-ri="4"][data-ci="${FIELDS.length - 1}"]`)?.classList.contains('meta-grid__cell--focused')).toBe(true)
+      expect(wrap.scrollTop).toBe(300 - 36)
+    })
+  })
+
+  it('paged (not windowed): Tab at the last column wrapping down to a row under the aggregation footer is corrected into the band', async () => {
+    await withPagedBand(async ({ root, wrap, rows, moved, clickCell }) => {
+      // Row 20, last column → row 21, column 0; row 21's bottom is at the scrollport bottom (536), 36px under the footer.
+      wrap.scrollTop = 300
+      await clickCell(19, FIELDS.length - 1)
+      stubRect(rows[20], 500, 36, moved)
+      press(root, 'Tab')
+      await settle()
+      expect(focusedRowNumber(root)).toBe('21')
+      expect(root.querySelector('td[data-ri="20"][data-ci="0"]')?.classList.contains('meta-grid__cell--focused')).toBe(true)
+      expect(wrap.scrollTop).toBe(300 + 36)
+    })
+  })
 })
