@@ -3,7 +3,7 @@
     <header class="user-admin__header">
       <div>
         <h1>用户管理</h1>
-        <p>平台管理员可在此查看用户访问状态并分配角色。</p>
+        <p>查看成员、邀请新用户，并在侧栏里维护资料与权限。</p>
       </div>
 
       <div class="user-admin__actions">
@@ -11,15 +11,8 @@
         <router-link class="user-admin__link" to="/admin/permissions">权限管理</router-link>
         <router-link class="user-admin__link" to="/admin/directory">目录同步</router-link>
         <router-link class="user-admin__link" to="/admin/audit">管理审计</router-link>
-        <input
-          v-model.trim="search"
-          class="user-admin__search"
-          type="search"
-          placeholder="搜索邮箱、用户名、手机号、姓名、员工号、部门或用户 ID"
-          @keyup.enter="void loadUsers()"
-        />
-        <button class="user-admin__button" type="button" :disabled="loading" @click="void loadUsers()">
-          {{ loading ? '加载中...' : '查询' }}
+        <button class="user-admin__button" type="button" data-testid="open-invite-user" @click="openInvite()">
+          邀请用户
         </button>
       </div>
     </header>
@@ -47,15 +40,111 @@
         </button>
       </div>
     </section>
-    <section class="user-admin__panel user-admin__panel--create">
+    <div class="user-admin__tabs" role="tablist" aria-label="用户管理视图">
+      <button
+        class="user-admin__tab"
+        :class="{ 'user-admin__tab--active': surface === 'members' }"
+        type="button"
+        role="tab"
+        :aria-selected="surface === 'members'"
+        @click="surface = 'members'"
+      >
+        成员
+      </button>
+      <button
+        class="user-admin__tab"
+        :class="{ 'user-admin__tab--active': surface === 'invites' }"
+        type="button"
+        role="tab"
+        :aria-selected="surface === 'invites'"
+        data-testid="pending-invites-tab"
+        @click="surface = 'invites'"
+      >
+        待处理邀请
+        <span v-if="pendingInviteCount > 0" class="user-admin__tab-count">{{ pendingInviteCount }}</span>
+      </button>
+    </div>
+
+    <div v-show="surface === 'invites'" class="user-admin__panel">
       <div class="user-admin__section-head">
         <div>
-          <h2>创建用户</h2>
-          <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。</p>
-          <p class="user-admin__hint" data-create-user-rule="login-name">{{ createUserRuleHints.loginName }}</p>
-          <p class="user-admin__hint" data-create-user-rule="password">{{ createUserRuleHints.password }}</p>
+          <h2>邀请记录</h2>
+          <p class="user-admin__hint">待接受的邀请在这里重发或撤销。已接受、已撤销的记录可切换查看。</p>
+        </div>
+        <div class="user-admin__role-actions">
+          <button
+            class="user-admin__filter"
+            :class="{ 'user-admin__filter--active': inviteStatusFilter === 'pending' }"
+            type="button"
+            @click="inviteStatusFilter = 'pending'"
+          >
+            待处理
+          </button>
+          <button
+            class="user-admin__filter"
+            :class="{ 'user-admin__filter--active': inviteStatusFilter === 'all' }"
+            type="button"
+            @click="inviteStatusFilter = 'all'"
+          >
+            全部记录
+          </button>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingInvites" @click="void loadInviteRecords(selectedUserId || undefined)">
+            {{ loadingInvites ? '刷新中...' : '刷新邀请记录' }}
+          </button>
         </div>
       </div>
+      <div v-if="inviteRecords.length === 0" class="user-admin__empty">暂无邀请记录</div>
+      <div v-else-if="visibleInviteRecords.length === 0" class="user-admin__empty">没有待处理的邀请</div>
+      <div v-else class="user-admin__role-list user-admin__invite-list">
+        <article v-for="record in visibleInviteRecords" :key="record.id" class="user-admin__role-card">
+          <strong>{{ record.userName || record.email }}</strong>
+          <span>{{ record.email }}</span>
+          <small>{{ record.productMode }} · {{ record.status }} · 创建于 {{ formatDate(record.createdAt) }}</small>
+          <p>最近发送：{{ formatDate(record.lastSentAt) }}</p>
+          <p v-if="record.acceptedAt">接受时间：{{ formatDate(record.acceptedAt) }}</p>
+          <a :href="buildInviteUrl(record.inviteToken)" target="_blank" rel="noreferrer">打开邀请链接</a>
+          <button
+            v-if="record.status !== 'accepted'"
+            class="user-admin__button user-admin__button--secondary"
+            type="button"
+            :disabled="busy || loadingInvites"
+            @click="void resendInvite(record)"
+          >
+            重发邀请
+          </button>
+          <button
+            v-if="record.status === 'pending'"
+            class="user-admin__button user-admin__button--secondary"
+            type="button"
+            :disabled="busy || loadingInvites"
+            @click="void revokeInvite(record)"
+          >
+            撤销邀请
+          </button>
+        </article>
+      </div>
+    </div>
+
+    <div
+      class="user-admin__modal"
+      :class="{ 'user-admin__modal--open': inviteOpen }"
+      role="dialog"
+      aria-modal="true"
+      aria-label="邀请用户"
+      :aria-hidden="inviteOpen ? 'false' : 'true'"
+    >
+      <button class="user-admin__modal-backdrop" type="button" aria-label="关闭邀请" @click="closeInvite()" />
+      <section class="user-admin__panel user-admin__panel--create">
+        <div class="user-admin__section-head">
+          <div>
+            <h2>邀请用户</h2>
+            <p class="user-admin__hint">一次邀请一名成员：填写邮箱和角色后创建账号。邀请文案可复制，并在「待处理邀请」里重发或撤销。</p>
+            <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。</p>
+            <p class="user-admin__hint" data-create-user-rule="login-name">{{ createUserRuleHints.loginName }}</p>
+            <p class="user-admin__hint" data-create-user-rule="password">{{ createUserRuleHints.password }}</p>
+          </div>
+          <button class="user-admin__button user-admin__button--secondary" type="button" @click="closeInvite()">关闭</button>
+        </div>
       <div class="user-admin__create-grid">
         <input v-model.trim="createForm.name" class="user-admin__search" type="text" placeholder="姓名" />
         <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱（可选）" />
@@ -200,56 +289,55 @@
         <a :href="createdOnboarding.acceptInviteUrl" target="_blank" rel="noreferrer">{{ createdOnboarding.acceptInviteUrl }}</a>
       </p>
       <pre v-if="createdInviteMessage" class="user-admin__invite">{{ createdInviteMessage }}</pre>
-    </section>
+        <label class="user-admin__note-label">
+          <span>附言（可选）</span>
+          <textarea
+            v-model="inviteNote"
+            class="user-admin__search user-admin__note"
+            rows="3"
+            placeholder="只附在复制的邀请文案末尾，不会提交到服务器"
+            aria-label="邀请附言（可选）"
+          />
+        </label>
+      </section>
+    </div>
 
-    <section class="user-admin__panel">
-      <div class="user-admin__section-head">
-        <div>
-          <h2>邀请记录</h2>
-          <p class="user-admin__hint">展示最近发出的邀请及其当前状态。</p>
-        </div>
-        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingInvites" @click="void loadInviteRecords(selectedUserId || undefined)">
-          {{ loadingInvites ? '刷新中...' : '刷新邀请记录' }}
-        </button>
-      </div>
-      <div v-if="inviteRecords.length === 0" class="user-admin__empty">暂无邀请记录</div>
-      <div v-else class="user-admin__role-list">
-        <article v-for="record in inviteRecords" :key="record.id" class="user-admin__role-card">
-          <strong>{{ record.userName || record.email }}</strong>
-          <span>{{ record.email }}</span>
-          <small>{{ record.productMode }} · {{ record.status }} · 创建于 {{ formatDate(record.createdAt) }}</small>
-          <p>最近发送：{{ formatDate(record.lastSentAt) }}</p>
-          <p v-if="record.acceptedAt">接受时间：{{ formatDate(record.acceptedAt) }}</p>
-          <a :href="buildInviteUrl(record.inviteToken)" target="_blank" rel="noreferrer">打开邀请链接</a>
-          <button
-            v-if="record.status !== 'accepted'"
-            class="user-admin__button user-admin__button--secondary"
-            type="button"
-            :disabled="busy || loadingInvites"
-            @click="void resendInvite(record)"
-          >
-            重发邀请
-          </button>
-          <button
-            v-if="record.status === 'pending'"
-            class="user-admin__button user-admin__button--secondary"
-            type="button"
-            :disabled="busy || loadingInvites"
-            @click="void revokeInvite(record)"
-          >
-            撤销邀请
-          </button>
-        </article>
-      </div>
-    </section>
-
+    <div v-show="surface === 'members'">
     <div class="user-admin__layout">
       <aside class="user-admin__panel">
-        <div class="user-admin__section-head">
-          <div>
-            <h2>用户列表</h2>
-            <p class="user-admin__hint">按账号、钉钉和目录状态快速筛选，再执行批量治理动作。</p>
-          </div>
+        <div class="user-admin__toolbar">
+          <input
+            v-model.trim="search"
+            class="user-admin__search"
+            type="search"
+            placeholder="搜索邮箱、用户名、手机号、姓名、员工号、部门或用户 ID"
+            aria-label="搜索成员"
+            @keyup.enter="void loadUsers()"
+          />
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading" @click="void loadUsers()">
+            {{ loading ? '加载中...' : '查询' }}
+          </button>
+          <select v-model="roleFilter" class="user-admin__select" aria-label="角色筛选">
+            <option value="">全部角色</option>
+            <option v-for="role in roleFilterOptions" :key="role" :value="role">{{ role }}</option>
+          </select>
+          <select v-model="accountStatusFilter" class="user-admin__select" aria-label="账号状态">
+            <option value="">全部状态</option>
+            <option value="active">启用</option>
+            <option value="inactive">停用</option>
+          </select>
+        </div>
+        <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
+          <button
+            v-for="option in userFilterOptions"
+            :key="option.value"
+            class="user-admin__filter"
+            :class="{ 'user-admin__filter--active': userListFilter === option.value }"
+            type="button"
+            @click="userListFilter = option.value"
+          >
+            {{ option.label }}
+          </button>
         </div>
         <div class="user-admin__summary">
           <span class="user-admin__metric">
@@ -281,6 +369,8 @@
             <small>待收口</small>
           </router-link>
         </div>
+        <details class="user-admin__governance">
+        <summary>治理工具</summary>
         <div class="user-admin__section-head user-admin__section-head--workbench">
           <div>
             <h3>治理工作台</h3>
@@ -317,23 +407,12 @@
             <span class="user-admin__workbench-note">{{ card.note }}</span>
           </router-link>
         </div>
-        <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
-          <button
-            v-for="option in userFilterOptions"
-            :key="option.value"
-            class="user-admin__filter"
-            :class="{ 'user-admin__filter--active': userListFilter === option.value }"
-            type="button"
-            @click="userListFilter = option.value"
-          >
-            {{ option.label }}
-          </button>
-        </div>
-        <div v-if="visibleUsers.length > 0" class="user-admin__bulkbar">
+        </details>
+        <div v-if="visibleUsers.length > 0" class="user-admin__bulkbar" :class="{ 'user-admin__bulkbar--idle': selectedUserIds.length === 0 }">
           <div>
             <strong>批量操作</strong>
             <p class="user-admin__hint">
-              已选择 {{ selectedUserIds.length }} / {{ visibleUsers.length }} 个当前筛选结果。
+              已选择 {{ selectedUserIds.length }} / {{ displayedUsers.length }} 个当前筛选结果。
             </p>
             <p v-if="screeningUsersMissingOpenId.length > 0" class="user-admin__hint">
               当前筛选结果中有 {{ screeningUsersMissingOpenId.length }} 个缺 OpenID 用户，可直接导出治理清单。
@@ -387,26 +466,51 @@
             </router-link>
           </div>
         </div>
-        <div v-if="visibleUsers.length === 0" class="user-admin__empty">暂无用户数据</div>
+        <div v-if="loading && users.length === 0" class="user-admin__empty">正在加载成员…</div>
+        <div v-else-if="displayedUsers.length === 0" class="user-admin__empty">暂无用户数据</div>
+        <div v-else class="user-admin__table" role="table" aria-label="成员列表">
+          <div class="user-admin__table-head" role="row">
+            <span role="columnheader" />
+            <button type="button" role="columnheader" @click="toggleSort('name')">
+              成员{{ sortMark('name') }}
+            </button>
+            <button type="button" role="columnheader" @click="toggleSort('role')">
+              角色{{ sortMark('role') }}
+            </button>
+            <button type="button" role="columnheader" @click="toggleSort('status')">
+              状态{{ sortMark('status') }}
+            </button>
+            <button type="button" role="columnheader" @click="toggleSort('lastLogin')">
+              最近登录{{ sortMark('lastLogin') }}
+            </button>
+            <span role="columnheader" />
+          </div>
         <article
-          v-for="user in visibleUsers"
+          v-for="user in pagedUsers"
           :key="user.id"
           class="user-admin__user"
           :class="{ 'user-admin__user--active': selectedUserId === user.id }"
+          role="row"
         >
           <label class="user-admin__user-select">
             <input
               :checked="selectedUserIdSet.has(user.id)"
               type="checkbox"
+              :aria-label="`选择 ${user.name || formatManagedUserLabel(user)}`"
               @change="void handleUserSelectionChange(user.id, $event)"
             />
             <span>选择</span>
           </label>
-          <button class="user-admin__user-body" type="button" @click="void selectUser(user.id)">
-            <strong>{{ user.name || formatManagedUserLabel(user) }}</strong>
-            <span>{{ formatManagedUserIdentifier(user) }}</span>
-            <span class="user-admin__meta">{{ user.role }} · {{ user.is_active ? '启用' : '停用' }}</span>
-            <div class="user-admin__row-badges">
+          <button class="user-admin__user-body" type="button" @click="void openUserDetail(user.id)">
+            <span class="user-admin__identity">
+              <span class="user-admin__avatar" aria-hidden="true">{{ userInitials(user) }}</span>
+              <span class="user-admin__identity-text">
+                <strong>{{ user.name || formatManagedUserLabel(user) }}</strong>
+                <span>{{ formatManagedUserIdentifier(user) }}</span>
+              </span>
+            </span>
+            <span class="user-admin__meta">{{ user.role }}</span>
+            <span class="user-admin__row-badges">
               <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.is_active, 'user-admin__row-badge--danger': !user.is_active }">
                 {{ user.is_active ? '账号启用' : '账号停用' }}
               </span>
@@ -428,15 +532,42 @@
               <span v-if="(user.businessRoleCount || 0) > 0" class="user-admin__row-badge user-admin__row-badge--muted">
                 业务角色 {{ user.businessRoleCount }}
               </span>
-            </div>
+            </span>
+            <span class="user-admin__meta">{{ formatLastLogin(user.last_login_at) }}</span>
           </button>
+          <div class="user-admin__row-menu">
+            <button
+              type="button"
+              :aria-expanded="rowMenuUserId === user.id"
+              aria-haspopup="menu"
+              @click="toggleRowMenu(user.id)"
+            >
+              操作
+            </button>
+            <div v-show="rowMenuUserId === user.id" class="user-admin__row-menu-panel" role="menu">
+              <button type="button" role="menuitem" @click="void openUserDetail(user.id)">编辑</button>
+            </div>
+          </div>
           <p v-if="user.dingtalkOpenIdMissing" class="user-admin__hint">
             {{ readMissingOpenIdGovernanceHint(user) }}
           </p>
         </article>
+        </div>
+        <div v-if="displayedUsers.length > pageSize" class="user-admin__pager">
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page <= 1" @click="page -= 1">上一页</button>
+          <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ displayedUsers.length }} 人</span>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page >= pageCount" @click="page += 1">下一页</button>
+        </div>
       </aside>
 
-      <section class="user-admin__panel user-admin__panel--detail">
+      <button
+        v-show="detailOpen"
+        class="user-admin__drawer-backdrop"
+        type="button"
+        aria-label="关闭用户详情"
+        @click="closeUserDetail()"
+      />
+      <section class="user-admin__panel user-admin__panel--detail" :class="{ 'user-admin__panel--detail-open': detailOpen }">
         <template v-if="access">
           <div class="user-admin__detail-head">
             <div>
@@ -454,6 +585,7 @@
                 {{ access.isAdmin ? '管理员' : '普通用户' }}
               </span>
             </div>
+            <button class="user-admin__button user-admin__button--secondary user-admin__detail-close" type="button" @click="closeUserDetail()">关闭</button>
           </div>
 
           <div class="user-admin__section">
@@ -841,8 +973,9 @@
             </div>
           </div>
 
-          <div class="user-admin__section">
+          <div class="user-admin__section user-admin__section--danger">
             <h3>账号操作</h3>
+            <p class="user-admin__hint">停用、重置密码和全部下线会影响该用户的现有会话，与上方的资料、角色分开操作。</p>
             <div class="user-admin__role-actions">
               <button class="user-admin__button" type="button" :disabled="busy" @click="void toggleUserStatus()">
                 {{ access.user.is_active ? '停用账号' : '启用账号' }}
@@ -963,6 +1096,7 @@
           请选择一个用户查看访问详情
         </div>
       </section>
+    </div>
     </div>
   </section>
 </template>
@@ -1289,6 +1423,18 @@ const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
+const surface = ref<'members' | 'invites'>('members')
+const inviteOpen = ref(false)
+const inviteNote = ref('')
+const inviteStatusFilter = ref<'pending' | 'all'>('pending')
+const detailOpen = ref(false)
+const rowMenuUserId = ref('')
+const roleFilter = ref('')
+const accountStatusFilter = ref<'' | 'active' | 'inactive'>('')
+const sortKey = ref<'' | 'name' | 'role' | 'status' | 'lastLogin'>('')
+const sortDir = ref<'asc' | 'desc'>('asc')
+const page = ref(1)
+const pageSize = 20
 const users = ref<ManagedUser[]>([])
 const selectedUserIds = ref<string[]>([])
 const userListFilter = ref<UserListFilter>(readInitialUserNavigation().filter)
@@ -1489,6 +1635,39 @@ const visibleUsers = computed(() => {
     if (userListFilter.value === 'platform-admin') return user.platformAdminEnabled === true
     return true
   })
+})
+const roleFilterOptions = computed(() => {
+  const roles = new Set<string>()
+  for (const user of users.value) {
+    if (user.role) roles.add(user.role)
+  }
+  return [...roles].sort((left, right) => left.localeCompare(right, 'zh'))
+})
+const displayedUsers = computed(() => {
+  let rows = visibleUsers.value
+  if (roleFilter.value) rows = rows.filter((user) => user.role === roleFilter.value)
+  if (accountStatusFilter.value === 'active') rows = rows.filter((user) => user.is_active)
+  if (accountStatusFilter.value === 'inactive') rows = rows.filter((user) => !user.is_active)
+  if (!sortKey.value) return rows
+  const direction = sortDir.value === 'asc' ? 1 : -1
+  const valueOf = (user: ManagedUser): string => {
+    if (sortKey.value === 'name') return user.name || formatManagedUserLabel(user)
+    if (sortKey.value === 'role') return user.role || ''
+    if (sortKey.value === 'status') return user.is_active ? '0' : '1'
+    return user.last_login_at || ''
+  }
+  return [...rows].sort((left, right) => valueOf(left).localeCompare(valueOf(right), 'zh') * direction)
+})
+const pageCount = computed(() => Math.max(1, Math.ceil(displayedUsers.value.length / pageSize)))
+const pagedUsers = computed(() => {
+  const current = Math.min(page.value, pageCount.value)
+  const start = (current - 1) * pageSize
+  return displayedUsers.value.slice(start, start + pageSize)
+})
+const pendingInviteCount = computed(() => inviteRecords.value.filter((record) => record.status === 'pending').length)
+const visibleInviteRecords = computed(() => {
+  if (inviteStatusFilter.value === 'all') return inviteRecords.value
+  return inviteRecords.value.filter((record) => record.status === 'pending' || record.status === 'expired')
 })
 const screeningUsersMissingOpenId = computed(() => visibleUsers.value.filter((user) => user.dingtalkOpenIdMissing === true))
 const screeningUsersMissingOpenIdWithGrant = computed(() => (
@@ -2062,7 +2241,7 @@ function clearSelectedUsers(): void {
 }
 
 function selectVisibleUsers(): void {
-  selectedUserIds.value = visibleUsers.value.map((user) => user.id)
+  selectedUserIds.value = displayedUsers.value.map((user) => user.id)
 }
 
 function toggleUserSelection(userId: string, checked: boolean): void {
@@ -2080,6 +2259,60 @@ function handleUserSelectionChange(userId: string, event: Event): void {
   const target = event.target
   if (!(target instanceof HTMLInputElement)) return
   toggleUserSelection(userId, target.checked)
+}
+
+function userInitials(user: ManagedUser): string {
+  const source = (user.name || user.email || user.username || '?').trim()
+  if (!source) return '?'
+  const parts = source.split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return `${parts[0]?.charAt(0) || ''}${parts[1]?.charAt(0) || ''}`.toUpperCase()
+  return source.slice(0, 1).toUpperCase()
+}
+
+function formatLastLogin(value: string | null | undefined): string {
+  if (!value) return '从未登录'
+  return formatDate(value)
+}
+
+function sortMark(key: 'name' | 'role' | 'status' | 'lastLogin'): string {
+  if (sortKey.value !== key) return ''
+  return sortDir.value === 'asc' ? ' ↑' : ' ↓'
+}
+
+function toggleSort(key: 'name' | 'role' | 'status' | 'lastLogin'): void {
+  page.value = 1
+  if (sortKey.value !== key) {
+    sortKey.value = key
+    sortDir.value = 'asc'
+    return
+  }
+  sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+}
+
+function toggleRowMenu(userId: string): void {
+  rowMenuUserId.value = rowMenuUserId.value === userId ? '' : userId
+}
+
+function openInvite(): void {
+  inviteOpen.value = true
+  surface.value = 'members'
+}
+
+function closeInvite(): void {
+  inviteOpen.value = false
+}
+
+function closeUserDetail(): void {
+  detailOpen.value = false
+  rowMenuUserId.value = ''
+}
+
+async function openUserDetail(userId: string): Promise<void> {
+  detailOpen.value = true
+  rowMenuUserId.value = ''
+  surface.value = 'members'
+  if (selectedUserId.value === userId && access.value?.user.id === userId) return
+  await selectUser(userId)
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -2376,6 +2609,7 @@ async function loadUsers(): Promise<void> {
       const requestedUser = userNavigation.value.userId
         ? users.value.find((item) => item.id === userNavigation.value.userId)
         : null
+      if (requestedUser) detailOpen.value = true
       await selectUser((requestedUser || users.value[0]).id)
     } else if (userNavigation.value.userId) {
       const navigationKey = buildUserNavigationKey(userNavigation.value)
@@ -2384,6 +2618,7 @@ async function loadUsers(): Promise<void> {
         requestedUser
         && (selectedUserId.value !== requestedUser.id || appliedUserNavigationKey.value !== navigationKey)
       ) {
+        detailOpen.value = true
         await selectUser(requestedUser.id)
       }
     }
@@ -2573,6 +2808,7 @@ async function handleUserNavigationChange(): Promise<void> {
     return
   }
 
+  detailOpen.value = true
   await selectUser(requestedUser.id)
 }
 
@@ -3029,7 +3265,9 @@ async function resendInvite(record: InviteLedgerRecord): Promise<void> {
 
 async function copyInviteMessage(): Promise<void> {
   if (!createdInviteMessage.value) return
-  if (await copyText(createdInviteMessage.value)) {
+  const note = inviteNote.value.trim()
+  const text = note ? `${createdInviteMessage.value}\n\n${note}` : createdInviteMessage.value
+  if (await copyText(text)) {
     setStatus('邀请文案已复制')
   } else {
     setStatus('复制邀请文案失败', 'error')
@@ -3370,16 +3608,31 @@ async function saveUserProfile(): Promise<void> {
   }
 }
 
+watch([userListFilter, roleFilter, accountStatusFilter, search], () => {
+  page.value = 1
+})
+
+function onUserAdminKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return
+  if (inviteOpen.value) {
+    closeInvite()
+    return
+  }
+  if (detailOpen.value) closeUserDetail()
+}
+
 const stopUserLocationSync = subscribeToLocationChanges(() => {
   if (!syncUserNavigationFromLocation()) return
   void handleUserNavigationChange()
 })
 
 onMounted(async () => {
+  window.addEventListener('keydown', onUserAdminKeydown)
   await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords(), loadAttendanceOnboardingOptions(), loadAttendanceOrgOptions()])
 })
 
 onUnmounted(() => {
+  window.removeEventListener('keydown', onUserAdminKeydown)
   stopUserLocationSync()
 })
 </script>
@@ -3557,12 +3810,13 @@ onUnmounted(() => {
 
 .user-admin__layout {
   display: grid;
-  /* minmax(0, ...) on both tracks (customer field report 2026-10-21): a plain `1fr` track is
-     minmax(auto, 1fr) and grows to its content's min-content, so one long unbreakable string could
-     push the right column (and the page) wider than the viewport. */
-  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+  /* Single full-width track (customer field report 2026-10-21, updated with the member-table
+     redesign): a plain `1fr` is minmax(auto, 1fr) and grows to min-content, so one long
+     unbreakable identifier could widen the page. The detail editor is an overlay drawer, not a
+     second column, so it cannot be pushed off or drawn over the table. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
-  min-height: 520px;
+  min-height: 0;
 }
 
 .user-admin__layout > * {
@@ -3653,18 +3907,35 @@ onUnmounted(() => {
 
 /* The missing-OpenID hint carries the whole corpId (one unbreakable token): full row, may break. */
 .user-admin__user > .user-admin__hint {
+  grid-column: 1 / -1;
+  grid-row: 2;
   flex-basis: 100%;
   min-width: 0;
+  margin: 2px 0 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--ms-border-light);
   overflow-wrap: anywhere;
 }
 
 .user-admin__panel--detail {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 30;
+  width: min(640px, 100%);
+  height: 100%;
+  max-height: 100vh;
+  margin: 0;
+  overflow: auto;
+  border-radius: 0;
+  transform: translateX(105%);
+  visibility: hidden;
   gap: 16px;
 }
 
 .user-admin__summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
   gap: 8px;
 }
 
@@ -3764,20 +4035,21 @@ onUnmounted(() => {
 }
 
 .user-admin__user {
-  display: flex;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 2.4fr) minmax(0, 0.7fr) minmax(0, 1.5fr) minmax(88px, 0.8fr) 64px;
   /* The missing-OpenID governance hint (a <p> after the user-body button) takes its own line instead
      of squeezing the button and running past the card. */
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   text-align: left;
   width: 100%;
   /* width: 100% plus padding/border must still fit the card. */
   box-sizing: border-box;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
-  padding: 12px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  padding: 10px 12px;
 }
 
 .user-admin__user--active {
@@ -3796,15 +4068,17 @@ onUnmounted(() => {
 }
 
 .user-admin__user-body {
-  flex: 1;
+  grid-column: 2 / 6;
   display: grid;
-  gap: 4px;
+  grid-template-columns: subgrid;
+  align-items: center;
   text-align: left;
   border: 0;
   padding: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
+  min-width: 0;
 }
 
 .user-admin__meta {
@@ -3954,6 +4228,266 @@ onUnmounted(() => {
 
 .user-admin__role-card p {
   margin: 0;
+}
+
+.user-admin__panel--detail-open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.user-admin__detail-close,
+.user-admin__panel--detail .user-admin__section-head > .user-admin__button,
+.user-admin__panel--detail .user-admin__role-actions > .user-admin__button {
+  flex: none;
+  width: auto;
+  white-space: nowrap;
+}
+
+.user-admin__invite-list {
+  display: grid;
+  gap: var(--ms-space-3);
+}
+
+.user-admin__invite-list .user-admin__role-card {
+  width: min(520px, 100%);
+}
+
+.user-admin__drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  border: 0;
+  background: color-mix(in srgb, var(--ms-text-1) 28%, transparent);
+}
+
+.user-admin__modal {
+  display: none;
+}
+
+.user-admin__modal--open {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--ms-space-5);
+}
+
+.user-admin__modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--ms-text-1) 35%, transparent);
+}
+
+.user-admin__modal--open .user-admin__panel--create {
+  position: relative;
+  z-index: 1;
+  width: min(960px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  overflow: auto;
+}
+
+.user-admin__note-label {
+  display: grid;
+  gap: 6px;
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.user-admin__note {
+  width: 100%;
+  min-height: 72px;
+  height: auto;
+  padding: 8px 12px;
+}
+
+.user-admin__tabs {
+  display: flex;
+  gap: var(--ms-space-1);
+  border-bottom: 1px solid var(--ms-border-light);
+}
+
+.user-admin__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ms-text-2);
+  font-weight: 600;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.user-admin__tab--active {
+  color: var(--ms-text-1);
+  border-bottom-color: var(--ms-color-primary);
+}
+
+.user-admin__tab-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.user-admin__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2);
+}
+
+.user-admin__toolbar .user-admin__search {
+  flex: 1 1 280px;
+}
+
+.user-admin__toolbar .user-admin__select {
+  min-width: 140px;
+}
+
+.user-admin__governance {
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  padding: 8px 12px;
+  background: var(--ms-bg-card);
+}
+
+.user-admin__governance summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ms-text-1);
+}
+
+.user-admin__bulkbar--idle {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.user-admin__table-head {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 2.4fr) minmax(0, 0.7fr) minmax(0, 1.5fr) minmax(88px, 0.8fr) 64px;
+  gap: 10px;
+  padding: 0 12px 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.user-admin__table-head button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.user-admin__identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.user-admin__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.user-admin__identity-text {
+  display: grid;
+  min-width: 0;
+}
+
+.user-admin__identity-text span {
+  color: var(--ms-text-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.user-admin__user-select span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.user-admin__row-menu {
+  position: relative;
+  justify-self: end;
+}
+
+.user-admin__row-menu > button,
+.user-admin__row-menu-panel button {
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  border-radius: var(--ms-radius-sm);
+  height: 32px;
+  padding: 0 8px;
+  cursor: pointer;
+  color: var(--ms-text-1);
+}
+
+.user-admin__row-menu-panel {
+  position: absolute;
+  right: 0;
+  top: 36px;
+  z-index: 5;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+}
+
+.user-admin__row-menu-panel button {
+  width: 100%;
+  border: 0;
+  text-align: left;
+}
+
+.user-admin__pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ms-space-2);
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.user-admin__section--danger {
+  margin-top: var(--ms-space-2);
+  padding-top: var(--ms-space-3);
+  border-top: 1px solid var(--ms-border-light);
+}
+
+.user-admin {
+  background: var(--ms-bg-page);
 }
 
 @media (max-width: 960px) {
