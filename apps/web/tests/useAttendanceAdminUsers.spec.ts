@@ -58,9 +58,42 @@ describe('useAttendanceAdminUsers', () => {
     expect(users.statusMessage.value).toBe('')
     expect(users.users.value.map((user) => user.email)).toEqual(['', '', 'carol@example.com'])
     const labels = users.users.value.map((user) => users.formatUserLabel(user as AttendanceAdminUserSearchItem))
-    expect(labels).toEqual(['Bob · user-2', 'user-3', 'carol@example.com · E4 · user-4'])
+    expect(labels).toEqual(['Bob · user-2', 'Unnamed employee · ID: user-3', 'carol@example.com · E4 · user-4'])
     // The formatter is null-safe on its own too (an item that bypassed the loader).
     expect(users.formatUserLabel({ id: 'user-5', email: null as unknown as string, name: 'Dan', role: 'user', is_active: true, is_admin: false, last_login_at: null, created_at: '' })).toBe('Dan · user-5')
+  })
+
+  it('distinguishes genuine blank identities, supplied name=id and retained technical placeholders', () => {
+    const directory = useAttendanceAdminUsers({ tr: (en) => en })
+    const user: AttendanceAdminUserSearchItem = {
+      id: 'opaque-person', name: null, email: '', role: 'user', created_at: '2026-01-01',
+      is_active: true, is_admin: false, last_login_at: null,
+    }
+    expect(directory.formatUserLabel(user)).toBe('Unnamed employee · ID: opaque-person')
+    expect(directory.formatUserLabel({ ...user, name: 'opaque-person' })).toBe('opaque-person')
+    expect(directory.formatUserLabel({ ...user, name: '  ', email: '  ' })).toBe('Unnamed employee · ID: opaque-person')
+    expect(directory.formatUserLabel({ ...user, name: 'Alice', email: 'alice@example.com' })).toBe('Alice · alice@example.com')
+    expect(directory.formatUserLabel({ ...user, name: null, email: user.id, role: '', created_at: '' })).toBe('Current value: opaque-person')
+  })
+
+  it.each(['org', 'global'] as const)('rejects a late JSON directory response after %s scope A-B-A', async (scope) => {
+    const orgId = ref('org-A')
+    const globalScope = ref(false)
+    let resolve!: (value: unknown) => void
+    const body = new Promise<unknown>((yes) => { resolve = yes })
+    const directory = useAttendanceAdminUsers({
+      orgId, globalScope, endpoint: '/api/attendance-admin/users/search',
+      apiFetch: vi.fn().mockResolvedValue({ ...jsonResponse(200, {}), json: () => body }),
+    })
+    const loading = directory.loadUsers('Alice')
+    await Promise.resolve()
+    if (scope === 'org') { orgId.value = 'org-B'; orgId.value = 'org-A' }
+    else { globalScope.value = true; globalScope.value = false }
+    resolve({ ok: true, data: { items: [{ id: 'old-person', name: 'Old Alice', email: '' }] } })
+    await loading
+    expect(directory.users.value).toEqual([])
+    expect(directory.loading.value).toBe(false)
+    expect(directory.statusMessage.value).toBe('')
   })
 
   it('injects the current value as a selectable placeholder when it is not part of the results', async () => {

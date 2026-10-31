@@ -1,4 +1,5 @@
-import { ref, type Ref } from 'vue'
+import { getCurrentScope, onScopeDispose, ref, watch, type Ref } from 'vue'
+import { isRetainedPersonnelValue } from './attendancePersonnelIdentity'
 import { apiFetch as defaultApiFetch } from '../../utils/api'
 
 type Translate = (en: string, zh: string) => string
@@ -48,18 +49,15 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
 }
 
 function formatUserLabel(user: AttendanceAdminUserSearchItem, tr: Translate): string {
-  if (
-    user.name === null
-    && user.email === user.id
-    && !user.role
-    && user.created_at === ''
-  ) {
+  if (isRetainedPersonnelValue(user)) {
     return `${tr('Current value', '当前值')}: ${user.id}`
   }
   // Email is optional when a user is created, and the server answers null for it (#6344); never trim it raw.
   const email = typeof user.email === 'string' ? user.email.trim() : ''
-  const primary = user.name?.trim() || email || user.id
-  const secondary = email && email !== primary ? email : (user.id !== primary ? user.id : '')
+  const primary = user.name?.trim() || email || tr('Unnamed employee', '未命名员工')
+  const secondary = !user.name?.trim() && !email
+    ? `ID: ${user.id}`
+    : email && email !== primary ? email : (user.id !== primary ? user.id : '')
   const profileParts = [user.employeeNo?.trim(), user.department?.trim()].filter(Boolean)
   return user.id ? [primary, ...profileParts, secondary].filter(Boolean).join(' · ') : tr('Unknown user', '未知用户')
 }
@@ -78,8 +76,20 @@ export function useAttendanceAdminUsers({
   const loading = ref(false)
   const statusMessage = ref('')
 
+  let requestSeq = 0
+  function invalidateUsers(): void {
+    requestSeq += 1
+    users.value = []
+    loading.value = false
+    statusMessage.value = ''
+  }
+  watch([() => orgId?.value, () => globalScope?.value], invalidateUsers, { flush: 'sync' })
+  if (getCurrentScope()) onScopeDispose(invalidateUsers)
+
   async function loadUsers(query = searchQuery.value) {
-    if (!isSessionCurrent()) return
+    const seq = ++requestSeq
+    const current = () => seq === requestSeq && isSessionCurrent()
+    if (!current()) return
     loading.value = true
     statusMessage.value = ''
     try {
@@ -102,7 +112,7 @@ export function useAttendanceAdminUsers({
         }
       }
       const response = await apiFetch(`${endpoint}${params.size ? `?${params.toString()}` : ''}`)
-      if (!isSessionCurrent()) return
+      if (!current()) return
       if (response.status === 403) {
         adminForbidden && (adminForbidden.value = true)
         users.value = []
@@ -110,7 +120,7 @@ export function useAttendanceAdminUsers({
         return
       }
       const data = await readJson(response)
-      if (!isSessionCurrent()) return
+      if (!current()) return
       if (!response.ok || data?.ok !== true) {
         throw new Error(String((data?.error as Record<string, unknown> | undefined)?.message || tr('Failed to load users', '加载用户失败')))
       }
@@ -125,12 +135,12 @@ export function useAttendanceAdminUsers({
         ))
         : []
     } catch (error: unknown) {
-      if (!isSessionCurrent()) return
+      if (!current()) return
       statusMessage.value = error instanceof Error && error.message
         ? error.message
         : tr('Failed to load users', '加载用户失败')
     } finally {
-      if (isSessionCurrent()) loading.value = false
+      if (current()) loading.value = false
     }
   }
 
