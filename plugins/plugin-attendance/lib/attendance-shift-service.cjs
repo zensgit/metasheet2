@@ -652,7 +652,7 @@ function createAttendanceShiftService(deps) {
    * legacy timing fields is rejected as ambiguous. A legacy-envelope create persists
    * a synthesized segment 0 so every new shift has segment rows.
    */
-  async function createShift(db, { orgId, input }) {
+  async function createShift(db, { orgId, input, actorId }) {
     const hasSegments = input.segments !== undefined && input.segments !== null
     const hasLegacyTiming = input.workStartTime !== undefined
       || input.workEndTime !== undefined
@@ -698,7 +698,7 @@ function createAttendanceShiftService(deps) {
     const shiftId = randomUUID()
     return db.transaction(async (trx) => {
       const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
-        ? await prepareTimezoneSourceChange(trx,{orgId}) : async () => {}
+        ? await prepareTimezoneSourceChange(trx,{orgId,businessEffectiveDate:input.businessEffectiveDate,sourceActorId:actorId}) : async () => {}
       const rows = await trx.query(
         `INSERT INTO attendance_shifts
          (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight,
@@ -747,7 +747,7 @@ function createAttendanceShiftService(deps) {
    *   - metadata: no segments and no timing fields — preserves segments and the
    *     stored envelope.
    */
-  async function updateShift(db, { orgId, shiftId, patch }) {
+  async function updateShift(db, { orgId, shiftId, patch, actorId }) {
     const hasSegments = patch.segments !== undefined && patch.segments !== null
     const hasEnvelopeTiming = patch.workStartTime !== undefined
       || patch.workEndTime !== undefined
@@ -764,7 +764,7 @@ function createAttendanceShiftService(deps) {
 
     return db.transaction(async (trx) => {
       const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
-        ? await prepareTimezoneSourceChange(trx,{orgId}) : async () => {}
+        ? await prepareTimezoneSourceChange(trx,{orgId,businessEffectiveDate:patch.businessEffectiveDate,sourceActorId:actorId}) : async () => {}
       const existingRows = await trx.query(
         'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2 FOR UPDATE',
         [shiftId, orgId],
@@ -1048,10 +1048,10 @@ function createAttendanceShiftService(deps) {
    * with zero writes for any durable blocker; historical evidence rows remain
    * stored untouched.
    */
-  async function deleteShift(db, { orgId, shiftId }) {
+  async function deleteShift(db, { orgId, shiftId, businessEffectiveDate, actorId }) {
     return db.transaction(async (trx) => {
       const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
-        ? await prepareTimezoneSourceChange(trx,{orgId}) : async () => {}
+        ? await prepareTimezoneSourceChange(trx,{orgId,businessEffectiveDate,sourceActorId:actorId}) : async () => {}
       const shiftRows = await trx.query(
         'SELECT id, name FROM attendance_shifts WHERE id = $1 AND org_id = $2 FOR UPDATE',
         [shiftId, orgId],

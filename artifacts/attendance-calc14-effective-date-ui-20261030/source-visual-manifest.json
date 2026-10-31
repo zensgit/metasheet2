@@ -1,0 +1,39 @@
+{
+  "state": "ACTUAL_SOURCE_COMPONENT_VISUAL_SLICE_ONLY",
+  "scope": "Only actual explicit-date SFC is this Draft; correction panels are another candidate.",
+  "sourceComponents": {
+    "targets": {
+      "file": "src/views/attendance/AttendanceCorrectionTargetsSection.vue",
+      "SHA256": "18a9a8649444b90597aa75e78f552f506fe73d5907bd4801c87205dbd2145b76"
+    },
+    "frozen": {
+      "file": "src/views/attendance/AttendanceFrozenCorrectionTargets.vue",
+      "SHA256": "94905914cc3d17bfa6b5707111bcab0202b365a5bf494480725e8f2e6b9fa099"
+    },
+    "effectiveDate": {
+      "file": "src/views/attendance/AttendanceBusinessEffectiveDate.vue",
+      "SHA256": "533e277eeb0b5e226498d5dab1c0fa15e2d069bdaa10b0394fafba3e25831050"
+    },
+    "contract": {
+      "file": "src/views/attendance/attendanceCorrectionTargets.ts",
+      "SHA256": "89987ee2bff27f78cda778cebb845314006e38275288e3b01869a609579fec32"
+    },
+    "tokens": {
+      "file": "src/styles/tokens.css",
+      "SHA256": "22bb69698344e8fb0d63df8ae745681f1bd2cb951275d646b42028437b68c1c5"
+    }
+  },
+  "screenshots": [
+    {
+      "file": "03-frozen-reference-B-explicit-blank-date.png",
+      "SHA256": "e135fcb6c4dcd5c28ffc732648856761e9ea364f2dd580b783ce86f3594af4bd",
+      "bytes": 139635
+    }
+  ],
+  "beforeAfterSourcePinsMatch": true,
+  "pageErrors": 0,
+  "consoleErrors": 0,
+  "browserCleanupComplete": true,
+  "fullApplicationAuthNativePopupTargetAcceptance": false,
+  "productSourceEditsFromCapture": false
+}

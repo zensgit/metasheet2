@@ -39,6 +39,8 @@ paths:
         that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED
         with no configuration or assignment change. Omission retains legacy unconditional save behavior.
         A no-op save retains revision and timestamps.
+        The optional businessEffectiveDate follows the existing W7 non-OFF actual-source-change requirement;
+        OFF omissions preserve legacy payloads. Ordinary writes cannot grant historical authorization.
       security: [ { bearerAuth: [] } ]
       parameters:
         - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
@@ -64,11 +66,16 @@ paths:
         '404': { description: Group or shift not found in authenticated organization }
         '409': { description: ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry }
         '503': { description: Attendance tables unavailable }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/groups/{groupId}/fixed-schedule/config/update:
     x-plugin: plugin-attendance
     post:
       summary: Save fixed schedule desired configuration through the POST update alias
-      description: Uses the identical handler, authorization, validation, revision checks and response as PUT config.
+      description: >-
+        Uses the identical handler, authorization, validation, revision checks and response as PUT config.
+        Optional businessEffectiveDate follows the existing W7 non-OFF actual-source-change requirement;
+        OFF omissions preserve legacy payloads. Ordinary writes cannot grant historical authorization.
       security: [ { bearerAuth: [] } ]
       parameters:
         - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
@@ -94,6 +101,86 @@ paths:
         '404': { description: Group or shift not found in authenticated organization }
         '409': { description: ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry }
         '503': { description: Attendance tables unavailable }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
+  /api/attendance/groups/{id}/fixed-schedule/apply:
+    x-plugin: plugin-attendance
+    post:
+      summary: Apply managed fixed schedule assignments
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceFixedScheduleMaterialize' }
+      responses:
+        '201':
+          description: Existing fixed schedule plan with created assignments and applied=true.
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission. }
+        '404': { description: Group or shift not found in the authenticated organization. }
+        '409': { description: Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT. }
+        '422': { description: Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+        '503': { description: Existing attendance source, runtime or storage unavailable. }
+  /api/attendance/groups/{id}/fixed-schedule/rebuild:
+    x-plugin: plugin-attendance
+    post:
+      summary: Rebuild managed fixed schedule assignments
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceFixedScheduleMaterialize' }
+      responses:
+        '200':
+          description: Existing fixed schedule plan with created/deactivated assignments and rebuilt=true.
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission. }
+        '404': { description: Group or shift not found in the authenticated organization. }
+        '409': { description: Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT. }
+        '422': { description: Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+        '503': { description: Existing attendance source, runtime or storage unavailable. }
+  /api/attendance/groups/{id}/fixed-schedule/clear:
+    x-plugin: plugin-attendance
+    post:
+      summary: Clear managed fixed schedule assignments
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceFixedScheduleClear' }
+      responses:
+        '200':
+          description: Existing producer identity, deactivated assignments and cleared=true.
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission. }
+        '404': { description: Group or shift not found in the authenticated organization. }
+        '409': { description: Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT. }
+        '422': { description: Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+        '503': { description: Existing attendance source, runtime or storage unavailable. }
   /api/attendance/effective-calendar:
     x-plugin: plugin-attendance
     get:
@@ -1423,6 +1510,12 @@ paths:
     x-plugin: plugin-attendance
     get:
       summary: Get default attendance rule
+      description: >-
+        Optional data.capabilities.businessEffectiveDateRequired is exactly true only for active existing
+        W7 states including suspended; then data.orgId equals the authenticated route organization.
+        OFF returns the existing default-rule response unchanged and omits the new field.
+        This is advisory source-date metadata; existing capabilities and authorization are preserved.
+        Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
@@ -1440,8 +1533,13 @@ paths:
                   data: { $ref: '#/components/schemas/AttendanceRule' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { description: ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure. }
     put:
       summary: Update default attendance rule
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -1450,6 +1548,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name: { type: string }
                 timezone: { type: string }
                 workStartTime: { type: string }
@@ -1487,10 +1586,19 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/shifts:
     x-plugin: plugin-attendance
     get:
       summary: List attendance shifts
+      description: >-
+        Each returned item.orgId equals the authenticated route organization.
+        Optional item.capabilities.businessEffectiveDateRequired is exactly true only for active existing
+        W7 states including suspended. OFF omits the new field and preserves the existing item and capabilities.
+        This is advisory source-date metadata; existing authorization is preserved.
+        Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
@@ -1522,8 +1630,13 @@ paths:
                       pageSize: { type: integer }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { description: ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure. }
     post:
       summary: Create attendance shift
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -1533,6 +1646,7 @@ paths:
               type: object
               additionalProperties: false
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name:
                   type: string
                   minLength: 1
@@ -1595,6 +1709,8 @@ paths:
             ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex
             rejection after request-shape validation, including multi-segment
             flex or core-hours coverage failure).
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -1620,6 +1736,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     put:
       summary: Update attendance shift
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1634,6 +1754,7 @@ paths:
               type: object
               additionalProperties: false
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name:
                   type: string
                   minLength: 1
@@ -1693,12 +1814,24 @@ paths:
             including multi-segment flex or core-hours coverage failure.
     delete:
       summary: Delete attendance shift
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -1722,6 +1855,8 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Shift not found
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/assignments:
     x-plugin: plugin-attendance
     get:
@@ -1770,6 +1905,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       summary: Create attendance shift assignment
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -1778,6 +1917,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 userId: { type: string }
                 shiftId: { type: string }
                 slotIndex:
@@ -1846,10 +1986,17 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/assignments/{id}:
     x-plugin: plugin-attendance
     put:
       summary: Update attendance shift assignment
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1863,6 +2010,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 userId: { type: string }
                 shiftId: { type: string }
                 slotIndex:
@@ -1900,14 +2048,28 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
     delete:
       summary: Delete attendance shift assignment
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -1923,6 +2085,9 @@ paths:
                       id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/holidays:
     x-plugin: plugin-attendance
     get:
@@ -1958,6 +2123,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       summary: Create attendance holiday
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -1966,6 +2135,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 date: { type: string, format: date }
                 name: { type: string, nullable: true }
                 type:
@@ -1987,6 +2157,9 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/holidays/{id}:
     x-plugin: plugin-attendance
     get:
@@ -2012,6 +2185,10 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update attendance holiday
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -2025,6 +2202,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 date: { type: string, format: date }
                 name: { type: string, nullable: true }
                 type:
@@ -2045,14 +2223,28 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
     delete:
       summary: Delete attendance holiday
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -2068,6 +2260,9 @@ paths:
                       id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/timezone-context/me:
     x-plugin: plugin-attendance
     get:
@@ -2546,6 +2741,16 @@ paths:
   /api/attendance-admin/calculation-group-memberships/transition:
     post:
       summary: Transition a user to a calculation group on an inclusive effective date
+      description: >-
+        Optional businessEffectiveDate is a source-history business date, independent of effectiveOn,
+        the membership timeline start. It is never inferred from effectiveOn or recording time.
+        OFF ignores it; an actual source change in an existing non-OFF W7 state requires it.
+        Completed replay and unchanged transitions retain their existing handling without a new source version.
+        Past ordinary dates return 403 ATTENDANCE_CALC14_HISTORICAL_AUTHORIZATION_REQUIRED;
+        source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.
+        Same-day source/date conflicts return 409 ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT;
+        immutable-source conflicts return 409 ATTENDANCE_CALC14_SOURCE_IMMUTABLE.
+        Errors are values-free; existing authorization remains in force and no historical entry route is added.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -2558,6 +2763,8 @@ paths:
                 userId: { type: string }
                 targetGroupId: { type: string, format: uuid }
                 effectiveOn: { type: string, format: date }
+                businessEffectiveDate:
+                  $ref: '#/components/schemas/AttendanceBusinessEffectiveDate'
                 reason: { type: string, minLength: 1, maxLength: 1000 }
                 correlationId: { type: string, minLength: 1, maxLength: 128 }
               required: [orgId, userId, targetGroupId, effectiveOn, reason]
@@ -2590,7 +2797,11 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422':
-          description: Target user is not active in the requested organization
+          description: >-
+            Target user is not active in the requested organization, or
+            ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED, ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID,
+            or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. Source-date requirement applies only
+            to actual non-OFF source changes, not completed replay or unchanged transitions.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -2604,6 +2815,12 @@ paths:
     x-plugin: plugin-attendance
     get:
       summary: List attendance groups
+      description: >-
+        Each returned item.orgId equals the authenticated route organization.
+        Optional item.capabilities.businessEffectiveDateRequired is exactly true only for active existing
+        W7 states including suspended. OFF omits the new field and preserves the existing item and capabilities.
+        This is advisory source-date metadata; existing authorization is preserved.
+        Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
@@ -2626,8 +2843,13 @@ paths:
                         items: { $ref: '#/components/schemas/AttendanceGroup' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { description: ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure. }
     post:
       summary: Create attendance group
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -2636,6 +2858,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name: { type: string }
                 code: { type: string }
                 timezone: { type: string }
@@ -2660,6 +2883,8 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/groups/{id}:
     x-plugin: plugin-attendance
     get:
@@ -2685,6 +2910,10 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update attendance group
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -2698,6 +2927,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name: { type: string }
                 code: { type: string }
                 timezone: { type: string }
@@ -2723,14 +2953,27 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
     delete:
       summary: Delete attendance group
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -2747,6 +2990,9 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/groups/{id}/members:
     x-plugin: plugin-attendance
     get:
@@ -2786,6 +3032,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       summary: Add attendance group members
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -2799,6 +3049,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 userId: { type: string }
                 userIds:
                   type: array
@@ -2881,10 +3132,17 @@ paths:
                               items:
                                 type: integer
                                 minimum: 0
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/groups/{id}/members/{userId}:
     x-plugin: plugin-attendance
     delete:
       summary: Remove an attendance group member
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -2895,6 +3153,14 @@ paths:
           name: userId
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -2911,6 +3177,9 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/leave-types:
     x-plugin: plugin-attendance
     get:
@@ -3597,6 +3866,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       summary: Create rotation rule
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -3605,6 +3878,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name: { type: string }
                 timezone: { type: string }
                 shiftSequence:
@@ -3672,6 +3946,9 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/rotation-rules/{id}:
     x-plugin: plugin-attendance
     get:
@@ -3709,6 +3986,10 @@ paths:
                       message: { type: string }
     put:
       summary: Update rotation rule
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -3722,6 +4003,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name: { type: string }
                 timezone: { type: string }
                 shiftSequence:
@@ -3746,14 +4028,28 @@ paths:
                   data: { $ref: '#/components/schemas/AttendanceRotationRule' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
     delete:
       summary: Delete rotation rule
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -3769,6 +4065,9 @@ paths:
                       id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/rotation-assignments:
     x-plugin: plugin-attendance
     get:
@@ -3806,6 +4105,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       summary: Create rotation assignment
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -3814,6 +4117,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 userId: { type: string }
                 rotationRuleId: { type: string }
                 startDate: { type: string, format: date }
@@ -3873,10 +4177,17 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
+
   /api/attendance/rotation-assignments/{id}:
     x-plugin: plugin-attendance
     put:
       summary: Update rotation assignment
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -3890,6 +4201,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 userId: { type: string }
                 rotationRuleId: { type: string }
                 startDate: { type: string, format: date }
@@ -3912,14 +4224,28 @@ paths:
                       rotation: { $ref: '#/components/schemas/AttendanceRotationRule' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
     delete:
       summary: Delete rotation assignment
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -3935,6 +4261,8 @@ paths:
                       id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
 
   /api/attendance/rule-sets:
     x-plugin: plugin-attendance
@@ -3973,6 +4301,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       summary: Create attendance rule set
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -3981,6 +4313,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name: { type: string }
                 description: { type: string, nullable: true }
                 version: { type: integer }
@@ -4044,6 +4377,8 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
 
   /api/attendance/rule-sets/{id}:
     x-plugin: plugin-attendance
@@ -4071,6 +4406,10 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update attendance rule set
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -4084,6 +4423,7 @@ paths:
             schema:
               type: object
               properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
                 name: { type: string }
                 description: { type: string, nullable: true }
                 version: { type: integer }
@@ -4104,14 +4444,28 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
     delete:
       summary: Delete attendance rule set
+      description: >-
+        businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual
+        source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor,
+        organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessEffectiveDate: { $ref: '#/components/schemas/AttendanceBusinessEffectiveDate' }
       responses:
         '200':
           description: OK
@@ -4127,6 +4481,8 @@ paths:
                       id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. }
+        '422': { description: ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. }
 
   /api/attendance/rule-sets/template:
     x-plugin: plugin-attendance

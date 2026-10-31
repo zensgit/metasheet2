@@ -180,6 +180,12 @@ async function createHarness(
           effectiveState: 'legacy',
           referenceSegments: false,
         }),
+        // Match the real host port for the non-rollout default org in this
+        // harness (src/index.ts). No other org or unreadable posture is modeled.
+        resolveAttendanceW7GroupArmSelectionV1: async (_trx: unknown, orgId: string) => {
+          expect(orgId).toBe('default')
+          return { effectiveState: 'off', selectsGroupArm: false }
+        },
         createRequestOperationBoundary: ({ adapters }: { adapters: Record<string, any> }) => ({
           execute: async (input: Record<string, any>) => db.transaction(async (trx: any) => {
             const operation = {

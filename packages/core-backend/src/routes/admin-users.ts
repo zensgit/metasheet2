@@ -15,6 +15,10 @@ import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
 import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../attendance/attendance-timezone-runtime-locks'
+import {
+  attendanceCalc14SourceWriteErrorV1,
+  prepareAttendanceCalc14SourceWriteContextV1,
+} from '../attendance/attendance-calc14-source-write-context'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
@@ -411,6 +415,7 @@ type CreateUserRequestBody = {
   attendanceGroupId?: string
   defaultShiftId?: string
   defaultShiftStartDate?: string
+  businessEffectiveDate?: string
   name?: string
   password?: string
   role?: string
@@ -4178,12 +4183,18 @@ export function adminUsersRouter(): Router {
       // (not a second/competing one — every write below moved from `query()` to `client.query()`
       // inside this one call).
       await transaction(async (client) => {
+        let flushSourceHistory = async (): Promise<void> => {}
         if (attendanceOrgId && attendanceOnboarding && (cleanAttendanceGroupId || cleanDefaultShiftId)) {
           // Only a new subject is admitted here. Serialize its source writes
           // before shift/user/role locks; no existing subject is reassigned.
           await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
             buildAttendanceTimezoneRuntimeOrgLockKeyV1(attendanceOrgId),
           ])
+          flushSourceHistory = await prepareAttendanceCalc14SourceWriteContextV1(client, {
+            orgId: attendanceOrgId,
+            actorId: adminUserId,
+            businessEffectiveDate: body.businessEffectiveDate,
+          })
         }
         if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
           // W3 safety erratum: this core route is a reference producer outside the
@@ -4359,6 +4370,7 @@ export function adminUsersRouter(): Router {
             assignmentId: (assignmentResult.rows as Array<{ assignmentId: string }>)[0]?.assignmentId ?? assignmentId,
           }
         }
+        await flushSourceHistory()
       })
 
       // Cache invalidation is a post-commit side effect, not part of the atomic write set.
@@ -4428,6 +4440,10 @@ export function adminUsersRouter(): Router {
         attendanceOnboarding,
       })
     } catch (error) {
+      const sourceWriteError = attendanceCalc14SourceWriteErrorV1(error)
+      if (sourceWriteError) {
+        return jsonError(res, sourceWriteError.status, sourceWriteError.code, sourceWriteError.message)
+      }
       if (error instanceof AttendanceShiftReferenceUnavailableError) {
         return jsonError(res, error.status, error.code, error.message, error.details)
       }

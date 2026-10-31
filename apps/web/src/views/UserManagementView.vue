@@ -100,6 +100,21 @@
           aria-label="默认班次生效日期（可选）"
           :disabled="!createForm.defaultShiftId"
         />
+        <div v-if="createAttendanceDateAvailable" data-create-user-effective-date-field>
+          <label for="create-user-attendance-effective-date">生效日期（可选）</label>
+          <input
+            id="create-user-attendance-effective-date"
+            v-model="createAttendanceBusinessEffectiveDate"
+            class="user-admin__search"
+            type="date"
+            aria-describedby="create-user-attendance-effective-date-hint"
+            :disabled="busy"
+            data-create-user-effective-date
+          />
+          <p id="create-user-attendance-effective-date-hint" class="user-admin__hint">
+            用于本次考勤分配变更；历史日期需单独核验，已冻结结果不受影响。
+          </p>
+        </div>
         <div class="user-admin__org-field" data-create-user-org-field>
           <select
             v-model="createForm.attendanceOrgId"
@@ -974,6 +989,7 @@ import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
+import { businessEffectiveDateError, withBusinessEffectiveDate } from './attendance/attendanceBusinessEffectiveDate'
 import {
   accessReadStillCurrent,
   describeRoleMembershipWrite,
@@ -1185,6 +1201,7 @@ type AttendanceGroupOption = {
   code: string
   /** The org the group belongs to, as the group list reports it; '' when the payload has none. */
   orgId: string
+  businessEffectiveDateRequired: boolean
 }
 
 type AttendanceShiftOption = {
@@ -1194,6 +1211,7 @@ type AttendanceShiftOption = {
   workEndTime: string
   /** The org the shift belongs to, as the shift list reports it; '' when the payload has none. */
   orgId: string
+  businessEffectiveDateRequired: boolean
 }
 
 type AccessPreset = {
@@ -1364,6 +1382,7 @@ const profileDraftPosition = ref('')
 const profileDraftHireDate = ref('')
 const appliedUserNavigationKey = ref('')
 const createUserRuleHints = getCreateUserRuleHints('zh')
+const createAttendanceBusinessEffectiveDate = ref('')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -1383,6 +1402,22 @@ const createForm = ref<CreateUserForm>({
   roleId: '',
   isActive: true,
 })
+const createAttendanceDateSources = computed(() => {
+  const sources: Array<AttendanceGroupOption | AttendanceShiftOption | undefined> = []
+  if (createForm.value.attendanceGroupId) sources.push(attendanceGroups.value.find(item => item.id === createForm.value.attendanceGroupId))
+  if (createForm.value.defaultShiftId) sources.push(attendanceShifts.value.find(item => item.id === createForm.value.defaultShiftId))
+  return sources
+})
+const createAttendanceDateAvailable = computed(() => {
+  const [first] = createAttendanceDateSources.value
+  if (!first || !first.orgId.trim() || !first.businessEffectiveDateRequired) return false
+  return createAttendanceDateSources.value.every(item => item?.businessEffectiveDateRequired === true && item.orgId === first.orgId)
+    && (!createForm.value.attendanceOrgId || createForm.value.attendanceOrgId === first.orgId)
+})
+watch(() => JSON.stringify([
+  createForm.value.attendanceOrgId, createForm.value.attendanceGroupId, createForm.value.defaultShiftId,
+  createAttendanceDateSources.value.map(item => item ? [item.id, item.orgId, item.businessEffectiveDateRequired] : null),
+]), () => { createAttendanceBusinessEffectiveDate.value = '' }, { flush: 'sync' })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
 const attendanceOrgHint = computed(() => {
   if (attendanceOrgOptionsFailed.value) return '组织列表暂不可用；不指定组织时不会写入组织归属。'
@@ -2249,6 +2284,12 @@ function firstOptionalString(...values: unknown[]): string {
   return ''
 }
 
+function hasSourceDateCapability(item: Record<string, unknown>): boolean {
+  const capabilities = item.capabilities
+  return capabilities !== null && typeof capabilities === 'object' && !Array.isArray(capabilities)
+    && 'businessEffectiveDateRequired' in capabilities && capabilities.businessEffectiveDateRequired === true
+}
+
 function normalizeAttendanceGroupOptions(payload: Record<string, unknown>): AttendanceGroupOption[] {
   const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
   const items = Array.isArray(data?.items) ? data.items : []
@@ -2258,6 +2299,7 @@ function normalizeAttendanceGroupOptions(payload: Record<string, unknown>): Atte
       name: firstOptionalString(item.name, item.code, item.id),
       code: readOptionalString(item.code),
       orgId: firstOptionalString(item.orgId, item.org_id),
+      businessEffectiveDateRequired: hasSourceDateCapability(item),
     }))
     .filter((item) => item.id.length > 0 && item.name.length > 0)
 }
@@ -2272,6 +2314,7 @@ function normalizeAttendanceShiftOptions(payload: Record<string, unknown>): Atte
       workStartTime: firstOptionalString(item.workStartTime, item.work_start_time),
       workEndTime: firstOptionalString(item.workEndTime, item.work_end_time),
       orgId: firstOptionalString(item.orgId, item.org_id),
+      businessEffectiveDateRequired: hasSourceDateCapability(item),
     }))
     .filter((item) => item.id.length > 0 && item.name.length > 0)
 }
@@ -2513,6 +2556,7 @@ async function fetchUserAccessOrThrow(userId: string): Promise<UserAccess> {
 }
 
 async function selectUser(userId: string): Promise<void> {
+  createAttendanceBusinessEffectiveDate.value = ''
   const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
   userAccessReadGeneration.value = generation
   selectedUserId.value = userId
@@ -2918,7 +2962,7 @@ async function createUser(): Promise<void> {
   try {
     const response = await apiFetch('/api/admin/users', {
       method: 'POST',
-      body: JSON.stringify({
+      body: JSON.stringify(withBusinessEffectiveDate({
         name: createForm.value.name,
         email: createForm.value.email,
         username: createForm.value.username || undefined,
@@ -2936,11 +2980,16 @@ async function createUser(): Promise<void> {
         role: createForm.value.role || undefined,
         roleId: createForm.value.roleId || undefined,
         isActive: createForm.value.isActive,
-      }),
+      }, createAttendanceDateAvailable.value ? createAttendanceBusinessEffectiveDate.value : '')),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       const errorPayload = payload.error as Record<string, unknown> | undefined
+      const code = errorPayload?.code
+      if (typeof code === 'string' && code.startsWith('ATTENDANCE_CALC14_')) {
+        throw new Error(businessEffectiveDateError(code, (_en, zh) => zh)
+          ?? '考勤生效日期未能确认，请核对组织与考勤配置后重试。')
+      }
       // Known validation codes render Chinese copy; anything else keeps the server message.
       const localizedError = describeCreateUserError(errorPayload, 'zh')
       if (localizedError) throw new Error(localizedError)
@@ -2955,6 +3004,7 @@ async function createUser(): Promise<void> {
     createdOnboarding.value = ((payload.data as Record<string, unknown>).onboarding as OnboardingPacket | undefined) || null
     createdInviteMessage.value = String(createdOnboarding.value?.inviteMessage || '')
     createdAttendanceOnboardingTarget.value = buildAttendanceOnboardingTarget(access.value.user)
+    createAttendanceBusinessEffectiveDate.value = ''
     createForm.value = {
       name: '',
       email: '',

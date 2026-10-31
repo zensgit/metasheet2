@@ -1984,6 +1984,15 @@ export interface PluginServices {
      * W7-1a's three hard throws for every non-allowlisted org, making a corrupt
      * or ambiguous posture row indistinguishable from an unconfigured one.
      */
+    isAttendanceCalc14BusinessDateV1(value: unknown): value is string
+    assertAttendanceCalc14OrdinaryBusinessEffectiveDateV1(value: unknown, today: string): string
+    readAttendanceCalc14UserPublicationV1(
+      trx: DatabaseTransaction, input: {orgId:string;userId:string;workDate:string},
+    ): Promise<import('../attendance/attendance-calc14-source-history').AttendanceCalc14UserPublicationV1 | null>
+    readAttendanceCalc14GroupSourcesV1(
+      trx: DatabaseTransaction,
+      input: { orgId: string; groupId: string; workDate: string },
+    ): Promise<import('../attendance/attendance-calc14-source-history').AttendanceCalc14SourceInputsV1 | null>
     resolveAttendanceW7GroupArmSelectionV1(
       trx: DatabaseTransaction,
       orgId: string,
