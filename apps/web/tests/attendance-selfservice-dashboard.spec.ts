@@ -3887,4 +3887,156 @@ describe('Attendance self-service dashboard', () => {
     expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
     expect(container!.textContent).toContain('Request submitted.')
   })
+
+  describe.each(['shared', 'dedicated'] as const)('assignment neutral labels / %s swap', (consumer) => {
+    const userIds = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+    ]
+    type ResolvedUser = { id: string; name: string | null; email: string; is_active?: boolean }
+    const failures = ['missing', 'legacy missing', 'nameless', '403', '404', '500', 'network'] as const
+
+    function installFixture(outcome: string, users: ResolvedUser[] = []) {
+      const ids = outcome === 'legacy missing'
+        ? ['legacy-swap-self', 'legacy-swap-a', 'legacy-swap-b']
+        : userIds
+      authMockState.currentUserId = ids[0]!
+      const { createBodies } = installShiftSwapSelfServiceMock({ actorUserId: ids[0] })
+      const fallback = vi.mocked(apiFetch).getMockImplementation()!
+      const items = ids.map((userId, index) => ({
+        assignment: {
+          id: 'neutral-swap-' + index, userId, shiftId: 'neutral-shift',
+          startDate: '2026-04-15', endDate: '2026-04-15', isActive: true,
+          publishStatus: 'published', assignmentKind: 'regular', producerType: null, slotIndex: 0,
+        },
+        shift: {
+          id: 'neutral-shift', name: 'Same shift', timezone: 'Asia/Shanghai',
+          workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10,
+          earlyGraceMinutes: 5, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5],
+        },
+      }))
+      const resolveCalls: Array<{ method: string; body: Record<string, unknown> }> = []
+      const writes: Array<{ url: string; method: string }> = []
+      vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+        const url = input
+        const method = String(init?.method || 'GET').toUpperCase()
+        if (url === '/api/attendance-admin/users/batch/resolve') {
+          const body = JSON.parse(String(init?.body || '{}')) as { userIds: string[] }
+          resolveCalls.push({ method, body })
+          if (outcome === 'network') throw new Error('SYNTHETIC_RESOLVE_FAILURE')
+          if (['403', '404', '500'].includes(outcome)) {
+            return jsonResponse(Number(outcome), { ok: false, error: { code: 'SYNTHETIC_RESOLVE_FAILURE' } })
+          }
+          const resolved = outcome === 'nameless'
+            ? ids.map((id, index) => ({ id, name: index ? null : '  ', email: index ? '' : '  ' }))
+            : users
+          return jsonResponse(200, { ok: true, data: {
+            items: [
+              ...resolved.filter(user => body.userIds.includes(user.id)),
+              { id: '44444444-4444-4444-8444-444444444444', name: 'FOREIGN_LABEL_CONTROL', email: '' },
+            ],
+            missingUserIds: body.userIds.filter(id => !resolved.some(user => user.id === id)),
+          } })
+        }
+        if (method !== 'GET') writes.push({ url, method })
+        if (url.startsWith('/api/attendance/assignments?')) {
+          return jsonResponse(200, { ok: true, data: { items, total: items.length } })
+        }
+        return fallback(input, init)
+      })
+      return { userIds: ids, items, createBodies, resolveCalls, writes }
+    }
+
+    async function mountFixture() {
+      const props = { mode: 'overview' as const }
+      app = createApp(AttendanceView, props)
+      app.mount(container!)
+      await flushUi()
+      if (consumer === 'shared') {
+        setFormValue(container!, '#attendance-request-type', 'shift_swap')
+      } else {
+        container!.querySelector<HTMLButtonElement>('[data-selfservice-action="shift-swap"]')!.click()
+      }
+      await flushUi()
+      const consumerRoot = consumer === 'shared'
+        ? container!
+        : container!.querySelector<HTMLElement>('[data-attendance-shift-swap-request-card]')!
+      expect(consumerRoot).toBeTruthy()
+      const requester = consumerRoot.querySelector<HTMLSelectElement>(
+        consumer === 'shared' ? '#attendance-shift-swap-requester-assignment' : '[data-shift-swap-card-requester]',
+      )!
+      const counterparty = consumerRoot.querySelector<HTMLSelectElement>(
+        consumer === 'shared' ? '#attendance-shift-swap-counterparty-assignment' : '[data-shift-swap-card-counterparty]',
+      )!
+      expect(requester).toBeTruthy()
+      expect(counterparty).toBeTruthy()
+      await vi.waitFor(() => {
+        expect(Array.from(requester.options).map(option => option.value)).toEqual(['', 'neutral-swap-0'])
+        expect(Array.from(counterparty.options).map(option => option.value)).toEqual(['', 'neutral-swap-1', 'neutral-swap-2'])
+      })
+      return { requester, counterparty }
+    }
+
+    it.each([
+      ...failures.map(outcome => ({ outcome, locale: 'en' as const })),
+      { outcome: 'missing', locale: 'zh-CN' as const },
+    ])('keeps option identities neutral and distinct for $outcome / $locale', async ({ outcome, locale }) => {
+      const fixture = installFixture(outcome)
+      useLocale().setLocale(locale)
+      const { requester, counterparty } = await mountFixture()
+      const neutral = locale === 'en' ? 'Unknown member' : '未知成员'
+      const technical = locale === 'en' ? 'User ID' : '用户 ID'
+      const slot = locale === 'en' ? 'Slot 0' : '槽位 0'
+      const text = fixture.userIds.map(id => neutral + ' (' + technical + ': ' + id + ') · Same shift · 2026-04-15 · ' + slot)
+      expect(requester.options[1]!.textContent?.trim()).toBe(text[0])
+      expect(Array.from(counterparty.options).slice(1).map(option => option.textContent?.trim())).toEqual(text.slice(1))
+      expect(counterparty.options[1]!.textContent).not.toBe(counterparty.options[2]!.textContent)
+      expect((requester.textContent || '') + (counterparty.textContent || '')).not.toMatch(/Deleted member|已删除成员|FOREIGN_LABEL_CONTROL/)
+      expect(fixture.resolveCalls.length).toBeGreaterThan(0)
+      for (const call of fixture.resolveCalls) expect(call).toEqual({ method: 'POST', body: { userIds: fixture.userIds, orgId: 'default' } })
+      expect(vi.mocked(apiFetch).mock.calls.some(([input]) => String(input).startsWith('/api/admin/users'))).toBe(false)
+      expect(fixture.writes).toEqual([])
+      expect(fixture.createBodies).toEqual([])
+    })
+
+    it.each(['en', 'zh-CN'] as const)('preserves resolved name email and authorized inactive output / %s', async (locale) => {
+      const fixture = installFixture('resolved', [
+        { id: userIds[0]!, name: '  Valid Name  ', email: 'named@example.invalid' },
+        { id: userIds[1]!, name: null, email: '  fallback@example.invalid  ' },
+        { id: userIds[2]!, name: '  Inactive Name  ', email: 'inactive@example.invalid', is_active: false },
+      ])
+      useLocale().setLocale(locale)
+      const { requester, counterparty } = await mountFixture()
+      const suffix = ' · Same shift · 2026-04-15 · ' + (locale === 'en' ? 'Slot 0' : '槽位 0')
+      expect(requester.options[1]!.textContent?.trim()).toBe('Valid Name' + suffix)
+      expect(Array.from(counterparty.options).slice(1).map(option => option.textContent?.trim())).toEqual([
+        'fallback@example.invalid' + suffix, 'Inactive Name' + suffix,
+      ])
+      expect(fixture.writes).toEqual([])
+    })
+
+    it('selects the second colliding unresolved coworker with the original swap payload', async () => {
+      const fixture = installFixture('missing')
+      const { requester, counterparty } = await mountFixture()
+      expect(counterparty.options[1]!.textContent).not.toBe(counterparty.options[2]!.textContent)
+      requester.value = 'neutral-swap-0'
+      requester.dispatchEvent(new Event('change', { bubbles: true }))
+      counterparty.value = 'neutral-swap-2'
+      counterparty.dispatchEvent(new Event('change', { bubbles: true }))
+      setFormValue(container!, consumer === 'shared' ? '#attendance-request-reason' : '[data-shift-swap-card-reason]', 'synthetic swap')
+      await flushUi(3)
+      if (consumer === 'shared') {
+        findButton(container!, 'Submit request').click()
+      } else {
+        container!.querySelector<HTMLButtonElement>('[data-shift-swap-card-submit]')!.click()
+      }
+      await flushUi()
+      expect(fixture.createBodies).toEqual([{
+        requesterAssignmentId: 'neutral-swap-0', orgId: 'default',
+        counterpartyAssignmentId: 'neutral-swap-2', reason: 'synthetic swap',
+      }])
+      expect(fixture.writes).toEqual([{ url: '/api/attendance/shift-swap-requests', method: 'POST' }])
+    })
+  })
 })
