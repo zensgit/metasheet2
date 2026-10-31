@@ -63,7 +63,14 @@ describe('publishApprovalCountsForUsers dual-publish wiring (B-2, todo-center-de
     mockedApprovalPublish.mockClear()
     mockedTodoPublish.mockClear()
 
-    await publishApprovalCountsForUsers(undefined, [{ userId: 'user-a' }, { userId: 'user-b' }], 'decide')
+    await publishApprovalCountsForUsers(
+      undefined,
+      [
+        { userId: 'user-a', roles: ['r'] },
+        { userId: 'user-b', roles: ['r'] },
+      ],
+      'decide',
+    )
 
     expect(mockedTodoPublish).toHaveBeenCalledTimes(2)
     for (const call of mockedTodoPublish.mock.calls) expect(call[0].sources).toEqual(['approval'])
