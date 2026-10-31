@@ -1,8 +1,8 @@
 /**
  * The list page's title search box. The page sends what is left after the trim; the server applies
  * its own rule to it (`GET /api/tasks?q=`: a literal, case-insensitive substring of the title, at
- * most 100 code points, 422 otherwise). The input's limit counts UTF-16 units, so it never lets more
- * than that through.
+ * most 100 code points after normalization, 422 otherwise). The input's limit counts UTF-16 units; the
+ * server's answer decides, and the page shows its message when text is refused.
  */
 export const TASK_SEARCH_DEBOUNCE_MS = 300
 

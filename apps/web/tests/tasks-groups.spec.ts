@@ -2394,16 +2394,6 @@ describe('/task-lists/:id — answers that land after the page moved on', () => 
   })
 })
 
-// ---------------------------------------------------------------------------------------------
-// G2-core (design task-g2-core-design-20261011.md §4.1): the status filter and the assigned
-// view's board. The placements read is not filtered by status (its visible set is the assigned
-// view, open and done, numbered densely), so under 未完成 a placed completed task names a task that
-// is not a row. The board keeps it as a hidden entry: counted in every move's position, never
-// shown, named by a status line, and moves stay on. Without a filter (全部), or when the row read
-// was cut short by its page, the existing [fe-35] rule still holds moves off. The fake backend here
-// honours `status` the way the server does; the cells above keep the fake that ignores it.
-// ---------------------------------------------------------------------------------------------
-
 describe('/tasks — title search and the board', () => {
   async function typeSearch(el: HTMLElement, text: string): Promise<void> {
     const input = shown(el, 'tasks-search-input') as HTMLInputElement
@@ -2455,6 +2445,16 @@ describe('/tasks — title search and the board', () => {
     expect(userPlacements.filter((p) => p.groupId === 'tg_def').sort((a, b) => a.position - b.position).map((p) => p.taskId)).toEqual(['t6', 't5', 't2'])
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// G2-core (design task-g2-core-design-20261011.md §4.1): the status filter and the assigned
+// view's board. The placements read is not filtered by status (its visible set is the assigned
+// view, open and done, numbered densely), so under 未完成 a placed completed task names a task that
+// is not a row. The board keeps it as a hidden entry: counted in every move's position, never
+// shown, named by a status line, and moves stay on. Without a filter (全部), or when the row read
+// was cut short by its page, the existing [fe-35] rule still holds moves off. The fake backend here
+// honours `status` the way the server does; the cells above keep the fake that ignores it.
+// ---------------------------------------------------------------------------------------------
 
 describe('/tasks — the status filter and the board (G2-core)', () => {
   function clearStorage(): void {
