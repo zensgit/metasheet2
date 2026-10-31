@@ -163,6 +163,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       // getIntegrationRow
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
       // T2 freeze gate (migrated schema present, no active frozen transfer)
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] }) // to_regclass
       .mockResolvedValueOnce({ rows: [] }) // active frozen-transfer SELECT
       // reclaimStaleDirectorySyncRuns → nothing stale
@@ -183,6 +184,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
   it('carries the active run id so the caller can observe the run in flight', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -217,6 +219,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
     const requestedRunId = '22222222-2222-4222-8222-222222222222'
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -230,10 +233,10 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
 
     expect(error).toBeInstanceOf(DirectorySyncRunReplayError)
     expect((error as DirectorySyncRunReplayError).runId).toBe(requestedRunId)
-    expect(pgMocks.query.mock.calls[4]?.[1]).toEqual(['dir-1', 'admin-1', 'manual', requestedRunId])
-    expect(String(pgMocks.query.mock.calls[5]?.[0])).toContain('WHERE id = $1')
-    expect(pgMocks.query.mock.calls[5]?.[1]).toEqual([requestedRunId, 'dir-1'])
-    expect(String(pgMocks.query.mock.calls[6]?.[0])).toContain("status = 'running'")
+    expect(pgMocks.query.mock.calls[5]?.[1]).toEqual(['dir-1', 'admin-1', 'manual', requestedRunId])
+    expect(String(pgMocks.query.mock.calls[6]?.[0])).toContain('WHERE id = $1')
+    expect(pgMocks.query.mock.calls[6]?.[1]).toEqual([requestedRunId, 'dir-1'])
+    expect(String(pgMocks.query.mock.calls[7]?.[0])).toContain("status = 'running'")
     expect(dingtalkMocks.fetchDingTalkAppAccessToken).not.toHaveBeenCalled()
     expect(dingtalkMocks.listDingTalkDepartments).not.toHaveBeenCalled()
   })
@@ -242,6 +245,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
     const requestedRunId = '33333333-3333-4333-8333-333333333333'
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -263,6 +267,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
       // T2 freeze gate: migrated schema present, no active freeze — both queries must
       // precede reclaim, which must precede claim (indexes below pin that order).
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'stale-run' }] }) // reclaim
@@ -271,16 +276,18 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
 
     await expect(syncDirectoryIntegration('dir-1', 'admin-1', 'manual')).rejects.toBeInstanceOf(DirectorySyncInProgressError)
 
+    // Handover schema probe precedes the existing transfer gate.
+    expect(String(pgMocks.query.mock.calls[1][0])).toContain("to_regclass('directory_handovers')")
     // Freeze-gate SQL shapes: to_regclass then active frozen-transfer SELECT.
-    expect(String(pgMocks.query.mock.calls[1][0])).toContain("to_regclass('provider_org_transfers')")
-    expect(String(pgMocks.query.mock.calls[2][0])).toContain('FROM provider_org_transfers')
-    expect(String(pgMocks.query.mock.calls[2][0])).toContain('freeze_source_sync')
+    expect(String(pgMocks.query.mock.calls[2][0])).toContain("to_regclass('provider_org_transfers')")
+    expect(String(pgMocks.query.mock.calls[3][0])).toContain('FROM provider_org_transfers')
+    expect(String(pgMocks.query.mock.calls[3][0])).toContain('freeze_source_sync')
 
-    const reclaimCall = pgMocks.query.mock.calls[3]
+    const reclaimCall = pgMocks.query.mock.calls[4]
     expect(String(reclaimCall[0])).toContain('UPDATE directory_sync_runs')
     expect(String(reclaimCall[0])).toContain("status = 'running'")
     // Reclaim strictly precedes the claim (and freeze-gate strictly precedes reclaim).
-    expect(String(pgMocks.query.mock.calls[4][0])).toContain('INSERT INTO directory_sync_runs')
+    expect(String(pgMocks.query.mock.calls[5][0])).toContain('INSERT INTO directory_sync_runs')
   })
 
   it('propagates a non-unique-violation insert error unchanged', async () => {
@@ -288,6 +295,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
       // Same migrated-schema freeze gate as the lease-conflict path above so this rejection
       // still lands on claim/INSERT rather than the freeze SELECT or reclaim.
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] }) // reclaim

@@ -2610,6 +2610,7 @@ jobs:
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/directory-org-transfer-source-freeze.db.test.ts \
+            tests/integration/directory-controlled-handover.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
