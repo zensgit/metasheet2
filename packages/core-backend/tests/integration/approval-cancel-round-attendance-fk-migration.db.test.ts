@@ -37,6 +37,12 @@
  * (memory: `feedback_positive_control_not_failclosed.md`) — three independent runs prove the
  * harness does not merely throw unconditionally.
  *
+ * 2026-10-28: the same file also covers the narrow NULL workflow_key backfill that runs before
+ * the precheck — attendance-linked shells are set to 'attendance.request', dangling references
+ * still abort, unlinked NULL keys are left alone, a zero-row database is a no-op, and a second
+ * up() does not write again. Those cases run in this file, which plugin-tests.yml already passes
+ * as a whole-file argument of the approval real-DB step.
+ *
  * NOT covered by this file: WI-0 lock-order census, WI-4 creation, WI-7/8 outlet guards, WI-8
  * seat guards, WI-12/13/14 redemption (separate sibling files per the taskbook split);
  * attendance-parity — NOT attempted on this branch (unchanged conclusion), but the REASON below
@@ -78,7 +84,10 @@ interface ScratchDbCtx {
   adminPool: Pool
   testPool: Pool
   testDb: Kysely<unknown>
+  notices: string[]
 }
+
+const BACKFILL_LOG_PREFIX = 'add_attendance_requests_approval_workflow_key: backfilled '
 
 async function setupPreMigrationDatabase(): Promise<ScratchDbCtx> {
   const scratchName = `ms2_atrfk_${randomUUID().replace(/-/g, '').slice(0, 20)}`
@@ -91,6 +100,12 @@ async function setupPreMigrationDatabase(): Promise<ScratchDbCtx> {
   const scratchUrl = new URL(dbUrl as string)
   scratchUrl.pathname = `/${scratchName}`
   const testPool = new Pool({ connectionString: scratchUrl.toString() })
+  const notices: string[] = []
+  testPool.on('connect', (client) => {
+    client.on('notice', (notice: { message?: string }) => {
+      if (typeof notice.message === 'string') notices.push(notice.message)
+    })
+  })
   const testDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: testPool }) })
 
   // Minimal pre-migration shape: only the columns this migration's own SQL reads/writes.
@@ -108,7 +123,52 @@ async function setupPreMigrationDatabase(): Promise<ScratchDbCtx> {
       approval_instance_id text
     )
   `.execute(testDb)
-  return { scratchName, adminPool, testPool, testDb }
+  return { scratchName, adminPool, testPool, testDb, notices }
+}
+
+async function withCapturedLogs(run: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = []
+  const original = console.log
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((part) => String(part)).join(' '))
+    original(...args)
+  }
+  try {
+    await run()
+  } finally {
+    console.log = original
+  }
+  return lines
+}
+
+function expectBackfillCount(lines: string[], notices: string[], count: number): void {
+  const line = `${BACKFILL_LOG_PREFIX}${count} approval_instances.workflow_key to attendance.request`
+  expect(lines.filter((entry) => entry === line)).toEqual([line])
+  expect(notices.filter((entry) => entry === line)).toEqual([line])
+}
+
+async function workflowKey(ctx: ScratchDbCtx, instanceId: string): Promise<string | null> {
+  const rows = await sql<{ workflow_key: string | null }>`
+    SELECT workflow_key FROM approval_instances WHERE id = ${instanceId}
+  `.execute(ctx.testDb)
+  return rows.rows[0]?.workflow_key ?? null
+}
+
+async function requestLink(ctx: ScratchDbCtx, requestId: string): Promise<{
+  approval_instance_id: string | null
+  approval_workflow_key: string | null
+}> {
+  const rows = await sql<{
+    approval_instance_id: string | null
+    approval_workflow_key: string | null
+  }>`
+    SELECT approval_instance_id, approval_workflow_key
+    FROM attendance_requests
+    WHERE id = ${requestId}
+  `.execute(ctx.testDb)
+  const row = rows.rows[0]
+  if (!row) throw new Error(`attendance request ${requestId} disappeared`)
+  return row
 }
 
 async function teardownScratchDatabase(ctx: ScratchDbCtx): Promise<void> {
@@ -172,6 +232,224 @@ describeIfDatabase('WI-3 Q1c attendance FK migration (§14.3 #10/#11): real-DB a
       expect(message).toContain('preflight failed')
       expect(message).toContain('1 attendance_requests row(s)')
       expect(message).toContain(danglingRequestId)
+      const link = await requestLink(ctx, danglingRequestId)
+      expect(link.approval_instance_id).toBe('no-such-approval-instance')
+      expect(link.approval_workflow_key).toBeNull()
+    } finally {
+      await teardownScratchDatabase(ctx)
+    }
+  })
+
+  it('backfill: NULL-key attendance-linked instance becomes attendance.request and migration succeeds', async () => {
+    const ctx = await setupPreMigrationDatabase()
+    try {
+      const shellId = randomUUID()
+      const keyedId = randomUUID()
+      const shellRequestId = randomUUID()
+      const keyedRequestId = randomUUID()
+      await sql`
+        INSERT INTO approval_instances (id, workflow_key) VALUES
+          (${shellId}, ${null}),
+          (${keyedId}, ${'custom.other'})
+      `.execute(ctx.testDb)
+      await sql`
+        INSERT INTO attendance_requests (id, approval_instance_id) VALUES
+          (${shellRequestId}, ${shellId}),
+          (${keyedRequestId}, ${keyedId})
+      `.execute(ctx.testDb)
+
+      const noticeStart = ctx.notices.length
+      const lines = await withCapturedLogs(() => up(ctx.testDb))
+      expectBackfillCount(lines, ctx.notices.slice(noticeStart), 1)
+
+      expect(await workflowKey(ctx, shellId)).toBe('attendance.request')
+      expect(await workflowKey(ctx, keyedId)).toBe('custom.other')
+      expect(await requestLink(ctx, shellRequestId)).toEqual({
+        approval_instance_id: shellId,
+        approval_workflow_key: 'attendance.request',
+      })
+      expect(await requestLink(ctx, keyedRequestId)).toEqual({
+        approval_instance_id: keyedId,
+        approval_workflow_key: 'custom.other',
+      })
+    } finally {
+      await teardownScratchDatabase(ctx)
+    }
+  })
+
+  it('backfill: platform source_system shell is backfilled; a comment row is not a conflict', async () => {
+    const ctx = await setupPreMigrationDatabase()
+    try {
+      await sql`ALTER TABLE approval_instances ADD COLUMN source_system text`.execute(ctx.testDb)
+      await sql`
+        CREATE TABLE approval_comments (
+          id text PRIMARY KEY,
+          instance_id text NOT NULL
+        )
+      `.execute(ctx.testDb)
+      const shellId = randomUUID()
+      const requestId = randomUUID()
+      await sql`
+        INSERT INTO approval_instances (id, workflow_key, source_system)
+        VALUES (${shellId}, ${null}, ${'platform'})
+      `.execute(ctx.testDb)
+      await sql`
+        INSERT INTO attendance_requests (id, approval_instance_id)
+        VALUES (${requestId}, ${shellId})
+      `.execute(ctx.testDb)
+      await sql`
+        INSERT INTO approval_comments (id, instance_id) VALUES (${randomUUID()}, ${shellId})
+      `.execute(ctx.testDb)
+
+      const noticeStart = ctx.notices.length
+      const lines = await withCapturedLogs(() => up(ctx.testDb))
+      expectBackfillCount(lines, ctx.notices.slice(noticeStart), 1)
+      expect(await workflowKey(ctx, shellId)).toBe('attendance.request')
+      expect((await requestLink(ctx, requestId)).approval_instance_id).toBe(shellId)
+    } finally {
+      await teardownScratchDatabase(ctx)
+    }
+  })
+
+  it('backfill: NULL-key instance not linked to attendance is untouched', async () => {
+    const ctx = await setupPreMigrationDatabase()
+    try {
+      const unlinkedId = randomUUID()
+      await sql`INSERT INTO approval_instances (id, workflow_key) VALUES (${unlinkedId}, ${null})`.execute(ctx.testDb)
+
+      const noticeStart = ctx.notices.length
+      const lines = await withCapturedLogs(() => up(ctx.testDb))
+      expectBackfillCount(lines, ctx.notices.slice(noticeStart), 0)
+      expect(await workflowKey(ctx, unlinkedId)).toBeNull()
+    } finally {
+      await teardownScratchDatabase(ctx)
+    }
+  })
+
+  it('backfill: zero attendance rows is a no-op and still installs the constraints', async () => {
+    const ctx = await setupPreMigrationDatabase()
+    try {
+      const noticeStart = ctx.notices.length
+      const lines = await withCapturedLogs(() => up(ctx.testDb))
+      expectBackfillCount(lines, ctx.notices.slice(noticeStart), 0)
+      const constraints = await sql<{ conname: string }>`
+        SELECT conname FROM pg_constraint
+        WHERE conname IN (
+          'uq_approval_instances_id_workflow_key',
+          'attendance_requests_instance_workflow_fkey',
+          'atr_instance_key_pair',
+          'atr_not_cancel_round'
+        )
+        ORDER BY conname
+      `.execute(ctx.testDb)
+      expect(constraints.rows.map((row) => row.conname)).toEqual([
+        'atr_instance_key_pair',
+        'atr_not_cancel_round',
+        'attendance_requests_instance_workflow_fkey',
+        'uq_approval_instances_id_workflow_key',
+      ])
+    } finally {
+      await teardownScratchDatabase(ctx)
+    }
+  })
+
+  it('backfill: a second up() is a no-op and does not duplicate constraints', async () => {
+    const ctx = await setupPreMigrationDatabase()
+    try {
+      const shellId = randomUUID()
+      const requestId = randomUUID()
+      await sql`INSERT INTO approval_instances (id, workflow_key) VALUES (${shellId}, ${null})`.execute(ctx.testDb)
+      await sql`
+        INSERT INTO attendance_requests (id, approval_instance_id) VALUES (${requestId}, ${shellId})
+      `.execute(ctx.testDb)
+
+      const firstNotices = ctx.notices.length
+      const firstLines = await withCapturedLogs(() => up(ctx.testDb))
+      expectBackfillCount(firstLines, ctx.notices.slice(firstNotices), 1)
+
+      const secondNotices = ctx.notices.length
+      const secondLines = await withCapturedLogs(() => up(ctx.testDb))
+      expectBackfillCount(secondLines, ctx.notices.slice(secondNotices), 0)
+
+      expect(await workflowKey(ctx, shellId)).toBe('attendance.request')
+      expect(await requestLink(ctx, requestId)).toEqual({
+        approval_instance_id: shellId,
+        approval_workflow_key: 'attendance.request',
+      })
+      const constraints = await sql<{ cnt: string }>`
+        SELECT count(*)::text AS cnt FROM pg_constraint
+        WHERE conname IN (
+          'uq_approval_instances_id_workflow_key',
+          'attendance_requests_instance_workflow_fkey',
+          'atr_instance_key_pair',
+          'atr_not_cancel_round'
+        )
+      `.execute(ctx.testDb)
+      expect(constraints.rows[0]?.cnt).toBe('4')
+    } finally {
+      await teardownScratchDatabase(ctx)
+    }
+  })
+
+  it.each([
+    ['approval_rounds', 'engine_instance_id'],
+    ['multitable_record_approval_submissions', 'approval_instance_id'],
+    ['multitable_automation_approval_bridges', 'approval_instance_id'],
+  ])('backfill: conflicting %s.%s reference is left NULL and the precheck still aborts', async (table, column) => {
+    const ctx = await setupPreMigrationDatabase()
+    try {
+      const instanceId = randomUUID()
+      const requestId = randomUUID()
+      await sql.raw(
+        `CREATE TABLE ${table} (id text PRIMARY KEY, ${column} text)`,
+      ).execute(ctx.testDb)
+      await sql`INSERT INTO approval_instances (id, workflow_key) VALUES (${instanceId}, ${null})`.execute(ctx.testDb)
+      await sql`
+        INSERT INTO attendance_requests (id, approval_instance_id) VALUES (${requestId}, ${instanceId})
+      `.execute(ctx.testDb)
+      await sql.raw(
+        `INSERT INTO ${table} (id, ${column}) VALUES ('${randomUUID()}', '${instanceId}')`,
+      ).execute(ctx.testDb)
+
+      let caught: unknown
+      try {
+        await up(ctx.testDb)
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(Error)
+      expect((caught as Error).message).toContain('preflight failed')
+      expect(await workflowKey(ctx, instanceId)).toBeNull()
+      expect((await requestLink(ctx, requestId)).approval_instance_id).toBe(instanceId)
+    } finally {
+      await teardownScratchDatabase(ctx)
+    }
+  })
+
+  it('backfill: non-platform source_system is not rewritten and the precheck still aborts', async () => {
+    const ctx = await setupPreMigrationDatabase()
+    try {
+      await sql`ALTER TABLE approval_instances ADD COLUMN source_system text`.execute(ctx.testDb)
+      const instanceId = randomUUID()
+      const requestId = randomUUID()
+      await sql`
+        INSERT INTO approval_instances (id, workflow_key, source_system)
+        VALUES (${instanceId}, ${null}, ${'plm'})
+      `.execute(ctx.testDb)
+      await sql`
+        INSERT INTO attendance_requests (id, approval_instance_id) VALUES (${requestId}, ${instanceId})
+      `.execute(ctx.testDb)
+
+      let caught: unknown
+      try {
+        await up(ctx.testDb)
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(Error)
+      expect((caught as Error).message).toContain('preflight failed')
+      expect(await workflowKey(ctx, instanceId)).toBeNull()
+      expect((await requestLink(ctx, requestId)).approval_instance_id).toBe(instanceId)
     } finally {
       await teardownScratchDatabase(ctx)
     }
