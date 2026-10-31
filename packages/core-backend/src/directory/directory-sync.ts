@@ -3924,6 +3924,18 @@ async function assertDirectorySyncNotFrozenByTransfer(
 ): Promise<void> {
   // Pool `query` is a bare function; transaction clients are `{ query }`. Normalize once.
   const q: FreezeCheckClient = client ?? { query: (sql, params) => query(sql, params) }
+  const handoverTable = await q.query<{ reg: string | null }>(
+    `SELECT to_regclass('directory_handovers')::text AS reg`,
+  )
+  if (handoverTable.rows[0]?.reg) {
+    const handover = await q.query<{ id: string }>(
+      `SELECT id FROM directory_handovers WHERE
+        (source_integration_id=$1 AND state IN ('applied','finalized'))
+        OR (target_integration_id=$1 AND state='applied') LIMIT 1`,
+      [integrationId],
+    )
+    if (handover.rows.length) throw new DirectorySyncFrozenByTransferError(handover.rows[0].id)
+  }
   const tableProbe = await q.query<{ reg: string | null }>(
     `SELECT to_regclass('provider_org_transfers')::text AS reg`,
   )

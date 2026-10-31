@@ -18,6 +18,7 @@
     "seed:demo": "echo 'Seeding demo data...' && exit 0",
     "seed:rbac": "tsx scripts/seed-rbac.ts",
     "preflight:dingtalk-directory-corp-scope": "tsx scripts/dingtalk-directory-corp-scope-preflight.ts",
+    "ops:directory-handover": "tsx scripts/directory-controlled-handover.ts",
     "smoke:plugins": "tsx scripts/smoke-plugins.ts",
     "smoke:sqlserver": "tsx scripts/smoke-sqlserver.ts",
     "smoke:sqlserver:seed": "tsx scripts/smoke-sqlserver-seed.ts",
