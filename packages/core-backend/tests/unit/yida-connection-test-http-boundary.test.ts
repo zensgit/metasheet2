@@ -19,7 +19,7 @@ import { draftInput, syntheticMaterial } from '../utils/stock-preparation-yida-o
 const commandId = '11111111-1111-4111-8111-111111111111'
 const otherCommand = '22222222-2222-4222-8222-222222222222'
 const actor = { actorId: 'synthetic-http-owner', tenantId: 'synthetic-http-tenant', workspaceId: null }
-const body = () => ({ commandId, mode: 'candidate', material: { appKey: ' synthetic-probe key ', appSecret: ' synthetic-probe secret ' } })
+const body = () => ({ commandId, mode: 'candidate', material: { appKey: 'synthetic-probe key', appSecret: 'synthetic-probe secret' } })
 const view = (outcome = 'ok') => ({ commandId, mode: 'candidate', outcome, tokenIssued: outcome === 'ok',
   tokenRetained: false, externalWriteAttempted: false, canSend: false })
 const ready = () => ({ commandId, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false })
@@ -85,6 +85,17 @@ describe('YiDa connection-test HTTP contract — fake host port, no IO', () => {
   ])('400 before the port: %s', async (_name, payload) => {
     const f = probePort()
     expect(await probe(payload, f.value)).toEqual(refusal('YIDA_OWNER_HTTP_INPUT', 400))
+    expect(f.calls).toHaveLength(0)
+  })
+  // A pasted pair with padding or a control character is refused before the port: never trimmed, never echoed.
+  it.each([
+    ['appKey', 'a trailing CR/LF', 'synthetic-probe key\r\n'], ['appKey', 'a leading NBSP', '\u00a0synthetic-probe key'],
+    ['appKey', 'an inner LF', 'synthetic-probe\nkey'], ['appSecret', 'a trailing space', 'synthetic-probe secret '],
+    ['appSecret', 'a leading TAB', '\tsynthetic-probe secret'], ['appSecret', 'a trailing ideographic space', 'synthetic-probe secret\u3000'],
+    ['appSecret', 'an inner DEL', 'synthetic-probe\u007fsecret'], ['appSecret', 'a trailing C1 NEL', 'synthetic-probe secret\u0085'],
+  ] as const)('400 before the port: %s with %s', async (key, _label, value) => {
+    const f = probePort()
+    expect(await probe({ ...body(), material: { ...body().material, [key]: value } }, f.value)).toEqual(refusal('YIDA_OWNER_HTTP_INPUT', 400))
     expect(f.calls).toHaveLength(0)
   })
   it('scope headers, query keys and a missing principal are refused before the port; no port is 503', async () => {

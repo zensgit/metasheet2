@@ -30,7 +30,10 @@ function metadata() { return { targetRef: ids.target, operationId: ids.operation
 function ready(sendEnabled = false, connectionTestEnabled = false) { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
   ...(connectionTestEnabled ? { connectionTestEnabled: true } : {}) } }
 function initialized(sendEnabled = false, connectionTestEnabled = false) { return { ...ready(sendEnabled, connectionTestEnabled), status: 'initialized', draft: metadata() } }
-const material: YidaInitializationMaterial = { appKey: ' SYN-KEY\r\n原字节 ', appSecret: ' SYN-SECRET\n原字节 ', systemToken: ' SYN-TOKEN\r\n原字节 ', userId: 'SYN-EXECUTION' }
+// What the operator pastes (surrounding blanks and a trailing line break the password box hides) and what is
+// sent: the same text with its edges trimmed, inner bytes unchanged. The server refuses the padded form.
+const pasted: YidaInitializationMaterial = { appKey: ' SYN-KEY原字节\r\n', appSecret: '\tSYN-SECRET原字节\n', systemToken: '\u00a0SYN-TOKEN原字节\r\n', userId: 'SYN-EXECUTION' }
+const material: YidaInitializationMaterial = { appKey: 'SYN-KEY原字节', appSecret: 'SYN-SECRET原字节', systemToken: 'SYN-TOKEN原字节', userId: 'SYN-EXECUTION' }
 function payload(): YidaInitializationInput { return { commandId: ids.command, material: { ...material }, draft: draftInput(),
   attestation: { kind: 'owner-reviewed-target', reviewRef: 'SYN-REVIEW', organizationId: 'SYN-ORG', executionIdentity: material.userId } } }
 function json(data: unknown, status = 200) { return new Response(JSON.stringify({ ok: true, data }), { status, headers: { 'Content-Type': 'application/json' } }) }
@@ -52,7 +55,7 @@ async function type(id: string, value: string) { const node = q<HTMLInputElement
 async function fill() {
   for (const key of ['appKey', 'appSecret', 'systemToken', 'userId'] as const) {
     const paste = new Event('paste', { cancelable: true })
-    Object.defineProperty(paste, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? material[key] : '' } })
+    Object.defineProperty(paste, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? pasted[key] : '' } })
     q(key).dispatchEvent(paste); expect(paste.defaultPrevented).toBe(true)
   }
   await type('review', 'SYN-REVIEW'); await type('organization', 'SYN-ORG')
@@ -785,5 +788,83 @@ describe('Yida owner connection test behind the server display bit', () => {
     }
     await check(createYidaInitializationClient, false)
     await check(memoryService('  if (row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) invalid()', ''), true)
+  })
+})
+
+// Pasted credentials (finding F9 on onprem-r78): a paste often carries a trailing line break or blanks the
+// password box hides. appKey/appSecret/systemToken go out with their edges trimmed, so the pair tested is the
+// pair L4 seals; text with whitespace or a control character inside is not sent at all.
+describe('Yida pasted credentials: edges trimmed before the test and L4, inner blanks refused locally', () => {
+  const okView = () => ({ commandId: ids.command, mode: 'candidate', outcome: 'ok', tokenIssued: true, tokenRetained: false, externalWriteAttempted: false, canSend: false })
+  async function pasteInto(field: string, value: string) {
+    const event = new Event('paste', { cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? value : '' } })
+    q(field).dispatchEvent(event); await flush()
+  }
+  async function openWithProbe() { mountPanel(); fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await click('refresh'); await fill() }
+  const sent = (call: number) => JSON.parse(fetchSpy.mock.calls[call][1].body as string) as { material: Record<string, string> }
+  const clients: ReturnType<typeof createYidaInitializationClient>[] = []
+  afterEach(() => { for (const value of clients.splice(0)) value.dispose() })
+
+  it('a paste with a trailing CR/LF reaches the connection test and L4 trimmed: the tested pair is the sealed pair', async () => {
+    await openWithProbe()
+    expect(absent('material-hint')).toBe(true)
+    fetchSpy.mockResolvedValueOnce(json(okView())); await click('connection-test')
+    const probed = sent(1).material
+    expect(probed.appKey === 'SYN-KEY原字节' && probed.appSecret === 'SYN-SECRET原字节').toBe(true)
+    expect(absent('connection-mismatch')).toBe(true); expect(q('connection-result').textContent).toContain('令牌已在服务器丢弃')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
+    const sealed = sent(2).material
+    expect(sealed.appKey === probed.appKey && sealed.appSecret === probed.appSecret).toBe(true)
+    expect(sealed.systemToken === 'SYN-TOKEN原字节' && sealed.userId === 'SYN-EXECUTION').toBe(true)
+    expect(q('initialized').textContent).toContain('canSend=false'); expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('after an ok test, the same text with or without the line break is the same pair; a changed inner byte is a mismatch', async () => {
+    await openWithProbe()
+    fetchSpy.mockResolvedValueOnce(json(okView())); await click('connection-test')
+    // Typed (an input event strips the line break) and re-pasted with other padding: still the tested pair.
+    await type('appSecret', 'SYN-SECRET原字节'); await pasteInto('appKey', '  SYN-KEY原字节 \n')
+    expect(absent('connection-mismatch')).toBe(true); expect(q('connection-result').textContent).toContain('令牌已在服务器丢弃')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    await type('appSecret', 'SYN-SECRET原字节X')
+    expect(q('connection-mismatch').textContent).toBe('已测试的凭据与当前输入不一致，请重新测试')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true); expect(absent('connection-result')).toBe(true)
+  })
+
+  it.each([
+    ['appKey', 'an inner space', 'SYN-KEY 原字节'], ['appSecret', 'an inner line break', 'SYN-SECRET\n原字节'],
+    ['systemToken', 'an inner TAB', 'SYN-TOKEN\t原字节'], ['appSecret', 'a C1 control', 'SYN-SECRET原字节\u0085'],
+  ] as const)('%s with %s: a hint naming only the field, and nothing is sent', async (key, _label, value) => {
+    await openWithProbe(); await pasteInto(key, value)
+    const hint = q('material-hint').textContent ?? ''
+    expect(hint.includes(key) && hint.includes('本页不会发送')).toBe(true)
+    for (const secret of [value, value.trim(), ...Object.values(material)]) expect(hint.includes(secret)).toBe(false)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    // The connection test sends appKey/appSecret only, so a blocked systemToken leaves it available.
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(key !== 'systemToken')
+    await click('submit'); if (key !== 'systemToken') await click('connection-test')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    await pasteInto(key, pasted[key])
+    expect(absent('material-hint')).toBe(true)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false)
+  })
+
+  it('the client refuses a padded or control-character credential before any request and keeps the ready command', async () => {
+    const value = createYidaInitializationClient(); clients.push(value)
+    fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await value.observe()
+    const probeRequest = (appKey: string, appSecret: string) => ({ commandId: ids.command, mode: 'candidate' as const, material: { appKey, appSecret } })
+    for (const [appKey, appSecret] of [[pasted.appKey, material.appSecret], [material.appKey, pasted.appSecret],
+      [material.appKey, 'SYN\u0000SECRET'], [`${material.appKey} `, material.appSecret]]) {
+      await expect(value.testConnection(probeRequest(appKey, appSecret))).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    for (const patch of [{ systemToken: pasted.systemToken }, { appKey: pasted.appKey }, { appSecret: `\u3000${material.appSecret}` }, { systemToken: 'SYN\u007fTOKEN' }]) {
+      const sample = payload()
+      await expect(value.initialize({ ...sample, material: { ...sample.material, ...patch } })).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    // Refused locally, so the observed ready command is not consumed: the unpadded payload initializes.
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await expect(value.initialize(payload())).resolves.toMatchObject({ status: 'initialized' })
   })
 })

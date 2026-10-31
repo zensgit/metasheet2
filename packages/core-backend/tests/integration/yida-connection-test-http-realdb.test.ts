@@ -33,7 +33,7 @@ const DINGTALK_OAUTH_ENDPOINT = 'https://api.dingtalk.com/v1.0/oauth2/accessToke
 const owner = Object.freeze({ actorId: 'synthetic-probe-owner', tenantId: 'synthetic-probe-tenant', workspaceId: null })
 const secondAdmin = Object.freeze({ ...owner, actorId: 'synthetic-probe-second-admin' })
 const otherCommand = '99999999-9999-4999-8999-999999999999'
-const pair = () => ({ appKey: ' synthetic-probe-app-key ', appSecret: ' synthetic-probe-app-secret ' })
+const pair = () => ({ appKey: 'synthetic-probe-app-key', appSecret: 'synthetic-probe-app-secret' })
 const ident = (value: string) => { if (!/^[a-z][a-z0-9_]*$/u.test(value)) throw new Error('OWNED_SCHEMA_REQUIRED'); return `"${value}"` }
 type Row = Record<string, unknown>
 type Result = { status: number; headers: Record<string, string | string[] | undefined>; body: Row }
@@ -226,7 +226,7 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     await start(); enablement = 'true'
     const source = example()
     const made = data(await http('POST', '/initialization', { commandId: anchor.commandId,
-      material: { ...pair(), systemToken: ' synthetic-probe-system-token ', userId: 'synthetic-probe-user' },
+      material: { ...pair(), systemToken: 'synthetic-probe-system-token', userId: 'synthetic-probe-user' },
       draft: { config: source.config, rowsText: source.text, allocation: { mode: 'original' } },
       attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-probe-review', organizationId: 'synthetic-probe-org', executionIdentity: 'synthetic-probe-user' } }), 201)
     expect(made).toMatchObject({ status: 'initialized', connectionTestEnabled: true, sendEnabled: false })
@@ -249,5 +249,30 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     const output = inspect(logs, { depth: null, colors: false, getters: false })
     for (const value of [...Object.values(pair()), 'synthetic-probe-access-token', 'PRIVATE_PROBE_CORRELATION_CANARY', 'connection-test', anchor])
       expect(output.includes(value)).toBe(false)
+  })
+
+  it('a pasted line break, padding or control character in appKey/appSecret/systemToken is 400 before any transaction, exchange or row', async () => {
+    const anchor = await provisionYidaInitializationAnchor({ database }, { ownerId: owner.actorId, tenantId: owner.tenantId })
+    await start(); enablement = 'true'
+    const source = example(), full = { ...pair(), systemToken: 'synthetic-probe-system-token', userId: 'synthetic-probe-user' }
+    const seal = (material: Row) => http('POST', '/initialization', { commandId: anchor.commandId, material,
+      draft: { config: source.config, rowsText: source.text, allocation: { mode: 'original' } },
+      attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-probe-review', organizationId: 'synthetic-probe-org', executionIdentity: full.userId } })
+    const before = await counts(); sql.length = 0
+    expect(before.integration_yida_initializations).toBe(0); expect(before.integration_yida_credential_materials).toBe(0)
+    for (const [key, value] of [['appKey', full.appKey + '\r\n'], ['appSecret', ' ' + full.appSecret], ['appSecret', full.appSecret + '\u00a0'],
+      ['appKey', 'synthetic-probe\tapp-key']] as const) {
+      denied(await http('POST', '/initialization/connection-test', { commandId: anchor.commandId, mode: 'candidate', material: { ...pair(), [key]: value } }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    }
+    for (const [key, value] of [['appKey', full.appKey + '\n'], ['appSecret', '\t' + full.appSecret], ['systemToken', full.systemToken + '\r\n'],
+      ['systemToken', '\u3000' + full.systemToken], ['systemToken', 'synthetic-probe\u0000system-token']] as const) {
+      denied(await seal({ ...full, [key]: value }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    }
+    // Refused before any transaction, exchange, crypto or write; the slot is still empty and ready.
+    expect(sql).toEqual([]); expect(tokenBodies).toEqual([]); expect(await counts()).toEqual(before)
+    expect(data(await http('GET', '/initialization'), 200)).toMatchObject({ commandId: anchor.commandId, status: 'ready', draft: null })
+    // Nothing was stamped: the same pair without padding is tested at once with exactly one exchange.
+    expect(data(await probe(anchor.commandId), 200).outcome).toBe('ok')
+    expect(tokenBodies).toEqual([pair()]); expect(await counts()).toEqual(before)
   })
 })

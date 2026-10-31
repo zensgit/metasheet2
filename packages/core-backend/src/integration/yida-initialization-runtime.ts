@@ -99,8 +99,13 @@ function snapshot(value: unknown): unknown {
 function captureInput(value: unknown): YidaInitializationInput {
   const row = record(value, ['commandId', 'material', 'draft', 'attestation'])
   const material = record(row.material, ['appKey', 'appSecret', 'systemToken', 'userId'])
-  for (const key of Object.keys(material)) if (typeof material[key] !== 'string' || !material[key].trim()
-    || material[key].length > (key === 'userId' ? 128 : 4096)) fail('INPUT')
+  // Sealed for good (generation 1, no rotation): never trimmed, and refused before any transaction,
+  // producer, crypto or write when a value has surrounding whitespace or any control character.
+  for (const key of Object.keys(material)) {
+    const field = material[key]
+    if (typeof field !== 'string' || !field || field.length > (key === 'userId' ? 128 : 4096) || field.trim() !== field
+      || /[\u0000-\u001f\u007f-\u009f]/u.test(field)) fail('INPUT')
+  }
   const draft = record(row.draft, ['config', 'rowsText', 'allocation'])
   if (typeof draft.rowsText !== 'string' || Buffer.byteLength(draft.rowsText, 'utf8') > 128 * 1024) fail('INPUT')
   const attestation = record(row.attestation, ['kind', 'reviewRef', 'organizationId', 'executionIdentity'])
