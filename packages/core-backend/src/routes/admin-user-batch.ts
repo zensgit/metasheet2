@@ -5,6 +5,11 @@ import { auditLog } from '../audit/audit'
 import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { revokeUserSessions } from '../auth/session-revocation'
 import {
+  countLivePlatformAdmins,
+  moveUsersToRecycleBin,
+  resolveUserRecycleRetentionDays,
+} from '../admin/user-recycle'
+import {
   ADMIN_USER_BATCH_LIMIT,
   planCreateBatch,
   planDeleteBatch,
@@ -68,8 +73,14 @@ async function loadKnownUsers(ids: string[], emails: string[]): Promise<KnownBat
     role: string
     department: string | null
     is_active: boolean
+    deleted_at: string | null
+    purged_at: string | null
+    is_platform_admin: boolean
   }>(
-    `SELECT id, email, name, role, department, is_active
+    `SELECT id, email, name, role, department, is_active, deleted_at, purged_at,
+            (COALESCE(is_admin, FALSE) IS TRUE OR role = 'admin' OR EXISTS (
+              SELECT 1 FROM user_roles ur WHERE ur.user_id = users.id AND ur.role_id = 'admin'
+            )) AS is_platform_admin
      FROM users
      WHERE id = ANY($1::text[])
         OR lower(email) = ANY($2::text[])`,
@@ -82,6 +93,9 @@ async function loadKnownUsers(ids: string[], emails: string[]): Promise<KnownBat
     role: row.role,
     department: row.department,
     isActive: row.is_active,
+    deletedAt: row.deleted_at ? String(row.deleted_at) : null,
+    purgedAt: row.purged_at ? String(row.purged_at) : null,
+    isPlatformAdmin: row.is_platform_admin === true,
   }))
 }
 
@@ -131,16 +145,20 @@ export function registerAdminUserBatchRoutes(router: Router): void {
 
       const [existing, knownRoleIds] = await Promise.all([
         emails.length
-          ? query<{ email: string }>('SELECT lower(email) AS email FROM users WHERE lower(email) = ANY($1::text[])', [emails])
-          : Promise.resolve({ rows: [] as Array<{ email: string }> }),
+          ? query<{ email: string; in_recycle: boolean }>(
+            `SELECT lower(email) AS email, (deleted_at IS NOT NULL AND purged_at IS NULL) AS in_recycle FROM users WHERE lower(email) = ANY($1::text[])`,
+            [emails],
+          )
+          : Promise.resolve({ rows: [] as Array<{ email: string; in_recycle: boolean }> }),
         loadRoleIds(roleIds),
       ])
       const plan = planCreateBatch({
         body: req.body,
-        existingEmails: new Set(existing.rows.map((row) => row.email)),
+        existingEmails: new Set(existing.rows.filter((row) => !row.in_recycle).map((row) => row.email)),
+        recycleEmails: new Set(existing.rows.filter((row) => row.in_recycle).map((row) => row.email)),
         knownRoleIds,
       })
-      if (!plan.ok) return jsonError(res, plan.status, plan.code, plan.message)
+      if (plan.ok === false) return jsonError(res, plan.status, plan.code, plan.message)
 
       const created: BatchItemResult[] = []
       for (const row of plan.rows) {
@@ -188,7 +206,7 @@ export function registerAdminUserBatchRoutes(router: Router): void {
         usersByEmail,
         knownRoleIds: await loadRoleIds(roleIds),
       })
-      if (!plan.ok) return jsonError(res, plan.status, plan.code, plan.message)
+      if (plan.ok === false) return jsonError(res, plan.status, plan.code, plan.message)
 
       const dryRun = req.body?.dryRun === true
       const applied: BatchItemResult[] = []
@@ -250,42 +268,31 @@ export function registerAdminUserBatchRoutes(router: Router): void {
         ? req.body.userIds.filter((value: unknown): value is string => typeof value === 'string')
         : []
       const known = await loadKnownUsers(ids.map((id) => id.trim()).filter(Boolean), [])
+      const knownUsers = new Map(known.map((user) => [user.id, user]))
+      const livePlatformAdminCount = req.body?.mode === 'hard' ? await countLivePlatformAdmins() : undefined
       const plan = planDeleteBatch({
         userIds: req.body?.userIds,
         mode: req.body?.mode,
         confirmText: req.body?.confirmText,
         actorId: adminUserId,
         knownIds: new Set(known.map((user) => user.id)),
+        knownUsers,
+        livePlatformAdminCount,
       })
-      if (!plan.ok && plan.code === 'HARD_DELETE_UNSUPPORTED') {
-        await auditLog({
-          actorId: adminUserId,
-          actorType: 'user',
-          action: 'delete',
-          resourceType: 'user-batch',
-          resourceId: 'hard-delete',
-          meta: {
-            adminUserId,
-            outcome: 'refused',
-            code: 'HARD_DELETE_UNSUPPORTED',
-            count: plan.userIds.length,
-          },
-        })
-        const results: BatchItemResult[] = plan.userIds.map((userId, index) => ({
-          index,
-          ok: false,
-          email: known.find((user) => user.id === userId)?.email ?? null,
-          userId,
-          code: 'HARD_DELETE_UNSUPPORTED',
-          message: plan.message,
-        }))
-        return jsonError(res, 409, 'HARD_DELETE_UNSUPPORTED', plan.message, summarize(results))
-      }
-      if (!plan.ok) return jsonError(res, plan.status, plan.code, plan.message)
+      if (plan.ok === false) return jsonError(res, plan.status, plan.code, plan.message)
 
-      const applied: BatchItemResult[] = []
-      for (const row of plan.rows) {
-        applied.push(await setActive(adminUserId, row.userId, false, row.index))
+      const mode = req.body?.mode === 'hard' ? 'recycle' : 'disable'
+      const applied: BatchItemResult[] = mode === 'recycle'
+        ? await moveUsersToRecycleBin({
+          actorId: adminUserId,
+          rows: plan.rows,
+          retentionDays: resolveUserRecycleRetentionDays(),
+        })
+        : []
+      if (mode === 'disable') {
+        for (const row of plan.rows) {
+          applied.push(await setActive(adminUserId, row.userId, false, row.index))
+        }
       }
       const results = [...plan.failures, ...applied].sort((left, right) => left.index - right.index)
       await auditLog({
@@ -293,15 +300,16 @@ export function registerAdminUserBatchRoutes(router: Router): void {
         actorType: 'user',
         action: 'delete',
         resourceType: 'user-batch',
-        resourceId: 'disable',
+        resourceId: mode,
         meta: {
           adminUserId,
-          mode: 'disable',
+          mode,
+          retentionDays: mode === 'recycle' ? resolveUserRecycleRetentionDays() : undefined,
           successCount: results.filter((item) => item.ok).length,
           failureCount: results.filter((item) => !item.ok).length,
         },
       })
-      return jsonOk(res, { ...summarize(results), mode: 'disable' })
+      return jsonOk(res, { ...summarize(results), mode })
     } catch (error) {
       const message = error instanceof Error ? error.message : '批量删除失败'
       return jsonError(res, 500, 'BATCH_DELETE_FAILED', message)
@@ -438,8 +446,9 @@ async function applyStatus(
     isActive,
     actorId: adminUserId,
     knownIds: new Set(known.map((user) => user.id)),
+    knownUsers: new Map(known.map((user) => [user.id, user])),
   })
-  if (!plan.ok) return { error: { status: plan.status, code: plan.code, message: plan.message } }
+  if (plan.ok === false) return { error: { status: plan.status, code: plan.code, message: plan.message } }
   const applied: BatchItemResult[] = []
   for (const row of plan.rows) {
     applied.push(await setActive(adminUserId, row.userId, isActive === true, row.index))
@@ -466,11 +475,19 @@ async function setActive(adminUserId: string, userId: string, isActive: boolean,
     `UPDATE users
      SET is_active = $2, updated_at = NOW()
      WHERE id = $1
+       AND deleted_at IS NULL
      RETURNING id, email`,
     [userId, isActive],
   )
   const row = updated.rows[0]
   if (!row) {
+    const existing = await query<{ deleted_at: string | null }>(
+      'SELECT deleted_at FROM users WHERE id = $1',
+      [userId],
+    )
+    if (existing.rows[0]?.deleted_at) {
+      return { index, ok: false, email: null, userId, code: 'USER_IN_RECYCLE_BIN', message: '该用户在回收站中，请先恢复' }
+    }
     return { index, ok: false, email: null, userId, code: 'USER_NOT_FOUND', message: '找不到该用户' }
   }
   if (!isActive) {

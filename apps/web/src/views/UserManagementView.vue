@@ -63,6 +63,18 @@
         待处理邀请
         <span v-if="pendingInviteCount > 0" class="user-admin__tab-count">{{ pendingInviteCount }}</span>
       </button>
+      <button
+        class="user-admin__tab"
+        :class="{ 'user-admin__tab--active': surface === 'recycle' }"
+        type="button"
+        role="tab"
+        :aria-selected="surface === 'recycle'"
+        data-testid="recycle-bin-tab"
+        @click="surface = 'recycle'"
+      >
+        {{ recycleText('tab') }}
+        <span v-if="recycleTotal > 0" class="user-admin__tab-count">{{ recycleTotal }}</span>
+      </button>
     </div>
 
     <div v-show="surface === 'invites'" class="user-admin__panel">
@@ -120,6 +132,60 @@
             @click="void revokeInvite(record)"
           >
             撤销邀请
+          </button>
+        </article>
+      </div>
+    </div>
+
+    <div v-show="surface === 'recycle'" class="user-admin__panel" data-testid="recycle-bin-panel">
+      <div class="user-admin__section-head">
+        <div>
+          <h2>{{ recycleText('title') }}</h2>
+          <p class="user-admin__hint">{{ recycleText('hint', { days: recycleRetentionDays }) }}</p>
+        </div>
+        <div class="user-admin__role-actions">
+          <input v-model.trim="recycleSearch" class="user-admin__search" type="text" :aria-label="recycleText('search')" :placeholder="recycleText('search')" data-testid="recycle-search" @keyup.enter="void loadRecycleBin()" />
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingRecycle" @click="void loadRecycleBin()">
+            {{ loadingRecycle ? recycleText('loading') : recycleText('refresh') }}
+          </button>
+        </div>
+      </div>
+      <div class="user-admin__role-actions">
+        <button class="user-admin__button" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0" data-testid="recycle-restore-selected" @click="void restoreRecycleUsers()">
+          {{ recycleText('restoreSelected') }}
+        </button>
+        <input v-model.trim="purgePhrase" class="user-admin__search" type="text" :aria-label="recycleText('purgePlaceholder')" :placeholder="recycleText('purgePlaceholder')" data-testid="recycle-purge-phrase" />
+        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0 || purgePhrase !== '立即清除'" data-testid="recycle-purge-selected" @click="void purgeRecycleUsers()">
+          {{ recycleText('purgeSelected') }}
+        </button>
+      </div>
+      <p class="user-admin__hint">{{ recycleText('purgedHint') }}</p>
+      <div v-if="loadingRecycle && recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('loading') }}</div>
+      <div v-else-if="recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('empty') }}</div>
+      <div v-else class="user-admin__table" role="table" aria-label="回收站">
+        <article v-for="user in recycleUsers" :key="user.id" class="user-admin__user" role="row" data-testid="recycle-row">
+          <label class="user-admin__user-select">
+            <input
+              :checked="recycleSelectedIds.includes(user.id)"
+              type="checkbox"
+              :aria-label="`${recycleText('restore')} ${user.name || user.email || user.id}`"
+              @change="toggleRecycleSelection(user.id, $event)"
+            />
+          </label>
+          <div class="user-admin__user-body">
+            <span class="user-admin__identity">
+              <span class="user-admin__avatar" aria-hidden="true">{{ userInitials(user) }}</span>
+              <span class="user-admin__identity-text">
+                <strong>{{ user.name || user.email || user.id }}</strong>
+                <span>{{ user.email || user.id }}</span>
+              </span>
+            </span>
+            <span class="user-admin__meta">{{ formatDate(user.deletedAt) }}</span>
+            <span class="user-admin__meta">{{ user.deletedBy || recycleText('unknownActor') }}</span>
+            <span class="user-admin__meta">{{ formatDate(user.purgeAfter) }}</span>
+          </div>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy" @click="void restoreRecycleUsers([user.id])">
+            {{ recycleText('restore') }}
           </button>
         </article>
       </div>
@@ -531,11 +597,11 @@
             </div>
           </div>
           <details class="user-admin__danger">
-            <summary>永久删除</summary>
-            <p class="user-admin__hint">默认请用「批量停用」：停用可恢复，并保留考勤、审计和目录历史。永久删除尚未开放（没有回收站，账号被多处引用）。确认后服务器会拒绝删除并留下审计。</p>
+            <summary>{{ recycleText('dangerSummary') }}</summary>
+            <p class="user-admin__hint">{{ recycleText('dangerHint') }}</p>
             <p v-if="selectedUserIds.length">将列出：{{ selectedUserLabels }}</p>
-            <input v-model.trim="hardDeletePhrase" class="user-admin__search" type="text" aria-label="永久删除确认" placeholder="输入「永久删除」" />
-            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== '永久删除'" @click="void submitHardDelete()">确认永久删除</button>
+            <input v-model.trim="hardDeletePhrase" class="user-admin__search" type="text" :aria-label="recycleText('dangerPhrase')" :placeholder="recycleText('dangerPhrase')" data-testid="recycle-move-phrase" />
+            <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="recycle-move-submit" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== '永久删除'" @click="void submitHardDelete()">{{ recycleText('dangerButton') }}</button>
           </details>
         </div>
         <div v-if="reimportOpen" class="user-admin__confirm" role="dialog" aria-label="导入更新" data-testid="reimport-dialog">
@@ -1202,6 +1268,8 @@ import {
 import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
+import { useLocale } from '../composables/useLocale'
+import { userRecycleLabel, type UserRecycleLabelKey } from './userRecycleLabels'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
@@ -1520,7 +1588,11 @@ const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
-const surface = ref<'members' | 'invites'>('members')
+const surface = ref<'members' | 'invites' | 'recycle'>('members')
+const { isZh } = useLocale()
+function recycleText(key: UserRecycleLabelKey, vars: Record<string, string | number> = {}): string {
+  return userRecycleLabel(isZh.value, key, vars)
+}
 const inviteOpen = ref(false)
 const inviteTab = ref<'single' | 'import' | 'paste'>('single')
 const inviteNote = ref('')
@@ -1534,6 +1606,23 @@ const bulkRoleId = ref('')
 const bulkDepartment = ref('')
 const bulkConfirm = ref<null | 'role' | 'department' | 'enable' | 'disable'>(null)
 const hardDeletePhrase = ref('')
+const loadingRecycle = ref(false)
+const recycleBusy = ref(false)
+const recycleSearch = ref('')
+const purgePhrase = ref('')
+const recycleRetentionDays = ref(30)
+const recycleTotal = ref(0)
+const recycleSelectedIds = ref<string[]>([])
+type RecycleBinUser = {
+  id: string
+  email: string | null
+  name: string | null
+  department: string | null
+  deletedAt: string
+  deletedBy: string | null
+  purgeAfter: string | null
+}
+const recycleUsers = ref<RecycleBinUser[]>([])
 const batchReport = ref<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>> } | null>(null)
 const inviteStatusFilter = ref<'pending' | 'all'>('pending')
 const detailOpen = ref(false)
@@ -2381,7 +2470,7 @@ function handleUserSelectionChange(userId: string, event: Event): void {
   toggleUserSelection(userId, target.checked)
 }
 
-function userInitials(user: ManagedUser): string {
+function userInitials(user: { name?: string | null; email?: string | null; username?: string | null }): string {
   const source = (user.name || user.email || user.username || '?').trim()
   if (!source) return '?'
   const parts = source.split(/\s+/).filter(Boolean)
@@ -3933,17 +4022,92 @@ async function submitHardDelete(): Promise<void> {
       }),
     })
     batchReport.value = await readBatchPayload(response)
-    setStatus(batchReport.value.results[0]?.message as string || '永久删除未执行', 'error')
+    selectedUserIds.value = []
+    await loadUsers()
+    recycleTotal.value = 0
+    setStatus(recycleText('moved', { ok: batchReport.value.successCount, fail: batchReport.value.failureCount }), batchReport.value.failureCount > 0 ? 'error' : 'info')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '永久删除未执行', 'error')
+    setStatus(error instanceof Error ? error.message : recycleText('moved', { ok: 0, fail: selectedUserIds.value.length }), 'error')
   } finally {
     bulkBusy.value = false
     hardDeletePhrase.value = ''
   }
 }
 
+function toggleRecycleSelection(userId: string, event: Event): void {
+  const checked = event.target instanceof HTMLInputElement && event.target.checked
+  recycleSelectedIds.value = checked
+    ? Array.from(new Set([...recycleSelectedIds.value, userId]))
+    : recycleSelectedIds.value.filter((id) => id !== userId)
+}
+
+async function loadRecycleBin(): Promise<void> {
+  loadingRecycle.value = true
+  try {
+    const params = new URLSearchParams()
+    if (recycleSearch.value) params.set('q', recycleSearch.value)
+    const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+    }
+    const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
+    recycleUsers.value = Array.isArray(data?.items) ? data.items : []
+    recycleTotal.value = Number(data?.total || recycleUsers.value.length)
+    if (typeof data?.retentionDays === 'number' && data.retentionDays > 0) recycleRetentionDays.value = data.retentionDays
+    const visible = new Set(recycleUsers.value.map((user) => user.id))
+    recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : recycleText('loading'), 'error')
+  } finally {
+    loadingRecycle.value = false
+  }
+}
+
+async function restoreRecycleUsers(userIds = recycleSelectedIds.value): Promise<void> {
+  if (userIds.length === 0) return
+  recycleBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/recycle/restore', {
+      method: 'POST',
+      body: JSON.stringify({ userIds }),
+    })
+    const report = await readBatchPayload(response)
+    await loadRecycleBin()
+    await loadUsers()
+    setStatus(recycleText('restored', { ok: report.successCount, fail: report.failureCount }), report.failureCount > 0 ? 'error' : 'info')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : recycleText('restored', { ok: 0, fail: userIds.length }), 'error')
+  } finally {
+    recycleBusy.value = false
+  }
+}
+
+async function purgeRecycleUsers(): Promise<void> {
+  if (recycleSelectedIds.value.length === 0 || purgePhrase.value !== '立即清除') return
+  recycleBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/recycle/purge', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: recycleSelectedIds.value, confirmText: purgePhrase.value }),
+    })
+    const report = await readBatchPayload(response)
+    purgePhrase.value = ''
+    await loadRecycleBin()
+    setStatus(recycleText('purged', { ok: report.successCount, fail: report.failureCount }), report.failureCount > 0 ? 'error' : 'info')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : recycleText('purged', { ok: 0, fail: recycleSelectedIds.value.length }), 'error')
+  } finally {
+    recycleBusy.value = false
+  }
+}
+
 watch([userListFilter, roleFilter, accountStatusFilter, search], () => {
   page.value = 1
+})
+
+watch(surface, (value) => {
+  if (value === 'recycle') void loadRecycleBin()
 })
 
 function onUserAdminKeydown(event: KeyboardEvent): void {

@@ -2,10 +2,8 @@
  * Pure planning for admin user batch create / update / disable / delete.
  * Routes apply the rows; this module does not touch the database.
  *
- * Permanent deletion is intentionally not planned as a write. Accounts are referenced by
- * attendance, audit, and directory history, and `users` has no recycle column. The hard-delete
- * request is validated (including the typed confirmation) and then refused with
- * HARD_DELETE_UNSUPPORTED so the follow-up (soft-delete + later purge) has a stable contract.
+ * mode=hard moves accounts into the recycle bin (soft delete). It does not remove the
+ * row: attendance, audit, and directory history keep the user id. Later purge anonymizes it.
  */
 
 export const ADMIN_USER_BATCH_LIMIT = 100
@@ -40,6 +38,9 @@ export type KnownBatchUser = {
   role: string
   department: string | null
   isActive: boolean
+  deletedAt?: string | null
+  purgedAt?: string | null
+  isPlatformAdmin?: boolean
 }
 
 export type PlannedUpdate = {
@@ -103,6 +104,7 @@ export function planCreateBatch(input: {
   body: unknown
   existingEmails: ReadonlySet<string>
   knownRoleIds: ReadonlySet<string>
+  recycleEmails?: ReadonlySet<string>
 }): PlanOk<PlannedCreateRow> | PlanErr {
   const read = readItems(input.body)
   if (!('items' in read)) return read
@@ -132,6 +134,10 @@ export function planCreateBatch(input: {
       return
     }
     seen.add(email)
+    if (input.recycleEmails?.has(email)) {
+      fail('USER_IN_RECYCLE_BIN', '该邮箱在回收站中，请先恢复或等待清除后再邀请')
+      return
+    }
     if (input.existingEmails.has(email)) {
       fail('EMAIL_ALREADY_EXISTS', '邮箱已存在')
       return
@@ -199,6 +205,14 @@ export function planUpdateBatch(input: {
       fail('USER_NOT_FOUND', '找不到该用户')
       return
     }
+    if (user.purgedAt) {
+      fail('ALREADY_PURGED', '该账号已清除', user.id)
+      return
+    }
+    if (user.deletedAt) {
+      fail('USER_IN_RECYCLE_BIN', '该用户在回收站中，请先恢复', user.id)
+      return
+    }
 
     const roleId = cleanRoleId(record.roleId)
     if (hasRole && !input.knownRoleIds.has(roleId)) {
@@ -263,6 +277,7 @@ export function planStatusBatch(input: {
   isActive: unknown
   actorId: string
   knownIds: ReadonlySet<string>
+  knownUsers?: ReadonlyMap<string, KnownBatchUser>
 }): PlanOk<{ index: number; userId: string }> | PlanErr {
   if (typeof input.isActive !== 'boolean') {
     return { ok: false, status: 400, code: 'STATUS_REQUIRED', message: '需要 isActive 布尔值' }
@@ -289,7 +304,8 @@ export function planStatusBatch(input: {
   const rows: Array<{ index: number; userId: string }> = []
   const failures: BatchItemResult[] = []
   ids.forEach((userId, index) => {
-    if (!input.knownIds.has(userId)) {
+    const known = input.knownUsers?.get(userId)
+    if (!input.knownIds.has(userId) && !known) {
       failures.push({
         index,
         ok: false,
@@ -297,6 +313,28 @@ export function planStatusBatch(input: {
         userId,
         code: 'USER_NOT_FOUND',
         message: '找不到该用户',
+      })
+      return
+    }
+    if (known?.purgedAt) {
+      failures.push({
+        index,
+        ok: false,
+        email: known.email,
+        userId,
+        code: 'ALREADY_PURGED',
+        message: '该账号已清除',
+      })
+      return
+    }
+    if (known?.deletedAt) {
+      failures.push({
+        index,
+        ok: false,
+        email: known.email,
+        userId,
+        code: 'USER_IN_RECYCLE_BIN',
+        message: '该用户在回收站中，请先恢复',
       })
       return
     }
@@ -322,7 +360,9 @@ export function planDeleteBatch(input: {
   confirmText: unknown
   actorId: string
   knownIds: ReadonlySet<string>
-}): PlanOk<{ index: number; userId: string }> | PlanErr | { ok: false; status: number; code: 'HARD_DELETE_UNSUPPORTED'; message: string; userIds: string[] } {
+  knownUsers?: ReadonlyMap<string, KnownBatchUser>
+  livePlatformAdminCount?: number
+}): PlanOk<{ index: number; userId: string }> | PlanErr {
   const mode = input.mode === 'hard' ? 'hard' : input.mode === 'disable' ? 'disable' : ''
   if (!mode) {
     return { ok: false, status: 400, code: 'DELETE_MODE_REQUIRED', message: 'mode 只能是 disable 或 hard' }
@@ -331,22 +371,81 @@ export function planDeleteBatch(input: {
   if (input.confirmText !== expected) {
     return { ok: false, status: 400, code: 'CONFIRM_TEXT_MISMATCH', message: `请输入「${expected}」以确认` }
   }
-  if (mode === 'hard') {
-    const ids = Array.isArray(input.userIds)
-      ? input.userIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-      : []
-    return {
-      ok: false,
-      status: 409,
-      code: 'HARD_DELETE_UNSUPPORTED',
-      message: '永久删除尚未开放。账号被考勤、审计和目录引用，请改用停用；回收站与延期清理记为后续项。',
-      userIds: ids.slice(0, ADMIN_USER_BATCH_LIMIT),
-    }
-  }
+  if (mode === 'hard') return planRecycleMove(input)
   return planStatusBatch({
     userIds: input.userIds,
     isActive: false,
     actorId: input.actorId,
     knownIds: input.knownIds,
+    knownUsers: input.knownUsers,
   })
+}
+
+function planRecycleMove(input: {
+  userIds: unknown
+  actorId: string
+  knownIds: ReadonlySet<string>
+  knownUsers?: ReadonlyMap<string, KnownBatchUser>
+  livePlatformAdminCount?: number
+}): PlanOk<{ index: number; userId: string }> | PlanErr {
+  if (!Array.isArray(input.userIds) || input.userIds.length === 0) {
+    return { ok: false, status: 400, code: 'BATCH_EMPTY', message: '请至少选择一名用户' }
+  }
+  const ids = input.userIds
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter(Boolean)
+  if (ids.length === 0) {
+    return { ok: false, status: 400, code: 'BATCH_EMPTY', message: '请至少选择一名用户' }
+  }
+  if (ids.length > ADMIN_USER_BATCH_LIMIT) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'BATCH_LIMIT_EXCEEDED',
+      message: `一次最多 ${ADMIN_USER_BATCH_LIMIT} 人`,
+    }
+  }
+
+  let adminsRemaining = input.livePlatformAdminCount ?? Number.POSITIVE_INFINITY
+  const rows: Array<{ index: number; userId: string }> = []
+  const failures: BatchItemResult[] = []
+  ids.forEach((userId, index) => {
+    const known = input.knownUsers?.get(userId)
+    const fail = (code: string, message: string, ok = false) => {
+      failures.push({
+        index,
+        ok,
+        email: known?.email ?? null,
+        userId,
+        code,
+        message,
+      })
+    }
+    if (userId === input.actorId) {
+      fail('SELF_DELETE_FORBIDDEN', '不能把自己的账号移入回收站')
+      return
+    }
+    if (!input.knownIds.has(userId) && !known) {
+      fail('USER_NOT_FOUND', '找不到该用户')
+      return
+    }
+    if (known?.purgedAt) {
+      fail('ALREADY_PURGED', '该账号已清除，无法再移入回收站')
+      return
+    }
+    if (known?.deletedAt) {
+      fail('ALREADY_IN_RECYCLE', '已在回收站', true)
+      return
+    }
+    if (known?.isPlatformAdmin) {
+      if (adminsRemaining <= 1) {
+        fail('LAST_PLATFORM_ADMIN', '至少保留一名平台管理员')
+        return
+      }
+      adminsRemaining -= 1
+    }
+    rows.push({ index, userId })
+  })
+  return { ok: true, rows, failures }
 }

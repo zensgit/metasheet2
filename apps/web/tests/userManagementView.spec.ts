@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
+import { useLocale } from '../src/composables/useLocale'
 import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
 
 const apiFetchMock = vi.fn()
@@ -713,6 +714,32 @@ function createApiImplementation(
       })
     }
 
+    if (pathname === '/api/admin/users/recycle' && (init?.method || 'GET').toUpperCase() !== 'POST') {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          total: 1,
+          retentionDays: 30,
+          items: [{
+            id: 'user-gone',
+            email: 'gone@example.com',
+            name: '已删除同事',
+            department: '装配',
+            deletedAt: '2026-10-01T00:00:00.000Z',
+            deletedBy: 'admin-1',
+            purgeAfter: '2026-10-31T00:00:00.000Z',
+          }],
+        },
+      })
+    }
+
+    if (pathname === '/api/admin/users/recycle/restore') {
+      return createJsonResponse({
+        ok: true,
+        data: { successCount: 1, failureCount: 0, results: [{ ok: true, userId: 'user-gone', message: '已恢复' }] },
+      })
+    }
+
     throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
   }
 }
@@ -755,6 +782,7 @@ describe('UserManagementView', () => {
   })
 
   afterEach(() => {
+    useLocale().setLocale('en')
     if (app) app.unmount()
     if (container) container.remove()
     window.history.replaceState({}, '', '/')
@@ -3301,5 +3329,25 @@ describe('UserManagementView', () => {
     await flushUi()
     const names = Array.from(container!.querySelectorAll('.user-admin__user strong')).map((node) => node.textContent?.trim())
     expect(names).toEqual(['Delta', 'Charlie', 'Bravo', 'Alpha'])
+  })
+
+  it('shows the recycle bin and restores a deleted account', async () => {
+    useLocale().setLocale('zh-CN')
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(12)
+
+    findButtonByText(container!, '回收站').click()
+    await waitForCondition(() => container!.textContent?.includes('已删除同事') === true)
+    expect(container!.textContent).toContain('不能登录')
+    expect(container!.textContent).toContain('30')
+
+    const row = findUserRow(container!, '已删除同事')
+    findButtonByText(row, '恢复').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/recycle/restore'))
+    const restoreCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/recycle/restore')
+    expect(JSON.parse(String((restoreCall?.[1] as RequestInit | undefined)?.body))).toEqual({ userIds: ['user-gone'] })
+    useLocale().setLocale('en')
   })
 })

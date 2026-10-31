@@ -323,6 +323,7 @@ import {
   startDingTalkCardPersonDeliveryRetentionScheduler,
   stopDingTalkCardPersonDeliveryRetentionScheduler,
 } from './services/dingtalk-card-person-delivery-retention-scheduler'
+import { startUserRecycleSweeper, stopUserRecycleSweeper } from './admin/user-recycle-scheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -4129,6 +4130,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopUserRecycleSweeper()
+      } catch (err) {
+        this.logger.warn(`User recycle sweeper shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -4803,6 +4812,20 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('DingTalk approval-card/person delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // User recycle bin: anonymize accounts whose retention window has elapsed.
+    // Enabled by default (USER_RECYCLE_RETENTION_DAYS, default 30). Opt out with
+    // USER_RECYCLE_SWEEPER_DISABLED=1. Does not delete the users row.
+    try {
+      const userRecycleSweeper = startUserRecycleSweeper()
+      this.logger.info(
+        userRecycleSweeper
+          ? 'User recycle sweeper initialized'
+          : 'User recycle sweeper disabled (USER_RECYCLE_SWEEPER_DISABLED=1 or test runtime)',
+      )
+    } catch (e) {
+      this.logger.error('User recycle sweeper initialization failed; continuing in degraded mode', e as Error)
     }
 
     // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard

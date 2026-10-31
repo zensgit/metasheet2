@@ -104,28 +104,43 @@ describe('admin user batch plan', () => {
     expect(plan.failures.map((row) => row.code)).toEqual(['SELF_DISABLE_FORBIDDEN', 'USER_NOT_FOUND'])
   })
 
-  it('requires the typed phrase and refuses hard delete even when the phrase matches', () => {
+  it('requires the typed phrase and plans a recycle move instead of deleting the row', () => {
+    const admin: KnownBatchUser = {
+      id: 'admin-1',
+      email: 'admin@example.com',
+      name: '管理员',
+      role: 'admin',
+      department: null,
+      isActive: true,
+      isPlatformAdmin: true,
+    }
+    const users = new Map<string, KnownBatchUser>([[lin.id, lin], [admin.id, admin]])
     const missing = planDeleteBatch({
       userIds: ['user-lin'],
       mode: 'hard',
       confirmText: '删除',
       actorId: 'admin-1',
       knownIds: new Set(['user-lin']),
+      knownUsers: users,
+      livePlatformAdminCount: 1,
     })
     expect(missing.ok).toBe(false)
     if (missing.ok || !('code' in missing)) return
     expect(missing.code).toBe('CONFIRM_TEXT_MISMATCH')
 
-    const refused = planDeleteBatch({
-      userIds: ['user-lin'],
+    const planned = planDeleteBatch({
+      userIds: [lin.id, admin.id, 'missing'],
       mode: 'hard',
       confirmText: HARD_DELETE_CONFIRM_TEXT,
       actorId: 'admin-1',
-      knownIds: new Set(['user-lin']),
+      knownIds: new Set([lin.id, admin.id]),
+      knownUsers: users,
+      livePlatformAdminCount: 1,
     })
-    expect(refused.ok).toBe(false)
-    if (refused.ok || !('code' in refused)) return
-    expect(refused.code).toBe('HARD_DELETE_UNSUPPORTED')
+    expect(planned.ok).toBe(true)
+    if (!planned.ok) return
+    expect(planned.rows.map((row) => row.userId)).toEqual([lin.id])
+    expect(planned.failures.map((row) => row.code)).toEqual(['SELF_DELETE_FORBIDDEN', 'USER_NOT_FOUND'])
 
     const disable = planDeleteBatch({
       userIds: ['user-lin'],
@@ -137,5 +152,18 @@ describe('admin user batch plan', () => {
     expect(disable.ok).toBe(true)
     if (!disable.ok) return
     expect(disable.rows.map((row) => row.userId)).toEqual(['user-lin'])
+  })
+
+  it('refuses a new invite for an email that is still in the recycle bin', () => {
+    const plan = planCreateBatch({
+      body: { items: [{ email: 'linlan@example.com', name: '林岚' }] },
+      existingEmails: new Set(),
+      recycleEmails: new Set(['linlan@example.com']),
+      knownRoleIds: new Set(),
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.rows).toHaveLength(0)
+    expect(plan.failures[0]?.code).toBe('USER_IN_RECYCLE_BIN')
   })
 })
