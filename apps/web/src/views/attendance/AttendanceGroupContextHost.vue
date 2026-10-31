@@ -21,6 +21,7 @@
       <span>{{ state.group.name }}</span>
       <span aria-hidden="true">/</span>
       <span>{{ stepLabel }}</span>
+      <button type="button" data-attendance-group-return @click="emit('return')">{{ tr('Return', '返回') }}</button>
     </header>
     <AttendanceGroupEffectivePolicyPanel
       v-if="showEffectivePolicyPanel"
