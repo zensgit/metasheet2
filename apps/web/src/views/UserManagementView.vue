@@ -69,7 +69,7 @@
         <input v-model.trim="createForm.mobile" class="user-admin__search" type="text" placeholder="手机号（可选）" />
         <input v-model.trim="createForm.employeeNo" class="user-admin__search" type="text" placeholder="员工号（可选）" />
         <input v-model.trim="createForm.department" class="user-admin__search" type="text" placeholder="部门（可选）" />
-        <input v-model.trim="createForm.position" class="user-admin__search" type="text" placeholder="岗位（可选）" />
+        <div><input v-model.trim="createForm.position" class="user-admin__search" type="text" placeholder="岗位（可选）" aria-describedby="create-position-help" /><p id="create-position-help" class="user-admin__hint">岗位是资料文字，不会自动指定审批人。保存用户并完成组织归属后，请在组织管理维护审批关系。</p></div>
         <input v-model="createForm.hireDate" class="user-admin__search" type="date" aria-label="入职日期（可选）" />
         <select
           v-model="createForm.attendanceGroupId"
@@ -493,6 +493,7 @@
                 class="user-admin__search"
                 type="text"
                 placeholder="岗位，可留空"
+                aria-describedby="edit-position-help"
               />
               <input
                 v-model="profileDraftHireDate"
@@ -507,6 +508,9 @@
               </button>
             </div>
           </div>
+
+          <p id="edit-position-help" class="user-admin__hint">岗位文字不等于直属上级或部门主管；更改岗位不会自动改变审批人。</p>
+          <UserApprovalRelations :key="access.user.id" :user-id="access.user.id" />
 
           <div class="user-admin__section">
             <h3>角色</h3>
@@ -968,6 +972,7 @@
 </template>
 
 <script setup lang="ts">
+import UserApprovalRelations from '../components/UserApprovalRelations.vue'
 import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'

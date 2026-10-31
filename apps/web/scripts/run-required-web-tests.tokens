@@ -625,6 +625,7 @@ useAttendanceRequestTimezone
 useAutoSumTotal
 useDingTalkPersonRecipientStatus
 usePlmExportActions
+userApprovalRelations
 userManagementRoleMembership
 userManagementView
 uuid-no-bare-randomuuid
