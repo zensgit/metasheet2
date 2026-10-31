@@ -43,6 +43,9 @@ export interface TodoCountsUpdatedPayload {
 
 interface UseTodoCountsRealtimeOptions {
   onCountsUpdated: (payload: TodoCountsUpdatedPayload) => void
+  /** `tasks:counts-updated` on the same socket: a bare signal that something changed. Nothing is read
+   *  from its payload. Without this callback the event is not listened to. */
+  onTasksCountsUpdated?: () => void
 }
 
 function stripApiSuffix(pathname: string): string {
@@ -129,6 +132,11 @@ export function useTodoCountsRealtime(options: UseTodoCountsRealtimeOptions) {
           const normalized = normalizePayload(payload)
           if (normalized) options.onCountsUpdated(normalized)
         })
+
+        const onTasksCountsUpdated = options.onTasksCountsUpdated
+        if (onTasksCountsUpdated) {
+          nextSocket.on('tasks:counts-updated', () => onTasksCountsUpdated())
+        }
 
         socket = nextSocket
         return nextSocket

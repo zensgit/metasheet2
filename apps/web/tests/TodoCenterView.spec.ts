@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import { TOKEN_KEYS } from '../src/composables/authPrincipal'
+import { TASKS_SIGNAL_WINDOW_MS } from '../src/tasks/useTasksBadge'
 
 // B-2 phase 2 (todo-center-design-lock v2.14 §4 front-end half) — the 待办中心 page.
 //
@@ -38,9 +39,11 @@ vi.mock('../src/todo/api', async (importOriginal) => {
 type CountsCallback = (payload: { count: number; sources: Record<string, string> }) => void
 
 let capturedOnCountsUpdated: CountsCallback | null = null
+let capturedOnTasksCountsUpdated: (() => void) | null = null
 vi.mock('../src/todo/useTodoCountsRealtime', () => ({
-  useTodoCountsRealtime: (options: { onCountsUpdated: CountsCallback }) => {
+  useTodoCountsRealtime: (options: { onCountsUpdated: CountsCallback; onTasksCountsUpdated?: () => void }) => {
     capturedOnCountsUpdated = options.onCountsUpdated
+    capturedOnTasksCountsUpdated = options.onTasksCountsUpdated ?? null
     return { reconnect: vi.fn(), disconnect: vi.fn() }
   },
 }))
@@ -71,6 +74,7 @@ describe('todo center view', () => {
     getTodoItemsSpy.mockReset()
     getTodoItemsSpy.mockResolvedValue({ items: [], sources: {} })
     capturedOnCountsUpdated = null
+    capturedOnTasksCountsUpdated = null
     // 判据 E tests drive `getAuthPrincipalKey()` through real storage — start clean.
     for (const key of TOKEN_KEYS) localStorage.removeItem(key)
   })
@@ -81,6 +85,8 @@ describe('todo center view', () => {
     app = null
     container = null
     capturedOnCountsUpdated = null
+    capturedOnTasksCountsUpdated = null
+    vi.useRealTimers()
     for (const key of TOKEN_KEYS) localStorage.removeItem(key)
     vi.clearAllMocks()
   })
@@ -426,5 +432,91 @@ describe('todo center view', () => {
     // principal.
     expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
     expect(groupOf(root, 'approval')).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // TASK SOURCE — the group, and the folded refresh on task count signals.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('renders a task source under the 任务 heading with links to the task pages', async () => {
+    getTodoItemsSpy.mockResolvedValue({
+      items: [{ source: 'task', id: 'task-1', title: '复核物料', href: '/tasks/task-1', updatedAt: '2026-09-18T00:00:00.000Z' }],
+      sources: { task: 'ok' },
+    })
+    const root = await mountView()
+
+    const group = groupOf(root, 'task')
+    expect(group?.querySelector('h2')?.textContent).toBe('任务')
+    expect(group?.querySelector('[data-router-link-to="/tasks/task-1"]')?.textContent).toContain('复核物料')
+    expect(groupOf(root, 'approval')).toBeNull()
+  })
+
+  it('labels the task source in English', async () => {
+    mocks.isZh = false
+    getTodoItemsSpy.mockResolvedValue({ items: [], sources: { task: 'ok' } })
+    const root = await mountView()
+
+    expect(groupOf(root, 'task')?.querySelector('h2')?.textContent).toBe('Tasks')
+  })
+
+  it('folds the task signals inside one window into one read, none before it closes', async () => {
+    await mountView()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers()
+
+    capturedOnTasksCountsUpdated!()
+    capturedOnTasksCountsUpdated!()
+    capturedOnTasksCountsUpdated!()
+    await flushUi()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(TASKS_SIGNAL_WINDOW_MS - 1)
+    await flushUi()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(1)
+    await flushUi()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(2)
+
+    // The next signal opens a new window.
+    capturedOnTasksCountsUpdated!()
+    vi.advanceTimersByTime(TASKS_SIGNAL_WINDOW_MS)
+    await flushUi()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('a window still open at unmount issues no read', async () => {
+    await mountView()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers()
+
+    capturedOnTasksCountsUpdated!()
+    app!.unmount()
+    app = null
+    vi.advanceTimersByTime(TASKS_SIGNAL_WINDOW_MS)
+    await flushUi()
+
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('after a confirmed sign-out, an open window and a later task signal issue no read', async () => {
+    localStorage.setItem('auth_token', 'principal-1-token')
+    await mountView()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers()
+
+    capturedOnTasksCountsUpdated!()
+    for (const key of TOKEN_KEYS) localStorage.removeItem(key)
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    notifyAuthPrincipalChange()
+    await flushUi()
+
+    vi.advanceTimersByTime(TASKS_SIGNAL_WINDOW_MS)
+    await flushUi()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+
+    capturedOnTasksCountsUpdated!()
+    vi.advanceTimersByTime(TASKS_SIGNAL_WINDOW_MS)
+    await flushUi()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
   })
 })

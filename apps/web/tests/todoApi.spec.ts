@@ -57,6 +57,43 @@ describe('todo center api client', () => {
     expect(result).toEqual({ count: 3, sources: { approval: 'ok' } })
   })
 
+  it('with named sources the read carries one comma-joined sources key', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ count: 0, items: [], sources: {} }) })
+
+    await getTodoCount({ sources: ['approval'] })
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/todo\/count\?sources=approval$/)
+
+    await getTodoItems({ sources: ['approval', 'task'] })
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/api\/todo\/items\?sources=approval,task$/)
+  })
+
+  it('without named sources the URL has no query', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ count: 0, items: [], sources: {} }) })
+
+    await getTodoCount()
+    await getTodoItems()
+
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/todo\/count$/)
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/api\/todo\/items$/)
+  })
+
+  it('both reads send the viewer time zone', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ count: 0, items: [], sources: {} }) })
+    const zone = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockReturnValue({
+      ...new Intl.DateTimeFormat().resolvedOptions(),
+      timeZone: 'Asia/Shanghai',
+    })
+
+    await getTodoCount()
+    await getTodoItems()
+    zone.mockRestore()
+
+    for (const call of fetchMock.mock.calls) {
+      const headers = new Headers((call[1] as RequestInit).headers)
+      expect(headers.get('x-viewer-time-zone')).toBe('Asia/Shanghai')
+    }
+  })
+
   it('getTodoItems rejects on a non-ok response rather than inventing an empty list', async () => {
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' })
 

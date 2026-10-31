@@ -279,6 +279,8 @@ export interface RouteMeta {
 
   // Permission requirements
   permissions?: string[]
+  /** At least one of these must be held, in addition to every code in `permissions`. */
+  permissionsAnyOf?: string[]
   roles?: string[]
   requiresAdmin?: boolean
 
