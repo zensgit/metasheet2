@@ -5227,20 +5227,31 @@ export class AutomationExecutor {
       }
     }
 
-    const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
-      instanceId,
-      nodeKey,
-      recipientUserId: assigneeUserId,
-      recipientDingTalkUserId: dingtalkUserId,
-      deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
-      integrationId: assigneeIntegrationId || null,
-      // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
-      // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
-      // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
-      // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
-      // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
-      entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
-    })
+    let delivery: Awaited<ReturnType<typeof insertDingTalkApprovalCardDelivery>>
+    try {
+      delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
+        instanceId,
+        nodeKey,
+        recipientUserId: assigneeUserId,
+        recipientDingTalkUserId: dingtalkUserId,
+        deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
+        integrationId: assigneeIntegrationId || null,
+        // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
+        // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
+        // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
+        // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
+        // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
+        entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
+      })
+    } catch (error) {
+      // This exact database guard proves no provider call occurred. Other insert failures
+      // retain the existing fail-closed intent handling; never retry an unknown send.
+      const guard = error as { code?: string; constraint?: string }
+      if (outboundId && guard?.code === '55000' && guard.constraint === 'directory_handover_card_insert') {
+        await recordOutboundOutcome(this.deps.queryFn, outboundId, 'failed', 'directory_handover_blocked')
+      }
+      throw error
+    }
 
     const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
     const decisionUrl = buildAppLink(baseUrl, '/m/approval-decision', { d: delivery.id, t: token })
