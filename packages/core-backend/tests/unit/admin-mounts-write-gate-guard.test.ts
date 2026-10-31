@@ -134,6 +134,8 @@ vi.mock('../../src/directory/directory-sync-alert-delivery', async (importOrigin
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'directory-sync-alert-delivery'))
 vi.mock('../../src/directory/deprovision-evidence-api', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'deprovision-evidence-api'))
+vi.mock('../../src/directory/local-organization-member-projection', async (importOriginal) =>
+  probe.wrap(await importOriginal<Record<string, unknown>>(), 'local-organization-member-projection'))
 vi.mock('../../src/directory/local-directory-org', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'local-directory-org'))
 vi.mock('../../src/directory/department-binding-reconciliation', async (importOriginal) =>
@@ -500,10 +502,11 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/force-reactivate', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts restoreDeprovisionEventForRequest -> ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/compensate-orphan-deny', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts compensateSupersededDenyGrantForRequest -> ensurePlatformAdmin', family: P },
 
-  // --- routes/admin-directory-local.ts（8 条；门从 ./admin-directory import） ---
+  // --- routes/admin-directory-local.ts（9 条；门从 ./admin-directory import） ---
   { mount: 'admin-directory-local', method: 'post', path: '/departments', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory-local', method: 'patch', path: '/departments/:departmentId', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory-local', method: 'post', path: '/departments/:departmentId/archive', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'post', path: '/member-projections', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory-local', method: 'post', path: '/accounts', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory-local', method: 'patch', path: '/accounts/:accountId', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory-local', method: 'post', path: '/accounts/:accountId/archive', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
@@ -1020,6 +1023,7 @@ describe('(A) 控制组：同一请求、只改门的输入，结论必须翻面
   const CONTROLS: readonly Control[] = [
     { mount: 'admin-directory', path: '/integrations/test', expectDownstream: 'directory-sync.testDirectoryIntegration' },
     { mount: 'admin-directory-local', path: '/departments' },
+    { mount: 'admin-directory-local', path: '/member-projections' },
     { mount: 'admin-directory-department-bindings', path: '/sweep' },
     { mount: 'admin-directory-routing-policy', path: '/:purpose' },
     { mount: 'admin-directory-org-transfers', path: '/' },
