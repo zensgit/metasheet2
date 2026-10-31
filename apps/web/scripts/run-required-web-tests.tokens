@@ -572,6 +572,7 @@ templateDetailI18n
 templateGalleryFilter
 tests/api.spec.ts
 tests/App.spec.ts
+tests/attendance-calc14-effective-date.spec.ts
 tests/attendance-rules-me-contract-sync.spec.ts
 tests/AttendanceReportFieldsSection.spec.ts
 tests/AttendanceSessionOrgSwitcher.spec.ts
@@ -608,6 +609,7 @@ tests/elearning-title-admin.spec.ts
 tests/network-unavailable-copy.spec.ts
 tests/useAttendanceSessionGuard.spec.ts
 tests/useAuth.spec.ts
+tests/userManagementCalc14EffectiveDate.spec.ts
 tests/useSessionOrg.spec.ts
 todoApi
 TodoCenterView

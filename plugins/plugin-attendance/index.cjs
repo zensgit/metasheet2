@@ -13571,7 +13571,7 @@ function applyEngineOverrides(metrics, engineResult) {
   const base = {
     workMinutes: metrics.workMinutes,
     overtimeMinutes: metrics.overtimeMinutes,
-    requiredMinutes: metrics.requiredMinutes,
+    ...(metrics.requiredMinutes === undefined ? {} : { requiredMinutes: metrics.requiredMinutes }),
   }
   const overrides = {}
   const nextMetrics = { ...metrics }

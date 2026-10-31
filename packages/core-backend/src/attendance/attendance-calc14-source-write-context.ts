@@ -38,19 +38,30 @@ export function assertAttendanceCalc14OrdinaryBusinessEffectiveDateV1(
 }
 
 export function attendanceCalc14SourceWriteErrorV1(error: unknown): AttendanceCalc14SourceWriteError | null {
-  if (error instanceof AttendanceCalc14SourceWriteError) return error
-  const dbError = error as { code?: string; message?: string } | null
-  if (dbError?.code !== '23514') return null
+  const typed = error instanceof AttendanceCalc14SourceWriteError
+  const dbError = error as { code?: unknown; message?: unknown } | null
+  if (!typed && dbError?.code !== '23514') return null
+  const code = typed ? error.code : dbError.message
   const statuses: Record<string, number> = {
     ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED: 422,
     ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT: 409,
     ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID: 403,
     ATTENDANCE_CALC14_SOURCE_IMMUTABLE: 409,
+    ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID: 422,
+    ATTENDANCE_CALC14_HISTORICAL_AUTHORIZATION_REQUIRED: 403,
+    ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE: 422,
   }
-  const status = statuses[dbError.message ?? '']
-  return typeof status === 'number'
-    ? new AttendanceCalc14SourceWriteError(status, dbError.message as string)
-    : null
+  if (typeof code !== 'string' || !Object.prototype.hasOwnProperty.call(statuses, code)) return null
+  // Driver messages retain the original four-code constraint contract.
+  if (!typed && ![
+    'ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED',
+    'ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT',
+    'ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID',
+    'ATTENDANCE_CALC14_SOURCE_IMMUTABLE',
+  ].includes(code)) return null
+  const status = statuses[code]
+  if (typed && (error.status !== status || error.message !== code)) return null
+  return new AttendanceCalc14SourceWriteError(status, code)
 }
 
 // These are the deferred capture triggers reached by the two core writers.
