@@ -3149,3 +3149,24 @@ multi-segment authoritative calculation remains off.
 > Rewritten sites in this document: the `W4C-R42` row, the `Prefix 01` clause, the exact-gate
 > mutation list, and the test-seam clause. **No other operative requirement changes**; the
 > `OD-W4C-40` decision row receives only a provenance pointer, and no runtime behaviour changes.
+
+
+## CALC15 named read-only explanation compatibility exception — 2026-10-27
+
+The human explicitly approved the concrete read-contract decision packet:
+only a visible active legacy_untracked daily record whose current calculation
+pointer is null may add optional current.calculationMode=envelope_legacy.
+Visibility reason must remain active, so review placeholders are excluded.
+Posture and the original four required current fields remain independent and
+unchanged. This is a named exception to section10.2 closed current and
+section12 OFF response byte equality for this field only. OpenAPI keeps
+additionalProperties:false and a single-literal optional enum.
+
+This labels the current legacy daily projection, not the complete historical
+calculation set. Restored rows may have legitimate earlier calculations.
+No data rewrite, migration, historical segment/baseline fabrication,
+recompute or calculator enablement is authorized. Every other OFF response,
+error, permission/scope check and parsing guard remains subject to the
+original contract. Detailed gates and actual evidence belong to the
+attendance-legacy-envelope-read-contract design-lock/verification dated20261027.
+Draft/HOLD, no merge/deploy/R71/flags; realUAT/50004excluded.
