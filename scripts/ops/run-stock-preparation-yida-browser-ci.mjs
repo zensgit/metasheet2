@@ -400,7 +400,7 @@ async function worker(owner, ownerPath, ownerSha) {
     for (const file of [tasks, json]) assert(plain(file, false, 0o600).size < 4 * 1024 * 1024)
     validateTaskReceipt(JSON.parse(fs.readFileSync(tasks, 'utf8')))
     const report = JSON.parse(fs.readFileSync(json, 'utf8'))
-    assert.equal(report.success, true); assert.equal(report.numTotalTests, 70); assert.equal(report.numPassedTests, 70)
+    assert.equal(report.success, true); assert.equal(report.numTotalTests, 72); assert.equal(report.numPassedTests, 72)
     for (const key of ['numFailedTests', 'numPendingTests', 'numTodoTests']) assert.equal(report[key], 0)
     assert.deepEqual(native.assertBrowserNetworkIsolation(), isolation)
     verifyHashes(owner)
