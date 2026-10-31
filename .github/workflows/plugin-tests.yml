@@ -853,6 +853,15 @@ jobs:
       # tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts, wired into the
       # "Run attendance integration tests" step below and excluded from this job's default
       # vitest.config.ts run.
+      - name: Run CALC14 effective source history contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-calc14-effective-source-history.test.ts \
+            tests/unit/attendance-calc14-core-source-writer.test.ts \
+            tests/unit/attendance-calc14-core-writer-routes.test.ts \
+            tests/unit/attendance-calc14-r4-policy-window.test.ts \
+            --reporter=dot
+
       - name: Run W4C-5 operator transition tooling unit tests
         if: matrix.node-version == '20.x'
         shell: bash
@@ -2923,6 +2932,11 @@ jobs:
             tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts \
             tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts \
             tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
+            tests/integration/attendance-calc14-effective-source-history.db.test.ts \
+            tests/integration/attendance-calc14-native-history.db.test.ts \
+            tests/integration/attendance-calc14-review-regressions.db.test.ts \
+            tests/integration/attendance-calc14-r4-policy-window.db.test.ts \
+            tests/integration/attendance-calc14-core-writers-native.db.test.ts \
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
             tests/integration/attendance-w4c3b-request-snapshots.db.test.ts \
             tests/integration/attendance-w4c3b-central-approval.db.test.ts \

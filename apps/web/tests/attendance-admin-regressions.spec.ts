@@ -1001,12 +1001,32 @@ describe('Attendance admin regressions', () => {
         return jsonResponse(200, { ok: true, data: { shift: { id, ...body } } })
       }
       if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'DELETE') {
-        writes.push({ url, method, body: {} })
+        writes.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : {} })
         return jsonResponse(200, { ok: true, data: { deleted: true } })
       }
       return fallback ? fallback(input, init) : emptyAttendanceResponse()
     })
     return writes
+  }
+
+  const calc14OrgFixture = '33333333-3333-4333-8333-333333333333'
+  function installCalc14RuleCapability(capability: unknown, responseOrg = calc14OrgFixture) {
+    window.localStorage.setItem('tenantId', calc14OrgFixture)
+    const receipt = { capability, responseOrg }
+    const fallback = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.startsWith('/api/attendance/rules/default') && (!init?.method || init.method === 'GET')) {
+        return jsonResponse(200, { ok: true, data: {
+          id: '77777777-7777-4777-8777-777777777777', orgId: receipt.responseOrg,
+          name: 'Default', timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00',
+          lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5],
+          capabilities: { businessEffectiveDateRequired: receipt.capability },
+        } })
+      }
+      return fallback ? fallback(input, init) : emptyAttendanceResponse()
+    })
+    return receipt
   }
 
   async function mountShiftAdmin(): Promise<HTMLElement> {
@@ -1021,6 +1041,112 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     return section!
   }
+
+  it('CALC14 unknown posture hides every new source-date control in the mounted admin page', async () => {
+    installShiftSegmentApi([attendanceShiftFixture()])
+    await mountShiftAdmin()
+    expect(container!.querySelectorAll('[data-calc14-date]')).toHaveLength(0)
+  })
+
+  it('CALC14 unknown posture keeps the exact old shift body despite stale date state', async () => {
+    const writes = installShiftSegmentApi([attendanceShiftFixture()])
+    const section = await mountShiftAdmin()
+    const state = app!._instance!.setupState as { calc14Dates: { shift: string } }
+    state.calc14Dates.shift = '2026-12-01'
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi()
+    expect(writes).toHaveLength(1)
+    expect(writes[0]!.body).toEqual({
+      name: 'Standard Shift', timezone: 'Asia/Shanghai',
+      segments: [{ segmentIndex: 0, startTime: '09:00', startDayOffset: 0, endTime: '18:00', endDayOffset: 0 }],
+      flexPolicy: { mode: 'strict' }, lateGraceMinutes: 10, earlyGraceMinutes: 10,
+      roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5],
+    })
+  })
+
+  it.each([
+    ['off', false, calc14OrgFixture],
+    ['unknown', undefined, calc14OrgFixture],
+    ['malformed', 'true', calc14OrgFixture],
+    ['foreign', true, '33333333-3333-4333-8333-333333333334'],
+  ])('CALC14 %s org rule metadata keeps legacy controls and body', async (_posture, capability, responseOrg) => {
+    installCalc14RuleCapability(capability, responseOrg)
+    const writes = installShiftSegmentApi([attendanceShiftFixture({ orgId: calc14OrgFixture })])
+    const section = await mountShiftAdmin()
+    expect(container!.querySelectorAll('[data-calc14-date]')).toHaveLength(0)
+    const state = app!._instance!.setupState as { calc14Dates: { shift: string } }
+    state.calc14Dates.shift = '2026-12-01'
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi()
+    expect(writes).toHaveLength(1)
+    expect(writes[0]!.body).toEqual({
+      name: 'Standard Shift', timezone: 'Asia/Shanghai',
+      segments: [{ segmentIndex: 0, startTime: '09:00', startDayOffset: 0, endTime: '18:00', endDayOffset: 0 }],
+      flexPolicy: { mode: 'strict' }, lateGraceMinutes: 10, earlyGraceMinutes: 10,
+      roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5], orgId: calc14OrgFixture,
+    })
+  })
+
+  it('CALC14 uses the server-bound active rule org when no org override exists', async () => {
+    installCalc14RuleCapability(true, calc14OrgFixture)
+    window.localStorage.removeItem('tenantId')
+    installShiftSegmentApi([attendanceShiftFixture({ orgId: calc14OrgFixture })])
+    const section = await mountShiftAdmin()
+    expect(section.querySelector('[data-calc14-date="shift-save"]')).not.toBeNull()
+  })
+
+  it('CALC14 losing org capability clears all management dates and delete drafts', async () => {
+    const receipt = installCalc14RuleCapability(true)
+    installShiftSegmentApi([attendanceShiftFixture({ orgId: calc14OrgFixture })])
+    await mountShiftAdmin()
+    const state = app!._instance!.setupState as {
+      calc14Dates: Record<string, string>
+      calc14ShiftDeletes: Record<string, string>
+      calc14GroupDeletes: Record<string, string>
+      calc14MemberDeletes: Record<string, string>
+    }
+    for (const key of Object.keys(state.calc14Dates)) state.calc14Dates[key] = '2026-12-01'
+    state.calc14ShiftDeletes.shift = '2026-12-01'
+    state.calc14GroupDeletes.group = '2026-12-01'
+    state.calc14MemberDeletes.member = '2026-12-01'
+    receipt.capability = false
+    Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === 'Reload rule')!.click()
+    await flushUi()
+    expect(Object.values(state.calc14Dates)).toEqual(['', '', '', '', '', ''])
+    expect(state.calc14ShiftDeletes).toEqual({})
+    expect(state.calc14GroupDeletes).toEqual({})
+    expect(state.calc14MemberDeletes).toEqual({})
+    expect(container!.querySelectorAll('[data-calc14-date]')).toHaveLength(0)
+  })
+
+  it('sends explicit shift effective dates and clears the editor when changing shifts', async () => {
+    installCalc14RuleCapability(true)
+    const writes = installShiftSegmentApi([
+      attendanceShiftFixture({ id: 'shift-a', orgId: calc14OrgFixture, capabilities: { businessEffectiveDateRequired: true } }),
+      attendanceShiftFixture({ id: 'shift-b', name: 'Other shift', orgId: calc14OrgFixture, capabilities: { businessEffectiveDateRequired: true } }),
+    ])
+    const section = await mountShiftAdmin()
+    const rows = Array.from(section.querySelectorAll<HTMLTableRowElement>('tbody tr'))
+    const edit = (row: HTMLTableRowElement) => Array.from(row.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Edit')!.click()
+    edit(rows[0]!)
+    await flushUi()
+    setInput(section, '[data-calc14-date="shift-save"]', '2026-12-01')
+    edit(rows[1]!)
+    await flushUi()
+    expect(section.querySelector<HTMLInputElement>('[data-calc14-date="shift-save"]')!.value).toBe('')
+    setInput(section, '[data-calc14-date="shift-save"]', '2026-12-02')
+    section.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn--primary')!.click()
+    await flushUi()
+    expect(writes[0]!.url).toBe('/api/attendance/shifts/shift-b/update')
+    expect(writes[0]!.body.businessEffectiveDate).toBe('2026-12-02')
+    setInput(rows[0]!, '[data-calc14-date="shift-delete"]', '2026-12-03')
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    Array.from(rows[0]!.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === 'Delete')!.click()
+    await flushUi()
+    expect(writes[1]).toEqual({ url: '/api/attendance/shifts/shift-a', method: 'DELETE', body: { businessEffectiveDate: '2026-12-03' } })
+    confirm.mockRestore()
+  })
 
   it('normalizes legacy shifts, preserves ordered segments on edit, and exposes preview-only limits', async () => {
     const splitShift = attendanceShiftFixture({
