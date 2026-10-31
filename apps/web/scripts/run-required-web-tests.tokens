@@ -73,6 +73,7 @@ approval-member-identity-coverage-enumeration
 approval-node-operation-policy
 approval-node-threshold-timeout-config
 approval-number-field-props
+approval-permissions
 approval-prefill-from-snapshot
 approval-process-attachment-dialog
 approval-record-link
