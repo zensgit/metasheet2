@@ -903,6 +903,7 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
       // W4_CANONICAL_PATH_PREFIXES.
       'attendance_business_trip_arrangements',
       'attendance_business_trip_requests',
+    'attendance_calc14_source_versions',
       'attendance_calculation_context_source_events',
       'attendance_calculation_context_source_state',
       'attendance_calculation_rollout_events',
