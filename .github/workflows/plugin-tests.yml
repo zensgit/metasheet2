@@ -973,6 +973,20 @@ jobs:
             tests/unit/attendance-shift-segments-service.test.ts \
             --reporter=dot
 
+      - name: Run approved correction exact target contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-approved-correction-target-contract.test.ts \
+            tests/unit/attendance-approved-correction-target-source.test.ts \
+            tests/unit/attendance-approved-correction-plugin-contract.test.ts \
+            tests/unit/attendance-approved-correction-write-admission.test.ts \
+            tests/unit/attendance-approved-correction-authority-admission.test.ts \
+            tests/unit/attendance-approved-correction-source-history.test.ts \
+            tests/unit/attendance-approved-correction-group-v2.test.ts \
+            tests/unit/attendance-approved-correction-async-input.test.ts \
+            tests/unit/attendance-approved-correction-carry-execution.test.ts \
+            --reporter=dot
+
       # #4556 W4C-4 §12.7/§12.9: immutable detail/trace, auth-order and
       # comparator mutation legs plus generated OpenAPI/SDK parity. Whole-file
       # names are explicit so a path-filter or default-suite exclusion cannot
@@ -2923,6 +2937,7 @@ jobs:
             tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts \
             tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts \
             tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
+            tests/integration/attendance-approved-correction-targets.db.test.ts \
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
             tests/integration/attendance-w4c3b-request-snapshots.db.test.ts \
             tests/integration/attendance-w4c3b-central-approval.db.test.ts \

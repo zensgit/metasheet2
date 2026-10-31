@@ -68,6 +68,12 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
+  // Approved correction selection, snapshots and apply reach frozen calculation inputs.
+  // Keep both W6 module and HTTP bans active for the core modules and plugin port.
+  'packages/core-backend/src/attendance/approved-correction-apply.ts',
+  'packages/core-backend/src/attendance/approved-correction-target-contract.ts',
+  'packages/core-backend/src/attendance/approved-correction-target-source.ts',
+  'plugins/plugin-attendance/lib/attendance-approved-correction-targets.cjs',
   // Trip, request and timezone modules supply or protect the frozen calculation context.
   // Apply both aggregate bans to every new module; no exclusion is introduced.
   'packages/core-backend/src/attendance/attendance-business-trip-locks.ts',

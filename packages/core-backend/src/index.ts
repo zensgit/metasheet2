@@ -1,3 +1,5 @@
+import { readAttendanceCorrectionTargetsV1, freezeAttendanceCorrectionTargetsV1 } from './attendance/approved-correction-target-source'
+import { validatePendingApprovedCorrectionV1 } from './attendance/approved-correction-apply'
 /**
  * MetaSheet Backend Core
  * 后端核心服务器入口
@@ -169,6 +171,7 @@ import {
   lockAttendanceCleaningSource,
 } from './attendance/attendance-multitable-cleaning-authority'
 import {
+  appendBoundApprovedCorrectionCalculationV1 as appendApprovedCorrectionCalculationV1,
   buildAttendanceRequestCreationAttributionSnapshotV1,
   createAttendanceLiveScheduledBoundaryV1,
   computeAttendanceOuterSourceDefinitionFingerprintV1,
@@ -217,7 +220,7 @@ import {
   buildAttendanceImportPolicySourceProofV1,
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
-import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
+import { createAttendanceRequestOperationBoundaryV1, requireAttendanceCorrectionSourcePostureV1 } from './attendance/w4c3b-request-operation-boundary'
 import {
   registerAttendanceCancellationExecutionProvider,
   registerCancelRoundCancelledEventDelivery,
@@ -3517,6 +3520,35 @@ export class MetaSheetServer {
                 bindRequestSnapshotOnTerminalDecision: (
                   input: Parameters<typeof bindAttendanceRequestTerminalSnapshotV1>[0],
                 ) => bindAttendanceRequestTerminalSnapshotV1(input),
+                approvedCorrection: {
+                  readTargets: readAttendanceCorrectionTargetsV1,
+                  freezeTargets: (
+                    client: import('./attendance/w4c3b-request-operation-boundary').AttendanceRequestPluginTrxV1,
+                    subject: Parameters<typeof freezeAttendanceCorrectionTargetsV1>[1],
+                    value: unknown,
+                    operation: unknown,
+                  ) => {
+                    if (client.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CORRECTION_TRANSACTION_REQUIRED')
+                    requireAttendanceCorrectionSourcePostureV1(client, operation, subject)
+                    return freezeAttendanceCorrectionTargetsV1(client, subject, value, operation)
+                  },
+                  validatePending: (
+                    client: import('./attendance/w4c3b-request-operation-boundary').AttendanceRequestPluginTrxV1,
+                    identity: Parameters<typeof validatePendingApprovedCorrectionV1>[1],
+                    operation: unknown,
+                  ) => {
+                    if (client.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CORRECTION_TRANSACTION_REQUIRED')
+                    return validatePendingApprovedCorrectionV1(client, identity, operation)
+                  },
+                  appendApproved: (
+                    client: import('./attendance/w4c3b-request-operation-boundary').AttendanceRequestPluginTrxV1,
+                    identity: Parameters<typeof appendApprovedCorrectionCalculationV1>[1],
+                    operation: unknown,
+                  ) => {
+                    if (client.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CORRECTION_TRANSACTION_REQUIRED')
+                    return appendApprovedCorrectionCalculationV1(client, identity, operation)
+                  },
+                },
                 buildRequestCalculationPayloadFromRequestRow:
                   buildAttendanceRequestCalculationPayloadFromRequestRowV1,
                 computeRequestPayloadFingerprint:

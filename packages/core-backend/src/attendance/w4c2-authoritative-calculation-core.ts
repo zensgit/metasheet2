@@ -92,6 +92,7 @@
  *
  * There is no `updated_at` — the calc table is append-only (§7.7).
  */
+import { requireApprovedCorrectionWriteAdmissionV1 } from './approved-correction-apply'
 import crypto from 'node:crypto'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
@@ -684,6 +685,7 @@ export async function writeAuthoritativeSegmentCalculationV1(
   trx: AttendanceW4TransactionClientV1,
   input: WriteAuthoritativeSegmentCalculationInputV1,
 ): Promise<WriteAuthoritativeSegmentCalculationResultV1> {
+  input = requireApprovedCorrectionWriteAdmissionV1(trx, input)
   const replay = await retryReplayLookup(trx, {
     orgId: input.orgId,
     entrypoint: input.entrypoint,
