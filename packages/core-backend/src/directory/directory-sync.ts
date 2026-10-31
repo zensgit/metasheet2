@@ -1,4 +1,5 @@
 import { DirectoryUserPaginationError, getNextDirectoryUserCursor } from './directory-user-pagination'
+import { hasDirectoryDepartmentCycle } from './directory-department-cycle'
 import { readDirectoryIdentityVerification, type DirectoryIdentityVerification } from './integration-identity'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
@@ -9,6 +10,7 @@ import { LoginNameRuleError, assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
+import { DingTalkIncompleteResponseError } from '../integrations/dingtalk/transport'
 import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
@@ -3273,6 +3275,10 @@ export async function fetchAllDepartments(
       departments.set(child.id, existing ? { ...existing, ...child } : child)
       if (!existing) queue.push(child.id)
     }
+  }
+
+  if (hasDirectoryDepartmentCycle(departments)) {
+    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
   }
 
   // dept-head plumbing: enrich each department with its manager user ids from the

@@ -29,6 +29,9 @@ cursors keep the pull running.
 - Cursor sets are per department. Do not require monotonic cursors. An explicitly
   final page may omit its cursor. Keep unique-user detail deduplication and
   multi-department membership merging.
+- A parent cycle in the pulled department map rejects the snapshot before manager
+  enrichment or preview/apply can consume it. Keep existing null and out-of-scope
+  parent semantics for valid graphs.
 - Failures use values-free messages. User pull errors propagate through the
   existing sync failure path before the apply transaction or preview completes.
 - New no-DB regressions drive the real client parsing and real fetchAllUsers

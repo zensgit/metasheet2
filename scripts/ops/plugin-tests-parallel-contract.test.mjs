@@ -32,7 +32,7 @@ const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
   if: "matrix.node-version == '20.x'",
   'working-directory': 'packages/core-backend',
-  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts',
+  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts',
 }
 
 function resultUpload(suite) {
