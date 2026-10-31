@@ -205,6 +205,26 @@ describe('todo center per-source door', () => {
       expect(codes).toEqual(['approvals:read', 'tasks:read'])
     })
 
+    it('naming a source still answers 403 for a viewer with none', async () => {
+      state.granted = new Set()
+      for (const path of [ITEMS, COUNT]) {
+        for (const name of ['approval', 'task']) {
+          const response = await request(pinned.url()).get(`${path}?sources=${name}`)
+          expect(response.status).toBe(403)
+          expect(response.body).toEqual({ error: 'Insufficient permissions' })
+        }
+      }
+    })
+
+    it('a failed check on a named source answers the same 500 body as rbacGuard', async () => {
+      state.failure = new Error('lookup failed')
+      for (const path of [ITEMS, COUNT]) {
+        const response = await request(pinned.url()).get(`${path}?sources=approval`)
+        expect(response.status).toBe(500)
+        expect(response.body).toEqual({ error: 'Permission check failed' })
+      }
+    })
+
     it('an unknown name is dropped', async () => {
       const count = await request(pinned.url()).get(`${COUNT}?sources=approval,bogus`)
       expect(count.body).toEqual({ count: 1, sources: { approval: 'ok' } })
