@@ -74,6 +74,7 @@ import {
   RECOVERY_CONFLICT_HTTP_STATUS,
   sendIfRecoveryConflict,
 } from '../db/recovery-conflict'
+import { registerAdminUserBatchRoutes } from './admin-user-batch'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -2504,6 +2505,7 @@ async function auditActivateSuccess(
 
 export function adminUsersRouter(): Router {
   const r = Router()
+  registerAdminUserBatchRoutes(r)
 
   r.get('/api/admin/role-delegation/summary', authenticate, async (req: Request, res: Response) => {
     const delegation = await ensureRoleDelegationAdmin(req, res)
