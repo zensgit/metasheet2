@@ -45,6 +45,8 @@ const EXEMPTIONS = {
     'Recovery-archive envelope crypto: per-archive DEKs and a custody keyring sealed under its own backup secret, never ENCRYPTION_KEY / ENCRYPTION_SALT, so a platform key change does not affect it (outside #6164).',
   'recovery-verify-script':
     'scripts/verify-recovery-manual-checkpoint.mts is an operator verification script: it seals a synthetic capture under a fresh randomBytes(32) key inside its own throwaway database to exercise the prepared-capture store; no platform material, no persisted store of this deployment.',
+  'credential-repair-fixture':
+    'scripts/ops-tests/dingtalk-group-credentials-20261030.case.ts seals only synthetic canaries and test rows under fresh randomBytes(32) key/salt in its own throwaway database; it never persists values in an application deployment or uses its encryption material.',
   'dead-plugin-config-manager':
     'src/plugin/PluginConfigManager.ts has no importer in src/ (the runtime uses core/plugin-config-manager.ts, which encrypts nothing); it would seal plugin_configs.value under a random per-instance key with crypto.createCipher, not platform material.',
   'unwired-security-service-impl':
@@ -108,6 +110,7 @@ const CENSUS: Readonly<Record<string, CensusEntry>> = {
   [`${CS}/multitable/recovery-archive-crypto.ts :: createCipheriv`]: { count: 1, exempt: 'recovery-archive-crypto' },
   [`${CS}/multitable/recovery-local-custody.ts :: createCipheriv`]: { count: 1, exempt: 'recovery-archive-crypto' },
   [`${SCRIPTS}/verify-recovery-manual-checkpoint.mts :: createCipheriv`]: { count: 1, exempt: 'recovery-verify-script' },
+  [`${SCRIPTS}/ops-tests/dingtalk-group-credentials-20261030.case.ts :: encryptStoredSecretValue`]: { count: 6, exempt: 'credential-repair-fixture' },
   [`${CS}/plugin/PluginConfigManager.ts :: encrypt`]: { count: 1, exempt: 'dead-plugin-config-manager' },
   [`${CS}/plugin/PluginConfigManager.ts :: createCipher`]: { count: 1, exempt: 'dead-plugin-config-manager' },
   [`${CS}/services/SecurityService.ts :: createCipheriv`]: { count: 1, exempt: 'unwired-security-service-impl' },
@@ -228,6 +231,20 @@ describe('encrypted-store census: every sealing site is pinned to a probed store
 })
 
 describe('scanner self-check (synthetic sources, memory only)', () => {
+
+  it('the credential-repair fixture exemption still rejects added or removed sealing sites', () => {
+    const victim = `${SCRIPTS}/ops-tests/dingtalk-group-credentials-20261030.case.ts`
+    const key = `${victim} :: encryptStoredSecretValue`
+    const source = readRepoFile(victim)
+    const mutations = [
+      { source: source.replace(/\bcrypto\.encryptStoredSecretValue\b/, 'crypto.removedEncrypt'), found: 5, help: GONE_SITE_HELP },
+      { source: `${source}\ncrypto.encryptStoredSecretValue('synthetic-added-site')\n`, found: 7, help: NEW_SITE_HELP },
+    ]
+    for (const mutation of mutations) {
+      const drift = censusDrift(countSealingSites(scanTree((rel) => rel === victim ? mutation.source : readRepoFile(rel))))
+      expect(drift).toEqual([`${key}: pinned 6, found ${mutation.found} — ${mutation.help}`])
+    }
+  })
 
   it('in-memory mutation: removing each YiDa encrypt site turns the unchanged pinned comparison red', () => {
     for (const victim of [
