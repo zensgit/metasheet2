@@ -6,14 +6,14 @@
  * outlive the dialog and a page reload until the result has been shown.
  *
  * The browser keeps, under a name built from the sheet id and the record id, a random id, the time it
- * was made and two counters: requests handed to the transport under this key (`sends`), and how many
- * of them a 4xx answered, meaning that attempt created nothing (`settled`). An entry with
- * `sends > settled` is unresolved; one with `sends === settled` is dormant, and the next send reuses
- * its key, which the server has never stored, unless a write failed, which `persisted: false` reports:
- * after a failed `markSent` write and a reload the stored counters miss a request that did go out, so
- * the entry reads dormant, and reusing its key is still safe. Nothing here is derived from the session:
- * what stops another account from reusing an entry is the server, which matches a key only within the
- * caller's own org and dispatcher, so another account's send makes that account's own task.
+ * was made and one counter (`unsettled`): requests handed to the transport under this key that no 4xx
+ * has answered (a 4xx means that attempt created nothing). An entry with `unsettled > 0` is unresolved;
+ * one with `unsettled === 0` is dormant, and the next send reuses its key, which the server has never
+ * stored, unless a write failed, which `persisted: false` reports: after a failed `markSent` write and
+ * a reload the stored count misses a request that did go out, so the entry reads dormant, and reusing
+ * its key is still safe. Nothing here is derived from the session: what stops another account from
+ * reusing an entry is the server, which matches a key only within the caller's own org and dispatcher,
+ * so another account's send makes that account's own task.
  *
  * The in-memory map is the record for this page; sessionStorage is the mirror that survives a reload.
  * Every storage call has its own try/catch: a failed write is reported as `persisted: false`, a failed
@@ -63,8 +63,8 @@ export interface DispatchKeyEntry {
   key: string
   /** When the key was made; orders the entries at the cap. */
   at: number
-  sends: number
-  settled: number
+  /** Requests handed to the transport under this key that no 4xx has answered; never below zero. */
+  unsettled: number
 }
 
 export interface DispatchKeyStore {
@@ -72,7 +72,7 @@ export interface DispatchKeyStore {
   obtain(scope: DispatchKeyScope): { key: string; persisted: boolean }
   /** One more request under this key; called before the request is handed to the transport. */
   markSent(scope: DispatchKeyScope): { persisted: boolean }
-  /** A 4xx answered one of the requests. Never exceeds `sends`; does nothing when there is no entry. */
+  /** A 4xx answered one of the requests. Never goes below zero; does nothing when there is no entry. */
   markSettled(scope: DispatchKeyScope): void
   /** There is an entry and at least one of its requests has no 4xx answer. */
   isUnresolved(scope: DispatchKeyScope): boolean
@@ -112,16 +112,15 @@ function parseEntry(raw: string): DispatchKeyEntry | null {
     return null
   }
   if (typeof value !== 'object' || value === null) return null
-  const { v, key, at, sends, settled } = value as Record<string, unknown>
+  const { v, key, at, unsettled } = value as Record<string, unknown>
   if (v !== 1 || !isDispatchKey(key) || typeof at !== 'number' || !Number.isFinite(at)) return null
-  if (!Number.isInteger(sends) || !Number.isInteger(settled)) return null
-  if ((settled as number) < 0 || (sends as number) < (settled as number)) return null
-  return { v: 1, key, at, sends: sends as number, settled: settled as number }
+  if (!Number.isInteger(unsettled) || (unsettled as number) < 0) return null
+  return { v: 1, key, at, unsettled: unsettled as number }
 }
 
 /** At the cap, dormant entries go before unresolved ones, oldest first within each. */
 function evictionOrder(a: [string, DispatchKeyEntry], b: [string, DispatchKeyEntry]): number {
-  const unresolved = Number(a[1].sends > a[1].settled) - Number(b[1].sends > b[1].settled)
+  const unresolved = Number(a[1].unsettled > 0) - Number(b[1].unsettled > 0)
   if (unresolved !== 0) return unresolved
   return a[1].at - b[1].at || a[0].localeCompare(b[0])
 }
@@ -225,7 +224,7 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
       if (found) return { key: found.entry.key, persisted: found.persisted }
       const key = deps.mint()
       evict()
-      const entry: DispatchKeyEntry = { v: 1, key, at: deps.now(), sends: 0, settled: 0 }
+      const entry: DispatchKeyEntry = { v: 1, key, at: deps.now(), unsettled: 0 }
       const persisted = writeStored(name, entry)
       held.set(name, { entry, persisted })
       return { key, persisted }
@@ -234,17 +233,17 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
       const name = dispatchKeyStorageKey(scope)
       const found = find(name)
       if (!found) return { persisted: false }
-      return { persisted: update(found, name, { ...found.entry, sends: found.entry.sends + 1 }) }
+      return { persisted: update(found, name, { ...found.entry, unsettled: found.entry.unsettled + 1 }) }
     },
     markSettled(scope) {
       const name = dispatchKeyStorageKey(scope)
       const found = find(name)
-      if (!found || found.entry.settled >= found.entry.sends) return
-      update(found, name, { ...found.entry, settled: found.entry.settled + 1 })
+      if (!found || found.entry.unsettled === 0) return
+      update(found, name, { ...found.entry, unsettled: found.entry.unsettled - 1 })
     },
     isUnresolved(scope) {
       const found = find(dispatchKeyStorageKey(scope))
-      return found !== null && found.entry.sends > found.entry.settled
+      return found !== null && found.entry.unsettled > 0
     },
     isPersisted(scope) {
       return find(dispatchKeyStorageKey(scope))?.persisted ?? false

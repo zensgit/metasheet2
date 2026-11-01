@@ -160,8 +160,8 @@
 # this guard's paths already cover.
 #
 # 派发任务 retry key (one new file, so twenty-seven whole-file args): `tasks-dispatch-key.spec.ts`
-# added — what `tasks/recordTaskDispatchKey.ts` keeps per record (a random id, a time and two
-# counters), when entries go (a session change away from a signed-in principal, the cap), a copied
+# added — what `tasks/recordTaskDispatchKey.ts` keeps per record (a random id, a time and one
+# counter), when entries go (a session change away from a signed-in principal, the cap), a copied
 # tab, and storage that is missing or throws.
 #
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/

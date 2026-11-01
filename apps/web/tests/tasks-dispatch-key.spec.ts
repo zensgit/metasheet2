@@ -7,11 +7,12 @@
  *
  * What it pins:
  *  1. Contents: under every kind of session the entry's name is the prefix plus sheet id and record
- *     id, its value is a random id, a time and two counters, and neither holds session data; a session
+ *     id, its value is a random id, a time and one counter, and neither holds session data; a session
  *     change adds nothing else to storage. A stored value that is not a valid entry is removed and
  *     reads as none.
- *  2. Counters: unresolved means more sends than 4xx answers; a dormant entry keeps its key; a reload
- *     (a new store on the same storage) finds the same key and counters.
+ *  2. Counter: unresolved means at least one send that no 4xx has answered, and a 4xx answer never
+ *     takes the count below zero; a dormant entry keeps its key; a reload (a new store on the same
+ *     storage) finds the same key and count.
  *  3. Session changes: leaving a signed-in principal removes every entry, also when that principal was
  *     read at page load (a new module graph) or could not be read, and a sign-in with none before it
  *     and a refresh for the same principal keep them. Thirty-three scopes leave thirty-two entries,
@@ -177,7 +178,7 @@ describe('what an entry holds', () => {
     },
   ]
 
-  it.each(sessions)('under $name it holds ids and counters only', ({ arrange, principal }) => {
+  it.each(sessions)('under $name it holds ids and a counter only', ({ arrange, principal }) => {
     const sessionTexts = arrange()
     expect(getAuthPrincipalKey()).toMatch(principal)
     resetDispatchKeysForTests()
@@ -192,8 +193,8 @@ describe('what an entry holds', () => {
     const entries = keyEntriesOf(session)
     expect(entries.map(([name]) => name)).toEqual([`${DISPATCH_KEY_STORAGE_PREFIX}["sht_1","rec_1"]`])
     const value = JSON.parse(entries[0][1]) as Record<string, unknown>
-    expect(Object.keys(value).sort()).toEqual(['at', 'key', 'sends', 'settled', 'v'])
-    expect(value).toMatchObject({ v: 1, key, sends: 2, settled: 1 })
+    expect(Object.keys(value).sort()).toEqual(['at', 'key', 'unsettled', 'v'])
+    expect(value).toMatchObject({ v: 1, key, unsettled: 1 })
 
     const everything = entriesOf(session).flat().join('\n')
     for (const text of [...sessionTexts, readDispatchIdentity(), getAuthPrincipalKey()!]) {
@@ -217,18 +218,18 @@ describe('what an entry holds', () => {
     ['not JSON', 'x'],
     ['null', 'null'],
     ['a list', '[]'],
-    ['another version', JSON.stringify({ v: 2, key: KEY_A, at: 1, sends: 1, settled: 0 })],
-    ['a key that is not a uuid', JSON.stringify({ v: 1, key: 'not-a-uuid-at-all', at: 1, sends: 1, settled: 0 })],
-    ['a key with text after it', JSON.stringify({ v: 1, key: `${KEY_A}x`, at: 1, sends: 1, settled: 0 })],
-    ['a key with text before it', JSON.stringify({ v: 1, key: `x${KEY_A}`, at: 1, sends: 1, settled: 0 })],
-    ['an upper-case key', JSON.stringify({ v: 1, key: KEY_A.replace(/1/g, 'A'), at: 1, sends: 1, settled: 0 })],
-    ['more 4xx answers than sends', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: 1, settled: 2 })],
-    ['a negative count', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: -1, settled: -1 })],
-    ['a fractional count', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: 1.5, settled: 0 })],
-    ['a missing count', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: 1 })],
-    ['a time that is not a number', JSON.stringify({ v: 1, key: KEY_A, at: 'then', sends: 1, settled: 0 })],
+    ['another version', JSON.stringify({ v: 2, key: KEY_A, at: 1, unsettled: 1 })],
+    ['a key that is not a uuid', JSON.stringify({ v: 1, key: 'not-a-uuid-at-all', at: 1, unsettled: 1 })],
+    ['a key with text after it', JSON.stringify({ v: 1, key: `${KEY_A}x`, at: 1, unsettled: 1 })],
+    ['a key with text before it', JSON.stringify({ v: 1, key: `x${KEY_A}`, at: 1, unsettled: 1 })],
+    ['an upper-case key', JSON.stringify({ v: 1, key: KEY_A.replace(/1/g, 'A'), at: 1, unsettled: 1 })],
+    ['the earlier two-counter shape', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: 1, settled: 0 })],
+    ['a negative count', JSON.stringify({ v: 1, key: KEY_A, at: 1, unsettled: -1 })],
+    ['a fractional count', JSON.stringify({ v: 1, key: KEY_A, at: 1, unsettled: 1.5 })],
+    ['a missing count', JSON.stringify({ v: 1, key: KEY_A, at: 1 })],
+    ['a time that is not a number', JSON.stringify({ v: 1, key: KEY_A, at: 'then', unsettled: 1 })],
     // Written out: JSON.stringify turns an infinite number into null, and JSON.parse reads this one as infinite.
-    ['a time that is not finite', `{"v":1,"key":"${KEY_A}","at":1e999,"sends":1,"settled":0}`],
+    ['a time that is not finite', `{"v":1,"key":"${KEY_A}","at":1e999,"unsettled":1}`],
   ]
 
   it.each(invalidValues)('%s reads as no entry and is removed', (_label, raw) => {
@@ -243,7 +244,7 @@ describe('what an entry holds', () => {
 
   it('a valid stored entry is read back whole', () => {
     const name = dispatchKeyStorageKey(SCOPE)
-    const storage = makeStorage([[name, JSON.stringify({ v: 1, key: KEY_A, at: 5, sends: 2, settled: 1 })]])
+    const storage = makeStorage([[name, JSON.stringify({ v: 1, key: KEY_A, at: 5, unsettled: 1 })]])
     const store = storeOn(storage)
 
     expect(store.isUnresolved(SCOPE)).toBe(true)
@@ -255,7 +256,7 @@ describe('what an entry holds', () => {
   })
 })
 
-describe('counters', () => {
+describe('the counter', () => {
   it('a new entry is dormant, a send makes it unresolved, a 4xx answer makes it dormant again with the same key', () => {
     const store = storeOn(makeStorage())
     const { key } = store.obtain(SCOPE)
@@ -278,14 +279,15 @@ describe('counters', () => {
     expect(store.isUnresolved(SCOPE)).toBe(true)
   })
 
-  it('settled never exceeds sends', () => {
+  it('a 4xx answer never takes the count below zero', () => {
     const storage = makeStorage()
     const store = storeOn(storage)
-    store.obtain(SCOPE)
+    const { key } = store.obtain(SCOPE)
     store.markSent(SCOPE)
     store.markSettled(SCOPE)
     store.markSettled(SCOPE)
-    expect(JSON.parse(storage.getItem(dispatchKeyStorageKey(SCOPE))!)).toMatchObject({ sends: 1, settled: 1 })
+    expect(JSON.parse(storage.getItem(dispatchKeyStorageKey(SCOPE))!)).toMatchObject({ key, unsettled: 0 })
+    expect(store.isUnresolved(SCOPE)).toBe(false)
   })
 
   it('a mark on a scope with no entry creates nothing', () => {
@@ -298,7 +300,7 @@ describe('counters', () => {
     expect(store.isPersisted(SCOPE)).toBe(false)
   })
 
-  it('a reload finds the same key and counters', () => {
+  it('a reload finds the same key and count', () => {
     const storage = makeStorage()
     const first = storeOn(storage)
     const { key } = first.obtain(SCOPE)
@@ -341,7 +343,7 @@ describe('counters', () => {
   it('an entry is written when it is made, not later', () => {
     const storage = makeStorage()
     const { key } = storeOn(storage).obtain(SCOPE)
-    expect(JSON.parse(storage.getItem(dispatchKeyStorageKey(SCOPE))!)).toMatchObject({ key, sends: 0, settled: 0 })
+    expect(JSON.parse(storage.getItem(dispatchKeyStorageKey(SCOPE))!)).toMatchObject({ key, unsettled: 0 })
   })
 })
 
@@ -578,7 +580,7 @@ describe('the cap', () => {
     const seeded = 40
     const storage = makeStorage(Array.from({ length: seeded }, (_, index): [string, string] => [
       dispatchKeyStorageKey(scopeAt(index)),
-      JSON.stringify({ v: 1, key: KEY_A, at: seeded - index, sends: 0, settled: 0 }),
+      JSON.stringify({ v: 1, key: KEY_A, at: seeded - index, unsettled: 0 }),
     ]))
 
     storeOn(storage).obtain(scopeAt(seeded))
@@ -683,7 +685,7 @@ describe('storage that is missing or throws', () => {
     expect(store.isPersisted(SCOPE)).toBe(true)
   })
 
-  it('after a failed write this page reads its own counters, and a new page reads the stored ones', () => {
+  it('after a failed write this page reads its own count, and a new page reads the stored one', () => {
     const storage = makeStorage()
     const store = storeOn(storage)
     store.obtain(SCOPE)
