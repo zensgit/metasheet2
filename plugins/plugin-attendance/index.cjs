@@ -1,3 +1,4 @@
+const { createAttendanceApprovedCorrectionTargetsV1 } = require('./lib/attendance-approved-correction-targets.cjs')
 const crypto = require('crypto')
 const { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
 const {
@@ -24692,6 +24693,10 @@ function buildAttendanceApprovalInstancePayload({
     minutes: draft?.metadata?.minutes ?? null,
   }
 
+  if (draft?.metadata?.correctionTargets !== undefined) {
+    formSnapshot.correctionTargets = draft.metadata.correctionTargets
+  }
+
   // S7-2/S7-3/S7-4 §3.4: freeze create-time org relations (managerId + deptHeadId + managerChainIds)
   // into the requester snapshot. Omitted fields stay omitted — never write null placeholders that would
   // change the legacy {id,name}-only snapshot shape for static-only flows.
@@ -25564,6 +25569,9 @@ module.exports = {
     // Intl probe (which accepts offset forms like "+05:00"). Reads and writes that do
 	    // not carry a timezone value are untouched.
 	    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
+    const approvedCorrectionTargets = createAttendanceApprovedCorrectionTargetsV1(
+      attendanceW4SegmentCalculationPort?.approvedCorrection, HttpError,
+    )
 	    // W4C-3c P20: singular active-current helper port (never re-implemented in the plugin).
 	    attendanceW4ActiveCurrentPort = attendanceW4SegmentCalculationPort?.activeCurrent ?? null
 
@@ -25608,7 +25616,9 @@ module.exports = {
 	          source: typeof outdoor.source === 'string' && outdoor.source ? outdoor.source : 'mobile',
 	        }
 	      }
-	      return { minutes, leaveTypeCode, outdoorPunch }
+	      return { minutes, leaveTypeCode, outdoorPunch,
+          ...(meta.correctionTargets === undefined ? {} : { correctionTargets: meta.correctionTargets }),
+        }
 	    }
 	    const buildRequestSnapshotPayloadFromDraft = (draft, metadata) => {
 	      const port = attendanceW4SegmentCalculationPort
@@ -25621,6 +25631,13 @@ module.exports = {
 	        ...buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
 	      })
 	    }
+    const correctionReadRowFingerprint = row => {
+      const payload = buildRequestSnapshotPayloadFromDraft({
+        workDate: row.workDate, requestedInAt: row.requested_in_at, requestedOutAt: row.requested_out_at,
+        reason: row.reason, metadata: row.metadata,
+      }, row.metadata)
+      return attendanceW4SegmentCalculationPort.computeRequestPayloadFingerprint(payload)
+    }
 	    const buildUnsupportedRequestSnapshotMaterial = (reason = 'missing') => {
 	      const port = attendanceW4SegmentCalculationPort
 	      const attributionSnapshot =
@@ -32771,6 +32788,7 @@ module.exports = {
       requestType: z.string().optional(),
       request_type: z.string().optional(),
       type: z.string().optional(),
+      correctionTargets: z.unknown().optional(),
       requestedInAt: z.string().optional(),
       requested_in_at: z.string().optional(),
       clockIn: z.string().optional(),
@@ -33814,7 +33832,7 @@ module.exports = {
       return clauses.length ? `AND (${clauses.join(' OR ')})` : 'AND FALSE'
     }
 
-    async function resolveAttendanceRequestDraft(client, parsedData, existingRequest = null) {
+    async function resolveAttendanceRequestDraft(client, parsedData, existingRequest = null, operation) {
       const orgId = existingRequest?.org_id ?? DEFAULT_ORG_ID
       const existingMetadata = normalizeMetadata(existingRequest?.metadata)
       const existingLeaveType = normalizeMetadata(existingMetadata.leaveType)
@@ -34131,15 +34149,17 @@ module.exports = {
         }
       }
 
-      return {
-        orgId,
-        workDate,
-        requestType,
-        requestedInAt,
-        requestedOutAt,
-        reason,
-        metadata,
+      const draft = { orgId, workDate, requestType, requestedInAt, requestedOutAt, reason, metadata }
+      const correction = await approvedCorrectionTargets.freeze(client, parsedData, existingMetadata, draft, {
+        orgId, userId: existingRequest?.user_id,
+      }, operation)
+      if (correction) {
+        metadata.correctionTargets = correction.targets
+        freshRequestTimezoneSnapshotMaterials.set(client, {
+          attributionSnapshot: correction.attributionSnapshot, contextSnapshot: correction.contextSnapshot,
+        })
       }
+      return draft
     }
 
     const resolveSchema = z.object({
@@ -34155,6 +34175,8 @@ module.exports = {
       expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     })
     const requestDecisionActionSchema = resolveSchema.extend({
+      expectedSnapshotVersion: z.coerce.number().int().min(1).optional(),
+      expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
       operationId: z.string().uuid().optional(),
       operation_id: z.string().uuid().optional(),
       expectedApprovalVersion: z.coerce.number().int().min(0).optional(),
@@ -34572,7 +34594,7 @@ module.exports = {
       } else freshRequestTimezoneTargets.set(trx,target)
     }
 
-    async function prepareGenericRequestCreate(trx, rawInput) {
+    async function prepareGenericRequestCreate(trx, rawInput, operation) {
       const route = genericRequestRoute(trx,rawInput)
       if (!route.orgId || route.requestId !== null) {
         throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
@@ -34581,6 +34603,7 @@ module.exports = {
         trx,
         route.requestBody,
         { org_id: route.orgId, user_id: route.actorId },
+        operation,
       )
       const timezoneTarget = freshRequestTimezoneTargets.get(trx)
       validateAttendanceLeaveTargetRangeV1(draft,timezoneTarget,HttpError,toWorkDate)
@@ -34629,10 +34652,11 @@ module.exports = {
       }
     }
 
-    async function executeGenericRequestCreate(trx, prepared) {
+    async function executeGenericRequestCreate(trx, prepared, operation) {
       const {
         route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments,
       } = prepared.state
+      approvedCorrectionTargets.assertExecution(draft, operation)
       const timezoneTarget = freshRequestTimezoneTargets.get(trx)
       if (timezoneTarget) draft.metadata.timezoneContextV1 = timezoneTarget
       await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
@@ -35646,7 +35670,7 @@ module.exports = {
       prepare: async function prepareRequestCreate(trx, rawInput, operation) {
         const variant = operation?.routeVariant
         if (variant === 'business_trip') return businessTripCreateAdapter.prepare(trx,rawInput)
-        if (variant === 'generic') return prepareGenericRequestCreate(trx, rawInput)
+        if (variant === 'generic') return prepareGenericRequestCreate(trx, rawInput, operation)
         if (variant === 'outdoor') return prepareOutdoorRequestCreate(trx, rawInput)
         if (variant === 'schedule_dispatch') return prepareScheduleDispatchRequestCreate(trx, rawInput)
         if (variant === 'shift_swap') return prepareShiftSwapRequestCreate(trx, rawInput)
@@ -35655,7 +35679,7 @@ module.exports = {
       async execute(trx, prepared, operation) {
         const variant = prepared?.state?.routeVariant ?? operation?.routeVariant
         if (variant === 'business_trip') return businessTripCreateAdapter.execute(trx,prepared)
-        if (variant === 'generic') return executeGenericRequestCreate(trx, prepared)
+        if (variant === 'generic') return executeGenericRequestCreate(trx, prepared, operation)
         if (variant === 'outdoor') return executeOutdoorRequestCreate(trx, prepared)
         if (variant === 'schedule_dispatch') return executeScheduleDispatchRequestCreate(trx, prepared)
         if (variant === 'shift_swap') return executeShiftSwapRequestCreate(trx, prepared)
@@ -35764,7 +35788,7 @@ module.exports = {
         if (existingRequest.status !== 'pending') {
           throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
         }
-        const draft = await resolveAttendanceRequestDraft(trx, route.requestBody, existingRequest)
+        const draft = await resolveAttendanceRequestDraft(trx, route.requestBody, existingRequest, operation)
         const timezoneTarget = freshRequestTimezoneTargets.get(trx)
         validateAttendanceLeaveTargetRangeV1(draft,timezoneTarget,HttpError,toWorkDate)
         if (timezoneTarget) draft.metadata.timezoneContextV1 = timezoneTarget
@@ -35815,8 +35839,9 @@ module.exports = {
           state: { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments },
         }
       },
-      execute: async function executeRequestPendingEdit(trx, prepared) {
+      execute: async function executeRequestPendingEdit(trx, prepared, operation) {
         const { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments } = prepared.state
+        approvedCorrectionTargets.assertExecution(draft, operation)
         const lockedRequestRows = await trx.query(
           'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
           [route.requestId],
@@ -36565,7 +36590,7 @@ module.exports = {
             action: route.action,
             decisionChannel: 'web',
             comment: normalizeOptionalText(route.requestBody.comment),
-            meta: route.requestBody.metadata ?? null,
+            meta: approvedCorrectionTargets.decisionMeta(route.requestBody),
           },
           state: null,
         }
@@ -36612,7 +36637,7 @@ module.exports = {
           action: route.action,
           decisionChannel: 'web',
           comment: normalizeOptionalText(route.requestBody.comment),
-          meta: route.requestBody.metadata ?? null,
+          meta: approvedCorrectionTargets.decisionMeta(route.requestBody),
         },
         state: null,
       }
@@ -37911,7 +37936,8 @@ module.exports = {
             orgId,
             rows.map(mapAttendanceRequestRow)
           )
-          res.json({ ok: true, success: true, data: { items, total, page, pageSize } })
+          const decisionItems = await approvedCorrectionTargets.enrichDecisionContexts(db, orgId, items, correctionReadRowFingerprint)
+          res.json({ ok: true, success: true, data: { items: decisionItems, total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -37922,6 +37948,37 @@ module.exports = {
         }
       })
     )
+
+    context.api.http.addRoute('GET', '/api/attendance/correction-targets',
+      withPermission('attendance:read', async (req, res) => {
+        const userId = getUserId(req)
+        const tokenSubject = getAuthenticatedTokenSubjectUserId(req)
+        if (!userId || !tokenSubject || tokenSubject !== userId) {
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'FORBIDDEN' } })
+          return
+        }
+        const parsed = z.object({ workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict().safeParse(req.query)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'ATTENDANCE_CORRECTION_TARGET_INVALID', message: 'ATTENDANCE_CORRECTION_TARGET_INVALID' } })
+          return
+        }
+        try {
+          const data = await db.transaction(async trx => {
+            const orgId = await deriveAttendanceApprovalOrgStampV1(trx, {
+              subjectUserId: userId, requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
+            })
+            return approvedCorrectionTargets.read(trx, { orgId, userId, workDate: parsed.data.workDate })
+          })
+          res.json({ ok: true, data })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.code } })
+            return
+          }
+          if (respondIfW4BoundaryError(res, error)) return
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'INTERNAL_ERROR' } })
+        }
+      }))
 
     context.api.http.addRoute(
       'GET',
@@ -37972,10 +38029,11 @@ module.exports = {
 	                fingerprint: String(snapshotRows[0].payload_fingerprint),
 	              }
 	            : null
+          const decisionRequests = await approvedCorrectionTargets.enrichDecisionContexts(db, orgId, requests, correctionReadRowFingerprint)
 	          res.json({
 	            ok: true,
 	            data: {
-	              request: requests[0],
+	              request: decisionRequests[0],
 	              ...(requestSnapshot ? { requestSnapshot } : {}),
 	            },
 	          })
@@ -39390,13 +39448,29 @@ module.exports = {
           // approval/request DML. Authoritative + missing snapshot fails closed here
           // (zero terminal writes). Shadow missing is allowed (unsupported pre-W4).
           // legacy_projection_only is a no-op.
-          if (isFinalApproval) {
+          if (isFinalApproval || requestMetadata.correctionTargets !== undefined) {
             lockedRequestSnapshot = await lockRequestSnapshotBeforeTerminalDecision(trx, {
               orgId,
               requestId,
               requestType,
               subjectUserId: requestRow.user_id,
             })
+          }
+
+          if (requestMetadata.correctionTargets !== undefined) {
+            if (!operation?.operationId || route.requestBody.expectedSnapshotVersion === undefined
+              || route.requestBody.expectedSnapshotFingerprint === undefined) {
+              throw new HttpError(400, 'ATTENDANCE_CORRECTION_DECISION_CONTEXT_REQUIRED', 'ATTENDANCE_CORRECTION_DECISION_CONTEXT_REQUIRED')
+            }
+            if (lockedRequestSnapshot?.kind !== 'locked'
+              || lockedRequestSnapshot.snapshot.version !== route.requestBody.expectedSnapshotVersion
+              || lockedRequestSnapshot.snapshot.payloadFingerprint !== route.requestBody.expectedSnapshotFingerprint) {
+              throw new HttpError(409, 'ATTENDANCE_CORRECTION_SNAPSHOT_CHANGED', 'ATTENDANCE_CORRECTION_SNAPSHOT_CHANGED')
+            }
+          }
+          if (action === 'approve' && isFinalApproval && requestMetadata.correctionTargets !== undefined) {
+            approvedCorrectionTargets.assertExecution({ metadata: requestMetadata }, operation)
+            await approvedCorrectionTargets.validate(trx, { orgId, userId: requestRow.user_id, requestId }, operation)
           }
 
           // W2: final overtime approval must validate its creation-frozen anchor before any
@@ -39860,7 +39934,14 @@ module.exports = {
                   referenceSegments: decisionReferenceSegments,
                 })
             const timezone = context.rule.timezone
-            if (requestType === 'missed_check_in' || requestType === 'missed_check_out' || requestType === 'time_correction') {
+            if (requestMetadata.correctionTargets !== undefined) {
+              const applied = await approvedCorrectionTargets.append(trx, {
+                orgId, userId: requestRow.user_id, requestId, operationId: operation.operationId,
+                actorId: requesterId, correlationId: operation.correlationId,
+                mode: operation.acceptedWritePosture,
+              }, operation)
+              record = applied.record
+            } else if (requestType === 'missed_check_in' || requestType === 'missed_check_out' || requestType === 'time_correction') {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
               const updateFirstInAt = requestRow.requested_in_at ? new Date(requestRow.requested_in_at) : null
               const updateLastOutAt = requestRow.requested_out_at ? new Date(requestRow.requested_out_at) : null

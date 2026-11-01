@@ -100,6 +100,8 @@
 import crypto from 'node:crypto'
 import { buildOnlinePunchRequestV1, ONLINE_PUNCH_SOURCE_REF, makeOnlinePunchReceiptV1, parseOnlinePunchReceiptV1, retryOnlinePunchClaimV1, withOnlinePunchCompanionV1, OnlinePunchConnectionUncertainError, type OnlinePunchRequestV1, type OnlinePunchReceiptV1 } from './online-punch-request'
 import type { AttendanceRequestOperationBoundaryInputV1, AttendanceRequestOperationExternalTransactionResultV1 } from './w4c3b-request-operation-boundary'
+import { loadRetainedAttendanceCorrectionsV1 } from './approved-correction-target-source'
+import { writeRetainedApprovedCorrectionCalculationV1 } from './approved-correction-apply'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -186,6 +188,7 @@ import {
   AttendanceW4AuthoritativeCalculationError,
   writeAuthoritativeSegmentCalculationV1,
   type AttendanceAuthoritativeParentPreimageV1,
+  type WriteAuthoritativeSegmentCalculationInputV1,
 } from './w4c2-authoritative-calculation-core'
 // The CANONICAL compatibility-fingerprint producer, shared byte-for-byte with import/rollback.
 // Never hand-rolled here, and never modeled on ops-retirement's separate 6-field
@@ -216,6 +219,41 @@ export class AttendanceW4LiveScheduledBoundaryError extends Error {
 
 function boundaryFail(code: string, httpStatus = 422): never {
   throw new AttendanceW4LiveScheduledBoundaryError(code, httpStatus)
+}
+
+type RetainedCorrectionExecutionV1 = Readonly<{
+  client: AttendanceW4TransactionClientV1
+  kind: 'live_punch'
+  phase: 'execute'
+  org: VerifiedAttendanceOrgIdentityV1
+  operation: VerifiedAttendanceOperationIdentityV1
+  userId: string
+  workDate: string
+  actorId: string
+  correlationId: string
+  mode: VerifiedAttendanceOrgIdentityV1['acceptedWritePosture']
+}>
+const retainedCorrectionExecutions = new WeakMap<object, RetainedCorrectionExecutionV1>()
+
+/** Read-only check of an active boundary execution; cannot mint or extend one. */
+export function requireAttendanceRetainedCorrectionExecutionV1(
+  client: AttendanceW4TransactionClientV1, execution: unknown,
+  input: WriteAuthoritativeSegmentCalculationInputV1,
+  org: VerifiedAttendanceOrgIdentityV1, operation: VerifiedAttendanceOperationIdentityV1,
+) {
+  const admitted = execution !== null && typeof execution === 'object'
+    ? retainedCorrectionExecutions.get(execution) : undefined
+  if (!admitted || admitted.client !== client || admitted.kind !== 'live_punch' || admitted.phase !== 'execute'
+    || admitted.org !== org || admitted.operation !== operation || operation.org !== org
+    || operation.kind !== 'item' || operation.entrypoint !== 'live_punch' || input.entrypoint !== 'live'
+    || admitted.mode !== 'authoritative' || org.acceptedWritePosture !== admitted.mode
+    || !input.context || input.orgId !== org.orgId || input.context.orgId !== org.orgId
+    || input.context.userId !== admitted.userId || input.context.workDate !== admitted.workDate
+    || input.operationId !== operation.id || input.actorId !== admitted.actorId
+    || input.correlationId !== admitted.correlationId) {
+    boundaryFail('ATTENDANCE_CORRECTION_OPERATION_REQUIRED', 400)
+  }
+  return Object.freeze({ org: admitted.org, operation: admitted.operation })
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,11 +1238,11 @@ async function nextCalculationVersion(
   return Number(result.rows[0].next)
 }
 
-interface ShadowCalculationRowInput {
+export interface ShadowCalculationRowInput {
   orgId: string
   recordId: string
   version: number
-  entrypoint: 'live' | 'scheduled'
+  entrypoint: 'live' | 'scheduled' | 'correction'
   /** NULL exactly for the W7 group-shadow comparison record (whose producing
    *  operation travels in the provenance marker — `chk_arc_operation_id`'s
    *  marker disjunct enforces the pairing); every served-path shadow row
@@ -1843,6 +1881,7 @@ async function loadLivePunchEvidence(
     `SELECT id::text AS id, event_type, occurred_at, source
        FROM attendance_events
       WHERE user_id = $1 AND org_id = $2 AND work_date = $3
+        AND event_type IN ('check_in', 'check_out')
       ORDER BY occurred_at, id`,
     [userId, orgId, workDate],
   )
@@ -2126,6 +2165,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
     online?: { request: OnlinePunchRequestV1; preflight: Awaited<ReturnType<typeof attendanceResultOperationPreflightV1>>; authorization: ReturnType<typeof createAuthorizedAttendanceWriteContextV1> },
     pluginTrx: AttendancePluginShapedTrxV1 = pluginShapedTrx(trx),
   ): Promise<AttendanceLivePunchBoundaryResultV1> {
+    const liveSubject = Object.freeze({ orgId: input.orgId, userId: input.userId, workDate: input.workDate })
     // Org-key pre-classification. The rollout domain is canonical UUIDs plus the
     // exact 'default' sentinel; a legacy org key OUTSIDE that lexical domain can
     // never carry a rollout-state row through the sanctioned transition writer
@@ -2246,6 +2286,19 @@ export function createAttendanceLiveScheduledBoundaryV1(
       return { kind: 'legacy_compat' as const, response: result }
     }
 
+    if (envelope.orgId !== liveSubject.orgId || envelope.commands[0].subjectUserId !== liveSubject.userId
+      || authorization.orgId !== liveSubject.orgId || authorization.capability !== 'punch'
+      || authorization.subjectScope.kind !== 'self' || authorization.subjectScope.userId !== liveSubject.userId) {
+      boundaryFail('ATTENDANCE_CORRECTION_OPERATION_REQUIRED', 400)
+    }
+    // Own the claimed command and its already SQL-rechecked authorization before
+    // further awaits. No factory witness alone can install an execution scope.
+    const retainedExecution: RetainedCorrectionExecutionV1 = Object.freeze({
+      client: trx, kind: 'live_punch', phase: 'execute', org, operation: identity,
+      userId: liveSubject.userId, workDate: liveSubject.workDate,
+      actorId: authorization.actorId, correlationId: envelope.correlationId, mode: org.acceptedWritePosture,
+    })
+
     // Three-posture matrix: a business time only the legacy parser accepts.
     // HOISTED above the authoritative branch by Gate D2 so both the authoritative reject
     // (below, first thing in the branch) and the eligible reject (further down) read ONE
@@ -2253,6 +2306,13 @@ export function createAttendanceLiveScheduledBoundaryV1(
     // is a try/catch around the strict instant parser), so hoisting it is behaviour-
     // preserving for every other posture.
     const legacyOnlyTime = input.occurredAtRaw !== null && !isStrictInstant(input.occurredAtRaw)
+    // Read the old frozen universe BEFORE either punch adapter mutates it.
+    // Legacy/OFF returned above; mode comes only from this preflight's witnesses.
+    const retainedCorrections = legacyOnlyTime
+      ? { approvedFacts: [] as ApprovedAttendanceFactV1[], evidence: [] as AttendanceEvidenceV1[], sourceDefinitionFingerprint: null }
+      : await loadRetainedAttendanceCorrectionsV1(trx, {
+          orgId: envelope.orgId, userId: input.userId, workDate: input.workDate,
+        }, org, identity)
 
     // W4 posture. Distinguish effective shadow vs eligible vs authoritative
     // (still under the org rollout shared lock acquired above).
@@ -2406,17 +2466,18 @@ export function createAttendanceLiveScheduledBoundaryV1(
         authoritativeAttribution.posture === 'resolved_v2'
           ? authoritativeAttribution.value.workDate
           : input.workDate
-      const authoritativeEvidence = await loadLivePunchEvidence(
+      const authoritativePunchEvidence = await loadLivePunchEvidence(
         trx,
         envelope.orgId,
         input.userId,
         authoritativeEvidenceAnchorWorkDate,
       )
+      const authoritativeEvidence = [...authoritativePunchEvidence, ...retainedCorrections.evidence]
       const authoritativeCalculated = calculateAttendanceSegmentsV1({
         attribution: authoritativeAttribution,
         context: authoritativeContext,
         evidence: authoritativeEvidence,
-        approvedFacts: [],
+        approvedFacts: retainedCorrections.approvedFacts,
       })
 
       // identityDrift override (canonical freeze semantics §4.2 candidate (i)), computed
@@ -2464,7 +2525,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         buildAuthoritativeLivePunchPreimageV1(authoritativeParent)
 
       // -- Step 7: the core owns the calc row, the lineage, and the parent pointer --------
-      const authoritativeWritten = await writeAuthoritativeSegmentCalculationV1(trx, {
+      const authoritativeWriteInput = {
         orgId: envelope.orgId,
         recordId: authoritativeParent.id,
         entrypoint: 'live',
@@ -2473,7 +2534,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         attribution: authoritativeAttribution,
         context: authoritativeContext,
         evidence: authoritativeEvidence as unknown as readonly unknown[],
-        approvedFacts: [],
+        approvedFacts: retainedCorrections.approvedFacts,
         provenanceRef: authoritativeProvenanceRef,
         // BOTH places: top-level for the core's own conflict check, and embedded so a
         // genuine retry's `input_provenance.payloadFingerprint` read matches.
@@ -2487,7 +2548,21 @@ export function createAttendanceLiveScheduledBoundaryV1(
         sourceBatchId: null,
         actorId: authorization.actorId,
         correlationId: envelope.correlationId,
-      })
+      }
+      const authoritativeWritten = await (async () => {
+        if (!retainedCorrections.approvedFacts.length) {
+          return writeAuthoritativeSegmentCalculationV1(trx, authoritativeWriteInput)
+        }
+        // Only this actual claimed live invocation installs authority. Nothing
+        // outside this module can register a token; all exits revoke it.
+        const execution = Object.freeze({})
+        retainedCorrectionExecutions.set(execution, retainedExecution)
+        try {
+          return await writeRetainedApprovedCorrectionCalculationV1(trx, authoritativeWriteInput, org, identity, execution)
+        } finally {
+          retainedCorrectionExecutions.delete(execution)
+        }
+      })()
 
       // Seal fingerprints are RECOMPUTED at the boundary over the same inputs the core
       // hashed — the core's return shape is deliberately unchanged by D2. The tier arg MUST
@@ -2497,7 +2572,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         attribution: authoritativeAttribution,
         context: authoritativeContext,
         evidence: authoritativeEvidence,
-        approvedFacts: [],
+        approvedFacts: retainedCorrections.approvedFacts,
         manualOverride: null,
         mergePolicy: 'append',
         calculationTier: 'segment_authoritative',
@@ -2584,7 +2659,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
           entrypoint: 'live',
           producingOperationId: identity.id,
           attribution: authoritativeAttribution,
-          evidence: authoritativeEvidence,
+          evidence: authoritativePunchEvidence,
           provenanceRef: authoritativeProvenanceRef,
           w7GroupShadow: authoritativeW7GroupShadow,
           identityDrift: authoritativeIdentityDrift,
@@ -2768,12 +2843,17 @@ export function createAttendanceLiveScheduledBoundaryV1(
       // drift check below, which forces review whenever they diverge).
       const evidenceAnchorWorkDate =
         attribution.posture === 'resolved_v2' ? attribution.value.workDate : input.workDate
-      const evidence = await loadLivePunchEvidence(trx, envelope.orgId, input.userId, evidenceAnchorWorkDate)
+      const punchEvidence = await loadLivePunchEvidence(trx, envelope.orgId, input.userId, evidenceAnchorWorkDate)
+      const evidence = [...punchEvidence, ...retainedCorrections.evidence]
+      if (retainedCorrections.approvedFacts.length && retainedCorrections.sourceDefinitionFingerprint
+        !== computeAttendanceSourceDefinitionFingerprintV1({ attribution, context })) {
+        boundaryFail('ATTENDANCE_CORRECTION_SOURCE_MISMATCH', 409)
+      }
       const calculation = calculateAttendanceSegmentsV1({
         attribution,
         context,
         evidence,
-        approvedFacts: [],
+        approvedFacts: retainedCorrections.approvedFacts,
       })
       // Section 8.2 step 7 (`:1821-1822` verbatim: "require candidate
       // identity plus source-definition fingerprint equality"): the
@@ -2996,7 +3076,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         context,
         segmentSnapshot: context ? (context.segments as unknown as unknown[]) : [],
         evidence: evidence as unknown as unknown[],
-        approvedFacts: [],
+        approvedFacts: retainedCorrections.approvedFacts,
         inputProvenance: { ...provenanceRef },
         provenanceRef,
         mergePolicy: 'append',
@@ -3028,7 +3108,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
           entrypoint: 'live',
           producingOperationId: identity.id,
           attribution,
-          evidence,
+          evidence: punchEvidence,
           provenanceRef,
           w7GroupShadow,
           identityDrift,
@@ -3920,4 +4000,16 @@ export function createAttendanceLiveScheduledBoundaryV1(
   }
 
   return { resolvesScheduledTimezone: !!adapters.resolveScheduledMembers, executeLivePunch, executeScheduledRun, recoverScheduledRun, probeOnlinePunchReplay, executeOnlinePunch }
+}
+
+
+// Only the bound approval path receives the private shadow writer. The deferred
+// import avoids a source-reader initialization cycle; raw insertion is not public.
+export async function appendBoundApprovedCorrectionCalculationV1(
+  client: import('./approved-correction-target-source').AttendanceCorrectionQueryClient,
+  identity: Parameters<typeof import('./approved-correction-apply').appendApprovedCorrectionCalculationV1>[1],
+  operation?: unknown,
+) {
+  const { appendApprovedCorrectionCalculationV1 } = await import('./approved-correction-apply')
+  return appendApprovedCorrectionCalculationV1(client, identity, insertShadowCalculation, operation)
 }

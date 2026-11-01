@@ -1,3 +1,4 @@
+import type { AttendanceCorrectionTargetV1 } from './approved-correction-target-contract'
 /**
  * W4C-0 (#4556) Stage C — canonical write-boundary TYPE declarations
  * (lock sections 4.1, 4.2, 4.3, 8.1). Types only: `executeAttendanceResultOperation`
@@ -193,6 +194,15 @@ export type ApprovedAttendanceFactV1 =
       direction: 'check_in' | 'check_out'
       occurredAt: string
       supersededEvidenceRef: string
+    })
+  | (ApprovedFactBaseV1 & {
+      kind: 'correction'
+      schemaVersion: 2
+      changes: ReadonlyArray<Readonly<{
+        target: AttendanceCorrectionTargetV1
+        occurredAt: string
+        adjustmentEvidenceRef: string
+      }>>
     })
   | (ApprovedFactBaseV1 & { kind: 'outdoor_punch'; direction: 'check_in' | 'check_out'; occurredAt: string })
   | (ApprovedFactBaseV1 & { kind: 'reversal'; reversesApprovalRecordId: string })

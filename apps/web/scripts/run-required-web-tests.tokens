@@ -572,6 +572,8 @@ templateDetailI18n
 templateGalleryFilter
 tests/api.spec.ts
 tests/App.spec.ts
+tests/attendance-correction-decision.spec.ts
+tests/attendance-correction-targets.spec.ts
 tests/attendance-rules-me-contract-sync.spec.ts
 tests/AttendanceReportFieldsSection.spec.ts
 tests/AttendanceSessionOrgSwitcher.spec.ts

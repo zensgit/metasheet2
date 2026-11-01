@@ -71,6 +71,16 @@ const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readShadowTraceCalculation', 'attendance_record_calculations', 1, 'history', 'immutable_shadow_trace', 'visibility_state=active'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readTraceSegments', 'attendance_record_segments', 1, 'history', 'immutable_authorized_trace_segments'),
   entry('plugins/plugin-attendance/index.cjs', 'loadW4c3cRecordSubjectForOperation', 'attendance_record_calculations', 2, 'history', 'operation_subject_precondition'),
+  // Approved correction uses immutable source/segment evidence and write-path history.
+  // These are not ordinary current projections; active/pointer checks are outside the
+  // SQL literal, so none claims an active SQL predicate fingerprint.
+  entry('packages/core-backend/src/attendance/approved-correction-apply.ts', 'appendApprovedCorrectionCalculationV1', 'attendance_record_calculations', 1, 'history', 'version_allocation'),
+  entry('packages/core-backend/src/attendance/approved-correction-target-source.ts', 'loadResolvedAttendanceCorrectionSourceV1', 'attendance_record_calculations', 1, 'history', 'correction_frozen_source_precondition'),
+  entry('packages/core-backend/src/attendance/approved-correction-target-source.ts', 'verifyFrozenCorrectionSourceV1', 'attendance_record_segments', 1, 'history', 'correction_frozen_segment_precondition'),
+  entry('packages/core-backend/src/attendance/approved-correction-target-source.ts', 'readRetainedAttendanceCorrectionsV1', 'attendance_record_calculations', 1, 'history', 'retained_correction_carry_precondition'),
+  // `instant` is only nearest-preceding-declaration attribution: the SQL actually
+  // loads the exact original frozen calculation inside readRetainedAttendanceCorrectionsV1.
+  entry('packages/core-backend/src/attendance/approved-correction-target-source.ts', 'instant', 'attendance_record_calculations', 1, 'history', 'retained_correction_original_source_history'),
 ])
 
 function keyOf(site) {

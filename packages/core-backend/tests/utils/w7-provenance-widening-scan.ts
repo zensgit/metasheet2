@@ -667,6 +667,9 @@ export function diffProvenanceWideningV1(
  * edits above a site do not churn this list.
  */
 export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Object.freeze([
+  // Approved correction preserves the locked parent owner, including w4_group.
+  // This exact read carries widening evidence; it is not a neutral constant emitter.
+  { file: 'packages/core-backend/src/attendance/approved-correction-apply.ts', text: "posture: 'present', projectionOwner: source.record.projection_owner as 'w4' | 'w4_group',", rule: 'widened_predicate' },
   // Reviewed ordinary-record repair and its preflight admit only legacy_untracked.
   // Both w4 and w4_group remain outside that repair scope; neither is downgraded
   // or treated as an ordinary legacy candidate. Keep the exact legacy-only tests.
