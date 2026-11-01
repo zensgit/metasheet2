@@ -1030,7 +1030,7 @@ describe('task M4 schema (real db)', () => {
         encoding: 'utf8',
         timeout: 110_000,
       })
-      expect(cli.status).toBe(1)
+      expect(cli.status, cli.stderr).toBe(1)
       expect(`${cli.stdout}\n${cli.stderr}`).toContain(
         `corrupted migrations: previously executed migration ${migrationName} is missing`,
       )
