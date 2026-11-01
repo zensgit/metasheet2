@@ -547,12 +547,20 @@ export async function listDingTalkDepartments(
       if (!id || !name) {
         throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
       }
+      const rawParent = entry.parent_id
+      let parentId: string | null
+      if (rawParent === null || rawParent === undefined) {
+        parentId = null
+      } else if (typeof rawParent === 'string') {
+        parentId = rawParent.trim() || null
+      } else if (typeof rawParent === 'number' && Number.isSafeInteger(rawParent) && rawParent >= 0) {
+        parentId = String(rawParent)
+      } else {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+      }
       return {
         id,
-        parentId:
-          entry.parent_id === null || entry.parent_id === undefined
-            ? null
-            : String(entry.parent_id).trim() || null,
+        parentId,
         name,
         order: readNumericField(entry, 'order', 'order_index') ?? 0,
         source: entry,

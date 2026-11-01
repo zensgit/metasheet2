@@ -15,6 +15,12 @@ cursors keep the pull running.
   accepted department list shapes and explicit empty arrays.
 - The user pagination flag must be an explicit boolean. Missing/invalid flags reject the page.
 - IDs accept nonempty strings or non-negative safe integers; names must be nonempty strings.
+- A supplied department-list parent is null when omitted, null, or blank after trim.
+  Nonempty strings keep their trimmed text, including out-of-scope parents and parent 0.
+  A non-negative safe integer becomes its decimal string. Arrays, objects, booleans,
+  fractional numbers, negatives, and unsafe integers reject the whole department list
+  with the existing values-free incomplete-department sentence. Preserve both accepted
+  list shapes, explicit empty lists, and row id, name, order, and source mapping.
 - Supplied department memberships must be arrays of valid ID scalars; malformed lists
   or elements reject the pull before apply. Preserve omitted/null fallbacks, explicit
   empty arrays, ordering and well-formed IDs outside the selected department map.
