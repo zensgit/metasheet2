@@ -7,12 +7,15 @@
  *
  * What it pins:
  *  1. Contents: under every kind of session the entry's name is the prefix plus sheet id and record
- *     id, its value is a random id, a time and two counters, and neither holds session data. A stored
- *     value that is not a valid entry is removed and reads as none.
+ *     id, its value is a random id, a time and two counters, and neither holds session data; a session
+ *     change adds nothing else to storage. A stored value that is not a valid entry is removed and
+ *     reads as none.
  *  2. Counters: unresolved means more sends than 4xx answers; a dormant entry keeps its key; a reload
  *     (a new store on the same storage) finds the same key and counters.
- *  3. Session changes: leaving a signed-in principal removes every entry, a sign-in with none before
- *     it and a refresh for the same principal keep them. Thirty-three scopes leave thirty-two entries.
+ *  3. Session changes: leaving a signed-in principal removes every entry, also when that principal was
+ *     read at page load (a new module graph) or could not be read, and a sign-in with none before it
+ *     and a refresh for the same principal keep them. Thirty-three scopes leave thirty-two entries,
+ *     counting entries from before a reload.
  *  4. A copied tab (a store on a copy of the storage) holds the same key until it releases its own.
  *  5. Storage that is missing or throws: the store still answers from memory and says so.
  */
@@ -84,6 +87,22 @@ function jwt(payload: Record<string, unknown>): string {
   return `header.${btoa(JSON.stringify(payload))}.signature`
 }
 
+function storeToken(token: string): void {
+  localStorage.setItem('auth_token', token)
+  localStorage.setItem('jwt', token)
+}
+
+function storeExplicitSession(): { token: string; actor: string; tenantId: string; epoch: string } {
+  const exp = Math.floor(Date.now() / 1000) + 3600
+  const actor = 'usr_explicit'
+  const tenantId = 'org_explicit'
+  const token = jwt({ userId: actor, tenantId, exp })
+  storeToken(token)
+  const epoch = 'epoch-marker-text'
+  localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({ state: 'ready', token, actor, tenantId, exp, epoch }))
+  return { token, actor, tenantId, epoch }
+}
+
 /** The session switch reads the new session one microtask after the notification. */
 async function settle(): Promise<void> {
   await Promise.resolve()
@@ -105,10 +124,9 @@ afterEach(() => {
 })
 
 describe('what an entry holds', () => {
-  function storeToken(token: string): void {
-    localStorage.setItem('auth_token', token)
-    localStorage.setItem('jwt', token)
-  }
+  afterEach(() => {
+    window.history.replaceState({}, '', '/')
+  })
 
   const sessions: Array<{ name: string; arrange: () => string[]; principal: RegExp }> = [
     {
@@ -131,15 +149,8 @@ describe('what an entry holds', () => {
     {
       name: 'an explicitly selected session',
       arrange: () => {
-        const exp = Math.floor(Date.now() / 1000) + 3600
-        const token = jwt({ userId: 'usr_explicit', tenantId: 'org_explicit', exp })
-        storeToken(token)
-        const epoch = 'epoch-marker-text'
-        localStorage.setItem(
-          EXPLICIT_SESSION_ORG_KEY,
-          JSON.stringify({ state: 'ready', token, actor: 'usr_explicit', tenantId: 'org_explicit', exp, epoch }),
-        )
-        return [token, 'usr_explicit', 'org_explicit', epoch]
+        const { token, actor, tenantId, epoch } = storeExplicitSession()
+        return [token, actor, tenantId, epoch]
       },
       principal: /^\["explicit"/,
     },
@@ -150,6 +161,17 @@ describe('what an entry holds', () => {
         storeToken(token)
         localStorage.setItem('tenantId', 'org_hint_text')
         return [token, 'usr_hint', 'org_hint_text']
+      },
+      principal: /^sub:/,
+    },
+    {
+      name: 'an org in the address',
+      arrange: () => {
+        const token = jwt({ userId: 'usr_address' })
+        storeToken(token)
+        window.history.replaceState({}, '', '/?tenantId=org_address_text')
+        expect(readDispatchIdentity()).toContain('org_address_text')
+        return [token, 'usr_address', 'org_address_text']
       },
       principal: /^sub:/,
     },
@@ -173,7 +195,7 @@ describe('what an entry holds', () => {
     expect(Object.keys(value).sort()).toEqual(['at', 'key', 'sends', 'settled', 'v'])
     expect(value).toMatchObject({ v: 1, key, sends: 2, settled: 1 })
 
-    const everything = JSON.stringify(entriesOf(session))
+    const everything = entriesOf(session).flat().join('\n')
     for (const text of [...sessionTexts, readDispatchIdentity(), getAuthPrincipalKey()!]) {
       expect(everything).not.toContain(text)
     }
@@ -197,12 +219,16 @@ describe('what an entry holds', () => {
     ['a list', '[]'],
     ['another version', JSON.stringify({ v: 2, key: KEY_A, at: 1, sends: 1, settled: 0 })],
     ['a key that is not a uuid', JSON.stringify({ v: 1, key: 'not-a-uuid-at-all', at: 1, sends: 1, settled: 0 })],
+    ['a key with text after it', JSON.stringify({ v: 1, key: `${KEY_A}x`, at: 1, sends: 1, settled: 0 })],
+    ['a key with text before it', JSON.stringify({ v: 1, key: `x${KEY_A}`, at: 1, sends: 1, settled: 0 })],
     ['an upper-case key', JSON.stringify({ v: 1, key: KEY_A.replace(/1/g, 'A'), at: 1, sends: 1, settled: 0 })],
     ['more 4xx answers than sends', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: 1, settled: 2 })],
     ['a negative count', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: -1, settled: -1 })],
     ['a fractional count', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: 1.5, settled: 0 })],
     ['a missing count', JSON.stringify({ v: 1, key: KEY_A, at: 1, sends: 1 })],
     ['a time that is not a number', JSON.stringify({ v: 1, key: KEY_A, at: 'then', sends: 1, settled: 0 })],
+    // Written out: JSON.stringify turns an infinite number into null, and JSON.parse reads this one as infinite.
+    ['a time that is not finite', `{"v":1,"key":"${KEY_A}","at":1e999,"sends":1,"settled":0}`],
   ]
 
   it.each(invalidValues)('%s reads as no entry and is removed', (_label, raw) => {
@@ -223,6 +249,9 @@ describe('what an entry holds', () => {
     expect(store.isUnresolved(SCOPE)).toBe(true)
     expect(store.isPersisted(SCOPE)).toBe(true)
     expect(store.obtain(SCOPE)).toEqual({ key: KEY_A, persisted: true })
+
+    store.markSettled(SCOPE)
+    expect(store.isUnresolved(SCOPE)).toBe(false)
   })
 })
 
@@ -280,6 +309,18 @@ describe('counters', () => {
     expect(afterReload.obtain(SCOPE).key).toBe(key)
     afterReload.markSettled(SCOPE)
     expect(afterReload.isUnresolved(SCOPE)).toBe(false)
+  })
+
+  it('a 4xx answer read back after a reload leaves the entry dormant with the same key', () => {
+    const storage = makeStorage()
+    const first = storeOn(storage)
+    const { key } = first.obtain(SCOPE)
+    first.markSent(SCOPE)
+    first.markSettled(SCOPE)
+
+    const afterReload = storeOn(storage)
+    expect(afterReload.isUnresolved(SCOPE)).toBe(false)
+    expect(afterReload.obtain(SCOPE).key).toBe(key)
   })
 
   it('release removes the entry from memory and storage, and the next key is new', () => {
@@ -388,6 +429,77 @@ describe('session changes', () => {
 
     expect(keyEntriesOf(session)).toEqual([])
   })
+
+  it('setToken for the same account during an explicit session removes every entry', async () => {
+    const { token } = storeExplicitSession()
+    resetDispatchKeysForTests()
+    expect(getAuthPrincipalKey()).toMatch(/^\["explicit"/)
+    obtainThree()
+
+    useAuth().setToken(token)
+    await settle()
+
+    expect(getAuthPrincipalKey()).toBe('sub:usr_explicit')
+    expect(keyEntriesOf(session)).toEqual([])
+  })
+
+  it('a sign-in after a session that could not be read removes every entry', async () => {
+    localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({ state: 'changing', epoch: 'epoch' }))
+    resetDispatchKeysForTests()
+    obtainThree()
+
+    useAuth().setToken(USER_A)
+    await settle()
+
+    expect(keyEntriesOf(session)).toEqual([])
+  })
+
+  it('a session change puts nothing in storage but the entries, and no session text', async () => {
+    const tokens = ['opaque-session-text-a', 'opaque-session-text-b']
+    useAuth().setToken(tokens[0])
+    await settle()
+    obtainThree()
+
+    useAuth().setToken(tokens[1])
+    await settle()
+    expect(entriesOf(session)).toEqual([])
+
+    dispatchKeys.obtain(SCOPE)
+    const all = entriesOf(session)
+    expect(all.map(([name]) => name)).toEqual([dispatchKeyStorageKey(SCOPE)])
+    for (const token of tokens) expect(all.flat().join('\n')).not.toContain(token)
+  })
+
+  describe('as the page loads', () => {
+    afterEach(() => {
+      vi.resetModules()
+    })
+
+    it('a principal read at load is remembered and its sign-out removes every entry', async () => {
+      storeToken(USER_A)
+      vi.resetModules()
+      const fresh = await import('../src/tasks/recordTaskDispatchKey')
+      const { useAuth: freshUseAuth } = await import('../src/composables/useAuth')
+      fresh.dispatchKeys.obtain(SCOPE)
+      fresh.dispatchKeys.obtain(OTHER_SCOPE)
+      fresh.dispatchKeys.obtain(THIRD_SCOPE)
+      expect(keyEntriesOf(session)).toHaveLength(3)
+
+      freshUseAuth().clearToken()
+      await settle()
+
+      expect(keyEntriesOf(session)).toEqual([])
+    })
+
+    it('a session that cannot be read at load does not stop the module loading', async () => {
+      localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({ state: 'changing', epoch: 'epoch' }))
+      vi.resetModules()
+
+      const fresh = await import('../src/tasks/recordTaskDispatchKey')
+
+      expect(isDispatchKey(fresh.dispatchKeys.obtain(SCOPE).key)).toBe(true)
+    })
+  })
 })
 
 describe('the cap', () => {
@@ -449,6 +561,47 @@ describe('the cap', () => {
 
     expect(keyEntriesOf(storage)).toHaveLength(DISPATCH_KEY_MAX_ENTRIES)
     expect(storage.getItem(dispatchKeyStorageKey(scopeAt(0)))).not.toBeNull()
+  })
+
+  it('entries from before a reload count toward the cap, and the oldest stored one goes', () => {
+    const storage = makeStorage()
+    fill(ticking(storage), DISPATCH_KEY_MAX_ENTRIES)
+
+    storeOn(storage).obtain(scopeAt(DISPATCH_KEY_MAX_ENTRIES))
+
+    expect(keyEntriesOf(storage)).toHaveLength(DISPATCH_KEY_MAX_ENTRIES)
+    expect(storage.getItem(dispatchKeyStorageKey(scopeAt(0)))).toBeNull()
+    expect(storage.getItem(dispatchKeyStorageKey(scopeAt(1)))).not.toBeNull()
+  })
+
+  it('more stored entries than the cap come down to the cap, by stored time and not by storage order', () => {
+    const seeded = 40
+    const storage = makeStorage(Array.from({ length: seeded }, (_, index): [string, string] => [
+      dispatchKeyStorageKey(scopeAt(index)),
+      JSON.stringify({ v: 1, key: KEY_A, at: seeded - index, sends: 0, settled: 0 }),
+    ]))
+
+    storeOn(storage).obtain(scopeAt(seeded))
+
+    expect(keyEntriesOf(storage)).toHaveLength(DISPATCH_KEY_MAX_ENTRIES)
+    expect(storage.getItem(dispatchKeyStorageKey(scopeAt(30)))).not.toBeNull()
+    for (let index = 31; index < seeded; index += 1) {
+      expect(storage.getItem(dispatchKeyStorageKey(scopeAt(index)))).toBeNull()
+    }
+    expect(storage.getItem(dispatchKeyStorageKey(scopeAt(seeded)))).not.toBeNull()
+  })
+
+  it('a mint failure at the cap removes nothing', () => {
+    const storage = makeStorage()
+    fill(ticking(storage), DISPATCH_KEY_MAX_ENTRIES)
+    const store = storeOn(storage, {
+      mint: () => {
+        throw new UuidUnavailableError()
+      },
+    })
+
+    expect(() => store.obtain(scopeAt(DISPATCH_KEY_MAX_ENTRIES))).toThrow(UuidUnavailableError)
+    expect(keyEntriesOf(storage)).toHaveLength(DISPATCH_KEY_MAX_ENTRIES)
   })
 
   it('the cap also holds in memory when storage is not available', () => {
@@ -528,6 +681,20 @@ describe('storage that is missing or throws', () => {
 
     expect(store.markSent(SCOPE)).toEqual({ persisted: true })
     expect(store.isPersisted(SCOPE)).toBe(true)
+  })
+
+  it('after a failed write this page reads its own counters, and a new page reads the stored ones', () => {
+    const storage = makeStorage()
+    const store = storeOn(storage)
+    store.obtain(SCOPE)
+    storage.setItem = () => {
+      throw new Error('quota')
+    }
+
+    expect(store.markSent(SCOPE)).toEqual({ persisted: false })
+
+    expect(store.isUnresolved(SCOPE)).toBe(true)
+    expect(storeOn(storage).isUnresolved(SCOPE)).toBe(false)
   })
 
   it('an accessor that throws behaves like a refused write', () => {
