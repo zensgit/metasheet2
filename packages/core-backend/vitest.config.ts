@@ -29,6 +29,8 @@ export default defineConfig({
     // Most integration tests require database/external services and custom PluginLoader API.
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
+      'tests/integration/admin-user-batch-review.db.test.ts',
+      'tests/integration/admin-user-recycle-review.db.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:

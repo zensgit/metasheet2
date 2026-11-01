@@ -362,7 +362,10 @@ function indexMountOrder(): MountKey[] {
 
 /** 注册文件里 `const <name> = Router()` 的变量名——只有这些变量上的 `.post(...)` 等才算注册。 */
 function routerVariables(text: string): string[] {
-  return [...text.matchAll(/\bconst ([A-Za-z_$][\w$]*) = (?:express\.)?Router\(\)/g)].map((match) => match[1])
+  const variables = [...text.matchAll(/\bconst ([A-Za-z_$][\w$]*) = (?:express\.)?Router\(\)/g)].map((match) => match[1])
+  if (text.includes('export function registerAdminUserBatchRoutes(router: Router): void {')) variables.push('router')
+  if (text.includes('export function registerAdminUserRecycleRoutes(router: Router): void {')) variables.push('router')
+  return variables
 }
 
 /**
@@ -442,6 +445,12 @@ const P = 'platform' as const
 const D = 'delegation' as const
 
 const REGISTRY: readonly WriteRouteEntry[] = [
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/create', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/update', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/disable', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/delete', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/restore', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/purge', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   // --- routes/admin-users.ts（27 条；门为处理器第一条语句） ---
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -798,21 +807,38 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：68 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
-    expect(REGISTRY).toHaveLength(68)
+  it('登记表条数与分族口径固定：74 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
+    expect(REGISTRY).toHaveLength(74)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(61)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(67)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
-      expect(entry.reg, label(entry)).toBe(MOUNTS[entry.mount].routeFile)
+      const delegatedRecycle = entry.mount === 'admin-users' && entry.path.startsWith('/api/admin/users/recycle/')
+      expect(entry.reg, label(entry)).toBe(delegatedRecycle ? 'routes/admin-user-recycle.ts' : MOUNTS[entry.mount].routeFile)
       const gate = parseGate(entry.gate)
       expect(gate, `${label(entry)} gate 形状不认识：${entry.gate}`).not.toBeNull()
       for (const branch of gate!.branches) {
-        expect(branch[branch.length - 1], label(entry)).toBe(FAMILY_GATE[entry.family])
+        expect(branch[branch.length - 1], label(entry)).toBe(delegatedRecycle ? 'ensureRecycleAdmin' : FAMILY_GATE[entry.family])
       }
     }
+  })
+
+  it('生产批量写由根平台管理员门注册，回收站注册器保持接入', () => {
+    const source = readSource('routes/admin-users.ts')
+    expect(source).not.toContain('registerAdminUserBatchRoutes(r)')
+    for (const operation of ['Create', 'Update', 'Disable', 'Delete']) {
+      const registration = `r.post('/api/admin/users/batch/${operation.toLowerCase()}', authenticate, async (req: Request, res: Response) => {`
+      const body = source.split(registration)[1]?.split('\n  })')[0]
+      expect(source.split(registration)).toHaveLength(2)
+      expect(body).toContain('const adminUserId = await ensurePlatformAdmin(req, res)')
+      expect(body).toContain('if (!adminUserId) return')
+      expect(body).toContain(`await handleAdminUserBatch${operation}(req, res, adminUserId)`)
+    }
+    expect(source).toContain("import { registerAdminUserRecycleRoutes } from './admin-user-recycle'")
+    expect(source.match(/registerAdminUserRecycleRoutes\(r\)/g)).toHaveLength(1)
+    expect(readSource('routes/admin-user-recycle.ts')).toContain('export function registerAdminUserRecycleRoutes(router: Router): void {')
   })
 
   it('挂载点锚点对 index.ts 自证：挂载语句恰好一处、字面路径 = mountPath、调用的工厂 = factory', () => {
@@ -991,7 +1017,16 @@ describe('(A) RBAC 判据不可用（isAdmin 抛错）时 fail-closed', () => {
         'admin-directory-routing-policy',
         'admin-directory-org-transfers',
       ] as MountKey[]
-    ).map((mount) => [mount, REGISTRY.find((entry) => entry.mount === mount && entry.family === 'platform')!] as const),
+    ).flatMap((mount) => {
+      const representatives = REGISTRY.filter((entry) => entry.mount === mount && entry.family === 'platform')
+      const gates = new Set<string>()
+      return representatives.filter((entry) => {
+        const key = entry.path.startsWith('/api/admin/users/batch/') ? `${entry.gate}:${entry.path}` : entry.gate
+        if (gates.has(key)) return false
+        gates.add(key)
+        return true
+      }).map((entry) => [mount, entry] as const)
+    }),
   )(
     '%s（ensurePlatformAdmin）-> 拒绝传播、无响应、无副作用（express 4 不接管 async 拒绝：这是挂住而不是 503）',
     async (_mount, entry) => {
@@ -1018,6 +1053,12 @@ describe('(A) 控制组：同一请求、只改门的输入，结论必须翻面
     readonly expectDownstream?: string
   }
   const CONTROLS: readonly Control[] = [
+    { mount: 'admin-users', path: '/api/admin/users/batch/create' },
+    { mount: 'admin-users', path: '/api/admin/users/batch/update' },
+    { mount: 'admin-users', path: '/api/admin/users/batch/disable' },
+    { mount: 'admin-users', path: '/api/admin/users/batch/delete' },
+    { mount: 'admin-users', path: '/api/admin/users/recycle/restore' },
+    { mount: 'admin-users', path: '/api/admin/users/recycle/purge' },
     { mount: 'admin-directory', path: '/integrations/test', expectDownstream: 'directory-sync.testDirectoryIntegration' },
     { mount: 'admin-directory-local', path: '/departments' },
     { mount: 'admin-directory-department-bindings', path: '/sweep' },

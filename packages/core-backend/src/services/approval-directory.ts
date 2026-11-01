@@ -119,7 +119,7 @@ export async function searchDirectoryUsers(
   const safeLimit = clampLimit(limit)
   const term = q ? `%${q}%` : null
   const params: unknown[] = []
-  const conditions: string[] = ['is_active = TRUE']
+  const conditions: string[] = ['is_active = TRUE', 'deleted_at IS NULL']
   if (term) {
     params.push(term)
     const p = `$${params.length}`
@@ -167,8 +167,9 @@ function sanitizeResolveIds(ids: readonly string[]): string[] {
  * never combined with a `q` term), and — the important difference for a values-free display
  * resolver — a row whose `name` is null/blank is DROPPED from the result rather than returned with
  * an empty string, so "absent from the response" is the single, unambiguous unresolved signal a
- * caller needs (no per-caller "is this name blank" convention). `is_active = TRUE` (same predicate
- * `searchDirectoryUsers` uses): a deactivated/removed account resolves to unresolved, not an error
+ * caller needs (no per-caller "is this name blank" convention). `is_active = TRUE AND deleted_at IS NULL`
+ * (same predicate `searchDirectoryUsers` uses): a deactivated, recycle-bin, or removed account resolves
+ * to unresolved, not an error
  * and not its old name — the caller decides how to render that (a values-free placeholder / count,
  * never the raw id).
  *
@@ -189,7 +190,7 @@ export async function resolveDirectoryUsersByIds(ids: readonly string[]): Promis
   const result = await query<{ id: string; name: string | null; email: string }>(
     `SELECT id, name, COALESCE(email, '') AS email
      FROM users
-     WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+     WHERE id = ANY($1::varchar[]) AND is_active = TRUE AND deleted_at IS NULL`,
     [safeIds],
   )
   return result.rows
