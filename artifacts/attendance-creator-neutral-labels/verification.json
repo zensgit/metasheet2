@@ -1,0 +1,226 @@
+{
+  "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "status": "local-gates-passed-Draft-only-current-head-CI-pending",
+  "caseCoverage": {
+    "sourcePhases": true,
+    "beforePrototypeGuard": {
+      "firstFullPassed": 101,
+      "firstFullFailed": 59,
+      "testOnlyLocaleRestoreAffected60Passed": true,
+      "unchanged100Carried": true
+    },
+    "currentGuard": {
+      "affected15Passed": true,
+      "other146CasesCarried": true,
+      "total161AcrossPhases": true,
+      "freshWholeSuiteClaimed": false
+    }
+  },
+  "originalMainRed": {
+    "failed": 4,
+    "pureControlsPassed": 10,
+    "excluded": 146,
+    "matching": "raw creator-name vs expected authorized creator/neutral"
+  },
+  "ownDirectoryRed": {
+    "failed": 1,
+    "controlPassed": 1,
+    "matching": "Object instead of User for unresolved constructor"
+  },
+  "mutations": [
+    {
+      "name": "creator-mutation-M1",
+      "exit": 1,
+      "actual": {
+        "failed": 1,
+        "passed": 9
+      }
+    },
+    {
+      "name": "creator-mutation-M2",
+      "exit": 1,
+      "actual": {
+        "passed": 6,
+        "failed": 4
+      }
+    },
+    {
+      "name": "creator-mutation-M3",
+      "exit": 1,
+      "actual": {
+        "passed": 8,
+        "failed": 2
+      }
+    },
+    {
+      "name": "creator-mutation-M4",
+      "exit": 1,
+      "actual": {
+        "passed": 9,
+        "failed": 1
+      }
+    },
+    {
+      "name": "creator-mutation-M5",
+      "exit": 1,
+      "actual": {
+        "skipped": 145,
+        "failed": 4,
+        "passed": 11
+      }
+    },
+    {
+      "name": "creator-mutation-M6",
+      "exit": 1,
+      "actual": {
+        "skipped": 145,
+        "failed": 4,
+        "passed": 11
+      }
+    },
+    {
+      "name": "creator-own-directory-guard-mutation",
+      "exit": 1,
+      "actual": {
+        "skipped": 8,
+        "passed": 2,
+        "failed": 1
+      }
+    }
+  ],
+  "registration": {
+    "frontendActualPassed": 38,
+    "backendActualPassed": 63,
+    "skip": 0,
+    "manifest": "official generator exact one-token addition, strict guard unchanged"
+  },
+  "currentQualityExit": 0,
+  "currentWebBuildExit": 0,
+  "introducedLintDiagnostics": 0,
+  "inheritedLintDiagnostics": {
+    "AttendanceView": 17
+  },
+  "sourceFence": {
+    "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+    "baseFunctions": 768,
+    "unchangedFunctions": 767,
+    "changedFunctions": [
+      "attendanceGroupManagerUserIds"
+    ],
+    "addedFunctions": [
+      "attendanceGroupCreatorLabel"
+    ],
+    "exactFunctionFence": [
+      "loadAttendanceGroupMembers",
+      "loadAttendanceGroupManagers",
+      "resolveAttendanceGroupMemberLabels",
+      "resolveAttendanceGroupManagerLabels",
+      "saveAttendanceGroup",
+      "addAttendanceGroupManager",
+      "removeAttendanceGroupManager"
+    ],
+    "stylesExact": true
+  },
+  "browser": {
+    "entry": "actual main/App/router/Experience/AdminCenter/AttendanceView",
+    "records": [
+      {
+        "id": "creator1440zh",
+        "width": 1440,
+        "status": "synthetic-label-proof-passed",
+        "resolverScopeMatched": true,
+        "rosterBatchCount": 1,
+        "technicalIdLayoutMeasurements": 5
+      },
+      {
+        "id": "creator768en",
+        "width": 768,
+        "status": "synthetic-label-proof-passed",
+        "resolverScopeMatched": true,
+        "rosterBatchCount": 1,
+        "technicalIdLayoutMeasurements": 5
+      },
+      {
+        "id": "creator768en403",
+        "width": 768,
+        "status": "synthetic-label-proof-passed",
+        "resolverScopeMatched": true,
+        "rosterBatchCount": 1,
+        "technicalIdLayoutMeasurements": 5
+      },
+      {
+        "id": "creator375zh",
+        "width": 375,
+        "status": "synthetic-label-proof-passed",
+        "resolverScopeMatched": true,
+        "rosterBatchCount": 1,
+        "technicalIdLayoutMeasurements": 5
+      }
+    ],
+    "originalMainCountControl": 1,
+    "syntheticOnly": true,
+    "applicationWrites": 0,
+    "externalForwarded": 0,
+    "pageErrors": 0,
+    "intentionalConsoleCategories": [
+      "bootstrap405",
+      "denied-directory403"
+    ],
+    "sourcePhaseCarry": {
+      "state": "passed-source-phase-browser-projection-equivalence",
+      "comparisons": 28,
+      "fixtureExtractedVia": "TypeScript AST of actually executed browser fixture, only pure ids/org/userRows/creators/managers initializers",
+      "exactHelperDelta": "one own-property guard line",
+      "AVandStyles": "unchanged from successful browser phase",
+      "browserRerunClaimed": false,
+      "currentHelperSha256": "3e91745d39031d8b051d59698a4d949b744b186aa0bd55a08f843ddf5ee448cf",
+      "oldHelperSha256": "0bce9fa2704cac6156821cce010ea5dfda8aaefc05b6617399f9b2d9fafb73f3",
+      "boundary": "current prototype-name guard has separate actual15 green +1 matching mutation; not an end-to-end prototype ID normalization claim"
+    },
+    "screenshots": [
+      {
+        "path": "artifacts/attendance-creator-neutral-labels/screenshots/2026-10-25T18-14-46-192Z-88817-creator1440zh-authorized-creators.png",
+        "sha256": "a4b2c7b6953c9b03fbb900eaad6fa5f89b07a27087496f259ca733e21b8813b7",
+        "label": "authorized-creators",
+        "scenario": "creator1440zh"
+      },
+      {
+        "path": "artifacts/attendance-creator-neutral-labels/screenshots/2026-10-25T18-14-46-192Z-88817-creator768en-authorized-creators.png",
+        "sha256": "9c5476883627cd16c6adb3e908a3b5a362b81dc946086874f207fed78f47ecdb",
+        "label": "authorized-creators",
+        "scenario": "creator768en"
+      },
+      {
+        "path": "artifacts/attendance-creator-neutral-labels/screenshots/2026-10-25T18-14-46-192Z-88817-creator768en403-denied-neutral-creators.png",
+        "sha256": "49f3f504559f8e85c94fedae9c73804e8f09694672b930c872455a92b901f60d",
+        "label": "denied-neutral-creators",
+        "scenario": "creator768en403"
+      },
+      {
+        "path": "artifacts/attendance-creator-neutral-labels/screenshots/2026-10-25T18-14-46-192Z-88817-creator375zh-authorized-creators.png",
+        "sha256": "c3316031a6e583b47df02c8c325e0d3748d0ef5acbbea186cc5047ff938d4f66",
+        "label": "authorized-creators",
+        "scenario": "creator375zh"
+      }
+    ],
+    "ownServersStopped": true,
+    "ownPortsClosed": true,
+    "mobilePosture": "original #4354 group workspace allowed, native horizontal table scroll; no full parent responsive/UAT claim"
+  },
+  "independentReview": "source-only closure, runtime owned and independently audited by main",
+  "limits": [
+    "prototype-named IDs own-helper support is not end-to-end normalizer support",
+    "four browser scenarios predate one-line own-property guard; exact28 projection equality and current15 case proof instead of rerun",
+    "not server authorization, lifecycle, live provider, deployment or business acceptance"
+  ],
+  "boundaries": {
+    "DraftHOLD": true,
+    "Stream": "OFF",
+    "lifecycle": "OFF",
+    "R71": "unchanged",
+    "realUAT": "excluded",
+    "business50004": "excluded",
+    "historical08PUT": "INCONCLUSIVE",
+    "mergeDeployTagReleaseConfigChanges": false
+  }
+}

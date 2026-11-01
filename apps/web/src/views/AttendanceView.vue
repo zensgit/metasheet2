@@ -5563,7 +5563,15 @@
                                   {{ attendanceGroupManagerRoleLabel(manager.role) }}
                                 </span>
                               </td>
-                              <td>{{ manager.createdBy || manager.created_by || '-' }}</td>
+                              <td data-attendance-group-manager-creator>
+                                <span v-if="attendanceGroupManagerCreatorId(manager)" class="attendance__group-member-identity">
+                                  <strong data-attendance-group-manager-creator-label>{{ attendanceGroupCreatorLabel(manager) }}</strong>
+                                  <small class="attendance__field-hint" data-attendance-group-manager-creator-id>
+                                    {{ tr('User ID', '用户 ID') }}: {{ attendanceGroupManagerCreatorId(manager) }}
+                                  </small>
+                                </span>
+                                <span v-else>-</span>
+                              </td>
                               <td>{{ formatDateTime(manager.createdAt ?? manager.created_at ?? null) }}</td>
                               <td class="attendance__table-actions">
                                 <button
@@ -10723,6 +10731,11 @@ import AttendanceAnnualOpsHelp from './attendance/AttendanceAnnualOpsHelp.vue'
 import AttendanceAdminGuide from './attendance/AttendanceAdminGuide.vue'
 import AttendanceOverrideAudienceFields from './attendance/AttendanceOverrideAudienceFields.vue'
 import { formatAnnualBalanceSubject } from './attendance/annualBalanceSubject'
+import {
+  attendanceGroupManagerCreatorId,
+  attendanceGroupManagerCreatorLabel,
+  collectAttendanceGroupManagerUserIds,
+} from './attendance/attendanceGroupManagerIdentity'
 
 import { getCalendarVisibleRange } from '../composables/useCalendarDays'
 import {
@@ -14579,15 +14592,11 @@ function attendanceGroupMemberSecondaryLabel(userId: string): string {
 }
 
 function attendanceGroupManagerUserIds(managers: AttendanceGroupManager[]): string[] {
-  const seen = new Set<string>()
-  const userIds: string[] = []
-  for (const manager of managers) {
-    const userId = String(manager.userId || manager.user_id || '').trim()
-    if (!userId || seen.has(userId)) continue
-    seen.add(userId)
-    userIds.push(userId)
-  }
-  return userIds
+  return collectAttendanceGroupManagerUserIds(managers)
+}
+
+function attendanceGroupCreatorLabel(manager: AttendanceGroupManager): string {
+  return attendanceGroupManagerCreatorLabel(manager, attendanceGroupManagerResolvedUsers.value, tr('User', '用户'))
 }
 
 function attendanceGroupManagerPrimaryLabel(userId: string): string {
