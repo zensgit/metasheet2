@@ -136,9 +136,13 @@ const makeupSpecs = ['verification/attendance-makeup-request.spec.ts']
 // pinned by scripts/ops/stock-prep-browser-ci-wiring.test.mjs), so the shared lane's testIgnore drops
 // those specs too. Excluded here for exactly that reason: this assertion is 「the shared lane collects
 // every spec that belongs to no dedicated lane」, and it has to know about every dedicated lane to
-// stay true rather than becoming a false red the moment a second one ships.
+// stay true rather than becoming a false red the moment a second one ships. The tasks acceptance walk
+// (tasks-*, playwright.tasks-verification.config.ts / tasks-web-guard.yml) is one more.
 const sharedSpecs = allVerificationSpecs
-  .filter((path) => !basename(path).startsWith('approval-') && !basename(path).startsWith('stock-prep-') && !makeupSpecs.includes(path))
+  .filter((path) => !basename(path).startsWith('approval-')
+    && !basename(path).startsWith('stock-prep-')
+    && !basename(path).startsWith('tasks-')
+    && !makeupSpecs.includes(path))
 
 test('approval workflow creates a stable PR and merge-queue context with a real classifier', () => {
   const source = readFileSync(workflowPath, 'utf8')
@@ -246,6 +250,11 @@ test('approval and shared Playwright configs own disjoint, exhaustive spec sets'
     listPlaywrightSpecs('playwright.attendance-makeup.config.ts'),
     makeupSpecs,
     'makeup lane must collect exactly the spec excluded from the shared lane',
+  )
+  assert.deepEqual(
+    listPlaywrightSpecs('playwright.tasks-verification.config.ts'),
+    allVerificationSpecs.filter((path) => basename(path).startsWith('tasks-')),
+    'tasks lane must collect exactly the specs excluded from the shared lane',
   )
 })
 

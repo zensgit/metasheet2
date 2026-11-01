@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tasks acceptance walk — browser verification harness</title>
+    <!--
+      The first two rules are App.vue's global base styles (its unscoped <style> block), copied: the
+      app shell is not mounted here, and without them the page keeps the browser's 8px body margin
+      and content-box sizing, which the real app never has. The last two stand in for the
+      MultitableWorkbench content row the record drawer sits in (`.mt-workbench__content` /
+      `.mt-workbench__main`, plus a full-height box), so the drawer's own push and overlay CSS lay
+      out the way they do on the workbench.
+    -->
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #333; background-color: var(--ms-bg-page); }
+      .walk-workbench-content { display: flex; position: relative; min-height: 0; height: 100vh; }
+      .walk-workbench-main { flex: 1; min-width: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./tasks-acceptance-walk-harness.ts"></script>
+  </body>
+</html>
