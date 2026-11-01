@@ -9,9 +9,11 @@
  * was made and two counters: requests handed to the transport under this key (`sends`), and how many
  * of them a 4xx answered, meaning that attempt created nothing (`settled`). An entry with
  * `sends > settled` is unresolved; one with `sends === settled` is dormant, and the next send reuses
- * its key, which the server has never stored. Nothing here is derived from the session: what stops
- * another account from reusing an entry is the server, which matches a key only within the caller's
- * own org and dispatcher, so another account's send makes that account's own task.
+ * its key, which the server has never stored, unless a write failed, which `persisted: false` reports:
+ * after a failed `markSent` write and a reload the stored counters miss a request that did go out, so
+ * the entry reads dormant, and reusing its key is still safe. Nothing here is derived from the session:
+ * what stops another account from reusing an entry is the server, which matches a key only within the
+ * caller's own org and dispatcher, so another account's send makes that account's own task.
  *
  * The in-memory map is the record for this page; sessionStorage is the mirror that survives a reload.
  * Every storage call has its own try/catch: a failed write is reported as `persisted: false`, a failed
@@ -22,9 +24,23 @@
  * refused leaves a dormant entry, which holds no attempt and is the first to go at the cap.
  *
  * An entry is released when its result has been shown, on 再派一项, and when the server refuses the
- * key. When this tab's session moves away from a signed-in principal (sign-out, another account, a
- * partial session switch), every entry goes; a sign-in with no principal before it keeps them, and a
- * token refresh for the same principal changes nothing.
+ * key. Separately, every entry goes when a session change moves this tab away from the principal it
+ * remembers. That sweep runs only on a page that has loaded this module, and only for transitions
+ * announced through `useAuth`; everything else (a page whose chunk has not loaded, a redirect from
+ * `handleUnauthorized`, another tab) leaves the entries to the server's scope above.
+ *
+ * What counts as moving away is the principal key changing, so besides sign-out, another account and a
+ * partial session switch it also covers:
+ *  - `setToken` for the same account during an explicitly selected session, which moves the key from
+ *    the session's tuple to the subject;
+ *  - any change of a token with no usable subject, which is keyed by its text;
+ *  - every org switch of the same account, a return to the first org included, because each one has
+ *    a new epoch;
+ *  - a sign-out on a 401 from the session probe;
+ *  - a sign-in after a session that could not be read (a partial switch, an expired explicit session).
+ *    It sweeps on purpose: nothing says whose entries these are, and the cost is losing a retry key.
+ * A sign-in with no principal before it keeps the entries, and a token refresh for the same principal
+ * changes nothing.
  */
 import { getAuthPrincipalKey, onAuthSessionSwitch } from '../composables/authPrincipal'
 import { randomUuid } from '../utils/uuid'
@@ -270,8 +286,9 @@ function readPrincipal(): string | null {
   }
 }
 
-// Subscribed at module load, not on the first dispatch: entries from before a reload have to go when
-// this page signs out, whether or not it has opened the dialog.
+// Subscribed at module load, not on the first dispatch: on a page that has loaded this module, entries
+// from before a reload go when it signs out, whether or not it has opened the dialog. A page that has
+// not loaded it has no subscription (see the header).
 function watchSessionSwitch(): void {
   rememberedPrincipal = readPrincipal()
   unsubscribeSessionSwitch = onAuthSessionSwitch(() => {
