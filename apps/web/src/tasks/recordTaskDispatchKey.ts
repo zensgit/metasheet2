@@ -27,7 +27,8 @@
  * key. Separately, every entry goes when a session change moves this tab away from the principal it
  * remembers. That sweep runs only on a page that has loaded this module, and only for transitions
  * announced through `useAuth`; everything else (a page whose chunk has not loaded, a redirect from
- * `handleUnauthorized`, another tab) leaves the entries to the server's scope above.
+ * `handleUnauthorized`, an ordinary session's change in another tab) leaves the entries to the
+ * server's scope above.
  *
  * What counts as moving away is the principal key changing, so besides sign-out, another account and a
  * partial session switch it also covers:
