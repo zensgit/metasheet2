@@ -1,7 +1,7 @@
 // Tasks acceptance-walk harness (task usability package 1, walk items 1 and 2). Two surfaces, picked
-// by `?surface=`:
+// by `?surface=` (required; any other value, or none, stops the page with an error):
 //
-//   dispatch (default) — the REAL MetaRecordInspector (the multitable record drawer) on one record,
+//   dispatch — the REAL MetaRecordInspector (the multitable record drawer) on one record,
 //     whose kebab 派发任务 entry opens the REAL MetaRecordTaskDispatchDialog, as a user reaches it.
 //   detail — the REAL TasksView on `/tasks/:id`, under a real vue-router with the task route
 //     records' paths, names and views, where an assignee is added.
@@ -19,9 +19,13 @@
 //    dev-mode mock layer: `approvals/api.ts` and `approvals/delegations.ts` mock under
 //    `import.meta.env.DEV`, but nothing on these two surfaces calls them, and the feature-flag
 //    store's dev override is only read from storage, which is left empty.
-//  * The token: a JWT-shaped token written to the two keys `setToken` writes (`auth_token`, `jwt`),
-//    before any app module is imported. Every app import below is dynamic for that reason: some
-//    modules read storage when they are evaluated.
+//  * The token: a JWT-shaped token carrying the user and its `tenantId` org claim, written to the
+//    keys `setToken` writes for such a token (`auth_token`, `jwt`, and the org hint `tenantId` /
+//    `workspaceId` it takes from the claim), before any app module is imported. Every app import
+//    below is dynamic for that reason: some modules read storage when they are evaluated. No
+//    explicit session org is stored, so this is an ordinary session; the dispatch binding's identity
+//    is the user, the request org and the token's org claim, the three parts a signed-in tasks
+//    user's identity has.
 //  * The locale is not set here: the spec's browser context has the zh-CN language, and `useLocale`
 //    picks the browser language when nothing is stored, as it does for a first-time user. The page
 //    refuses to start if that did not give zh-CN, so a context change cannot quietly switch the
@@ -34,9 +38,19 @@
 //    and the history and approval panels; none of them is on the dispatch path, and without it they
 //    render nothing and send nothing. With no multitable requests, the workbench's before-send hook
 //    on the binding has nothing to see, so it is not installed.
+//  * The dispatch surface has no router (the workbench page has one). So the dialog's `hasRouter` is
+//    false and its link to a created task would be a plain `<a href>`, and the drawer builds the
+//    record link for the task's source line by hand (`/multitable/:sheetId/:viewId?...`) instead of
+//    resolving it through the router. Neither is reached: the walk's one create is refused, so no
+//    task link renders and no source line is written.
 //  * The detail surface uses a memory history and does not install main.ts's route guards. Its
 //    route records are written here rather than imported from router/appRoutes.ts, so the page
 //    loads only the task views; tests/tasks-routes.spec.ts pins the production records.
+//  * Element Plus and Pinia are not installed (main.ts installs both on the app). Nothing on either
+//    surface needs them: the components that render Element Plus parts import them by name
+//    (`ElIcon`, the date picker panel), and none of the modules here is a Pinia store (the
+//    feature-flag store is a plain module). Only Element Plus's stylesheet is loaded, as main.ts
+//    loads it.
 import { createApp, defineComponent, h } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, type RouteRecordRaw } from 'vue-router'
 // The stylesheets main.ts loads, in its order.
@@ -48,6 +62,7 @@ import type { MetaField, MetaRecord, PersonSummary } from '../src/multitable/typ
 import {
   WALK_BASE_ID,
   WALK_NO_ACCESS_USER_ID,
+  WALK_ORG_ID,
   WALK_RECORD_ID,
   WALK_RECORD_TITLE,
   WALK_SHEET_ID,
@@ -127,10 +142,22 @@ async function mountDetail(): Promise<void> {
   app.mount('#app')
 }
 
+const SURFACES = ['dispatch', 'detail'] as const
+type Surface = (typeof SURFACES)[number]
+
+function readSurface(): Surface {
+  const value = new URLSearchParams(window.location.search).get('surface')
+  const surface = SURFACES.find((name) => name === value)
+  if (!surface) throw new Error(`unknown ?surface=${value ?? ''}; expected one of ${SURFACES.join(', ')}`)
+  return surface
+}
+
 async function main(): Promise<void> {
-  const surface = new URLSearchParams(window.location.search).get('surface') === 'detail' ? 'detail' : 'dispatch'
+  const surface = readSurface()
   localStorage.setItem('auth_token', WALK_TOKEN)
   localStorage.setItem('jwt', WALK_TOKEN)
+  localStorage.setItem('tenantId', WALK_ORG_ID)
+  localStorage.setItem('workspaceId', WALK_ORG_ID)
 
   const { useLocale } = await import('../src/composables/useLocale')
   const locale = useLocale().locale.value
@@ -144,7 +171,6 @@ async function main(): Promise<void> {
   if (surface === 'detail') await mountDetail()
   else await mountDispatch()
 
-  document.documentElement.setAttribute('data-walk-surface', surface)
   window.__TASKS_WALK_READY__ = true
 }
 

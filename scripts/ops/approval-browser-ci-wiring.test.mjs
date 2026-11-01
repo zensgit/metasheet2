@@ -137,7 +137,8 @@ const makeupSpecs = ['verification/attendance-makeup-request.spec.ts']
 // those specs too. Excluded here for exactly that reason: this assertion is 「the shared lane collects
 // every spec that belongs to no dedicated lane」, and it has to know about every dedicated lane to
 // stay true rather than becoming a false red the moment a second one ships. The tasks acceptance walk
-// (tasks-*, playwright.tasks-verification.config.ts / tasks-web-guard.yml) is one more.
+// (tasks-*, playwright.tasks-verification.config.ts / tasks-web-guard.yml) is one more; that lane's
+// own collection is pinned by scripts/ops/tasks-browser-ci-wiring.test.mjs, not here.
 const sharedSpecs = allVerificationSpecs
   .filter((path) => !basename(path).startsWith('approval-')
     && !basename(path).startsWith('stock-prep-')
@@ -250,11 +251,6 @@ test('approval and shared Playwright configs own disjoint, exhaustive spec sets'
     listPlaywrightSpecs('playwright.attendance-makeup.config.ts'),
     makeupSpecs,
     'makeup lane must collect exactly the spec excluded from the shared lane',
-  )
-  assert.deepEqual(
-    listPlaywrightSpecs('playwright.tasks-verification.config.ts'),
-    allVerificationSpecs.filter((path) => basename(path).startsWith('tasks-')),
-    'tasks lane must collect exactly the specs excluded from the shared lane',
   )
 })
 

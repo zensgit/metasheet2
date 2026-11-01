@@ -6,17 +6,19 @@ import { defineConfig, devices } from '@playwright/test'
 //
 // What it walks, on harness pages that mount the real components (verification/
 // tasks-acceptance-walk-harness.html/.ts) with every /api answer given by the spec:
-//   1. the record drawer's 派发任务 dialog at 390 and 360 wide (16px gutters, no page scroll
-//      sideways, due date and time stacked), with a 1280 desktop control;
+//   1. the record drawer's 派发任务 dialog at 390 and 360 wide (its box inside the viewport with
+//      16px gutters, due date and time stacked), with a 1280 desktop control;
 //   2. the 422 ASSIGNEE_TASK_ACCESS_REQUIRED message, once from the dialog's create and once from
 //      the task detail page's assignee add.
 // It is not a full stack: no backend, no database. The third walk item (following the enablement
 // page on a test database) is not covered here.
 //
-// `retries: 0` on purpose: the walk counts only if it passes on its first try. The locale and the
-// time zone are pinned on the browser context (not in the page), so the product picks zh-CN from
-// the browser language the way it does for a user without a stored choice, and the dialog's
-// browser-zone due keys are deterministic on any runner.
+// `retries: 0` on purpose: the walk counts only if it passes on its first try. That, the testMatch
+// ownership and tasks-web-guard.yml's walk steps are pinned by
+// scripts/ops/tasks-browser-ci-wiring.test.mjs. The locale and the time zone are pinned on the
+// browser context (not in the page), so the product picks zh-CN from the browser language the way it
+// does for a user without a stored choice, and the dialog's browser-zone due keys are deterministic
+// on any runner.
 //
 // Run: `pnpm --filter @metasheet/web exec playwright test
 //       --config playwright.tasks-verification.config.ts` (cwd = apps/web).

@@ -15,16 +15,20 @@ import {
  * Task usability package 1 — the acceptance walk's first two items, in a real browser
  * (playwright.tasks-verification.config.ts; harness: tasks-acceptance-walk-harness.html/.ts).
  *
- *  1. The 派发任务 dialog at 390 and 360 wide: no sideways page scroll, the dialog inside a 16px
+ *  1. The 派发任务 dialog at 390 and 360 wide: the dialog's box inside the viewport with a 16px
  *     gutter on each side, the due date above the due time, and its controls reachable. A 1280
- *     control keeps the desktop layout. Red if the dialog's `@media (max-width: 480px)` block is
- *     removed (the dialog keeps its 420px minimum and spills past both edges; the due row stays a
- *     row); the 1280 control is red if that block is applied at every width.
+ *     control keeps the desktop layout, also inside the viewport. Red if the dialog's
+ *     `@media (max-width: 480px)` block is removed (the dialog keeps its 420px minimum and spills
+ *     past both edges; the due row stays a row); the 1280 control is red if that block is applied
+ *     at every width. The page-scroll check only covers the page behind the dialog: the dialog sits
+ *     in a fixed overlay, which the page's scroll width does not count, so the dialog's own box is
+ *     what is compared with the viewport.
  *  2. A create that names an assignee without task access, from the dialog, and an assignee add on
  *     the task detail page: the server's 422 ASSIGNEE_TASK_ACCESS_REQUIRED shows that code's own
  *     message. The dialog is red if the code leaves CREATE_TASK_VALIDATION_CODES (tasks/tasksApi.ts),
  *     classifyDispatchFailure (tasks/recordTaskDispatch.ts) or the dialog's FAILURE_MESSAGES; the
- *     detail page is red if it leaves TASKS_CODE_KEYS (tasks/labels.ts).
+ *     detail page is red if it leaves TASKS_CODE_KEYS (tasks/labels.ts). The detail page shows it
+ *     below the add-assignee form, in the same section.
  *
  * The expected strings are read from the label tables themselves (both files import nothing), by
  * key, not through the lookups under test: `codeMessage` is not called here, so a missing
@@ -123,8 +127,17 @@ async function box(locator: Locator): Promise<{ x: number; y: number; width: num
   return found!
 }
 
-async function expectNoHorizontalOverflow(page: Page): Promise<void> {
+/** The page behind the dialog does not scroll sideways. It says nothing about the dialog itself: the
+ *  dialog is in a fixed overlay, which `scrollWidth` does not count (see `expectInsideViewport`). */
+async function expectNoPageHorizontalScroll(page: Page): Promise<void> {
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+}
+
+/** The dialog's own box lies within [0, innerWidth]. */
+async function expectInsideViewport(page: Page, modal: { x: number; width: number }): Promise<void> {
+  const innerWidth = await page.evaluate(() => window.innerWidth)
+  expect(modal.x, 'dialog left edge inside the viewport').toBeGreaterThanOrEqual(0)
+  expect(modal.x + modal.width, 'dialog right edge inside the viewport').toBeLessThanOrEqual(innerWidth)
 }
 
 /** The control is on screen once scrolled to, and inside the viewport's width. */
@@ -141,15 +154,16 @@ for (const viewport of [
   { width: 390, height: 844 },
   { width: 360, height: 740 },
 ]) {
-  test(`派发任务 dialog fits a ${viewport.width}px screen: 16px gutters, no sideways scroll, due date above due time`, async ({ page }) => {
+  test(`派发任务 dialog fits a ${viewport.width}px screen: inside the viewport with 16px gutters, due date above due time`, async ({ page }) => {
     const api = await openHarness(page, viewport.width, viewport.height, 'dispatch')
     const dialog = await openDispatchDialog(page)
 
-    await expectNoHorizontalOverflow(page)
+    await expectNoPageHorizontalScroll(page)
     const modal = await box(dialog)
+    await expectInsideViewport(page, modal)
     expect(Math.abs(modal.x - 16), 'left gutter').toBeLessThanOrEqual(1)
     expect(Math.abs(viewport.width - modal.x - modal.width - 16), 'right gutter').toBeLessThanOrEqual(1)
-    expect(await dialog.locator('.meta-dispatch__body').evaluate((el) => el.scrollWidth <= el.clientWidth), 'no sideways scroll inside the dialog').toBe(true)
+    expect(await dialog.locator('.meta-dispatch__body').evaluate((el) => el.scrollWidth <= el.clientWidth), 'no sideways scroll inside the dialog body').toBe(true)
 
     const date = await box(page.getByTestId('record-task-dispatch-due-date'))
     const time = await box(page.getByTestId('record-task-dispatch-due-time'))
@@ -169,8 +183,9 @@ test('派发任务 dialog keeps its desktop layout at 1280px: at least 420px wid
   const api = await openHarness(page, 1280, 800, 'dispatch')
   const dialog = await openDispatchDialog(page)
 
-  await expectNoHorizontalOverflow(page)
+  await expectNoPageHorizontalScroll(page)
   const modal = await box(dialog)
+  await expectInsideViewport(page, modal)
   expect(modal.width, 'desktop minimum width').toBeGreaterThanOrEqual(420)
   expect(modal.width, 'desktop maximum width').toBeLessThanOrEqual(540)
 
@@ -214,7 +229,7 @@ for (const viewport of [
   { width: 390, height: 844 },
   { width: 1280, height: 800 },
 ]) {
-  test(`task detail: adding an assignee without task access shows the task-access message next to the assignee form (${viewport.width}px)`, async ({ page }) => {
+  test(`task detail: adding an assignee without task access shows the task-access message below the assignee form (${viewport.width}px)`, async ({ page }) => {
     const api = await openHarness(page, viewport.width, viewport.height, 'detail')
     const input = page.getByTestId('tasks-detail-add-assignee-input')
     await expect(input).toBeVisible()
@@ -228,6 +243,19 @@ for (const viewport of [
     await expect(error).toHaveText(DETAIL_ACCESS_MESSAGE)
     await expect(error).toHaveAttribute('role', 'alert')
     await expect(page.getByTestId('tasks-action-error')).toHaveCount(0)
+    // Below the add-assignee form, in the same section (the completion-mode switch sits between them).
+    const form = page.getByTestId('tasks-detail-add-assignee-form')
+    expect(
+      await error.evaluate((el) => {
+        const formEl = document.querySelector('[data-testid="tasks-detail-add-assignee-form"]')
+        return Boolean(formEl && formEl.parentElement === el.parentElement
+          && (formEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING))
+      }),
+      'the message follows the add-assignee form in the same section',
+    ).toBe(true)
+    const formBox = await box(form)
+    const errorBox = await box(error)
+    expect(errorBox.y, 'the message starts below the add-assignee form').toBeGreaterThanOrEqual(formBox.y + formBox.height - 0.5)
     // The typed id stays, so it can be corrected.
     await expect(input).toHaveValue(WALK_NO_ACCESS_USER_ID)
 

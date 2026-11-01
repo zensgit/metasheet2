@@ -163,17 +163,21 @@
 # whole-file args): a real-browser walk in its own Playwright lane
 # (`playwright.tasks-verification.config.ts`, its own Vite on 5177, the files
 # `verification/tasks-acceptance-walk*`). It mounts the real record drawer with its 派发任务 dialog,
-# and the real task detail page, on harness pages; every network answer comes from the spec, in the
+# and the real task detail page, on harness pages; every /api answer comes from the spec, in the
 # shapes the server sends. It is not a full stack: no backend, no database. It checks the
-# dialog at 390 and 360 wide (16px gutters, no sideways page scroll, due date above due time) against
-# a 1280 control, and the 422 `ASSIGNEE_TASK_ACCESS_REQUIRED` message at the dialog's create and at
-# the detail page's assignee add. The walk's third item (following the enablement page on a test
-# database) is not covered here. The run must report exactly six tests, all passed on the first try
-# (the lane has no retries), none skipped and none flaky; the check step after it fails otherwise,
-# so a skipped, dropped or flaky test cannot pass as a green run. The run takes every spec the
-# lane's config collects (no file argument), so a second tasks-* spec changes the count and turns
-# the check red until it is updated. The screenshots are uploaded as `tasks-walk-screenshots`, and
-# the traces of a failed walk as `tasks-walk-traces`.
+# dialog at 390 and 360 wide (its box inside the viewport with 16px gutters, due date above due time)
+# against a 1280 control, and the 422 `ASSIGNEE_TASK_ACCESS_REQUIRED` message at the dialog's create
+# and below the detail page's assignee add form. The walk's third item (following the enablement
+# page on a test database) is not covered here. The run must report exactly six tests, all passed on
+# the first try (the lane has no retries), none skipped and none flaky; the check step after it
+# fails otherwise, so a skipped, dropped or flaky test cannot pass as a green run. The run takes
+# every spec the lane's config collects (no file argument), so a second tasks-* spec changes the
+# count and turns the check red until it is updated. The screenshots are uploaded as
+# `tasks-walk-screenshots`, and the traces of a failed walk as `tasks-walk-traces`.
+# scripts/ops/tasks-browser-ci-wiring.test.mjs, run as a step of this job, pins the lane's spec
+# ownership, its `retries: 0`, the type-check step, the walk run without a file argument, the check
+# step's count against `--list`, and the screenshot upload, so none of them can be dropped while the
+# job stays green.
 #
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
@@ -195,9 +199,17 @@ on:
       - 'apps/web/src/multitable/components/MetaRecordTaskDispatchDialog.vue'
       - 'apps/web/src/multitable/components/MetaRecordInspector.vue'
       - 'apps/web/src/multitable/utils/meta-record-labels.ts'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/src/multitable/ui/**'
+      - 'apps/web/src/stores/featureFlags.ts'
+      - 'apps/web/src/composables/useAuth.ts'
+      - 'apps/web/src/composables/useLocale.ts'
+      - 'apps/web/src/utils/api.ts'
       - 'apps/web/verification/tasks-*'
       - 'apps/web/playwright.tasks-verification.config.ts'
+      - 'apps/web/playwright.verification.config.ts'
       - 'apps/web/tsconfig.verification-tasks.json'
+      - 'scripts/ops/tasks-browser-ci-wiring.test.mjs'
       - 'apps/web/vite.config.ts'
       - 'apps/web/package.json'
       - 'package.json'
@@ -216,9 +228,17 @@ on:
       - 'apps/web/src/multitable/components/MetaRecordTaskDispatchDialog.vue'
       - 'apps/web/src/multitable/components/MetaRecordInspector.vue'
       - 'apps/web/src/multitable/utils/meta-record-labels.ts'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/src/multitable/ui/**'
+      - 'apps/web/src/stores/featureFlags.ts'
+      - 'apps/web/src/composables/useAuth.ts'
+      - 'apps/web/src/composables/useLocale.ts'
+      - 'apps/web/src/utils/api.ts'
       - 'apps/web/verification/tasks-*'
       - 'apps/web/playwright.tasks-verification.config.ts'
+      - 'apps/web/playwright.verification.config.ts'
       - 'apps/web/tsconfig.verification-tasks.json'
+      - 'scripts/ops/tasks-browser-ci-wiring.test.mjs'
       - 'apps/web/vite.config.ts'
       - 'apps/web/package.json'
       - 'package.json'
@@ -299,6 +319,12 @@ jobs:
 
       - name: Install Playwright chromium (+ system deps)
         run: pnpm exec playwright install --with-deps chromium
+
+      # Pins the walk's wiring below (spec ownership, `retries: 0`, the type-check, the run without a
+      # file argument, the count in the check step, the screenshot upload). It runs `playwright test
+      # --list`; it sits after the install, as the stock-prep lane's wiring step does.
+      - name: Verify the tasks walk's CI wiring
+        run: node --test scripts/ops/tasks-browser-ci-wiring.test.mjs
 
       # verification/ is outside tsconfig.app.json's `include`, so `vue-tsc -b` never sees the walk's
       # harness, fixtures and spec; this project checks them against the production code they import.

@@ -16,12 +16,14 @@ export const WALK_RECORD_ID = 'rec_walk_1'
 export const WALK_RECORD_TITLE = '巡检记录 A'
 export const WALK_TASK_ID = 'tsk_walk_1'
 
-/** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
-export const WALK_TOKEN = `h.${btoa(JSON.stringify({ sub: WALK_USER_ID })).replace(/=+$/, '')}.s`
+/** A JWT-shaped token the app's own payload reader understands (header and signature are not read).
+ *  It carries the subject and the `tenantId` claim, the claim the server takes the user's org from,
+ *  as every token of a working tasks session does. No explicit session org is stored with it. */
+export const WALK_TOKEN = `h.${btoa(JSON.stringify({ sub: WALK_USER_ID, tenantId: WALK_ORG_ID })).replace(/=+$/, '')}.s`
 
 /** `GET /api/auth/me`: routes/auth.ts answers `{ success, data: { user, features } }`, with the
  *  feature keys of `buildFeaturePayload` there; `tasks` is true exactly when the server mounts the
- *  task routes. */
+ *  task routes. `user.tenantId` is the token's `tenantId` claim, where the server takes it from. */
 export function walkSessionBody(): Record<string, unknown> {
   return {
     success: true,
@@ -60,7 +62,9 @@ export function walkSessionBody(): Record<string, unknown> {
 export const ASSIGNEE_TASK_ACCESS_REQUIRED_BODY = { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }
 
 /** `GET /api/tasks/:id`: the object `getTask` (services/task-records.ts) returns, key for key.
- *  `canManageMembers` is true, so the assignee add form renders. */
+ *  `canManageMembers` is true, so the assignee add form renders. `dueAt` is the instant the server
+ *  derives from the due date (tasks/task-dates.ts `computeDueAt`, called by tasks/task-edit.ts): with
+ *  no due time, the end of that day (23:59:59.999) in the task's zone, here UTC+8. */
 export function walkTaskDetailBody(): Record<string, unknown> {
   return {
     id: WALK_TASK_ID,
@@ -68,7 +72,7 @@ export function walkTaskDetailBody(): Record<string, unknown> {
     status: 'open',
     completionMode: 'all',
     createdBy: WALK_USER_ID,
-    dueAt: null,
+    dueAt: '2031-05-06T15:59:59.999Z',
     dueDate: '2031-05-06',
     dueTime: null,
     timeZone: 'Asia/Shanghai',
