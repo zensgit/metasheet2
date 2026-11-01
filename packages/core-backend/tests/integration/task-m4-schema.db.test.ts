@@ -847,6 +847,8 @@ describe('task M4 schema (real db)', () => {
 
           await m4Up(trx)
           await sourceLinksUp(trx)
+          const links = await run<{ r: string | null }>(`SELECT to_regclass('public.task_source_links')::text AS r`)
+          expect(links[0].r).toBe('task_source_links')
           const after = await snapshot(run)
           expect(byKey(after.columns)).toEqual(byKey(before.columns))
           expect(after.constraints).toEqual(before.constraints)
@@ -876,6 +878,8 @@ describe('task M4 schema (real db)', () => {
       expect(col).toHaveLength(1)
       const key = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'public.tasks'::regclass AND conname = 'tasks_id_org_id_key'`)
       expect(key).toHaveLength(1)
+      const links = await q(`SELECT to_regclass('public.task_source_links')::text AS r`)
+      expect(links[0].r).toBe('task_source_links')
     })
   })
 
@@ -956,18 +960,19 @@ describe('task M4 schema (real db)', () => {
       )
       const before = (await q('SELECT count(*)::int AS n FROM task_source_links'))[0].n
 
-      const refusal = await sourceLinksDown(linkDb()).then(
-        () => null,
-        (err: Error & { code?: string }) => err,
-      )
-      expect(refusal?.message).toMatch(ERROR_TOKEN)
-      expect(refusal?.code).toBe(TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE)
-      expect(refusal?.message).toContain(`${before} row(s)`)
-      expect(refusal?.message).not.toContain(taskId)
-      expect(refusal?.message).not.toContain(sheetId)
-
-      expect(await linkTable(poolRunner)).toBe('task_source_links')
-      expect((await q('SELECT count(*)::int AS n FROM task_source_links'))[0].n).toBe(before)
+      await inRolledBackTransaction(async (trx, run) => {
+        const refusal = await sourceLinksDown(trx).then(
+          () => null,
+          (err: Error & { code?: string }) => err,
+        )
+        expect(refusal?.message).toMatch(ERROR_TOKEN)
+        expect(refusal?.code).toBe(TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE)
+        expect(refusal?.message).toContain(`${before} row(s)`)
+        expect(refusal?.message).not.toContain(taskId)
+        expect(refusal?.message).not.toContain(sheetId)
+        expect(await linkTable(run)).toBe('task_source_links')
+        expect((await run<{ n: number }>('SELECT count(*)::int AS n FROM task_source_links'))[0].n).toBe(before)
+      })
     })
 
     it('with the table already gone, down() resolves: the count is a separate statement', async () => {
