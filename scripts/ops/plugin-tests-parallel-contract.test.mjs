@@ -28,6 +28,13 @@ const permissionStep = {
   run: 'pnpm --filter @metasheet/core-backend exec vitest run \\\n  tests/unit/admin-mounts-write-gate-guard.test.ts \\\n  tests/unit/admin-directory-routes.test.ts \\\n  tests/unit/admin-directory-5xx-values-free.test.ts\n',
 }
 
+const directoryClientLintStep = {
+  name: 'Run DingTalk directory client lint',
+  if: "matrix.node-version == '20.x'",
+  'working-directory': 'packages/core-backend',
+  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts',
+}
+
 function resultUpload(suite) {
   return {
     name: `Upload ${suite} test results`, if: 'always()', uses: 'actions/upload-artifact@v4',
@@ -56,6 +63,12 @@ function assertParallelWorkflow(doc) {
     const actual = structuredClone(job.steps)
     if (suite === 'contracts') assert.deepEqual(actual.splice(2, 1), [inventoryStep])
     if (suite === 'permissions') assert.deepEqual(actual.splice(-1), [permissionStep])
+    if (suite === 'unit') {
+      const lintIndex = actual.findIndex(step => step.name === 'Run linting')
+      assert.ok(lintIndex >= 0, 'Keep the original lint step')
+      assert.deepEqual(actual.splice(lintIndex + 1, 1), [directoryClientLintStep],
+        'Keep the additional configured DingTalk client lint immediately after the original lint')
+    }
     if (!['contracts', 'permissions', 'unit'].includes(suite)) {
       assert.deepEqual(actual.splice(-1), [resultUpload(suite)])
     }
@@ -117,6 +130,12 @@ test('each database suite owns a fresh runner/database and migration ordering', 
 test('removed/filtered/reordered steps, disabled suites and a weakened aggregate are rejected', () => {
   const mutations = [
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
+    doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
+    doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
+    doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },
+    doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name)['working-directory'] = '.' },
+    doc => { const steps = doc.jobs.unit.steps; const index = steps.findIndex(step => step.name === directoryClientLintStep.name); [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]] },
+    doc => { doc.jobs.unit.steps.push(structuredClone(directoryClientLintStep)) },
     doc => { doc.jobs.unit.steps.pop() },
     doc => { doc.jobs.unit.steps.find(step => step.name === 'Run core-backend tests').run += ' -t selected' },
     doc => { doc.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').if = false },
