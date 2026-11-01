@@ -7,7 +7,7 @@ const shared = 'shared-account-token'
 const authority = { origin: 'https://synthetic.invalid', tenantId: 'yt-b', orgId: 'org-1' }
 const persisted = {
   type: 'plm',
-  connection: { url: 'https://synthetic.invalid/prefix', headers: { 'x-tenant-id': 'yt-b', 'x-org-id': 'org-1' } },
+  connection: { url: 'https://synthetic.invalid', headers: { 'x-tenant-id': 'yt-b', 'x-org-id': 'org-1' } },
   options: { apiMode: 'yuantus', tenantId: 'yt-b', orgId: 'org-1' },
 }
 
@@ -17,6 +17,7 @@ function adapter() {
     name: 'source-1',
     type: 'plm',
     connection: {
+      // Cached adapter path stays non-root. Personal transport must ignore it.
       url: 'https://synthetic.invalid/prefix',
       headers: {
         'x-tenant-id': 'yt-b',
@@ -246,5 +247,34 @@ describe('personal BOM write transport', () => {
     })
     expect(fetch).not.toHaveBeenCalled()
     expect(adapter().personalBomWriteManagementUrl(persisted)).not.toContain('/personal-bom-write')
+  })
+
+  it.each(['https://synthetic.invalid', 'https://synthetic.invalid/'])(
+    'admits persisted root %s on the management helper',
+    (url) => {
+      vi.stubEnv('PLM_PERSONAL_BOM_WRITE_ENABLED', 'true')
+      const fetch = vi.fn()
+      vi.stubGlobal('fetch', fetch)
+      const config = { ...persisted, connection: { ...persisted.connection, url } }
+      expect(adapter().personalBomWriteManagementUrl(config)).toBe(
+        'https://synthetic.invalid/personal-approval-grants#bom-write',
+      )
+      expect(fetch).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    'https://synthetic.invalid/prefix',
+    'https://synthetic.invalid/prefix/',
+    'https://synthetic.invalid/%2F',
+  ])('rejects persisted pathname %s before any personal fetch', (url) => {
+    vi.stubEnv('PLM_PERSONAL_BOM_WRITE_ENABLED', 'true')
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const config = { ...persisted, connection: { ...persisted.connection, url } }
+    expect(() => adapter().personalBomWriteManagementUrl(config)).toThrow(
+      expect.objectContaining({ status: 403, code: 'PLM_BOM_WRITE_FORBIDDEN' }),
+    )
+    expect(fetch).not.toHaveBeenCalled()
   })
 })

@@ -44,6 +44,20 @@ interface Row {
   previous_grant_revoke_state: string | null
 }
 
+function encodedSource(url: string, encoding: 'object' | 'json') {
+  const row = source()
+  const persistedConfig = {
+    connection: {
+      url,
+      headers: { 'x-tenant-id': 'yt-b', 'x-org-id': 'org-1', Authorization: 'Bearer shared-account' },
+    },
+    options: { apiMode: 'yuantus', tenantId: 'yt-b', orgId: 'org-1' },
+    credentials: { token: 'shared-account' },
+  }
+  row.config = (encoding === 'json' ? JSON.stringify(persistedConfig) : persistedConfig) as never
+  return row
+}
+
 function source(over: Record<string, unknown> = {}) {
   return {
     id: SOURCE,
@@ -403,6 +417,54 @@ describe('personal BOM write binding', () => {
     const bound = await bindId(mem, svc, 'a')
     expect(bound).toMatchObject({ dataSourceId: SOURCE, subjectId: '42', bound: true })
     expect(mem.calls.filter((call) => call.op === 'verify')).toHaveLength(1)
+  })
+
+  it.each([
+    ['object', 'https://native.invalid'],
+    ['object', 'https://native.invalid/'],
+    ['json', 'https://native.invalid'],
+    ['json', 'https://native.invalid/'],
+  ] as const)('admits persisted %s root %s for management and bind', async (encoding, url) => {
+    const { mem, svc } = service()
+    mem.sources.set(SOURCE, encodedSource(url, encoding))
+    await expect(svc.managementUrl(actor(), SOURCE)).resolves.toBe(
+      'https://native.invalid/personal-approval-grants#bom-write',
+    )
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    expect(saved.targetOrigin).toBe('https://native.invalid')
+    expect(mem.calls).toEqual([
+      expect.objectContaining({ op: 'verify', origin: 'https://native.invalid', tenantId: 'yt-b' }),
+    ])
+    expect(mem.bindings).toHaveLength(1)
+  })
+
+  it.each([
+    ['object', 'https://native.invalid/prefix'],
+    ['object', 'https://native.invalid/prefix/'],
+    ['object', 'https://native.invalid/%2F'],
+    ['json', 'https://native.invalid/prefix'],
+    ['json', 'https://native.invalid/prefix/'],
+    ['json', 'https://native.invalid/%2F'],
+  ] as const)('rejects persisted %s pathname %s before verify', async (encoding, url) => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    try {
+      const { mem, svc } = service()
+      mem.sources.set(SOURCE, encodedSource(url, encoding))
+      await expect(svc.managementUrl(actor(), SOURCE)).rejects.toMatchObject({
+        status: 403,
+        code: 'PLM_BOM_WRITE_FORBIDDEN',
+      })
+      await expect(
+        svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
+      ).rejects.toMatchObject({ status: 403, code: 'PLM_BOM_WRITE_FORBIDDEN' })
+      expect(mem.calls).toHaveLength(0)
+      expect(mem.bindings).toHaveLength(0)
+      expect(mem.queries.some((sql) => sql.includes('INSERT INTO plm_personal_bom_write_bindings'))).toBe(false)
+      expect(fetch).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('refuses a non-PLM source column even if its JSON claims PLM', async () => {
@@ -1053,14 +1115,14 @@ describe('personal BOM write binding', () => {
         },
       })
     const mem = memory()
-    mem.sources.set(SOURCE, at('https://bound.example/plm'))
+    mem.sources.set(SOURCE, at('https://bound.example'))
     const svc = new PlmPersonalBomWriteBindingService(mem.pool as never, () => stale as never)
     const grant = yuw('a')
     const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     expect(saved.targetOrigin).toBe('https://bound.example')
     expect(hosts).toEqual(['bound.example'])
 
-    mem.sources.set(SOURCE, at('https://moved.example/plm'))
+    mem.sources.set(SOURCE, at('https://moved.example'))
     await expect(svc.managementUrl(actor(), SOURCE)).resolves.toBe(
       'https://moved.example/personal-approval-grants#bom-write',
     )
@@ -1084,6 +1146,7 @@ describe('personal BOM write binding', () => {
     expect(String(fetch.mock.calls[2][0])).toBe('https://bound.example/api/v1/plm-bom-write-grant/grant')
     expect(fetch.mock.calls[2][1].headers.Authorization).toBe(`Bearer ${grant}`)
 
+    // Unlink keeps the frozen origin. This non-root path is not an admission input.
     mem.sources.set(SOURCE, at('https://elsewhere.example/plm'))
     await svc.unbind(OWNER, rebound.id)
     expect(hosts).toEqual(['bound.example', 'moved.example', 'bound.example', 'moved.example'])
@@ -1091,6 +1154,166 @@ describe('personal BOM write binding', () => {
     expect(fetch.mock.calls[3][1].headers.Authorization).toBe(`Bearer ${yuw('e')}`)
     expect(hosts).not.toContain('stale.example')
     expect(hosts).not.toContain('elsewhere.example')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('rejects a same-origin prefix after a root bind and still revokes that frozen root', async () => {
+    const root = 'https://native.invalid'
+    const prefix = `${root}/prefix`
+    const cachedUrl = 'https://stale.example/cached'
+    const grant = yuw('a')
+    const connectionId = 'conn-1'
+    const tenantId = 'yt-b'
+    const orgId = 'org-1'
+    const mem = memory()
+    const boundSource = source()
+    ;(boundSource.config as { connection: { url: string } }).connection.url = root
+    mem.sources.set(SOURCE, boundSource)
+    const atGrant: Array<{ bindingCleared: boolean; retiredSecret: string | null; retiredState: string }> = []
+    let grantCalls = 0
+    const fetch = vi.fn(async (url: URL, _init: { method: string; headers: Record<string, string> }) => {
+      const href = String(url)
+      if (href.endsWith('/grant')) {
+        grantCalls += 1
+        const retiredCipher = mem.retired[0]?.encrypted_grant ?? null
+        atGrant.push({
+          bindingCleared: mem.bindings[0]?.encrypted_grant == null,
+          retiredSecret: retiredCipher ? decryptStoredSecretValue(retiredCipher) : null,
+          retiredState: mem.retired[0]?.state ?? '',
+        })
+        if (grantCalls === 1) return new Response('unavailable', { status: 429 })
+        return new Response(null, { status: 204 })
+      }
+      return new Response(JSON.stringify(verified()), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetch)
+    try {
+      const cached = new PLMAdapter(
+        { get: async () => undefined } as never,
+        { info() {}, warn() {}, error() {}, debug() {} } as never,
+        {
+          id: 'stale',
+          name: 'stale',
+          type: 'plm',
+          connection: {
+            url: cachedUrl,
+            headers: { 'x-tenant-id': tenantId, 'x-org-id': orgId, Authorization: 'Bearer shared-account' },
+          },
+          options: { apiMode: 'yuantus', tenantId, orgId },
+          credentials: { token: 'shared-account' },
+        } as never,
+      )
+      const requests = vi.spyOn(cached, 'personalBomWriteRequest')
+      const requested = () => requests.mock.calls.map(([operation, token, boundConnection, authority]) => [
+        operation,
+        token,
+        boundConnection,
+        authority.origin,
+        authority.tenantId,
+        authority.orgId,
+      ])
+      const svc = new PlmPersonalBomWriteBindingService(mem.pool as never, () => cached as never)
+      const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId, grant })
+      expect(saved.targetOrigin).toBe(root)
+      expect(requested()).toEqual([['verify', grant, connectionId, root, tenantId, orgId]])
+
+      ;(mem.sources.get(SOURCE)!.config as { connection: { url: string } }).connection.url = prefix
+      await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({
+        status: 403,
+        code: 'PLM_BOM_WRITE_FORBIDDEN',
+      })
+      await expect(svc.freezeForOperation(actor(), saved.id, {
+        operationKind: 'line',
+        partId: 'part-1',
+        bomLineId: 'line-1',
+        clientKey: 'browser-key-1',
+        patch: { quantity: 1 },
+      })).rejects.toMatchObject({ status: 403, code: 'PLM_BOM_WRITE_FORBIDDEN' })
+      await expect(svc.managementUrl(actor(), SOURCE)).rejects.toMatchObject({
+        status: 403,
+        code: 'PLM_BOM_WRITE_FORBIDDEN',
+      })
+      await expect(svc.bind(actor(), { dataSourceId: SOURCE, connectionId, grant: yuw('e') })).rejects.toMatchObject({
+        status: 403,
+        code: 'PLM_BOM_WRITE_FORBIDDEN',
+      })
+      expect(requests.mock.calls).toHaveLength(1)
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
+      expect(mem.bindings[0].target_origin).toBe(root)
+      await expect(svc.list(actor())).resolves.toEqual([
+        expect.objectContaining({
+          id: saved.id,
+          targetOrigin: root,
+          bound: true,
+          yuantusTenantId: tenantId,
+          yuantusOrgId: orgId,
+        }),
+      ])
+
+      delete process.env.PLM_PERSONAL_BOM_WRITE_ENABLED
+      mem.memberships[0].is_active = false
+      await expect(svc.list(actor())).resolves.toEqual([])
+      mem.sources.get(SOURCE)!.owner_id = 'other-owner'
+      await expect(svc.unbind(OWNER, saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+      expect(requests.mock.calls.filter(([operation]) => operation === 'revoke')).toHaveLength(0)
+      expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
+      mem.sources.get(SOURCE)!.owner_id = OWNER
+
+      const unbound = await svc.unbind(OWNER, saved.id)
+      expect(unbound.bound).toBe(false)
+      expect(unbound.remoteRevokeState).toBe('unknown')
+      expect(mem.bindings[0].encrypted_grant).toBeNull()
+      expect(mem.bindings[0].target_origin).toBe(root)
+      expect(mem.retired[0]).toMatchObject({
+        state: 'unknown',
+        slot: 'current',
+        target_origin: root,
+        yuantus_tenant_id: tenantId,
+        yuantus_org_id: orgId,
+        connection_id: connectionId,
+      })
+      expect(decryptStoredSecretValue(mem.retired[0].encrypted_grant!)).toBe(grant)
+      expect(requested()[1]).toEqual(['revoke', grant, connectionId, root, tenantId, orgId])
+      expect(atGrant[0]).toEqual({ bindingCleared: true, retiredSecret: grant, retiredState: 'pending' })
+
+      const restarted = new PlmPersonalBomWriteBindingService(mem.pool as never, () => cached as never)
+      await restarted.retryRetiredRevocations(OWNER)
+      expect((mem.sources.get(SOURCE)!.config as { connection: { url: string } }).connection.url).toBe(prefix)
+      expect(requested()).toEqual([
+        ['verify', grant, connectionId, root, tenantId, orgId],
+        ['revoke', grant, connectionId, root, tenantId, orgId],
+        ['revoke', grant, connectionId, root, tenantId, orgId],
+      ])
+      expect(atGrant).toEqual([
+        { bindingCleared: true, retiredSecret: grant, retiredState: 'pending' },
+        { bindingCleared: true, retiredSecret: grant, retiredState: 'unknown' },
+      ])
+      expect(fetch.mock.calls.map(([url, init]) => [String(url), init.method])).toEqual([
+        [`${root}/api/v1/plm-bom-write-grant/verify`, 'POST'],
+        [`${root}/api/v1/plm-bom-write-grant/grant`, 'DELETE'],
+        [`${root}/api/v1/plm-bom-write-grant/grant`, 'DELETE'],
+      ])
+      for (const [, init] of fetch.mock.calls) {
+        expect(init.headers.Authorization).toBe(`Bearer ${grant}`)
+        expect(init.headers['x-tenant-id']).toBe(tenantId)
+        expect(init.headers['x-org-id']).toBe(orgId)
+      }
+      expect(JSON.stringify(fetch.mock.calls)).not.toContain('shared-account')
+      expect(JSON.stringify(fetch.mock.calls)).not.toContain('stale.example')
+      expect(JSON.stringify(fetch.mock.calls)).not.toContain('/prefix')
+      expect(JSON.stringify(requests.mock.calls)).not.toContain('shared-account')
+      expect(JSON.stringify(requests.mock.calls)).not.toContain('stale.example')
+      expect(JSON.stringify(requests.mock.calls)).not.toContain('/prefix')
+      expect(mem.retired[0].state).toBe('revoked')
+      expect(mem.retired[0].encrypted_grant).toBeNull()
+      expect(mem.bindings[0].encrypted_grant).toBeNull()
+      expect(mem.bindings[0].remote_revoke_state).toBe('revoked')
+      expect(mem.bindings[0].target_origin).toBe(root)
+      expect(JSON.stringify(mem.retired)).not.toContain(grant)
+      await expect(restarted.list(actor())).resolves.toEqual([])
     } finally {
       vi.unstubAllGlobals()
     }
