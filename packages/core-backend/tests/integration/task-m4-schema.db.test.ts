@@ -5,15 +5,27 @@
  * `tasks_id_org_id_key` against the design, exercises every CHECK / unique / FK behaviour the
  * design names (including the composite org FKs, ASSUMPTION(task-m4): [own-37]), and runs the
  * migration's own down() then up() inside one transaction on one connection, compares the catalog
- * snapshots, and rolls back (§2.3). This file does not start MetaSheetServer.
+ * snapshots, and rolls back (§2.3). That round trip takes `task_source_links` down first and brings it
+ * back last, because its FK depends on `tasks_id_org_id_key`: the runner rolls back in reverse order
+ * of execution, and the later migration always goes first. The last describe pins the rollback rules
+ * of `task_source_links` itself. This file does not start MetaSheetServer.
  */
 import '../helpers/assert-rbac-optional-off'
+import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { CompiledQuery, Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { down as m4Down, up as m4Up } from '../../src/db/migrations/zzzz20261009130000_create_task_m4_tables'
+import {
+  TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE,
+  down as sourceLinksDown,
+  up as sourceLinksUp,
+} from '../../src/db/migrations/zzzz20261101140000_create_task_source_links'
 import { newTaskGroupId, newTaskId, newTaskListEventId, newTaskListId } from '../../src/services/task-ids-runtime'
 import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
 
@@ -816,6 +828,9 @@ describe('task M4 schema (real db)', () => {
           const before = await snapshot(run)
           expect(byKey(before.columns)).toEqual(byKey(EXPECTED_COLUMNS))
 
+          // The later migration's table holds an FK on tasks_id_org_id_key, so it goes first.
+          await run('DELETE FROM task_source_links')
+          await sourceLinksDown(trx)
           await m4Down(trx)
           for (const table of M4_TABLES) {
             const rows = await run<{ r: string | null }>(`SELECT to_regclass('public.${table}')::text AS r`)
@@ -831,6 +846,7 @@ describe('task M4 schema (real db)', () => {
           expect(tasks[0].r).toBe('tasks')
 
           await m4Up(trx)
+          await sourceLinksUp(trx)
           const after = await snapshot(run)
           expect(byKey(after.columns)).toEqual(byKey(before.columns))
           expect(after.constraints).toEqual(before.constraints)
@@ -861,5 +877,161 @@ describe('task M4 schema (real db)', () => {
       const key = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'public.tasks'::regclass AND conname = 'tasks_id_org_id_key'`)
       expect(key).toHaveLength(1)
     })
+  })
+
+  describe('task_source_links rollback (down() refuses while rows exist; never committed here)', () => {
+    const ROLLBACK = Symbol('task-source-links-rollback')
+    const ERROR_TOKEN = /TASK_SOURCE_LINKS_DOWN_BLOCKED/
+    const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..')
+    const BACKEND_DIR = join(REPO_ROOT, 'packages/core-backend')
+    const LANE_WORKFLOW = join(REPO_ROOT, '.github/workflows/tasks-realdb.yml')
+    let pool: Pool | undefined
+    let kdb: Kysely<unknown> | undefined
+
+    function linkDb(): Kysely<unknown> {
+      const url = process.env.DATABASE_URL
+      if (!url) throw new Error('DATABASE_URL is required')
+      pool ??= new Pool({ connectionString: url, max: 1 })
+      kdb ??= new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+      return kdb
+    }
+
+    /** Runs `body` in a transaction that always rolls back: the shared lane database keeps the table. */
+    async function inRolledBackTransaction(body: (trx: Kysely<unknown>, run: Runner) => Promise<void>): Promise<void> {
+      let reachedEnd = false
+      try {
+        await linkDb().transaction().execute(async (trx) => {
+          const run: Runner = async <R>(text: string, params: unknown[] = []) =>
+            (await trx.executeQuery(CompiledQuery.raw(text, params))).rows as R[]
+          await body(trx, run)
+          reachedEnd = true
+          throw ROLLBACK
+        })
+      } catch (err) {
+        if (err !== ROLLBACK) throw err
+      }
+      expect(reachedEnd).toBe(true)
+    }
+
+    async function linkCatalog(run: Runner): Promise<{ columns: unknown[]; constraints: unknown[]; indexes: unknown[] }> {
+      const columns = await run(
+        `SELECT a.attname AS c, format_type(a.atttypid, a.atttypmod) AS ty, a.attnotnull AS nn,
+                pg_get_expr(ad.adbin, ad.adrelid) AS d
+           FROM pg_attribute a
+           LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+          WHERE a.attrelid = 'public.task_source_links'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+          ORDER BY a.attname`,
+      )
+      const constraints = await run(
+        `SELECT conname AS n, pg_get_constraintdef(oid) AS d
+           FROM pg_constraint
+          WHERE conrelid = 'public.task_source_links'::regclass
+          ORDER BY conname`,
+      )
+      const indexes = await run(
+        `SELECT indexname AS n, indexdef AS d
+           FROM pg_indexes
+          WHERE schemaname = 'public' AND tablename = 'task_source_links'
+          ORDER BY indexname`,
+      )
+      return { columns, constraints, indexes }
+    }
+
+    const linkTable = async (run: Runner): Promise<string | null> =>
+      (await run<{ r: string | null }>(`SELECT to_regclass('public.task_source_links')::text AS r`))[0].r
+
+    afterAll(async () => {
+      if (kdb) await kdb.destroy()
+      else if (pool) await pool.end()
+    })
+
+    it('with a row in the table, down() refuses with the count only and changes nothing', async () => {
+      const orgId = org('links')
+      const taskId = await insertTask(orgId)
+      const sheetId = `sheet_${STAMP}`
+      await q(
+        `INSERT INTO task_source_links (task_id, org_id, source_type, sheet_id, record_id, created_by)
+         VALUES ($1, $2, 'multitable_record', $3, $4, $5)`,
+        [taskId, orgId, sheetId, `rec_${STAMP}`, `usr_c_${STAMP}`],
+      )
+      const before = (await q('SELECT count(*)::int AS n FROM task_source_links'))[0].n
+
+      const refusal = await sourceLinksDown(linkDb()).then(
+        () => null,
+        (err: Error & { code?: string }) => err,
+      )
+      expect(refusal?.message).toMatch(ERROR_TOKEN)
+      expect(refusal?.code).toBe(TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE)
+      expect(refusal?.message).toContain(`${before} row(s)`)
+      expect(refusal?.message).not.toContain(taskId)
+      expect(refusal?.message).not.toContain(sheetId)
+
+      expect(await linkTable(poolRunner)).toBe('task_source_links')
+      expect((await q('SELECT count(*)::int AS n FROM task_source_links'))[0].n).toBe(before)
+    })
+
+    it('with the table already gone, down() resolves: the count is a separate statement', async () => {
+      await inRolledBackTransaction(async (trx, run) => {
+        await run('DROP TABLE task_source_links')
+        await sourceLinksDown(trx)
+        expect(await linkTable(run)).toBeNull()
+      })
+      expect(await linkTable(poolRunner)).toBe('task_source_links')
+    })
+
+    it('on an empty table, down() drops it and up() restores identical columns, constraints and indexes', async () => {
+      await inRolledBackTransaction(async (trx, run) => {
+        await run('DELETE FROM task_source_links')
+        const before = await linkCatalog(run)
+        await sourceLinksDown(trx)
+        expect(await linkTable(run)).toBeNull()
+        await sourceLinksUp(trx)
+        expect(await linkCatalog(run)).toEqual(before)
+        const unique = await run<{ d: string }>(
+          `SELECT indexdef AS d FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_tsrc_dispatch_key'`,
+        )
+        expect(unique[0].d).toContain('CREATE UNIQUE INDEX')
+        expect(unique[0].d).toContain('WHERE (dispatch_key IS NOT NULL)')
+      })
+      expect(await linkTable(poolRunner)).toBe('task_source_links')
+    })
+
+    // A build without this migration's file refuses to migrate a database that has executed it, which
+    // is why rolling the service back redeploys with the migration step off. This runs the CLI that
+    // deployments run, not an in-process Migrator: the provider's file import runs from node_modules,
+    // outside vitest's TypeScript transform. `MIGRATION_EXCLUDE` is scoped to the lane's migrate step
+    // and is not in this process's environment, so the names come from the workflow file: if the
+    // refusal ever stopped, this run finds nothing pending instead of applying the migrations the
+    // lane leaves out to the shared lane database.
+    it('a build that does not ship the migration refuses to migrate and writes nothing', async () => {
+      const files = readdirSync(join(BACKEND_DIR, 'src/db/migrations'))
+        .filter((name) => /^zzzz\d{14}_create_task_source_links\.ts$/.test(name))
+      expect(files).toHaveLength(1)
+      const migrationName = files[0].replace(/\.ts$/, '')
+
+      const declared = /MIGRATION_EXCLUDE:\s*(\S+)/.exec(readFileSync(LANE_WORKFLOW, 'utf8'))
+      expect(declared).not.toBeNull()
+      const laneExcluded = declared![1].split(',')
+      expect(laneExcluded.length).toBeGreaterThan(0)
+
+      const ledger = async (): Promise<number> =>
+        Number((await q('SELECT count(*)::int AS n FROM kysely_migration'))[0].n)
+      expect(await q('SELECT 1 FROM kysely_migration WHERE name = $1', [migrationName])).toHaveLength(1)
+      const ledgerBefore = await ledger()
+
+      const cli = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate.ts'], {
+        cwd: BACKEND_DIR,
+        env: { ...process.env, MIGRATION_EXCLUDE: [...laneExcluded, migrationName].join(',') },
+        encoding: 'utf8',
+        timeout: 110_000,
+      })
+      expect(cli.status).toBe(1)
+      expect(`${cli.stdout}\n${cli.stderr}`).toContain(
+        `corrupted migrations: previously executed migration ${migrationName} is missing`,
+      )
+
+      expect(await ledger()).toBe(ledgerBefore)
+      expect(await linkTable(poolRunner)).toBe('task_source_links')
+    }, 120_000)
   })
 })
