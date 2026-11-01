@@ -34,6 +34,7 @@ import type { Database } from '../../src/db/types'
 /** Result queues: push values to control what execute / executeTakeFirst return. */
 let executeQueue: unknown[]
 let executeTakeFirstQueue: unknown[]
+let selectArgCalls: unknown[][]
 
 function makeChain(): Record<string, unknown> {
   const self: Record<string, unknown> = {}
@@ -48,6 +49,10 @@ function makeChain(): Record<string, unknown> {
   for (const m of methods) {
     self[m] = vi.fn(chainFn)
   }
+  self.select = vi.fn((...args: unknown[]) => {
+    selectArgCalls.push(args)
+    return self
+  })
   self.execute = vi.fn(async () => executeQueue.shift() ?? [])
   self.executeTakeFirst = vi.fn(async () => executeTakeFirstQueue.shift())
   self.executeTakeFirstOrThrow = vi.fn(async () => {
@@ -97,6 +102,15 @@ const ACTIVE_CREATOR = {
   local_password_set: true,
 }
 
+function renderSelectArg(value: unknown): string {
+  if (Array.isArray(value)) return value.map(renderSelectArg).join('\n')
+  if (value && typeof value === 'object' && 'toOperationNode' in value) {
+    const node = value as { toOperationNode?: () => unknown }
+    if (typeof node.toOperationNode === 'function') return JSON.stringify(node.toOperationNode())
+  }
+  return JSON.stringify(value)
+}
+
 function tokenRow(
   created: { token: { id: string; name: string; tokenHash: string; tokenPrefix: string; scopes: ApiTokenScope[]; createdAt: string } },
   overrides: Record<string, unknown> = {},
@@ -121,6 +135,7 @@ describe('ApiTokenService', () => {
   beforeEach(() => {
     executeQueue = []
     executeTakeFirstQueue = []
+    selectArgCalls = []
     db = createMockDb()
     svc = new ApiTokenService(db)
   })
@@ -275,7 +290,45 @@ describe('ApiTokenService', () => {
     if (!result.valid) expect(result.reason).toMatch(/invalid/i)
   })
 
-  test('mutation: omitting creator gate would green the four negative creator cases', async () => {
+  test('validateToken creator query reads deleted_at and purged_at via to_jsonb(users)', async () => {
+    const created = await svc.createToken('user1', { name: 'JsonbCreator', scopes: ['records:read'] })
+    selectArgCalls = []
+    executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR, deleted_at: null, purged_at: null })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(true)
+    const rendered = selectArgCalls.map((args) => args.map(renderSelectArg).join('\n')).join('\n')
+    expect(rendered).toContain('to_jsonb(users)')
+    expect(rendered).toContain("->> 'deleted_at'")
+    expect(rendered).toContain("->> 'purged_at'")
+  })
+
+  test('validateToken fails when creator is recycled despite is_active', async () => {
+    const created = await svc.createToken('user1', { name: 'RecycledCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      is_active: true,
+      deleted_at: '2026-10-01T00:00:00.000Z',
+      purged_at: null,
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/recycle bin/i)
+  })
+
+  test('validateToken fails when creator is purged despite is_active', async () => {
+    const created = await svc.createToken('user1', { name: 'PurgedCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      is_active: true,
+      deleted_at: null,
+      purged_at: '2026-10-02T00:00:00.000Z',
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/recycle bin/i)
+  })
+
+  test('mutation: omitting creator gate would green the negative creator cases', async () => {
     // Load-bearing: each negative creator state must fail with the current gate.
     // If the creator query/gate is deleted, these would incorrectly become valid.
     const cases = [
@@ -283,6 +336,8 @@ describe('ApiTokenService', () => {
       { label: 'pending', creator: { ...ACTIVE_CREATOR, activation_status: 'pending_activation' }, reason: /pending activation/i },
       { label: 'inactive', creator: { ...ACTIVE_CREATOR, is_active: false }, reason: /inactive|disabled/i },
       { label: 'invalid', creator: { ...ACTIVE_CREATOR, activation_status: 'corrupted' }, reason: /invalid/i },
+      { label: 'recycled', creator: { ...ACTIVE_CREATOR, is_active: true, deleted_at: '2026-10-01T00:00:00.000Z', purged_at: null }, reason: /recycle bin/i },
+      { label: 'purged', creator: { ...ACTIVE_CREATOR, is_active: true, deleted_at: null, purged_at: '2026-10-02T00:00:00.000Z' }, reason: /recycle bin/i },
     ] as const
     for (const c of cases) {
       const created = await svc.createToken('user1', { name: c.label, scopes: ['records:read'] })
