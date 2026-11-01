@@ -170,6 +170,11 @@ export class AuditService extends EventEmitter {
       const category = (auditData.eventCategory || 'SYSTEM').toLowerCase();
       const eventType = (auditData.eventType || 'UNKNOWN').toLowerCase();
       const topic = `system.audit.${category}.${eventType}`;
+      // Typed fields win only for an explicit nonblank user. All other shapes keep the
+      // historical userId ternary and the string-or-system fallback, including userId 0.
+      const explicitUserActor = auditData.actorType === 'user'
+        && typeof auditData.actorId === 'string'
+        && auditData.actorId.trim().length > 0;
 
       const event: AuditMessageEvent = {
         id: `audit_${logId || Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
@@ -178,8 +183,8 @@ export class AuditService extends EventEmitter {
           userName: auditData.userName,
           userEmail: auditData.userEmail,
           sessionId: auditData.sessionId,
-          actorType: auditData.userId ? 'user' : 'system',
-          actorId: auditData.userId?.toString() || 'system'
+          actorType: explicitUserActor ? 'user' : (auditData.userId ? 'user' : 'system'),
+          actorId: explicitUserActor ? auditData.actorId : (auditData.userId?.toString() || 'system')
         },
         what: {
           eventType: auditData.eventType,

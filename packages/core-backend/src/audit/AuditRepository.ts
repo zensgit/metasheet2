@@ -15,6 +15,9 @@ export interface AuditLogData {
   action: string;
   actionDetails?: Record<string, unknown>;
   userId?: number;
+  // MessageBus who-envelope only. createAuditLog SQL, binds, and AuditLogRow ignore these.
+  actorId?: string;
+  actorType?: 'user' | 'system' | 'plugin' | 'service';
   userName?: string;
   userEmail?: string;
   userRoles?: string[];

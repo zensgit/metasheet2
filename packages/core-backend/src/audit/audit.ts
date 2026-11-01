@@ -47,17 +47,27 @@ export async function auditLog(options: AuditLogOptions): Promise<void> {
     ? Number(options.actorId)
     : undefined
   const userId = Number.isFinite(parsedUserId) ? parsedUserId : undefined
+  // Envelope identity only: the original actorId, and only for an explicit nonblank user.
+  // Identity is never read from meta. Blank strings stay on the numeric userId path.
+  const typedActorId = options.actorType === 'user'
+    && typeof options.actorId === 'string'
+    && options.actorId.trim().length > 0
+    ? options.actorId
+    : undefined
 
   try {
+    const details = {
+      userId,
+      resourceType: options.resourceType,
+      resourceId: options.resourceId,
+      actionDetails: options.meta
+    }
     await auditService.logEvent(
       options.action.toUpperCase(),
       options.action,
-      {
-        userId,
-        resourceType: options.resourceType,
-        resourceId: options.resourceId,
-        actionDetails: options.meta
-      }
+      typedActorId === undefined
+        ? details
+        : { ...details, actorId: typedActorId, actorType: 'user' as const }
     )
   } catch (error) {
     // Audit write failures are silent data loss: count them and log at error level.
