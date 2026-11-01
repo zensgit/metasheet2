@@ -7,8 +7,8 @@
  * migration's own down() then up() inside one transaction on one connection, compares the catalog
  * snapshots, and rolls back (§2.3). That round trip takes `task_source_links` down first and brings it
  * back last, because its FK depends on `tasks_id_org_id_key`: the runner rolls back in reverse order
- * of execution, and the later migration always goes first. The last describe pins the rollback rules
- * of `task_source_links` itself. This file does not start MetaSheetServer.
+ * of execution, and the later migration always goes first. The shape of `task_source_links` is pinned
+ * with the rest, and the last describe pins its rollback rules. This file does not start MetaSheetServer.
  */
 import '../helpers/assert-rbac-optional-off'
 import { spawnSync } from 'node:child_process'
@@ -230,6 +230,48 @@ const EXPECTED_INDEXES: Array<[string, string]> = [
   IDX('uq_tskn_source_key', true, 'task_notification_deliveries', '(org_id, source_key)'),
 ]
 
+// `task_source_links`, hand-checked against the SQL in its migration, in the catalog's name order. The
+// list of allowed source types has one value, and PostgreSQL stores a one-value IN as an equality.
+type LinkColumn = [column: string, type: string, notNull: boolean, defaultExpr: string | null]
+
+const EXPECTED_LINK_COLUMNS: LinkColumn[] = [
+  ['base_id', 'text', false, null],
+  ['created_at', TSTZ, true, 'now()'],
+  ['created_by', 'text', true, null],
+  ['dispatch_key', 'text', false, null],
+  ['org_id', 'text', true, null],
+  ['record_id', 'text', true, null],
+  ['sheet_id', 'text', true, null],
+  ['source_type', 'text', true, null],
+  ['task_id', 'text', true, null],
+  ['view_id', 'text', false, null],
+]
+
+const EXPECTED_LINK_CONSTRAINTS: Array<[string, string]> = [
+  ['task_source_links_base_id_printable_chk', "CHECK (((base_id IS NULL) OR (base_id ~ '^[!-~]+$'::text)))"],
+  ['task_source_links_created_by_printable_chk', PRINTABLE('created_by')],
+  ['task_source_links_dispatch_key_chk', "CHECK (((dispatch_key IS NULL) OR (dispatch_key ~ '^[A-Za-z0-9_-]{8,64}$'::text)))"],
+  ['task_source_links_org_id_printable_chk', PRINTABLE('org_id')],
+  ['task_source_links_pkey', 'PRIMARY KEY (task_id)'],
+  ['task_source_links_record_id_printable_chk', PRINTABLE('record_id')],
+  ['task_source_links_sheet_id_printable_chk', PRINTABLE('sheet_id')],
+  ['task_source_links_source_type_chk', "CHECK ((source_type = 'multitable_record'::text))"],
+  ['task_source_links_task_fk', 'FOREIGN KEY (task_id, org_id) REFERENCES tasks(id, org_id) ON DELETE CASCADE'],
+  ['task_source_links_view_id_printable_chk', "CHECK (((view_id IS NULL) OR (view_id ~ '^[!-~]+$'::text)))"],
+]
+
+const EXPECTED_LINK_INDEXES: Array<[string, string]> = [
+  IDX('idx_tsrc_record', false, 'task_source_links', '(sheet_id, record_id, org_id)'),
+  IDX('task_source_links_pkey', true, 'task_source_links', '(task_id)'),
+  IDX('uq_tsrc_dispatch_key', true, 'task_source_links', '(org_id, created_by, dispatch_key) WHERE (dispatch_key IS NOT NULL)'),
+]
+
+const EXPECTED_LINK_CATALOG = {
+  columns: EXPECTED_LINK_COLUMNS,
+  constraints: EXPECTED_LINK_CONSTRAINTS,
+  indexes: EXPECTED_LINK_INDEXES,
+}
+
 // ── Catalog snapshot (one query runner so the same code serves the pool and a transaction) ──
 
 type Runner = <R>(text: string, params?: unknown[]) => Promise<R[]>
@@ -276,6 +318,38 @@ async function snapshot(run: Runner): Promise<Snapshot> {
   )
   return {
     columns: columns.map((r) => [r.t, r.c, r.ty, r.nn, r.d]),
+    constraints: constraints.map((r) => [r.n, r.d]),
+    indexes: indexes.map((r) => [r.n, r.d]),
+  }
+}
+
+async function linkCatalog(run: Runner): Promise<{
+  columns: LinkColumn[]
+  constraints: Array<[string, string]>
+  indexes: Array<[string, string]>
+}> {
+  const columns = await run<{ c: string; ty: string; nn: boolean; d: string | null }>(
+    `SELECT a.attname AS c, format_type(a.atttypid, a.atttypmod) AS ty, a.attnotnull AS nn,
+            pg_get_expr(ad.adbin, ad.adrelid) AS d
+       FROM pg_attribute a
+       LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+      WHERE a.attrelid = 'public.task_source_links'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+      ORDER BY a.attname`,
+  )
+  const constraints = await run<{ n: string; d: string }>(
+    `SELECT conname AS n, pg_get_constraintdef(oid) AS d
+       FROM pg_constraint
+      WHERE conrelid = 'public.task_source_links'::regclass
+      ORDER BY conname`,
+  )
+  const indexes = await run<{ n: string; d: string }>(
+    `SELECT indexname AS n, indexdef AS d
+       FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = 'task_source_links'
+      ORDER BY indexname`,
+  )
+  return {
+    columns: columns.map((r) => [r.c, r.ty, r.nn, r.d]),
     constraints: constraints.map((r) => [r.n, r.d]),
     indexes: indexes.map((r) => [r.n, r.d]),
   }
@@ -401,6 +475,21 @@ describe('task M4 schema (real db)', () => {
         expect(r.confdeltype, String(r.conname)).toBe('c')
         expect(r.condeferrable, String(r.conname)).toBe(false)
       }
+    })
+
+    it('task_source_links: column, constraint and index sets equal the migration exactly', async () => {
+      expect(await linkCatalog(poolRunner)).toEqual(EXPECTED_LINK_CATALOG)
+    })
+
+    it('task_source_links: the FK targets tasks, is ON DELETE CASCADE and is not deferrable', async () => {
+      const rows = await q(
+        `SELECT conname, confrelid::regclass::text AS target, confdeltype, condeferrable
+           FROM pg_constraint
+          WHERE contype = 'f' AND conrelid = 'public.task_source_links'::regclass`,
+      )
+      expect(rows).toEqual([
+        { conname: 'task_source_links_task_fk', target: 'tasks', confdeltype: 'c', condeferrable: false },
+      ])
     })
 
     it('no constraint or column default on the M4 tables depends on a function outside pg_catalog (pg_restore empty search_path)', async () => {
@@ -849,6 +938,7 @@ describe('task M4 schema (real db)', () => {
           await sourceLinksUp(trx)
           const links = await run<{ r: string | null }>(`SELECT to_regclass('public.task_source_links')::text AS r`)
           expect(links[0].r).toBe('task_source_links')
+          expect(await linkCatalog(run)).toEqual(EXPECTED_LINK_CATALOG)
           const after = await snapshot(run)
           expect(byKey(after.columns)).toEqual(byKey(before.columns))
           expect(after.constraints).toEqual(before.constraints)
@@ -917,30 +1007,6 @@ describe('task M4 schema (real db)', () => {
       expect(reachedEnd).toBe(true)
     }
 
-    async function linkCatalog(run: Runner): Promise<{ columns: unknown[]; constraints: unknown[]; indexes: unknown[] }> {
-      const columns = await run(
-        `SELECT a.attname AS c, format_type(a.atttypid, a.atttypmod) AS ty, a.attnotnull AS nn,
-                pg_get_expr(ad.adbin, ad.adrelid) AS d
-           FROM pg_attribute a
-           LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-          WHERE a.attrelid = 'public.task_source_links'::regclass AND a.attnum > 0 AND NOT a.attisdropped
-          ORDER BY a.attname`,
-      )
-      const constraints = await run(
-        `SELECT conname AS n, pg_get_constraintdef(oid) AS d
-           FROM pg_constraint
-          WHERE conrelid = 'public.task_source_links'::regclass
-          ORDER BY conname`,
-      )
-      const indexes = await run(
-        `SELECT indexname AS n, indexdef AS d
-           FROM pg_indexes
-          WHERE schemaname = 'public' AND tablename = 'task_source_links'
-          ORDER BY indexname`,
-      )
-      return { columns, constraints, indexes }
-    }
-
     const linkTable = async (run: Runner): Promise<string | null> =>
       (await run<{ r: string | null }>(`SELECT to_regclass('public.task_source_links')::text AS r`))[0].r
 
@@ -961,6 +1027,7 @@ describe('task M4 schema (real db)', () => {
       const before = (await q('SELECT count(*)::int AS n FROM task_source_links'))[0].n
 
       await inRolledBackTransaction(async (trx, run) => {
+        const catalogBefore = await linkCatalog(run)
         const refusal = await sourceLinksDown(trx).then(
           () => null,
           (err: Error & { code?: string }) => err,
@@ -972,6 +1039,7 @@ describe('task M4 schema (real db)', () => {
         expect(refusal?.message).not.toContain(sheetId)
         expect(await linkTable(run)).toBe('task_source_links')
         expect((await run<{ n: number }>('SELECT count(*)::int AS n FROM task_source_links'))[0].n).toBe(before)
+        expect(await linkCatalog(run)).toEqual(catalogBefore)
       })
     })
 
@@ -988,6 +1056,7 @@ describe('task M4 schema (real db)', () => {
       await inRolledBackTransaction(async (trx, run) => {
         await run('DELETE FROM task_source_links')
         const before = await linkCatalog(run)
+        expect(before).toEqual(EXPECTED_LINK_CATALOG)
         await sourceLinksDown(trx)
         expect(await linkTable(run)).toBeNull()
         await sourceLinksUp(trx)
@@ -1014,10 +1083,19 @@ describe('task M4 schema (real db)', () => {
       expect(files).toHaveLength(1)
       const migrationName = files[0].replace(/\.ts$/, '')
 
-      const declared = /MIGRATION_EXCLUDE:\s*(\S+)/.exec(readFileSync(LANE_WORKFLOW, 'utf8'))
+      const declared = /^\s*MIGRATION_EXCLUDE:\s*(\S+)\s*$/m.exec(readFileSync(LANE_WORKFLOW, 'utf8'))
       expect(declared).not.toBeNull()
       const laneExcluded = declared![1].split(',')
       expect(laneExcluded.length).toBeGreaterThan(0)
+      for (const name of laneExcluded) expect(name).toMatch(/^[\w.-]+\.(sql|ts)$/)
+
+      // The migrator stops at the first executed name it cannot find, so on a database that has run one
+      // of these the refusal below would name that one. The ledger holds names without the extension.
+      const laneNames = laneExcluded.map((name) => name.replace(/\.(sql|ts)$/, ''))
+      expect(
+        await q('SELECT name FROM kysely_migration WHERE name = ANY($1::text[])', [laneNames]),
+        'this cell needs a database built with the lane\'s MIGRATION_EXCLUDE',
+      ).toEqual([])
 
       const ledger = async (): Promise<number> =>
         Number((await q('SELECT count(*)::int AS n FROM kysely_migration'))[0].n)
@@ -1030,7 +1108,7 @@ describe('task M4 schema (real db)', () => {
         encoding: 'utf8',
         timeout: 110_000,
       })
-      expect(cli.status, cli.stderr).toBe(1)
+      expect(cli.status, [cli.error?.message, cli.signal, cli.stderr].filter(Boolean).join('\n')).toBe(1)
       expect(`${cli.stdout}\n${cli.stderr}`).toContain(
         `corrupted migrations: previously executed migration ${migrationName} is missing`,
       )
