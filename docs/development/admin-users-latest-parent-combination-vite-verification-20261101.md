@@ -107,3 +107,11 @@ Astra ultra 对完整 tree `515199600150a4822775ef395082dcb1e4013d9a` 给出 **b
 证据生成时发现私有 index 的初次文件枚举遗漏原 index 中新增文件，`534920908ba3c71db6a219b509e207666f579c4c` 是无效的不完整快照，已明确撤回并通知审阅者，不可作为资格来源。正确快照 `515199600150a4822775ef395082dcb1e4013d9a` 包含全部新增文件，并以运行代码目录零差异校验。`combined.patch` 已重新生成。
 
 收尾重新核对 main、父、子远端 SHA，均与本轮冻结来源相同。尚未公开或运行远端修复 CI，暂不合并、不部署。下一步权限不从本地绿色推导。
+
+## 经批准公开后的实际 CI 补修
+
+Owner 随后批准公开独立组合分支及 Draft PR，并确认目标仅为 #6668 与 #6676。组合提交 `d8e09698b3394c5a5505694881089f0b02a09086` 已创建 Draft #6685，未改变两个原 PR 分支，也未合并或部署。GitHub 生成的合并树与该提交相同；实际 CI 已执行，不再仅以本地 Linux 证据代替。
+
+首轮 Plugin System Tests 的 contracts 失败来自新增管理员 DB 工作流中的动态路径 `admin-user-${{ matrix.slice }}-review.db.test.ts`：既有 attendance wiring 守卫静态解析时拆成无法对应任何测试的参数，因而 fail closed。两个管理员 PostgreSQL CI 矩阵任务本身均通过。相同 wiring 命令本地复现 322 项中 321 通过、1 失败。
+
+仅将动态执行步骤拆成 batch/recycle 两个带矩阵条件的显式文件路径。仍为原有两个隔离数据库矩阵任务；安装、迁移、运行配置、测试集合及超时不变，未改静态守卫或白名单。修复后 `node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs` 为 322/322 通过，无跳过；`pnpm validate:all` 通过。Astra medium 对这项小范围工作流补修独立复核 bounded PASS，未发现测试丢失或不安全跳过。此补修须以新提交重新运行实际 CI，旧头通过项不作为新头绿色证据。

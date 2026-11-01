@@ -69,5 +69,9 @@ jobs:
           NODE_ENV: development
       - name: Apply real migration chain
         run: pnpm --filter @metasheet/core-backend migrate
-      - name: Regression tests against isolated PostgreSQL
-        run: pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/admin-user-${{ matrix.slice }}-review.db.test.ts
+      - name: Batch regression tests against isolated PostgreSQL
+        if: matrix.slice == 'batch'
+        run: pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/admin-user-batch-review.db.test.ts
+      - name: Recycle regression tests against isolated PostgreSQL
+        if: matrix.slice == 'recycle'
+        run: pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/admin-user-recycle-review.db.test.ts
