@@ -428,13 +428,24 @@ function globalHistoryFlagsInSource() {
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
   // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
   // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle])].sort()
 }
+
+test('recycle sweeper manifest requires exact true and matches the runtime source', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.USER_RECYCLE_SWEEPER_ENABLED
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.equal(spec.source, 'packages/core-backend/src/admin/user-recycle-scheduler.ts#startUserRecycleSweeper')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '1', 'TRUE', ' true', 'true ']) assert.equal(isActivated(spec, value), false)
+})
 
 function grepPluginFlagTokens(pattern) {
   const libDir = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')

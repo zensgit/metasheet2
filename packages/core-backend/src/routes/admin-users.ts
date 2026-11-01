@@ -74,6 +74,13 @@ import {
   RECOVERY_CONFLICT_HTTP_STATUS,
   sendIfRecoveryConflict,
 } from '../db/recovery-conflict'
+import {
+  handleAdminUserBatchCreate,
+  handleAdminUserBatchDelete,
+  handleAdminUserBatchDisable,
+  handleAdminUserBatchUpdate,
+} from './admin-user-batch'
+import { registerAdminUserRecycleRoutes } from './admin-user-recycle'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -1779,7 +1786,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON ad.directory_account_id = a.id
       JOIN allowed_departments scoped
         ON scoped.id = ad.directory_department_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
       UNION
       SELECT DISTINCT u.id
@@ -1788,7 +1795,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON gm.user_id = u.id
       JOIN allowed_groups scoped_groups
         ON scoped_groups.group_id = gm.group_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
     )
     SELECT COUNT(*)::int AS c
@@ -1849,7 +1856,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON ad.directory_account_id = a.id
       JOIN allowed_departments scoped
         ON scoped.id = ad.directory_department_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
       UNION
       SELECT DISTINCT
@@ -1873,7 +1880,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON gm.user_id = u.id
       JOIN allowed_groups scoped_groups
         ON scoped_groups.group_id = gm.group_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
     )
     SELECT id, email, username, name, mobile, "employeeNo", department, position, "hireDate", role, is_active, is_admin, last_login_at, created_at, updated_at
@@ -2504,6 +2511,28 @@ async function auditActivateSuccess(
 
 export function adminUsersRouter(): Router {
   const r = Router()
+  registerAdminUserRecycleRoutes(r)
+
+  r.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchCreate(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/update', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchUpdate(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/disable', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDisable(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/delete', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDelete(req, res, adminUserId)
+  })
 
   r.get('/api/admin/role-delegation/summary', authenticate, async (req: Request, res: Response) => {
     const delegation = await ensureRoleDelegationAdmin(req, res)
@@ -3247,7 +3276,9 @@ export function adminUsersRouter(): Router {
           Promise.resolve([]),
           (async () => {
             const term = q ? `%${q}%` : '%'
-            const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1' : ''
+            const where = q
+              ? 'WHERE deleted_at IS NULL AND (COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1)'
+              : 'WHERE deleted_at IS NULL'
             const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
             const listSql = `
               SELECT ${ADMIN_USER_PROFILE_SELECT}
@@ -3627,7 +3658,9 @@ export function adminUsersRouter(): Router {
       })
 
       const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1' : ''
+      const where = q
+        ? 'WHERE deleted_at IS NULL AND (COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1)'
+        : 'WHERE deleted_at IS NULL'
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const listSql = `
         SELECT ${ADMIN_USER_PROFILE_SELECT}
@@ -3649,7 +3682,7 @@ export function adminUsersRouter(): Router {
         const pinned = await query<AdminUserProfile>(
           `SELECT ${ADMIN_USER_PROFILE_SELECT}
            FROM users
-           WHERE id = $1`,
+           WHERE id = $1 AND deleted_at IS NULL`,
           [pinUserId],
         )
         if (pinned.rows[0]) {
@@ -5135,6 +5168,11 @@ export function adminUsersRouter(): Router {
           lockedUser.activationStatus ?? '',
           isActive,
         )
+        if (lockedUser.deletedAt || lockedUser.purgedAt) {
+          const recycled = new Error('账号在回收站中，请从回收站恢复后再修改状态')
+          ;(recycled as Error & { code?: string }).code = 'USER_IN_RECYCLE_BIN'
+          throw recycled
+        }
 
         if (lockedUser.isActive !== isActive) {
           await client.query(
@@ -5157,9 +5195,15 @@ export function adminUsersRouter(): Router {
             pendingActivationError: error as Error,
           }
         }
+        if (code === 'USER_IN_RECYCLE_BIN') {
+          return { recycleError: error as Error }
+        }
         throw error
       })
       if (!updateResult) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if ('recycleError' in updateResult) {
+        return jsonError(res, 409, 'USER_IN_RECYCLE_BIN', updateResult.recycleError.message)
+      }
       if ('pendingActivationError' in updateResult) {
         return jsonError(
           res,

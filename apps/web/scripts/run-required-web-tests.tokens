@@ -6,6 +6,7 @@
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
 adminPageContentSearch.spec.ts
+adminUserBatch
 amountAutoSum
 approval-amount-in-words
 approval-assignee-source
