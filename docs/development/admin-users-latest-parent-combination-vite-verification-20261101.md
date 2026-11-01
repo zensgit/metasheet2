@@ -115,3 +115,7 @@ Owner 随后批准公开独立组合分支及 Draft PR，并确认目标仅为 #
 首轮 Plugin System Tests 的 contracts 失败来自新增管理员 DB 工作流中的动态路径 `admin-user-${{ matrix.slice }}-review.db.test.ts`：既有 attendance wiring 守卫静态解析时拆成无法对应任何测试的参数，因而 fail closed。两个管理员 PostgreSQL CI 矩阵任务本身均通过。相同 wiring 命令本地复现 322 项中 321 通过、1 失败。
 
 仅将动态执行步骤拆成 batch/recycle 两个带矩阵条件的显式文件路径。仍为原有两个隔离数据库矩阵任务；安装、迁移、运行配置、测试集合及超时不变，未改静态守卫或白名单。修复后 `node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs` 为 322/322 通过，无跳过；`pnpm validate:all` 通过。Astra medium 对这项小范围工作流补修独立复核 bounded PASS，未发现测试丢失或不安全跳过。此补修须以新提交重新运行实际 CI，旧头通过项不作为新头绿色证据。
+
+第二轮提交 `5b4fb974c773fa06b11d1bc843ac5c917de0025a` 的实际 CI 进一步发现三个接线遗漏：`adminUserBatch` 在 required-web 登记块中未按字母排序、未加入独立 token manifest，以及 recycle route 测试的五处 `request(app())` 被既有零债务 tripwire 拒绝。Plugin unit 共 3 个文件、9 项失败；保留失败证据，不用同头重跑掩盖。
+
+Grok 完成三个文件的最小补修：移动既有 token 位置、manifest 仅新增该 token、四个 recycle 用例的五处请求改用项目已有 `usePinnedServer()`。请求方法、路径、正文、mock、断言和超时均保留，不改业务实现、守卫或白名单。四个受影响套件共 70/70 通过；manifest 检查确认 20 条 gating invocation 的 628 个 distinct tokens 与独立清单一致；`pnpm validate:all` 通过。Astra medium 静态独立复核 bounded PASS。新的提交仍须重新通过实际 GitHub CI；这不是全套 CI 已通过的声明。

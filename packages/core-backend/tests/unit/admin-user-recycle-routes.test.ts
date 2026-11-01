@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const pg = vi.hoisted(() => ({ query: vi.fn() }))
 const audit = vi.hoisted(() => ({ auditLog: vi.fn(async () => undefined) }))
@@ -34,8 +35,11 @@ function app() {
   return server
 }
 
+const pinned = usePinnedServer()
+
 describe('admin user recycle routes', () => {
   beforeEach(() => {
+    pinned.setApp(app())
     authState.id = 'admin-1'
     authState.role = 'admin'
     pg.query.mockReset()
@@ -46,7 +50,7 @@ describe('admin user recycle routes', () => {
   it('rejects a non-admin', async () => {
     authState.id = 'user-2'
     authState.role = 'user'
-    const response = await request(app()).get('/api/admin/users/recycle')
+    const response = await request(pinned.url()).get('/api/admin/users/recycle')
     expect(response.status).toBe(403)
     expect(response.body.error.code).toBe('FORBIDDEN')
   })
@@ -67,7 +71,7 @@ describe('admin user recycle routes', () => {
         }],
       })
 
-    const response = await request(app()).get('/api/admin/users/recycle')
+    const response = await request(pinned.url()).get('/api/admin/users/recycle')
     expect(response.status).toBe(200)
     expect(response.body.data.total).toBe(1)
     expect(response.body.data.retentionDays).toBe(30)
@@ -88,7 +92,7 @@ describe('admin user recycle routes', () => {
       return { rows: [] }
     })
 
-    const response = await request(app())
+    const response = await request(pinned.url())
       .post('/api/admin/users/recycle/restore')
       .send({ userIds: ['user-lin', 'missing'] })
 
@@ -102,7 +106,7 @@ describe('admin user recycle routes', () => {
   })
 
   it('requires the purge phrase and anonymizes without deleting the user row', async () => {
-    const mismatch = await request(app())
+    const mismatch = await request(pinned.url())
       .post('/api/admin/users/recycle/purge')
       .send({ userIds: ['user-lin'], confirmText: '删除' })
     expect(mismatch.status).toBe(400)
@@ -117,7 +121,7 @@ describe('admin user recycle routes', () => {
       return { rows: [] }
     })
 
-    const response = await request(app())
+    const response = await request(pinned.url())
       .post('/api/admin/users/recycle/purge')
       .send({ userIds: ['user-lin'], confirmText: '立即清除' })
 
