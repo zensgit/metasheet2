@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const pg = vi.hoisted(() => ({ query: vi.fn() }))
 const audit = vi.hoisted(() => ({ auditLog: vi.fn(async () => undefined) }))
@@ -48,8 +49,11 @@ function app() {
   return server
 }
 
+const pinned = usePinnedServer()
+
 describe('admin user batch routes', () => {
   beforeEach(() => {
+    pinned.setApp(app())
     authState.id = 'admin-1'
     authState.role = 'admin'
     pg.query.mockReset()
@@ -67,7 +71,7 @@ describe('admin user batch routes', () => {
       return { rows: [] }
     })
 
-    const response = await request(app())
+    const response = await request(pinned.url())
       .post('/api/admin/users/batch/create')
       .send({
         items: [
@@ -107,7 +111,7 @@ describe('admin user batch routes', () => {
       throw new Error(`unexpected sql ${sql}`)
     })
 
-    const response = await request(app())
+    const response = await request(pinned.url())
       .post('/api/admin/users/batch/update')
       .send({
         dryRun: true,
@@ -127,7 +131,7 @@ describe('admin user batch routes', () => {
     authState.id = 'user-2'
     authState.role = 'user'
 
-    const response = await request(app())
+    const response = await request(pinned.url())
       .post('/api/admin/users/batch/disable')
       .send({ userIds: ['user-lin'], isActive: false })
 
@@ -149,7 +153,7 @@ describe('admin user batch routes', () => {
       return { rows: [] }
     })
 
-    const response = await request(app())
+    const response = await request(pinned.url())
       .post('/api/admin/users/batch/disable')
       .send({ userIds: ['user-lin', 'admin-1'], isActive: false })
 
@@ -168,7 +172,7 @@ describe('admin user batch routes', () => {
       rows: [{ id: 'user-lin', email: 'linlan@example.com', name: '林岚', role: 'user', department: null, is_active: true }],
     })
 
-    const response = await request(app())
+    const response = await request(pinned.url())
       .post('/api/admin/users/batch/delete')
       .send({ userIds: ['user-lin'], mode: 'hard', confirmText: '永久删除' })
 
