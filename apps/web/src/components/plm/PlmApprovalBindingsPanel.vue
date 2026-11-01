@@ -11,10 +11,12 @@
     <p v-if="busy" role="status">正在处理…</p>
     <template v-if="snapshot">
       <p>连接：<strong>{{ snapshot.connection.label }}</strong>（{{ snapshot.connection.id }}）</p>
-      <p><a :href="snapshot.connection.grantManagementUrl" target="_blank" rel="noopener noreferrer">在 Yuantus 创建授权</a>，然后回到此页完成绑定。</p>
+      <p v-if="managementHref(snapshot)"><a :href="managementHref(snapshot)" target="_blank" rel="noopener noreferrer">在 Yuantus 创建授权</a>，然后回到此页完成绑定。</p>
       <article v-for="item in snapshot.bindings" :key="item.id">
         <strong>{{ item.bound ? '已绑定' : '已解绑' }}</strong>
+        <p v-if="!item.canUse">此保存的连接当前不可用，只能解除保存的绑定。</p>
         <dl>
+          <div><dt>保存的连接</dt><dd>{{ item.connectionId }}</dd></div>
           <div><dt>已验证账号</dt><dd>{{ item.subjectId }}</dd></div>
           <div><dt>租户 / 组织</dt><dd>{{ item.tenantId }} / {{ item.orgId }}</dd></div>
           <div><dt>授权到期</dt><dd>{{ new Date(item.expiresAt).toLocaleString() }}</dd></div>
@@ -24,17 +26,17 @@
           请使用同一 Yuantus 账号、租户和组织重新绑定有效授权，再查询未结操作结果。
         </p>
         <div class="actions">
-          <button type="button" :disabled="busy || !item.bound" @click="sync(item.id)">同步我的审批待办</button>
-          <button v-if="item.unresolvedCount" type="button" :disabled="busy || !item.bound" @click="reconcile(item.id)">查询未结操作结果</button>
+          <button type="button" :disabled="busy || !item.bound || !item.canUse" @click="sync(item.id)">同步我的审批待办</button>
+          <button v-if="item.unresolvedCount" type="button" :disabled="busy || !item.bound || !item.canUse" @click="reconcile(item.id)">查询未结操作结果</button>
           <button type="button" :disabled="busy || !item.bound" @click="unbind(item.id)">解除 Yuantus 绑定</button>
         </div>
       </article>
       <p v-if="!snapshot.bindings.length">尚未绑定个人审批授权。</p>
-      <form autocomplete="off" @submit.prevent="bind">
+      <form v-if="managementHref(snapshot)" autocomplete="off" @submit.prevent="bind">
         <label for="plm-personal-grant">Yuantus 个人审批授权</label>
         <input id="plm-personal-grant" v-model="grant" type="password" autocomplete="new-password" autocapitalize="off" :spellcheck="false" :disabled="busy" required>
         <p>仅提交给当前连接进行验证；提交后输入会立即清空。</p>
-        <button type="submit" :disabled="busy || !grant.trim()">验证并绑定个人授权</button>
+        <button type="submit" :disabled="busy || !grant.trim() || !managementHref(snapshot)">验证并绑定个人授权</button>
       </form>
     </template>
   </section>
@@ -85,6 +87,8 @@ async function run(action?: (signal: AbortSignal) => Promise<string>) {
   busy.value = true
   status.value = ''
   failed.value = false
+  // Drop any unsent grant before awaiting so a refreshed connection cannot submit the previous draft.
+  grant.value = ''
   try {
     const message = action ? await action(signal) : ''
     if (!current()) return
@@ -103,15 +107,22 @@ async function run(action?: (signal: AbortSignal) => Promise<string>) {
   }
 }
 function load() { void run() }
+function managementHref(current: PlmApprovalBindings | null) {
+  return current?.connection.grantManagementUrl ?? ''
+}
 function bind() {
-  if (busy.value || !snapshot.value || !grant.value.trim()) return
-  const connection = snapshot.value.connection.id
+  const current = snapshot.value
+  if (busy.value || !current || !current.connection.grantManagementUrl || !grant.value.trim()) return
+  const connection = current.connection.id
   const secret = grant.value
   grant.value = ''
   void run(async (signal) => {
     await bindPlmApprovalGrant(connection, secret, signal)
     return '个人授权已验证并绑定。可同步待办或查询未结操作结果。'
   })
+}
+function rowCanUse(id: string) {
+  return !!snapshot.value?.bindings.some((item) => item.id === id && item.canUse)
 }
 function unbind(id: string) {
   grant.value = ''
@@ -121,12 +132,14 @@ function unbind(id: string) {
   })
 }
 function sync(id: string) {
+  if (!rowCanUse(id)) return
   void run(async (signal) => {
     const result = await syncPlmApprovalTasks(id, signal)
     return `已同步 ${result.taskCount} 个待办，移除 ${result.retiredCount} 个已失效待办。`
   })
 }
 function reconcile(id: string) {
+  if (!rowCanUse(id)) return
   void run(async (signal) => {
     const result = await reconcilePlmApprovalCommands(id, signal)
     return `已确认 ${result.settled} 项，仍待确认 ${result.pending} 项；${result.admissionRequired} 项须回到当前审批页面重新确认。本次仅查询结果，未发起新的审批。`

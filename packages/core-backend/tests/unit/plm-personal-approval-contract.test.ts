@@ -44,6 +44,8 @@ describe('personal binding local unlink', () => {
   const taskSql =
     'UPDATE plm_personal_approval_tasks SET active=false,updated_at=now() WHERE binding_id=$1'
   const cardSql = `UPDATE dingtalk_approval_card_deliveries SET card_state='revoked',updated_at=now() WHERE plm_task_id IN(SELECT id FROM plm_personal_approval_tasks WHERE binding_id=$1) AND card_state='sent'`
+  const listSql =
+    `SELECT b.*,(SELECT count(*) FROM plm_personal_approval_commands x WHERE x.binding_id=b.id AND x.state='pending') AS unresolved FROM plm_personal_approval_bindings b WHERE b.owner_id=$1 ORDER BY id`
   const lockSql =
     'SELECT * FROM plm_personal_approval_bindings WHERE id=$1 AND owner_id=$2 FOR UPDATE'
   const userSql = 'SELECT id FROM users WHERE id=$1 AND is_active=true FOR SHARE'
@@ -66,7 +68,11 @@ describe('personal binding local unlink', () => {
       ...overrides,
     }
   }
-  function pg(options: { activeUser: boolean; binding: ReturnType<typeof row> | null }) {
+  function pg(options: {
+    activeUser: boolean
+    binding: ReturnType<typeof row> | null
+    listed?: Array<ReturnType<typeof row> & { unresolved?: string }>
+  }) {
     const calls: { sql: string; params: unknown[] }[] = []
     const client = {
       query: vi.fn(async (sql: string, params?: unknown[]) => {
@@ -85,6 +91,18 @@ describe('personal binding local unlink', () => {
           if (sql.includes('id=$1') && bound[0] === saved.id && bound[1] === saved.owner_id)
             return { rows: [saved], rowCount: 1 }
           return { rows: [], rowCount: 0 }
+        }
+        // Observed list fixtures only. owner_id=$1 selects rows; unresolved stays a count string.
+        if (sql.includes('AS unresolved') && sql.includes('FROM plm_personal_approval_bindings b')) {
+          const source = options.listed ?? []
+          const visible = sql.includes('b.owner_id=$1')
+            ? source.filter((item) => item.owner_id === bound[0])
+            : source
+          const rows = visible.map((item) => ({
+            ...item,
+            unresolved: typeof item.unresolved === 'string' ? item.unresolved : '0',
+          }))
+          return { rows, rowCount: rows.length }
         }
         return { rows: [], rowCount: 0 }
       }),
@@ -303,6 +321,257 @@ describe('personal binding local unlink', () => {
       expect(driftedConnection.calls.some((c) => c.sql.includes('owner_id=$1 AND connection_id=$2'))).toBe(
         false,
       )
+    })
+  })
+  function projected(saved: ReturnType<typeof row>, unresolvedCount: number, canUse: boolean) {
+    return {
+      id: String(saved.id),
+      connectionId: String(saved.connection_id),
+      subjectId: String(saved.subject_id),
+      tenantId: String(saved.tenant_id),
+      orgId: String(saved.org_id),
+      grantId: String(saved.grant_id),
+      expiresAt: new Date(saved.expires_at as Date).toISOString(),
+      bound: !!saved.encrypted_grant,
+      unresolvedCount,
+      canUse,
+    }
+  }
+  function connection(grantManagementUrl: string | null) {
+    return { id: 'fixed', label: 'Yuantus', grantManagementUrl }
+  }
+  function expectOwnerList(calls: { sql: string; params: unknown[] }[]) {
+    expect(calls.map((call) => call.sql)).toEqual(['BEGIN', userSql, listSql, 'COMMIT'])
+    expect(calls[1].params).toEqual([owner])
+    expect(calls[2].params).toEqual([owner])
+    expect(calls[2].sql.includes('connection_id=$2')).toBe(false)
+  }
+  function transport(overrides: { url?: () => unknown; tenant?: () => unknown; org?: () => unknown } = {}) {
+    const request = vi.fn(() => {
+      throw new Error('remote fetch')
+    })
+    const provider = vi.fn(() => ({
+      personalApprovalManagementUrl: overrides.url ?? (() => 'https://example.invalid/personal-approval-grants'),
+      getEffectiveTenantId: overrides.tenant ?? (() => 'tenant-saved'),
+      getEffectiveOrgId: overrides.org ?? (() => 'org-saved'),
+      personalApprovalRequest: request,
+    }))
+    return { provider, request }
+  }
+  async function readList(
+    rows: Array<ReturnType<typeof row> & { unresolved?: string }>,
+    provider: () => unknown,
+  ) {
+    return withFetch(async (fetchSpy) => {
+      enable('fixed')
+      const fx = pg({ activeUser: true, binding: null, listed: rows })
+      const svc = new PlmPersonalApprovalBindingService(fx.pool as never, provider as never)
+      const result = await svc.list(owner)
+      expectOwnerList(fx.calls)
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(JSON.stringify(result)).not.toContain('enc:original-secret')
+      expect(JSON.stringify(fx.calls)).not.toContain('enc:original-secret')
+      expect(fx.client.release).toHaveBeenCalledTimes(1)
+      return result
+    })
+  }
+  it('lists every saved binding for the active owner and marks only the current scope usable', async () => {
+    const current = { ...row({ id: 'binding-current' }), unresolved: '2' }
+    const legacy = { ...row({ id: 'binding-legacy', connection_id: 'legacy' }), unresolved: '1' }
+    const foreign = { ...row({ id: 'binding-foreign', owner_id: 'owner-2' }), unresolved: '9' }
+    const { provider, request } = transport()
+    const result = await readList([current, legacy, foreign], provider)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(request).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      connection: connection('https://example.invalid/personal-approval-grants'),
+      bindings: [projected(current, 2, true), projected(legacy, 1, false)],
+    })
+    expect(JSON.stringify(result)).not.toContain('binding-foreign')
+    expect(JSON.stringify(result)).not.toContain('remote fetch')
+  })
+  it('keeps an old connection listed when its saved id no longer matches', async () => {
+    const legacy = { ...row({ id: 'binding-legacy', connection_id: 'legacy' }), unresolved: '1' }
+    const { provider, request } = transport()
+    const result = await readList([legacy], provider)
+    expect(request).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      connection: connection('https://example.invalid/personal-approval-grants'),
+      bindings: [projected(legacy, 1, false)],
+    })
+  })
+  it.each([
+    ['tenant', () => 'tenant-drift', () => 'org-saved'],
+    ['org', () => 'tenant-saved', () => 'org-drift'],
+  ] as const)('keeps the management URL but marks drifted %s unusable while the other saved scope matches', async (_scope, tenant, org) => {
+    const saved = { ...row(), unresolved: '0' }
+    const { provider, request } = transport({ tenant, org })
+    const result = await readList([saved], provider)
+    expect(request).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      connection: connection('https://example.invalid/personal-approval-grants'),
+      bindings: [projected(saved, 0, false)],
+    })
+  })
+  it('marks an expired saved binding unusable without a personal provider call', async () => {
+    const saved = { ...row({ expires_at: new Date('2000-01-01T00:00:00.000Z') }), unresolved: '4' }
+    const { provider, request } = transport()
+    const result = await readList([saved], provider)
+    expect(request).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      connection: connection('https://example.invalid/personal-approval-grants'),
+      bindings: [projected(saved, 4, false)],
+    })
+  })
+  it('marks an unbound saved binding unusable without a personal provider call', async () => {
+    const saved = { ...row({ encrypted_grant: null }), unresolved: '3' }
+    const { provider, request } = transport()
+    const result = await readList([saved], provider)
+    expect(request).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      connection: connection('https://example.invalid/personal-approval-grants'),
+      bindings: [projected(saved, 3, false)],
+    })
+  })
+  it('returns cleanup rows when the provider getter, management URL, or effective scope fails', async () => {
+    const current = { ...row({ id: 'binding-current' }), unresolved: '2' }
+    const legacy = { ...row({ id: 'binding-legacy', connection_id: 'legacy' }), unresolved: '0' }
+    const thrown = vi.fn(() => {
+      throw new Error('fixture-secret')
+    })
+    const failed = await readList([current, legacy], thrown)
+    expect(thrown).toHaveBeenCalledTimes(1)
+    expect(failed).toEqual({
+      connection: connection(null),
+      bindings: [projected(current, 2, false), projected(legacy, 0, false)],
+    })
+    expect(JSON.stringify(failed)).not.toContain('fixture-secret')
+    const management = transport({
+      url: () => {
+        throw new Error('fixture-secret')
+      },
+    })
+    const missingUrl = await readList([current], management.provider)
+    expect(management.request).not.toHaveBeenCalled()
+    expect(missingUrl).toEqual({
+      connection: connection(null),
+      bindings: [projected(current, 2, false)],
+    })
+    expect(JSON.stringify(missingUrl)).not.toContain('fixture-secret')
+    const missingScope = transport({ tenant: () => undefined })
+    const noScope = await readList([current], missingScope.provider)
+    expect(missingScope.request).not.toHaveBeenCalled()
+    expect(noScope).toEqual({
+      connection: connection(null),
+      bindings: [projected(current, 2, false)],
+    })
+    const orgDown = transport({
+      org: () => {
+        throw new Error('fixture-secret')
+      },
+    })
+    const noOrg = await readList([legacy], orgDown.provider)
+    expect(orgDown.request).not.toHaveBeenCalled()
+    expect(noOrg).toEqual({
+      connection: connection(null),
+      bindings: [projected(legacy, 0, false)],
+    })
+    expect(JSON.stringify(noOrg)).not.toContain('https://example.invalid/personal-approval-grants')
+  })
+  it('propagates owner, module, list SQL, metadata, and post-await gate failures', async () => {
+    const saved = row()
+    await withFetch(async (fetchSpy) => {
+      enable('fixed')
+      const idle = vi.fn(() => {
+        throw new Error('provider should stay idle')
+      })
+      const inactive = pg({ activeUser: false, binding: saved, listed: [{ ...saved, unresolved: '1' }] })
+      const svc = new PlmPersonalApprovalBindingService(inactive.pool as never, idle as never)
+      await expect(svc.list(owner)).rejects.toMatchObject({ status: 401, message: 'PLM_CARD_UNAUTHORIZED' })
+      expect(inactive.calls.map((call) => call.sql)).toEqual(['BEGIN', userSql, 'ROLLBACK'])
+      expect(inactive.calls.some((call) => call.sql.includes('AS unresolved'))).toBe(false)
+      expect(idle).not.toHaveBeenCalled()
+      expect(fetchSpy).not.toHaveBeenCalled()
+    })
+    await withFetch(async (fetchSpy) => {
+      vi.stubEnv('PLM_APPROVAL_CARD_ENABLED', '1')
+      const idle = vi.fn(() => {
+        throw new Error('provider should stay idle')
+      })
+      const off = pg({ activeUser: true, binding: saved })
+      const svc = new PlmPersonalApprovalBindingService(off.pool as never, idle as never)
+      await expect(svc.list(owner)).rejects.toThrow()
+      expect(off.pool.connect).not.toHaveBeenCalled()
+      expect(idle).not.toHaveBeenCalled()
+      expect(fetchSpy).not.toHaveBeenCalled()
+    })
+    await withFetch(async (fetchSpy) => {
+      enable('fixed')
+      const calls: { sql: string; params: unknown[] }[] = []
+      const client = {
+        query: vi.fn(async (sql: string, params?: unknown[]) => {
+          const boundParams = params ?? []
+          calls.push({ sql, params: boundParams })
+          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [], rowCount: 0 }
+          if (sql.includes('FROM users')) return { rows: [{ id: owner }], rowCount: 1 }
+          if (sql.includes('AS unresolved')) throw new Error('sql-failure')
+          return { rows: [], rowCount: 0 }
+        }),
+        release: vi.fn(),
+      }
+      const pool = { connect: vi.fn(async () => client), query: vi.fn() }
+      const idle = vi.fn(() => {
+        throw new Error('provider should stay idle')
+      })
+      const svc = new PlmPersonalApprovalBindingService(pool as never, idle as never)
+      await expect(svc.list(owner)).rejects.toThrow('sql-failure')
+      expect(calls.map((call) => call.sql)).toEqual(['BEGIN', userSql, listSql, 'ROLLBACK'])
+      expect(calls[2].params).toEqual([owner])
+      expect(calls.some((call) => call.sql === 'COMMIT')).toBe(false)
+      expect(idle).not.toHaveBeenCalled()
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(JSON.stringify(calls)).not.toContain('enc:original-secret')
+    })
+    await withFetch(async (fetchSpy) => {
+      enable('fixed')
+      const bad = { ...row({ expires_at: new Date(Number.NaN) }), unresolved: '0' }
+      const fx = pg({ activeUser: true, binding: null, listed: [bad] })
+      const { provider, request } = transport()
+      const svc = new PlmPersonalApprovalBindingService(fx.pool as never, provider as never)
+      await expect(svc.list(owner)).rejects.toThrow('Invalid time value')
+      expect(request).not.toHaveBeenCalled()
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(fx.calls.some((call) => call.sql === 'ROLLBACK')).toBe(true)
+      expect(fx.calls.some((call) => call.sql === 'COMMIT')).toBe(false)
+      expect(JSON.stringify(fx.calls)).not.toContain('enc:original-secret')
+    })
+    await withFetch(async (fetchSpy) => {
+      enable('fixed')
+      const calls: { sql: string; params: unknown[] }[] = []
+      const client = {
+        query: vi.fn(async (sql: string, params?: unknown[]) => {
+          const boundParams = params ?? []
+          calls.push({ sql, params: boundParams })
+          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [], rowCount: 0 }
+          if (sql.includes('FROM users')) return { rows: [{ id: owner }], rowCount: 1 }
+          if (sql.includes('AS unresolved')) {
+            vi.stubEnv('PLM_APPROVAL_CARD_ENABLED', 'false')
+            return { rows: [{ ...saved, unresolved: '0' }], rowCount: 1 }
+          }
+          return { rows: [], rowCount: 0 }
+        }),
+        release: vi.fn(),
+      }
+      const pool = { connect: vi.fn(async () => client), query: vi.fn() }
+      const idle = vi.fn(() => {
+        throw new Error('provider should stay idle')
+      })
+      const svc = new PlmPersonalApprovalBindingService(pool as never, idle as never)
+      await expect(svc.list(owner)).rejects.toThrow()
+      expect(idle).not.toHaveBeenCalled()
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(calls.map((call) => call.sql)).toEqual(['BEGIN', userSql, listSql, 'ROLLBACK'])
+      expect(calls.some((call) => call.sql === 'COMMIT')).toBe(false)
     })
   })
 })

@@ -10,7 +10,8 @@ const binding = {
   id: 'binding-1', connectionId: 'plm', subjectId: 'person-1', tenantId: 'tenant', orgId: 'org',
   grantId: 'grant-1', expiresAt: '2030-01-01T00:00:00Z', bound: true, unresolvedCount: 2,
 }
-const state = { connection: { id: 'plm', label: 'Yuantus', grantManagementUrl: 'https://yuantus.test/personal-approval-grants' }, bindings: [binding] }
+const listed = { ...binding, canUse: true }
+const state = { connection: { id: 'plm', label: 'Yuantus', grantManagementUrl: 'https://yuantus.test/personal-approval-grants' }, bindings: [listed] }
 function reply(data: unknown, status = 200) { return new Response(JSON.stringify({ ok: true, data }), { status }) }
 beforeEach(() => apiFetch.mockReset())
 
@@ -39,16 +40,21 @@ describe('personal Yuantus binding transport', () => {
   })
 
   it('projects metadata and cannot retain an unexpected credential in its response', async () => {
-    apiFetch.mockResolvedValue(reply({ ...state, bindings: [{ ...binding, grant: 'must-not-survive', secret: 'must-not-survive' }] }))
-    expect(await getPlmApprovalBindings()).toEqual(state)
+    apiFetch.mockResolvedValue(reply({
+      ...state,
+      bindings: [{ ...listed, grant: 'must-not-survive', secret: 'must-not-survive', encrypted_grant: 'must-not-survive' }],
+    }))
+    const result = await getPlmApprovalBindings()
+    expect(result).toEqual(state)
+    expect(JSON.stringify(result)).not.toContain('must-not-survive')
   })
 
   it.each([
     null, { ...state, connection: null }, { ...state, bindings: {} },
-    { ...state, bindings: [{ ...binding, bound: 'true' }] },
-    { ...state, bindings: [{ ...binding, expiresAt: 'invalid' }] },
-    { ...state, bindings: [{ ...binding, unresolvedCount: -1 }] },
-    { ...state, bindings: [{ ...binding, connectionId: 'another-provider' }] },
+    { ...state, bindings: [{ ...listed, bound: 'true' }] },
+    { ...state, bindings: [{ ...listed, expiresAt: 'invalid' }] },
+    { ...state, bindings: [{ ...listed, unresolvedCount: -1 }] },
+    { ...state, bindings: [{ ...listed, connectionId: 'another-provider' }] },
   ])('rejects malformed metadata without presenting bound status', async (data) => {
     apiFetch.mockResolvedValue(reply(data))
     await expect(getPlmApprovalBindings()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
@@ -79,5 +85,51 @@ describe('personal Yuantus binding transport', () => {
   it('rejects invalid reconciliation counts rather than calling them resolved', async () => {
     apiFetch.mockResolvedValue(reply({ settled: '1', pending: 0, admissionRequired: 0 }))
     await expect(reconcilePlmApprovalCommands('binding-1')).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it.each([undefined, null, 'true', 'false', 1, 0])('rejects non-boolean canUse %s', async (canUse) => {
+    apiFetch.mockResolvedValue(reply({ ...state, bindings: [{ ...listed, canUse }] }))
+    await expect(getPlmApprovalBindings()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it('rejects canUse true for a mismatched connection, an unbound row, or a null management URL', async () => {
+    const cases = [
+      { ...state, bindings: [{ ...listed, connectionId: 'old-plm', canUse: true }] },
+      { ...state, bindings: [{ ...listed, bound: false, canUse: true }] },
+      { ...state, connection: { ...state.connection, grantManagementUrl: null }, bindings: [{ ...listed, canUse: true }] },
+    ]
+    for (const data of cases) {
+      apiFetch.mockResolvedValue(reply(data))
+      await expect(getPlmApprovalBindings()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+    }
+  })
+
+  it.each([undefined, '', 'notaurl'])('rejects a missing or unparseable management URL %s', async (grantManagementUrl) => {
+    apiFetch.mockResolvedValue(reply({
+      ...state,
+      connection: { ...state.connection, grantManagementUrl },
+      bindings: [{ ...listed, canUse: false }],
+    }))
+    await expect(getPlmApprovalBindings()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  })
+
+  it('accepts an old connection and an explicit null management URL when canUse is false', async () => {
+    const legacy = {
+      connection: { id: 'plm', label: 'Yuantus', grantManagementUrl: null },
+      bindings: [
+        { ...binding, id: 'binding-old', connectionId: 'old-plm', canUse: false },
+        { ...binding, canUse: false },
+      ],
+    }
+    apiFetch.mockResolvedValue(reply(legacy))
+    expect(await getPlmApprovalBindings()).toEqual(legacy)
+    const staleWithUrl = { ...state, bindings: [{ ...binding, connectionId: 'old-plm', canUse: false }] }
+    apiFetch.mockResolvedValue(reply(staleWithUrl))
+    expect(await getPlmApprovalBindings()).toEqual(staleWithUrl)
+  })
+
+  it('keeps POST bind on the basic DTO without canUse or credentials', async () => {
+    apiFetch.mockResolvedValue(reply({ ...binding, canUse: true, grant: 'must-not-survive', encrypted_grant: 'must-not-survive' }, 201))
+    expect(await bindPlmApprovalGrant('plm', 'fixture-personal-grant')).toEqual(binding)
   })
 })
