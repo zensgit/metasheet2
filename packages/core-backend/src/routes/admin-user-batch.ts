@@ -110,11 +110,7 @@ async function auditItem(
   })
 }
 
-export function registerAdminUserBatchRoutes(router: Router): void {
-  router.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
-    const adminUserId = await ensureBatchAdmin(req, res)
-    if (!adminUserId) return
-
+export async function handleAdminUserBatchCreate(req: Request, res: Response, adminUserId: string): Promise<void> {
     try {
       const rawItems = Array.isArray(req.body?.items) ? req.body.items as unknown[] : []
       if (rawItems.length > ADMIN_USER_BATCH_LIMIT) {
@@ -161,16 +157,12 @@ export function registerAdminUserBatchRoutes(router: Router): void {
         },
       })
       return jsonOk(res, summarize(results))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '批量创建失败'
-      return jsonError(res, 500, 'BATCH_CREATE_FAILED', message)
+    } catch {
+      return jsonError(res, 500, 'BATCH_CREATE_FAILED', '批量创建失败')
     }
-  })
+}
 
-  router.post('/api/admin/users/batch/update', authenticate, async (req: Request, res: Response) => {
-    const adminUserId = await ensureBatchAdmin(req, res)
-    if (!adminUserId) return
-
+export async function handleAdminUserBatchUpdate(req: Request, res: Response, adminUserId: string): Promise<void> {
     try {
       const rawItems = Array.isArray(req.body?.items) ? req.body.items as Array<Record<string, unknown>> : []
       if (rawItems.length > ADMIN_USER_BATCH_LIMIT) {
@@ -223,28 +215,22 @@ export function registerAdminUserBatchRoutes(router: Router): void {
         })
       }
       return jsonOk(res, { ...summarize(results), dryRun })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '批量更新失败'
-      return jsonError(res, 500, 'BATCH_UPDATE_FAILED', message)
+    } catch {
+      return jsonError(res, 500, 'BATCH_UPDATE_FAILED', '批量更新失败')
     }
-  })
+}
 
-  router.post('/api/admin/users/batch/disable', authenticate, async (req: Request, res: Response) => {
-    const adminUserId = await ensureBatchAdmin(req, res)
-    if (!adminUserId) return
+export async function handleAdminUserBatchDisable(req: Request, res: Response, adminUserId: string): Promise<void> {
     try {
       const payload = await applyStatus(adminUserId, req.body?.userIds, req.body?.isActive)
       if ('error' in payload) return jsonError(res, payload.error.status, payload.error.code, payload.error.message)
       return jsonOk(res, payload)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '批量停用失败'
-      return jsonError(res, 500, 'BATCH_STATUS_FAILED', message)
+    } catch {
+      return jsonError(res, 500, 'BATCH_STATUS_FAILED', '批量停用失败')
     }
-  })
+}
 
-  router.post('/api/admin/users/batch/delete', authenticate, async (req: Request, res: Response) => {
-    const adminUserId = await ensureBatchAdmin(req, res)
-    if (!adminUserId) return
+export async function handleAdminUserBatchDelete(req: Request, res: Response, adminUserId: string): Promise<void> {
     try {
       const ids = Array.isArray(req.body?.userIds)
         ? req.body.userIds.filter((value: unknown): value is string => typeof value === 'string')
@@ -302,10 +288,31 @@ export function registerAdminUserBatchRoutes(router: Router): void {
         },
       })
       return jsonOk(res, { ...summarize(results), mode: 'disable' })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '批量删除失败'
-      return jsonError(res, 500, 'BATCH_DELETE_FAILED', message)
+    } catch {
+      return jsonError(res, 500, 'BATCH_DELETE_FAILED', '批量删除失败')
     }
+}
+
+export function registerAdminUserBatchRoutes(router: Router): void {
+  router.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensureBatchAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchCreate(req, res, adminUserId)
+  })
+  router.post('/api/admin/users/batch/update', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensureBatchAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchUpdate(req, res, adminUserId)
+  })
+  router.post('/api/admin/users/batch/disable', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensureBatchAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDisable(req, res, adminUserId)
+  })
+  router.post('/api/admin/users/batch/delete', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensureBatchAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDelete(req, res, adminUserId)
   })
 }
 

@@ -74,7 +74,12 @@ import {
   RECOVERY_CONFLICT_HTTP_STATUS,
   sendIfRecoveryConflict,
 } from '../db/recovery-conflict'
-import { registerAdminUserBatchRoutes } from './admin-user-batch'
+import {
+  handleAdminUserBatchCreate,
+  handleAdminUserBatchDelete,
+  handleAdminUserBatchDisable,
+  handleAdminUserBatchUpdate,
+} from './admin-user-batch'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -2505,7 +2510,28 @@ async function auditActivateSuccess(
 
 export function adminUsersRouter(): Router {
   const r = Router()
-  registerAdminUserBatchRoutes(r)
+  // Batch writes are registered here, not via a child router: the admin write-gate guard
+  // enumerates this file's `r.post(...)` calls and requires `ensurePlatformAdmin` in each handler.
+  r.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchCreate(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/update', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchUpdate(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/disable', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDisable(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/delete', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDelete(req, res, adminUserId)
+  })
 
   r.get('/api/admin/role-delegation/summary', authenticate, async (req: Request, res: Response) => {
     const delegation = await ensureRoleDelegationAdmin(req, res)

@@ -5,7 +5,8 @@
  * Refreshed 2026-10-10 against main 1b843faee: registry unchanged (67 entries); line refs replaced
  * by self-verifying anchors.（登记表不变，仍是 67 条；文件里不再有任何源码行号，改为能对源码自证的锚点。）
  *
- * 2026-10-30：新增身份元数据保存路由，当前 68 条 / platform 61 条；下述 67 条口径保留为原基线说明。
+ * 2026-10-31：用户批量写路由 4 条，当前 72 条 / platform 65 条。
+ * 2026-10-30：新增身份元数据保存路由，当时 68 条 / platform 61 条；下述 67 条口径保留为原基线说明。
  *
  * 为什么不能照搬 #5680 的「中间件首位必须是门」判据：
  *   本批 67 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
@@ -419,7 +420,7 @@ function parseGate(gate: string): { file: string; branches: string[][] } | null 
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（68 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
+// 登记表（72 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -442,7 +443,11 @@ const P = 'platform' as const
 const D = 'delegation' as const
 
 const REGISTRY: readonly WriteRouteEntry[] = [
-  // --- routes/admin-users.ts（27 条；门为处理器第一条语句） ---
+  // --- routes/admin-users.ts（31 条；门为处理器第一条语句） ---
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/create', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/update', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/disable', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/delete', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -798,12 +803,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：68 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
-    expect(REGISTRY).toHaveLength(68)
+  it('登记表条数与分族口径固定：72 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
+    expect(REGISTRY).toHaveLength(72)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(61)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(65)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
       expect(entry.reg, label(entry)).toBe(MOUNTS[entry.mount].routeFile)
