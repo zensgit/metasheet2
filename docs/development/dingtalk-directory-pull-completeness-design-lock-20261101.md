@@ -44,6 +44,12 @@ cursors keep the pull running.
 - A parent cycle in the pulled department map rejects the snapshot before manager
   enrichment or preview/apply can consume it. Keep existing null and out-of-scope
   parent semantics for valid graphs.
+- An already returned department id whose normalized parentId differs from the
+  next returned row rejects the snapshot with the existing values-free
+  incomplete-department sentence, before manager enrichment or preview/apply.
+  The synthetic seeded root is not a returned id until a wire row replaces it.
+  Same normalized parent keeps the later name, order, and source and does not
+  requeue the id.
 - Failures use values-free messages. User pull errors propagate through the
   existing sync failure path before the apply transaction or preview completes.
 - New no-DB regressions drive the real client parsing and real fetchAllUsers

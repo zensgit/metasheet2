@@ -8,7 +8,7 @@ vi.mock('../../src/integrations/dingtalk/client', async (importOriginal) => ({
 import { DingTalkIncompleteResponseError } from '../../src/integrations/dingtalk/client'
 import { fetchAllDepartments } from '../../src/directory/directory-sync'
 
-type Row = { dept_id: string; parent_id: string | null; name: string }
+type Row = { dept_id: string; parent_id: string | null; name: string; order?: number }
 const row = (id: string, parentId: string | null): Row => ({ dept_id: id, parent_id: parentId, name: 'Department ' + id })
 let children: Record<string, Row[]>
 let listCalls: string[]
@@ -96,5 +96,49 @@ describe('directory department cycle completeness', () => {
     expect((error as Error).message).toBe('Failed to read complete DingTalk departments')
     expect(JSON.stringify(error)).not.toMatch(/PRIVATE_DEPARTMENT/)
     expect(detailCalls).toEqual([])
+  })
+
+  it('rejects contradictory returned department parents before enrichment', async () => {
+    children = {
+      '1': [
+        { dept_id: '2', parent_id: '1', name: 'CONTRADICTORY_PARENT_SENTINEL_2' },
+        { dept_id: '3', parent_id: '1', name: 'CONTRADICTORY_PARENT_SENTINEL_3' },
+      ],
+      '2': [{ dept_id: '4', parent_id: '2', name: 'CONTRADICTORY_PARENT_SENTINEL_EARLY' }],
+      '3': [{ dept_id: '4', parent_id: '3', name: 'CONTRADICTORY_PARENT_SENTINEL_LATE' }],
+    }
+    const error = await fetchAllDepartments(config, 'Synthetic root').catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(DingTalkIncompleteResponseError)
+    expect((error as Error).message).toBe('Failed to read complete DingTalk departments')
+    expect(listCalls).toEqual(['1', '2', '3'])
+    expect(detailCalls).toEqual([])
+    expect(JSON.stringify(error)).not.toMatch(/CONTRADICTORY_PARENT_SENTINEL/)
+  })
+
+  it('keeps matching duplicate department parents with later metadata', async () => {
+    children = {
+      '1': [
+        { dept_id: '2', parent_id: '1', name: 'CONTRADICTORY_PARENT_SENTINEL_2' },
+        { dept_id: '3', parent_id: '1', name: 'CONTRADICTORY_PARENT_SENTINEL_3' },
+      ],
+      '2': [{ dept_id: '4', parent_id: '2', name: 'CONTRADICTORY_PARENT_SENTINEL_EARLY' }],
+      '3': [{ dept_id: '4', parent_id: ' 2 ', name: 'Late', order: 7 }],
+    }
+    const result = await fetchAllDepartments(config, 'Synthetic root')
+    const fours = [...result.values()].filter((department) => department.id === '4')
+    expect(fours).toHaveLength(1)
+    expect(fours[0]).toMatchObject({
+      id: '4',
+      parentId: '2',
+      name: 'Late',
+      order: 7,
+    })
+    expect(fours[0]?.source).toMatchObject({
+      name: 'Late',
+      parent_id: ' 2 ',
+      order: 7,
+    })
+    expect(listCalls).toEqual(['1', '2', '3', '4'])
+    expect(detailCalls).toEqual(['1', '2', '3', '4'])
   })
 })

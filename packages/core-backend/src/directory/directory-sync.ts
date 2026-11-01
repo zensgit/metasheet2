@@ -3256,6 +3256,8 @@ export async function fetchAllDepartments(
     baseUrl: config.baseUrl,
   })
   const departments = new Map<string, DingTalkDepartment>()
+  // The seeded synthetic root is not a returned wire id until a list row replaces it.
+  const returnedWireDepartmentIds = new Set<string>()
   departments.set(config.rootDepartmentId, {
     id: config.rootDepartmentId,
     parentId: null,
@@ -3272,7 +3274,15 @@ export async function fetchAllDepartments(
     const children = await listDingTalkDepartments(accessToken, current, { baseUrl: config.baseUrl })
     for (const child of children) {
       const existing = departments.get(child.id)
+      if (
+        existing
+        && returnedWireDepartmentIds.has(child.id)
+        && existing.parentId !== child.parentId
+      ) {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
+      }
       departments.set(child.id, existing ? { ...existing, ...child } : child)
+      returnedWireDepartmentIds.add(child.id)
       if (!existing) queue.push(child.id)
     }
   }
