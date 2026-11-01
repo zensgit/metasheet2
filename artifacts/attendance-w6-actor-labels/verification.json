@@ -1,0 +1,284 @@
+{
+  "recorded_at": "2026-10-25T03:18:53.752990+00:00",
+  "baseline": "8a426818804897a20f7674c39c56b3a445909c3a",
+  "candidate_source_paths_sha256": {
+    "apps/web/src/views/AttendanceView.vue": "71aa45873ab2d995ad3cd0557f94b897044345863d7fbc15db1e083a337128ec",
+    "apps/web/src/views/attendance/attendanceGroupEffectivePolicyLabels.ts": "27454de2e39c599975ce0521a415f5809276a26ffe430b836dfe3454184ba18d",
+    "apps/web/tests/attendance-admin-anchor-nav.spec.ts": "04ea6504710cc1d2281a66b160ff310fcc00302d93a644d257a6f59cce033f47",
+    "apps/web/scripts/run-required-web-tests.sh": "ede946177527856ea87ab17b555622b3073c182469c3e2cc093d86ee1ce17982",
+    "apps/web/scripts/run-required-web-tests.tokens": "2698239c4db7cd0ca1cc90ff5d0555367947ca81a6d194b8a3c686cd5c6b614b"
+  },
+  "local_actual_assertions": [
+    {
+      "stage": "final-labels-full",
+      "exit": 0,
+      "actual_assertion_statuses": {
+        "passed": 57
+      }
+    },
+    {
+      "stage": "final-labels-wiring",
+      "exit": 0,
+      "actual_assertion_statuses": {
+        "passed": 36
+      }
+    },
+    {
+      "stage": "final-labels-backend-lane-guards",
+      "exit": 0,
+      "actual_assertion_statuses": {
+        "passed": 63
+      }
+    },
+    {
+      "stage": "final-labels-manifest-check",
+      "exit": 0,
+      "actual_assertion_statuses": null
+    },
+    {
+      "stage": "final-labels-shell-syntax",
+      "exit": 0,
+      "actual_assertion_statuses": null
+    },
+    {
+      "stage": "final-labels-scoped-lint",
+      "exit": 0,
+      "actual_assertion_statuses": null
+    },
+    {
+      "stage": "final-mutation-neutral-fallback",
+      "exit": 1,
+      "actual_assertion_statuses": {
+        "skipped": 52,
+        "failed": 3,
+        "passed": 2
+      }
+    },
+    {
+      "stage": "final-mutation-visual-identity",
+      "exit": 1,
+      "actual_assertion_statuses": {
+        "skipped": 52,
+        "passed": 2,
+        "failed": 3
+      }
+    },
+    {
+      "stage": "final-mutation-accessible-remove",
+      "exit": 1,
+      "actual_assertion_statuses": {
+        "skipped": 52,
+        "passed": 2,
+        "failed": 3
+      }
+    },
+    {
+      "stage": "final-labels-quality",
+      "exit": 0,
+      "actual_assertion_statuses": null
+    },
+    {
+      "stage": "final-labels-build",
+      "exit": 0,
+      "actual_assertion_statuses": null
+    }
+  ],
+  "mutation_source_exact_restored": true,
+  "original_reproduction": {
+    "failed": 20,
+    "controls_passed": 2,
+    "excluded": 32
+  },
+  "visual_identity_reproduction": {
+    "failed": 21,
+    "controls_passed": 4,
+    "excluded": 32
+  },
+  "intermediate54_green_superseded_by_visual_review": true,
+  "unchanged_helper_neighbor": {
+    "passed": 1,
+    "excluded": 145,
+    "rerun_on_final_candidate": false,
+    "applicability": "helper runtime AST unchanged; not evidence for new visual rendering"
+  },
+  "AttendanceView_lint": {
+    "baseline_exit": 1,
+    "candidate_exit": 1,
+    "inherited_diagnostics": 17,
+    "introduced_diagnostics": 0
+  },
+  "browser": {
+    "entry": "apps/web/src/main.ts",
+    "synthetic_only": true,
+    "actual_source_paths_checked": 30,
+    "source_checks": [
+      {
+        "phase": "before",
+        "matches": true
+      },
+      {
+        "phase": "after",
+        "matches": true
+      }
+    ],
+    "records": [
+      {
+        "width": 1366,
+        "height": 900,
+        "locale": "zh",
+        "status": "personnel-labels-passed",
+        "controls": [
+          {
+            "actor": "member",
+            "technicalIdVisible": true,
+            "width": 333.90625,
+            "height": 19.5
+          },
+          {
+            "actor": "manager",
+            "technicalIdVisible": true,
+            "width": 255.0625,
+            "height": 39
+          }
+        ],
+        "completed": [
+          "neutral-primary-for-missing-and-nameless",
+          "authorized-name-and-inactive-preserved",
+          "technical-identifiers-distinct",
+          "unknown-is-not-inferred-deleted",
+          "unexpected-foreign-row-not-rendered"
+        ],
+        "layout": [
+          {
+            "label": "member-primary-labels",
+            "viewport": 1366,
+            "left": 676,
+            "right": 1310,
+            "clientWidth": 632,
+            "scrollWidth": 632,
+            "documentWidth": 1366
+          },
+          {
+            "label": "owner-primary-labels",
+            "viewport": 1366,
+            "left": 676,
+            "right": 1310,
+            "clientWidth": 632,
+            "scrollWidth": 632,
+            "documentWidth": 1366
+          }
+        ],
+        "consoleErrorCount": 1,
+        "blockedWebSockets": 1
+      },
+      {
+        "width": 768,
+        "height": 900,
+        "locale": "en",
+        "status": "personnel-labels-passed",
+        "controls": [
+          {
+            "actor": "member",
+            "technicalIdVisible": true,
+            "width": 328.1875,
+            "height": 19.5
+          },
+          {
+            "actor": "manager",
+            "technicalIdVisible": true,
+            "width": 225.015625,
+            "height": 39
+          }
+        ],
+        "completed": [
+          "neutral-primary-for-missing-and-nameless",
+          "authorized-name-and-inactive-preserved",
+          "technical-identifiers-distinct",
+          "unknown-is-not-inferred-deleted",
+          "unexpected-foreign-row-not-rendered"
+        ],
+        "layout": [
+          {
+            "label": "member-primary-labels",
+            "viewport": 768,
+            "left": 48,
+            "right": 720,
+            "clientWidth": 670,
+            "scrollWidth": 670,
+            "documentWidth": 768
+          },
+          {
+            "label": "owner-primary-labels",
+            "viewport": 768,
+            "left": 48,
+            "right": 720,
+            "clientWidth": 670,
+            "scrollWidth": 670,
+            "documentWidth": 768
+          }
+        ],
+        "consoleErrorCount": 1,
+        "blockedWebSockets": 1
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "locale": "en",
+        "status": "blocked-by-product-mobile-admin-gate",
+        "controls": [
+          ".attendance-shell__desktop-hint button"
+        ],
+        "completed": [
+          "honest-mobile-gate-no-editor-proof"
+        ],
+        "layout": [
+          {
+            "label": "mobile-admin-blocked",
+            "viewport": 390,
+            "left": 0,
+            "right": 390,
+            "clientWidth": 388,
+            "scrollWidth": 388,
+            "documentWidth": 390
+          }
+        ],
+        "consoleErrorCount": 1,
+        "blockedWebSockets": 1
+      }
+    ],
+    "page_errors": 0,
+    "network_or_write_violations": 0,
+    "application_writes": 0,
+    "external_requests_forwarded": 0,
+    "own_server_exited": true,
+    "own_server_port_closed": true,
+    "console_limit": "One console.error and one deliberately blocked WebSocket were counted per viewport; raw console text was not retained. This proves no unhandled pageerror, not zero console errors.",
+    "mobile_editor_proven": false
+  },
+  "screenshots": [
+    {
+      "path": "artifacts/attendance-w6-actor-labels/screenshots/2026-10-25T03-17-02-599Z-38115-1366-member-primary-labels.png",
+      "sha256": "12efc07cea771e0746aeaba8c26d94534716f9590725ba7dab2d1a7f89df420c",
+      "label": "member-primary-labels"
+    },
+    {
+      "path": "artifacts/attendance-w6-actor-labels/screenshots/2026-10-25T03-17-02-599Z-38115-768-member-primary-labels.png",
+      "sha256": "e53b71a69f3c06ff6b8de229952bf8369a65021d7320c681dcb8e52437d47590",
+      "label": "member-primary-labels"
+    },
+    {
+      "path": "artifacts/attendance-w6-actor-labels/screenshots/2026-10-25T03-17-02-599Z-38115-390-mobile-admin-blocked.png",
+      "sha256": "192dc6f2eb7260c957053bcc01df5ef71f5cbad67243c37248a978341b0ba0ca",
+      "label": "mobile-admin-blocked"
+    }
+  ],
+  "independent_review": {
+    "model": "gpt-6.1-sol/high",
+    "source_only": true,
+    "initial_hidden_ID_and_required_wiring_P2s_repaired": true,
+    "followup_confirmed_new_P1_P2": 0,
+    "not_a_substitute_for_main_execution": true
+  },
+  "required_CI": "pending_publication_fresh_head",
+  "boundary": "Draft/HOLD; no merge/deploy/R71/tag/release/config changes; Stream/lifecycle OFF; real UAT and business50004 excluded; 08am historical PUT INCONCLUSIVE; no global FE-06/W8 certification"
+}
