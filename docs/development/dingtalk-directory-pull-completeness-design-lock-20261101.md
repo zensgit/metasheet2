@@ -55,8 +55,48 @@ cursors keep the pull running.
 - New no-DB regressions drive the real client parsing and real fetchAllUsers
   with only the HTTP/client boundary mocked. They enter the existing backend
   unit-test glob; no skipped DB gate or new broad test runner.
-- Keep Draft/HOLD. No merge/deploy/R71 change, external writes, Stream/lifecycle
-  enablement, migration or target acceptance. No unchanged green suite reruns.
+- Process status (2026-11-01): the owner lifted Draft/HOLD for Ready and merge of
+  this change only. No deploy/R71 change, tag or release, external writes,
+  Stream/lifecycle enablement, migration or target acceptance. No unchanged green
+  suite reruns.
 
 This does not remove the user/get detail calls, decide real-tenant fields,
 ratify offboarding semantics, or claim live/full-app/target acceptance.
+
+## Deploy gate after merge
+
+These gates have run only against HTTP mocks. Public documentation and existing
+records do not show that every legitimate provider reply passes them, and one
+rejected reply fails the whole pull on every run. A failed pull changes no
+directory rows, but joiners and departures stop syncing, and this change adds no
+flag: recovery is a code change or redeploying a prior build.
+
+Any tag, package or image containing this change stays undeployed until a real
+read-only probe on an isolated tenant passes with coverage, or the owner
+explicitly waives it. Being on main does not grant this, and neither does the
+standing tag authorization. Deploy authorization names a tag rather than its
+contents, so whoever prepares or approves a deploy must check this gate.
+
+The probe needs a tenant with a zero-direct-member department, a childless
+department and a department with at least two direct members. It records types and
+counts only, never ids, names, URLs or raw bodies, and uses preview, not a real
+sync. It answers:
+
+- Listing a childless department: is `result` an empty array, or omitted?
+- `user/list` on a zero-direct-member department: is `list` an empty array, or
+  omitted? Is `has_more` a boolean, or absent?
+- Paging at size 1: is `has_more` boolean on every page, and is `next_cursor`
+  usable and unrepeated?
+- Across all rows: any missing or blank id or name, any malformed `dept_id_list`?
+- `user/get`: does the returned id equal the requested id, once per unique user?
+- Does the preview result agree with the walk's counts?
+
+Any rejected shape blocks deployment, and the owner decides whether this lock
+changes. A clean result clears that tenant at that time, not every tenant. Missing
+coverage is inconclusive, not a pass.
+
+Open owner decision: a tenant with a home-school contacts directory can get a
+department row with id -7 under the root. The provider's guidance is to exclude
+that row; the ID rule above rejects the whole listing. The prior code very likely
+failed such a tenant too, but that is not proven, and its connectivity test can
+change from pass to fail.
