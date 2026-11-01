@@ -244,13 +244,16 @@ describe('what an entry holds', () => {
 
   it('a valid stored entry is read back whole', () => {
     const name = dispatchKeyStorageKey(SCOPE)
-    const storage = makeStorage([[name, JSON.stringify({ v: 1, key: KEY_A, at: 5, unsettled: 1 })]])
+    const storage = makeStorage([[name, JSON.stringify({ v: 1, key: KEY_A, at: 5, unsettled: 2 })]])
     const store = storeOn(storage)
 
     expect(store.isUnresolved(SCOPE)).toBe(true)
     expect(store.isPersisted(SCOPE)).toBe(true)
     expect(store.obtain(SCOPE)).toEqual({ key: KEY_A, persisted: true })
 
+    // A count above one is read as it is: one 4xx answer leaves the other request unanswered.
+    store.markSettled(SCOPE)
+    expect(store.isUnresolved(SCOPE)).toBe(true)
     store.markSettled(SCOPE)
     expect(store.isUnresolved(SCOPE)).toBe(false)
   })
