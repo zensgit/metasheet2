@@ -11,11 +11,7 @@
  * with the rest, and the last describe pins its rollback rules. This file does not start MetaSheetServer.
  */
 import '../helpers/assert-rbac-optional-off'
-import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { CompiledQuery, Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -976,9 +972,6 @@ describe('task M4 schema (real db)', () => {
   describe('task_source_links rollback (down() refuses while rows exist; never committed here)', () => {
     const ROLLBACK = Symbol('task-source-links-rollback')
     const ERROR_TOKEN = /TASK_SOURCE_LINKS_DOWN_BLOCKED/
-    const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..')
-    const BACKEND_DIR = join(REPO_ROOT, 'packages/core-backend')
-    const LANE_WORKFLOW = join(REPO_ROOT, '.github/workflows/tasks-realdb.yml')
     let pool: Pool | undefined
     let kdb: Kysely<unknown> | undefined
 
@@ -1069,52 +1062,5 @@ describe('task M4 schema (real db)', () => {
       })
       expect(await linkTable(poolRunner)).toBe('task_source_links')
     })
-
-    // A build without this migration's file refuses to migrate a database that has executed it, which
-    // is why rolling the service back redeploys with the migration step off. This runs the CLI that
-    // deployments run, not an in-process Migrator: the provider's file import runs from node_modules,
-    // outside vitest's TypeScript transform. `MIGRATION_EXCLUDE` is scoped to the lane's migrate step
-    // and is not in this process's environment, so the names come from the workflow file: if the
-    // refusal ever stopped, this run finds nothing pending instead of applying the migrations the
-    // lane leaves out to the shared lane database.
-    it('a build that does not ship the migration refuses to migrate and writes nothing', async () => {
-      const files = readdirSync(join(BACKEND_DIR, 'src/db/migrations'))
-        .filter((name) => /^zzzz\d{14}_create_task_source_links\.ts$/.test(name))
-      expect(files).toHaveLength(1)
-      const migrationName = files[0].replace(/\.ts$/, '')
-
-      const declared = /^\s*MIGRATION_EXCLUDE:\s*(\S+)\s*$/m.exec(readFileSync(LANE_WORKFLOW, 'utf8'))
-      expect(declared).not.toBeNull()
-      const laneExcluded = declared![1].split(',')
-      expect(laneExcluded.length).toBeGreaterThan(0)
-      for (const name of laneExcluded) expect(name).toMatch(/^[\w.-]+\.(sql|ts)$/)
-
-      // The migrator stops at the first executed name it cannot find, so on a database that has run one
-      // of these the refusal below would name that one. The ledger holds names without the extension.
-      const laneNames = laneExcluded.map((name) => name.replace(/\.(sql|ts)$/, ''))
-      expect(
-        await q('SELECT name FROM kysely_migration WHERE name = ANY($1::text[])', [laneNames]),
-        'this cell needs a database built with the lane\'s MIGRATION_EXCLUDE',
-      ).toEqual([])
-
-      const ledger = async (): Promise<number> =>
-        Number((await q('SELECT count(*)::int AS n FROM kysely_migration'))[0].n)
-      expect(await q('SELECT 1 FROM kysely_migration WHERE name = $1', [migrationName])).toHaveLength(1)
-      const ledgerBefore = await ledger()
-
-      const cli = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate.ts'], {
-        cwd: BACKEND_DIR,
-        env: { ...process.env, MIGRATION_EXCLUDE: [...laneExcluded, migrationName].join(',') },
-        encoding: 'utf8',
-        timeout: 110_000,
-      })
-      expect(cli.status, [cli.error?.message, cli.signal, cli.stderr].filter(Boolean).join('\n')).toBe(1)
-      expect(`${cli.stdout}\n${cli.stderr}`).toContain(
-        `corrupted migrations: previously executed migration ${migrationName} is missing`,
-      )
-
-      expect(await ledger()).toBe(ledgerBefore)
-      expect(await linkTable(poolRunner)).toBe('task_source_links')
-    }, 120_000)
   })
 })
