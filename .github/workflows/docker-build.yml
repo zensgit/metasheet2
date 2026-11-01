@@ -94,6 +94,7 @@ jobs:
             candidate-receipt-transport.json
             candidate-ledger-reconciliation.json
             candidate-db-tests.json
+            candidate-db-test-assembly.json
             candidate-cli-receipt.json
             candidate-backup-restore.json
             candidate-runtime-receipts.json

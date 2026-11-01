@@ -118,6 +118,39 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaises(UnicodeDecodeError):
             self.task_with_output(b'log\xe6', decode=True)
 
+    def workflow_mount(self, revision=None):
+        tree = ast.parse(WRITER.with_name('staging-handover-rehearsal.py').read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'db_test_workflow_mount')
+        source = 'e94c982b66a0d41a2eeb7e49a1a367934f39a2b6'
+        git = Mock()
+        git.check_output.side_effect = [(revision or source).encode(), b'frozen workflow']
+        namespace = {'SOURCE':source,'subprocess':git,'hashlib':hashlib}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<assembly-test>', 'exec'), namespace)
+        return namespace['db_test_workflow_mount'](self.root)
+
+    def test_frozen_workflow_is_mounted_readonly_only_at_expected_file(self):
+        file = self.root / '.github/workflows/plugin-tests.yml'
+        file.parent.mkdir(parents=True)
+        file.write_bytes(b'frozen workflow')
+        mounts, digest = self.workflow_mount()
+        self.assertEqual(mounts, ['--mount', 'type=bind,source=' + str(file.resolve()) + ',target=/app/.github/workflows/plugin-tests.yml,readonly'])
+        self.assertEqual(digest, hashlib.sha256(b'frozen workflow').hexdigest())
+
+    def test_missing_workflow_refuses_test_assembly(self):
+        with self.assertRaises(FileNotFoundError):
+            self.workflow_mount()
+
+    def test_changed_workflow_refuses_test_assembly(self):
+        file = self.root / '.github/workflows/plugin-tests.yml'
+        file.parent.mkdir(parents=True)
+        file.write_bytes(b'changed workflow')
+        with self.assertRaisesRegex(RuntimeError, 'DB_TEST_WORKFLOW_CHANGED'):
+            self.workflow_mount()
+
+    def test_wrong_source_refuses_test_assembly(self):
+        with self.assertRaisesRegex(RuntimeError, 'DB_TEST_SOURCE_CHANGED'):
+            self.workflow_mount('b' * 40)
+
     def test_matching_hash_does_not_accept_truncated_json_or_invalid_utf8(self):
         self.produce()
         for data in [b'{"partial":', b'\xff']:

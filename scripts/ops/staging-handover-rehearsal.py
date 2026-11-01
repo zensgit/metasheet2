@@ -32,6 +32,17 @@ def docker(*args, **kw):
 def inspect(ref):
     return json.loads(docker('inspect', ref).stdout)[0]
 
+def db_test_workflow_mount(source):
+    relative = '.github/workflows/plugin-tests.yml'
+    revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD']).decode().strip()
+    if revision != SOURCE:
+        raise RuntimeError('DB_TEST_SOURCE_CHANGED')
+    expected = subprocess.check_output(['git', '-C', str(source), 'show', SOURCE + ':' + relative])
+    file = (source / relative).resolve()
+    if file.read_bytes() != expected:
+        raise RuntimeError('DB_TEST_WORKFLOW_CHANGED')
+    return ['--mount', 'type=bind,source=' + str(file) + ',target=/app/' + relative + ',readonly'], hashlib.sha256(expected).hexdigest()
+
 def create(name, image, args, command=(), entry=None):
     opts = ['--name', name, '--label', 'codex.candidate=' + SCOPE, *args]
     if entry: opts += ['--entrypoint', entry]
@@ -265,10 +276,14 @@ try:
              'directory-dingtalk-openid-grant-path.db.test.ts','directory-org-transfer-source-freeze.db.test.ts',
              'directory-source-freeze-lock-correctness.db.test.ts','provider-org-transfer-t1.api.test.ts']
     test_dir = PRIVATE / 'db-tests'; test_dir.mkdir(mode=0o700)
+    workflow_mount, workflow_hash = db_test_workflow_mount(ROOT / 'source')
+    (ROOT / 'candidate-db-test-assembly.json').write_text(json.dumps({'source':SOURCE,
+        'file':'.github/workflows/plugin-tests.yml','sha256':workflow_hash,'readOnly':True,
+        'scope':'dbtests container only','expectedTests':185},indent=2))
     try:
         task(BACK,'dbtests',[vitest,'run','--root','/app/packages/core-backend','--config','/app/packages/core-backend/vitest.integration.config.ts',
              *['/app/packages/core-backend/tests/integration/'+f for f in files],'--reporter=json','--outputFile=/receipts/candidate-db-tests.json'],
-             extra={'EXPECT_DB':'1'},mounts=['--mount','type=bind,source='+str(test_dir)+',target=/receipts'],timeout=600,decode=False)
+             extra={'EXPECT_DB':'1'},mounts=['--mount','type=bind,source='+str(test_dir)+',target=/receipts',*workflow_mount],timeout=600,decode=False)
     finally:
         report = test_dir/'candidate-db-tests.json'
         if report.exists(): shutil.copyfile(report,ROOT/'candidate-db-tests.json')
