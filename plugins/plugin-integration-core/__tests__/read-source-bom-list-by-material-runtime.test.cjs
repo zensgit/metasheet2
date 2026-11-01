@@ -34,6 +34,10 @@ const {
   bomListByMaterialContractViolation,
 } = require(path.join(__dirname, '..', 'lib', 'read-source-bom-list-by-material-contract.cjs'))
 const { createK3WiseWebApiAdapter } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs'))
+const {
+  prepareReadSourceProbe,
+  executeReadSourceProbe,
+} = require(path.join(__dirname, '..', 'lib', 'read-source-probe-runtime.cjs'))
 
 // ── fixtures ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -360,6 +364,43 @@ async function testRealAdapterKeyDiscipline() {
   )
 }
 
+// Unsafe numeric keys (raw JSON 9007199254740993 parses to 9007199254740992) must be refused at input
+// normalization, BEFORE String() produces a digit run the real adapter would accept and query. Both the
+// probe and the configured-read production chains run prepare -> execute -> real adapter (fetch stubbed only).
+async function testUnsafeNumericKeyRealChains() {
+  const prepareProbe = (key) => prepareReadSourceProbe({ config: presetConfig(), boundedSmoke: false, inputs: { key } })
+  const prepareRead = (key) => prepareConfiguredRead({ config: presetConfig(), inputs: { key } })
+  const isKeyRequired = (error) => error instanceof ReadSourceProbeContractError && error.reason === 'key_required'
+
+  const parsedUnsafe = JSON.parse('9007199254740993')
+  assert.equal(parsedUnsafe, 9007199254740992, 'fixture: the raw JSON id has already been rounded by the parser')
+  for (const key of [parsedUnsafe, Number.MAX_SAFE_INTEGER + 2, 1e20, 1.5, -3]) {
+    for (const prepare of [prepareProbe, prepareRead]) {
+      const { calls } = createWireHarness(happyRaw())
+      assert.throws(() => prepare(key), isKeyRequired, `unsafe numeric key ${String(key)} must be refused at prepare`)
+      assert.equal(calls.length, 0, 'a refused numeric key must produce ZERO fetch calls (not even login)')
+    }
+  }
+
+  // Positive controls: a safe number and an exact long digit string still reach the wire unchanged.
+  for (const [key, digits] of [
+    [31415, '31415'],
+    [Number.MAX_SAFE_INTEGER, '9007199254740991'],
+    ['9007199254740993', '9007199254740993'],
+  ]) {
+    const read = createWireHarness(happyRaw())
+    const readOutcome = await executeConfiguredRead(prepareRead(key), read.deps)
+    assert.equal(readOutcome.evidence.ok, true)
+    const probe = createWireHarness(happyRaw())
+    const probeEvidence = await executeReadSourceProbe(prepareProbe(key), probe.deps)
+    assert.equal(probeEvidence.ok, true)
+    for (const { calls } of [read, probe]) {
+      assert.deepEqual(calls.map((call) => call.pathname), ['/K3API/Login', '/K3API/BOM/GetList'])
+      assert.equal(calls[1].body.Data.Filter, `[FPercentItemID] = ${digits}`)
+    }
+  }
+}
+
 // ── adapter-direct gates: marker, config mode, limit cap, wrong object/mode ─────────────────────────
 
 async function testAdapterDirectGates() {
@@ -477,6 +518,7 @@ async function main() {
   await testRealAdapterPinnedWire()
   await testRealAdapterEnvelopeRejected()
   await testRealAdapterKeyDiscipline()
+  await testUnsafeNumericKeyRealChains()
   await testAdapterDirectGates()
   await testWrongModeFailsBeforeRead()
   testLatentStateAndKeyPredicate()

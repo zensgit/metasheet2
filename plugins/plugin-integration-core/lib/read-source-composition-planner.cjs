@@ -10,8 +10,11 @@
 //   1. plans an approved two-hop composition (reusing the C-R1 save-time validator verbatim, so
 //      approved-only / resolver_lookup-only / write-shaped-step-rejected all hold at plan time),
 //   2. derives hop N+1's key-only input from hop N's resolved single value — a typed scalar handoff
-//      validated by the SAME normalizeReadSourceProbeInputs predicate the probe/read runtime enforces
-//      (no second key predicate to drift), and
+//      validated by the reused normalizeReadSourceProbeInputs key predicate (no second general key
+//      predicate to drift) PLUS one chain-only guard: a prior numeric value beyond the safe-integer
+//      range may already have been rounded upstream (e.g. by JSON.parse), so it is rejected before String()
+//      coercion could mint a plausible-looking but wrong key. Exact long digit STRINGS are untouched, and
+//      the guard is deliberately NOT a plan-independent "safe integer" rule (finite safe fractions pass), and
 //   3. stitches values-free per-step chain evidence: a `{step, ok, rule?, errorCode?}` vector only —
 //      never the intermediate resolved value, candidate values, field/target names, hosts, credentials,
 //      or the runtime key (design-lock lock 5).
@@ -188,7 +191,9 @@ function planReadSourceComposition(composition, options = {}) {
 // ── 2. derive ──────────────────────────────────────────────────────────────────────────────────────
 // Derives hop `stepOrdinal`'s key-only input from the PREVIOUS hop's resolved data. The handoff is a
 // typed single scalar: the prior resolver's declared output target must match the config-declared
-// wiring, and the value must pass the SAME key predicate the runtime applies (reused, not re-stated).
+// wiring, and the value must pass the reused runtime key predicate (not re-stated) after one chain-only
+// magnitude guard: a number with |value| > Number.MAX_SAFE_INTEGER is VALUE_INVALID (it may already be
+// lossy, and String() would erase that numeric provenance).
 // Failure vocabulary is pinned:
 //   VALUE_MISSING   — the prior hop never resolved (null / malformed / blank / throwing data)
 //   TARGET_MISMATCH — resolved, but to a different declared output target than the wiring expects
@@ -211,6 +216,11 @@ function deriveCompositionStepInput(plan, stepOrdinal, priorData) {
       return Object.freeze({ ok: false, errorCode: 'READ_SOURCE_COMPOSITION_HANDOFF_TARGET_MISMATCH' })
     }
     if (!snapshot.scalar) {
+      return Object.freeze({ ok: false, errorCode: 'READ_SOURCE_COMPOSITION_HANDOFF_VALUE_INVALID' })
+    }
+    // Must run BEFORE normalizeReadSourceProbeInputs can String() the value. Not !Number.isSafeInteger:
+    // safe fractions (1.5 / -1.5) remain valid handoffs for non-BL2 next hops.
+    if (typeof snapshot.value === 'number' && Math.abs(snapshot.value) > Number.MAX_SAFE_INTEGER) {
       return Object.freeze({ ok: false, errorCode: 'READ_SOURCE_COMPOSITION_HANDOFF_VALUE_INVALID' })
     }
     try {
