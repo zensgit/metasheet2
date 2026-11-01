@@ -56,6 +56,27 @@ export type PlannedUpdate = {
 type PlanOk<T> = { ok: true; rows: T[]; failures: BatchItemResult[] }
 type PlanErr = { ok: false; status: number; code: string; message: string }
 
+export type HardDeleteRefusal = {
+  ok: false
+  status: 409
+  code: 'HARD_DELETE_UNSUPPORTED'
+  message: string
+  userIds: string[]
+}
+
+/** `strict` is off in this package, so `if (!plan.ok)` does not narrow the union. */
+export function planFailure(plan: { ok: boolean }): { status: number; code: string; message: string } | null {
+  if (plan.ok) return null
+  const failed = plan as { status?: number; code?: string; message?: string }
+  if (typeof failed.status !== 'number' || typeof failed.code !== 'string' || typeof failed.message !== 'string') return null
+  return { status: failed.status, code: failed.code, message: failed.message }
+}
+
+export function hardDeleteRefusal(plan: { ok: boolean }): HardDeleteRefusal | null {
+  if (plan.ok || !('userIds' in plan)) return null
+  return plan as HardDeleteRefusal
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as Record<string, unknown>
@@ -322,7 +343,7 @@ export function planDeleteBatch(input: {
   confirmText: unknown
   actorId: string
   knownIds: ReadonlySet<string>
-}): PlanOk<{ index: number; userId: string }> | PlanErr | { ok: false; status: number; code: 'HARD_DELETE_UNSUPPORTED'; message: string; userIds: string[] } {
+}): PlanOk<{ index: number; userId: string }> | PlanErr | HardDeleteRefusal {
   const mode = input.mode === 'hard' ? 'hard' : input.mode === 'disable' ? 'disable' : ''
   if (!mode) {
     return { ok: false, status: 400, code: 'DELETE_MODE_REQUIRED', message: 'mode 只能是 disable 或 hard' }

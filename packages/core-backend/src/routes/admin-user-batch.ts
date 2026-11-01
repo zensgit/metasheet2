@@ -6,8 +6,10 @@ import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { revokeUserSessions } from '../auth/session-revocation'
 import {
   ADMIN_USER_BATCH_LIMIT,
+  hardDeleteRefusal,
   planCreateBatch,
   planDeleteBatch,
+  planFailure,
   planStatusBatch,
   planUpdateBatch,
   type BatchItemResult,
@@ -136,7 +138,10 @@ export async function handleAdminUserBatchCreate(req: Request, res: Response, ad
         existingEmails: new Set(existing.rows.map((row) => row.email)),
         knownRoleIds,
       })
-      if (!plan.ok) return jsonError(res, plan.status, plan.code, plan.message)
+      if (!plan.ok) {
+        const createFailure = planFailure(plan)
+        return jsonError(res, createFailure?.status ?? 400, createFailure?.code ?? 'BATCH_CREATE_FAILED', createFailure?.message ?? '批量创建失败')
+      }
 
       const created: BatchItemResult[] = []
       for (const row of plan.rows) {
@@ -180,7 +185,10 @@ export async function handleAdminUserBatchUpdate(req: Request, res: Response, ad
         usersByEmail,
         knownRoleIds: await loadRoleIds(roleIds),
       })
-      if (!plan.ok) return jsonError(res, plan.status, plan.code, plan.message)
+      if (!plan.ok) {
+        const updateFailure = planFailure(plan)
+        return jsonError(res, updateFailure?.status ?? 400, updateFailure?.code ?? 'BATCH_UPDATE_FAILED', updateFailure?.message ?? '批量更新失败')
+      }
 
       const dryRun = req.body?.dryRun === true
       const applied: BatchItemResult[] = []
@@ -243,7 +251,8 @@ export async function handleAdminUserBatchDelete(req: Request, res: Response, ad
         actorId: adminUserId,
         knownIds: new Set(known.map((user) => user.id)),
       })
-      if (!plan.ok && plan.code === 'HARD_DELETE_UNSUPPORTED') {
+      const refused = hardDeleteRefusal(plan)
+      if (refused) {
         await auditLog({
           actorId: adminUserId,
           actorType: 'user',
@@ -254,20 +263,23 @@ export async function handleAdminUserBatchDelete(req: Request, res: Response, ad
             adminUserId,
             outcome: 'refused',
             code: 'HARD_DELETE_UNSUPPORTED',
-            count: plan.userIds.length,
+            count: refused.userIds.length,
           },
         })
-        const results: BatchItemResult[] = plan.userIds.map((userId, index) => ({
+        const results: BatchItemResult[] = refused.userIds.map((userId, index) => ({
           index,
           ok: false,
           email: known.find((user) => user.id === userId)?.email ?? null,
           userId,
           code: 'HARD_DELETE_UNSUPPORTED',
-          message: plan.message,
+          message: refused.message,
         }))
-        return jsonError(res, 409, 'HARD_DELETE_UNSUPPORTED', plan.message, summarize(results))
+        return jsonError(res, 409, 'HARD_DELETE_UNSUPPORTED', refused.message, summarize(results))
       }
-      if (!plan.ok) return jsonError(res, plan.status, plan.code, plan.message)
+      if (!plan.ok) {
+        const deleteFailure = planFailure(plan)
+        return jsonError(res, deleteFailure?.status ?? 400, deleteFailure?.code ?? 'BATCH_DELETE_FAILED', deleteFailure?.message ?? '批量删除失败')
+      }
 
       const applied: BatchItemResult[] = []
       for (const row of plan.rows) {
@@ -446,7 +458,12 @@ async function applyStatus(
     actorId: adminUserId,
     knownIds: new Set(known.map((user) => user.id)),
   })
-  if (!plan.ok) return { error: { status: plan.status, code: plan.code, message: plan.message } }
+  if (!plan.ok) {
+    const statusFailure = planFailure(plan)
+    return {
+      error: statusFailure ?? { status: 400, code: 'BATCH_STATUS_FAILED', message: '批量停用失败' },
+    }
+  }
   const applied: BatchItemResult[] = []
   for (const row of plan.rows) {
     applied.push(await setActive(adminUserId, row.userId, isActive === true, row.index))
