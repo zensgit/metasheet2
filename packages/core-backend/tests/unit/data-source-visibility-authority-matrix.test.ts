@@ -73,9 +73,9 @@ const auditMock = vi.mocked(auditLog)
 
 const DS_PERMS = ['data_sources:read', 'data_sources:write', 'data_sources:execute']
 
-const ADMIN = { id: 'u_dsv_admin', role: 'admin' }
+const ADMIN = { id: '00000000-0000-4000-8000-000000000101', role: 'admin' }
 const ADMIN_VIA_ROLES = { id: 'u_dsv_admin2', roles: ['admin', 'member'] }
-const OWNER = { id: 'u_dsv_owner', roles: ['member'], permissions: DS_PERMS }
+const OWNER = { id: '00000000-0000-4000-8000-000000000102', roles: ['member'], permissions: DS_PERMS }
 const OTHER = { id: 'u_dsv_other', roles: ['member'], permissions: DS_PERMS }
 
 // ── poison values: if ANY of these ever appears in ANY response body or audit row, credentials
@@ -642,6 +642,49 @@ describe('data plane stays OWNER-ONLY — admin management is not data access', 
   })
 })
 
+describe('data_sources audit actor strings', () => {
+  const ID = 'dsv-uuid-audit'
+
+  it('retains the authenticated UUID on create despite caller-supplied actor fields', async () => {
+    const res = await as({ ...OWNER, userId: OTHER.id, sub: OTHER.id })
+      .post('/api/data-sources')
+      .send({ ...sourcePayload(ID), actorId: OTHER.id, meta: { actorId: OTHER.id } })
+    expect(res.status).toBe(201)
+    const call = auditCalls('create', ID).at(-1)
+    expect(call).toMatchObject({
+      actorId: OWNER.id,
+      actorType: 'user',
+      meta: { actorId: OWNER.id, name: ID, type: 'postgres' },
+    })
+    expect(JSON.stringify(call)).not.toContain(OTHER.id)
+    expectNoPoison(call)
+
+    const own = await as(OWNER).get(`/api/data-sources/${ID}`)
+    expect(own.status).toBe(200)
+    expect(own.body.data.ownerId).toBe(OWNER.id)
+  })
+
+  it('keeps the UUID admin actor separate from the UUID source owner', async () => {
+    const res = await as(ADMIN).get(`/api/data-sources/${ID}`)
+    expect(res.status).toBe(200)
+    expect(auditCalls('read', ID).at(-1)).toMatchObject({
+      actorId: ADMIN.id,
+      meta: { actorId: ADMIN.id, ownerId: OWNER.id, crossOwnerAdmin: true },
+    })
+    expect(res.body.data.ownerId).toBe(OWNER.id)
+  })
+
+  it.each([{ userId: ADMIN.id }, { sub: ADMIN.id }])(
+    'keeps the existing authentication refusal for an id-less user: %j',
+    async (identity) => {
+      const before = auditCalls().length
+      const res = await as({ ...identity, role: 'admin' }).get(`/api/data-sources/${ID}`)
+      expect(res.status).toBe(401)
+      expect(auditCalls().length).toBe(before)
+    },
+  )
+})
+
 describe('poison sweep — credentials are write-only for EVERY tier, everywhere', () => {
   it('no credential value ever appeared in any audit row of this whole file', () => {
     expectNoPoison(auditMock.mock.calls)
@@ -655,6 +698,16 @@ describe('poison sweep — credentials are write-only for EVERY tier, everywhere
     for (const call of crossOwner) {
       expect([ADMIN.id, ADMIN_VIA_ROLES.id]).toContain(call.actorId)
       expect((call.meta as Record<string, unknown>).ownerId).toBe(OWNER.id)
+      expect((call.meta as Record<string, unknown>).actorId).toBe(call.actorId)
+    }
+  })
+
+  it('every existing data-source audit call retains its actor in persistent metadata', () => {
+    const calls = auditCalls().filter((call) => call.resourceType === 'data_source')
+    expect(calls.length).toBeGreaterThan(0)
+    for (const call of calls) {
+      expect(call.actorId).toBeTruthy()
+      expect(call.meta?.actorId).toBe(call.actorId)
     }
   })
 })
