@@ -415,8 +415,8 @@ export function sanitizeNativeConflict(body: string): SanitizedNativeConflict | 
   return Object.keys(detail).length ? detail : undefined
 }
 
-export function personalBomWriteHttpError(status: number, body: string): PlmPersonalBomWriteError {
-  const detail = sanitizeNativeConflict(body)
+export function personalBomWriteHttpError(status: number, body?: string): PlmPersonalBomWriteError {
+  const detail = body === undefined ? undefined : sanitizeNativeConflict(body)
   const code =
     status === 401
       ? 'PLM_BOM_WRITE_UNAUTHORIZED'

@@ -2610,7 +2610,38 @@ export class PLMAdapter extends HTTPAdapter {
         headers,
         ...(prepared.body !== undefined ? { body: JSON.stringify(prepared.body) } : {}),
       })
-      const body = await response.text()
+      let body = ''
+      if (response.body) {
+        const reader = response.body.getReader()
+        const chunks: Uint8Array[] = []
+        let retained = 0
+        try {
+          let step = await reader.read()
+          while (!step.done) {
+            const value = step.value
+            if (value && value.byteLength > 0) {
+              // 8192 raw bytes plus one leading 3-byte UTF-8 BOM. Overflow is confirmed only after cancel resolves.
+              if (retained + value.byteLength > 8192 + 3) {
+                await reader.cancel()
+                if (!response.ok) throw personalBomWriteHttpError(response.status)
+                throw new PlmPersonalBomWriteError(503, 'PLM_BOM_WRITE_UNAVAILABLE', undefined, true)
+              }
+              chunks.push(value)
+              retained += value.byteLength
+            }
+            step = await reader.read()
+          }
+        } finally {
+          reader.releaseLock()
+        }
+        const merged = new Uint8Array(retained)
+        let offset = 0
+        for (const chunk of chunks) {
+          merged.set(chunk, offset)
+          offset += chunk.byteLength
+        }
+        body = new TextDecoder().decode(merged)
+      }
       if (!response.ok) throw personalBomWriteHttpError(response.status, body)
       return parsePersonalBomWriteSuccess(operation, response.status, body)
     } catch (error) {
