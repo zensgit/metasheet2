@@ -8,8 +8,9 @@
  * `sheet_id` and `record_id` have no FK: a record link outlives the record, and the read that shows
  * it goes through the record's own gate. `dispatch_key` is the client's retry key for one dispatch;
  * `uq_tsrc_dispatch_key` makes it unique per org and dispatcher, and keyless rows stay out of the
- * index. Every id column carries the same printable CHECK as the other task tables. A soft-deleted
- * task keeps its row; a hard delete cascades.
+ * index. Every id column except `task_id` carries the same printable CHECK as the other task tables;
+ * `task_id` is held to an existing task by the FK, as on the list and group items. A soft-deleted task
+ * keeps its row; a hard delete cascades.
  *
  * Ordering: Kysely runs migrations in full-filename order. The full filename sorts after
  * `zzzz20261009130000_create_task_m4_tables` (the composite FK targets its `tasks_id_org_id_key`) and
@@ -58,10 +59,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 // with rows is kept: rolling the service back leaves it in place, and the previous release does not
 // read it. The existence check and the count are two statements because Postgres resolves every
 // relation named in a statement before evaluating it, so one statement with a CASE guard answers
-// 42P01 on a half-applied `up()`.
+// 42P01 on a half-applied `up()`. The name is unqualified so the check finds the same table the count
+// and the DROP resolve to.
 export async function down(db: Kysely<unknown>): Promise<void> {
   const exists = await sql<{ e: boolean }>`
-    SELECT to_regclass('public.task_source_links') IS NOT NULL AS e
+    SELECT to_regclass('task_source_links') IS NOT NULL AS e
   `.execute(db)
   if (exists.rows[0]?.e) {
     const result = await sql<{ n: number }>`
