@@ -119,12 +119,7 @@ export class PlmPersonalApprovalBindingService {
     )
       throw new Failure(403, 'PLM_PROVIDER_FORBIDDEN')
   }
-  private async bound(
-    c: PoolClient,
-    id: string,
-    owner: string,
-    credential = true,
-  ): Promise<Binding> {
+  private async ownedBinding(c: PoolClient, id: string, owner: string): Promise<Binding> {
     requirePlmApprovalCard()
     await this.activeOwner(c, owner)
     const b = (
@@ -134,13 +129,17 @@ export class PlmPersonalApprovalBindingService {
       )
     ).rows[0]
     if (!b) throw new Failure(404, 'PLM_BINDING_REQUIRED')
+    return b
+  }
+  private async bound(c: PoolClient, id: string, owner: string): Promise<Binding> {
+    const b = await this.ownedBinding(c, id, owner)
     this.checkScope(b, {
       connection_id: b.connection_id,
       tenant_id: b.tenant_id,
       org_id: b.org_id,
       auth_user_id: b.subject_id,
     })
-    if (credential && (!b.encrypted_grant || new Date(b.expires_at).getTime() <= Date.now()))
+    if (!b.encrypted_grant || new Date(b.expires_at).getTime() <= Date.now())
       throw new Failure(409, 'PLM_BINDING_REQUIRED')
     return b
   }
@@ -245,7 +244,7 @@ export class PlmPersonalApprovalBindingService {
   }
   async unbind(owner: string, id: string) {
     return this.tx(async (c) => {
-      const b = await this.bound(c, id, owner, false)
+      const b = await this.ownedBinding(c, id, owner)
       await c.query(
         'UPDATE plm_personal_approval_bindings SET encrypted_grant=NULL,generation=generation+1,updated_at=now() WHERE id=$1',
         [b.id],
