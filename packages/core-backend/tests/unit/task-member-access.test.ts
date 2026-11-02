@@ -23,11 +23,23 @@ interface Person {
 
 const calls: Array<{ sql: string; params?: unknown[] }> = []
 let people: Record<string, Person> = {}
+/** A read kind (see `kindOf`) whose statement throws instead of answering. */
+let failing: { kind: string; error: Error } | null = null
+
+function kindOf(sql: string): string {
+  if (sql.includes('FROM users u')) return 'admin'
+  if (sql.includes('UNION ALL')) return 'codes'
+  if (sql.includes('permissions FROM users')) return 'column'
+  if (sql.includes('LEFT JOIN role_permissions')) return 'roles'
+  if (sql.includes('FROM user_namespace_admissions')) return 'enabled'
+  return sql
+}
 
 const db = {
   query: async (raw: string, params?: unknown[]) => {
     const sql = raw.replace(/\s+/g, ' ').trim()
     calls.push({ sql, params })
+    if (failing && kindOf(sql) === failing.kind) throw failing.error
     if (sql.includes('FROM users u')) {
       const asked = (params?.[0] ?? []) as string[]
       return { rows: asked.filter((id) => people[id]?.admin).map((user_id) => ({ user_id })) }
@@ -46,19 +58,13 @@ const db = {
 }
 
 function kinds(): string[] {
-  return calls.map(({ sql }) => {
-    if (sql.includes('FROM users u')) return 'admin'
-    if (sql.includes('UNION ALL')) return 'codes'
-    if (sql.includes('permissions FROM users')) return 'column'
-    if (sql.includes('LEFT JOIN role_permissions')) return 'roles'
-    if (sql.includes('FROM user_namespace_admissions')) return 'enabled'
-    return sql
-  })
+  return calls.map(({ sql }) => kindOf(sql))
 }
 
 beforeEach(() => {
   calls.length = 0
   people = {}
+  failing = null
   vi.mocked(query).mockClear()
 })
 
@@ -139,5 +145,22 @@ describe('assertTaskAccess', () => {
   it('resolves when every person can use tasks', async () => {
     people = { 'usr-e': { codes: ['tasks:read', 'tasks:write'], enabled: true }, 'usr-a': { admin: true } }
     await expect(assertTaskAccess(db, ['usr-e', 'usr-a'])).resolves.toBeUndefined()
+  })
+})
+
+describe('a failed read', () => {
+  it.each(['admin', 'codes', 'column', 'roles', 'enabled'])('the %s read failing rejects with its own error, not 422, and nothing is sent after it', async (kind) => {
+    people = { 'usr-e': { codes: ['tasks:read', 'tasks:write'], enabled: true } }
+    const error = new Error(`read failed: ${kind}`)
+    failing = { kind, error }
+    await expect(findTaskAccessHolders(db, ['usr-e', 'usr-f'])).rejects.toBe(error)
+    expect(kinds().at(-1)).toBe(kind)
+    expect(kinds().filter((seen) => seen === kind)).toHaveLength(1)
+
+    calls.length = 0
+    const failure = await assertTaskAccess(db, ['usr-e']).then(() => null, (caught: unknown) => caught)
+    expect(failure).toBe(error)
+    expect(failure).not.toMatchObject({ status: 422 })
+    expect(vi.mocked(query)).not.toHaveBeenCalled()
   })
 })

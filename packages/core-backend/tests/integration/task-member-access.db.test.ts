@@ -24,12 +24,13 @@ import { rawRequest, startTasksListener, type TasksListener } from '../helpers/t
  * /api/tasks (every assignee other than the creator) and POST /api/tasks/:id/assignees (any target
  * other than the caller). The named person must be able to use tasks: the same answer the task
  * routes give that person on a read route and on a write route. Every refusal is the same 422
- * ASSIGNEE_TASK_ACCESS_REQUIRED and nothing is written. The active-org-member test runs first and
- * is unchanged (task-m4-org-members.db.test.ts).
+ * ASSIGNEE_TASK_ACCESS_REQUIRED and nothing is written. The active-org-member test runs first; its
+ * cells are in task-m4-org-members.db.test.ts.
  *
  * The shape table compares, per seeded user, the server's own answer on both routes (a token with
  * no role or permission claims, so the user is read from the database as in production) with the
- * write points and with the predicate called on its own. Each shape uses a fresh user: the route
+ * write points and with the predicate called on its own; each route's answer is also pinned on its
+ * own (READ_OPEN, WRITE_OPEN), not only the two together. Each shape uses a fresh user: the route
  * guard keeps a short per-user memo, so a user's grants never change after their first request.
  * The source mutants at the end must each turn a cell red.
  */
@@ -199,6 +200,10 @@ function writeAt(key: WriteKey, cell: Cell, target: string, bearer = cell.creato
 const SHAPES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n'] as const
 type Shape = typeof SHAPES[number]
 const ADMITTED: ReadonlySet<Shape> = new Set<Shape>(['e', 'f', 'g', 'i', 'n'])
+/** Each route on its own: the shapes the read route lets in, and the shapes the write route lets in.
+ * `c` holds only the read code and `d` only the write code, each with task access enabled. */
+const READ_OPEN: ReadonlySet<Shape> = new Set<Shape>(['c', 'e', 'f', 'g', 'i', 'n'])
+const WRITE_OPEN: ReadonlySet<Shape> = new Set<Shape>(['d', 'e', 'f', 'g', 'i', 'n'])
 
 async function seedShape(shape: Shape, userId: string, orgId: string, stamp: string): Promise<void> {
   await bareMember(userId, orgId)
@@ -262,6 +267,12 @@ async function seedShape(shape: Shape, userId: string, orgId: string, stamp: str
 }
 
 describe('task access at the two write points', () => {
+  it('the admitted shapes are exactly the shapes both routes let in; one code alone is let in by one route only', () => {
+    expect(SHAPES.filter((shape) => READ_OPEN.has(shape) && WRITE_OPEN.has(shape))).toEqual(SHAPES.filter((shape) => ADMITTED.has(shape)))
+    expect(READ_OPEN.has('c') && !WRITE_OPEN.has('c')).toBe(true)
+    expect(WRITE_OPEN.has('d') && !READ_OPEN.has('d')).toBe(true)
+  })
+
   it.each(SHAPES)('shape-%s', async (shape) => {
     const cell = await cellOf(`s${shape}`)
     const target = `usrT_${shape}_${cell.stamp}`
@@ -272,8 +283,8 @@ describe('task access at the two write points', () => {
     const bearer = claimsLessToken(target, cell.orgId)
     const read = await get('/api/tasks/context', bearer)
     const write = await post(`/api/tasks/tsk_missing_${cell.stamp}/comments`, bearer, { body: '备料复核' })
-    expect([200, 403], read.text).toContain(read.status)
-    expect([404, 403], write.text).toContain(write.status)
+    expect(read.status, `read ${read.text}`).toBe(READ_OPEN.has(shape) ? 200 : 403)
+    expect(write.status, `write ${write.text}`).toBe(WRITE_OPEN.has(shape) ? 404 : 403)
     const door = read.status === 200 && write.status === 404
     const predicate = (await findTaskAccessHolders(poolDb, [target])).has(target)
     expect(predicate, 'predicate').toBe(door)

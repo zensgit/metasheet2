@@ -8,14 +8,18 @@
  * - the session org (`AuthService.resolveSessionTenantId`): a `user_orgs` row for that org with
  *   `is_active`, and `users.is_active`;
  * - the account gate every sign-in and token check runs (`evaluateUserAuthenticationGate`,
- *   `user-activation.ts`): `activation_status` is `activated` and the role is not `disabled`, where
- *   the role is the one login resolves: a user holding the RBAC `admin` role is checked as `admin`.
- *   The local-password condition is not part of it: it applies to password login only.
+ *   `user-activation.ts`): the account is not in the recycle bin (`deleted_at` and `purged_at` both
+ *   empty, read the way `AuthService.getUserById` reads them, so that an account whose `is_active`
+ *   was turned back on while it is still in the recycle bin is refused too), `activation_status` is
+ *   `activated` and the role is not `disabled`, where the role is the one login resolves: a user
+ *   holding the RBAC `admin` role is checked as `admin`. The local-password condition is not part of
+ *   it: it applies to password login only.
  * ASSUMPTION(task-m4): [own-27] the target of an ownership transfer takes the same test. [own-16]
  * the acting user is never checked here: their org claim passed that test when the token was
  * verified. One
  * code for every failure: 422 `INACTIVE_ORG_MEMBER` does not say whether the user is unknown,
- * belongs to another org, is inactive in this org, or is inactive altogether. Callers: list member
+ * belongs to another org, is inactive in this org, is inactive altogether, or is in the recycle
+ * bin. Callers: list member
  * add and owner transfer (`task-list-records.ts`), `createTask` (`task-records.ts`), `addAssignee`
  * and `addFollower` (`task-structure.ts`). Membership rows already written are never cleaned up
  * when a user leaves the org.
@@ -30,6 +34,7 @@ export async function findActiveOrgMembers(db: Db, orgId: string, userIds: strin
      FROM user_orgs uo
      JOIN users u ON u.id = uo.user_id
      WHERE uo.org_id = $1 AND uo.user_id = ANY($2::text[]) AND uo.is_active = true AND u.is_active = true
+       AND (to_jsonb(u) ->> 'deleted_at') IS NULL AND (to_jsonb(u) ->> 'purged_at') IS NULL
        AND u.activation_status = 'activated'
        AND (u.role <> 'disabled' OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 'admin'))`,
     [orgId, userIds],

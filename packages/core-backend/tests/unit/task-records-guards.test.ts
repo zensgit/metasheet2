@@ -18,6 +18,8 @@ import {
 } from '../../src/services/task-list-records'
 import { completeTask, countPending, createTask, parseTaskPage, reopenTask, toTaskPendingItem } from '../../src/services/task-records'
 import { addAssignee, addComment, addFollower, deleteTaskById, leaveTask, removeAssignee, removeFollower, switchCompletionMode } from '../../src/services/task-structure'
+import { resetTaskCountsBroadcasterForTests, setTaskCountsBroadcaster } from '../../src/services/task-counts-realtime'
+import { sendError } from '../../src/routes/tasks-http'
 import {
   createTaskListGroup,
   createUserTaskGroup,
@@ -1333,6 +1335,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
     for (const fragment of [
       'uo.org_id = $1', 'uo.user_id = ANY($2::text[])', 'uo.is_active = true', 'u.is_active = true', 'JOIN users u ON u.id = uo.user_id',
       "u.activation_status = 'activated'", "(u.role <> 'disabled' OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 'admin'))",
+      "(to_jsonb(u) ->> 'deleted_at') IS NULL", "(to_jsonb(u) ->> 'purged_at') IS NULL",
     ]) {
       expect(lookup).toContain(fragment)
     }
@@ -1426,6 +1429,55 @@ describe('task org membership (M4 PR-3a S9)', () => {
     await expect(addAssignee({ ...byAssignee, body: { userId: 'usr-1' } }))
       .rejects.toMatchObject({ status: 422, code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
     expect(written()).toEqual([])
+  })
+
+  it('createTask and addAssignee: a failed task access read rejects with its own error, not 422; nothing is written, no counts signal is sent, and the route answers 500 INTERNAL', async () => {
+    const rooms: string[] = []
+    setTaskCountsBroadcaster((room) => { rooms.push(room) })
+    const seed = { createdBy: 'usr-1', active: ['usr-2'], usable: ['usr-2'] }
+    const writes = {
+      create: () => createTask({ ...createBase, assignees: ['usr-1', 'usr-2'] }),
+      add: () => addAssignee({ ...memberBase, body: { userId: 'usr-2' } }),
+    }
+    try {
+      // The control: with every read answering, both writes send the counts signal.
+      for (const run of Object.values(writes)) {
+        rooms.length = 0
+        respondWith(seed)
+        await expect(run()).resolves.toBeDefined()
+        expect(rooms.length).toBeGreaterThan(0)
+      }
+
+      for (const fragment of ACCESS_FRAGMENTS) {
+        for (const [key, run] of Object.entries(writes)) {
+          const label = `${key} ${fragment}`
+          rooms.length = 0
+          state.calls.length = 0
+          respondWith(seed)
+          const answer = state.respond!
+          const failure = new Error(`read failed: ${fragment}`)
+          state.respond = (sql, params) => {
+            if (sql.includes(fragment) && !sql.includes('FROM user_orgs')) throw failure
+            return answer(sql, params)
+          }
+          const error = await run().then(() => null, (caught: unknown) => caught)
+          expect(error, label).toBe(failure)
+          expect(accessCalls().map(([seen]) => seen), label).toContain(fragment)
+          expect(written(), label).toEqual([])
+          expect(rooms, label).toEqual([])
+
+          const res = { statusCode: 0, body: undefined as unknown }
+          const reply = {
+            status(code: number) { res.statusCode = code; return reply },
+            json(body: unknown) { res.body = body; return reply },
+          }
+          sendError(reply as unknown as Parameters<typeof sendError>[0], error)
+          expect(res, label).toEqual({ statusCode: 500, body: { error: { code: 'INTERNAL' } } })
+        }
+      }
+    } finally {
+      resetTaskCountsBroadcasterForTests()
+    }
   })
 
   it('createTask: the lookup asks for every id but the creator whatever the order (the creator after another id, absent, or in the middle)', async () => {
