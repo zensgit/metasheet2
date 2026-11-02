@@ -406,7 +406,13 @@ export async function appendManualOverrideCalculationV1(
     priorInputProvenance?.provenance && typeof priorInputProvenance.provenance === 'object'
       ? priorInputProvenance.provenance
       : priorInputProvenance?.transport !== undefined
-        ? priorInputProvenance
+        ? {
+          transport: priorInputProvenance.transport,
+          sourceRef: priorInputProvenance.sourceRef,
+          artifactSha256: priorInputProvenance.artifactSha256,
+          normalizedCsvSha256: priorInputProvenance.normalizedCsvSha256,
+          convertedSheetName: priorInputProvenance.convertedSheetName,
+        }
         : null
   let provenanceFingerprint: string
   try {
