@@ -29,8 +29,7 @@
             <!-- B-2 (todo-center-design-lock v2.14 §2 "前端壳" row: 中心替换/推广该徽标) — the
                  badge above is now DATA-wired to the todo center's own aggregate, but that alone
                  left the page it aggregates into reachable only by typing /todo — no nav entry
-                 anywhere pointed at it. Same gate as the badge/审批中心 link (both read the same
-                 `approvals:read`-gated data; today's ONLY registered source is `approval`), same
+                 anywhere pointed at it. Same gate as the badge/审批中心 link in this shell, same
                  nav-link styling, kept as its OWN entry rather than folded into `nav-approvals` or
                  made the badge's own href — deliberately, so this addition cannot regress the
                  existing "badge is a sibling of the link, never a child of it" contract the P1b
@@ -48,8 +47,10 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
-            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
-            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
+            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. In this
+                 shell the page also lists tasks, so task access alone reaches it. The focused branch
+                 above keeps its approval-only gate: /todo and /tasks are outside that shell. -->
+            <router-link v-if="canUseApprovals || canUseTasks" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
             <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
                  the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` so a badge-only
                  failure cannot blank the shell, and gated

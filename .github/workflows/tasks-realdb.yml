@@ -86,4 +86,5 @@ jobs:
           tests/integration/task-m4-dingtalk.db.test.ts
           tests/integration/task-m4-realtime.db.test.ts
           tests/integration/task-g2-status-filter.db.test.ts
+          tests/integration/task-todo-source.db.test.ts
           --reporter=verbose

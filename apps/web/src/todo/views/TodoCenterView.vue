@@ -208,6 +208,7 @@ import { useLocale } from '../../composables/useLocale'
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../composables/authPrincipal'
 import { useTodoCountsRealtime, type TodoCountsUpdatedPayload } from '../useTodoCountsRealtime'
 import { isCancelRoundWorkflow } from '../../approvals/cancelRound'
+import { TASKS_SIGNAL_WINDOW_MS } from '../../tasks/useTasksBadge'
 
 interface RenderableItem extends PendingItem {
   // Precomputed once per `applyResult()` call (not re-evaluated per render in the template) —
@@ -280,8 +281,8 @@ function cancelRoundSubtypeLabel(): string {
   return isZh.value ? '撤销申请' : 'Cancellation request'
 }
 
-const SOURCE_LABELS_ZH: Record<string, string> = { approval: '审批' }
-const SOURCE_LABELS_EN: Record<string, string> = { approval: 'Approvals' }
+const SOURCE_LABELS_ZH: Record<string, string> = { approval: '审批', task: '任务' }
+const SOURCE_LABELS_EN: Record<string, string> = { approval: 'Approvals', task: 'Tasks' }
 
 function hasSession(): boolean {
   try {
@@ -359,15 +360,36 @@ function handleCountsUpdated(_payload: TodoCountsUpdatedPayload): void {
   void refresh()
 }
 
+// A task write sends one signal per recipient, so a bulk write is a burst. The first signal opens a
+// window of `TASKS_SIGNAL_WINDOW_MS`, the signals inside it are absorbed, and one `refresh()` runs when
+// it closes. Same length as the tasks badge's window; the badge keeps its own.
+let taskSignalWindow: ReturnType<typeof setTimeout> | null = null
+
+function closeTaskSignalWindow(): void {
+  if (taskSignalWindow !== null) {
+    clearTimeout(taskSignalWindow)
+    taskSignalWindow = null
+  }
+}
+
+function handleTasksCountsUpdated(): void {
+  if (!acceptPushes || taskSignalWindow !== null) return
+  taskSignalWindow = setTimeout(() => {
+    taskSignalWindow = null
+    void refresh()
+  }, TASKS_SIGNAL_WINDOW_MS)
+}
+
 // Isolated for the same reason `ApprovalTodoBadge.vue` isolates this call — see file-level note.
 try {
-  useTodoCountsRealtime({ onCountsUpdated: handleCountsUpdated })
+  useTodoCountsRealtime({ onCountsUpdated: handleCountsUpdated, onTasksCountsUpdated: handleTasksCountsUpdated })
 } catch {
   // No realtime refresh for this session; refresh() on mount and on auth transitions still keeps
   // the list current.
 }
 
 const unsubscribeAuthPrincipal = onAuthPrincipalChange(() => {
+  closeTaskSignalWindow()
   generation += 1
   groups.value = []
   loadFailed.value = false
@@ -390,6 +412,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   disposed = true
+  closeTaskSignalWindow()
   unsubscribeAuthPrincipal()
 })
 

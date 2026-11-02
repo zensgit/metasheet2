@@ -44,6 +44,46 @@ function trustedTokenClaimsAllowPermission(user: Express.Request['user'], permis
 }
 
 /**
+ * The decision `rbacGuard` makes for one permission code, without answering the request: `true` when
+ * the request may use that code, `false` when it may not (including a request with no user id). An
+ * error from a lookup is thrown to the caller. `rbacGuard` is built on this function, so a caller
+ * that needs one answer per code gets exactly the guard's answer.
+ */
+export async function requestHasPermission(req: Request, permissionCode: string): Promise<boolean> {
+  const userId = req.user?.id?.toString()
+  const requestUser = req.user
+
+  if (!userId) return false
+
+  // Global admins need no further lookups.
+  if (requestUserIsAdmin(requestUser)) return true
+
+  // Trust the authenticated request user first. jwtAuthMiddleware refreshes
+  // role/permission data on each request, and development fallback users only
+  // exist on req.user (not in RBAC tables).
+  if (
+    requestUserHasResolvedPermission(requestUser, permissionCode)
+    && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
+  ) {
+    return true
+  }
+
+  if (
+    trustedTokenClaimsAllowPermission(requestUser, permissionCode)
+    && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
+  ) {
+    return true
+  }
+
+  // Check if user is admin
+  const adminCheck = await isAdmin(userId)
+  if (adminCheck) return true
+
+  // Check specific permission
+  return await userHasPermission(userId, permissionCode)
+}
+
+/**
  * RBAC guard middleware factory
  * Creates middleware that checks if user has required permission
  *
@@ -58,48 +98,13 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
-      const requestUser = req.user
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
         return
       }
 
-      // Global admins bypass namespace admission and RBAC table lookups.
-      if (requestUserIsAdmin(requestUser)) {
-        next()
-        return
-      }
-
-      // Trust the authenticated request user first. jwtAuthMiddleware refreshes
-      // role/permission data on each request, and development fallback users only
-      // exist on req.user (not in RBAC tables).
-      if (
-        requestUserHasResolvedPermission(requestUser, permissionCode)
-        && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
-      ) {
-        next()
-        return
-      }
-
-      if (
-        trustedTokenClaimsAllowPermission(requestUser, permissionCode)
-        && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
-      ) {
-        next()
-        return
-      }
-
-      // Check if user is admin (admins bypass permission checks)
-      const adminCheck = await isAdmin(userId)
-      if (adminCheck) {
-        next()
-        return
-      }
-
-      // Check specific permission
-      const hasPermission = await userHasPermission(userId, permissionCode)
-      if (hasPermission) {
+      if (await requestHasPermission(req, permissionCode)) {
         next()
         return
       }

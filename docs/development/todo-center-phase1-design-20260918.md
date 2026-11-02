@@ -120,7 +120,7 @@ DTO / 内存契约(本切片新增,均为纯投影,不落表):
 **已知局限,记录不修**(`routes/todo.ts:11-17` 文件顶部注释原文如此,不是事后补记):两个路由用
 `rbacGuard('approvals','read')` 单一权限门槛。今天只注册了审批源,门槛与数据暴露面重合;一旦注册第二
 个源(评论/任务/…),这个门槛会**错误地**对不持 `approvals:read` 的 viewer 隐藏非审批的待办项——必须
-在那之前改为按源判权限或 `rbacGuardAny`。见 §6。
+在那之前改为按源判权限或 `rbacGuardAny`。见 §6。(2026-11-01 起已改为按来源判权限,见本文修订记录。)
 
 `rbacGuard` 本身对 401/403 的响应不带专用码(`res.status(401).json({ error: 'Authentication required'
 })` / `res.status(403).json({ error: 'Insufficient permissions' })`,`packages/core-backend/src/rbac/
@@ -271,6 +271,21 @@ src/services/approval-realtime.ts` exit 0),它不再是本切片的接缝,见 §
 - §7-4:云课堂「待处理」的定义交该域;
 - §7-5:任务线的来源接口以 §3 为准(§3.0 的提取属审批线工作,不进任务线);
 - §7-6:AuthService 层静默收窄是否修,由平台授权线裁。
+
+### 修订记录(2026-11-01):任务来源接入待办中心,锁 §3 接口调整
+
+owner 已确认。上面的 RATIFY 记录不改写;本段记录自此日起 §3 接口的变化,本文 §3 的「`rbacGuard('approvals','read')`
+单一权限门槛」同时由按来源判权限取代。
+
+- **每个来源声明所需权限**:`PendingSource` 增加必填字段 `permission`,取值为该来源自身读路由使用的权限码
+  (审批 `approvals:read`,任务 `tasks:read`)。`register()` 拒绝未声明或为空的来源。两个待办路由按来源判断:
+  查看者只看到其声明权限判定通过的来源,判定函数与 `rbacGuard` 相同;一个来源都看不到时仍返回 403。
+- **viewer 增加组织和时区**:`PendingViewer` 增加可选字段 `orgId`(取自已认证会话)和 `timeZone`(请求头
+  `x-viewer-time-zone` 校验后的值)。审批来源仍只读原有三个字段,结果不变。实时推送没有请求上下文,不带这两个字段。
+- **注册表增加枚举接口**:`sourceEntries()` 和 `sourceNames()`,按注册顺序返回。
+
+不扩大权限范围,也不扩大任务访问的开通范围:没有新增权限码,也没有给任何人增加授权;每个来源只向其自身读路由已放行的查看者展示。任务
+来源随任务路由一起注册,任务功能关闭时行为不变。
 
 ## 8. 绝对断言自扫(本文档)
 

@@ -55,6 +55,13 @@ const mocks = vi.hoisted(() => ({
   realtimeThrows: false,
   routePath: '/multitable',
   routeMeta: { requiresAuth: true } as Record<string, unknown>,
+  plmFocused: false,
+  features: [] as string[],
+}))
+
+// The tasks badge has its own spec and its own network reads; here only its presence in the nav matters.
+vi.mock('../src/tasks/TasksTodoBadge.vue', () => ({
+  default: { render: () => null },
 }))
 
 vi.mock('vue-router', () => ({
@@ -70,8 +77,8 @@ vi.mock('../src/stores/featureFlags', () => ({
     resolveHomePath: () => '/home', // App.vue brand link (#5700) reads it; the brand target itself is pinned in App.spec.ts
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
     isAttendanceFocused: () => false,
-    isPlmWorkbenchFocused: () => false,
-    hasFeature: () => false,
+    isPlmWorkbenchFocused: () => mocks.plmFocused,
+    hasFeature: (feature: string) => mocks.features.includes(feature),
   }),
 }))
 
@@ -119,6 +126,8 @@ describe('app-level approval todo badge', () => {
     mocks.realtimeThrows = false
     mocks.routePath = '/multitable'
     mocks.routeMeta = { requiresAuth: true }
+    mocks.plmFocused = false
+    mocks.features = []
     capturedOnCountsUpdated = null
     realtimeCallCount.value = 0
     getTodoCountSpy.mockReset()
@@ -221,6 +230,48 @@ describe('app-level approval todo badge', () => {
     const root = await mountApp()
 
     expect(root.querySelector('[data-testid="nav-todo-center"]')?.textContent?.trim()).toBe('Todo Center')
+  })
+
+  it('the badge reads the approval source only', async () => {
+    getTodoCountSpy.mockResolvedValue({ count: 2, sources: { approval: 'ok' } })
+    await mountApp()
+
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(1)
+    expect(getTodoCountSpy).toHaveBeenCalledWith({ sources: ['approval'] })
+  })
+
+  it('task access alone shows the 待办中心 link in the platform shell, with no approval badge and no count read', async () => {
+    mocks.permissions = ['tasks:read']
+    mocks.features = ['tasks']
+    const root = await mountApp()
+
+    expect(root.querySelector('[data-testid="nav-todo-center"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="nav-tasks"]')).not.toBeNull()
+    expect(badgeOf(root)).toBeNull()
+    expect(getTodoCountSpy).not.toHaveBeenCalled()
+  })
+
+  it('task access without the tasks feature shows no 待办中心 link', async () => {
+    mocks.permissions = ['tasks:read']
+    mocks.features = []
+    const root = await mountApp()
+
+    expect(root.querySelector('[data-testid="nav-todo-center"]')).toBeNull()
+  })
+
+  it('the plm workbench shell keeps its 待办中心 link for approval access only', async () => {
+    mocks.plmFocused = true
+    mocks.features = ['tasks']
+
+    mocks.permissions = ['tasks:read']
+    let root = await mountApp()
+    expect(root.querySelector('[data-testid="nav-todo-center"]')).toBeNull()
+    app?.unmount()
+    container?.remove()
+
+    mocks.permissions = ['approvals:read']
+    root = await mountApp()
+    expect(root.querySelector('[data-testid="nav-todo-center"]')).not.toBeNull()
   })
 
   it('updates from the realtime counts composable without any further fetch', async () => {
@@ -375,10 +426,8 @@ describe('app-level approval todo badge', () => {
     expect(getTodoCountSpy).not.toHaveBeenCalled()
   })
 
-  // B-2: the /todo nav-link is gated by the SAME predicate as the badge/审批中心 link
-  // (`canUseApprovals`, i.e. `approvals:read` — the identical permission `appRoutes.ts` requires to
-  // enter the route), not a separately-invented one — so a principal who cannot see the 审批中心
-  // link cannot see an entry into the page that aggregates it either.
+  // B-2: with neither approval nor task access there is no entry into the page. The route accepts the
+  // same two permissions (`appRoutes.ts`).
   it('renders no 待办中心 nav-link for a principal without approvals:read', async () => {
     mocks.permissions = []
     getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })

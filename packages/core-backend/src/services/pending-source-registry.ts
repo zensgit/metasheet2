@@ -2,7 +2,7 @@
  * 待办中心 v1 首切片 — `PendingSourceRegistry` (todo-center-design-lock §3/§4).
  *
  * The todo center is a pure projection: it does not own a table and does not judge visibility
- * itself. Each domain (approval today; comment / task / e-learning in later slices, per the lock's
+ * itself. Each domain (approval and task today; comment / e-learning in later slices, per the lock's
  * §2 accession table) registers ONE source exposing its own "what is pending for this viewer" and
  * "how many" queries; the registry only aggregates.
  *
@@ -33,7 +33,8 @@ export interface PendingItem {
   workflowKey?: string | null
 }
 
-/** The three-input viewer contract §3.0 pins for the approval source; used as the ONE shape every
+/** The three required identity fields §3.0 pins for the approval source, plus optional session
+ *  fields (see the amendment record in the phase-1 design); used as the ONE shape every
  *  registered source is handed today. A future source needing a different projection of the viewer
  *  widens this type rather than each source inventing its own — see the lock's §3 "不得自行判断可见
  *  性,也不得自己拼第二份 pending 谓词" constraint. */
@@ -41,16 +42,33 @@ export interface PendingViewer {
   actorId: string
   roles: string[]
   permissions: string[]
+  /** The authenticated session's organization, `null` when the session has none. Set by
+   *  `routes/todo.ts`; absent on a realtime push, which has no request. A source that needs it treats
+   *  absent and `null` alike. */
+  orgId?: string | null
+  /** The viewer's validated IANA time zone, `null` when the request sent none or an invalid one. Same
+   *  note as `orgId`. */
+  timeZone?: string | null
 }
 
 export type PendingSourceStatus = 'ok' | 'unavailable'
 
 export interface PendingSource {
   name: string
+  /** The permission code of this source's own read routes. A viewer sees this source in the todo
+   *  center only when that code admits them (`routes/todo.ts`). Required: `register()` refuses a
+   *  blank value, so every source has declared who may read it. */
+  permission: string
   listPendingForUser(viewer: PendingViewer): Promise<PendingItem[]>
   /** Optional per §3: "缺省由 list 派生" — when absent, the registry counts `listPendingForUser`'s
    *  result length instead of issuing a second query. */
   countPendingForUser?(viewer: PendingViewer): Promise<number>
+}
+
+/** Limits an aggregate to the named sources. Omitted = every registered source. A name that is not
+ *  registered is ignored, and registration order is kept whatever order the names come in. */
+export interface PendingSourceQueryOptions {
+  sources?: readonly string[]
 }
 
 export interface PendingItemsResult {
@@ -93,7 +111,20 @@ export class PendingSourceRegistry {
   /** Idempotent by source name — re-registering (e.g. once per server instance in tests) replaces
    *  rather than duplicates. */
   register(source: PendingSource): void {
+    if (typeof source.permission !== 'string' || source.permission.trim().length === 0) {
+      throw new Error(`Pending source '${source.name}' must declare the permission its read routes use`)
+    }
     this.sources.set(source.name, source)
+  }
+
+  /** Every registered source's name and permission code, in registration order. */
+  sourceEntries(): ReadonlyArray<Readonly<{ name: string; permission: string }>> {
+    return [...this.sources.values()].map(({ name, permission }) => ({ name, permission }))
+  }
+
+  /** Every registered source's name, in registration order. */
+  sourceNames(): string[] {
+    return [...this.sources.keys()]
   }
 
   /** Test-only escape hatch: a suite that wants a clean registry (e.g. to register a
@@ -102,10 +133,17 @@ export class PendingSourceRegistry {
     this.sources.clear()
   }
 
-  async listPendingForUser(viewer: PendingViewer): Promise<PendingItemsResult> {
+  private selectSources(options?: PendingSourceQueryOptions): PendingSource[] {
+    const registered = [...this.sources.values()]
+    if (!options?.sources) return registered
+    const wanted = new Set(options.sources)
+    return registered.filter((source) => wanted.has(source.name))
+  }
+
+  async listPendingForUser(viewer: PendingViewer, options?: PendingSourceQueryOptions): Promise<PendingItemsResult> {
     const items: PendingItem[] = []
     const sources: Record<string, PendingSourceStatus> = {}
-    for (const source of this.sources.values()) {
+    for (const source of this.selectSources(options)) {
       try {
         const sourceItems = await source.listPendingForUser(viewer)
         items.push(...sourceItems)
@@ -135,10 +173,10 @@ export class PendingSourceRegistry {
     return { items, sources }
   }
 
-  async countPendingForUser(viewer: PendingViewer): Promise<PendingCountResult> {
+  async countPendingForUser(viewer: PendingViewer, options?: PendingSourceQueryOptions): Promise<PendingCountResult> {
     let count = 0
     const sources: Record<string, PendingSourceStatus> = {}
-    for (const source of this.sources.values()) {
+    for (const source of this.selectSources(options)) {
       try {
         if (source.countPendingForUser) {
           count += await source.countPendingForUser(viewer)

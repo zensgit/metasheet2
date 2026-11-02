@@ -20,7 +20,8 @@
  * lane). The field stays optional and forward-looking rather than invented-and-asserted: nothing
  * here claims the backend sends it, only that a caller that DOES see it must not treat it as `0`.
  */
-import { apiGet } from '../utils/api'
+import { resolveViewerTimeZone } from '../tasks/tasksApi'
+import { apiGet, type ApiFetchOptions } from '../utils/api'
 
 export type PendingSourceStatus = 'ok' | 'unavailable'
 
@@ -53,12 +54,27 @@ export interface TodoCountResponse {
   degraded?: boolean
 }
 
-export async function getTodoItems(): Promise<TodoItemsResponse> {
-  return apiGet('/api/todo/items')
+/** Limits a read to the named sources (`?sources=a,b`). The server only ever narrows with it. */
+export interface TodoReadOptions {
+  sources?: string[]
 }
 
-export async function getTodoCount(): Promise<TodoCountResponse> {
-  return apiGet('/api/todo/count')
+function todoPath(path: string, options?: TodoReadOptions): string {
+  if (!options?.sources) return path
+  return `${path}?sources=${options.sources.map(encodeURIComponent).join(',')}`
+}
+
+function todoRequestOptions(): ApiFetchOptions {
+  const timeZone = resolveViewerTimeZone()
+  return timeZone ? { headers: { 'x-viewer-time-zone': timeZone } } : {}
+}
+
+export async function getTodoItems(options?: TodoReadOptions): Promise<TodoItemsResponse> {
+  return apiGet(todoPath('/api/todo/items', options), todoRequestOptions())
+}
+
+export async function getTodoCount(options?: TodoReadOptions): Promise<TodoCountResponse> {
+  return apiGet(todoPath('/api/todo/count', options), todoRequestOptions())
 }
 
 /**

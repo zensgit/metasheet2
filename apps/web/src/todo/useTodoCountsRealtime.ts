@@ -28,6 +28,7 @@
 import { onBeforeUnmount, onMounted } from 'vue'
 import { io, type Socket } from 'socket.io-client'
 import { useAuth } from '../composables/useAuth'
+import { TASKS_COUNTS_UPDATED_EVENT } from '../tasks/useTasksCountsRealtime'
 import { getApiBase } from '../utils/api'
 import type { PendingSourceStatus } from './api'
 
@@ -43,6 +44,9 @@ export interface TodoCountsUpdatedPayload {
 
 interface UseTodoCountsRealtimeOptions {
   onCountsUpdated: (payload: TodoCountsUpdatedPayload) => void
+  /** `tasks:counts-updated` on the same socket: a bare signal that something changed. Nothing is read
+   *  from its payload. Without this callback the event is not listened to. */
+  onTasksCountsUpdated?: () => void
 }
 
 function stripApiSuffix(pathname: string): string {
@@ -129,6 +133,11 @@ export function useTodoCountsRealtime(options: UseTodoCountsRealtimeOptions) {
           const normalized = normalizePayload(payload)
           if (normalized) options.onCountsUpdated(normalized)
         })
+
+        const onTasksCountsUpdated = options.onTasksCountsUpdated
+        if (onTasksCountsUpdated) {
+          nextSocket.on(TASKS_COUNTS_UPDATED_EVENT, () => onTasksCountsUpdated())
+        }
 
         socket = nextSocket
         return nextSocket

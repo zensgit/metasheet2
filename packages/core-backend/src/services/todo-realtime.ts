@@ -29,7 +29,12 @@
 import type { Injector } from '@wendellhu/redi'
 import { ICollabService, type ICollabService as CollabServicePort, type ILogger } from '../di/identifiers'
 import { buildAuthenticatedUserRoom } from './CollabService'
-import { pendingSourceRegistry, type PendingCountResult, type PendingViewer } from './pending-source-registry'
+import {
+  pendingSourceRegistry,
+  type PendingCountResult,
+  type PendingSourceQueryOptions,
+  type PendingViewer,
+} from './pending-source-registry'
 
 export interface TodoCountsUpdatedPayload extends PendingCountResult {
   reason: string
@@ -39,10 +44,13 @@ export interface TodoCountsUpdatedPayload extends PendingCountResult {
 /** Injectable so tests can assert this module calls it with a `PendingViewer` and does no querying
  *  of its own — mirrors `approval-realtime.ts`'s injectable `ApprovalCountQuery` pattern. Defaults to
  *  the process-wide `pendingSourceRegistry` singleton (the same one `routes/todo.ts` reads). */
-export type TodoCountFetcher = (viewer: PendingViewer) => Promise<PendingCountResult>
+export type TodoCountFetcher = (
+  viewer: PendingViewer,
+  options?: PendingSourceQueryOptions,
+) => Promise<PendingCountResult>
 
-const defaultCountPendingForUser: TodoCountFetcher = (viewer) =>
-  pendingSourceRegistry.countPendingForUser(viewer)
+const defaultCountPendingForUser: TodoCountFetcher = (viewer, options) =>
+  options ? pendingSourceRegistry.countPendingForUser(viewer, options) : pendingSourceRegistry.countPendingForUser(viewer)
 
 export async function publishTodoCountsUpdate(input: {
   injector?: Injector
@@ -52,6 +60,9 @@ export async function publishTodoCountsUpdate(input: {
   roles?: string[]
   permissions?: string[]
   reason: string
+  /** Limits the push to these sources. A push has no request, so it has no organization and often no
+   *  permissions: a caller names the sources its event belongs to. */
+  sources?: readonly string[]
   countPendingForUser?: TodoCountFetcher
 }): Promise<void> {
   try {
@@ -63,7 +74,9 @@ export async function publishTodoCountsUpdate(input: {
       roles: input.roles ?? [],
       permissions: input.permissions ?? [],
     }
-    const { count, sources } = await countPendingForUser(viewer)
+    const { count, sources } = input.sources
+      ? await countPendingForUser(viewer, { sources: input.sources })
+      : await countPendingForUser(viewer)
     const payload: TodoCountsUpdatedPayload = {
       count,
       sources,

@@ -1,6 +1,6 @@
 /**
- * The approval domain's `PendingSource` registration (todo-center-design-lock §3/§3.0/§4) — the
- * ONLY source registered in the v1 first slice.
+ * The approval domain's `PendingSource` registration (todo-center-design-lock §3/§3.0/§4), one of
+ * the registered sources.
  *
  * Both `listPendingForUser` and `countPendingForUser` go through the SAME shared query
  * (`approval-pending-query.ts`) `/api/approvals/pending-count` was extracted from, so the todo
@@ -95,6 +95,7 @@ const AGGREGATE_ALL_SOURCE_SYSTEMS = null
 
 export const approvalPendingSource: PendingSource = {
   name: APPROVAL_PENDING_SOURCE_NAME,
+  permission: 'approvals:read',
 
   async listPendingForUser(viewer: PendingViewer): Promise<PendingItem[]> {
     if (!pool) {

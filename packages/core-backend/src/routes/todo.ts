@@ -2,26 +2,24 @@
  * 待办中心 v1 首切片 — `GET /api/todo/items` (aggregated list) and `GET /api/todo/count`
  * (aggregated count), per todo-center-design-lock §3/§4.
  *
- * Both routes aggregate across `pendingSourceRegistry` (only the approval source is registered in
- * this slice — see `services/approval-pending-source.ts`). Neither route judges visibility itself:
+ * Both routes aggregate across `pendingSourceRegistry`. Neither route judges row visibility itself:
  * each source's own query is scoped to the viewer's identity, so the center only aggregates and
  * reports per-source status (`ok` / `unavailable`), never re-deriving a pending predicate of its own
  * (lock §3 hard constraint).
  *
- * Permission gate (slice-1 note, revisit when a second source is registered): both routes require
- * `approvals:read` via `rbacGuard`. That is a real narrowing choice, not an oversight — today the
- * ONLY registered source is the approval domain, so the gate is exactly coextensive with the data
- * this endpoint can return, and it keeps the endpoint's exposure surface no wider than the existing
- * `/api/approvals/pending-count` badge. This must move to a per-source check (or `rbacGuardAny`)
- * once a second source (comments/tasks/...) is registered — a blanket `approvals:read` gate would
- * then wrongly hide non-approval pending items from a viewer who lacks that one permission.
+ * Access is decided per source (`todoSourceDoor`): a viewer gets exactly the sources whose declared
+ * permission `requestHasPermission` grants them, the same answer that source's own read routes give.
+ * A viewer with no such source gets the usual 403. The optional `?sources=a,b` query can only narrow
+ * that set.
  */
 import { Router } from 'express'
-import type { Request, Response } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import { Logger } from '../core/logger'
 import { authenticate } from '../middleware/auth'
-import { rbacGuard } from '../rbac/rbac'
+import { requestHasPermission } from '../rbac/rbac'
+import { validateViewerTimeZoneHeader } from '../tasks/task-dates'
 import { resolveApprovalActorId, resolveApprovalActorPermissions } from './approvals'
+import { orgId as sessionOrgId } from './tasks-http'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
 import { pendingSourceRegistry, type PendingViewer } from '../services/pending-source-registry'
 
@@ -36,6 +34,85 @@ async function resolveTodoViewer(req: Request): Promise<PendingViewer | null> {
     actorId,
     roles: await resolveApprovalActorRoles(req),
     permissions: resolveApprovalActorPermissions(req),
+    orgId: sessionOrgId(req) || null,
+    timeZone: validateViewerTimeZoneHeader(req.header('x-viewer-time-zone')),
+  }
+}
+
+/**
+ * The requested source names, or `null` when the request names none (every allowed source). The query
+ * parser can hand over a string, an array or an object: a string or the string members of an array
+ * are read, anything else counts as not named. `?sources=` names an empty set, which differs from not
+ * naming any. The result is only ever intersected with the allowed set.
+ */
+function parseRequestedSources(raw: unknown): ReadonlySet<string> | null {
+  let members: string[]
+  if (typeof raw === 'string') members = [raw]
+  else if (Array.isArray(raw)) members = raw.filter((member): member is string => typeof member === 'string')
+  else return null
+  return new Set(
+    members
+      .flatMap((member) => member.split(','))
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0),
+  )
+}
+
+/**
+ * Decides which registered sources this request may read. Answers 401 / 403 / 500 with the same bodies
+ * as `rbacGuard`; otherwise leaves the effective source names (registration order) in
+ * `res.locals.todoSources`. Each distinct permission code is evaluated at most once per request.
+ */
+async function todoSourceDoor(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const userId = req.user?.id?.toString()
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required' })
+      return
+    }
+
+    const requested = parseRequestedSources(req.query.sources)
+    const entries = pendingSourceRegistry.sourceEntries()
+    const decisions = new Map<string, boolean>()
+    const mayRead = async (permission: string): Promise<boolean> => {
+      let decision = decisions.get(permission)
+      if (decision === undefined) {
+        decision = await requestHasPermission(req, permission)
+        decisions.set(permission, decision)
+      }
+      return decision
+    }
+
+    // A named source the viewer may read settles the answer. The other codes are only needed to tell an
+    // empty answer from a refusal.
+    if (requested) {
+      const named: string[] = []
+      for (const { name, permission } of entries) {
+        if (requested.has(name) && (await mayRead(permission))) named.push(name)
+      }
+      if (named.length > 0) {
+        res.locals.todoSources = named
+        next()
+        return
+      }
+    }
+
+    const allowed: string[] = []
+    for (const { name, permission } of entries) {
+      if (await mayRead(permission)) allowed.push(name)
+    }
+
+    if (allowed.length === 0) {
+      logger.warn(`Access denied for user ${userId}: no readable todo source`)
+      res.status(403).json({ error: 'Insufficient permissions' })
+      return
+    }
+
+    res.locals.todoSources = requested ? allowed.filter((name) => requested.has(name)) : allowed
+    next()
+  } catch (error) {
+    logger.error('Todo source check error', error instanceof Error ? error : undefined)
+    res.status(500).json({ error: 'Permission check failed' })
   }
 }
 
@@ -49,13 +126,17 @@ function todoUserRequiredResponse(res: Response): Response {
 export function todoRouter(): Router {
   const r = Router()
 
-  r.get('/api/todo/items', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+  r.get('/api/todo/items', authenticate, todoSourceDoor, async (req: Request, res: Response) => {
+    const allowedSources = res.locals.todoSources
+    if (!Array.isArray(allowedSources)) return res.status(403).json({ error: 'Insufficient permissions' })
     if (!resolveApprovalActorId(req)) return todoUserRequiredResponse(res)
 
     try {
       const viewer = await resolveTodoViewer(req)
       if (!viewer) return todoUserRequiredResponse(res)
-      const { items, sources } = await pendingSourceRegistry.listPendingForUser(viewer)
+      const { items, sources } = await pendingSourceRegistry.listPendingForUser(viewer, {
+        sources: allowedSources,
+      })
       res.json({ items, sources })
     } catch (error) {
       // The registry itself catches every per-source failure (fail-closed, see
@@ -67,13 +148,17 @@ export function todoRouter(): Router {
     }
   })
 
-  r.get('/api/todo/count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+  r.get('/api/todo/count', authenticate, todoSourceDoor, async (req: Request, res: Response) => {
+    const allowedSources = res.locals.todoSources
+    if (!Array.isArray(allowedSources)) return res.status(403).json({ error: 'Insufficient permissions' })
     if (!resolveApprovalActorId(req)) return todoUserRequiredResponse(res)
 
     try {
       const viewer = await resolveTodoViewer(req)
       if (!viewer) return todoUserRequiredResponse(res)
-      const { count, sources } = await pendingSourceRegistry.countPendingForUser(viewer)
+      const { count, sources } = await pendingSourceRegistry.countPendingForUser(viewer, {
+        sources: allowedSources,
+      })
       res.json({ count, sources })
     } catch (error) {
       logger.error('Failed to count todo items', error instanceof Error ? error : undefined)
