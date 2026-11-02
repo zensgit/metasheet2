@@ -2278,6 +2278,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
   'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
   'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
+  'tests/integration/attendance-w4c3a-preconditions-org-scope.db.test.ts',
   'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
   'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
   'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
