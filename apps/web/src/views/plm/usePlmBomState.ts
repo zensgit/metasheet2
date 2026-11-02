@@ -30,7 +30,7 @@ function normalizeFilterNeedle(value: string): string {
 
 function matchesFilter(needle: string, tokens: unknown[]): boolean {
   if (!needle) return true
-  return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
+  return tokens.some((token) => String(token === 0 ? token : token || '').toLowerCase().includes(needle))
 }
 
 function buildQuickPickLabel(source: string, main: string, name: string, id: string): string {
@@ -46,6 +46,7 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
   const bomLoading = ref(false)
   const bomError = ref('')
   const bomDepth = ref(options.defaultBomDepth)
+  const bomAppliedDepth = ref<number | null>(null)
   const bomEffectiveAt = ref('')
   const bomView = ref<'table' | 'tree'>('table')
   const bomCollapsed = ref<Set<string>>(new Set())
@@ -194,11 +195,17 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
     if (!items.length) return []
 
     const parentMap = new Map<string, BomLineRecord[]>()
+    const seenRealLineIds = new Map<string, Set<string>>()
     for (const line of items) {
       const parentId = String(line?.parent_item_id || '')
       if (!parentMap.has(parentId)) {
         parentMap.set(parentId, [])
+        seenRealLineIds.set(parentId, new Set<string>())
       }
+      const realLineId = options.resolveBomLineId(line)
+      const seenForParent = seenRealLineIds.get(parentId)
+      if (realLineId && seenForParent?.has(realLineId)) continue
+      if (realLineId) seenForParent?.add(realLineId)
       parentMap.get(parentId)?.push(line)
     }
 
@@ -274,7 +281,7 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
       if (componentId && !hasCycle) {
         nextPath.add(componentId)
       }
-      const children = componentId && !hasCycle ? parentMap.get(componentId) || [] : []
+      const children = componentId && !hasCycle && (bomAppliedDepth.value === null || depth < bomAppliedDepth.value) ? parentMap.get(componentId) || [] : []
       rows.push({
         key,
         parentKey,
@@ -516,6 +523,7 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
     bomLoading,
     bomError,
     bomDepth,
+    bomAppliedDepth,
     bomEffectiveAt,
     bomView,
     bomCollapsed,

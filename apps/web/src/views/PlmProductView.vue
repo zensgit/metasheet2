@@ -874,6 +874,7 @@ const {
   bomLoading,
   bomError,
   bomDepth,
+  bomAppliedDepth,
   bomEffectiveAt,
   bomView,
   bomCollapsed,
@@ -1722,13 +1723,15 @@ async function loadBom() {
   bomLoading.value = true
   bomError.value = ''
   try {
-    const depthValue = Number.isFinite(bomDepth.value) ? Math.max(1, Math.floor(bomDepth.value)) : undefined
+    const depthValue = Number.isFinite(bomDepth.value) ? Math.max(1, Math.floor(bomDepth.value)) : DEFAULT_BOM_DEPTH
     const effectiveAt = normalizeEffectiveAt(bomEffectiveAt.value)
     const result = await plmService.getBom<BomLineRecord>(productId.value, {
       depth: depthValue,
       effectiveAt,
     })
-    bomItems.value = result.items || []
+    const items = result.items || []
+    bomAppliedDepth.value = depthValue
+    bomItems.value = items
   } catch (error: any) {
     handleAuthError(error)
     bomError.value = error?.message || '加载 BOM 失败'
