@@ -100,6 +100,17 @@ describe('YiDa initialization HTTP contract — no IO fake host port', () => {
       .toEqual({ status: 403, result: { ok: false, error: { code: 'YIDA_INITIALIZATION_DENIED' } } })
     expect(reads).toEqual([])
   })
+  it('ENCRYPTION_NOT_READY from the host is its own closed 503 code; a forged code string is not', async () => {
+    const f = port()
+    const refused: YidaInitializationHttpPort = { ...f.value, async initialize() { throw new YidaInitializationError('ENCRYPTION_NOT_READY') } }
+    expect(await dispatch('POST', input(), refused))
+      .toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY' } } })
+    const forged: YidaInitializationHttpPort = { ...f.value, async initialize() {
+      throw Object.assign(new Error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY'), { code: 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY' }) } }
+    expect(await dispatch('POST', input(), forged)).toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } } })
+    // GET status is not gated on the material.
+    expect(await dispatch('GET', undefined, refused)).toEqual({ status: 200, result: { ok: true, data: { ...ready(), sendEnabled: false } } })
+  })
   it('raw identity mismatch and padded material userId reject before host invocation', async () => {
     const f = port(), request = input()
     for (const bad of [{ ...request, attestation: { ...request.attestation, executionIdentity: 'synthetic-other-executor' } },

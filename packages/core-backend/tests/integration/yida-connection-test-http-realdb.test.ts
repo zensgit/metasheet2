@@ -53,6 +53,10 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
   const stops: Array<() => Promise<void>> = [], sql: string[] = [], tokenBodies: Row[] = [], foreignFetch: string[] = []
   const logs: Array<Record<PropertyKey, unknown>> = []
   let logSpy: ReturnType<typeof vi.spyOn>
+  // L4 refuses unless ENCRYPTION_KEY / ENCRYPTION_SALT pass the production checks in every NODE_ENV,
+  // and this suite's setup configures neither: beforeAll sets explicit synthetic material for the whole file
+  // (only the POST /initialization case needs it; L3 without keys is covered by yida-host-connection-test-realdb).
+  let savedEncryption: Array<[string, string | undefined]> = []
   const security = Object.freeze({ async encrypt(value: string) { return 'enc:' + Buffer.from(value).toString('base64') },
     async decrypt(value: string) { return Buffer.from(value.slice(4), 'base64').toString() } })
   const syntheticFetch = (async (url: unknown, init?: RequestInit) => {
@@ -129,6 +133,9 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     expect(result.body).toEqual({ ok: false, error: { code } })
   }
   beforeAll(async () => {
+    savedEncryption = ['ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]])
+    process.env.ENCRYPTION_KEY = 'synthetic-probe-encryption-key-0123456789abcdef'
+    process.env.ENCRYPTION_SALT = 'synthetic-probe-encryption-salt-0123456789abcdef'
     const lib = path.join(root, 'plugins/plugin-integration-core/lib')
     createProbeBinding = requireCjs(path.join(lib, 'yida-connection-probe.cjs')).createYidaConnectionProbeBinding
     createInitBinding = (await importNative(pathToFileURL(path.join(lib, 'yida-initialization-producer.mjs')).href)).createYidaInitializationBinding as typeof createInitBinding
@@ -167,7 +174,10 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     expect(foreignFetch).toEqual([])
     if (schema) { await admin.query(`DROP SCHEMA ${ident(schema)} CASCADE`); schema = '' }
   }, 30000)
-  afterAll(async () => { try { logSpy?.mockRestore(); admin?.release(); await pool?.end() } catch { /* best effort */ } }, 30000)
+  afterAll(async () => {
+    try { logSpy?.mockRestore(); admin?.release(); await pool?.end() } catch { /* best effort */ }
+    finally { for (const [key, value] of savedEncryption) { if (value === undefined) delete process.env[key]; else process.env[key] = value } }
+  }, 30000)
 
   it('switch OFF: the GET carries no connectionTestEnabled key and the probe is 403 DISABLED before any transaction', async () => {
     const anchor = await provisionYidaInitializationAnchor({ database }, { ownerId: owner.actorId, tenantId: owner.tenantId })
