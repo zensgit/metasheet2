@@ -85,6 +85,27 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     for (const value of [...Object.values(syntheticMaterial()), 'synthetic-http-review', 'synthetic-http-organization',
       'synthetic_http_form', 'synthetic HTTP part']) expect(output.includes(value)).toBe(false)
   })
+  it('encryption material failing the production checks is 503 ENCRYPTION_NOT_READY in every NODE_ENV and writes nothing', async () => {
+    const ready = data(await f.http('GET', '/initialization'), 200), before = await f.initializationProof()
+    const saved = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]] as const)
+    const set = (key: string, value: string | undefined) => { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    const salt = process.env.ENCRYPTION_SALT
+    try {
+      for (const nodeEnv of [undefined, 'development', 'test', 'Production', 'production']) {
+        for (const variant of [{ ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined },
+          { ENCRYPTION_KEY: 'default-key-change-in-production', ENCRYPTION_SALT: 'default-salt-change-in-production' },
+          { ENCRYPTION_KEY: '   ', ENCRYPTION_SALT: salt }]) {
+          set('NODE_ENV', nodeEnv); for (const [key, value] of Object.entries(variant)) set(key, value)
+          f.sql.length = 0
+          denied(await f.http('POST', '/initialization', input(ready.commandId)), 503, 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY')
+          expect(f.sql.some(sql => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(sql))).toBe(false)
+          expect(f.sql.at(-1)).toBe('ROLLBACK')
+        }
+      }
+    } finally { for (const [key, value] of saved) set(key, value) }
+    expect(await f.initializationProof()).toEqual(before); await noExternalWrite()
+    expect(data(await f.http('GET', '/initialization'), 200)).toMatchObject({ commandId: ready.commandId, status: 'ready', draft: null })
+  })
   it('the second actually qualified administrator cannot read ready or initialize the anchor owner slot', async () => {
     f.setEnablement('true')
     const ready = data(await f.http('GET', '/initialization'), 200), before = await f.initializationProof()
