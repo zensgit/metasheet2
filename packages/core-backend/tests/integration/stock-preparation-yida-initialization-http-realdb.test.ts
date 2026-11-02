@@ -112,12 +112,15 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     const saved = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]] as const)
     const set = (key: string, value: string | undefined) => { if (value === undefined) delete process.env[key]; else process.env[key] = value }
     const key = process.env.ENCRYPTION_KEY, salt = process.env.ENCRYPTION_SALT
-    const warning = 'YiDa initialization sealed under an encryption key or salt shorter than 32 characters; plan a key rotation before the first real send.'
+    const warning = 'YiDa initialization sealed under an encryption key or salt shorter than 32 characters; '
+      + 'this seal cannot be re-keyed: keep this exact ENCRYPTION_KEY and ENCRYPTION_SALT (back up docker\\app.env) for the life of this deployment.'
     try {
       // Each variant passes the shared production checks; only the L4 seal-material check refuses it.
       for (const nodeEnv of ['development', 'production']) {
         for (const variant of [{ ENCRYPTION_KEY: '<openssl rand -hex 32>', ENCRYPTION_SALT: '<openssl rand -hex 32, generated separately>' },
           { ENCRYPTION_KEY: '<openssl rand -hex 32>', ENCRYPTION_SALT: salt },
+          // The dev-doc 32-hex sample pair (printed in lower case), compared ignoring case.
+          { ENCRYPTION_KEY: 'ABCDEF0123456789ABCDEF0123456789', ENCRYPTION_SALT: '0123456789ABCDEF0123456789ABCDEF' },
           { ENCRYPTION_KEY: 'default-salt-change-in-production', ENCRYPTION_SALT: 'default-key-change-in-production' },
           { ENCRYPTION_KEY: key, ENCRYPTION_SALT: key }]) {
           set('NODE_ENV', nodeEnv); for (const [name, value] of Object.entries(variant)) set(name, value)

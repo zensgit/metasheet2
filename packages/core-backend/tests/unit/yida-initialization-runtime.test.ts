@@ -314,16 +314,34 @@ describe('L4 refuses before any writer unless the encryption material passes the
     expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
     expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
   })
-  it('the readiness bit is the anchor owner\'s only: DENIED, a wrong command and an initialized slot keep their own codes', async () => {
+  // One material per refusal rule: the production checks (this describe) and each L4 seal-material rule
+  // (getYidaSealMaterialIssues). Whichever check refuses, it runs behind the live ACL, anchor owner, command and slot
+  // checks, so only the authorized anchor owner with an empty slot learns that the material is not ready.
+  const ownerOnly: Readonly<Record<string, readonly [typeof materials[string], 'production checks' | 'seal material']>> = {
+    'both unset': [materials['both unset'], 'production checks'],
+    'a doc placeholder key': [{ ENCRYPTION_KEY: '<openssl rand -hex 32>', ENCRYPTION_SALT: syntheticEncryption.ENCRYPTION_SALT }, 'seal material'],
+    'the documented sample values': [{ ENCRYPTION_KEY: 'your-32-byte-key-here', ENCRYPTION_SALT: 'your-salt-here' }, 'seal material'],
+    'the built-in defaults swapped': [{ ENCRYPTION_KEY: encryptedSecrets.DEFAULT_ENCRYPTION_SALT, ENCRYPTION_SALT: encryptedSecrets.DEFAULT_ENCRYPTION_KEY }, 'seal material'],
+    'KEY equal to SALT': [{ ENCRYPTION_KEY: syntheticEncryption.ENCRYPTION_KEY, ENCRYPTION_SALT: syntheticEncryption.ENCRYPTION_KEY }, 'seal material'],
+  }
+  it.each(Object.keys(ownerOnly))('%s: the readiness bit is the anchor owner\'s only: DENIED, a revoked ACL, a wrong command and an initialized slot keep their own codes', async name => {
+    const [material, check] = ownerOnly[name]
     const { f } = await active()
     await f.runtime.initialize(actor, input())
     const fresh = await active()
-    useEnvironment('development', materials['both unset'])
+    useEnvironment('development', material)
+    expect(encryptedSecrets.getEncryptionMaterialIssues(process.env).length > 0).toBe(check === 'production checks')
+    expect(getYidaSealMaterialIssues(process.env).length > 0).toBe(check === 'seal material')
     await rejected(fresh.f.runtime.initialize(secondAdmin, input()), 'DENIED')
     await rejected(fresh.f.runtime.initialize({ ...actor, tenantId: 'synthetic-other-tenant' }, input()), 'DENIED')
     await rejected(fresh.f.runtime.initialize(actor, { ...input(), commandId: '00000000-0000-4000-8000-000000000099' }), 'CONFLICT')
     await rejected(f.runtime.initialize(actor, input()), 'CONFLICT')
-    expect(fresh.f.createProducer).not.toHaveBeenCalled(); expect(fresh.f.commits).toBe(0)
+    fresh.f.allowed = false
+    await rejected(fresh.f.runtime.initialize(actor, input()), 'DENIED')
+    fresh.f.allowed = true
+    // Positive control: the same material does refuse the anchor owner with an empty slot.
+    await rejected(fresh.f.runtime.initialize(actor, input()), 'ENCRYPTION_NOT_READY')
+    expect(fresh.f.createProducer).not.toHaveBeenCalled(); expect(fresh.f.commits).toBe(0); expect(f.initialize).toHaveBeenCalledTimes(1)
     // GET is untouched: status needs no encryption material and still decodes the sealed slot.
     expect((await f.runtime.status(actor)).status).toBe('initialized')
   })
@@ -350,6 +368,9 @@ describe('L4 also refuses public or obviously invalid material that passes the p
     '(a) a padded angle-bracket key': { ENCRYPTION_KEY: `  <paste the generated key here>${tab}`, ENCRYPTION_SALT: long.ENCRYPTION_SALT },
     '(a) a placeholder salt only': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: '<openssl rand -hex 32, generated separately>' },
     '(a) the secret-management report samples': { ENCRYPTION_KEY: 'your-32-byte-key-here', ENCRYPTION_SALT: 'your-salt-here' },
+    '(a) the report samples in another case': { ENCRYPTION_KEY: 'YOUR-32-BYTE-KEY-HERE', ENCRYPTION_SALT: 'Your-Salt-Here' },
+    '(a) the dev-doc 32-hex sample pair': { ENCRYPTION_KEY: 'abcdef0123456789abcdef0123456789', ENCRYPTION_SALT: '0123456789abcdef0123456789abcdef' },
+    '(a) the dev-doc 32-hex sample key in upper case': { ENCRYPTION_KEY: 'ABCDEF0123456789ABCDEF0123456789', ENCRYPTION_SALT: long.ENCRYPTION_SALT },
     '(b) both built-in defaults swapped': { ENCRYPTION_KEY: defaultSalt, ENCRYPTION_SALT: defaultKey },
     '(b) the default salt as the key': { ENCRYPTION_KEY: defaultSalt, ENCRYPTION_SALT: long.ENCRYPTION_SALT },
     '(b) the default key as the salt': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: defaultKey },
@@ -432,10 +453,13 @@ describe('L4 also refuses public or obviously invalid material that passes the p
       expect(f.initialize).toHaveBeenCalledTimes(1); expect(warnings.seen).toEqual([])
     } finally { warnings.spy.mockRestore() }
   })
-  it('the warning text is a fixed constant: no value, and no number but the 32-character advice', () => {
+  it('the warning text is a fixed constant: no value, no number but the 32-character threshold, and no re-key advice', () => {
+    // The seal cannot be re-keyed (a changed ENCRYPTION_KEY / ENCRYPTION_SALT leaves the slot unreadable), so the
+    // advice is to keep the exact material, never to rotate it.
     expect(YIDA_SHORT_SEAL_MATERIAL_WARNING).toBe('YiDa initialization sealed under an encryption key or salt shorter than 32 characters; '
-      + 'plan a key rotation before the first real send.')
+      + 'this seal cannot be re-keyed: keep this exact ENCRYPTION_KEY and ENCRYPTION_SALT (back up docker\\app.env) for the life of this deployment.')
     expect(YIDA_SHORT_SEAL_MATERIAL_WARNING.match(/\d+/gu)).toEqual(['32'])
+    expect(/rotat/iu.test(YIDA_SHORT_SEAL_MATERIAL_WARNING)).toBe(false)
   })
   it('the helper is pure and values-free, and leaves unset, blank and default material to the shared checks', () => {
     for (const env of [{}, { ENCRYPTION_KEY: '', ENCRYPTION_SALT: ' ' }, { ENCRYPTION_KEY: defaultKey, ENCRYPTION_SALT: defaultSalt },

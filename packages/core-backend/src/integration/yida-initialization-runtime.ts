@@ -144,12 +144,15 @@ type Run = { controller: AbortController; pending: Promise<unknown>; dependencie
 type Registration = { closed: boolean; createProducer: YidaInitializationRuntimeBinding['createInitializationProducer']; runs: Set<Run>; draining?: Promise<void> }
 
 // The sample values the docs print for ENCRYPTION_KEY / ENCRYPTION_SALT (the docker/*.template and *.env.example
-// files ship both lines empty): docs/deployment/multitable-windows-onprem-easy-start-20260319.md and
-// docs/CONFIG_SECRET_MANAGEMENT_REPORT.md. Any other value wrapped in <...> is an unfilled placeholder too.
+// files ship both lines empty): docs/deployment/multitable-windows-onprem-easy-start-20260319.md,
+// docs/CONFIG_SECRET_MANAGEMENT_REPORT.md and the 32-hex pair in
+// docs/development/ops-encryption-material-preflight-{design,verification}-20260914.md. Listed in lower case and
+// compared ignoring case. Any other value wrapped in <...> is an unfilled placeholder too.
 const SAMPLE_ENCRYPTION_VALUES: readonly string[] = Object.freeze(['<openssl rand -hex 32>',
-  '<openssl rand -hex 32, generated separately>', 'your-32-byte-key-here', 'your-salt-here'])
+  '<openssl rand -hex 32, generated separately>', 'your-32-byte-key-here', 'your-salt-here',
+  'abcdef0123456789abcdef0123456789', '0123456789abcdef0123456789abcdef'])
 const sealValue = (value: unknown) => typeof value === 'string' ? value.trim() : ''
-const placeholder = (value: string) => /^<[\s\S]*>$/u.test(value) || SAMPLE_ENCRYPTION_VALUES.includes(value)
+const placeholder = (value: string) => /^<[\s\S]*>$/u.test(value) || SAMPLE_ENCRYPTION_VALUES.includes(value.toLowerCase())
 /**
  * L4 only; pure and values-free. getEncryptionMaterialIssues (shared with every other feature, unchanged) compares
  * each variable only with its own default. L4 seals for good (generation 1, no rotation), so it also refuses material
@@ -158,8 +161,8 @@ const placeholder = (value: string) => /^<[\s\S]*>$/u.test(value) || SAMPLE_ENCR
  */
 export function getYidaSealMaterialIssues(env: Readonly<Record<string, string | undefined>>): string[] {
   const key = sealValue(env.ENCRYPTION_KEY), salt = sealValue(env.ENCRYPTION_SALT), issues: string[] = []
-  if (key && placeholder(key)) issues.push('ENCRYPTION_KEY is an unfilled placeholder')
-  if (salt && placeholder(salt)) issues.push('ENCRYPTION_SALT is an unfilled placeholder')
+  if (key && placeholder(key)) issues.push('ENCRYPTION_KEY is a placeholder or documented sample value')
+  if (salt && placeholder(salt)) issues.push('ENCRYPTION_SALT is a placeholder or documented sample value')
   if (key === DEFAULT_ENCRYPTION_SALT) issues.push('ENCRYPTION_KEY is the built-in default salt')
   if (salt === DEFAULT_ENCRYPTION_KEY) issues.push('ENCRYPTION_SALT is the built-in default key')
   if (key && key === salt) issues.push('ENCRYPTION_KEY equals ENCRYPTION_SALT')
@@ -169,8 +172,11 @@ export function getYidaSealMaterialIssues(env: Readonly<Record<string, string | 
 export function isYidaSealMaterialShort(env: Readonly<Record<string, string | undefined>>): boolean {
   return sealValue(env.ENCRYPTION_KEY).length < 32 || sealValue(env.ENCRYPTION_SALT).length < 32
 }
+// The seal has no re-key path (generation 1 only; ConfigService.rotateKey re-encrypts system_configs only): after a
+// change of ENCRYPTION_KEY / ENCRYPTION_SALT the sealed slot no longer opens. So the advice is to keep the material.
 export const YIDA_SHORT_SEAL_MATERIAL_WARNING = 'YiDa initialization sealed under an encryption key or salt shorter than '
-  + '32 characters; plan a key rotation before the first real send.'
+  + '32 characters; this seal cannot be re-keyed: keep this exact ENCRYPTION_KEY and ENCRYPTION_SALT '
+  + '(back up docker\\app.env) for the life of this deployment.'
 let sealLogger: Logger | undefined
 function warnShortSealMaterial(): void {
   // Advisory, after COMMIT: it never turns a committed seal into a failure. In the owner HTTP request context the

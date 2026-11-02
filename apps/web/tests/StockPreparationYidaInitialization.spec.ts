@@ -236,8 +236,8 @@ describe('Yida initialization explicit local management UI', () => {
     fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 503)); await click('submit'); noSecrets()
     expect(q('error').textContent).toBe('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY')
     const hint = q('error-hint').textContent ?? ''
-    for (const part of ['本机加密密钥未配置或仍是默认值', '或仍是文档里的示例占位、两项互相对调或两项相同', '初始化未执行，未写入任何内容',
-      'docker\\app.env', 'ENCRYPTION_KEY / ENCRYPTION_SALT', '重启后端', '手动 GET'])
+    for (const part of ['本机加密密钥未配置或仍是默认值', '或仍是文档里的示例占位', '（值不能用尖括号 <…> 包住）', '、内置默认值互相对调或两项相同',
+      '初始化未执行，未写入任何内容', 'docker\\app.env', 'ENCRYPTION_KEY / ENCRYPTION_SALT', '重启后端', '手动 GET'])
       expect(hint.includes(part)).toBe(true)
     // Values-free: neither the pasted material nor the review identifiers appear in the hint.
     for (const value of [...Object.values(material), 'SYN-REVIEW', 'SYN-ORG']) expect(hint.includes(value)).toBe(false)
