@@ -5753,9 +5753,9 @@ interface ReviewBindingsOutcome {
   failed: unknown[]
 }
 
-// Shared by the batch-bind and batch-admit-users partial-failure toasts: both server
-// routes return `failed: [{ accountId, error }]` for per-item failures (DT-HARDEN-04).
-// Both call sites use the same limit so the two toasts stay visually consistent.
+// Shared by the batch-bind, batch-admit-users and batch-unbind partial-failure toasts: all
+// three server routes return `failed: [{ accountId, error }]` for per-item failures
+// (DT-HARDEN-04). All call sites use the same limit so the toasts stay visually consistent.
 const FAILED_BINDINGS_PREVIEW_LIMIT = 3
 
 function readFailedBindingsPreview(failed: unknown[], limit: number): string {
@@ -6149,8 +6149,11 @@ async function batchUnbindReviewItems() {
     })
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '批量停权处理失败'))
-    const processedItems = Array.isArray(body?.data?.items) ? body.data.items : []
-    appliedCount = processedItems.length > 0 ? processedItems.length : batchIds.length
+    const data = body?.data as Record<string, unknown> | undefined
+    const processedItems = Array.isArray(data?.items) ? data.items : []
+    appliedCount = Number(data?.updatedCount ?? processedItems.length)
+    const failedCount = Number(data?.failedCount ?? 0)
+    const failedItems = Array.isArray(data?.failed) ? data.failed : []
     setReviewBatchProgress({
       kind: 'unbind',
       phase: 'refreshing',
@@ -6159,18 +6162,30 @@ async function batchUnbindReviewItems() {
       message: `已提交 ${appliedCount} / ${batchIds.length}，正在刷新目录成员与待处理队列...`,
     })
     for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
-    setStatus(`已完成 ${batchIds.length} 个目录成员的批量停权处理`)
+    const failedPreview = readFailedBindingsPreview(failedItems, FAILED_BINDINGS_PREVIEW_LIMIT)
+    const message = failedCount > 0
+      ? `已停权处理 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
+      : `已完成 ${batchIds.length} 个目录成员的批量停权处理`
+    setStatus(message, failedCount > 0 ? 'error' : 'info')
     await Promise.all([
       loadIntegrations(),
       loadReviewItems(selectedIntegration.value.id),
       loadAccounts(selectedIntegration.value.id),
     ])
+    // Re-select the failed rows still in the queue so they can be retried; the reload resets selection.
+    const failedIds = new Set(failedItems.map((entry) => (
+      entry && typeof entry === 'object' ? (entry as Record<string, unknown>).accountId : undefined
+    )))
+    const reviewIds = new Set(reviewItems.value.map((item) => item.account.id))
+    for (const accountId of batchIds) {
+      if (failedIds.has(accountId) && reviewIds.has(accountId)) selectedReviewIds[accountId] = true
+    }
     setReviewBatchProgress({
       kind: 'unbind',
       phase: 'completed',
       total: batchIds.length,
       applied: appliedCount,
-      message: `已完成 ${batchIds.length} 个目录成员的批量停权处理`,
+      message,
     })
   } catch (error) {
     setReviewBatchProgress({
