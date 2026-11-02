@@ -28,7 +28,9 @@ import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
  * Fixture, by SQL: five `users` rows (one platform administrator by `users.role`, four employees)
  * with a password hashed by the backend's own bcrypt settings, one active `user_orgs` row each in
  * one org, and the columns sign-in reads (active, activated, local password set). Nothing else.
- * Every role, permission and task access row is written by the page's own HTTP calls, every token
+ * Every task role, permission and task access row is written by the page's own HTTP calls (sign-in
+ * in the default product mode also gives each employee the attendance self-service role, as it
+ * does on a real install; cleanup removes it), every token
  * comes from POST /api/auth/login (one sign-in per account, under the per-account limit), and the
  * positive case is an employee, never the administrator.
  *
@@ -37,8 +39,8 @@ import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
  * carries no role or permission claims either (asserted), so every answer below comes from the
  * database. The product mode is the default one.
  *
- * Permission memo: an employee's 403 before the grant is read while the memo is cold, and the
- * same token is used after the grant, without signing in again. One server process here.
+ * Permission memo: an employee's 403 before the grant and the 200 after it use the same token,
+ * without signing in again. One server process here.
  *
  * NOT covered: the admin pages (/admin/roles, /admin/users), loading `app.env` and restarting the
  * backend, the PM2 / systemd / Docker / Windows steps, more than one backend process, and any real

@@ -149,7 +149,7 @@ describe('assertTaskAccess', () => {
 })
 
 describe('a failed read', () => {
-  it.each(['admin', 'codes', 'column', 'roles', 'enabled'])('the %s read failing rejects with its own error, not 422, and nothing is sent after it', async (kind) => {
+  it.each(['admin', 'codes', 'column', 'roles', 'enabled'])('read %# failing rejects with its own error, not 422, and nothing is sent after it', async (kind) => {
     people = { 'usr-e': { codes: ['tasks:read', 'tasks:write'], enabled: true } }
     const error = new Error(`read failed: ${kind}`)
     failing = { kind, error }

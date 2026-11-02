@@ -21,7 +21,8 @@
  * belongs to another org, is inactive in this org, is inactive altogether, or is in the recycle
  * bin. Callers: list member
  * add and owner transfer (`task-list-records.ts`), `createTask` (`task-records.ts`), `addAssignee`
- * and `addFollower` (`task-structure.ts`). Membership rows already written are never cleaned up
+ * and `addFollower` (`task-structure.ts`); the reminder scan (`task-scheduler.ts`) and the delivery
+ * worker skip anyone it leaves out. Membership rows already written are never cleaned up
  * when a user leaves the org.
  */
 import { fail, type Db } from './task-records'
