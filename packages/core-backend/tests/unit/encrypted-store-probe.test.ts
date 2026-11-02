@@ -160,6 +160,7 @@ const EXPECTED_STORE_FIELDS = [
   'attendance_integrations.config.appSecret|appsecret|app_secret',
   'system_configs.value (is_encrypted)',
   ...YIDA_FIELDS.map(([store, field]) => `${store}.${field}`),
+  'dingtalk_login_repairs.before_identity',
 ]
 
 const fixture: { rows: FixtureRows; sealed: string[]; plaintexts: string[] } = { rows: {}, sealed: [], plaintexts: [] }
@@ -336,9 +337,20 @@ const EXPECTED_UNDER_A = [
   ['attendance_integrations.config.appSecret|appsecret|app_secret', 'ok', 1, 1, 0, 0, null],
   ['system_configs.value (is_encrypted)', 'ok', 5, 2, 0, 3, null],
   ...YIDA_FIELDS.map(([store, field]) => [`${store}.${field}`, 'ok', 2, 1, 0, 1, null]),
+  ['dingtalk_login_repairs.before_identity', 'ok', 0, 0, 0, 0, null],
 ]
 
 describe('probeEncryptedStores: trial decrypt with the current material', () => {
+  it('login repair history uses the raw platform envelope and caps trial decryption at twenty rows', async () => {
+    const entry = ENCRYPTED_STORE_CATALOG.find(e => e.store === 'dingtalk_login_repairs')!
+    expect(entry).toMatchObject({field:'before_identity',scheme:'platform-enc',prefixOn:'raw',columns:['before_identity'],maxRows:20})
+    const sealed = (fixture.rows['data_sources.config.credentials.apiKey'] as string[])[0]
+    const db = fakeDatabase({'dingtalk_login_repairs.before_identity':Array.from({length:30},()=>sealed)})
+    const report = await probeEncryptedStores({query:db.query,env:ENV_A})
+    expect(db.catalogStatements().find(s=>s.sql===entry.sql)?.params).toEqual([21])
+    expect(report.stores.find(s=>s.store===entry.store)).toMatchObject({status:'ok',rows:20,encrypted:20,undecryptable:0,truncated:true,sampled:20})
+  })
+
 
   function assertYidaCatalog(catalog: readonly EncryptedStoreCatalogEntry[]) {
     for (const [store, field] of YIDA_FIELDS) {
@@ -535,7 +547,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
     for (const s of db.catalogStatements()) {
       const entry = ENCRYPTED_STORE_CATALOG.find((e) => e.sql === s.sql) as EncryptedStoreCatalogEntry
       const yida = s.sql.includes(' FROM integration_yida_')
-      expect({ sql: s.sql, bounded: /\sLIMIT \$1$/.test(s.sql), params: s.params }).toEqual({ sql: s.sql, bounded: true, params: [yida ? yidaCap(entry.store) + 1 : 10_001] })
+      expect({ sql: s.sql, bounded: /\sLIMIT \$1$/.test(s.sql), params: s.params }).toEqual({ sql: s.sql, bounded: true, params: [entry.store === 'dingtalk_login_repairs' ? 21 : yida ? yidaCap(entry.store) + 1 : 10_001] })
     }
     expect(ENCRYPTED_STORE_COLUMNS_SQL).toBe('SELECT attname FROM pg_attribute WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped')
     expect(db.prechecks().every((s) => s.params?.length === 1 && CATALOG_TABLES.includes(String(s.params[0])))).toBe(true)
@@ -567,7 +579,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
 
   it('YiDa stores read at most maxRows (50; 20 for draft operations and send approvals): more rows are sampled with LIMIT maxRows + 1 and say `truncated`; other stores keep rowLimit', async () => {
     expect(ENCRYPTED_STORE_CATALOG.filter((e) => e.maxRows !== undefined).map((e) => `${e.store}.${e.field}`))
-      .toEqual(YIDA_FIELDS.map(([store, field]) => `${store}.${field}`))
+      .toEqual([...YIDA_FIELDS.map(([store, field]) => `${store}.${field}`), 'dingtalk_login_repairs.before_identity'])
     const many = (label: string) => Array.from({ length: 120 }, () => (fixture.rows[label] as string[])[0])
     const rows: FixtureRows = { 'data_sources.config.credentials.password': many('data_sources.config.credentials.password') }
     for (const [store, field] of YIDA_FIELDS) rows[`${store}.${field}`] = many(`${store}.${field}`)
@@ -925,7 +937,7 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     const report = await runEncryptedStoreProbeAtStartup({ resolvePool: () => fakeDatabase(fixture.rows), env: ENV_B, logger })
     expect(report?.totals.undecryptable).toBe(17)
     expect(logger.info).toHaveBeenCalledTimes(1)
-    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 16 store field\(s\); 17 undecryptable/)
+    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 17 store field\(s\); 17 undecryptable/)
     const broken = EXPECTED_UNDER_A.filter((row) => (row[3] as number) > 0).map((row) => row[0])
     expect(logger.warn).toHaveBeenCalledTimes(broken.length)
     expect(logger.warn.mock.calls.map((call) => `${call[1].store}.${call[1].field}`)).toEqual(broken)

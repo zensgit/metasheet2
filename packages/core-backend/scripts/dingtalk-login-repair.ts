@@ -1,17 +1,27 @@
-/** Operator-only, private-file CLI; never emits passwords, provider identities or proof ciphertext. */
+/** Operator-only private-file workflow. No proof or credential is printed. */
 import { lstat, readFile, writeFile } from 'node:fs/promises'
 import {
   verifyDingTalkRepair,
   previewDingTalkRepair,
   applyDingTalkRepair,
   rollbackDingTalkRepair,
+  releaseDingTalkRepair,
+  previewDingTalkRepairRecovery,
 } from '../src/auth/dingtalk-identity-repair'
 async function main() {
   const [action, file, out, ...rest] = process.argv.slice(2)
   if (
     rest.length ||
     !file ||
-    !['verify', 'preview', 'apply', 'rollback'].includes(action) ||
+    ![
+      'verify',
+      'preview',
+      'apply',
+      'rollback-preview',
+      'release-preview',
+      'rollback',
+      'release',
+    ].includes(action) ||
     (action === 'verify' ? !out : !!out)
   )
     throw Error('Invalid command')
@@ -21,12 +31,14 @@ async function main() {
   const input = JSON.parse(await readFile(file, 'utf8'))
   const fields =
     action === 'verify'
-      ? ['userId', 'password', 'code', 'actorId']
+      ? ['userId', 'password', 'code', 'actorId', 'actorPassword']
       : action === 'preview'
         ? ['proof']
         : action === 'apply'
           ? ['proof', 'digest', 'confirm']
-          : ['id', 'actorId', 'digest', 'confirm']
+          : action.endsWith('-preview')
+            ? ['id', 'actorId', 'actorPassword']
+            : ['id', 'actorId', 'actorPassword', 'digest', 'confirm']
   if (
     !input ||
     Array.isArray(input) ||
@@ -40,8 +52,12 @@ async function main() {
       input.password,
       input.code,
       input.actorId,
+      input.actorPassword,
     )
-    await writeFile(out, JSON.stringify({ proof }), { mode: 0o600, flag: 'wx' })
+    await writeFile(out, JSON.stringify({ proof }), {
+      mode: 0o600,
+      flag: 'wx',
+    })
     return {
       verified: true,
       expiresInSeconds: 300,
@@ -52,12 +68,16 @@ async function main() {
   if (action === 'preview') return previewDingTalkRepair(input.proof)
   if (action === 'apply')
     return applyDingTalkRepair(input.proof, input.digest, input.confirm)
-  return rollbackDingTalkRepair(
-    input.id,
-    input.actorId,
-    input.digest,
-    input.confirm,
-  )
+  if (action.endsWith('-preview'))
+    return previewDingTalkRepairRecovery(
+      input.id,
+      input.actorId,
+      input.actorPassword,
+      action === 'rollback-preview' ? 'rollback' : 'release',
+    )
+  return (
+    action === 'rollback' ? rollbackDingTalkRepair : releaseDingTalkRepair
+  )(input.id, input.actorId, input.digest, input.confirm, input.actorPassword)
 }
 main()
   .then((r) => {

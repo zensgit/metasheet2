@@ -281,6 +281,11 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     maxRows: YIDA_SNAPSHOT_MAX_ROWS,
     sql: `SELECT snapshot_encrypted AS value FROM integration_yida_send_approvals WHERE snapshot_encrypted <> '' LIMIT $1`,
   }),
+  catalogEntry({
+    store: 'dingtalk_login_repairs', field: 'before_identity', scheme: 'platform-enc',
+    prefixOn: 'raw', columns: ['before_identity'], maxRows: 20,
+    sql: `SELECT before_identity AS value FROM dingtalk_login_repairs WHERE before_identity <> '' LIMIT $1`,
+  }),
 ])
 
 export type EncryptedStoreProbeStatus = 'ok' | 'table_missing' | 'column_missing' | 'read_failed'

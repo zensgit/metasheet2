@@ -1,81 +1,59 @@
-# 钉钉单账号登录身份受控修复：设计与验证
+# 钉钉单账号登录身份受控修复
 
-日期：2026-11-02（Asia/Taipei）。独立 Draft 交付；未合并、部署、真实扫码、绑定、解绑或企业切换。未使用 Mac mini。
+状态：Draft／HOLD。本轮修订以 PR #6693 当前 head 为准；原 head `6aa9a739998527c94665d5baf22da352d5c9a94f` 的 201 项记录不能替代修订验证，也不能证明旧实现可上线。
 
-## 问题和范围
+## 范围与身份依据
 
-当前登录应用与历史目录应用可能不同，旧身份不能解析当前扫码者。重新绑定旧目录成员会再次写回旧标识；自助绑定又正确拒绝目录托管用户。不能靠显示名、邮箱相似、开放自动建号、关闭目录保护或抢占另一个管理员账号恢复登录。
+仅提供运维私有文件 CLI，修复现有账号的钉钉登录身份，不建立公开绑定接口。保留本地账号、角色、准入、组织成员权限、目录关联及审批记录；不切换企业、不代审批、不启用同步。
 
-本补丁提供仅受控主机／数据库运维人员使用的 CLI，优先复用现有密码哈希校验、OAuth profile 读取、用户访问图锁、加密存储、generation fencing 和会话撤销登记。没有新增公开绑定 API，也没有变更现有自助绑定和交接摘要规则。
+verify 同时要求有效管理员及其密码、目标账号的非临时本地密码、新鲜的当前应用钉钉资料，以及当前应用下已经关联到目标账号的活动目录证据。企业、UnionID、OpenID 证据必须相容；另一用户占用、隐藏的第二个人、企业不符、仅 OpenID 相同而 UnionID 冲突均拒绝。不按昵称、邮箱相同或管理员知道密码推定同一人。证据不足的旧 E4 关联仍阻断，不能用本工具绕过完整 E4→Canary 交接。
 
-基线：`f485ccae0d0a5735be2c395c81f8834ca3b657b3`。当前线上问题仍未执行真实修复；本补丁不是线上本人身份已核实的证明。
+证明使用平台 AES-GCM 材料加密，绑定管理员凭据摘要、目标权限／准入快照、登录应用范围与一次性 nonce，五分钟过期。只输出证明文件，不签发本地会话。预览仅输出打码线索和摘要，不构成本人确认的替代。
 
-## 流程
+## 执行与互斥
 
-1. `verify`：目标账号本地密码 + 当前应用新鲜授权码，同时检查有效平台管理员、目标启用／激活、本地密码可用、现有登录授权 enabled、唯一既有钉钉身份、同企业。复用提供方认证，要求 Open ID／Union ID 完整。返回五分钟 AES-GCM 加密证据，只写指定的 0600 新文件，不产生本地会话或业务写入。
-2. `preview`：验证证据用途、时效、当前企业／应用、账号权限及绑定快照，检查另一账号占用、活动修复及未解决撤权副作用。只读业务状态，返回摘要，不自动接受漂移。
-3. `apply`：精确 `confirm=apply` 和管理员批准摘要；重新加锁及复核。单事务更新该用户的登录身份、写加密旧身份审计日志及一次性 nonce，推进访问 generation。账号 ID／角色／权限／目录链接／审批／待办保持不变，不创建或启用登录授权。
-4. `rollback`：精确操作确认和 apply 后摘要，权限、身份或链接有变化即拒绝。原身份与日志状态在单事务恢复，generation 单调推进，使用既有撤销登记失效该账号全部当前会话。恢复后的密码登录通道可重新使用。
+preview、rollback-preview、release-preview 为只读 REPEATABLE READ 事务，不加核心表写锁、不递增 generation、不创建会话。权限快照包含 users、角色、角色权限、直接权限、组织、namespace admissions、外部授权、目录关联、身份键和来源。仅忽略 created_at、updated_at、last_login_at 这三类元数据。
 
-双重控制权证明并不自动证明旧目录错配跨应用标识属于同一个人：运维仍须由本人和管理员确认正确目标。CLI 的 actorId 是受控运维身份留痕，不是公共接口凭空信任传入的管理员 ID。不得将此 CLI 直接包装成公开 API。
+写事务首句固定 READ COMMITTED，再取得身份维护互斥、核心表 NOWAIT 锁及 canonical 用户锁。现有部分写入未共享用户 mutex，因此此维护操作仍可能拒绝并发写入，必须安排维护窗口。lock_timeout 为五秒，statement_timeout 为三十秒。与 applied handover 双向排斥；安全解绑也不能抹掉日志中原来源的互斥依据。不修改 handover 的产品摘要规则。
 
-输入文件要求常规文件、0600／无组和其他用户权限、最大 64 KiB，严格字段集；证明输出不覆盖已有文件。凭据／授权码不放命令行。错误仅输出固定拒绝码。verify 会向当前配置的钉钉提供方交换一次授权码；真实执行同样需要事先明确批准，失败后的授权码不重放。
+apply 需精确证明摘要及 `confirm=apply`。身份旧值加密保存；写产品审计并记录真实管理员。撤销目标已存在的 JWT 会话、session registry 记录与多维表 API token，递增 generation，不倒退。OAuth／免登认证结果携带在用户锁内取得的 generation，登记 session 时重新锁定并核对；API token 创建／轮换也复核请求认证时的 generation。旧 refresh 不得重新激活已撤销 sid，无 sid 的 refresh 同样复核 generation。
 
-## 防旧来源覆盖及撤权边界
+这不禁止修复完成后的有效新登录，也不承诺取消所有已经执行的业务请求。现有无 sid JWT 在应用节点时钟超前于数据库时，仍受既有时间水位机制限制；本轮没有修改全局 JWT 合约。生产必须完成迁移并验证时钟与会话机制，不能把本地结果称为全部凭据系统的安全证明。开发模式 RBAC_TOKEN_TRUST 不提供数据库 generation 时，API token 签发会拒绝。
 
-新增迁移 `zzzz20261102150000_dingtalk_login_repairs` 建日志、活动用户唯一索引及身份 INSERT／UPDATE 守卫。活动修复记录固定新的企业、Open ID、Union ID、external key、provider 与 local user ID；旧目录同步／重新绑定写回旧身份时拒绝整个事务。
+## 防覆盖、回退与 release
 
-修复推进 users tuple/generation，守卫对同一 users 行 FOR SHARE；旧 REPEATABLE READ 快照不能漏看日志后覆盖身份，必须 serialization-fail。
+活动记录严格固定企业、UnionID、OpenID、external key 及身份归属。只有新鲜 OAuth 在同一用户锁和事务内验证同企业／同 UnionID／同应用后，才可推进 OpenID pin；目录旧 OpenID 不能自行覆盖。目录 OpenID 为空的正常成员继续使用同人登录身份补全。第二目录来源关联由数据库守卫拒绝。
 
-守卫允许正常同人 profile／登录遥测；**不阻止授权关闭或删除身份**，避免妨碍撤权。删除后旧来源重新插入旧身份仍拒绝。发生这类后续变化，自动回退拒绝，不能重新启用已撤销的授权。
+rollback-preview 显示当前摘要及变动分段。后续登录、角色补齐、资料或合法权限变更不再让恢复永久无出口，但必须重新审阅和批准当前恢复摘要。rollback 只恢复本次身份旧值，保留之后的角色、准入、密码、启用标记等合法变更；拒绝未解决撤权、其他人占用或 applied handover。执行后再次撤销目标当前会话和 API token。恢复不能复活已撤销授权。
 
-活动 pin 保持到批准回退；没有自动释放或 finalize。旧来源写入被拒绝可能导致其整批同步事务失败，需要运维另行处理旧来源；不得自动关闭守卫、迁移目录或打开同步。非空修复历史时迁移 down 拒绝，不能降级到缺少此守卫的旧运行版本。
+release 不恢复旧身份，也不恢复权限。有效用户必须有唯一当前应用、同企业同人的 canonical 目录来源；撤权用户可结束活动身份 pin，但撤权状态及证据保留。**release 仅解除身份 pin，目录来源约束继续生效。** released_account_ids 只保留恰好一个 canonical 账户 ID，否则为空数组；空数组会持续拒绝包括原账号在内的目录重绑。历史来源 IDs 保持不变。新来源接入、跨企业或解除此持久约束不在本轮范围，须另行设计和批准。正常受控交接移动原稳定账户 ID，不创建第二个账户。
 
-## 锁、审计与会话影响
+此约束不依赖没有实际消费者的 connectionDisabled 字段，也不把 status=inactive 或 sync_enabled=false 当作手动同步／在途同步已停止的证明。具有完整有效配置、能够成功同步的旧来源，在 release 后尝试第二关联仍由真实数据库守卫拒绝；其同步批次可能失败，禁止自动解除守卫。
 
-复用 canonical 用户锁；现有部分角色写入未参与同一用户 mutex，因此少见的运维事务对相关权限／身份表使用 SHARE ROW EXCLUSIVE NOWAIT，失败立即拒绝。该锁会影响其他组织的相关写入，应单独维护窗口；lock_timeout 5 秒、statement_timeout 30 秒。
+## 运维入口与备份
 
-旧身份加密保存，密码、权限内容只参与摘要不写入日志。日志记录创建／回退 actor、时间、nonce 和摘要。应用及回退推进 generation，原 generation 不倒退。**apply 使原访问 generation 的会话失效；rollback 撤销目标账号全部当前会话（包括密码登录会话），不只本次扫码会话。** 执行前必须告知影响并批准，不能声称仅撤一个会话。
-
-权限变化、其他账号占用、同一证明重复消费、并发抢占、摘要漂移、未解决撤权副作用或企业变化均失败关闭。不会绕过 E4 在途审批交接阻断，也不会更改产品交接摘要。
-
-## 运维命令（仅说明，不授权执行）
-
-在批准的运维窗口、正确构建及专用加密材料环境中：
+以下仅说明接口，不授权真实执行：
 
 ```sh
 pnpm ops:dingtalk-login-repair verify /restricted/verify.json /restricted/proof.json
 pnpm ops:dingtalk-login-repair preview /restricted/proof.json
 pnpm ops:dingtalk-login-repair apply /restricted/apply.json
+pnpm ops:dingtalk-login-repair rollback-preview /restricted/recovery.json
 pnpm ops:dingtalk-login-repair rollback /restricted/rollback.json
+pnpm ops:dingtalk-login-repair release-preview /restricted/recovery.json
+pnpm ops:dingtalk-login-repair release /restricted/release.json
 ```
 
-verify 输入：userId/password/code/actorId。preview：proof。apply：proof/digest/confirm。rollback：id/actorId/digest/confirm。不得在聊天、PR、日志或命令行中传递实际密码、授权码、证明或身份标识。
+verify 输入：userId/password/code/actorId/actorPassword。preview：proof。apply：proof/digest/confirm。两种 recovery preview：id/actorId/actorPassword；执行 rollback／release 再增加 digest/confirm。输入必须为私有常规文件，无组／其他用户权限，最多 64 KiB，严格字段集；证明输出 0600 且不覆盖。凭据、授权码和证明不得进入命令参数、聊天或 PR。失败仅打印固定拒绝码。
 
-## 本机合成验证
+真实窗口前必须另批：完整迁移台账、专用加密材料及可恢复配置／数据库备份、当前身份与目录证据、审批在途依赖、session/API token 影响、来源约束后续处理和维护窗口。新加密字段 `dingtalk_login_repairs.before_identity` 已登记普查和启动探测，单字段最多抽取二十行，不代表全库普查。换材料而不迁移密文会使恢复拒绝；必须保留原材料与密文备份。非空修复历史不允许 migration down，不能通过删除历史或直接拆守卫回滚。
 
-环境：Node 20.20.2、独占临时 PostgreSQL 15，仅回环地址、三个新建合成数据库；提供方认证仅测试桩，无 Docker／SSH／线上／Mac mini 调用。依赖复用已有安装，无安装升级。首次 PG 初始化遇沙箱共享内存限制后，在获准本机隔离范围内重启初始化。
+## 本地验证与交付门槛
 
-最终新库完整迁移安装及重放通过；仅排除仓库既知 Draft backfill `zzzz20260919090000_create_approval_template_group_backfill_batches`。本地最终库台账 461 项；不沿用 staging 台账。
+Node 20.20.2、本机 PostgreSQL 15.17、全新合成库；提供方仅测试桩。没有真实扫码、线上连接、真实绑定、部署、候选构建或 Mac mini 使用。
 
-九文件真实数据库组合 **201 项通过，0 失败／跳过**：原目录／权限／审批八文件 185 项，加本功能 16 项（含 DB 必须存在哨兵）。本功能覆盖核验／预览零业务写、真实 bcrypt、密码／管理员／启用／授权拒绝、合成提供方异常、跨企业／跨应用／过期证明、另一账号冲突、OAuth 服务解析到原账号、实际目录重新绑定被 guard 拒绝、角色和审批记录严格保持（实际待办服务仍返回可操作条目）、权限漂移拒绝回退、会话撤销生效、并发 apply 一成功、故障注入整事务回滚、旧 RR 写入拒绝、撤权删除允许但旧身份重插拒绝、非空日志拒绝 migration down。
+修订验证：十一文件真实 DB 组合 250 项（含原八文件 185、修复文件 55、API 路由／组织准入十项）；八文件重点单测 311 项；另五十文件 auth／DingTalk 回归 870 项，与前者有交集，不累计。CI 合约六项、TypeScript noEmit 通过。十个其他改动运行文件定向 ESLint 通过；AuthService 的 137 行原有 no-extra-semi 在旧 head 上同样失败，本轮未改无关代码。
 
-TypeScript noEmit 和定向 ESLint 通过。测试文件已登记现有 approval real-DB CI，并排除无 DB 单元套件，未降低任何必需检查。
+包含真实 refresh 屏障红转绿、旧 OAuth 认证版本拒绝、API 创建／轮换版本拒绝、RR 默认事务在用户锁等待期间新提交 token 的撤销、首次登录补角色后的恢复、无变化同步后的恢复、缺 OpenID 绑定／解绑、OpenID 轮换后旧目录拒绝、release 前同步成功正对照及其后精确拒绝、隐藏第二人／UnionID 冲突拒绝、加密字段探测及密钥变化后恢复拒绝／原密文恢复。真实行为优于仅检查 generation 值。
 
-复现（在独立本机合成数据库迁移完成后）：
-
-```sh
-# DATABASE_URL 仅指向本机合成库；设置 DB_SSL=false、EXPECT_DB=1。
-cd packages/core-backend
-node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/dingtalk-login-repair.db.test.ts
-../../node_modules/.bin/tsc --noEmit --pretty false
-../../node_modules/.bin/eslint src/auth/dingtalk-identity-repair.ts src/db/migrations/zzzz20261102150000_dingtalk_login_repairs.ts scripts/dingtalk-login-repair.ts
-```
-
-准确的冻结 head、CI 结论和完整组合命令以 PR 及本地 FINAL-VERIFICATION.md 为准；本地绿不等于当前 head 的 13 项必需 CI 全绿。
-
-## 未执行／限制
-
-未做真实扫码、本人确认、线上读写或真实绑定；未验收新镜像／正式包，不构建候选、不发布镜像；未执行 staging 升级、E4 交接、审批处置、退役或同步。没有迁移旧身份数据或批量补角色。
-
-当前 first-login 可能改变权限摘要的产品风险继续保留；本流程遇到权限漂移拒绝 rollback，不重新计算摘要强行回退。上线前仍需独立复审、CI、完整迁移台账及维护窗口／备份／会话影响批准。
+执行命令和当前 head／CI 结论保存在本地 FINAL-VERIFICATION.md。以上为本地验证，未宣告当前 head 的十三项必需 CI 通过。合并、部署、真实绑定、E4 交接、审批处置、停用和启用同步仍需单独批准。

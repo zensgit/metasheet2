@@ -67,6 +67,8 @@ const SCRIPTS = 'packages/core-backend/scripts'
 const CENSUS: Readonly<Record<string, CensusEntry>> = {
   // data_sources.config.credentials.{password,apiKey,token} — DataSourceManager.encryptCredentials
   [`${CS}/data-adapters/DataSourceManager.ts :: encryptStoredSecretValue`]: { count: 1, stores: ['data_sources'] },
+  // One encrypted short-lived proof file and one durable rollback snapshot. Neither contains a reusable provider token.
+  [`${CS}/auth/dingtalk-identity-repair.ts :: encryptStoredSecretValue`]: { count: 2, stores: ['dingtalk_login_repairs'] },
   // directory_integrations.config: appSecret + workNotificationAgentId (create + update)
   [`${CS}/directory/directory-sync.ts :: normalizeStoredSecretValue`]: { count: 4, stores: ['directory_integrations'] },
   // directory_integrations.config.approvalCardLinkSecret

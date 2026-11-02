@@ -224,7 +224,7 @@ describe('explicit session organization routes', () => {
     authServiceMocks.resolveSessionTenantId.mockResolvedValue('org-b')
     authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', exp: 2000000000 })
     authServiceMocks.createToken.mockReturnValue('signed-new-token')
-    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+    sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
   })
 
   it('lists only the authenticated actor memberships, ignoring submitted actor selectors', async () => {
@@ -289,7 +289,7 @@ describe('auth login routes', () => {
     sessionMocks.revokeUserSessions.mockReset()
     activationMocks.activatePendingUser.mockReset()
     auditMocks.auditLog.mockReset()
-    sessionRegistryMocks.createUserSession.mockReset()
+    sessionRegistryMocks.createUserSession.mockReset().mockResolvedValue({id:'synthetic-session'})
     sessionRegistryMocks.listUserSessions.mockReset()
     sessionRegistryMocks.getUserSession.mockReset()
     sessionRegistryMocks.revokeUserSession.mockReset()
@@ -1880,6 +1880,7 @@ describe('auth login routes', () => {
         email: 'manager@example.com',
       },
       localUserId: 'user-1',
+      sessionGeneration: 7,
       localUserEmail: 'manager@example.com',
       localUserName: 'Manager',
       localUserRole: 'admin',
@@ -1891,7 +1892,7 @@ describe('auth login routes', () => {
     authServiceMocks.readTokenPayload.mockReturnValue({
       exp: expSeconds,
     })
-    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+    sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
     pgMocks.query.mockResolvedValue({ rows: [] })
 
     const response = await invokeRoute('post', '/dingtalk/callback', {
@@ -1923,6 +1924,7 @@ describe('auth login routes', () => {
       'user-1',
       expect.objectContaining({
         ipAddress: '127.0.0.1',
+        expectedAccessGeneration: 7,
         userAgent: 'Vitest Browser',
       }),
     )
@@ -2097,6 +2099,7 @@ describe('auth login routes', () => {
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockResolvedValue({
         dingtalkUser: { unionId: 'union-1', nick: 'Alpha' },
         localUserId: 'user-1',
+        sessionGeneration: 9,
         localUserEmail: 'alpha@example.com',
         localUserName: 'Alpha',
         localUserRole: 'user',
@@ -2105,7 +2108,7 @@ describe('auth login routes', () => {
       rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
       authServiceMocks.createToken.mockReturnValue('jwt-container-token')
       authServiceMocks.readTokenPayload.mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 3600 })
-      sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+      sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
       pgMocks.query.mockResolvedValue({ rows: [] })
 
       const response = await invokeRoute('post', '/login/dingtalk/container', {
@@ -2117,6 +2120,7 @@ describe('auth login routes', () => {
       expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).toHaveBeenCalledWith('auth-code-9')
       const body = response.body as Record<string, any>
       expect(body.success).toBe(true)
+      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('user-1',expect.objectContaining({expectedAccessGeneration:9}))
       expect(body.data).toMatchObject({
         mode: 'login',
         token: 'jwt-container-token',

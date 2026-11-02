@@ -80,6 +80,9 @@ function assertParallelWorkflow(doc) {
         assert.equal(step.run.split(addition).length - 1, 1, 'Handover DB suite must run exactly once')
         assert.ok(step.run.includes(predecessor + addition), 'Keep the new whole-file suite at its reviewed position')
         step.run = step.run.replace(addition, '')
+        const repairAddition = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n'
+        assert.equal(step.run.split(repairAddition).length - 1, 1, 'Login repair DB suite must run exactly once')
+        step.run=step.run.replace(repairAddition,'')
       }
       if (suite !== 'unit' && step.name === 'Upload install log on failure') {
         assert.equal(step.with.name, `install-log-${nodeMatrix}-${suite}`)
@@ -130,6 +133,7 @@ test('each database suite owns a fresh runner/database and migration ordering', 
 test('removed/filtered/reordered steps, disabled suites and a weakened aggregate are rejected', () => {
   const mutations = [
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/dingtalk-login-repair.db.test.ts \\\n', '') },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },

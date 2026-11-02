@@ -644,7 +644,7 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
   )
 }
 
-async function issueAuthSessionToken(user: User, req: Request): Promise<string> {
+async function issueAuthSessionToken(user: User, req: Request, expectedAccessGeneration?: number): Promise<string> {
   const sessionId = randomUUID()
   const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
   const tokenUser = tenantId ? { ...user, tenantId } : user
@@ -652,12 +652,14 @@ async function issueAuthSessionToken(user: User, req: Request): Promise<string> 
   const payload = authService.readTokenPayload(token)
 
   if (payload?.exp) {
-    await createUserSession(user.id, {
+    const session = await createUserSession(user.id, {
       sessionId,
+      expectedAccessGeneration,
       expiresAt: new Date(payload.exp * 1000).toISOString(),
       ipAddress: getClientIP(req),
       userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
+    if (!session) throw new DingTalkLoginPolicyError('Authentication changed; please sign in again', {statusCode:409,code:'authentication_changed'})
   }
 
   try {
@@ -1733,7 +1735,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req)
+    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
 
     logger.info(`DingTalk login for ${user.email} (openId: ${result.dingtalkUser.openId}, new: ${result.isNewUser})`)
 
@@ -1846,7 +1848,7 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req)
+    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
 
     logger.info(`DingTalk container login for ${user.email} (unionId: ${result.dingtalkUser.unionId}, new: ${result.isNewUser})`)
 

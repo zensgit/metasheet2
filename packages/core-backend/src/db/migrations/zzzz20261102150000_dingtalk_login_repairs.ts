@@ -3,8 +3,9 @@ import { sql, type Kysely } from 'kysely'
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE TABLE dingtalk_login_repairs (
     id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES users(id), proof_nonce uuid NOT NULL UNIQUE,
-    state text NOT NULL CHECK(state IN ('applied','rolled_back')), before_identity text NOT NULL,
+    state text NOT NULL CHECK(state IN ('applied','rolled_back','released')), before_identity text NOT NULL,
     expected_identity jsonb NOT NULL, after_digest text NOT NULL, actor_id text NOT NULL,
+    source_account_ids uuid[] NOT NULL, source_integration_ids uuid[] NOT NULL, login_client_id text NOT NULL, after_segments jsonb, released_account_ids uuid[], CHECK(state <> 'released' OR released_account_ids IS NOT NULL),
     created_at timestamptz NOT NULL DEFAULT now(), rollback_actor_id text, rolled_back_at timestamptz
   )`.execute(db)
   await sql`CREATE UNIQUE INDEX dingtalk_login_repairs_active ON dingtalk_login_repairs(user_id) WHERE state='applied'`.execute(
@@ -26,8 +27,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     IF pinned IS NOT NULL THEN
       IF (TG_OP='UPDATE' AND (NEW.provider IS DISTINCT FROM OLD.provider OR NEW.local_user_id IS DISTINCT FROM OLD.local_user_id))
         OR NEW.external_key IS DISTINCT FROM pinned->>'external_key'
-        OR NEW.corp_id IS DISTINCT FROM pinned->>'corp_id'
         OR NEW.provider_open_id IS DISTINCT FROM pinned->>'provider_open_id'
+        OR NEW.corp_id IS DISTINCT FROM pinned->>'corp_id'
         OR NEW.provider_union_id IS DISTINCT FROM pinned->>'provider_union_id' THEN
         RAISE EXCEPTION 'repaired login identity is pinned' USING ERRCODE='55000';
       END IF;
@@ -41,12 +42,33 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE TRIGGER dingtalk_repaired_identity_insert BEFORE INSERT ON user_external_identities FOR EACH ROW WHEN (NEW.provider='dingtalk') EXECUTE FUNCTION guard_dingtalk_repaired_identity()`.execute(
     db,
   )
+  await sql`CREATE FUNCTION guard_repaired_directory_link() RETURNS trigger LANGUAGE plpgsql AS $$
+  DECLARE allowed uuid[];
+  BEGIN
+    IF NEW.link_status='linked' AND NEW.local_user_id IS NOT NULL THEN
+      PERFORM id FROM users WHERE id=NEW.local_user_id FOR SHARE;
+      SELECT CASE WHEN state='released' THEN released_account_ids ELSE source_account_ids END INTO allowed
+      FROM dingtalk_login_repairs WHERE user_id=NEW.local_user_id AND state IN ('applied','released')
+      ORDER BY CASE WHEN state='applied' THEN 0 ELSE 1 END,created_at DESC,id DESC LIMIT 1;
+      IF allowed IS NOT NULL AND NOT (NEW.directory_account_id=ANY(allowed)) THEN
+        RAISE EXCEPTION 'repair blocks a second directory source' USING ERRCODE='55000';
+      END IF;
+    END IF;
+    RETURN NEW;
+  END $$`.execute(db)
+  await sql`CREATE TRIGGER repaired_directory_link BEFORE INSERT OR UPDATE ON directory_account_links FOR EACH ROW EXECUTE FUNCTION guard_repaired_directory_link()`.execute(
+    db,
+  )
 }
 export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DO $$ BEGIN IF EXISTS(SELECT 1 FROM dingtalk_login_repairs) THEN
     RAISE EXCEPTION 'login repair history must be retained'; END IF; END $$`.execute(
     db,
   )
+  await sql`DROP TRIGGER repaired_directory_link ON directory_account_links`.execute(
+    db,
+  )
+  await sql`DROP FUNCTION guard_repaired_directory_link()`.execute(db)
   await sql`DROP TRIGGER dingtalk_repaired_identity_insert ON user_external_identities`.execute(
     db,
   )
