@@ -235,21 +235,43 @@ function taskStatusClause(status: string | undefined): string {
   return TASK_STATUS_CLAUSE[value as TaskStatusFilter]
 }
 
-function taskViewCondition(input: { orgId: string; actorId: string; view: string; status?: string }) {
+// Basic title search on `GET /api/tasks?q=`: a literal, case-insensitive substring of the title, on
+// top of the view and status. The value is normalized the way a title is when it is stored (NFC,
+// edge trim), so a query matches the stored spelling; the limit counts code points, like the list
+// name's. Nothing left after the trim, text Postgres cannot take as a parameter, or a longer value
+// is 422 INVALID_QUERY. An absent query adds no clause and no parameter.
+const TASK_SEARCH_MAX_CODEPOINTS = 100
+
+function escapeTaskSearchTerm(term: string): string {
+  return term.replace(/[\\%_]/g, '\\$&')
+}
+
+function taskSearchPattern(q: string): string {
+  const term = normalizeUserText(q)
+  if (term === null || !isStorableText(term) || [...term].length > TASK_SEARCH_MAX_CODEPOINTS) fail(422, 'INVALID_QUERY')
+  return `%${escapeTaskSearchTerm(term)}%`
+}
+
+function taskViewCondition(input: { orgId: string; actorId: string; view: string; status?: string; q?: string }) {
   if (!TASK_VIEWS.includes(input.view as TaskView)) fail(422, 'INVALID_VIEW')
   const statusClause = taskStatusClause(input.status)
+  const pattern = input.q === undefined ? null : taskSearchPattern(input.q)
   const cond = buildTaskScopeCondition({
     view: input.view as TaskView,
     actorParam: input.actorId,
     orgParam: input.orgId,
   })
-  return { sql: `${cond.sql}${statusClause}`, params: cond.params }
+  if (pattern === null) return { sql: `${cond.sql}${statusClause}`, params: cond.params }
+  // After the view and status clauses, numbered after the condition's own parameters; `pageClause`
+  // numbers on from there.
+  const params = [...cond.params, pattern]
+  return { sql: `${cond.sql}${statusClause} AND tasks.title ILIKE $${params.length} ESCAPE '\\'`, params }
 }
 
 // ASSUMPTION(task-m4): [own-10] the list functions keep their array return; the routes pair each
 // with the matching count function to build `{ items, total }`. RULED(2026-10-07): [R04] list
 // identity never enters these view arms.
-export async function listTasks(input: { orgId: string; actorId: string; view: string; status?: string; page?: TaskPageParams }): Promise<Row[]> {
+export async function listTasks(input: { orgId: string; actorId: string; view: string; status?: string; q?: string; page?: TaskPageParams }): Promise<Row[]> {
   const cond = taskViewCondition(input)
   const paged = pageClause(cond.params, pageOrDefault(input.page))
   const result = await query<Row>(
@@ -259,8 +281,8 @@ export async function listTasks(input: { orgId: string; actorId: string; view: s
   return result.rows
 }
 
-/** Unpaged row count under the same view and status condition as `listTasks`. */
-export async function countTasks(input: { orgId: string; actorId: string; view: string; status?: string }): Promise<number> {
+/** Unpaged row count under the same view, status and search condition as `listTasks`. */
+export async function countTasks(input: { orgId: string; actorId: string; view: string; status?: string; q?: string }): Promise<number> {
   const cond = taskViewCondition(input)
   const result = await query<{ n: string }>(
     `SELECT count(*)::text AS n FROM tasks WHERE ${cond.sql}`,

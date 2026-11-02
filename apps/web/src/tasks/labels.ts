@@ -46,6 +46,13 @@ export const TASKS_ZH = {
   createdHiddenByViewAndFilter: '任务已创建。当前视图和筛选下，列表中不显示它。',
   createdHiddenShowOpen: '查看未完成任务',
   createdHiddenOpenTask: '打开新任务',
+  // the same, when the new task's title does not hold the search text
+  createdHiddenBySearch: '任务已创建。当前搜索条件下，列表中不显示它。',
+  // the list page's title search
+  searchLabel: '按标题搜索任务',
+  searchPlaceholder: '搜索任务标题',
+  searchInvalid: '搜索内容无效，请修改后重试',
+  listEmptySearch: '当前筛选下没有标题匹配的任务',
   listEmpty: '暂无任务',
   // G2-core: the empty line names the status filter it was read under.
   listEmptyOpen: '暂无未完成任务',
@@ -398,6 +405,11 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   createdHiddenByViewAndFilter: 'Task created. The current view and filter do not show it.',
   createdHiddenShowOpen: 'Show tasks not completed',
   createdHiddenOpenTask: 'Open the new task',
+  createdHiddenBySearch: 'Task created. The current search does not show it.',
+  searchLabel: 'Search tasks by title',
+  searchPlaceholder: 'Search task titles',
+  searchInvalid: 'This search cannot be used. Please change it and try again.',
+  listEmptySearch: 'No task titles match under the current filter',
   listEmpty: 'No tasks yet',
   listEmptyOpen: 'No incomplete tasks',
   listEmptyDone: 'No completed tasks',
@@ -704,6 +716,7 @@ export const TASKS_FMT_ZH = {
   groupsDeletePrompt: (name: string): string => `确认删除分组「${name}」？其中的任务将回到默认分组`,
   /** G2-core (design §4.1): placed tasks the status filter leaves out; moves still count them. */
   groupsHiddenByFilter: (count: number): string => `另有 ${count} 项已分组任务不在当前状态筛选中，未显示`,
+  groupsHiddenBySearch: (count: number): string => `另有 ${count} 项已分组任务不在当前搜索结果中，未显示`,
 }
 
 export type TasksFmt = typeof TASKS_FMT_ZH
@@ -732,6 +745,8 @@ export const TASKS_FMT_EN: { [K in keyof TasksFmt]: (...args: Parameters<TasksFm
   groupsRenameNamed: (name) => `Rename group "${name}"`,
   groupsDeleteNamed: (name) => `Delete group "${name}"`,
   groupsDeletePrompt: (name) => `Delete group "${name}"? Its tasks go back to the default group.`,
+  groupsHiddenBySearch: (count) =>
+    count === 1 ? '1 more grouped task is not in the current search results and is not shown' : `${count} more grouped tasks are not in the current search results and are not shown`,
   groupsHiddenByFilter: (count) =>
     count === 1
       ? '1 grouped task is outside the status filter and not shown'

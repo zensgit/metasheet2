@@ -463,6 +463,19 @@
                 @click="switchStatus(statusOption.value)"
               >{{ t[statusOption.labelKey] }}</button>
             </nav>
+            <!-- Title search, on top of the view and the status above. The box stays on the page while
+                 the rows below reload, so typing keeps its focus. -->
+            <div class="tasks-view__search">
+              <input
+                v-model="searchInput"
+                type="search"
+                class="tasks-view__search-input"
+                data-testid="tasks-search-input"
+                :maxlength="TASK_SEARCH_MAX_LENGTH"
+                :placeholder="t.searchPlaceholder"
+                :aria-label="t.searchLabel"
+              />
+            </div>
 
             <form class="tasks-view__create" data-testid="tasks-create-form" @submit.prevent="onCreate">
               <input
@@ -519,8 +532,11 @@
                  viewer (it is their remembered choice). The new task's page is always offered.
                  The 未完成 switch is offered only in a view that lists the new task; in 关注中 /
                  我委派的 the view leaves it out under any status, so the copy does not put it down
-                 to the filter alone. Cleared by the next create, a status or view switch, and a
-                 route change.
+                 to the filter alone. The search is named only when the view and status would
+                 otherwise list the new task, with the task's page only; when the view or status also
+                 leaves it out, their copy stands. Cleared by the next create, a status or view
+                 switch, and a route change. A search change drops only the search's reason, so a
+                 task the status or view still leaves out keeps its notice.
                  The role="status" region is always mounted and only its content comes and goes: a
                  polite live region that enters the page together with its text is not reliably
                  announced, while a change inside an existing one is. Empty, it takes no space. -->
@@ -531,10 +547,12 @@
                 data-testid="tasks-create-hidden-notice"
               >
                 <span data-testid="tasks-create-hidden-text">{{
-                  createdHidden.viewLists ? t.createdHiddenByFilter : t.createdHiddenByViewAndFilter
+                  createdHidden.bySearch && createdHidden.viewLists && !createdHidden.byStatus
+                    ? t.createdHiddenBySearch
+                    : createdHidden.viewLists ? t.createdHiddenByFilter : t.createdHiddenByViewAndFilter
                 }}</span>
                 <button
-                  v-if="createdHidden.viewLists"
+                  v-if="createdHidden.viewLists && createdHidden.byStatus"
                   type="button"
                   data-testid="tasks-create-hidden-show-open"
                   @click="onShowOpenFromNotice"
@@ -564,7 +582,8 @@
             <TaskPersonalGroups
               v-if="listResult.kind === 'ok' && currentView === 'assigned'"
               :items="listResult.items"
-              :rows-filtered="currentStatus !== 'all'"
+              :rows-filtered="currentStatus !== 'all' || activeSearch !== ''"
+              :rows-searched="activeSearch !== ''"
               :rows-truncated="listResult.truncated"
               :reload-items="reloadListQuietly"
               @org-missing="onListsOrgMissing"
@@ -624,15 +643,19 @@
                 >{{ t.reopen }}</button>
               </li>
             </ul>
-            <p v-else-if="listResult.kind === 'empty'" class="tasks-view__message" data-testid="tasks-list-empty">
-              {{ currentStatus === 'open' ? t.listEmptyOpen : currentStatus === 'done' ? t.listEmptyDone : t.listEmpty }}
-            </p>
             <p v-else-if="listResult.kind === 'error'" class="tasks-view__message" data-testid="tasks-list-error" role="alert">
-              {{ t.listLoadFailed }}
+              {{ listResult.invalidSearch === true ? t.searchInvalid : t.listLoadFailed }}
             </p>
-            <p v-else class="tasks-view__message" data-testid="tasks-list-loading">
+            <p v-else-if="listResult.kind === 'loading'" class="tasks-view__message" data-testid="tasks-list-loading">
               {{ t.loading }}
             </p>
+            <!-- The empty line, including the search's no-match text, is said in an always-mounted
+                 polite region, for the same reason as the created-task notice above. -->
+            <div data-testid="tasks-list-empty-live" role="status">
+              <p v-if="listResult.kind === 'empty'" class="tasks-view__message" data-testid="tasks-list-empty">
+                {{ activeSearch !== '' ? t.listEmptySearch : currentStatus === 'open' ? t.listEmptyOpen : currentStatus === 'done' ? t.listEmptyDone : t.listEmpty }}
+              </p>
+            </div>
           </div>
         </div>
       </template>
@@ -714,6 +737,7 @@ import {
   viewListsNewTask,
   writeTaskStatusFilter,
 } from '../../tasks/tasksStatusFilter'
+import { TASK_SEARCH_DEBOUNCE_MS, TASK_SEARCH_MAX_LENGTH, taskSearchTerm, titleHoldsTaskSearch } from '../../tasks/tasksSearch'
 import { completeNoopReason, offersReopenAll, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
 import {
   buildCreateDue,
@@ -778,6 +802,19 @@ const STATUS_FILTERS: Array<{ value: TaskStatusFilter; labelKey: keyof TasksText
 
 const currentStatus = ref<TaskStatusFilter>(readTaskStatusFilter())
 
+// Title search. `searchInput` is the box; `activeSearch` is its normalized text, the term the server
+// searches for, which the list reads under behind a debounce (see `watch(searchInput, ...)`). Kept across view and status switches and across
+// a visit to a task's page, like the view and status; not remembered per browser.
+const searchInput = ref('')
+const activeSearch = ref('')
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearSearchTimer(): void {
+  if (searchTimer === null) return
+  clearTimeout(searchTimer)
+  searchTimer = null
+}
+
 type ListRenderState =
   | { kind: 'loading' }
   // `truncated`: the read stopped short of its `total` (G2-core: handed to the assigned view's
@@ -785,7 +822,10 @@ type ListRenderState =
   // filter leaves out).
   | { kind: 'ok'; items: TaskListItem[]; truncated: boolean }
   | { kind: 'empty' }
-  | { kind: 'error' }
+  // `invalidSearch`: the server refused the search text (only text the box cannot rule out itself,
+  // such as a paste that normalizes to more than the limit), so the viewer can act on it unlike a
+  // failed read.
+  | { kind: 'error'; invalidSearch?: boolean }
 
 const listResult = ref<ListRenderState>({ kind: 'loading' })
 
@@ -829,7 +869,9 @@ const createErrorCode = ref<string | null>(null)
 // list (`statusFilterHidesNewTask`), shown as an inline notice; `null` otherwise. `viewLists` is
 // whether the view it was made under lists it at all (`viewListsNewTask`), fixed at create time:
 // only then does switching the status filter reach it.
-const createdHidden = ref<{ id: string; viewLists: boolean } | null>(null)
+// `byStatus`: the status filter leaves it out. `bySearch`: the new title does not hold the active
+// search text. Each reason is fixed at create time; a search change drops only `bySearch`.
+const createdHidden = ref<{ id: string; viewLists: boolean; byStatus: boolean; bySearch: boolean } | null>(null)
 // The status switch's nav, for moving focus after the notice's action removes the notice.
 const statusSwitcherRef = ref<HTMLElement | null>(null)
 
@@ -1013,11 +1055,24 @@ let listGeneration = 0
 // an await means the response belongs to a page the viewer isn't looking at anymore.
 let listPageToken = 0
 
+/** The list read both loaders make. Without search text the call keeps its three arguments, so the
+ *  request is the one the page sent before search existed. */
+function readList(): ReturnType<typeof listTasks> {
+  const q = activeSearch.value
+  return q === ''
+    ? listTasks(currentView.value, undefined, currentStatus.value)
+    : listTasks(currentView.value, undefined, currentStatus.value, q)
+}
+
+function failedListState(result: { kind: string; status?: number }): ListRenderState {
+  return { kind: 'error', invalidSearch: result.kind === 'error' && result.status === 422 && activeSearch.value !== '' }
+}
+
 async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
   listResult.value = { kind: 'loading' }
-  const result = await listTasks(currentView.value, undefined, currentStatus.value)
+  const result = await readList()
   if (mine !== listGeneration) return
 
   if (result.kind === 'ok') {
@@ -1034,7 +1089,7 @@ async function loadList(): Promise<void> {
   // 'predicate_error' | 'forbidden' | 'not_found' | 'error': all render as the same discriminable
   // failure state (distinct from 'empty' — an empty 200 and a failed load must never look the
   // same), but 'predicate_error' specifically must NOT set `orgMissingFromAction`.
-  listResult.value = { kind: 'error' }
+  listResult.value = failedListState(result)
 }
 
 /** M4 (design §4.6, `[fe-40]`): the list re-read in place for the assigned view's grouping board
@@ -1044,7 +1099,7 @@ async function loadList(): Promise<void> {
 async function reloadListQuietly(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
-  const result = await listTasks(currentView.value, undefined, currentStatus.value)
+  const result = await readList()
   if (mine !== listGeneration) return
   if (result.kind === 'ok') {
     listResult.value =
@@ -1057,7 +1112,7 @@ async function reloadListQuietly(): Promise<void> {
     orgMissingFromAction.value = true
     return
   }
-  listResult.value = { kind: 'error' }
+  listResult.value = failedListState(result)
 }
 
 // Same out-of-order-resolution discipline as `listGeneration` above, for the detail read: a
@@ -1122,6 +1177,34 @@ function switchStatus(status: TaskStatusFilter): void {
   void loadList()
 }
 
+/** Same page-moved-on discipline as `switchStatus`. The page reads from the first row (it sends no
+ *  offset), so a new query always starts there. */
+function applySearch(q: string): void {
+  if (q === activeSearch.value) return
+  listPageToken += 1
+  const hidden = createdHidden.value
+  createdHidden.value = hidden !== null && (hidden.byStatus || !hidden.viewLists) ? { ...hidden, bySearch: false } : null
+  activeSearch.value = q
+  void loadList()
+}
+
+// `v-model` on the box does not update during an IME composition, so unfinished pinyin is not
+// searched. Clearing the box, or leaving nothing in it but blanks and zero-width marks, restores the
+// list at once; text that normalizes to the active query reads nothing.
+watch(searchInput, (raw) => {
+  clearSearchTimer()
+  const q = taskSearchTerm(raw)
+  if (q === '') {
+    applySearch('')
+    return
+  }
+  if (q === activeSearch.value) return
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    applySearch(q)
+  }, TASK_SEARCH_DEBOUNCE_MS)
+})
+
 /** The hidden-by-filter notice's action: the same switch as pressing 未完成. The notice (and the
  *  button that was pressed) goes away, so focus moves to the 未完成 button it pressed for the
  *  viewer instead of falling back to the page body. */
@@ -1171,9 +1254,12 @@ async function onCreate(): Promise<void> {
     if (result.kind === 'ok') {
       clearCreateForm()
       notifyTasksChanged()
-      // Decided from the filter alone (a new task is never completed), not from the reloaded rows.
-      if (statusFilterHidesNewTask(currentStatus.value)) {
-        createdHidden.value = { id: result.id, viewLists: viewListsNewTask(currentView.value) }
+      // Decided from the filter and the search text alone (a new task is never completed), not from
+      // the reloaded rows.
+      const bySearch = activeSearch.value !== '' && !titleHoldsTaskSearch(title, activeSearch.value)
+      const byStatus = statusFilterHidesNewTask(currentStatus.value)
+      if (bySearch || byStatus) {
+        createdHidden.value = { id: result.id, viewLists: viewListsNewTask(currentView.value), byStatus, bySearch }
       }
       await loadList()
     } else if (result.kind === 'org_missing') {
@@ -1962,6 +2048,7 @@ const unsubscribeLists = onListsChanged(() => {
 
 onBeforeUnmount(() => {
   unsubscribeLists()
+  clearSearchTimer()
 })
 
 /** The lists sidebar's read or create, or a grouping-board write, reported no org selected: the
@@ -2049,6 +2136,10 @@ watch(taskId, (id) => {
   // as stale too.
   listPageToken += 1
   createdHidden.value = null
+  // Text still waiting on the debounce is taken as typed: no read now (the viewer left the list), and
+  // the list this route edge or the way back loads reads under what the box shows.
+  clearSearchTimer()
+  activeSearch.value = taskSearchTerm(searchInput.value)
   // A list READ still in flight from before this navigation is stale too: bump the generation so
   // its late result (including a late org_missing) cannot paint over the page now showing.
   listGeneration += 1
@@ -2175,6 +2266,16 @@ onMounted(async () => {
   display: flex;
   gap: 8px;
   margin: 12px 0;
+}
+
+.tasks-view__search {
+  margin: 12px 0;
+}
+
+.tasks-view__search-input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 320px;
 }
 
 .tasks-view__create {

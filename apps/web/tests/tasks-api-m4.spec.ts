@@ -561,6 +561,33 @@ describe('listTasks — page and total', () => {
     expect(lastCall()[0]).toBe('/api/tasks?view=delegated')
   })
 
+  it('search: q is sent encoded after the status and before the page; absent or empty leaves the string unchanged', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], total: 0 }))
+    await listTasks('assigned', undefined, 'open', 'alpha')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open&q=alpha')
+    await listTasks('created', { offset: 100 }, 'done', 'alpha')
+    expect(lastCall()[0]).toBe(`/api/tasks?view=created&status=done&q=alpha&limit=${TASK_PAGE_LIMIT}&offset=100`)
+    await listTasks('assigned', undefined, undefined, 'alpha')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&q=alpha')
+    await listTasks('assigned', undefined, 'all', '100% a_b\\c&d=e 任务')
+    expect(lastCall()[0]).toBe(`/api/tasks?view=assigned&status=all&q=${encodeURIComponent('100% a_b\\c&d=e 任务')}`)
+    await listTasks('assigned', undefined, 'open', undefined)
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open')
+    await listTasks('assigned', undefined, 'open', '')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open')
+  })
+
+  it('search: text that cannot be encoded reads as a failed request, with nothing sent', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], total: 0 }))
+    await expect(listTasks('assigned', undefined, 'open', 'a\ud83d')).resolves.toEqual({ kind: 'error', status: 0 })
+    expect(h.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('search: a refused query keeps its status in the error result', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'INVALID_QUERY' } }))
+    await expect(listTasks('assigned', undefined, 'open', '\u200b')).resolves.toEqual({ kind: 'error', status: 422 })
+  })
+
   it('G2-core: an unknown status answered as predicate_error reads as predicate_error, not as an empty list', async () => {
     h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], degraded: true, reason: 'predicate_error' }))
     await expect(listTasks('assigned', undefined, 'open')).resolves.toEqual({ kind: 'predicate_error' })
