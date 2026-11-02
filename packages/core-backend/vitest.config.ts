@@ -1216,6 +1216,7 @@ export default defineConfig({
       'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
       // Multi-timezone D1 requires a real database and must not enter the no-DB lane.
       'tests/integration/attendance-timezone-policy-routes.db.test.ts',
+      'tests/integration/attendance-approval-requester-display.db.test.ts',
       'tests/integration/attendance-business-trip.db.test.ts',
       'tests/integration/attendance-multitimezone-browser.db.test.ts',
       'tests/integration/attendance-timezone-policy-write-routes.db.test.ts',
