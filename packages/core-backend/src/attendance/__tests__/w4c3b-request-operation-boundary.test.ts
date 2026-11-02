@@ -4,6 +4,10 @@ import {
   AttendanceW4RequestBoundaryError,
   ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1,
   createAttendanceRequestOperationBoundaryV1,
+  requireAttendanceRequestDecisionCalculationWitnessV1,
+  recordAttendanceRequestDecisionCalculationResultV1,
+  type AttendanceRequestPluginTrxV1,
+  type AttendanceRequestOperationContextV1,
   type AttendanceRequestOperationAdapterV1,
 } from '../w4c3b-request-operation-boundary'
 
@@ -352,5 +356,165 @@ describe('W4C-3b request operation boundary', () => {
     ).rejects.toBeInstanceOf(AttendanceW4RequestBoundaryError)
 
     expect(acquireConnection).not.toHaveBeenCalled()
+  })
+})
+
+
+function ep01DecisionAdapters() {
+  const configured = adapters([])
+  const original = configured.request_decision
+  const withDecisionPayload = (prepared: ReturnType<typeof preparedState>) => ({
+    ...prepared,
+    commandPayload: {
+      requestId: REQUEST_ID, approvalRef: REQUEST_ID, expectedApprovalVersion: 0,
+      expectedApprovalNode: 'node-1', action: 'approve', decisionChannel: 'web',
+      comment: null, meta: null,
+    },
+  })
+  configured.request_decision = {
+    ...original,
+    async prepareIdentity(trx, routeInput, operation) {
+      return withDecisionPayload(await original.prepareIdentity(trx, routeInput, operation) as ReturnType<typeof preparedState>)
+    },
+    async prepare(trx, routeInput, operation) {
+      return withDecisionPayload(await original.prepare(trx, routeInput, operation) as ReturnType<typeof preparedState>)
+    },
+  }
+  return configured
+}
+
+describe('EP01 decision calculation execution authority', () => {
+  it.each(['success', 'throw'] as const)('admits only the live matching decision and expires on %s', async (ending) => {
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ORG_ID
+    const client = fakeClient('shadow')
+    const configured = ep01DecisionAdapters()
+    const original = configured.request_decision.execute
+    let saved: { trx: AttendanceRequestPluginTrxV1; operation: AttendanceRequestOperationContextV1 } | undefined
+    configured.request_decision = {
+      ...configured.request_decision,
+      async execute(trx, prepared, operation) {
+        saved = { trx, operation }
+        const witness = requireAttendanceRequestDecisionCalculationWitnessV1(trx, operation)
+        expect(witness.trx).toBe(client)
+        expect(witness.org.orgId).toBe(ORG_ID)
+        expect(witness.org.acceptedWritePosture).toBe('shadow')
+        expect(witness.subjectUserId).toBe(USER_ID)
+        expect(witness.actorId).toBe(USER_ID)
+        expect(witness.identity.id).toBe(OPERATION_ID)
+        expect(Object.isFrozen(witness)).toBe(true)
+        const before = client.calls.length
+        for (const [facade, context] of [[{ ...trx }, operation], [trx, { ...operation }]] as const) {
+          expect(() => requireAttendanceRequestDecisionCalculationWitnessV1(facade, context))
+            .toThrowError('W4C3B_REQUEST_CALCULATION_WITNESS_REQUIRED')
+        }
+        expect(client.calls).toHaveLength(before)
+        if (ending === 'throw') throw new Error('EP01_SYNTHETIC_EXECUTION_FAILURE')
+        return original(trx, prepared, operation)
+      },
+    }
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => ({ client, release: vi.fn() }), adapters: configured,
+    })
+    const result = boundary.execute({
+      kind: 'request_decision', operationId: OPERATION_ID,
+      correlationId: 'ep01-witness', routeVariant: null, routeInput: {},
+    })
+    if (ending === 'throw') await expect(result).rejects.toThrow('EP01_SYNTHETIC_EXECUTION_FAILURE')
+    else await expect(result).resolves.toEqual({ kind: 'executed', response: { id: REQUEST_ID } })
+    expect(saved).toBeDefined()
+    const before = client.calls.length
+    expect(() => requireAttendanceRequestDecisionCalculationWitnessV1(saved!.trx, saved!.operation))
+      .toThrowError('W4C3B_REQUEST_CALCULATION_WITNESS_REQUIRED')
+    expect(client.calls).toHaveLength(before)
+  })
+
+  it.each(['legacy', 'non_decision'] as const)('does not mint authority for %s', async (caseKind) => {
+    if (caseKind === 'legacy') delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ORG_ID
+    const client = fakeClient(caseKind === 'legacy' ? null : 'shadow')
+    const configured = ep01DecisionAdapters()
+    const kind = caseKind === 'legacy' ? 'request_decision' : 'request_create'
+    const original = configured[kind].execute
+    configured[kind] = {
+      ...configured[kind],
+      async execute(trx, prepared, operation) {
+        const before = client.calls.length
+        expect(() => requireAttendanceRequestDecisionCalculationWitnessV1(trx, operation))
+          .toThrowError('W4C3B_REQUEST_CALCULATION_WITNESS_REQUIRED')
+        expect(client.calls).toHaveLength(before)
+        return original(trx, prepared, operation)
+      },
+    }
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => ({ client, release: vi.fn() }), adapters: configured,
+    })
+    await expect(boundary.execute({
+      kind, operationId: OPERATION_ID, correlationId: 'ep01-witness-negative',
+      routeVariant: kind === 'request_create' ? 'generic' : null, routeInput: {},
+    })).resolves.toEqual({
+      kind: caseKind === 'legacy' ? 'legacy_compat' : 'executed',
+      response: { id: REQUEST_ID },
+    })
+  })
+})
+
+
+describe('EP01 private calculation result seal', () => {
+  it.each(['success', 'throw'] as const)('keeps proof private and cleans up on %s', async (ending) => {
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ORG_ID
+    const client = fakeClient('shadow')
+    const configured = ep01DecisionAdapters()
+    const original = configured.request_decision.execute
+    const proof = {
+      resolvedRecordId: '55555555-5555-4555-8555-555555555555',
+      resolvedCalculationId: '66666666-6666-4666-8666-666666666666',
+      resultSemanticFingerprint: 'a'.repeat(64),
+      resultProvenanceFingerprint: 'b'.repeat(64),
+    }
+    let saved: { trx: AttendanceRequestPluginTrxV1; operation: AttendanceRequestOperationContextV1 } | undefined
+    configured.request_decision = {
+      ...configured.request_decision,
+      async execute(trx, prepared, operation) {
+        saved = { trx, operation }
+        const copy = { ...proof }
+        const before = client.calls.length
+        for (const [facade, context] of [[{ ...trx }, operation], [trx, { ...operation }]] as const) {
+          expect(() => recordAttendanceRequestDecisionCalculationResultV1(facade, context, copy))
+            .toThrowError('W4C3B_REQUEST_CALCULATION_WITNESS_REQUIRED')
+        }
+        expect(client.calls).toHaveLength(before)
+        recordAttendanceRequestDecisionCalculationResultV1(trx, operation, copy)
+        copy.resolvedCalculationId = OPERATION_ID
+        expect(() => recordAttendanceRequestDecisionCalculationResultV1(trx, operation, copy))
+          .toThrowError('W4C3B_REQUEST_CALCULATION_RESULT_ALREADY_RECORDED')
+        if (ending === 'throw') throw new Error('EP01_SYNTHETIC_AFTER_CALCULATION')
+        return original(trx, prepared, operation)
+      },
+    }
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => ({ client, release: vi.fn() }), adapters: configured,
+    })
+    const result = boundary.execute({
+      kind: 'request_decision', operationId: OPERATION_ID, correlationId: 'ep01-private-seal',
+      routeVariant: null, routeInput: {},
+    })
+    if (ending === 'throw') await expect(result).rejects.toThrow('EP01_SYNTHETIC_AFTER_CALCULATION')
+    else await expect(result).resolves.toEqual({ kind: 'executed', response: { id: REQUEST_ID } })
+    const seals = client.calls.filter(({ sqlText }) =>
+      sqlText.startsWith('UPDATE attendance_result_operations') && sqlText.includes("state = 'completed'"))
+    if (ending === 'throw') {
+      expect(seals).toEqual([])
+      expect(client.calls.some(({ sqlText }) => sqlText.includes('INSERT INTO attendance_result_event_outbox'))).toBe(false)
+    } else {
+      expect(seals).toHaveLength(1)
+      expect(seals[0]!.params.slice(4, 9)).toEqual([
+        proof.resolvedRecordId, proof.resolvedCalculationId, REQUEST_ID,
+        proof.resultSemanticFingerprint, proof.resultProvenanceFingerprint,
+      ])
+    }
+    const before = client.calls.length
+    expect(() => recordAttendanceRequestDecisionCalculationResultV1(saved!.trx, saved!.operation, proof))
+      .toThrowError('W4C3B_REQUEST_CALCULATION_WITNESS_REQUIRED')
+    expect(client.calls).toHaveLength(before)
   })
 })
