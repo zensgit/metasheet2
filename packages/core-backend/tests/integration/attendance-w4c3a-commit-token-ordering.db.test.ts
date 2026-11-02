@@ -1,3 +1,4 @@
+import { registerImportTokenConcurrencyNativeCases } from '../utils/attendance-import-token-concurrency-native'
 import { randomUUID } from 'node:crypto'
 import http from 'node:http'
 import net from 'node:net'
@@ -360,4 +361,15 @@ describeIfDatabase('W4C-3a M60 commit-token ordering (real routes, real PostgreS
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
   }, 120_000)
+})
+
+// Private consumer proof needs real PostgreSQL, not an additional HTTP server per counterfactual.
+describeIfDatabase('PSP02 shared token consumer (exact production source, native PostgreSQL)', () => {
+  let pool: Pool
+  beforeAll(() => {
+    if (!dbUrl) throw new Error('PSP02 requires a real database')
+    pool = new Pool({ connectionString: dbUrl })
+  })
+  afterAll(async () => { await pool?.end() })
+  registerImportTokenConcurrencyNativeCases(() => pool)
 })

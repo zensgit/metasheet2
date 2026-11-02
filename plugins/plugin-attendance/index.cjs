@@ -1,3 +1,4 @@
+const { consumePersistedAttendanceImportTokenV1 } = require('./lib/attendance-import-token-consumer.cjs')
 const crypto = require('crypto')
 const { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
 const {
@@ -67,6 +68,8 @@ const { registerAttendanceTimezonePolicyRoutes } = require('./lib/attendance-tim
 const { registerAttendanceTimezoneTargetRoutes } = require('./lib/attendance-timezone-target-routes.cjs')
 const { createAttendanceTimezoneReadContext, withTimezoneExportColumns } = require('./lib/attendance-timezone-read-context.cjs')
 const { createAttendanceTimezoneRuntime } = require('./lib/attendance-timezone-runtime.cjs')
+const { createAttendancePunchDetailProducerV1 } = require('./lib/attendance-punch-detail-producer.cjs')
+const { createAttendancePunchDetailPreviewAuthorizerV1 } = require('./lib/attendance-punch-detail-preview-authorizer.cjs')
 const { authorizeAttendanceTimezoneManage } = require('./lib/attendance-timezone-manage-authority.cjs')
 const { createBusinessTripService, getBusinessTripServerInstant } = require('./lib/attendance-business-trip.cjs')
 const { lockAttendanceTimezoneOrg, AttendanceTimezonePolicyError } = require('./lib/attendance-timezone-policy-store.cjs')
@@ -6044,6 +6047,29 @@ async function createImportCommitToken({ db, orgId, userId }) {
 }
 
 async function consumeImportCommitToken(token, { db, orgId, userId }) {
+  if (requireImportCommitToken) {
+    if (!db) {
+      throw new HttpError(
+        503,
+        'DB_NOT_READY',
+        'Database connection is required to validate import commit tokens.',
+      )
+    }
+    try {
+      const consumed = await consumePersistedAttendanceImportTokenV1(db, { token, orgId, userId })
+      importCommitTokens.delete(token)
+      return consumed
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        throw new HttpError(
+          503,
+          'DB_NOT_READY',
+          'Attendance import token table missing. Run migrations before enabling token enforcement.',
+        )
+      }
+      throw error
+    }
+  }
   pruneImportCommitTokens()
   const entry = importCommitTokens.get(token)
   if (entry) {
@@ -16227,7 +16253,7 @@ function createPluginAttendanceWorkDateResolver(db, options = {}) {
   const explicitActiveCurrentPort = options.activeCurrent ?? null
   const resolver = createAttendanceWorkDateResolver({
     toWorkDate,
-    buildZonedDate: options.effectiveTimezone === undefined ? buildZonedDate
+    buildZonedDate: options.effectiveTimezone === undefined && options.strictWallInstants !== true ? buildZonedDate
       : (...args) => attendanceTimezoneRuntime.uniqueWallInstant(...args),
     addDaysToDateKey,
     normalizeTimeString,
@@ -25513,6 +25539,11 @@ module.exports = {
       rejectUnauthenticatedAttendanceImportOrg(res)
       return null
     }
+    const authorizePunchDetailPreview = createAttendancePunchDetailPreviewAuthorizerV1({
+      createRbacHelpers, logger, loadAttendanceScopeContextForUser,
+      loadActiveAttendanceSchedulerScopesForActor, resolveAttendanceUserSchedulerScopeFacts,
+      attendanceSchedulerScopeAllowsActorActionFacts,
+    })
     const emitEvent = (type, data) => {
       if (context.api?.events?.emit) {
         context.api.events.emit(type, data)
@@ -26255,6 +26286,7 @@ module.exports = {
       'AttendanceW4AuthorizationError',
       'AttendanceW4LiveScheduledBoundaryError',
       'AttendanceW4RequestBoundaryError',
+      'AttendanceApprovedOvertimeInputError',
       'ApprovedLeaveCancellationError',
       'AttendanceW4MergePolicyError',
       // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
@@ -28588,6 +28620,7 @@ module.exports = {
 
 		    const mapImportJobRow = (row) => {
 		      const status = normalizeImportJobStatus(row.status)
+        if (row.punch_preview_version != null) throw new Error('ATTENDANCE_PUNCH_DETAIL_PREVIEW_VERIFICATION_REQUIRED')
 		      const isV1 = Number(row.w4_contract_version) === 1
 		      if (
 		        isV1 &&
@@ -28715,6 +28748,7 @@ module.exports = {
 		        job.created_at,
 		        job.updated_at,
 		        job.w4_contract_version,
+		        job.punch_preview_version,
 		        job.w4_legacy_input_fingerprint,
 		        job.w4_execution_reason_code,
 		        CASE
@@ -29136,7 +29170,7 @@ module.exports = {
 	        // Classification read only: discriminator + status. Never SELECT payload
 	        // (or SELECT *) before the V1 branch — V1 must not hydrate legacy payload.
 	        const classifyRows = await db.query(
-	          `SELECT id, status, w4_contract_version
+	          `SELECT id, status, w4_contract_version, punch_preview_version
 	             FROM attendance_import_jobs
 	            WHERE id = $1`,
 	          [rowId],
@@ -29144,6 +29178,15 @@ module.exports = {
 	        if (!classifyRows.length) return
 
 	        const classifyRow = classifyRows[0]
+            if (classifyRow.punch_preview_version != null) {
+              if (!ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED) return
+              if (classifyRow.punch_preview_version !== 1 || classifyRow.w4_contract_version != null
+                || typeof attendanceW4SegmentCalculationPort?.processPunchDetailPreviewJob !== 'function') {
+                throw new Error('ATTENDANCE_PUNCH_DETAIL_PREVIEW_HOST_MISSING')
+              }
+              await attendanceW4SegmentCalculationPort.processPunchDetailPreviewJob({ jobId: rowId }, authorizePunchDetailPreview)
+              return
+            }
 		        const status = normalizeImportJobStatus(classifyRow.status)
 		        const w4ContractVersionRaw = classifyRow.w4_contract_version
 		        const isV1 =
@@ -39385,6 +39428,10 @@ module.exports = {
           const resolvedAt = requestRow.request_type === 'business_trip' ? getBusinessTripServerInstant() : new Date()
           let finalOvertimeAnchor = null
           let lockedRequestSnapshot = null
+          let preparedOvertimeCalculation = null
+          let preparedOvertimeContext = null
+          let hideOvertimeReviewRecord = false
+          let terminalRequestBindResult = null
 
           // W4C-3b P12: lock latest immutable request snapshot BEFORE any terminal
           // approval/request DML. Authoritative + missing snapshot fails closed here
@@ -39424,6 +39471,27 @@ module.exports = {
                 422,
                 'OVERTIME_ATTRIBUTION_SNAPSHOT_MISMATCH',
                 'Overtime attribution snapshot does not match the request subject and work date',
+              )
+            }
+          }
+
+          if (action === 'approve' && isFinalApproval && requestType === 'overtime'
+            && (operation.acceptedWritePosture === 'authoritative' || operation.acceptedWritePosture === 'shadow')) {
+            if (!lockedRequestSnapshot || (lockedRequestSnapshot.kind !== 'locked'
+              && !(operation.acceptedWritePosture === 'shadow' && lockedRequestSnapshot.kind === 'missing_shadow_allowed'))) {
+              throw new HttpError(409, 'ATTENDANCE_OVERTIME_SNAPSHOT_UNSUPPORTED', 'Overtime calculation snapshot is unavailable')
+            }
+            if (typeof attendanceW4SegmentCalculationPort?.prepareApprovedOvertimeCalculation !== 'function'
+              || typeof attendanceW4SegmentCalculationPort?.readPreparedApprovedOvertimeContext !== 'function'
+              || typeof attendanceW4SegmentCalculationPort?.appendApprovedOvertimeCalculation !== 'function') {
+              throw new HttpError(503, 'ATTENDANCE_OVERTIME_CALCULATION_PORT_UNAVAILABLE', 'Overtime calculation is unavailable')
+            }
+            preparedOvertimeCalculation = await attendanceW4SegmentCalculationPort.prepareApprovedOvertimeCalculation({
+              facade: trx, operation, requestId, preTerminalSnapshot: lockedRequestSnapshot,
+            })
+            if (operation.acceptedWritePosture === 'authoritative') {
+              preparedOvertimeContext = attendanceW4SegmentCalculationPort.readPreparedApprovedOvertimeContext(
+                trx, operation, preparedOvertimeCalculation,
               )
             }
           }
@@ -39549,6 +39617,7 @@ module.exports = {
                   ? lockedRequestSnapshot.snapshot.payloadFingerprint
                   : undefined,
             })
+            terminalRequestBindResult = bindResult
             if (bindResult && (bindResult.kind === 'bound' || bindResult.kind === 'unsupported_pre_w4_shadow')) {
               nextMetadata[requestSnapshotTerminalBindingMetaKey] = bindResult.binding
             }
@@ -39848,10 +39917,12 @@ module.exports = {
               }
             }
             const frozenTarget = freshRequestTimezoneTargets.get(trx)
-            const baseRule = frozenTarget?.rule ?? await loadDefaultRule(trx, orgId)
-            const context = frozenTarget
-              ? {rule:frozenTarget.rule,isWorkingDay:frozenTarget.isWorkingDay,holiday:null}
-              : await resolveWorkContext({
+            const baseRule = preparedOvertimeContext ? null : frozenTarget?.rule ?? await loadDefaultRule(trx, orgId)
+            const context = preparedOvertimeContext
+              ? { rule: { timezone: preparedOvertimeContext.timezone }, isWorkingDay: preparedOvertimeContext.isWorkday, holiday: null }
+              : frozenTarget
+                ? {rule:frozenTarget.rule,isWorkingDay:frozenTarget.isWorkingDay,holiday:null}
+                : await resolveWorkContext({
                   db: trx,
                   orgId,
                   userId: requestRow.user_id,
@@ -39922,6 +39993,21 @@ module.exports = {
                 existingRow: existingCorrectionRow,
                 client: trx,
               })
+            } else if (preparedOvertimeCalculation && operation.acceptedWritePosture === 'authoritative') {
+              const calculated = await attendanceW4SegmentCalculationPort.appendApprovedOvertimeCalculation({
+                facade: trx, operation, prepared: preparedOvertimeCalculation,
+                bindResult: terminalRequestBindResult,
+              })
+              const calculatedRows = await trx.query(
+                'SELECT * FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND id = $3::uuid',
+                [orgId, requestRow.user_id, calculated.recordId],
+              )
+              record = calculatedRows[0]
+              if (!record) {
+                throw new HttpError(409, 'ATTENDANCE_OVERTIME_RESULT_RECORD_MISSING', 'Overtime calculation record is unavailable')
+              }
+              hideOvertimeReviewRecord = calculated.outcome === 'review_required'
+                && record.visibility_state === 'retired' && record.visibility_reason === 'review_placeholder'
             } else if (requestType === 'leave' || requestType === 'overtime') {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
               const overtimeRecordMeta = requestType === 'overtime' && finalOvertimeAnchor
@@ -39961,6 +40047,17 @@ module.exports = {
                 meta: overtimeRecordMeta,
                 client: trx,
               })
+              if (preparedOvertimeCalculation && operation.acceptedWritePosture === 'shadow') {
+                // Keep the served legacy projection; comparison persistence is mandatory
+                // in this same approval transaction and never takes the W4 pointer.
+                const compared = await attendanceW4SegmentCalculationPort.appendApprovedOvertimeCalculation({
+                  facade: trx, operation, prepared: preparedOvertimeCalculation,
+                  bindResult: terminalRequestBindResult,
+                })
+                if (!record || compared.recordId !== record.id) {
+                  throw new HttpError(409, 'ATTENDANCE_OVERTIME_RESULT_RECORD_MISSING', 'Overtime calculation record is unavailable')
+                }
+              }
             } else if (requestType === 'outdoor_punch') {
               // ② S3 外勤审批 (#2304): final approve materialises the deferred outdoor punch as ONE real
               // punch event (the original eventType + occurredAt, source='outdoor_approval') and appends the
@@ -40094,7 +40191,7 @@ module.exports = {
           return {
             requestId,
             status: isFinalApproval ? newStatus : 'pending',
-            record,
+            record: hideOvertimeReviewRecord ? null : record,
             orgId: null,
             userId: requestRow.user_id,
             approvalStep: {
@@ -43342,10 +43439,23 @@ module.exports = {
       }
     )
 
+    const punchDetailImportProducer = createAttendancePunchDetailProducerV1({
+      HttpError, port: attendanceW4SegmentCalculationPort, db, randomUUID,
+      requireImportCommitToken, consumeImportCommitToken,
+      mapImportJobRow, enqueueImportJob, authorizePunchDetailPreview,
+      assertAttendanceImportPrepareAllowed, assertAttendanceImportPreviewAllowed, assertAttendanceImportCommitAllowed,
+      resolveImportEngineByRowCount,
+      resolveImportRecordUpsertStrategy, resolveImportItemsInsertStrategy, resolveImportChunkConfig,
+      loadDefaultRule, createWorkDateResolver: createPluginAttendanceWorkDateResolver,
+      loadShiftById, resolveWorkContext, issueFrozenContext: issueW4FrozenContextForProducerV1,
+      parseOvertimeAttribution: parseOvertimeAttributionV1,
+    })
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import/preview',
       async (req, res) => {
+        if (await punchDetailImportProducer.tryHandleSync('preview', req, res)) return
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -43915,6 +44025,7 @@ module.exports = {
       'POST',
       '/api/attendance/import/commit',
       async (req, res) => {
+        if (await punchDetailImportProducer.tryHandleSync('commit', req, res)) return
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -43934,6 +44045,7 @@ module.exports = {
 	        if (importAccess.fullImport && idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 	          if (existing) {
+            if (punchDetailImportProducer.rejectDailyReplay(existing, res)) return
 	            const existingRowCount = existing.imported + existing.skipped
 	            const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
 	            res.json({
@@ -44050,6 +44162,7 @@ module.exports = {
 	        if (!importAccess.fullImport && idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey, { createdBy: requesterId })
 	          if (existing) {
+            if (punchDetailImportProducer.rejectDailyReplay(existing, res)) return
 	            const existingRowCount = existing.imported + existing.skipped
 	            const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
 	            res.json({
@@ -44254,6 +44367,7 @@ module.exports = {
 	                  importAccess.fullImport ? undefined : { createdBy: requesterId }
 	                )
                 if (existing) {
+            if (punchDetailImportProducer.rejectDailyReplay(existing, res)) return
                   const existingRowCount = existing.imported + existing.skipped
                   const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
                   res.json({
@@ -44305,6 +44419,7 @@ module.exports = {
           return
         }
 
+        if (await punchDetailImportProducer.tryHandleAsyncPreview(req, res)) return
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -44498,6 +44613,8 @@ module.exports = {
           res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Async import disabled' } })
           return
         }
+
+        if (await punchDetailImportProducer.tryHandleAsyncCommit(req, res)) return
 
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
@@ -44696,6 +44813,14 @@ module.exports = {
           const row = await loadImportJob(jobId, orgId)
           if (!row) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Import job not found' } })
+            return
+          }
+          if (row.punch_preview_version != null) {
+            if (!ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED) {
+              res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Async preview disabled' } })
+              return
+            }
+            await punchDetailImportProducer.handlePreviewJobRead(req, res, jobId)
             return
           }
           res.json({ ok: true, data: mapImportJobRow(row) })

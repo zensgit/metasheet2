@@ -4,11 +4,13 @@
 // classification ledger: a new read/write, a renamed enclosing wrapper, or a changed number of
 // sites fails instead of inheriting a broad operational-table allowlist.
 
-const { assertP25Use } = require('./table-classification.cjs')
+const { assertP25Use, P25_OPERATIONAL_TABLE_SPECS } = require('./table-classification.cjs')
 
 const P25_IDENTITY_ADAPTER_PATHS = Object.freeze({
   enqueue: ['packages/core-backend/src/attendance/w4c3a-legacy-plan-enqueue.ts'],
   private_worker: ['packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts'],
+  punch_preview_enqueue: ['packages/core-backend/src/attendance/w4c3a-punch-detail-preview-host.ts'],
+  punch_preview_worker: ['packages/core-backend/src/attendance/w4c3a-punch-detail-preview-job-host.ts'],
 })
 
 const P25_IDENTITY_ROLES = new Set([
@@ -40,6 +42,18 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_jobs', 'write', 'update', 5, 'operational_status', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_legacy_terminal_responses', 'write', 'insert', 1, 'compatibility_transport', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_upload_cleanup_commands', 'write', 'insert', 1, 'operational_status', 'private_worker'),
+  // Replay checks the current identity before delegating plan/replay validation to the
+  // existing private worker. This read does not claim a retryable V1 job or load a plan.
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-job-replay-host.ts', 'createAttendancePunchDetailJobReplayHostV1', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'punch_commit_replay_preflight'),
+  // Named preview jobs require a null w4_contract_version and carry preview status only.
+  // Their immutable command transport uses separate exact paths, never V1 job/plan access.
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-preview-host.ts', 'execute', 'attendance_import_jobs', 'read', 'select', 1, 'operational_status', 'punch_preview_enqueue'),
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-preview-host.ts', 'execute', 'attendance_import_jobs', 'write', 'insert', 1, 'operational_status', 'punch_preview_enqueue'),
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-preview-host.ts', 'execute', 'attendance_import_punch_preview_records', 'read', 'select', 1, 'compatibility_transport', 'punch_preview_enqueue'),
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-preview-host.ts', 'execute', 'attendance_import_punch_preview_records', 'write', 'insert', 1, 'compatibility_transport', 'punch_preview_enqueue'),
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-preview-job-host.ts', 'execute', 'attendance_import_jobs', 'read', 'select', 2, 'operational_status', 'punch_preview_worker'),
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-preview-job-host.ts', 'execute', 'attendance_import_jobs', 'write', 'update', 1, 'operational_status', 'punch_preview_worker'),
+  entry('packages/core-backend/src/attendance/w4c3a-punch-detail-preview-job-host.ts', 'execute', 'attendance_import_punch_preview_records', 'read', 'select', 2, 'compatibility_transport', 'punch_preview_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'lockJobsBatchesAndItems', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'loadBatchReferenceState', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
   // W4C-5: retryable-job posture, non-terminal-legacy-job, and incomplete-operation predicates
@@ -66,9 +80,14 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts', 'down', 'attendance_import_legacy_terminal_responses', 'read', 'select', 1, 'schema_migration', 'migration'),
   entry('packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts', 'down', 'attendance_import_upload_cleanup_commands', 'read', 'select', 1, 'schema_migration', 'migration'),
   entry('packages/core-backend/src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals.ts', 'down', 'attendance_import_legacy_execution_plan_chunks', 'read', 'select', 1, 'schema_migration', 'migration'),
+  entry('packages/core-backend/src/db/migrations/zzzz20261028103000_attendance_punch_preview_records.ts', 'up', 'attendance_import_jobs', 'read', 'select', 1, 'schema_migration', 'migration'),
+  entry('packages/core-backend/src/db/migrations/zzzz20261028103000_attendance_punch_preview_records.ts', 'up', 'attendance_import_punch_preview_records', 'read', 'select', 1, 'schema_migration', 'migration'),
+  entry('packages/core-backend/src/db/migrations/zzzz20261028103000_attendance_punch_preview_records.ts', 'down', 'attendance_import_jobs', 'read', 'select', 1, 'schema_migration', 'migration'),
+  entry('packages/core-backend/src/db/migrations/zzzz20261028103000_attendance_punch_preview_records.ts', 'down', 'attendance_import_punch_preview_records', 'read', 'select', 1, 'schema_migration', 'migration'),
   // #6164 step 1 (encrypted-store probe): ONE read-only SELECT of the integration config's appSecret to count
   // values the current ENCRYPTION_KEY/SALT can no longer decrypt; counts only, never a value, no write.
   entry('packages/core-backend/src/security/encrypted-store-probe.ts', 'catalogEntry', 'attendance_integrations', 'read', 'select', 1, 'configuration_maintenance', 'encrypted_store_probe'),
+  entry('plugins/plugin-attendance/lib/attendance-import-token-consumer.cjs', 'consumePersistedAttendanceImportTokenV1', 'attendance_import_tokens', 'write', 'delete', 1, 'transport', 'token_lifecycle'),
   entry('plugins/plugin-attendance/index.cjs', 'pruneImportCommitTokensDb', 'attendance_import_tokens', 'write', 'delete', 1, 'transport', 'token_lifecycle'),
   entry('plugins/plugin-attendance/index.cjs', 'createImportCommitToken', 'attendance_import_tokens', 'write', 'insert', 2, 'transport', 'token_lifecycle'),
   entry('plugins/plugin-attendance/index.cjs', 'consumeImportCommitToken', 'attendance_import_tokens', 'write', 'delete', 3, 'transport', 'token_lifecycle'),
@@ -115,7 +134,9 @@ function keyOf(site) {
 }
 
 function assertIdentityAdapterPath(classification) {
-  if (!P25_IDENTITY_ROLES.has(classification.role)) return
+  const reservedTransport = classification.role === 'transport' &&
+    P25_OPERATIONAL_TABLE_SPECS[classification.table]?.reservedIdentityTransport === true
+  if (!P25_IDENTITY_ROLES.has(classification.role) && !reservedTransport) return
   const allowedPaths = P25_IDENTITY_ADAPTER_PATHS[classification.adapter]
   if (!allowedPaths || !allowedPaths.includes(classification.relPath)) {
     const error = new Error(`ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN: ${keyOf(classification)}`)
