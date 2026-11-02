@@ -13,9 +13,10 @@
       <label v-for="field in materialFields" :key="field">{{ field }}<input type="password" :value="material[field]" :data-testid="`sp-yida-init-${field}`" autocomplete="off" spellcheck="false" @input="setMaterial(field, $event)" @paste="pasteMaterial(field, $event)"></label>
       <label>人工审核编号<input :value="reviewRef" data-testid="sp-yida-init-review" autocomplete="off" @input="setReview('review', $event)"></label>
       <label>人工确认 organizationId<input :value="organizationId" data-testid="sp-yida-init-organization" autocomplete="off" @input="setReview('organization', $event)"></label>
-      <section v-if="state?.status === 'ready' && state.connectionTestEnabled === true" class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
-        <p>测试连接（服务器已开通）：只用上面的 appKey/appSecret 向钉钉换一次令牌并当场丢弃；不写宜搭、不保存、不授权发送。须先由服务器操作员执行 bootstrap-yida-initialization-owner 建立锚点，并已手动 GET 到初始化命令。结果 ok 只证明 appKey/appSecret 是有效应用对；systemToken、userId、appType、formUuid 要到首次真实新建才知道。</p>
+      <section class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
+        <p>测试连接：只用上面的 appKey/appSecret 向钉钉换一次令牌并当场丢弃；不写宜搭、不保存、不授权发送。须先由服务器操作员执行 bootstrap-yida-initialization-owner 建立锚点，并已手动 GET 到初始化命令。结果 ok 只证明 appKey/appSecret 是有效应用对；systemToken、userId、appType、formUuid 要到首次真实新建才知道。</p>
         <button type="button" data-testid="sp-yida-init-connection-test" :disabled="!mayTestConnection" @click="testConnection">测试连接（仅换令牌，不写表单）</button>
+        <p v-if="connectionTestBlockedReason" data-testid="sp-yida-init-connection-blocked">暂不能测试：{{ connectionTestBlockedReason }}</p>
         <p v-if="shownOutcome" data-testid="sp-yida-init-connection-result">{{ outcomeCopy[shownOutcome] }}</p>
         <p v-if="testedPairMismatch" data-testid="sp-yida-init-connection-mismatch">已测试的凭据与当前输入不一致，请重新测试</p>
         <label v-if="testedPairMismatch"><input :checked="overrideTested" type="checkbox" data-testid="sp-yida-init-connection-override" @change="setOverride">不重新测试，仍按当前输入初始化（owner 明确决定）</label>
@@ -23,6 +24,11 @@
       <label><input :checked="acknowledged" type="checkbox" data-testid="sp-yida-init-ack" @change="setAcknowledgement">我已人工审核目标与执行身份，确认永久单槽仅归服务器指定 owner；此操作不发送。</label>
       <button type="button" data-testid="sp-yida-init-submit" :disabled="!mayInitialize" @click="initialize">仅初始化本地材料、草稿和人工目标</button>
     </fieldset>
+    <!-- After initialization the button stays visible but greyed: the server answers 409 there by design. -->
+    <section v-else class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
+      <button type="button" data-testid="sp-yida-init-connection-test" disabled>测试连接（仅换令牌，不写表单）</button>
+      <p data-testid="sp-yida-init-connection-blocked">暂不能测试：{{ connectionTestBlockedReason }}</p>
+    </section>
     <section v-if="state?.status === 'initialized' && state.draft" data-testid="sp-yida-init-initialized">
       <p>本地配置已初始化；canSend=false，tokenIssued=false，externalWriteAttempted=false。没有 grant 或发送许可。</p>
       <p>本地草稿：{{ state.draft.operationId }}；目标：{{ state.draft.targetRef }}；{{ state.draft.rowCount }} 行（仍未核验远端）。</p>
@@ -40,7 +46,8 @@ import { createYidaInitializationClient, YidaInitializationClientError, type Yid
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
 
 const props = defineProps<{ draftInput: YidaOwnerDraftInput | null }>()
-const emit = defineEmits<{ 'locked-change': [locked: boolean]; 'send-enabled-change': [enabled: boolean] }>()
+const emit = defineEmits<{ 'locked-change': [locked: boolean]; 'send-enabled-change': [enabled: boolean]
+  'progress-change': [progress: { statusRead: boolean; tested: boolean; initialized: boolean }] }>()
 const materialFields = ['appKey', 'appSecret', 'systemToken', 'userId'] as const
 const material = reactive<Record<keyof YidaInitializationMaterial, string>>({ appKey: '', appSecret: '', systemToken: '', userId: '' })
 const reviewRef = ref(''), organizationId = ref(''), acknowledged = ref(false)
@@ -153,6 +160,21 @@ function dropInputResult(): void {
   // A prior uncertain command stays frozen until another explicit GET.
 }
 watch(() => props.draftInput, dropInputResult, { deep: true, flush: 'sync' })
+// Display only (issue #6687): why 测试连接 is greyed, and the step-guide progress for the parent panel.
+// mayTestConnection stays the only gate; the order names the first missing step. "Tested" = an ok
+// outcome shown, which already means the inputs still equal the pair that got it.
+const connectionTestBlockedReason = computed(() => {
+  if (state.value?.status === 'initialized') return '本地槽已初始化；测试连接只在初始化之前可用（服务器此时按设计回 409）。'
+  if (invalidated.value) return '服务器拒绝了当前登录，或登录会话已变化；请刷新页面后重新打开本地初始化。'
+  if (busy.value) return '请求进行中，请稍候。'
+  if (uncertain.value) return '状态未确认：请先手动 GET 本地初始化状态。'
+  if (!state.value || !commandId.value) return '尚未读取状态：请先做第 6 步「手动 GET 本地初始化状态」。'
+  if (state.value.connectionTestEnabled !== true) return '服务器未开启测试连接（开关关闭）；需服务器操作员开启后再手动 GET。'
+  if (material.appKey.trim().length === 0 || material.appSecret.trim().length === 0) return '请先填写 appKey 和 appSecret。'
+  return ''
+})
+watch([() => state.value !== null && !uncertain.value, () => shownOutcome.value === 'ok', () => state.value?.status === 'initialized'],
+  ([statusRead, tested, initialized]) => emit('progress-change', { statusRead, tested, initialized }), { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => { generation += 1; client?.dispose(); client = null; clearPrivate(); state.value = null; commandId.value = null })
 async function refresh(): Promise<void> {
   if (busy.value || invalidated.value) return
