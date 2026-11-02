@@ -41,6 +41,7 @@ const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
+const attendanceShiftReferenceCapabilityLib = require('./lib/attendance-shift-reference-capability.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
@@ -8721,6 +8722,8 @@ function getAttendanceShiftService() {
       DEFAULT_ORG_ID,
       normalizeLegacyRotationRulesForShiftName,
       prepareTimezoneSourceChange:prepareAttendanceTimezoneSourceChange,
+      readReferenceSegmentsCapability: (readDb, orgId) =>
+        attendanceShiftReferenceCapabilityLib.readAttendanceShiftReferenceCapability(readDb, attendanceW4SegmentCalculationPortRef, orgId),
     })
   }
   return attendanceShiftService
@@ -8796,8 +8799,9 @@ function getAttendanceGroupFixedScheduleEffectivenessService() {
  * That is emphatically NOT a claim that read and write admission agree. They do not, and by
  * design: this slice wires the resolved posture into exactly ONE read call site (the approval
  * path), so for an ENABLED org the other read paths listed on `resolveWorkContext` still fail
- * closed while its writers are admitted — and `buildShiftCapabilities` still reports
- * `preview_only` in the shift DTO. The shared thing is the PREDICATE; read-side admission is
+ * closed while its writers are admitted. Request-scoped shift DTOs now report reference
+ * authoring from a readonly canonical posture read; calculator fields remain closed.
+ * The shared thing is the PREDICATE; read-side admission is
  * deliberately narrower than write-side admission until the remaining call sites get their
  * lock-order census.
  *
@@ -49191,12 +49195,15 @@ module.exports = {
       'GET',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
         const shiftId = normalizeUuidString(req.params.id)
         if (!shiftId) {
           respondInvalidUuid(res)
           return
         }
+
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
 
         try {
           // W3: dual-read — persisted segments when present, legacy envelope synthesis otherwise.

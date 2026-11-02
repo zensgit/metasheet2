@@ -1200,6 +1200,7 @@ export default defineConfig({
       // wiring) — so the no-DB job collected and skip-greened them every PR in addition to the
       // real run. Both points now present.
       'tests/integration/attendance-shift-segments-migration.db.test.ts',
+      'tests/integration/attendance-shift-reference-capability.db.test.ts',
       'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
       // OBS-1 owner P1 (2026-08-08): the 加班银行 v1-5a settlement schema lock was the LAST file the
       // derived corpus still could not see — it was named `attendance-settlement-table-v1-5a.test.ts`
