@@ -497,6 +497,7 @@ const CHECK_MESSAGES: Record<DispatchCheckCode, MetaRecordLabelKey> = {
 
 const FAILURE_MESSAGES: Record<DispatchFailure, MetaRecordLabelKey> = {
   INACTIVE_ORG_MEMBER: 'dispatch.errorInactiveMember',
+  ASSIGNEE_TASK_ACCESS_REQUIRED: 'dispatch.errorAssigneeTaskAccess',
   INVALID_ASSIGNEES: 'dispatch.assigneeInvalid',
   LIMIT: 'dispatch.assigneeLimit',
   ORG_MISSING: 'dispatch.errorOrgMissing',
@@ -653,4 +654,11 @@ function onKeydown(event: KeyboardEvent): void {
 .meta-dispatch__success { margin: 0; font-size: 14px; }
 .meta-dispatch__link { margin-left: 8px; color: var(--ms-color-primary, #409eff); }
 .meta-dispatch__actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #ebedf0; }
+/* Narrow screens: the dialog drops its fixed minimum and fits the viewport with a 16px gutter on
+   each side; the due date and time stack. Nothing changes above the breakpoint. */
+@media (max-width: 480px) {
+  .meta-dispatch-overlay { padding: 0 16px; }
+  .meta-dispatch-modal { min-width: 0; width: 100%; max-width: calc(100vw - 32px); box-sizing: border-box; }
+  .meta-dispatch__row--due { flex-direction: column; }
+}
 </style>

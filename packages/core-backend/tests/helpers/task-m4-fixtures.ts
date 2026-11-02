@@ -4,7 +4,7 @@
  *
  * - seedTaskActor: permissions (ON CONFLICT DO NOTHING), roles, role_permissions, users,
  *   user_roles, user_orgs, optional namespace admission and direct grants, and a signed JWT.
- * - seedOrgMembers: users + user_orgs only.
+ * - seedOrgMembers: users + user_orgs, and task access unless `taskAccess` is false.
  * - orgMemberSeeds: seedOrgMembers with a per-file record and its own cleanup, for the M2/M3 files
  *   (S9, [N2]).
  * - dropTaskM4Fixtures: org-prefix cleanup of task rows (FK cascades take list items, group
@@ -141,11 +141,42 @@ export async function seedTaskActor(opts: SeedTaskActorOptions): Promise<SeededT
   return { userId, roleId, bearer: signTaskToken(userId, roleId, opts.orgId) }
 }
 
-/** Seeds `users` + `user_orgs` only (no role, no admission). `active` defaults to true. */
+/** The shared role `seedOrgMembers` gives its users unless `taskAccess` is false. */
+export const TASK_FIXTURE_MEMBER_ROLE = 'role_tasks_fixture_member'
+
+/**
+ * Task access for `userIds`, as an assignee needs it: the shared fixture role with both task codes
+ * and task access enabled. Idempotent.
+ */
+export async function grantFixtureTaskAccess(userIds: string[]): Promise<void> {
+  const db = poolManager.get()
+  await ensureTaskPermissions()
+  await db.query('INSERT INTO roles (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING', [TASK_FIXTURE_MEMBER_ROLE])
+  await db.query(
+    `INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'tasks:read'), ($1, 'tasks:write')
+     ON CONFLICT DO NOTHING`,
+    [TASK_FIXTURE_MEMBER_ROLE],
+  )
+  for (const userId of userIds) {
+    await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, TASK_FIXTURE_MEMBER_ROLE])
+    await db.query(
+      `INSERT INTO user_namespace_admissions (
+         user_id, namespace, enabled, source, created_at, updated_at
+       ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())
+       ON CONFLICT DO NOTHING`,
+      [userId],
+    )
+  }
+}
+
+/**
+ * Seeds `users` + `user_orgs`. `active` defaults to true. Unless `taskAccess` is false, each user also
+ * gets task access (grantFixtureTaskAccess), so that someone else can name them as an assignee.
+ */
 export async function seedOrgMembers(
   orgId: string,
   userIds: string[],
-  opts: { active?: boolean } = {},
+  opts: { active?: boolean; taskAccess?: boolean } = {},
 ): Promise<void> {
   const db = poolManager.get()
   for (const userId of userIds) {
@@ -155,6 +186,7 @@ export async function seedOrgMembers(
       [userId, orgId, opts.active ?? true],
     )
   }
+  if (opts.taskAccess !== false && userIds.length > 0) await grantFixtureTaskAccess(userIds)
 }
 
 /**
@@ -162,8 +194,8 @@ export async function seedOrgMembers(
  * cleanup deletes task rows only (design §4.6, [N2]: an assignee or follower someone else writes
  * must be an active member of the org). `seed` runs seedOrgMembers for ids this record has not
  * seen; an id it already seeded (the same user in a second org) gets only the `user_orgs` row.
- * `drop` deletes exactly the recorded ids' `user_orgs` and `users` rows and forgets them, so a file
- * with several `afterAll` hooks can call it in each.
+ * `drop` deletes exactly the recorded ids' task access and role rows, `user_orgs` and `users` rows
+ * and forgets them, so a file with several `afterAll` hooks can call it in each.
  */
 export function orgMemberSeeds(): {
   seed: (orgId: string, userIds: string[]) => Promise<void>
@@ -187,6 +219,8 @@ export function orgMemberSeeds(): {
       const userIds = [...seeded]
       if (userIds.length === 0) return
       const db = poolManager.get()
+      await db.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [userIds])
+      await db.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [userIds])
       await db.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds])
       await db.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds])
       seeded.clear()

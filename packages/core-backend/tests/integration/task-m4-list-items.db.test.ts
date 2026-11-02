@@ -939,7 +939,13 @@ describe('permission codes and missing org', () => {
     const right = await actor('codesright', stamp, orgId, [`tasks:${route.code}`])
     const listId = await listVia(owner, [[wrong.userId, 'edit'], [right.userId, 'edit']])
     // Each caller is the task's assignee, so the add is allowed; the removal finds it in the list.
-    const taskId = await newTask(orgId, owner.userId, [wrong.userId, right.userId])
+    // The two callers hold one task code each, so they cannot be named as assignees through the
+    // service: their rows are written with SQL.
+    const taskId = await newTask(orgId, owner.userId, [])
+    await poolManager.get().query(
+      `INSERT INTO task_assignees (task_id, user_id, assigned_by) SELECT $1, u, $3 FROM unnest($2::text[]) AS u`,
+      [taskId, [wrong.userId, right.userId], owner.userId],
+    )
     if (route.code === 'write' && route.label.startsWith('DELETE')) await seedItem(listId, taskId, orgId)
     const { method, path, body } = route.call(listId, taskId)
     const before = await orgState(orgId)

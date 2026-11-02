@@ -159,6 +159,26 @@
 # dialog itself lives under `src/multitable/`; its dispatch modules are under `src/tasks/`, which
 # this guard's paths already cover.
 #
+# Task usability package 1, acceptance walk items 1 and 2 (no new vitest file, so still twenty-six
+# whole-file args): a real-browser walk in its own Playwright lane
+# (`playwright.tasks-verification.config.ts`, its own Vite on 5177, the files
+# `verification/tasks-acceptance-walk*`). It mounts the real record drawer with its 派发任务 dialog,
+# and the real task detail page, on harness pages; every /api answer comes from the spec, in the
+# shapes the server sends. It is not a full stack: no backend, no database. It checks the
+# dialog at 390 and 360 wide (its box inside the viewport with 16px gutters, due date above due time)
+# against a 1280 control, and the 422 `ASSIGNEE_TASK_ACCESS_REQUIRED` message at the dialog's create
+# and below the detail page's assignee add form. The walk's third item (following the enablement
+# page on a test database) is not covered here. The run must report exactly six tests, all passed on
+# the first try (the lane has no retries), none skipped and none flaky; the check step after it
+# fails otherwise, so a skipped, dropped or flaky test cannot pass as a green run. The run takes
+# every spec the lane's config collects (no file argument), so a second tasks-* spec changes the
+# count and turns the check red until it is updated. The screenshots are uploaded as
+# `tasks-walk-screenshots`, and the traces of a failed walk as `tasks-walk-traces`.
+# scripts/ops/tasks-browser-ci-wiring.test.mjs, run as a step of this job, pins the lane's spec
+# ownership, its `retries: 0`, the type-check step, the walk run without a file argument, the check
+# step's count against `--list`, and the screenshot upload, so none of them can be dropped while the
+# job stays green.
+#
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
 # regression on the /tasks skeleton surface into a visible red.
@@ -176,6 +196,24 @@ on:
       - 'apps/web/src/router/guardPolicy.ts'
       - 'apps/web/src/router/appRoutes.ts'
       - 'apps/web/src/App.vue'
+      - 'apps/web/src/multitable/components/MetaRecordTaskDispatchDialog.vue'
+      - 'apps/web/src/multitable/components/MetaRecordInspector.vue'
+      - 'apps/web/src/multitable/utils/meta-record-labels.ts'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/src/multitable/ui/**'
+      - 'apps/web/src/stores/featureFlags.ts'
+      - 'apps/web/src/composables/useAuth.ts'
+      - 'apps/web/src/composables/useLocale.ts'
+      - 'apps/web/src/utils/api.ts'
+      - 'apps/web/verification/tasks-*'
+      - 'apps/web/playwright.tasks-verification.config.ts'
+      - 'apps/web/playwright.verification.config.ts'
+      - 'apps/web/tsconfig.verification-tasks.json'
+      - 'scripts/ops/tasks-browser-ci-wiring.test.mjs'
+      - 'apps/web/vite.config.ts'
+      - 'apps/web/package.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/tasks-web-guard.yml'
   push:
     branches:
@@ -187,6 +225,24 @@ on:
       - 'apps/web/src/router/guardPolicy.ts'
       - 'apps/web/src/router/appRoutes.ts'
       - 'apps/web/src/App.vue'
+      - 'apps/web/src/multitable/components/MetaRecordTaskDispatchDialog.vue'
+      - 'apps/web/src/multitable/components/MetaRecordInspector.vue'
+      - 'apps/web/src/multitable/utils/meta-record-labels.ts'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/src/multitable/ui/**'
+      - 'apps/web/src/stores/featureFlags.ts'
+      - 'apps/web/src/composables/useAuth.ts'
+      - 'apps/web/src/composables/useLocale.ts'
+      - 'apps/web/src/utils/api.ts'
+      - 'apps/web/verification/tasks-*'
+      - 'apps/web/playwright.tasks-verification.config.ts'
+      - 'apps/web/playwright.verification.config.ts'
+      - 'apps/web/tsconfig.verification-tasks.json'
+      - 'scripts/ops/tasks-browser-ci-wiring.test.mjs'
+      - 'apps/web/vite.config.ts'
+      - 'apps/web/package.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/tasks-web-guard.yml'
 
 jobs:
@@ -260,3 +316,77 @@ jobs:
             tests/tasks-view-transitions.spec.ts \
             tests/tasks-view.spec.ts \
             --reporter=verbose
+
+      - name: Install Playwright chromium (+ system deps)
+        run: pnpm exec playwright install --with-deps chromium
+
+      # Pins the walk's wiring below (spec ownership, `retries: 0`, the type-check, the run without a
+      # file argument, the count in the check step, the screenshot upload). It runs `playwright test
+      # --list`; it sits after the install, as the stock-prep lane's wiring step does.
+      - name: Verify the tasks walk's CI wiring
+        run: node --test scripts/ops/tasks-browser-ci-wiring.test.mjs
+
+      # verification/ is outside tsconfig.app.json's `include`, so `vue-tsc -b` never sees the walk's
+      # harness, fixtures and spec; this project checks them against the production code they import.
+      # It runs only in this lane, not in the web app's own `type-check` script.
+      - name: Type-check the tasks verification harnesses
+        run: pnpm --filter @metasheet/web exec vue-tsc --noEmit -p tsconfig.verification-tasks.json
+
+      - name: Run the tasks acceptance walk (boots Vite, renders the real components)
+        id: walk
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/apps/web/verification-output/tasks-walk-report.json
+        run: pnpm --filter @metasheet/web exec playwright test --config playwright.tasks-verification.config.ts --reporter=list,json
+
+      # The walk counts only as a full run: exactly six tests, each passed on its single attempt.
+      - name: Check the acceptance walk ran every test and all passed
+        run: |
+          node <<'EOF'
+          const fs = require('fs')
+          const EXPECTED = 6
+          const report = JSON.parse(fs.readFileSync('apps/web/verification-output/tasks-walk-report.json', 'utf8'))
+          const tests = []
+          const walk = (suite) => {
+            for (const spec of suite.specs ?? []) {
+              for (const test of spec.tests ?? []) {
+                tests.push({ title: spec.title, status: test.status, results: (test.results ?? []).map((result) => result.status) })
+              }
+            }
+            for (const child of suite.suites ?? []) walk(child)
+          }
+          for (const suite of report.suites ?? []) walk(suite)
+          const stats = report.stats ?? {}
+          const problems = []
+          if (tests.length !== EXPECTED) problems.push(`expected ${EXPECTED} tests, the report has ${tests.length}`)
+          for (const test of tests) {
+            if (test.status !== 'expected' || test.results.length !== 1 || test.results[0] !== 'passed') {
+              problems.push(`${test.title}: ${test.status} [${test.results.join(', ')}]`)
+            }
+          }
+          if (stats.expected !== EXPECTED || stats.unexpected !== 0 || stats.skipped !== 0 || stats.flaky !== 0) {
+            problems.push(`stats: ${JSON.stringify(stats)}`)
+          }
+          if ((report.errors ?? []).length > 0) problems.push(`${report.errors.length} run-level errors`)
+          if (problems.length > 0) {
+            console.error(problems.join('\n'))
+            process.exit(1)
+          }
+          console.log(`tasks acceptance walk: ${tests.length} tests, all passed`)
+          EOF
+
+      # Only when the walk ran; a full pass must have left every screenshot.
+      - name: Upload the acceptance walk screenshots
+        if: always() && steps.walk.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tasks-walk-screenshots
+          path: apps/web/verification-output/tu-*.png
+          if-no-files-found: ${{ steps.walk.outcome == 'success' && 'error' || 'warn' }}
+
+      - name: Upload the acceptance walk traces
+        if: failure() && steps.walk.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tasks-walk-traces
+          path: apps/web/verification-output/_pw-tasks/**
+          if-no-files-found: ignore

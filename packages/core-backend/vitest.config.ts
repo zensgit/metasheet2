@@ -1969,6 +1969,9 @@ export default defineConfig({
       'tests/integration/task-m4-list-items.db.test.ts',
       'tests/integration/task-m4-groups.db.test.ts',
       'tests/integration/task-m4-org-members.db.test.ts',
+      'tests/integration/task-member-access.db.test.ts',
+      // The enablement walk: its own trust-off step in tasks-realdb.yml (vitest.tasks-enablement.config.ts).
+      'tests/integration/task-enablement-http.db.test.ts',
       'tests/integration/task-m4-outbox.db.test.ts',
       'tests/integration/task-m4-delivery.db.test.ts',
       'tests/integration/task-m4-scheduler.db.test.ts',
