@@ -19,6 +19,10 @@
  *     counting entries from before a reload.
  *  4. A copied tab (a store on a copy of the storage) holds the same key until it releases its own.
  *  5. Storage that is missing or throws: the store still answers from memory and says so.
+ *  6. A release that storage refuses: this page never hands the released key out again, a reload
+ *     does not either when the value could be overwritten, and when storage refuses both a reload
+ *     reads it back (the limit the module header states). A release leaves other records' entries
+ *     alone, and a newer entry written under the released name is read from storage again.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getAuthPrincipalKey, notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
@@ -759,5 +763,176 @@ describe('storage that is missing or throws', () => {
     expect(() => store.obtain(SCOPE)).toThrow(UuidUnavailableError)
     expect(entriesOf(storage)).toEqual([])
     expect(store.isUnresolved(SCOPE)).toBe(false)
+  })
+})
+
+describe('a release that storage refuses', () => {
+  const refuse = () => {
+    throw new Error('blocked')
+  }
+
+  const releases: Array<{ name: string; drop: (store: DispatchKeyStore) => void }> = [
+    { name: 'release', drop: (store) => store.release(SCOPE) },
+    { name: 'releaseAll', drop: (store) => store.releaseAll() },
+  ]
+
+  /** An entry with one send that no 4xx has answered, as a shown result leaves it. */
+  function sent(
+    storage: Storage,
+    overrides: Partial<DispatchKeyStoreDeps> = {},
+  ): { store: DispatchKeyStore; key: string } {
+    const store = storeOn(storage, overrides)
+    const { key } = store.obtain(SCOPE)
+    store.markSent(SCOPE)
+    return { store, key }
+  }
+
+  it.each(releases)('$name with the removal refused: this page gets a new key', ({ drop }) => {
+    const storage = makeStorage()
+    const { store, key } = sent(storage)
+    storage.removeItem = refuse
+
+    drop(store)
+
+    expect(store.isUnresolved(SCOPE)).toBe(false)
+    expect(store.isPersisted(SCOPE)).toBe(false)
+    const next = store.obtain(SCOPE).key
+    expect(isDispatchKey(next)).toBe(true)
+    expect(next).not.toBe(key)
+  })
+
+  it.each(releases)('$name with the removal refused: the stored value is overwritten and a reload gets a new key', ({ drop }) => {
+    const storage = makeStorage()
+    const { store, key } = sent(storage)
+    storage.removeItem = refuse
+
+    drop(store)
+
+    expect(storage.getItem(dispatchKeyStorageKey(SCOPE))).not.toContain(key)
+    const afterReload = storeOn(storage)
+    expect(afterReload.isUnresolved(SCOPE)).toBe(false)
+    expect(afterReload.obtain(SCOPE).key).not.toBe(key)
+  })
+
+  it.each(releases)('$name with the removal and the overwrite refused: this page gets a new key, a reload reads the old one', ({ drop }) => {
+    const storage = makeStorage()
+    const { store, key } = sent(storage)
+    storage.removeItem = refuse
+    storage.setItem = refuse
+
+    drop(store)
+
+    expect(store.isUnresolved(SCOPE)).toBe(false)
+    const next = store.obtain(SCOPE).key
+    expect(next).not.toBe(key)
+    expect(store.obtain(SCOPE).key).toBe(next)
+    // The limit the module header states: nothing in storage says the entry was released, so a reloaded
+    // page reads it as live and sends its key again, which the server answers with the task it made.
+    expect(storeOn(storage).obtain(SCOPE).key).toBe(key)
+  })
+
+  it('releaseAll with storage that cannot list its names still drops the entries this page held', () => {
+    const storage = makeStorage()
+    const { store, key } = sent(storage)
+    storage.key = refuse
+    Object.defineProperty(storage, 'length', { get: refuse })
+
+    store.releaseAll()
+
+    // Checked before this page writes anything under the name again.
+    expect(storage.getItem(dispatchKeyStorageKey(SCOPE))).toBeNull()
+    expect(storeOn(storage).isUnresolved(SCOPE)).toBe(false)
+    expect(store.isUnresolved(SCOPE)).toBe(false)
+    expect(store.obtain(SCOPE).key).not.toBe(key)
+  })
+
+  const profiles: Array<{ name: string; apply: (storage: Storage) => void }> = [
+    { name: 'storage working', apply: () => {} },
+    {
+      name: 'the removal refused',
+      apply: (storage) => {
+        storage.removeItem = refuse
+      },
+    },
+  ]
+
+  it.each(profiles)('$name: a release of one record after a reload leaves another record unresolved with its key', ({ apply }) => {
+    const storage = makeStorage()
+    const first = storeOn(storage)
+    first.obtain(SCOPE)
+    first.markSent(SCOPE)
+    const otherKey = first.obtain(OTHER_SCOPE).key
+    first.markSent(OTHER_SCOPE)
+    apply(storage)
+
+    // Released before the reloaded page has read the other record, so that entry comes from storage.
+    const afterReload = storeOn(storage)
+    afterReload.release(SCOPE)
+
+    expect(afterReload.isUnresolved(SCOPE)).toBe(false)
+    expect(afterReload.isUnresolved(OTHER_SCOPE)).toBe(true)
+    expect(afterReload.obtain(OTHER_SCOPE).key).toBe(otherKey)
+  })
+
+  it('a key written after a refused release is read from storage again once it has left memory', () => {
+    const storage = makeStorage()
+    const setItem = storage.setItem
+    let tick = 0
+    const { store, key } = sent(storage, { now: () => (tick += 1) })
+    storage.removeItem = refuse
+    storage.setItem = refuse
+    store.release(SCOPE)
+    storage.setItem = setItem
+    const { key: next, persisted } = store.obtain(SCOPE)
+    expect(persisted).toBe(true)
+    storage.setItem = refuse
+
+    // The new key is the oldest entry held, so the last of these takes it out of memory; storage keeps it.
+    for (let index = 1; index <= DISPATCH_KEY_MAX_ENTRIES; index += 1) {
+      store.obtain({ sheetId: 'sht_cap', recordId: `rec_${index}` })
+    }
+
+    expect(next).not.toBe(key)
+    expect(store.obtain(SCOPE).key).toBe(next)
+    expect(storeOn(storage).obtain(SCOPE).key).toBe(next)
+  })
+
+  it('a key made after a refused release that was never written leaves memory at the cap, and the released key stays unread', () => {
+    const storage = makeStorage()
+    let tick = 0
+    const { store, key } = sent(storage, { now: () => (tick += 1) })
+    storage.removeItem = refuse
+    storage.setItem = refuse
+    store.release(SCOPE)
+    const next = store.obtain(SCOPE).key
+
+    // The new key is the oldest entry held, so the last of these takes it out of memory.
+    for (let index = 1; index <= DISPATCH_KEY_MAX_ENTRIES; index += 1) {
+      store.obtain({ sheetId: 'sht_cap', recordId: `rec_${index}` })
+    }
+
+    expect(store.isUnresolved(SCOPE)).toBe(false)
+    const after = store.obtain(SCOPE).key
+    expect(after).not.toBe(key)
+    expect(after).not.toBe(next)
+  })
+
+  it.each(releases)('$name with storage working: the entry goes, and the next key is kept and found after a reload', ({ drop }) => {
+    const storage = makeStorage()
+    const { store, key } = sent(storage)
+
+    drop(store)
+
+    expect(storage.getItem(dispatchKeyStorageKey(SCOPE))).toBeNull()
+    expect(store.isUnresolved(SCOPE)).toBe(false)
+    const next = store.obtain(SCOPE).key
+    expect(next).not.toBe(key)
+    expect(store.obtain(SCOPE).key).toBe(next)
+    expect(store.markSent(SCOPE)).toEqual({ persisted: true })
+    expect(store.isUnresolved(SCOPE)).toBe(true)
+
+    const afterReload = storeOn(storage)
+    expect(afterReload.isUnresolved(SCOPE)).toBe(true)
+    expect(afterReload.obtain(SCOPE).key).toBe(next)
   })
 })

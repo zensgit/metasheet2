@@ -24,7 +24,19 @@
  * refused leaves a dormant entry, which holds no attempt and is the first to go at the cap.
  *
  * An entry is released when its result has been shown, on 再派一项, and when the server refuses the
- * key. Separately, every entry goes when a session change moves this tab away from the principal it
+ * key. A released key is not handed out again by this page: it keeps the released names and takes no
+ * entry under them from storage until an entry made after the release has been written there. Making
+ * room at the cap still reads such values to count them, apart from the one for the record whose entry
+ * is being written. When storage refuses the removal, the stored value is overwritten with one that
+ * reads as no entry, so a reloaded page does not read it back either. When storage refuses both, a
+ * reloaded page cannot tell the released entry from a live one and hands its key out again. That still
+ * makes no second task: within one org and dispatcher the server keeps a key for one task only, so a
+ * resend under it is answered with the task that key already made, and after a shown result the next
+ * dispatch from that record therefore gets the earlier task back instead of creating a new one; a key
+ * it never stored (a dormant entry on 再派一项) is as new as any other, and a key it refused is refused
+ * again.
+ *
+ * Separately, every entry goes when a session change moves this tab away from the principal it
  * remembers. That sweep runs only on a page that has loaded this module, and only for transitions
  * announced through `useAuth`; everything else (a page whose chunk has not loaded, a redirect from
  * `handleUnauthorized`, an ordinary session's change in another tab) leaves the entries to the
@@ -52,6 +64,9 @@ export const DISPATCH_KEY_STORAGE_PREFIX = 'metasheet.tasks.dispatchKey.v1:'
 export const DISPATCH_KEY_MAX_ENTRIES = 32
 
 const DISPATCH_KEY_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
+
+/** Written over a value that storage would not remove; `parseEntry` reads it as no entry. */
+const DISCARDED_VALUE = 'discarded'
 
 export interface DispatchKeyScope {
   sheetId: string
@@ -127,6 +142,9 @@ function evictionOrder(a: [string, DispatchKeyEntry], b: [string, DispatchKeyEnt
 
 function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clearMemory: () => void } {
   const held = new Map<string, HeldEntry>()
+  // Names released on this page whose stored value may still be the released entry: `find` takes no
+  // entry under them from storage until a newer entry under that name has been written there.
+  const released = new Set<string>()
 
   function target(): Storage | null {
     try {
@@ -136,11 +154,20 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
     }
   }
 
+  /** A value storage will not remove is overwritten with one that reads as no entry. */
   function removeStored(name: string): void {
+    const storage = target()
+    if (!storage) return
     try {
-      target()?.removeItem(name)
+      storage.removeItem(name)
+      return
     } catch {
-      // Stays in storage; it is still one random id under a record's name.
+      // Overwritten below instead.
+    }
+    try {
+      storage.setItem(name, DISCARDED_VALUE)
+    } catch {
+      // Stays in storage as it was; it is still one random id under a record's name (see the header).
     }
   }
 
@@ -163,6 +190,7 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
     if (!storage) return false
     try {
       storage.setItem(name, JSON.stringify(entry))
+      released.delete(name)
       return true
     } catch {
       return false
@@ -188,6 +216,7 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
   function find(name: string): HeldEntry | null {
     const inMemory = held.get(name)
     if (inMemory) return inMemory
+    if (released.has(name)) return null
     const entry = readStored(name)
     if (!entry) return null
     const found: HeldEntry = { entry, persisted: true }
@@ -195,14 +224,15 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
     return found
   }
 
-  /** Makes room for one more entry. */
-  function evict(): void {
+  /** Makes room for one more entry under `except`, which is not counted: its value is replaced next. */
+  function evict(except: string): void {
     const all = new Map<string, DispatchKeyEntry>()
     for (const name of storedNames()) {
       const entry = readStored(name)
       if (entry) all.set(name, entry)
     }
     for (const [name, current] of held) all.set(name, current.entry)
+    all.delete(except)
     const surplus = all.size - DISPATCH_KEY_MAX_ENTRIES + 1
     if (surplus <= 0) return
     for (const [name] of [...all.entries()].sort(evictionOrder).slice(0, surplus)) {
@@ -223,7 +253,7 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
       const found = find(name)
       if (found) return { key: found.entry.key, persisted: found.persisted }
       const key = deps.mint()
-      evict()
+      evict(name)
       const entry: DispatchKeyEntry = { v: 1, key, at: deps.now(), unsettled: 0 }
       const persisted = writeStored(name, entry)
       held.set(name, { entry, persisted })
@@ -250,15 +280,27 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
     },
     release(scope) {
       const name = dispatchKeyStorageKey(scope)
+      released.add(name)
       held.delete(name)
       removeStored(name)
     },
     releaseAll() {
+      // Names held here count too: a storage that cannot list its names may still read them back.
+      const names = new Set([...held.keys(), ...storedNames()])
       held.clear()
-      for (const name of storedNames()) removeStored(name)
+      for (const name of names) {
+        released.add(name)
+        removeStored(name)
+      }
     },
   }
-  return { store, clearMemory: () => held.clear() }
+  return {
+    store,
+    clearMemory: () => {
+      held.clear()
+      released.clear()
+    },
+  }
 }
 
 export function createDispatchKeyStore(deps: DispatchKeyStoreDeps): DispatchKeyStore {
