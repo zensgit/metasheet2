@@ -7,6 +7,7 @@ import type supertest from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { tasksRouter } from '../../src/routes/tasks'
+import { listUserPermissions } from '../../src/rbac/service'
 import { TASK_ACCESS_CODES, holdsTaskCode } from '../../src/services/task-member-access'
 import {
   startTasksListener,
@@ -936,6 +937,9 @@ describe('tasks auth gate', () => {
       await db.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [columnAdmin])
       const roleRows = await db.query('SELECT count(*)::int AS n FROM user_roles WHERE user_id = $1', [columnAdmin])
       expect(roleRows.rows[0]?.n).toBe(0)
+      // Only the administrator read can let this member through: the member holds no task code.
+      const memberCodes = await listUserPermissions(columnAdmin, (sql, params) => db.query(sql, params))
+      expect(TASK_ACCESS_CODES.some((code) => holdsTaskCode(memberCodes, code)), memberCodes.join(',')).toBe(false)
       const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
       expect(created.status).toBe(200)
       const taskId = String(created.body.id)

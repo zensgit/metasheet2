@@ -36,9 +36,9 @@ import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
  *
  * Token-claim trust is off: this file runs only under vitest.tasks-enablement.config.ts, its own
  * step in tasks-realdb.yml, which does not load tests/setup.integration.ts. The sign-in token
- * carries no `roles`, `perms` or `permissions` claim either (asserted); it does carry the account's
- * own `role` field, which the trust-off path does not use, so every answer below comes from the
- * database. The product mode is the default one.
+ * carries no `roles`, `perms` or `permissions` claim either (asserted). It does carry the account's
+ * own `role` field, but with trust off the server takes the user, role included, from the database,
+ * so every answer below comes from the database. The product mode is the default one.
  *
  * Permission memo: an employee's 403 before the grant and the 200 after it use the same token,
  * without signing in again. One server process here.
