@@ -34,6 +34,7 @@ on:
       - 'apps/web/tests/sessionCenterView.spec.ts'
       - 'apps/web/tests/usePlmBomState.spec.ts'
       - 'apps/web/tests/usePlmSearchPanel.spec.ts'
+      - 'apps/web/tests/plmProductLoadOwnership.spec.ts'
       - 'apps/web/package.json'
       - 'package.json'
       - 'pnpm-workspace.yaml'
@@ -79,6 +80,7 @@ on:
       - 'apps/web/tests/sessionCenterView.spec.ts'
       - 'apps/web/tests/usePlmBomState.spec.ts'
       - 'apps/web/tests/usePlmSearchPanel.spec.ts'
+      - 'apps/web/tests/plmProductLoadOwnership.spec.ts'
       - 'apps/web/package.json'
       - 'package.json'
       - 'pnpm-workspace.yaml'
@@ -174,6 +176,7 @@ jobs:
           tests/plm-bom-write-pending.spec.ts
           tests/usePlmBomState.spec.ts
           tests/usePlmSearchPanel.spec.ts
+          tests/plmProductLoadOwnership.spec.ts
           --reporter=verbose
       - name: Run the whole personal approval PostgreSQL suite
         env:

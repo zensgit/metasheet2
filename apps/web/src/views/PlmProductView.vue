@@ -278,6 +278,8 @@ const productError = ref('')
 const productMetadata = ref<PlmItemMetadata | null>(null)
 const productMetadataLoading = ref(false)
 const productMetadataError = ref('')
+let productLoadGeneration = 0
+let bomLoadGeneration = 0
 const productView = computed(() => {
   const data = product.value || {}
   const props = data.properties || {}
@@ -1673,6 +1675,7 @@ async function copyProductField(kind: ProductCopyKind) {
 async function loadProduct() {
   const resolvedId = productId.value || productItemNumber.value
   if (!resolvedId) return
+  const generation = ++productLoadGeneration
   syncQueryParams({ productId: productId.value, itemNumber: productItemNumber.value, itemType: itemType.value })
   productLoading.value = true
   productError.value = ''
@@ -1683,6 +1686,7 @@ async function loadProduct() {
       itemType: itemType.value || undefined,
       itemNumber: productItemNumber.value || undefined,
     })
+    if (generation !== productLoadGeneration) return
     product.value = result
     if (productView.value.partNumber && !productItemNumber.value) {
       productItemNumber.value = productView.value.partNumber === '-' ? '' : productView.value.partNumber
@@ -1709,12 +1713,15 @@ async function loadProduct() {
       loadApprovals(),
     ])
   } catch (error: any) {
+    if (generation !== productLoadGeneration) return
     handleAuthError(error)
     productMetadata.value = null
     productMetadataError.value = ''
     productError.value = error?.message || '加载产品失败'
   } finally {
-    productLoading.value = false
+    if (generation === productLoadGeneration) {
+      productLoading.value = false
+    }
   }
 }
 
@@ -1722,21 +1729,27 @@ async function loadBom() {
   if (!productId.value) return
   bomLoading.value = true
   bomError.value = ''
+  const requestedProductId = productId.value
+  const generation = ++bomLoadGeneration
   try {
     const depthValue = Number.isFinite(bomDepth.value) ? Math.max(1, Math.floor(bomDepth.value)) : DEFAULT_BOM_DEPTH
     const effectiveAt = normalizeEffectiveAt(bomEffectiveAt.value)
-    const result = await plmService.getBom<BomLineRecord>(productId.value, {
+    const result = await plmService.getBom<BomLineRecord>(requestedProductId, {
       depth: depthValue,
       effectiveAt,
     })
+    if (generation !== bomLoadGeneration || productId.value !== requestedProductId) return
     const items = result.items || []
     bomAppliedDepth.value = depthValue
     bomItems.value = items
   } catch (error: any) {
+    if (generation !== bomLoadGeneration || productId.value !== requestedProductId) return
     handleAuthError(error)
     bomError.value = error?.message || '加载 BOM 失败'
   } finally {
-    bomLoading.value = false
+    if (generation === bomLoadGeneration) {
+      bomLoading.value = false
+    }
   }
 }
 
