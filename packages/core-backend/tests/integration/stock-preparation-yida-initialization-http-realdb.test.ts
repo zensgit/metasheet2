@@ -112,8 +112,9 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     const saved = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]] as const)
     const set = (key: string, value: string | undefined) => { if (value === undefined) delete process.env[key]; else process.env[key] = value }
     const key = process.env.ENCRYPTION_KEY, salt = process.env.ENCRYPTION_SALT
-    const warning = 'YiDa initialization sealed under an encryption key or salt shorter than 32 characters; '
-      + 'this seal cannot be re-keyed: keep this exact ENCRYPTION_KEY and ENCRYPTION_SALT (back up docker\\app.env) for the life of this deployment.'
+    const warning = 'YiDa initialization sealed credentials under an encryption key or salt shorter than 32 characters. '
+      + 'This seal cannot be re-keyed. Securely back up the effective ENCRYPTION_KEY and ENCRYPTION_SALT from the configuration '
+      + 'sources used by the running service. Keep those exact values for the life of the deployment.'
     try {
       // Each variant passes the shared production checks; only the L4 seal-material check refuses it.
       for (const nodeEnv of ['development', 'production']) {

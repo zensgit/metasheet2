@@ -236,9 +236,11 @@ describe('Yida initialization explicit local management UI', () => {
     fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 503)); await click('submit'); noSecrets()
     expect(q('error').textContent).toBe('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY')
     const hint = q('error-hint').textContent ?? ''
-    for (const part of ['本机加密密钥未配置或仍是默认值', '或仍是文档里的示例占位', '（值不能用尖括号 <…> 包住）', '、内置默认值互相对调或两项相同',
-      '初始化未执行，未写入任何内容', 'docker\\app.env', 'ENCRYPTION_KEY / ENCRYPTION_SALT', '重启后端', '手动 GET'])
-      expect(hint.includes(part)).toBe(true)
+    for (const part of ['本次宜搭初始化未写入数据', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT', '为空或相同',
+      '内置默认值（含对调）', '文档示例', '<…>', '新部署确认没有加密数据后', '实际使用的配置源',
+      '先保留并安全备份当前生效的密钥和盐', '盘点已有密文', '完成迁移并验证能解密，再切换配置并重启后端', '手动 GET'])
+      expect(hint).toContain(part)
+    expect(hint).not.toMatch(/app\.env/i)
     // Values-free: neither the pasted material nor the review identifiers appear in the hint.
     for (const value of [...Object.values(material), 'SYN-REVIEW', 'SYN-ORG']) expect(hint.includes(value)).toBe(false)
     expect(absent('initialized')).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(true)

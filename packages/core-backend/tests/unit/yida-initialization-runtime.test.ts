@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { types } from 'node:util'
 import ts from 'typescript'
+import winston from 'winston'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as authority from '../../src/integration/automation-live-authority'
 import * as bootstrap from '../../src/integration/yida-initialization-bootstrap'
@@ -38,19 +40,23 @@ function deferred<T = void>() {
   return { promise, resolve }
 }
 const emptyAnchor = (): Row => ({ slot: 1, command_id: commandId, owner_id: actor.actorId, tenant_id: actor.tenantId, workspace_id: null })
-function loadMutant(source: string): typeof import('../../src/integration/yida-initialization-runtime') {
-  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+function loadTestModule<T>(source: string, resolve: (name: string) => unknown): T {
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText
   const exports = {}
-  new Function('require', 'exports', compiled)((specifier: string) => {
+  new Function('require', 'exports', compiled)(resolve, exports)
+  return exports as T
+}
+function loadMutant(source: string, logger = coreLogger): typeof import('../../src/integration/yida-initialization-runtime') {
+  return loadTestModule(source, (specifier: string) => {
     if (specifier === 'node:util') return { types }
     if (specifier === './automation-live-authority') return authority
     if (specifier === './yida-initialization-bootstrap') return bootstrap
     if (specifier === '../security/encrypted-secrets') return encryptedSecrets
     if (specifier === '../context/request-context') return requestContext
-    if (specifier === '../core/logger') return coreLogger
+    if (specifier === '../core/logger') return logger
     throw new Error('Unexpected isolated module import')
-  }, exports)
-  return exports as typeof import('../../src/integration/yida-initialization-runtime')
+  })
 }
 // L4 refuses unless ENCRYPTION_KEY / ENCRYPTION_SALT pass the production checks in EVERY NODE_ENV, and
 // tests/setup.ts configures neither: each case starts from explicit synthetic, non-default material and
@@ -380,10 +386,13 @@ describe('L4 also refuses public or obviously invalid material that passes the p
   const short: Readonly<Record<string, Material>> = {
     'a 1-character key and salt': { ENCRYPTION_KEY: 'k', ENCRYPTION_SALT: 's' },
     'a 31-character key': { ENCRYPTION_KEY: 'k'.repeat(31), ENCRYPTION_SALT: long.ENCRYPTION_SALT },
+    'a key of 31 Unicode code points': { ENCRYPTION_KEY: '\u{1F512}'.repeat(31), ENCRYPTION_SALT: long.ENCRYPTION_SALT },
+    'a padded salt of 31 Unicode code points': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: ` ${'\u{20000}'.repeat(31)} ` },
     'a salt 31 characters after trimming': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: ` ${'s'.repeat(31)} ` },
   }
   const sealed: Readonly<Record<string, Material>> = {
     '32-character key and salt': { ENCRYPTION_KEY: 'k'.repeat(32), ENCRYPTION_SALT: 's'.repeat(32) },
+    '32 Unicode code points in each value': { ENCRYPTION_KEY: '\u{1F512}'.repeat(32), ENCRYPTION_SALT: '\u{20000}'.repeat(32) },
     'the long synthetic material': long,
   }
   function useEnvironment(nodeEnv: typeof nodeEnvs[number], material: Material) {
@@ -402,6 +411,55 @@ describe('L4 also refuses public or obviously invalid material that passes the p
   const insideOwnerRequest = <T>(work: () => Promise<T>) => requestContext.runWithRequestContext({ correlationId: 'synthetic-correlation',
     privateObservationSurface: 'yida-owner-http', userId: 'synthetic-request-user', tenantId: 'synthetic-request-tenant' },
   () => coreLogger.runWithLogContext({ requestId: 'synthetic-request-id' }, work))
+
+  it('omits the active OpenTelemetry span only from the short-material warning', async () => {
+    // The container hoists the telemetry plugin's dependencies. Load the same optional API explicitly
+    // here so a strict pnpm layout also exercises the traced path.
+    const requireTelemetry = createRequire(path.resolve(__dirname, '../../../../plugins/plugin-telemetry-otel/package.json'))
+    const api = requireTelemetry('@opentelemetry/api')
+    const { NodeTracerProvider } = requireTelemetry('@opentelemetry/sdk-node').node
+    const provider = new NodeTracerProvider()
+    const fromTest = createRequire(__filename)
+    const logger = loadTestModule<typeof coreLogger>(readFileSync(path.resolve(__dirname, '../../src/core/logger.ts'), 'utf8'), name => {
+      if (name === '@opentelemetry/api') return api
+      if (name === '../context/request-context') return requestContext
+      return fromTest(name)
+    })
+    const source = readFileSync(path.resolve(__dirname, '../../src/integration/yida-initialization-runtime.ts'), 'utf8')
+    const { f } = await active({ createRuntime: loadMutant(source, logger).createYidaInitializationRuntime })
+    useEnvironment('production', short['a 1-character key and salt'])
+    const entries: Row[] = []
+    const capture = vi.spyOn(winston.transports.Console.prototype, 'log').mockImplementation((info, done) => {
+      entries.push({ ...info }); done()
+    })
+    const traceId = '1'.repeat(32), spanId = '2'.repeat(16)
+    const priorLevel = process.env.LOG_LEVEL
+    try {
+      setEnv('LOG_LEVEL', 'warn')
+      provider.register({ propagator: null })
+      const traced = api.trace.setSpanContext(api.ROOT_CONTEXT, { traceId, spanId, traceFlags: 1 })
+      await api.context.with(traced, async () => {
+        const control = new logger.Logger('TraceControl')
+        control.warn('before')
+        const result = await requestContext.runWithRequestContext({ correlationId: 'synthetic-owner',
+          privateObservationSurface: 'yida-owner-http' }, () => logger.runWithLogContext({ requestId: 'synthetic-request' },
+          () => f.runtime.initialize(actor, input())))
+        expect(result.status).toBe('initialized')
+        control.warn('after')
+      })
+      await new Promise(resolve => setImmediate(resolve))
+      const controls = entries.filter(entry => entry.context === 'TraceControl')
+      expect(controls).toMatchObject([{ message: 'before', traceId, spanId }, { message: 'after', traceId, spanId }])
+      const warned = entries.filter(entry => entry.message === YIDA_SHORT_SEAL_MATERIAL_WARNING)
+      expect(warned).toHaveLength(1)
+      expect(Object.keys(warned[0]).sort()).toEqual(['context', 'level', 'message', 'service', 'timestamp'])
+    } finally {
+      setEnv('LOG_LEVEL', priorLevel)
+      capture.mockRestore()
+      api.context.disable(); api.trace.disable()
+      await provider.shutdown()
+    }
+  })
 
   it.each(nodeEnvs.flatMap(nodeEnv => Object.keys(refused).map(name => [nodeEnv, name] as const)))(
     'NODE_ENV %s, %s: ENCRYPTION_NOT_READY with no producer, write, fetch or warning; the slot stays ready', async (nodeEnv, name) => {
@@ -456,8 +514,9 @@ describe('L4 also refuses public or obviously invalid material that passes the p
   it('the warning text is a fixed constant: no value, no number but the 32-character threshold, and no re-key advice', () => {
     // The seal cannot be re-keyed (a changed ENCRYPTION_KEY / ENCRYPTION_SALT leaves the slot unreadable), so the
     // advice is to keep the exact material, never to rotate it.
-    expect(YIDA_SHORT_SEAL_MATERIAL_WARNING).toBe('YiDa initialization sealed under an encryption key or salt shorter than 32 characters; '
-      + 'this seal cannot be re-keyed: keep this exact ENCRYPTION_KEY and ENCRYPTION_SALT (back up docker\\app.env) for the life of this deployment.')
+    expect(YIDA_SHORT_SEAL_MATERIAL_WARNING).toBe('YiDa initialization sealed credentials under an encryption key or salt shorter than 32 characters. '
+      + 'This seal cannot be re-keyed. Securely back up the effective ENCRYPTION_KEY and ENCRYPTION_SALT from the configuration '
+      + 'sources used by the running service. Keep those exact values for the life of the deployment.')
     expect(YIDA_SHORT_SEAL_MATERIAL_WARNING.match(/\d+/gu)).toEqual(['32'])
     expect(/rotat/iu.test(YIDA_SHORT_SEAL_MATERIAL_WARNING)).toBe(false)
   })

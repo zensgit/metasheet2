@@ -1,7 +1,7 @@
 import { types } from 'node:util'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { getRequestContextStorage } from '../context/request-context'
-import { Logger, runWithLogContext } from '../core/logger'
+import { Logger, runWithLogContext, runWithRootTraceContext } from '../core/logger'
 import { DEFAULT_ENCRYPTION_KEY, DEFAULT_ENCRYPTION_SALT, getEncryptionMaterialIssues } from '../security/encrypted-secrets'
 import { assertAutomationIntegrationActor, AutomationActorAuthorityError } from './automation-live-authority'
 import {
@@ -170,22 +170,22 @@ export function getYidaSealMaterialIssues(env: Readonly<Record<string, string | 
 }
 /** Short material is sealed (an existing short key may already protect other stores) but warned about once sealed. */
 export function isYidaSealMaterialShort(env: Readonly<Record<string, string | undefined>>): boolean {
-  return sealValue(env.ENCRYPTION_KEY).length < 32 || sealValue(env.ENCRYPTION_SALT).length < 32
+  return Array.from(sealValue(env.ENCRYPTION_KEY)).length < 32
+    || Array.from(sealValue(env.ENCRYPTION_SALT)).length < 32
 }
 // The seal has no re-key path (generation 1 only; ConfigService.rotateKey re-encrypts system_configs only): after a
 // change of ENCRYPTION_KEY / ENCRYPTION_SALT the sealed slot no longer opens. So the advice is to keep the material.
-export const YIDA_SHORT_SEAL_MATERIAL_WARNING = 'YiDa initialization sealed under an encryption key or salt shorter than '
-  + '32 characters; this seal cannot be re-keyed: keep this exact ENCRYPTION_KEY and ENCRYPTION_SALT '
-  + '(back up docker\\app.env) for the life of this deployment.'
+export const YIDA_SHORT_SEAL_MATERIAL_WARNING = 'YiDa initialization sealed credentials under an encryption key or salt shorter than 32 characters. '
+  + 'This seal cannot be re-keyed. Securely back up the effective ENCRYPTION_KEY and ENCRYPTION_SALT from the configuration '
+  + 'sources used by the running service. Keep those exact values for the life of the deployment.'
 let sealLogger: Logger | undefined
 function warnShortSealMaterial(): void {
   // Advisory, after COMMIT: it never turns a committed seal into a failure. In the owner HTTP request context the
   // private observation surface (core/logger.ts) rewrites every message to YIDA_OWNER_HTTP_WARN, which would drop
-  // the advice. It is a server constant (no value, length or caller data), so it is written outside the request and
-  // log contexts and carries no correlation, request, user or tenant field.
+  // the advice. Write only the fixed server text outside the request, log and OpenTelemetry contexts.
   try {
-    getRequestContextStorage().exit(() => runWithLogContext({}, () =>
-      (sealLogger ??= new Logger('YidaInitialization')).warn(YIDA_SHORT_SEAL_MATERIAL_WARNING)))
+    const writeWarning = () => (sealLogger ??= new Logger('YidaInitialization')).warn(YIDA_SHORT_SEAL_MATERIAL_WARNING)
+    getRequestContextStorage().exit(() => runWithLogContext({}, () => runWithRootTraceContext(writeWarning)))
   } catch { /* advisory only */ }
 }
 
