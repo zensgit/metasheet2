@@ -863,22 +863,29 @@ export class AuthService {
    * Single-shot user_roles insert against the caller's transaction (backfill or register).
    * Deliberately does NOT
    * retry or invalidate caches — the caller owns both.
+   *
+   * Returns how many membership rows the statements actually inserted. `assignUserRoles` is
+   * ON CONFLICT DO NOTHING, so a role the user already holds counts 0 and the caller can tell a
+   * real membership change from a no-op re-insert.
    */
   private async insertUserRolesOnce(
     client: AliasQueryClient,
     userId: string,
     roleIds: readonly string[],
-  ): Promise<void> {
+  ): Promise<number> {
+    let inserted = 0
     for (const roleId of roleIds) {
       // Self-service assigns from a set fixed in this module, so the authority is stated as
       // exactly that set rather than as an unbounded one.
-      await assignUserRoles({
+      const membership = await assignUserRoles({
         userIds: [userId],
         roleId,
         scope: { kind: 'fixed', roleIds: SELF_SERVICE_ASSIGNABLE_ROLE_IDS },
         executor: client,
       })
+      inserted += membership.rowCount
     }
+    return inserted
   }
 
   private async backfillAttendanceSelfService(
@@ -890,7 +897,7 @@ export class AuthService {
     const pool = poolManager.get()
     for (let attempt = 1; ; attempt++) {
       try {
-        const persisted = await pool.transaction(async (client) => {
+        const outcome = await pool.transaction(async (client) => {
           await lockNamespaceAdmissionWrites(client, userId)
           const result = await client.query(
             `SELECT enabled, source
@@ -904,13 +911,19 @@ export class AuthService {
             role,
             permissions,
             admission: parseAttendanceSelfServiceAdmissionRows(result.rows),
-          }) !== 'bootstrap') return false
+          }) !== 'bootstrap') return { persisted: false, insertedRoles: 0 }
 
-          await this.insertUserRolesOnce(client, userId, roleIds)
-          return true
+          return { persisted: true, insertedRoles: await this.insertUserRolesOnce(client, userId, roleIds) }
         })
-        if (persisted) invalidateUserPerms(userId)
-        return persisted
+        // Invalidate only after a commit that CHANGED membership. A user with no attendance
+        // admission row reaches this path on every authenticated request (the admission filter
+        // drops the default role's attendance codes), and once the role is held the insert is
+        // an ON CONFLICT no-op. Invalidating on those no-ops moved the cache generation under
+        // concurrent requests of the same user, and listUserPermissions then fails closed to []
+        // for a read that saw two moves (rbac/service.ts). The role is held either way, so the
+        // caller still merges the self-service codes.
+        if (outcome.insertedRoles > 0) invalidateUserPerms(userId)
+        return outcome.persisted
       } catch (error) {
         if (isRecoveryAuthorityBusyError(error)) {
           if (attempt >= USER_ROLE_ASSIGNMENT_RETRY_LIMIT) {
