@@ -1,3 +1,5 @@
+import { DirectoryUserPaginationError, getNextDirectoryUserCursor } from './directory-user-pagination'
+import { hasDirectoryDepartmentCycle } from './directory-department-cycle'
 import { readDirectoryIdentityVerification, type DirectoryIdentityVerification } from './integration-identity'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
@@ -8,6 +10,7 @@ import { LoginNameRuleError, assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
+import { DingTalkIncompleteResponseError } from '../integrations/dingtalk/transport'
 import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
@@ -3253,6 +3256,8 @@ export async function fetchAllDepartments(
     baseUrl: config.baseUrl,
   })
   const departments = new Map<string, DingTalkDepartment>()
+  // The seeded synthetic root is not a returned wire id until a list row replaces it.
+  const returnedWireDepartmentIds = new Set<string>()
   departments.set(config.rootDepartmentId, {
     id: config.rootDepartmentId,
     parentId: null,
@@ -3269,9 +3274,21 @@ export async function fetchAllDepartments(
     const children = await listDingTalkDepartments(accessToken, current, { baseUrl: config.baseUrl })
     for (const child of children) {
       const existing = departments.get(child.id)
+      if (
+        existing
+        && returnedWireDepartmentIds.has(child.id)
+        && existing.parentId !== child.parentId
+      ) {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
+      }
       departments.set(child.id, existing ? { ...existing, ...child } : child)
+      returnedWireDepartmentIds.add(child.id)
       if (!existing) queue.push(child.id)
     }
+  }
+
+  if (hasDirectoryDepartmentCycle(departments)) {
+    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
   }
 
   // dept-head plumbing: enrich each department with its manager user ids from the
@@ -3285,10 +3302,7 @@ export async function fetchAllDepartments(
       if (apiCalls) apiCalls.departmentDetailCalls += 1
       return getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl })
     },
-    (deptId, error) =>
-      logger.warn(
-        `dept-head: department/get failed for dept ${deptId} (integration ${integrationName}); carrying prior forward: ${readErrorMessage(error, 'unknown error')}`,
-      ),
+    () => logger.warn('DingTalk department detail unavailable; carrying prior manager list forward'),
   )
 
   return departments
@@ -3315,6 +3329,7 @@ export async function fetchAllUsers(
 
   for (const departmentId of departmentMap.keys()) {
     let cursor = 0
+    const seenCursors = new Set<number>([cursor])
     let hasMore = true
     while (hasMore) {
       if (apiCalls) apiCalls.userListPageCalls += 1
@@ -3325,6 +3340,7 @@ export async function fetchAllUsers(
         pageSize,
         { baseUrl: config.baseUrl },
       )
+      const nextCursor = getNextDirectoryUserCursor(response, seenCursors)
       for (const summary of response.users) {
         const existing = users.get(summary.userId)
         if (!existing) {
@@ -3343,10 +3359,11 @@ export async function fetchAllUsers(
           departmentIds: mergeDepartmentIds(existing.departmentIds, summary.departmentIds),
         })
       }
-      if (!response.hasMore || response.nextCursor === null) {
+      if (nextCursor === null) {
         hasMore = false
       } else {
-        cursor = response.nextCursor
+        cursor = nextCursor
+        seenCursors.add(cursor)
       }
     }
   }
@@ -3996,6 +4013,7 @@ const DIRECTORY_FAILURE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
   DirectoryConflictError,
   DirectoryTenantChangeBlockedError,
   DirectorySyncLeaseLostError,
+  DirectoryUserPaginationError,
   RecoveryConflictError,
   LoginNameRuleError,
   PasswordPolicyError,

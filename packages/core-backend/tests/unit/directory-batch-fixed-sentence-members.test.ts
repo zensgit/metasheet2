@@ -59,6 +59,7 @@ import {
   batchUnbindDirectoryAccounts,
   type DirectoryAccountBatchOutcome,
 } from '../../src/directory/directory-sync'
+import { DirectoryUserPaginationError } from '../../src/directory/directory-user-pagination'
 import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
 import { LoginNameRuleError } from '../../src/auth/login-name-rule'
 import { PasswordPolicyError } from '../../src/auth/password-policy-error'
@@ -102,6 +103,7 @@ const MEMBER_FACTORIES: Readonly<Record<string, () => Error>> = {
   DirectoryConflictError: () => new DirectoryConflictError('Directory account binding changed; retry the operation'),
   DirectoryTenantChangeBlockedError: () => new DirectoryTenantChangeBlockedError('corp_id is immutable on directory integration dir-1'),
   DirectorySyncLeaseLostError: () => new DirectorySyncLeaseLostError('run-r41b'),
+  DirectoryUserPaginationError: () => new DirectoryUserPaginationError(),
   RecoveryConflictError: () => new RecoveryConflictError(Object.assign(new Error(RECOVERY_AUTHORITY_BUSY_MARKER), { code: '40001' })),
   LoginNameRuleError: () => new LoginNameRuleError(),
   PasswordPolicyError: () => new PasswordPolicyError(['Password must contain at least one number']),
