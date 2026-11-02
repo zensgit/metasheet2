@@ -1317,8 +1317,11 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
       'refresh.confirm', 'refresh.continuation', 'refresh.end', 'refresh.evidence', 'refresh.holds', 'refresh.keep',
       // Batch-refresh step 5 PR-8 (R-63): the change plan — its page, its confirm and the review (the puller reviews).
       'refresh.changePlan', 'refresh.changePlanConfirm', 'refresh.reviewComplete',
+      // 人工补充行 B4 fix round 1 (OQ4; R-68): the puller READS the per-sheet switch and the last pull's reminder (the
+      // SET stays ADMIN, OQ6).
+      'projectTarget.manualRowsRead',
     ].sort(),
-    'P-14: exactly thirteen PULL-tier manifest capabilities — create, archive, restore, overview ensure, the six refresh routes and the three change-plan routes',
+    'P-14: exactly fourteen PULL-tier manifest capabilities — create, archive, restore, the manual-rows switch read, overview ensure, the six refresh routes and the three change-plan routes',
   )
   for (const entry of pullTier) {
     for (const [user, expected, who] of [

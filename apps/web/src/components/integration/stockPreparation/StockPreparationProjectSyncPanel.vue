@@ -299,6 +299,16 @@
     <p v-if="report && afterRowsText" class="sp-sync__counts" data-testid="stock-prep-project-sync-target-rows">
       {{ afterRowsText }}
     </p>
+    <!-- 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3; R-68): the per-sheet switch and the last pull's
+         reminder live in their own component; this panel hands it the project, the scope, this run's report (a new
+         report re-reads) and whether a project-sheet run has seen the sheet. An injected double keeps it inert. -->
+    <StockPreparationProjectTargetManualRows
+      :project-no="submittedProjectNo || props.projectNo"
+      :scope="scope"
+      :last-run="report"
+      :project-sheet-known="Boolean(afterState && afterState.status !== 'absent')"
+      :inert="Boolean(props.api || props.targetApi)"
+    />
     <!-- S2 fix round 1 (refuter #1): the project sheet is missing the customer's extension columns
          (dry run / write refused 422 TARGET_SCHEMA_INCOMPLETE on a project sheet). A puller repairs
          it in place — the create route's replay re-installs the pack — and the pull runs again;
@@ -595,6 +605,7 @@ import { onAuthPrincipalChange, readAuthSessionSignature } from '../../../compos
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationLargeBomPullPanel from './StockPreparationLargeBomPullPanel.vue'
+import StockPreparationProjectTargetManualRows from './StockPreparationProjectTargetManualRows.vue'
 import {
   STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS,
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
