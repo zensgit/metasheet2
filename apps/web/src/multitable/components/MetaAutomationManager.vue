@@ -979,6 +979,12 @@ import {
 import { loadRuleEntriesConcurrently, mergeRuleEntries } from '../utils/automation-rule-concurrent-merge'
 import { AUTOMATION_RECIPES, applyRecipeToDraft, type AutomationRecipe } from '../automationRecipes'
 import { storedRuleHasDeletedTriggerSelfMutation } from '../automationSaveBlockReasons'
+import {
+  automationDuplicateRuleConfirmButton,
+  automationDuplicateRuleConfirmMessage,
+  automationDuplicateRuleConfirmTitle,
+  findDuplicateAutomationRule,
+} from '../utils/automation-duplicate-rule'
 
 const props = defineProps<{
   visible: boolean
@@ -1918,7 +1924,29 @@ function openPersonDeliveryViewerFromLog(ruleId: string) {
   showPersonDeliveryViewer.value = true
 }
 
+// 客户反馈 2026-10-27 4d: every enabled rule runs on its own, so a second rule with the same trigger and
+// actions sends everything twice. Ask before saving such a rule (never refuse). Cancel keeps the editor open.
+async function confirmPossibleDuplicateRule(payload: Partial<AutomationRule>): Promise<boolean> {
+  const duplicate = findDuplicateAutomationRule(payload, rules.value, { excludeRuleId: editingRule.value?.id ?? null })
+  if (!duplicate) return true
+  try {
+    await ElMessageBox.confirm(
+      automationDuplicateRuleConfirmMessage(duplicate.name, isZh.value),
+      automationDuplicateRuleConfirmTitle(isZh.value),
+      {
+        type: 'warning',
+        confirmButtonText: automationDuplicateRuleConfirmButton(isZh.value),
+        cancelButtonText: automationLabel('editor.cancel', isZh.value),
+      },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function onRuleEditorSave(payload: Partial<AutomationRule>, meta?: { dingtalkRecipientNotice?: string }) {
+  if (!(await confirmPossibleDuplicateRule(payload))) return
   try {
     if (editingRule.value?.id) {
       await updateRule(props.sheetId, editingRule.value.id, payload)
