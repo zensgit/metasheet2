@@ -8,7 +8,10 @@
  *      edit whose undo would clear a required column never enters the stack, the returned version is reported;
  *   G  MetaGridTable: the 「人工补充」 row label for every reader; single-cell editing of the fillable columns of a manual
  *      row only when the workbench names them (never on the row mark alone); range fill and paste (the focused cell
- *      included) keep treating them as read-only.
+ *      included) keep treating them as read-only;
+ *   E  MetaGridTable's in-place 「新增人工补充行」 (fix round 2): the inline add row and the R74 footer entry keep their
+ *      places and read 「+ 新增人工补充行」 when the workbench passes `manualRowCreate`, emitting `create-manual-row` only;
+ *      an ordinary sheet keeps 「+ 新建记录」.
  *
  * Collected by the required web gate through the existing `multitable-grid` token (a vitest path-substring filter).
  * Every value is synthetic.
@@ -468,5 +471,144 @@ describe('G — MetaGridTable on a project sheet with manual rows', () => {
     gridEl.dispatchEvent(pasteEvent('PASTED'))
     await flushUi()
     expect(grid.patchCell).toHaveBeenCalledWith('rec_mr_manual', F.notes, 'PASTED', 3)
+  })
+})
+
+// ── E. The in-place 「新增人工补充行」 entries (fix round 2) ──────────────────────────────────────────────────────
+// On a registered project sheet in state `allowed` the workbench passes `manualRowCreate` with `canCreate: false`. The
+// inline add row (after the last row; grouped: after the last group) and the R74 footer entry (left of the pager) keep
+// their places, element and classes, read 「+ 新增人工补充行」 and emit `create-manual-row` — never `create-record`.
+
+const ENTRY_FIELDS = [FIELDS[0], FIELDS[4]] // 名称, 备注
+function entryRows(): MetaRecord[] {
+  return [
+    { id: 'rec_e_a', version: 1, data: { [F.name]: 'Part A', [F.notes]: '' } },
+    { id: 'rec_e_b', version: 1, data: { [F.name]: 'Part B', [F.notes]: '' } },
+    { id: 'rec_e_blank', version: 1, data: { [F.name]: '', [F.notes]: 'note-of-the-blank-row' } },
+  ]
+}
+
+async function mountEntryGrid(props: Record<string, unknown>) {
+  const onCreateRecord = vi.fn()
+  const onCreateManualRow = vi.fn()
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  app = createApp({
+    setup: () => () => h(MetaGridTable, {
+      rows: entryRows(), visibleFields: ENTRY_FIELDS, sortRules: [], loading: false, currentPage: 1, totalPages: 1,
+      startIndex: 0, canEdit: true, searchText: '', rowDensity: 'normal',
+      onCreateRecord, onCreateManualRow,
+      ...props,
+    }),
+  })
+  app.mount(container)
+  await nextTick()
+  return { root: container, onCreateRecord, onCreateManualRow }
+}
+function unmountEntryGrid(): void {
+  app?.unmount(); app = null
+  container?.remove(); container = null
+}
+const entryText = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim()
+const inlineManual = (root: HTMLElement) => root.querySelector<HTMLButtonElement>('[data-testid="grid-inline-add-manual-row"]')
+const footerManual = (root: HTMLElement) => root.querySelector<HTMLButtonElement>('[data-testid="grid-footer-add-manual-row"]')
+const footerGeneric = (root: HTMLElement) => root.querySelector<HTMLButtonElement>('[data-testid="grid-footer-add-record"]')
+/** Where a create entry sits: its row's index among the tbody's rows (inline) or its index in the footer bar. */
+function placeOf(button: HTMLButtonElement) {
+  const tr = button.closest('tr')
+  const where = tr
+    ? { tbodyIndex: Array.from(tr.parentElement!.children).indexOf(tr), lastRow: tr.parentElement!.lastElementChild === tr }
+    : { footerIndex: Array.from(button.parentElement!.children).indexOf(button), inFooter: button.closest('.meta-grid__pagination') !== null }
+  return { ...where, tag: button.tagName, type: button.type, cls: button.className, rowCls: tr?.className ?? null }
+}
+
+describe('E — the in-place 「新增人工补充行」 entries (MetaGridTable)', () => {
+  it('E-01 flat (zh): the inline row after the last row and the footer entry (left of the pager, outside the scroll area) read 「+ 新增人工补充行」; no generic entry', async () => {
+    useLocale().setLocale('zh-CN')
+    const { root } = await mountEntryGrid({ canCreate: false, manualRowCreate: true })
+    const inline = inlineManual(root)!
+    expect(entryText(inline)).toBe('+ 新增人工补充行')
+    const tr = inline.closest('tr')!
+    expect(tr.parentElement!.tagName).toBe('TBODY')
+    expect(tr.parentElement!.lastElementChild).toBe(tr)
+    const footer = footerManual(root)!
+    expect(entryText(footer)).toBe('+ 新增人工补充行')
+    expect(footer.closest('.meta-grid__pagination')).not.toBeNull()
+    expect(footer.closest('.meta-grid__table-wrap')).toBeNull()
+    expect(footer.parentElement!.firstElementChild).toBe(footer)
+    expect(footerGeneric(root)).toBeNull()
+    const addButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('.meta-grid__add-row-btn, .meta-grid__footer-add-btn'))
+    expect(addButtons.map((button) => entryText(button))).toEqual(['+ 新增人工补充行', '+ 新增人工补充行'])
+  })
+
+  it('E-02 grouped by 名称 (zh): the inline entry sits after the LAST group — 「(无值)」 here, as on the last page in the field report', async () => {
+    useLocale().setLocale('zh-CN')
+    const { root } = await mountEntryGrid({ canCreate: false, manualRowCreate: true, groupFields: [FIELDS[0]] })
+    const headers = root.querySelectorAll('[data-test="group-header"]')
+    expect(headers).toHaveLength(3)
+    expect(entryText(headers[2])).toContain('(无值)')
+    const tr = inlineManual(root)!.closest('tr')!
+    expect(tr.parentElement!.lastElementChild).toBe(tr)
+    expect(tr.previousElementSibling!.classList.contains('meta-grid__row')).toBe(true)
+    expect(tr.previousElementSibling!.textContent).toContain('note-of-the-blank-row')
+    expect(entryText(inlineManual(root))).toBe('+ 新增人工补充行')
+    expect(entryText(footerManual(root))).toBe('+ 新增人工补充行')
+  })
+
+  it.each([
+    ['flat', {}],
+    ['grouped', { groupFields: [FIELDS[0]] }],
+  ])('E-03 %s: the same place, element and classes as 「+ 新建记录」 on an ordinary sheet; enabled and in the tab order', async (_label, extra) => {
+    const generic = await mountEntryGrid({ canCreate: true, ...extra })
+    const expected = [placeOf(generic.root.querySelector<HTMLButtonElement>('.meta-grid__add-row-btn')!), placeOf(footerGeneric(generic.root)!)]
+    unmountEntryGrid()
+    const manual = await mountEntryGrid({ canCreate: false, manualRowCreate: true, ...extra })
+    const entries = [inlineManual(manual.root)!, footerManual(manual.root)!]
+    expect(entries.map(placeOf)).toEqual(expected)
+    for (const button of entries) {
+      expect(button.disabled).toBe(false)
+      expect(button.tabIndex).toBe(0)
+      button.focus()
+      expect(document.activeElement).toBe(button)
+    }
+  })
+
+  it('E-04 clicking either entry emits create-manual-row only — never create-record', async () => {
+    const grid = await mountEntryGrid({ canCreate: false, manualRowCreate: true })
+    inlineManual(grid.root)!.click()
+    footerManual(grid.root)!.click()
+    expect(grid.onCreateManualRow).toHaveBeenCalledTimes(2)
+    expect(grid.onCreateRecord).not.toHaveBeenCalled()
+  })
+
+  it('E-05 an ordinary sheet (no manualRowCreate) is unchanged: 「+ 新建记录」 in both places, each emits create-record; no manual entry', async () => {
+    useLocale().setLocale('zh-CN')
+    const grid = await mountEntryGrid({ canCreate: true })
+    expect(inlineManual(grid.root)).toBeNull()
+    expect(footerManual(grid.root)).toBeNull()
+    const inline = grid.root.querySelector<HTMLButtonElement>('.meta-grid__add-row-btn')!
+    expect(entryText(inline)).toBe('+ 新建记录')
+    expect(entryText(footerGeneric(grid.root))).toBe('+ 新建记录')
+    inline.click()
+    footerGeneric(grid.root)!.click()
+    expect(grid.onCreateRecord).toHaveBeenCalledTimes(2)
+    expect(grid.onCreateManualRow).not.toHaveBeenCalled()
+  })
+
+  it('E-06 never both: with canCreate on, manualRowCreate adds nothing; with both off (any other state, a reader) there is no entry at all', async () => {
+    const both = await mountEntryGrid({ canCreate: true, manualRowCreate: true })
+    expect(inlineManual(both.root)).toBeNull()
+    expect(footerManual(both.root)).toBeNull()
+    expect(both.root.querySelectorAll('.meta-grid__add-row-btn')).toHaveLength(1)
+    unmountEntryGrid()
+    const none = await mountEntryGrid({ canCreate: false, manualRowCreate: false })
+    expect(none.root.querySelector('.meta-grid__add-row-btn')).toBeNull()
+    expect(none.root.querySelector('.meta-grid__footer-add-btn')).toBeNull()
+  })
+
+  it('E-07 an empty sheet keeps its empty state (no inline row, no footer entry), as the generic entries do', async () => {
+    const grid = await mountEntryGrid({ canCreate: false, manualRowCreate: true, rows: [] })
+    expect(inlineManual(grid.root)).toBeNull()
+    expect(footerManual(grid.root)).toBeNull()
   })
 })

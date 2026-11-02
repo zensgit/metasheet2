@@ -236,8 +236,10 @@
       <span>{{ wb('notice.recordCreateBlockedByLock', isZh) }}</span>
     </div>
     <!-- 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.1 / §3.7 / §8 B3.3): on a registered project sheet the
-         R68 note above gives way to this one — 「新增人工补充行」 in state `allowed`, otherwise the state's reason (an
-         unlocked sheet: 「需管理员修复本表」). Every generic create entry is hidden meanwhile (canCreateRecordByHand). -->
+         R68 note above gives way to this one — in state `allowed` the line that points to 「新增人工补充行」, otherwise the
+         state's reason (an unlocked sheet: 「需管理员修复本表」). Every generic create entry is hidden meanwhile
+         (canCreateRecordByHand); in `allowed` the toolbar's, the inline row's and the footer's places hold
+         「新增人工补充行」 instead (`manualRowsCreateAvailable`), so this note carries no button of its own. -->
     <div
       v-if="manualRowsBannerVisible && manualRowsNotice"
       class="mt-workbench__capability-banner mt-workbench__manual-rows-note"
@@ -247,13 +249,6 @@
     >
       <template v-if="manualRowsNotice.kind === 'entry'">
         <span>{{ manualRowLabel('notice.useManualRow', isZh) }}</span>
-        <MtButton
-          v-if="manualRowsCreateAvailable"
-          variant="primary"
-          size="sm"
-          data-testid="manual-row-create"
-          @click="openManualRowDialog"
-        >{{ manualRowLabel('entry.create', isZh) }}</MtButton>
       </template>
       <template v-else>
         <strong v-if="manualRowsNotice.headlineKey" data-testid="manual-rows-reason-headline">{{ manualRowLabel(manualRowsNotice.headlineKey, isZh) }}</strong>
@@ -284,6 +279,7 @@
       :group-field-ids="grid.groupFieldIds.value"
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       :can-reset-to-shared="canResetToShared"
+      :manual-row-create="manualRowsCreateAvailable" @add-manual-row="openManualRowDialog"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
       @set-group-fields="onSetGroupFields" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
       @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
@@ -447,6 +443,7 @@
           :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="canCreateRecordByHand" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :manual-row-record-ids="manualRowRecordIdsInGrid" :manual-row-field-ids="manualRowEditableFieldIds"
+          :manual-row-create="manualRowsCreateAvailable"
           :commit-range="grid.patchRange"
           :range-context-key="JSON.stringify([workbench.activeSheetId.value, workbench.activeViewId.value])"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
@@ -475,6 +472,7 @@
           @go-to-page="grid.goToPage" @load-more="grid.loadMore" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="onSetColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @bulk-restore="onBulkRestoreRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
+          @create-manual-row="openManualRowDialog"
           @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
           @set-frozen-rows="onSetFrozenRows"
@@ -1120,10 +1118,12 @@ const capabilitySource = computed(() => workbench.capabilities.value ?? role.val
 const caps = useMultitableCapabilities(capabilitySource)
 // 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3–OQ8): /context sends `stockPreparationManualRows`
 // ONLY on a registered project sheet (P_reg), to an actor who can create, edit or delete. While it is present — WHATEVER
-// its state — every generic create entry below is hidden (`canCreateRecordByHand`), and the note that replaces them shows
-// 「新增人工补充行」 (state `allowed`) or the state's reason. Every manual-row control is gated on THIS block, never on a
-// row's `manualSupplement` mark (#6664 note N2), which is only the 「人工补充」 label. Read fail-closed
-// (utils/manual-rows.ts): absent ⇒ exactly the old behaviour; present but malformed ⇒ `unavailable`, no manual control.
+// its state — every generic create entry below is hidden (`canCreateRecordByHand`). In state `allowed` the toolbar's, the
+// grid's inline row's and the footer's places hold 「新增人工补充行」 instead (`manualRowsCreateAvailable`, R74's footer
+// kept); in every other state there is no entry at all and the note shows the state's reason. Every manual-row control
+// is gated on THIS block, never on a row's `manualSupplement` mark (#6664 note N2), which is only the 「人工补充」 label.
+// Read fail-closed (utils/manual-rows.ts): absent ⇒ exactly the old behaviour; present but malformed ⇒ `unavailable`,
+// no manual control.
 const manualRowsBlock = computed(() => readManualRowsBlock(capabilitySource.value))
 // R68 (#6454 judge note): /context sends `recordCreateBlockedByLock: true` when the sheet has a column people may
 // not write (the 备料 project sheet's PLM columns) that its own validation also marks required, so a record a
@@ -3304,9 +3304,10 @@ async function onDuplicateRecord(recordId?: string | null) {
 // While the active sheet's /context is still on its way (`capabilitiesStale`) no manual-row control is offered.
 
 const manualRowsNotice = computed(() => (manualRowsBlock.value ? manualRowsNoticeOf(manualRowsBlock.value) : null))
-// The note where the generic create entries were: only for an actor who could create (a reader lost nothing).
+// The note above the table (the R68 note's place): only for an actor who could create (a reader lost nothing).
 const manualRowsBannerVisible = computed(() => manualRowsBlock.value !== null && caps.canCreateRecord.value && !capabilitiesStale.value)
-// 「新增人工补充行」 and 「复制为新行」: state `allowed` only (ADR §3.1).
+// 「新增人工补充行」 (toolbar / inline row / footer, in the generic entries' places) and 「复制为新行」: state `allowed`
+// only (ADR §3.1).
 const manualRowsCreateAvailable = computed(() => (
   caps.canCreateRecord.value && !capabilitiesStale.value && manualRowsCreateEnabled(manualRowsBlock.value)
 ))

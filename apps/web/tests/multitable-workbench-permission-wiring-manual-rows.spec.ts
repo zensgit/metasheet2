@@ -8,10 +8,11 @@ import type { ManualCellWrite } from '../src/multitable/composables/useMultitabl
 // the workbench wiring, with the REAL capabilities composable reading /context's `stockPreparationManualRows` block:
 //
 //   W-01 block present → EVERY generic create entry is off (toolbar add / import, grid "+ row" and footer, inspector
-//        duplicate, kanban / gallery / calendar / timeline / gantt / hierarchy), whatever the state; a new form-view
-//        submission keeps its pre-B3 gate (OQ7, the form route is unchanged); the R68 note gives way to the manual-rows note;
-//   W-02 the note per state (zh): 「新增人工补充行」 only in `allowed`, otherwise the state's reason (lock_missing →
-//        「需管理员修复本表」);
+//        duplicate, kanban / gallery / calendar / timeline / gantt / hierarchy), whatever the state; the in-place
+//        「新增人工补充行」 (toolbar, inline row, footer) only in `allowed`; a new form-view submission keeps its pre-B3 gate
+//        (OQ7, the form route is unchanged); the R68 note gives way to the manual-rows note;
+//   W-02 the note per state (zh): in `allowed` the line pointing to 「新增人工补充行」 (no button of its own — the entries
+//        are in place), otherwise the state's reason (lock_missing → 「需管理员修复本表」);
 //   W-03 block absent → exactly the old entries, no note, and a row's `manualSupplement` mark alone enables nothing
 //        (N2: no manual grid cells, no 复制为新行, the route resolver answers /patch);
 //   W-04 an actor who cannot create sees no note and no manual entry;
@@ -21,7 +22,11 @@ import type { ManualCellWrite } from '../src/multitable/composables/useMultitabl
 //   W-08 复制为新行: asks, POST /records/:recordId/manual-copy, opens the new row;
 //   W-09 the grid's route resolver (patchCell / undo / redo) and the grid props;
 //   W-10 the drawer: the fillable columns of a manual row are lifted; its saves go one at a time, each carrying the version
-//        the previous step returned (ADR §3.4 「第二步必须带第一步返回的 version」).
+//        the previous step returned (ADR §3.4 「第二步必须带第一步返回的 version」);
+//   W-11 the three in-place entries with the REAL toolbar and grid fed the workbench's own props (fix round 2, R74's
+//        footer kept): in `allowed` the toolbar, inline-row and footer places hold 「+ 新增人工补充行」 and open the
+//        dialog, never a generic create; lock_missing / disabled: no entry in any of them; an ordinary sheet keeps
+//        「+ 新建记录」 in all three, each sending the generic create.
 //
 // Collected by the required web gate through the existing `multitable-workbench-permission-wiring` token.
 
@@ -211,8 +216,33 @@ function unmount(): void {
 }
 
 const note = () => container!.querySelector('[data-testid="manual-rows-note"]')
+// The note's own button (before fix round 2) — must stay gone: the entries are in the generic entries' places now.
 const createButton = () => container!.querySelector<HTMLButtonElement>('[data-testid="manual-row-create"]')
 const dialog = () => document.body.querySelector('[data-testid="manual-row-dialog"]')
+/** What the toolbar's in-place 「新增人工补充行」 emits (W-11 proves the real button reaches this listener). */
+async function openFromToolbarEntry(): Promise<void> {
+  const onAddManualRow = captured.MetaToolbar!.onAddManualRow as () => void
+  onAddManualRow()
+  await flushUi()
+}
+
+// W-11: the REAL toolbar / grid, mounted beside the workbench with the props and listeners the stubs captured.
+const realApps: VueApp<Element>[] = []
+const REAL = {
+  MetaToolbar: () => vi.importActual<{ default: Component }>('../src/multitable/components/MetaToolbar.vue'),
+  MetaGridTable: () => vi.importActual<{ default: Component }>('../src/multitable/components/MetaGridTable.vue'),
+}
+async function mountReal(name: keyof typeof REAL): Promise<HTMLElement> {
+  const { default: Real } = await REAL[name]()
+  const props = { ...captured[name]! }
+  const el = document.createElement('div')
+  document.body.appendChild(el)
+  const realApp = createApp({ render: () => h(Real, props) })
+  realApp.mount(el)
+  realApps.push(realApp)
+  await flushUi()
+  return el
+}
 
 beforeEach(() => {
   for (const key of Object.keys(captured)) captured[key] = null
@@ -223,6 +253,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  while (realApps.length) realApps.pop()!.unmount()
   unmount()
   container?.remove()
   container = null
@@ -234,12 +265,14 @@ afterEach(() => {
 })
 
 describe('W-01 a P_reg sheet (block present): every generic create entry is off, whatever the state', () => {
-  it.each(['allowed', 'disabled', 'unavailable'])('state %s: toolbar add / import, grid "+ row", inspector duplicate', async (state) => {
+  it.each(['allowed', 'disabled', 'unavailable'])('state %s: toolbar add / import, grid "+ row", inspector duplicate; 新增人工补充行 in their places only in allowed', async (state) => {
     await mount('grid', withBlock({ ...BLOCK, state, ...(state === 'unavailable' ? { reason: 'lock_missing' } : {}) }))
     expect(captured.MetaToolbar!['can-create-record']).toBe(false)
     expect(captured.MetaGridTable!['can-create']).toBe(false)
     expect(captured.MetaRecordInspector!['can-create']).toBe(false)
-    expect(note(), 'the manual-rows note replaces the entries').not.toBeNull()
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(state === 'allowed')
+    expect(captured.MetaGridTable!['manual-row-create']).toBe(state === 'allowed')
+    expect(note(), 'the manual-rows note takes the R68 note\'s place').not.toBeNull()
   })
 
   it.each([
@@ -249,14 +282,16 @@ describe('W-01 a P_reg sheet (block present): every generic create entry is off,
     ['timeline', 'MetaTimelineView'],
     ['gantt', 'MetaGanttView'],
     ['hierarchy', 'MetaHierarchyView'],
-  ])('%s create: off with the block present, on without it (ADR §3.7 「全部通用新建入口」)', async (viewType, stub) => {
+  ])('%s create: off with the block present, on without it (ADR §3.7 「全部通用新建入口」); the toolbar\'s in-place 新增人工补充行 reaches this view too', async (viewType, stub) => {
     await mount(viewType, withBlock())
     expect(captured[stub], `${stub} rendered`).toBeTruthy()
     expect(captured[stub]!['can-create']).toBe(false)
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(true)
     unmount()
     for (const key of Object.keys(captured)) captured[key] = null
     await mount(viewType, { ...WRITER_CAPS })
     expect(captured[stub]!['can-create']).toBe(true)
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(false)
   })
 
   it('OQ7 「表单不改」: a new form-view submission (the form route) keeps its pre-B3 gate — open on an unlocked registered sheet, closed by R68 on a locked one', async () => {
@@ -279,10 +314,12 @@ describe('W-01 a P_reg sheet (block present): every generic create entry is off,
 describe('W-02 the note per state (zh)', () => {
   beforeEach(() => useLocale().setLocale('zh-CN'))
 
-  it('allowed: 「新增人工补充行」 with the §3.1 text', async () => {
+  it('allowed: the §3.1 text pointing to 「新增人工补充行」; no button of its own (the toolbar\'s place, right under it, holds one)', async () => {
     await mount('grid', withBlock())
-    expect(note()?.textContent).toContain('备料项目表上请用「新增人工补充行」新增行；PLM 行由拉取写入。')
-    expect(createButton()?.textContent?.trim()).toBe('新增人工补充行')
+    expect(note()?.textContent?.trim()).toBe('备料项目表上请用「新增人工补充行」新增行；PLM 行由拉取写入。')
+    expect(note()!.querySelector('button')).toBeNull()
+    expect(createButton()).toBeNull()
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(true)
   })
 
   it.each([
@@ -295,6 +332,9 @@ describe('W-02 the note per state (zh)', () => {
   ])('%j: no entry, the reason', async (partial, headline, text) => {
     await mount('grid', withBlock({ ...BLOCK, ...partial }))
     expect(createButton()).toBeNull()
+    expect(note()!.querySelector('button')).toBeNull()
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(false)
+    expect(captured.MetaGridTable!['manual-row-create']).toBe(false)
     expect(container!.querySelector('[data-testid="manual-rows-reason"]')?.textContent?.trim()).toBe(text)
     const headlineEl = container!.querySelector('[data-testid="manual-rows-reason-headline"]')
     if (headline) expect(headlineEl?.textContent?.trim()).toBe(headline)
@@ -308,6 +348,8 @@ describe('W-03 block absent: the old entries, and the row mark alone enables not
     await mount('grid', { ...WRITER_CAPS })
     expect(captured.MetaToolbar!['can-create-record']).toBe(true)
     expect(captured.MetaGridTable!['can-create']).toBe(true)
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(false)
+    expect(captured.MetaGridTable!['manual-row-create']).toBe(false)
     expect(note()).toBeNull()
     // The page still holds a row the server marked `manualSupplement` (the host registry says so) — but no block.
     expect(captured.MetaGridTable!['manual-row-record-ids']).toEqual([])
@@ -332,6 +374,8 @@ describe('W-04 an actor who cannot create', () => {
   it('gets no note and no manual entry (an editor still edits manual rows)', async () => {
     await mount('grid', withBlock(BLOCK, { ...WRITER_CAPS, canCreateRecord: false }))
     expect(note()).toBeNull()
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(false)
+    expect(captured.MetaGridTable!['manual-row-create']).toBe(false)
     expect(captured.MetaRecordInspector!['manual-copy-available']).toBe(false)
     expect(capturedGridOptions!.resolveManualCellWrite!('rec_wb_manual', F.spec)).toEqual({ required: false })
   })
@@ -354,8 +398,7 @@ describe('W-06 the 新增人工补充行 dialog', () => {
 
   async function openDialog(): Promise<void> {
     await mount('grid', withBlock())
-    createButton()!.click()
-    await flushUi()
+    await openFromToolbarEntry()
     expect(dialog()).not.toBeNull()
   }
   const input = (fieldId: string) => document.body.querySelector<HTMLInputElement>(`[data-manual-row-field="${fieldId}"] input`)
@@ -423,8 +466,7 @@ describe('W-07 N5: the actor\'s field permissions narrow the block\'s lists', ()
     await mount('grid', withBlock())
     expect(captured.MetaGridTable!['manual-row-field-ids']).toEqual([F.code, F.name, F.raw, F.total])
     expect(capturedGridOptions!.resolveManualCellWrite!('rec_wb_manual', F.spec)).toBeNull()
-    createButton()!.click()
-    await flushUi()
+    await openFromToolbarEntry()
     expect(document.body.querySelector(`[data-manual-row-field="${F.spec}"]`)).toBeNull()
     expect(document.body.querySelector(`[data-manual-row-field="${F.name}"]`)).not.toBeNull()
   })
@@ -432,8 +474,7 @@ describe('W-07 N5: the actor\'s field permissions narrow the block\'s lists', ()
   it('a required column the actor may not see blocks the dialog (counted, not named)', async () => {
     gridMock.fieldPermissions.value = { ...PERMS, [F.name]: { visible: false, readOnly: true } }
     await mount('grid', withBlock())
-    createButton()!.click()
-    await flushUi()
+    await openFromToolbarEntry()
     expect(document.body.querySelector('[data-testid="manual-row-dialog-blocked"]')).not.toBeNull()
     expect(document.body.querySelector<HTMLButtonElement>('[data-action="manual-row-dialog-submit"]')!.disabled).toBe(true)
   })
@@ -547,5 +588,149 @@ describe('W-10 the drawer on a manual row', () => {
     const onPatch = captured.MetaRecordInspector!.onPatch as (fieldId: string, value: unknown) => Promise<void>
     await onPatch(F.notes, 'note')
     expect(gridMock.patchCell).toHaveBeenCalledWith('rec_wb_plm', F.notes, 'note', 5)
+  })
+})
+
+// ── W-11 the three in-place entries (fix round 2; R74's footer kept) ─────────────────────────────────────────────────
+// On an ordinary sheet 「+ 新建记录」 sits in three places: the toolbar (top right), the inline row after the last row
+// (grouped: after the last group — on the last page the 「(无值)」 one) and the footer (left of the pager, R74: a long
+// sheet needs no scrolling). On a registered project sheet in state `allowed` each place holds 「+ 新增人工补充行」 and
+// opens the same dialog; in every other state none of them holds any entry.
+
+const TOOLBAR_ENTRY = '[data-testid="toolbar-add-manual-row"]'
+const INLINE_ENTRY = '[data-testid="grid-inline-add-manual-row"]'
+const FOOTER_ENTRY = '[data-testid="grid-footer-add-manual-row"]'
+const entryText = (el: Element | null | undefined) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim()
+const buttonsReading = (root: ParentNode, pattern: RegExp) =>
+  Array.from(root.querySelectorAll<HTMLButtonElement>('button')).filter((button) => pattern.test(entryText(button)))
+/** The toolbar's create place: the last item of the toolbar's action group, where 「+ 新建记录」 sits. */
+const isToolbarCreatePlace = (button: Element) => button.parentElement!.lastElementChild === button
+const isLastTbodyRow = (button: Element) => {
+  const tr = button.closest('tr')!
+  return tr.parentElement!.tagName === 'TBODY' && tr.parentElement!.lastElementChild === tr
+}
+const isFooterFirstItem = (button: Element) =>
+  button.closest('.meta-grid__pagination') !== null && button.closest('.meta-grid__table-wrap') === null
+  && button.parentElement!.firstElementChild === button
+
+describe('W-11 the three in-place entries (the real toolbar and grid, fed the workbench\'s own props)', () => {
+  beforeEach(() => useLocale().setLocale('zh-CN'))
+
+  it.each([
+    ['the toolbar (top right)', 'MetaToolbar', TOOLBAR_ENTRY],
+    ['the inline row after the last row', 'MetaGridTable', INLINE_ENTRY],
+    ['the footer (left of the pager)', 'MetaGridTable', FOOTER_ENTRY],
+  ] as const)('allowed — %s: 「+ 新增人工补充行」, a keyboard-reachable button that opens the dialog; no generic create', async (_place, name, selector) => {
+    await mount('grid', withBlock())
+    const root = await mountReal(name)
+    const entry = root.querySelector<HTMLButtonElement>(selector)
+    expect(entry, 'the in-place entry').not.toBeNull()
+    expect(entryText(entry)).toBe('+ 新增人工补充行')
+    expect(buttonsReading(root, /新建记录/)).toHaveLength(0)
+    expect(entry!.tagName).toBe('BUTTON')
+    expect(entry!.disabled).toBe(false)
+    expect(entry!.tabIndex).toBe(0)
+    entry!.focus()
+    expect(document.activeElement).toBe(entry)
+    expect(dialog()).toBeNull()
+    entry!.click()
+    await flushUi()
+    expect(dialog(), 'the same MetaManualRowDialog').not.toBeNull()
+    const required = Array.from(document.body.querySelectorAll<HTMLElement>('[data-manual-row-field]'))
+      .filter((row) => (row.textContent ?? '').includes('*'))
+      .map((row) => row.getAttribute('data-manual-row-field'))
+    expect(required, 'only 名称 and 总用量 are required').toEqual([F.name, F.total])
+    expect(document.body.querySelector('[data-testid="manual-row-dialog-project-no"]'), '项目号 is shown').not.toBeNull()
+    expect(document.body.querySelector('[data-testid="manual-row-dialog-project-no"] input'), '项目号 is read-only (filled by the server)').toBeNull()
+    expect(gridMock.createRecord).not.toHaveBeenCalled()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('allowed: each entry sits where the generic one sits — the toolbar\'s last action, the tbody\'s last row, the footer\'s first item outside the scroll area', async () => {
+    await mount('grid', withBlock())
+    const toolbar = await mountReal('MetaToolbar')
+    const gridRoot = await mountReal('MetaGridTable')
+    expect(isToolbarCreatePlace(toolbar.querySelector(TOOLBAR_ENTRY)!)).toBe(true)
+    expect(isLastTbodyRow(gridRoot.querySelector(INLINE_ENTRY)!)).toBe(true)
+    expect(isFooterFirstItem(gridRoot.querySelector(FOOTER_ENTRY)!)).toBe(true)
+  })
+
+  it('allowed, grouped by 名称: the inline entry follows the last group (the 「(无值)」 one here) and opens the dialog', async () => {
+    gridMock.rows.value = [...ROWS(), { id: 'rec_wb_blank', version: 1, data: { [F.name]: '', [F.spec]: '', [F.notes]: 'note-of-the-blank-row' } }]
+    gridMock.groupFields.value = [FIELDS.find((field) => field.id === F.name)!]
+    await mount('grid', withBlock())
+    const gridRoot = await mountReal('MetaGridTable')
+    const headers = gridRoot.querySelectorAll('[data-test="group-header"]')
+    expect(headers).toHaveLength(3)
+    expect(entryText(headers[2])).toContain('(无值)')
+    const entry = gridRoot.querySelector<HTMLButtonElement>(INLINE_ENTRY)!
+    expect(isLastTbodyRow(entry)).toBe(true)
+    expect(entry.closest('tr')!.previousElementSibling!.textContent).toContain('note-of-the-blank-row')
+    entry.click()
+    await flushUi()
+    expect(dialog()).not.toBeNull()
+    expect(gridMock.createRecord).not.toHaveBeenCalled()
+  })
+
+  it('each entry has its generic counterpart\'s element and classes (the same size), place by place', async () => {
+    const shape = (button: Element | null | undefined) => (button ? { tag: button.tagName, cls: button.className } : null)
+    await mount('grid', { ...WRITER_CAPS })
+    let toolbar = await mountReal('MetaToolbar')
+    let gridRoot = await mountReal('MetaGridTable')
+    const generic = [
+      shape(buttonsReading(toolbar, /^\+ 新建记录$/)[0]),
+      shape(gridRoot.querySelector('.meta-grid__add-row-btn')),
+      shape(gridRoot.querySelector('[data-testid="grid-footer-add-record"]')),
+    ]
+    while (realApps.length) realApps.pop()!.unmount()
+    unmount()
+    for (const key of Object.keys(captured)) captured[key] = null
+    await mount('grid', withBlock())
+    toolbar = await mountReal('MetaToolbar')
+    gridRoot = await mountReal('MetaGridTable')
+    const manual = [shape(toolbar.querySelector(TOOLBAR_ENTRY)), shape(gridRoot.querySelector(INLINE_ENTRY)), shape(gridRoot.querySelector(FOOTER_ENTRY))]
+    expect(generic.every((item) => item !== null)).toBe(true)
+    expect(manual).toEqual(generic)
+  })
+
+  it.each([
+    ['lock_missing', { state: 'unavailable', reason: 'lock_missing' }, '需管理员修复本表'],
+    ['disabled', { state: 'disabled' }, null],
+  ] as const)('%s: none of the three places holds any create entry (neither 新增人工补充行 nor 新建记录); the note gives the reason', async (_state, partial, headline) => {
+    await mount('grid', withBlock({ ...BLOCK, ...partial }))
+    const toolbar = await mountReal('MetaToolbar')
+    const gridRoot = await mountReal('MetaGridTable')
+    for (const selector of [TOOLBAR_ENTRY, INLINE_ENTRY, FOOTER_ENTRY]) expect(document.body.querySelector(selector), selector).toBeNull()
+    expect(gridRoot.querySelector('[data-testid="grid-footer-add-record"]')).toBeNull()
+    expect(gridRoot.querySelector('.meta-grid__add-row-btn')).toBeNull()
+    expect(buttonsReading(toolbar, /新建记录|新增人工补充行/)).toHaveLength(0)
+    expect(buttonsReading(gridRoot, /新建记录|新增人工补充行/)).toHaveLength(0)
+    expect(container!.querySelector('[data-testid="manual-rows-reason"]')).not.toBeNull()
+    const headlineEl = container!.querySelector('[data-testid="manual-rows-reason-headline"]')
+    if (headline) expect(headlineEl?.textContent?.trim()).toBe(headline)
+    else expect(headlineEl).toBeNull()
+    expect(dialog()).toBeNull()
+  })
+
+  it('an ordinary sheet (no block): all three places keep 「+ 新建记录」, each sends the generic create; no manual entry, no dialog', async () => {
+    await mount('grid', { ...WRITER_CAPS })
+    const toolbar = await mountReal('MetaToolbar')
+    const gridRoot = await mountReal('MetaGridTable')
+    for (const selector of [TOOLBAR_ENTRY, INLINE_ENTRY, FOOTER_ENTRY]) expect(document.body.querySelector(selector), selector).toBeNull()
+    const toolbarAdd = buttonsReading(toolbar, /^\+ 新建记录$/)
+    expect(toolbarAdd).toHaveLength(1)
+    const inlineAdd = gridRoot.querySelector<HTMLButtonElement>('.meta-grid__add-row-btn')!
+    const footerAdd = gridRoot.querySelector<HTMLButtonElement>('[data-testid="grid-footer-add-record"]')!
+    expect(isToolbarCreatePlace(toolbarAdd[0])).toBe(true)
+    expect(isLastTbodyRow(inlineAdd)).toBe(true)
+    expect(isFooterFirstItem(footerAdd)).toBe(true)
+    for (const button of [toolbarAdd[0], inlineAdd, footerAdd]) {
+      expect(entryText(button)).toBe('+ 新建记录')
+      button.click()
+      await flushUi()
+    }
+    expect(gridMock.createRecord).toHaveBeenCalledTimes(3)
+    expect(dialog()).toBeNull()
+    expect(note()).toBeNull()
   })
 })

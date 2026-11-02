@@ -191,6 +191,13 @@
               </button>
             </td>
           </tr>
+          <tr v-if="showManualRowAdd && !loading" class="meta-grid__add-row" data-test="grid-add-manual-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" data-testid="grid-inline-add-manual-row" @click="emit('create-manual-row')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
+              </button>
+            </td>
+          </tr>
         </tbody>
         <tbody v-else>
           <!-- #5863c: frozen rows (always mounted) + the A1 virtualization top spacer are both items in
@@ -394,6 +401,13 @@
               </button>
             </td>
           </tr>
+          <tr v-if="showManualRowAdd && !loading" class="meta-grid__add-row" data-test="grid-add-manual-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" data-testid="grid-inline-add-manual-row" @click="emit('create-manual-row')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
+              </button>
+            </td>
+          </tr>
         </tbody>
         <tfoot v-if="hasAnyAggregation" class="meta-grid__foot">
           <tr>
@@ -429,8 +443,9 @@
          so it keeps the pager rather than strand the viewer on that page (客户反馈 2026-10-21). The rows-per-page
          select sits in the same footer whenever there is more than one page or a non-default size to undo.
          客户反馈 2026-10-27 (R74): the footer also carries 「跳转到第 [ ] 行」 (whenever there is more than one row, NOT
-         tied to showPager, which is off on the flat page 1) and a 「+ 新建记录」 that needs no scrolling. -->
-    <div v-if="showPager || showPageSizeSelect || showRowJump || showFooterAdd" class="meta-grid__pagination">
+         tied to showPager, which is off on the flat page 1) and a 「+ 新建记录」 that needs no scrolling.
+         人工补充行 B3: on a registered project sheet in state `allowed` that place holds 「+ 新增人工补充行」 instead. -->
+    <div v-if="showPager || showPageSizeSelect || showRowJump || showFooterAdd || showManualRowAdd" class="meta-grid__pagination">
       <button
         v-if="showFooterAdd"
         type="button"
@@ -439,6 +454,15 @@
         @click="emit('create-record')"
       >
         <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ l('grid.addRecordInline') }}
+      </button>
+      <button
+        v-if="showManualRowAdd"
+        type="button"
+        class="meta-grid__page-btn meta-grid__footer-add-btn"
+        data-testid="grid-footer-add-manual-row"
+        @click="emit('create-manual-row')"
+      >
+        <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
       </button>
       <template v-if="showPager">
         <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
@@ -588,6 +612,10 @@ const props = defineProps<{
    *  fill, paste and Yjs keep treating these cells as read-only. */
   manualRowRecordIds?: string[]
   manualRowFieldIds?: string[]
+  /** 人工补充行 B3 (ADR §8 B3.3): true ⇒ the inline add row and the footer entry (R74) keep their places and read
+   *  「新增人工补充行」, emitting `create-manual-row` — never `create-record`. The workbench passes it only in state
+   *  `allowed` of a registered project sheet, where `canCreate` is off; absent / false ⇒ unchanged. */
+  manualRowCreate?: boolean
   rangeContextKey?: string
   commitRange?: (changes: RangeChange[]) => Promise<unknown>
   columnWidths?: Record<string, number>
@@ -691,6 +719,8 @@ const emit = defineEmits<{
   (e: 'duplicate-record', recordId: string): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
+  // 人工补充行 B3: the inline add row / footer entry in their 「新增人工补充行」 form (see `manualRowCreate`).
+  (e: 'create-manual-row'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
   (e: 'set-frozen-rows', frozenTopRowCount: number): void
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
@@ -918,6 +948,9 @@ function onPageSizeChange(event: Event) {
 // canCreate gate as the inline row (the workbench turns it off for a PLM-locked sheet, R68). An empty sheet keeps
 // its empty state, as the inline row does.
 const showFooterAdd = computed(() => props.canCreate === true && filteredRows.value.length > 0)
+// 人工补充行 B3: on a registered project sheet in state `allowed` the same two places (inline row, footer) carry
+// 「新增人工补充行」 — `manualRowCreate`, never together with the generic entry, under the same "rows exist" rule.
+const showManualRowAdd = computed(() => props.manualRowCreate === true && props.canCreate !== true && filteredRows.value.length > 0)
 
 // Row N is the number in the row-number column: startIndex + index + 1, where the index is into displayRows (the
 // server order on the flat path; the visible order on the grouped path, where row numbers are nav indices).
