@@ -694,12 +694,16 @@ describe('W-11 the three in-place entries (the real toolbar and grid, fed the wo
   })
 
   it.each([
-    ['lock_missing', { state: 'unavailable', reason: 'lock_missing' }, '需管理员修复本表'],
-    ['disabled', { state: 'disabled' }, null],
-  ] as const)('%s: none of the three places holds any create entry (neither 新增人工补充行 nor 新建记录); the note gives the reason', async (_state, partial, headline) => {
+    ['lock_missing', { state: 'unavailable', reason: 'lock_missing' }, '需管理员修复本表', false],
+    ['disabled', { state: 'disabled' }, null, false],
+    ['lock_missing, grouped by 名称', { state: 'unavailable', reason: 'lock_missing' }, '需管理员修复本表', true],
+    ['disabled, grouped by 名称', { state: 'disabled' }, null, true],
+  ] as const)('%s: none of the three places holds any create entry (neither 新增人工补充行 nor 新建记录); the note gives the reason', async (_state, partial, headline, grouped) => {
+    if (grouped) gridMock.groupFields.value = [FIELDS.find((field) => field.id === F.name)!]
     await mount('grid', withBlock({ ...BLOCK, ...partial }))
     const toolbar = await mountReal('MetaToolbar')
     const gridRoot = await mountReal('MetaGridTable')
+    if (grouped) expect(gridRoot.querySelectorAll('[data-test="group-header"]').length, 'the grouped render path').toBeGreaterThan(0)
     for (const selector of [TOOLBAR_ENTRY, INLINE_ENTRY, FOOTER_ENTRY]) expect(document.body.querySelector(selector), selector).toBeNull()
     expect(gridRoot.querySelector('[data-testid="grid-footer-add-record"]')).toBeNull()
     expect(gridRoot.querySelector('.meta-grid__add-row-btn')).toBeNull()
@@ -732,5 +736,34 @@ describe('W-11 the three in-place entries (the real toolbar and grid, fed the wo
     expect(gridMock.createRecord).toHaveBeenCalledTimes(3)
     expect(dialog()).toBeNull()
     expect(note()).toBeNull()
+  })
+})
+
+describe('W-11b the entries follow the ACTIVE sheet\'s own /context (proposed MF-2)', () => {
+  it('while the capabilities still belong to the previous sheet: no entry in any place; after the active sheet\'s /context lands: all three', async () => {
+    useLocale().setLocale('zh-CN')
+    const capabilitiesSheetId = ref<string | null>('sheet_wb_previous')
+    workbenchMock = { ...createWorkbenchMock('grid', withBlock()), capabilitiesSheetId }
+    const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(false)
+    expect(captured.MetaGridTable!['manual-row-create']).toBe(false)
+    let toolbar = await mountReal('MetaToolbar')
+    let gridRoot = await mountReal('MetaGridTable')
+    for (const selector of [TOOLBAR_ENTRY, INLINE_ENTRY, FOOTER_ENTRY]) expect(document.body.querySelector(selector), selector).toBeNull()
+    expect(buttonsReading(toolbar, /新建记录|新增人工补充行/)).toHaveLength(0)
+    expect(buttonsReading(gridRoot, /新建记录|新增人工补充行/)).toHaveLength(0)
+    while (realApps.length) realApps.pop()!.unmount()
+    capabilitiesSheetId.value = 'sheet_wb'
+    await flushUi()
+    expect(captured.MetaToolbar!['manual-row-create']).toBe(true)
+    expect(captured.MetaGridTable!['manual-row-create']).toBe(true)
+    toolbar = await mountReal('MetaToolbar')
+    gridRoot = await mountReal('MetaGridTable')
+    expect(toolbar.querySelector(TOOLBAR_ENTRY)).not.toBeNull()
+    expect(gridRoot.querySelector(INLINE_ENTRY)).not.toBeNull()
+    expect(gridRoot.querySelector(FOOTER_ENTRY)).not.toBeNull()
   })
 })
