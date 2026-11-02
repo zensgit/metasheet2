@@ -524,6 +524,18 @@ describe('business trip real request approval and destination arrangement',() =>
     expect(response.status,response.body.error?.code).toBe(200)
     return {orgId,token,userId:owner.userId}
   }
+  async function waitForPolicyWaiter(pid:number,completed:()=>boolean) {
+    for(let attempt=0;attempt<250;attempt++){
+      const locks=await f.pool.query(`SELECT 1 FROM pg_locks held JOIN pg_locks waiting
+        ON held.locktype=waiting.locktype AND held.database=waiting.database
+        AND held.classid=waiting.classid AND held.objid=waiting.objid AND held.objsubid=waiting.objsubid
+        WHERE held.pid=$1 AND held.locktype='advisory' AND held.granted=true AND waiting.granted=false`,[pid])
+      if(locks.rowCount)return true
+      if(completed())break
+      await new Promise(resolve=>setTimeout(resolve,20))
+    }
+    return false
+  }
   it('default-rule and holiday CRUD preserve started fallback shifts without punches or trips',async()=>{
     const owner=await calendarOwner(),date='2026-08-20'
     punchClock.setOnlinePunchInstantForTests(new Date(date+'T10:00:00Z'))
@@ -589,6 +601,68 @@ describe('business trip real request approval and destination arrangement',() =>
     expect(status.body.data.calendarPolicy).toEqual(stable)
     expect(await f.counts(owner.userId)).toMatchObject({events:0,records:0,requests:0})
   },60000)
+  it('global settings recheck a revoked manager before another organization fold, with an authorized ambiguity control',async()=>{
+    punchClock.setOnlinePunchInstantForTests('2026-08-20T00:00:00Z')
+    const owners:Awaited<ReturnType<typeof calendarOwner>>[]=[]
+    try{
+      const manager=await calendarOwner();owners.push(manager)
+      const other=await calendarOwner();owners.push(other)
+      const rule=await f.request('/api/attendance/rules/default',other.token,{orgId:other.orgId,
+        timezone:'America/New_York',workStartTime:'00:30',workEndTime:'01:00',workingDays:[0,1,2,3,4,5,6]},'PUT')
+      expect(rule.status,rule.body.error?.code).toBe(200)
+      // 00:45 local: the active fallback shift ends at an ambiguous 01:00.
+      punchClock.setOnlinePunchInstantForTests('2026-11-01T04:45:00Z')
+      const orgIds=owners.map(owner=>owner.orgId)
+      const snapshot=async()=>({
+        rules:(await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=ANY($1::text[]) ORDER BY id',[orgIds])).rows,
+        holidays:(await f.pool.query('SELECT * FROM attendance_holidays WHERE org_id=ANY($1::text[]) ORDER BY id',[orgIds])).rows,
+        settings:(await f.pool.query("SELECT * FROM system_configs WHERE key='attendance.settings'")).rows,
+        audit:(await f.pool.query('SELECT * FROM attendance_timezone_policy_audit WHERE org_id=ANY($1::text[]) ORDER BY id',[orgIds])).rows,
+        manager:await f.counts(manager.userId),other:await f.counts(other.userId),
+      })
+      const before=await snapshot()
+      const patch={calendarPolicy:{overrides:[]}}
+      const update=()=>f.request('/api/attendance/settings',manager.token,patch,'PUT')
+      const blocker=await f.pool.connect()
+      let pending:ReturnType<typeof update>|undefined
+      let completed:Awaited<ReturnType<typeof update>>|undefined
+      try{
+        await blocker.query('BEGIN')
+        const pid=(await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number
+        await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+          [JSON.stringify(['attendance-timezone-policy-v1',manager.orgId])])
+        pending=update().then(response=>{completed=response;return response})
+        expect(await waitForPolicyWaiter(pid,()=>completed!==undefined),
+          'global settings must wait at policy prefix; early status '+completed?.status+' code '+completed?.body.error?.code).toBe(true)
+        await blocker.query('UPDATE user_orgs SET is_active=false WHERE org_id=$1 AND user_id=$2',[manager.orgId,manager.userId])
+        await blocker.query('COMMIT')
+        const refused=await pending
+        expect(refused.status,refused.body.error?.code).toBe(403)
+        expect(refused.body.error.code).toBe('ATTENDANCE_TIMEZONE_FORBIDDEN')
+        expect(await snapshot()).toEqual(before)
+      }finally{
+        await blocker.query('ROLLBACK')
+        blocker.release()
+        if(pending)await pending
+      }
+      await f.pool.query('UPDATE user_orgs SET is_active=true WHERE org_id=$1 AND user_id=$2',[manager.orgId,manager.userId])
+      const ambiguous=await update()
+      expect(ambiguous.status,ambiguous.body.error?.code).toBe(422)
+      expect(ambiguous.body.error.code).toBe('ATTENDANCE_TIMEZONE_WALL_AMBIGUOUS')
+      expect(await snapshot()).toEqual(before)
+      expect(before.manager).toEqual({events:0,records:0,requests:0,operations:0})
+      expect(before.other).toEqual(before.manager)
+    }finally{
+      punchClock.setOnlinePunchInstantForTests(null)
+      const orgIds=owners.map(owner=>owner.orgId),userIds=owners.map(owner=>owner.userId)
+      await f.pool.query('DELETE FROM attendance_rules WHERE org_id=ANY($1::text[])',[orgIds])
+      await f.pool.query('DELETE FROM user_orgs WHERE org_id=ANY($1::text[])',[orgIds])
+      for(const table of ['user_permissions','user_roles','user_namespace_admissions']) {
+        await f.pool.query(`DELETE FROM ${table} WHERE user_id=ANY($1::text[])`,[userIds])
+      }
+      await f.pool.query('DELETE FROM users WHERE id=ANY($1::text[])',[userIds])
+    }
+  },60000)
   it('revoked actor membership refuses all calendar source-management writes without source or audit changes',async()=>{
     // The settings writer scans every org's current shifts, including retained DST fixtures.
     punchClock.setOnlinePunchInstantForTests('2026-08-20T00:00:00Z')
@@ -625,16 +699,7 @@ describe('business trip real request approval and destination arrangement',() =>
           await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
             [JSON.stringify(['attendance-timezone-policy-v1',owner.orgId])])
           pending=request().then(response=>{completed=response;return response})
-          let waiting=false
-          for(let attempt=0;attempt<250;attempt++){
-            const locks=await f.pool.query(`SELECT 1 FROM pg_locks held JOIN pg_locks waiting
-              ON held.locktype=waiting.locktype AND held.database=waiting.database
-              AND held.classid=waiting.classid AND held.objid=waiting.objid AND held.objsubid=waiting.objsubid
-              WHERE held.pid=$1 AND held.locktype='advisory' AND held.granted=true AND waiting.granted=false`,[pid])
-            if(locks.rowCount){waiting=true;break}
-            if(completed)break
-            await new Promise(resolve=>setTimeout(resolve,20))
-          }
+          const waiting=await waitForPolicyWaiter(pid,()=>completed!==undefined)
           expect(waiting,'source writer '+requestIndex+' must wait at policy prefix; early status '+completed?.status+' code '+completed?.body.error?.code).toBe(true)
           await blocker.query('UPDATE user_orgs SET is_active=false WHERE org_id=$1 AND user_id=$2',[owner.orgId,owner.userId])
           await blocker.query('COMMIT')

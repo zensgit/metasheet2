@@ -1,5 +1,7 @@
 'use strict'
 
+const { authorizeAttendanceTimezoneManage } = require('./attendance-timezone-manage-authority.cjs')
+
 // A settings patch must never replay a cached calendar over a concurrent update.
 function createAttendanceCalendarSettingsWriter({
   HttpError, settingsKey, defaultSettings, normalizeSettings, mergeSettings,
@@ -13,12 +15,20 @@ function createAttendanceCalendarSettingsWriter({
           UNION SELECT org_id FROM attendance_rules ORDER BY org_id`)
         // Acquire ALL policy prefixes before any member, calendar or source row.
         for (const { org_id: orgId } of orgs) await lockOrg(trx, orgId)
+        // Check after the lock wait without holding membership rows across the scan.
+        if (actor && !await authorizeAttendanceTimezoneManage({
+          orgId: actor.orgId, actorId: actor.actorId,
+          query: async (sql, values) => ({ rows: await trx.query(sql, values) }),
+        })) {
+          throw new HttpError(403, 'ATTENDANCE_TIMEZONE_FORBIDDEN', 'ATTENDANCE_TIMEZONE_FORBIDDEN')
+        }
         for (const { org_id: orgId } of orgs) {
           verify.push(await prepareSourceChange(trx, { orgId, userIds: null }))
         }
       }
       if (actor) {
         if (patch.calendarPolicy?.overrides === undefined) await lockOrg(trx, actor.orgId)
+        // Recheck authority and lock membership here, just before the settings write path.
         await assertManage(trx, actor)
       }
       // Also serializes the absent-row case; status-only sync writes take this
