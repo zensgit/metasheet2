@@ -30,6 +30,8 @@ import {
  *           roll back together.
  *       Each injected fault is a trigger that raises ONLY for this file's stamped rows (integration
  *       specs share one Postgres in CI), dropped in `finally`.
+ *       The same holds for the reactivation branch: with a deactivated anchor seeded, failed writers
+ *       leave it deactivated and unaudited; only a committing writer revives it (same id, one audit).
  *   (2) positive controls: each success path still yields exactly one active anchor and exactly one
  *       bootstrap audit (now written after COMMIT).
  *   (3) concurrency: a deterministic barrier — a raw holder transaction inserts the anchor and keeps
@@ -45,12 +47,22 @@ import {
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
+// Top-level, outside `describeIfDatabase`: the CI step sets EXPECT_DB=1, so a run there without a
+// DATABASE_URL turns red here instead of skipping the whole file green (the in-describe sentinel
+// below is skipped together with its describe).
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 const STAMP = Date.now()
 const ORG_PREFIX = `w16tx-${STAMP}-`
 const orgId = (suffix: string): string => `${ORG_PREFIX}${suffix}`
 const newUserId = (suffix: string): string => `w16tx-user-${STAMP}-${suffix}`
 const MISSING_ID = '00000000-0000-0000-0000-000000000000'
 const BOOTSTRAP_ACTION = 'directory.local_integration.bootstrap'
+const REACTIVATE_ACTION = 'directory.local_integration.reactivate'
+const LOCAL_ANCHOR_NAME = 'Local organization'
 
 async function seedUser(id: string, isActive = true): Promise<void> {
   await query(
@@ -151,6 +163,42 @@ async function withStampedFault<T>(
   } finally {
     await query(`DROP FUNCTION IF EXISTS ${name}()`)
   }
+}
+
+/**
+ * Seed the org's canonical local anchor as DEACTIVATED (raw SQL: no product path deactivates a local
+ * anchor today, so this is the only way to reach the reactivation branch). Returns its id.
+ */
+async function seedInactiveAnchor(org: string): Promise<string> {
+  const r = await query<{ id: string }>(
+    `INSERT INTO directory_integrations (
+       org_id, provider, name, status, corp_id, config, sync_enabled, default_deprovision_policy, created_at, updated_at
+     )
+     VALUES ($1, 'local', $2, 'inactive', $3, '{"mode":"editable","source":"local"}'::jsonb, false, 'mark_inactive', NOW(), NOW())
+     RETURNING id`,
+    [org, LOCAL_ANCHOR_NAME, `local:${org}`],
+  )
+  return r.rows[0].id
+}
+
+async function anchorState(org: string): Promise<{ id: string; status: string; reactivateAudits: number; bootstrapAudits: number }[]> {
+  const r = await query<{ id: string; status: string; reactivate_audits: number; bootstrap_audits: number }>(
+    `SELECT i.id, i.status,
+       (SELECT count(*)::int FROM audit_logs
+         WHERE action = $2 AND resource_type = 'directory-integration' AND action_details ->> 'orgId' = $1) AS reactivate_audits,
+       (SELECT count(*)::int FROM audit_logs
+         WHERE action = $3 AND resource_type = 'directory-integration' AND action_details ->> 'orgId' = $1) AS bootstrap_audits
+     FROM directory_integrations i
+     WHERE i.org_id = $1 AND i.provider = 'local'
+     ORDER BY i.created_at`,
+    [org, REACTIVATE_ACTION, BOOTSTRAP_ACTION],
+  )
+  return r.rows.map((row) => ({
+    id: row.id,
+    status: row.status,
+    reactivateAudits: row.reactivate_audits,
+    bootstrapAudits: row.bootstrap_audits,
+  }))
 }
 
 /** Poll until a service statement is parked on a lock held by `holderPid` (no sleeps as proof). */
@@ -294,6 +342,30 @@ describeIfDatabase('W1-6 — the local org anchor is created inside each writer\
       const outcome = await settle(switchLocalPrimaryDepartment(org, MISSING_ID, MISSING_ID))
       expect(outcome).toBeInstanceOf(LocalDirectoryNotFoundError)
       expect(await footprint(org)).toEqual(EMPTY)
+    })
+
+    // The reactivation branch (a deactivated anchor revived in place) also runs inside the writer's
+    // transaction: a failed writer must leave the anchor deactivated and unaudited; only a writer that
+    // commits revives it (same id) and audits the reactivation once, after commit.
+    it('a deactivated anchor stays deactivated (and unaudited) through failed writers; a successful writer revives the same id once', async () => {
+      const org = orgId('reactivate-rollback')
+      seededOrgIds.push(org)
+      const anchorId = await seedInactiveAnchor(org)
+      const inactive = [{ id: anchorId, status: 'inactive', reactivateAudits: 0, bootstrapAudits: 0 }]
+
+      expect(await archiveLocalAccount(org, MISSING_ID)).toBeNull()
+      expect(await anchorState(org)).toEqual(inactive)
+
+      expect(await updateLocalDepartment(org, MISSING_ID, { name: 'Nope' })).toBeNull()
+      expect(await anchorState(org)).toEqual(inactive)
+
+      const outcome = await settle(createLocalAccount({ orgId: org, localUserId: newUserId('reactivate-missing') }))
+      expect(outcome).toBeInstanceOf(LocalDirectoryNotFoundError)
+      expect(await anchorState(org)).toEqual(inactive)
+
+      const dept = await createLocalDepartment({ orgId: org, name: 'Revived' })
+      expect(dept.integrationId).toBe(anchorId)
+      expect(await anchorState(org)).toEqual([{ id: anchorId, status: 'active', reactivateAudits: 1, bootstrapAudits: 0 }])
     })
   })
 
