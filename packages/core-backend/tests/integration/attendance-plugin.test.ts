@@ -6,7 +6,7 @@ import net from 'net'
 import fs from 'fs/promises'
 import { createHash, randomUUID } from 'crypto'
 import { createRequire } from 'module'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import http from 'http'
 import * as bcrypt from 'bcryptjs'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
@@ -7517,6 +7517,869 @@ attendanceIntegrationDescribe(
       await pool.end().catch(() => undefined)
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
     }
+  })
+
+  describe('payroll-cycle-atomicity', () => {
+    type OrgFixture = { orgId: string; userId: string; token: string; headers: Record<string, string> }
+    type CycleDbRow = {
+      id: string
+      org_id: string
+      template_id: string | null
+      name: string | null
+      start_date: string
+      end_date: string
+      status: string
+      metadata: Record<string, unknown> | null
+      updated_at: string
+    }
+    type SettlementDbRow = {
+      user_id: string
+      source: string
+      convertible_minutes: number
+      must_pay_minutes: number
+      period_start_date: string
+      period_end_date: string
+    }
+    type CycleEventPayload = { orgId?: string; payrollCycleId?: string }
+    type CycleEventBus = {
+      subscribe(type: string, handler: (payload: unknown) => void): string
+      unsubscribe(id: string): boolean
+    }
+    type Holder = { client: PoolClient; pid: number; finished: boolean }
+
+    const waitBudgetMs = 8_000
+    const fixtureOrgIds: string[] = []
+    let atomicityPool: Pool | undefined
+    let cycleEventBus: CycleEventBus | undefined
+    let org: OrgFixture
+
+    function requireBaseUrl(): string {
+      if (!baseUrl) throw new Error('payroll-cycle-atomicity: attendance integration server is not running')
+      return baseUrl
+    }
+
+    function requirePool(): Pool {
+      if (!atomicityPool) throw new Error('payroll-cycle-atomicity: database pool is not ready')
+      return atomicityPool
+    }
+
+    function requireBus(): CycleEventBus {
+      if (!cycleEventBus) throw new Error('payroll-cycle-atomicity: event bus is not loaded')
+      return cycleEventBus
+    }
+
+    beforeAll(async () => {
+      requireBaseUrl()
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) throw new Error(attendanceIntegrationMissingDbMessage)
+      atomicityPool = new Pool({ connectionString: dbUrl, max: 6 })
+      await atomicityPool.query('SELECT 1')
+      for (const table of [
+        'attendance_payroll_cycles',
+        'attendance_payroll_cycle_settlements',
+        'attendance_payroll_templates',
+        'attendance_leave_balances',
+      ]) {
+        await requireAttendanceTable(atomicityPool, table)
+      }
+      const isolation = await atomicityPool.query<{ default_transaction_isolation: string }>('SHOW default_transaction_isolation')
+      expect(isolation.rows[0]?.default_transaction_isolation, 'route transactions are expected to run at the server default isolation').toBe('read committed')
+      cycleEventBus = (await import('../../src/integration/events/event-bus')).eventBus as unknown as CycleEventBus
+    })
+
+    beforeEach(async () => {
+      org = await createOrgFixture()
+    })
+
+    afterEach(async () => {
+      const pool = requirePool()
+      const orgIds = fixtureOrgIds.splice(0)
+      if (orgIds.length === 0) return
+      await pool.query('DELETE FROM attendance_payroll_cycle_settlements WHERE org_id = ANY($1::text[])', [orgIds])
+      await pool.query('DELETE FROM attendance_payroll_cycles WHERE org_id = ANY($1::text[])', [orgIds])
+      await pool.query('DELETE FROM attendance_payroll_templates WHERE org_id = ANY($1::text[])', [orgIds])
+      await pool.query('DELETE FROM attendance_leave_balances WHERE org_id = ANY($1::text[])', [orgIds])
+    })
+
+    afterAll(async () => {
+      await atomicityPool?.end()
+      atomicityPool = undefined
+    })
+
+    async function createOrgFixture(): Promise<OrgFixture> {
+      const orgId = `r7-payroll-atomicity-${randomUUID()}`
+      fixtureOrgIds.push(orgId)
+      const userId = `r7-payroll-admin-${randomUUID()}`
+      const tokenRes = await requestAdminFixtureToken(
+        `${requireBaseUrl()}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      expect(tokenRes.status, tokenRes.raw).toBe(200)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) throw new Error(`payroll-cycle-atomicity: admin dev-token missing: ${tokenRes.raw}`)
+      return { orgId, userId, token, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'x-org-id': orgId } }
+    }
+
+    function cycleUrl(id: string): string {
+      return `${requireBaseUrl()}/api/attendance/payroll-cycles/${id}`
+    }
+
+    function updateCycle(ctx: OrgFixture, id: string, body: Record<string, unknown>, entry: 'put' | 'post-update' = 'put'): Promise<HttpResponse> {
+      return requestJson(entry === 'put' ? cycleUrl(id) : `${cycleUrl(id)}/update`, {
+        method: entry === 'put' ? 'PUT' : 'POST',
+        headers: ctx.headers,
+        body: JSON.stringify({ orgId: ctx.orgId, ...body }),
+      })
+    }
+
+    function deleteCycle(ctx: OrgFixture, id: string, entry: 'delete' | 'post-override' = 'delete'): Promise<HttpResponse> {
+      if (entry === 'delete') return requestJson(cycleUrl(id), { method: 'DELETE', headers: ctx.headers })
+      return requestJson(cycleUrl(id), { method: 'POST', headers: { ...ctx.headers, 'X-HTTP-Method-Override': 'DELETE' } })
+    }
+
+    function errorCode(res: HttpResponse): string | undefined {
+      return (res.body as { error?: { code?: string } } | undefined)?.error?.code
+    }
+
+    async function createTemplate(ctx: OrgFixture, name: string): Promise<string> {
+      const res = await requestJson(`${requireBaseUrl()}/api/attendance/payroll-templates`, {
+        method: 'POST',
+        headers: ctx.headers,
+        body: JSON.stringify({ orgId: ctx.orgId, name, timezone: 'UTC', startDay: 1, endDay: 28, endMonthOffset: 0, autoGenerate: false }),
+      })
+      expect(res.status, res.raw).toBe(201)
+      const id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!id) throw new Error(`payroll-cycle-atomicity: template id missing: ${res.raw}`)
+      return id
+    }
+
+    async function createCycle(
+      ctx: OrgFixture,
+      input: { startDate: string; endDate: string; status?: 'open' | 'closed' | 'archived'; templateId?: string; name?: string },
+    ): Promise<string> {
+      const res = await requestJson(`${requireBaseUrl()}/api/attendance/payroll-cycles`, {
+        method: 'POST',
+        headers: ctx.headers,
+        body: JSON.stringify({
+          orgId: ctx.orgId,
+          name: input.name ?? `r7 ${input.startDate}`,
+          startDate: input.startDate,
+          endDate: input.endDate,
+          status: input.status === 'archived' ? 'closed' : (input.status ?? 'open'),
+          ...(input.templateId ? { templateId: input.templateId } : {}),
+        }),
+      })
+      expect(res.status, res.raw).toBe(201)
+      const id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!id) throw new Error(`payroll-cycle-atomicity: cycle id missing: ${res.raw}`)
+      if (input.status === 'archived') {
+        const archived = await updateCycle(ctx, id, { status: 'archived' })
+        expect(archived.status, archived.raw).toBe(200)
+      }
+      return id
+    }
+
+    async function readCycle(id: string): Promise<CycleDbRow | null> {
+      const result = await requirePool().query<CycleDbRow>(
+        `SELECT id::text AS id, org_id, template_id::text AS template_id, name, start_date::text AS start_date,
+                end_date::text AS end_date, status, metadata, updated_at::text AS updated_at
+           FROM attendance_payroll_cycles WHERE id = $1`,
+        [id],
+      )
+      return result.rows[0] ?? null
+    }
+
+    async function readSettlements(cycleId: string): Promise<SettlementDbRow[]> {
+      const result = await requirePool().query<SettlementDbRow>(
+        `SELECT user_id, source, convertible_minutes, must_pay_minutes,
+                period_start_date::text AS period_start_date, period_end_date::text AS period_end_date
+           FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 ORDER BY user_id, source`,
+        [cycleId],
+      )
+      return result.rows
+    }
+
+    async function seedCompTimeLot(ctx: OrgFixture, userId: string, source = 'restday', minutes = 90): Promise<void> {
+      await requirePool().query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, overtime_source)
+         VALUES ($1, $2, 'comp_time', $3, $3, 'overtime_conversion', $4, 'active', '2010-01-01', $5)`,
+        [ctx.orgId, userId, minutes, `r7-payroll-atomicity:${randomUUID()}`, source],
+      )
+    }
+
+    function captureCycleEvents(type: string): { forCycle: (cycleId: string) => CycleEventPayload[]; stop: () => void } {
+      const seen: CycleEventPayload[] = []
+      const id = requireBus().subscribe(type, (payload: unknown) => {
+        seen.push((payload ?? {}) as CycleEventPayload)
+      })
+      return {
+        forCycle: (cycleId: string) => seen.filter((event) => event.payrollCycleId === cycleId),
+        stop: () => {
+          requireBus().unsubscribe(id)
+        },
+      }
+    }
+
+    async function withinBudget<T>(promise: Promise<T>, label: string, budgetMs = waitBudgetMs): Promise<T> {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`payroll-cycle-atomicity: ${label} did not finish within ${budgetMs}ms`)), budgetMs)
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+
+    async function openHolder(ctx: OrgFixture, cycleId: string): Promise<Holder> {
+      const client = await requirePool().connect()
+      try {
+        await client.query('BEGIN')
+        const pid = Number((await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+        const locked = await client.query(
+          'SELECT id FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2 FOR UPDATE',
+          [cycleId, ctx.orgId],
+        )
+        expect(locked.rowCount).toBe(1)
+        return { client, pid, finished: false }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+        throw error
+      }
+    }
+
+    async function finishHolder(holder: Holder, outcome: 'COMMIT' | 'ROLLBACK'): Promise<void> {
+      if (holder.finished) return
+      holder.finished = true
+      try {
+        await holder.client.query(outcome)
+      } finally {
+        holder.client.release()
+      }
+    }
+
+    async function waitUntilRouteBlockedBy(holderPid: number, pending: Promise<HttpResponse>): Promise<number> {
+      const early: { res?: HttpResponse } = {}
+      pending.then((res) => { early.res = res }, () => undefined)
+      const deadline = Date.now() + waitBudgetMs
+      while (Date.now() < deadline) {
+        if (early.res) throw new Error(`payroll-cycle-atomicity: route answered ${early.res.status} before waiting on the holder: ${early.res.raw}`)
+        const blocked = await requirePool().query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity
+            WHERE pid <> $1
+              AND state = 'active'
+              AND wait_event_type = 'Lock'
+              AND $1 = ANY(pg_blocking_pids(pid))
+              AND query ILIKE '%attendance_payroll_cycles%'
+            ORDER BY pid`,
+          [holderPid],
+        )
+        if (blocked.rows.length > 1) throw new Error(`payroll-cycle-atomicity: ${blocked.rows.length} backends wait on holder ${holderPid}`)
+        if (blocked.rows.length === 1) return Number(blocked.rows[0].pid)
+        await delay(20)
+      }
+      throw new Error(`payroll-cycle-atomicity: no route backend waited on holder ${holderPid} within ${waitBudgetMs}ms`)
+    }
+
+    async function interleave(
+      ctx: OrgFixture,
+      cycleId: string,
+      holderWrites: (client: PoolClient) => Promise<void>,
+      send: () => Promise<HttpResponse>,
+      whileBlocked?: () => Promise<void>,
+    ): Promise<HttpResponse> {
+      const holder = await openHolder(ctx, cycleId)
+      let pending: Promise<HttpResponse> | undefined
+      try {
+        await holderWrites(holder.client)
+        pending = send()
+        await waitUntilRouteBlockedBy(holder.pid, pending)
+        if (whileBlocked) await whileBlocked()
+        await finishHolder(holder, 'COMMIT')
+        return await withinBudget(pending, 'route request after the holder committed')
+      } finally {
+        await finishHolder(holder, 'ROLLBACK').catch(() => undefined)
+        if (pending) await withinBudget(pending, 'route request cleanup').catch(() => undefined)
+      }
+    }
+
+    const holderSets = (sql: string, params: unknown[]) => async (client: PoolClient) => {
+      const result = await client.query(sql, params)
+      expect(result.rowCount).toBe(1)
+    }
+
+    it('T1 [control] open maintenance succeeds; closed/archived rename, metadata and same-value full payloads succeed without touching period or settlement', async () => {
+      const templateId = await createTemplate(org, 'r7 t1 template')
+      await seedCompTimeLot(org, `r7-t1-user-${randomUUID()}`)
+
+      const openId = await createCycle(org, { startDate: '2011-01-01', endDate: '2011-01-28', templateId })
+      const openRes = await updateCycle(org, openId, { name: 'r7 t1 open renamed', metadata: { note: 't1-open' } })
+      expect(openRes.status, openRes.raw).toBe(200)
+      expect(await readCycle(openId)).toMatchObject({
+        name: 'r7 t1 open renamed', metadata: { note: 't1-open' }, status: 'open',
+        start_date: '2011-01-01', end_date: '2011-01-28', template_id: templateId,
+      })
+
+      const closedId = await createCycle(org, { startDate: '2011-02-01', endDate: '2011-02-28', templateId, status: 'closed' })
+      const closedSettlements = await readSettlements(closedId)
+      expect(closedSettlements.length).toBeGreaterThan(0)
+      const closedBodies: Record<string, unknown>[] = [
+        { name: 'r7 t1 closed renamed' },
+        { metadata: { note: 't1-closed' } },
+        { templateId, name: 'r7 t1 closed renamed', startDate: '2011-02-01', endDate: '2011-02-28', status: 'closed' },
+        { anchorDate: '2011-02-15' },
+      ]
+      for (const body of closedBodies) {
+        const res = await updateCycle(org, closedId, body)
+        expect(res.status, `${JSON.stringify(body)} ${res.raw}`).toBe(200)
+      }
+      expect(await readCycle(closedId)).toMatchObject({
+        name: 'r7 t1 closed renamed', metadata: { note: 't1-closed' }, status: 'closed',
+        start_date: '2011-02-01', end_date: '2011-02-28', template_id: templateId,
+      })
+      expect(await readSettlements(closedId)).toEqual(closedSettlements)
+
+      const archivedId = await createCycle(org, { startDate: '2011-03-01', endDate: '2011-03-28', templateId, status: 'archived' })
+      const archivedSettlements = await readSettlements(archivedId)
+      for (const body of [
+        { name: 'r7 t1 archived renamed' },
+        { templateId, name: 'r7 t1 archived renamed', startDate: '2011-03-01', endDate: '2011-03-28', status: 'archived' },
+      ]) {
+        const res = await updateCycle(org, archivedId, body)
+        expect(res.status, `${JSON.stringify(body)} ${res.raw}`).toBe(200)
+      }
+      expect(await readCycle(archivedId)).toMatchObject({
+        name: 'r7 t1 archived renamed', status: 'archived',
+        start_date: '2011-03-01', end_date: '2011-03-28', template_id: templateId,
+      })
+      expect(await readSettlements(archivedId)).toEqual(archivedSettlements)
+    })
+
+    it('T2a [defect] close commits first, then a name-only maintenance takes the lock: the unsubmitted status stays closed', async () => {
+      const cycleId = await createCycle(org, { startDate: '2012-01-01', endDate: '2012-01-28' })
+      const res = await interleave(
+        org,
+        cycleId,
+        holderSets(`UPDATE attendance_payroll_cycles SET status = 'closed', updated_at = now() WHERE id = $1`, [cycleId]),
+        () => updateCycle(org, cycleId, { name: 'r7 t2a renamed' }),
+      )
+      expect(res.status, res.raw).toBe(200)
+      expect(await readCycle(cycleId)).toMatchObject({
+        status: 'closed', name: 'r7 t2a renamed', start_date: '2012-01-01', end_date: '2012-01-28',
+      })
+    })
+
+    it('T2b [defect] close commits first, then a maintenance changing dates, template or anchorDate takes the lock: 409 CYCLE_CLOSED_PERIOD_FROZEN and nothing changes', async () => {
+      const templateId = await createTemplate(org, 'r7 t2b template')
+      const otherTemplateId = await createTemplate(org, 'r7 t2b other template')
+      const cases: Array<{ startDate: string; endDate: string; body: Record<string, unknown> }> = [
+        { startDate: '2012-02-01', endDate: '2012-02-28', body: { startDate: '2012-02-02', endDate: '2012-02-27' } },
+        { startDate: '2012-03-01', endDate: '2012-03-28', body: { templateId: otherTemplateId } },
+        { startDate: '2012-04-01', endDate: '2012-04-28', body: { anchorDate: '2012-05-15' } },
+      ]
+      for (const testCase of cases) {
+        const cycleId = await createCycle(org, { startDate: testCase.startDate, endDate: testCase.endDate, templateId })
+        const res = await interleave(
+          org,
+          cycleId,
+          holderSets(`UPDATE attendance_payroll_cycles SET status = 'closed', updated_at = now() WHERE id = $1`, [cycleId]),
+          () => updateCycle(org, cycleId, testCase.body),
+        )
+        expect(res.status, `${JSON.stringify(testCase.body)} ${res.raw}`).toBe(409)
+        expect(errorCode(res)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+        expect(await readCycle(cycleId)).toMatchObject({
+          status: 'closed', start_date: testCase.startDate, end_date: testCase.endDate, template_id: templateId,
+        })
+      }
+    })
+
+    it('T3 [defect] maintenance commits first, then close takes the lock: close keeps the latest dates/template and the snapshot carries that period', async () => {
+      const templateId = await createTemplate(org, 'r7 t3 template')
+      const laterTemplateId = await createTemplate(org, 'r7 t3 later template')
+      await seedCompTimeLot(org, `r7-t3-user-${randomUUID()}`)
+      const cycleId = await createCycle(org, { startDate: '2013-01-01', endDate: '2013-01-28', templateId })
+      const res = await interleave(
+        org,
+        cycleId,
+        holderSets(
+          `UPDATE attendance_payroll_cycles SET start_date = '2013-01-02', end_date = '2013-01-27', template_id = $2, updated_at = now() WHERE id = $1`,
+          [cycleId, laterTemplateId],
+        ),
+        () => updateCycle(org, cycleId, { status: 'closed' }),
+      )
+      expect(res.status, res.raw).toBe(200)
+      expect(await readCycle(cycleId)).toMatchObject({
+        status: 'closed', start_date: '2013-01-02', end_date: '2013-01-27', template_id: laterTemplateId,
+      })
+      const settlements = await readSettlements(cycleId)
+      expect(settlements.length).toBeGreaterThan(0)
+      for (const row of settlements) {
+        expect(row).toMatchObject({ period_start_date: '2013-01-02', period_end_date: '2013-01-27' })
+      }
+    })
+
+    it('T4a [defect] a zero-row close commits first, then delete takes the lock: 409 CYCLE_CLOSED_NOT_DELETABLE and the cycle survives', async () => {
+      const cycleId = await createCycle(org, { startDate: '2014-01-01', endDate: '2014-01-28' })
+      const res = await interleave(
+        org,
+        cycleId,
+        holderSets(`UPDATE attendance_payroll_cycles SET status = 'closed', updated_at = now() WHERE id = $1`, [cycleId]),
+        () => deleteCycle(org, cycleId),
+      )
+      expect(res.status, res.raw).toBe(409)
+      expect(errorCode(res)).toBe('CYCLE_CLOSED_NOT_DELETABLE')
+      expect(await readCycle(cycleId)).toMatchObject({ status: 'closed', start_date: '2014-01-01', end_date: '2014-01-28' })
+      expect(await readSettlements(cycleId)).toEqual([])
+    })
+
+    it('T4b [defect] a close with settlement rows commits first, then delete takes the lock: 409 CYCLE_CLOSED_NOT_DELETABLE and cycle plus settlement stay intact', async () => {
+      const cycleId = await createCycle(org, { startDate: '2014-02-01', endDate: '2014-02-28' })
+      const settledUserId = `r7-t4b-user-${randomUUID()}`
+      const res = await interleave(
+        org,
+        cycleId,
+        async (client) => {
+          await holderSets(`UPDATE attendance_payroll_cycles SET status = 'closed', updated_at = now() WHERE id = $1`, [cycleId])(client)
+          await client.query(
+            `INSERT INTO attendance_payroll_cycle_settlements
+               (org_id, cycle_id, period_start_date, period_end_date, closed_at, user_id, source, convertible_minutes, must_pay_minutes, snapshot)
+             VALUES ($1, $2, '2014-02-01', '2014-02-28', now(), $3, 'restday', 90, 0, '{}'::jsonb)`,
+            [org.orgId, cycleId, settledUserId],
+          )
+        },
+        () => deleteCycle(org, cycleId),
+      )
+      expect(res.status, res.raw).toBe(409)
+      expect(errorCode(res)).toBe('CYCLE_CLOSED_NOT_DELETABLE')
+      expect(await readCycle(cycleId)).toMatchObject({ status: 'closed' })
+      expect(await readSettlements(cycleId)).toEqual([
+        { user_id: settledUserId, source: 'restday', convertible_minutes: 90, must_pay_minutes: 0, period_start_date: '2014-02-01', period_end_date: '2014-02-28' },
+      ])
+    })
+
+    it('T4c [control] an open cycle that already has settlement rows keeps its period frozen and stays undeletable on every entry; a rename still succeeds', async () => {
+      const cycleId = await createCycle(org, { startDate: '2014-03-01', endDate: '2014-03-28' })
+      const settledUserId = `r7-t4c-user-${randomUUID()}`
+      await requirePool().query(
+        `INSERT INTO attendance_payroll_cycle_settlements
+           (org_id, cycle_id, period_start_date, period_end_date, closed_at, user_id, source, convertible_minutes, must_pay_minutes, snapshot)
+         VALUES ($1, $2, '2014-03-01', '2014-03-28', now(), $3, 'restday', 90, 0, '{}'::jsonb)`,
+        [org.orgId, cycleId, settledUserId],
+      )
+      const rowBefore = await readCycle(cycleId)
+      expect(rowBefore).toMatchObject({ status: 'open', start_date: '2014-03-01', end_date: '2014-03-28' })
+      const settlementsBefore = await readSettlements(cycleId)
+      expect(settlementsBefore).toEqual([
+        { user_id: settledUserId, source: 'restday', convertible_minutes: 90, must_pay_minutes: 0, period_start_date: '2014-03-01', period_end_date: '2014-03-28' },
+      ])
+
+      for (const entry of ['put', 'post-update'] as const) {
+        const frozen = await updateCycle(org, cycleId, { startDate: '2014-03-02', endDate: '2014-03-27' }, entry)
+        expect(frozen.status, `${entry} ${frozen.raw}`).toBe(409)
+        expect(errorCode(frozen)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+        expect(await readCycle(cycleId)).toEqual(rowBefore)
+        expect(await readSettlements(cycleId)).toEqual(settlementsBefore)
+      }
+      for (const entry of ['delete', 'post-override'] as const) {
+        const refused = await deleteCycle(org, cycleId, entry)
+        expect(refused.status, `${entry} ${refused.raw}`).toBe(409)
+        expect(errorCode(refused)).toBe('CYCLE_CLOSED_NOT_DELETABLE')
+        expect(await readCycle(cycleId)).toEqual(rowBefore)
+        expect(await readSettlements(cycleId)).toEqual(settlementsBefore)
+      }
+
+      const rename = await updateCycle(org, cycleId, { name: 'r7 t4c renamed' })
+      expect(rename.status, rename.raw).toBe(200)
+      expect(await readCycle(cycleId)).toMatchObject({
+        name: 'r7 t4c renamed', status: 'open', start_date: '2014-03-01', end_date: '2014-03-28',
+      })
+      expect(await readSettlements(cycleId)).toEqual(settlementsBefore)
+    })
+
+    it('T5 [defect] delete commits first, then close or archive takes the lock: 404 NOT_FOUND, no orphan snapshot and no success event', async () => {
+      await seedCompTimeLot(org, `r7-t5-user-${randomUUID()}`)
+      const events = captureCycleEvents('attendance.payrollCycle.updated')
+      try {
+        const cases: Array<{ startDate: string; endDate: string; status: 'closed' | 'archived' }> = [
+          { startDate: '2015-01-01', endDate: '2015-01-28', status: 'closed' },
+          { startDate: '2015-02-01', endDate: '2015-02-28', status: 'archived' },
+        ]
+        for (const testCase of cases) {
+          const cycleId = await createCycle(org, { startDate: testCase.startDate, endDate: testCase.endDate })
+          const res = await interleave(
+            org,
+            cycleId,
+            holderSets('DELETE FROM attendance_payroll_cycles WHERE id = $1', [cycleId]),
+            () => updateCycle(org, cycleId, { status: testCase.status }),
+          )
+          expect(res.status, `${testCase.status} ${res.raw}`).toBe(404)
+          expect(errorCode(res)).toBe('NOT_FOUND')
+          expect(await readCycle(cycleId)).toBeNull()
+          expect(await readSettlements(cycleId)).toEqual([])
+          expect(events.forCycle(cycleId)).toEqual([])
+        }
+
+        const liveId = await createCycle(org, { startDate: '2015-03-01', endDate: '2015-03-28' })
+        const liveRes = await updateCycle(org, liveId, { status: 'closed' })
+        expect(liveRes.status, liveRes.raw).toBe(200)
+        expect(events.forCycle(liveId)).toEqual([{ orgId: org.orgId, payrollCycleId: liveId }])
+        expect((await readSettlements(liveId)).length).toBeGreaterThan(0)
+      } finally {
+        events.stop()
+      }
+    })
+
+    it('T6 [defect] a second close that read open before the first close committed does not snapshot again when new people or sources appear meanwhile', async () => {
+      const firstUserId = `r7-t6-user-a-${randomUUID()}`
+      await seedCompTimeLot(org, firstUserId)
+      const cycleId = await createCycle(org, { startDate: '2016-01-01', endDate: '2016-01-28' })
+      const res = await interleave(
+        org,
+        cycleId,
+        async (client) => {
+          await holderSets(`UPDATE attendance_payroll_cycles SET status = 'closed', updated_at = now() WHERE id = $1`, [cycleId])(client)
+          await client.query(
+            `INSERT INTO attendance_payroll_cycle_settlements
+               (org_id, cycle_id, period_start_date, period_end_date, closed_at, user_id, source, convertible_minutes, must_pay_minutes, snapshot)
+             VALUES ($1, $2, '2016-01-01', '2016-01-28', now(), $3, 'restday', 90, 0, '{}'::jsonb)`,
+            [org.orgId, cycleId, firstUserId],
+          )
+        },
+        () => updateCycle(org, cycleId, { status: 'closed' }),
+        async () => {
+          await seedCompTimeLot(org, `r7-t6-user-b-${randomUUID()}`)
+          await seedCompTimeLot(org, firstUserId, 'workday', 45)
+        },
+      )
+      expect(res.status, res.raw).toBe(200)
+      expect(await readCycle(cycleId)).toMatchObject({ status: 'closed' })
+      expect(await readSettlements(cycleId)).toEqual([
+        { user_id: firstUserId, source: 'restday', convertible_minutes: 90, must_pay_minutes: 0, period_start_date: '2016-01-01', period_end_date: '2016-01-28' },
+      ])
+    })
+
+    it('T7a [defect] a date/template change commits first, then a legal archive takes the lock: archive does not write the old period back', async () => {
+      const templateId = await createTemplate(org, 'r7 t7a template')
+      const laterTemplateId = await createTemplate(org, 'r7 t7a later template')
+      const cycleId = await createCycle(org, { startDate: '2017-01-01', endDate: '2017-01-28', templateId })
+      const res = await interleave(
+        org,
+        cycleId,
+        holderSets(
+          `UPDATE attendance_payroll_cycles SET start_date = '2017-01-03', end_date = '2017-01-25', template_id = $2, updated_at = now() WHERE id = $1`,
+          [cycleId, laterTemplateId],
+        ),
+        () => updateCycle(org, cycleId, { status: 'archived' }),
+      )
+      expect(res.status, res.raw).toBe(200)
+      expect(await readCycle(cycleId)).toMatchObject({
+        status: 'archived', start_date: '2017-01-03', end_date: '2017-01-25', template_id: laterTemplateId,
+      })
+    })
+
+    it('T7b [defect] archive commits first, then a rename or a delete takes the lock: the cycle stays archived and the delete is refused', async () => {
+      const renameId = await createCycle(org, { startDate: '2017-02-01', endDate: '2017-02-28' })
+      const renameRes = await interleave(
+        org,
+        renameId,
+        holderSets(`UPDATE attendance_payroll_cycles SET status = 'archived', updated_at = now() WHERE id = $1`, [renameId]),
+        () => updateCycle(org, renameId, { name: 'r7 t7b renamed' }),
+      )
+      expect(renameRes.status, renameRes.raw).toBe(200)
+      expect(await readCycle(renameId)).toMatchObject({ status: 'archived', name: 'r7 t7b renamed', start_date: '2017-02-01', end_date: '2017-02-28' })
+
+      const deleteId = await createCycle(org, { startDate: '2017-03-01', endDate: '2017-03-28' })
+      const deleteRes = await interleave(
+        org,
+        deleteId,
+        holderSets(`UPDATE attendance_payroll_cycles SET status = 'archived', updated_at = now() WHERE id = $1`, [deleteId]),
+        () => deleteCycle(org, deleteId),
+      )
+      expect(deleteRes.status, deleteRes.raw).toBe(409)
+      expect(errorCode(deleteRes)).toBe('CYCLE_CLOSED_NOT_DELETABLE')
+      expect(await readCycle(deleteId)).toMatchObject({ status: 'archived' })
+    })
+
+    it('T8 [defect] closed/archived to open is refused with 409 ATTENDANCE_PERIOD_REOPEN_UNSUPPORTED on both update entries, also with dates or an old full payload, with zero writes', async () => {
+      const templateId = await createTemplate(org, 'r7 t8 template')
+      await seedCompTimeLot(org, `r7-t8-user-${randomUUID()}`)
+      const closedId = await createCycle(org, { startDate: '2018-01-01', endDate: '2018-01-28', templateId, status: 'closed', name: 'r7 t8 closed' })
+      const archivedId = await createCycle(org, { startDate: '2018-02-01', endDate: '2018-02-28', templateId, status: 'archived', name: 'r7 t8 archived' })
+      for (const cycle of [
+        { id: closedId, name: 'r7 t8 closed', startDate: '2018-01-01', endDate: '2018-01-28' },
+        { id: archivedId, name: 'r7 t8 archived', startDate: '2018-02-01', endDate: '2018-02-28' },
+      ]) {
+        const rowBefore = await readCycle(cycle.id)
+        const settlementsBefore = await readSettlements(cycle.id)
+        expect(rowBefore?.status).not.toBe('open')
+        const bodies: Record<string, unknown>[] = [
+          { status: 'open' },
+          { status: 'open', startDate: '2019-06-01', endDate: '2019-06-28' },
+          { templateId, name: cycle.name, startDate: cycle.startDate, endDate: cycle.endDate, status: 'open' },
+        ]
+        for (const entry of ['put', 'post-update'] as const) {
+          for (const body of bodies) {
+            const res = await updateCycle(org, cycle.id, body, entry)
+            expect(res.status, `${entry} ${JSON.stringify(body)} ${res.raw}`).toBe(409)
+            expect(errorCode(res), `${entry} ${JSON.stringify(body)}`).toBe('ATTENDANCE_PERIOD_REOPEN_UNSUPPORTED')
+            expect(await readCycle(cycle.id)).toEqual(rowBefore)
+            expect(await readSettlements(cycle.id)).toEqual(settlementsBefore)
+          }
+        }
+      }
+    })
+
+    it('T9 [control] a settlement INSERT failure and a commit-time failure both roll back status, dates and settlement and emit no success event', async () => {
+      const pool = requirePool()
+      await seedCompTimeLot(org, `r7-t9-user-${randomUUID()}`)
+      const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+      const faultFunction = `r7_payroll_settlement_fault_${suffix}`
+      const insertTrigger = `r7_payroll_settlement_insert_fault_${suffix}`
+      const commitTrigger = `r7_payroll_settlement_commit_fault_${suffix}`
+      const events = captureCycleEvents('attendance.payrollCycle.updated')
+      const closeWithNewPeriod = { status: 'closed', startDate: '2020-01-02', endDate: '2020-01-27' }
+      try {
+        await pool.query(
+          `CREATE FUNCTION ${faultFunction}() RETURNS trigger LANGUAGE plpgsql AS $fn$
+           BEGIN
+             IF NEW.org_id = TG_ARGV[0] THEN
+               RAISE EXCEPTION 'R7_SYNTHETIC_SETTLEMENT_FAULT';
+             END IF;
+             RETURN NEW;
+           END $fn$`,
+        )
+        const cycleId = await createCycle(org, { startDate: '2020-01-01', endDate: '2020-01-28' })
+        const rowBefore = await readCycle(cycleId)
+        expect(rowBefore).toMatchObject({ status: 'open', start_date: '2020-01-01', end_date: '2020-01-28' })
+
+        await pool.query(
+          `CREATE TRIGGER ${insertTrigger} BEFORE INSERT ON attendance_payroll_cycle_settlements
+           FOR EACH ROW EXECUTE FUNCTION ${faultFunction}('${org.orgId}')`,
+        )
+        const insertFault = await updateCycle(org, cycleId, closeWithNewPeriod)
+        expect(insertFault.status, insertFault.raw).toBe(500)
+        expect(errorCode(insertFault)).toBe('INTERNAL_ERROR')
+        expect(await readCycle(cycleId)).toEqual(rowBefore)
+        expect(await readSettlements(cycleId)).toEqual([])
+        expect(events.forCycle(cycleId)).toEqual([])
+        await pool.query(`DROP TRIGGER ${insertTrigger} ON attendance_payroll_cycle_settlements`)
+
+        await pool.query(
+          `CREATE CONSTRAINT TRIGGER ${commitTrigger} AFTER INSERT ON attendance_payroll_cycle_settlements
+           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${faultFunction}('${org.orgId}')`,
+        )
+        const commitFault = await updateCycle(org, cycleId, closeWithNewPeriod)
+        expect(commitFault.status, commitFault.raw).toBe(500)
+        expect(errorCode(commitFault)).toBe('INTERNAL_ERROR')
+        expect(await readCycle(cycleId)).toEqual(rowBefore)
+        expect(await readSettlements(cycleId)).toEqual([])
+        expect(events.forCycle(cycleId)).toEqual([])
+        await pool.query(`DROP TRIGGER ${commitTrigger} ON attendance_payroll_cycle_settlements`)
+
+        const healthy = await updateCycle(org, cycleId, closeWithNewPeriod)
+        expect(healthy.status, healthy.raw).toBe(200)
+        expect(await readCycle(cycleId)).toMatchObject({ status: 'closed', start_date: '2020-01-02', end_date: '2020-01-27' })
+        const settlements = await readSettlements(cycleId)
+        expect(settlements.length).toBeGreaterThan(0)
+        for (const row of settlements) {
+          expect(row).toMatchObject({ period_start_date: '2020-01-02', period_end_date: '2020-01-27' })
+        }
+        expect(events.forCycle(cycleId)).toEqual([{ orgId: org.orgId, payrollCycleId: cycleId }])
+      } finally {
+        events.stop()
+        await pool.query(`DROP TRIGGER IF EXISTS ${insertTrigger} ON attendance_payroll_cycle_settlements`)
+        await pool.query(`DROP TRIGGER IF EXISTS ${commitTrigger} ON attendance_payroll_cycle_settlements`)
+        await pool.query(`DROP FUNCTION IF EXISTS ${faultFunction}()`)
+      }
+    })
+
+    it('T10 [control] while cycle A is row-locked and its real-route update waits, cycle B of the same org completes; [defect] A then applies onto the latest row', async () => {
+      const cycleA = await createCycle(org, { startDate: '2021-01-01', endDate: '2021-01-28', name: 'r7 t10 a' })
+      const cycleB = await createCycle(org, { startDate: '2021-02-01', endDate: '2021-02-28', name: 'r7 t10 b' })
+      const holder = await openHolder(org, cycleA)
+      let pendingA: Promise<HttpResponse> | undefined
+      let pendingB: Promise<HttpResponse> | undefined
+      try {
+        await holderSets(`UPDATE attendance_payroll_cycles SET name = 'r7 t10 a renamed by holder', updated_at = now() WHERE id = $1`, [cycleA])(holder.client)
+        const progressA = { settled: false }
+        pendingA = updateCycle(org, cycleA, { metadata: { t10: 'a' } })
+        pendingA.then(() => { progressA.settled = true }, () => { progressA.settled = true })
+        const waiterPid = await waitUntilRouteBlockedBy(holder.pid, pendingA)
+
+        pendingB = updateCycle(org, cycleB, { name: 'r7 t10 b renamed' })
+        const resB = await withinBudget(pendingB, 'cycle B update while cycle A is row-locked')
+        expect(resB.status, resB.raw).toBe(200)
+        expect(await readCycle(cycleB)).toMatchObject({ name: 'r7 t10 b renamed', status: 'open' })
+        expect(progressA.settled).toBe(false)
+        const stillBlocked = await requirePool().query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock' AND $2 = ANY(pg_blocking_pids(pid))`,
+          [waiterPid, holder.pid],
+        )
+        expect(stillBlocked.rows[0]?.n).toBe(1)
+
+        await finishHolder(holder, 'COMMIT')
+        const resA = await withinBudget(pendingA, 'cycle A update after the holder committed')
+        expect(resA.status, resA.raw).toBe(200)
+        expect(await readCycle(cycleA)).toMatchObject({ name: 'r7 t10 a renamed by holder', metadata: { t10: 'a' }, status: 'open' })
+      } finally {
+        await finishHolder(holder, 'ROLLBACK').catch(() => undefined)
+        if (pendingA) await withinBudget(pendingA, 'cycle A cleanup').catch(() => undefined)
+        if (pendingB) await withinBudget(pendingB, 'cycle B cleanup').catch(() => undefined)
+      }
+    })
+
+    it('T11 [control] PUT and POST /update, DELETE and POST with the DELETE override give the same answers; a zero-row archived cycle stays frozen; create-as-closed and generate-as-closed still snapshot once', async () => {
+      const templateId = await createTemplate(org, 'r7 t11 template')
+      const zeroRowArchivedId = await createCycle(org, { startDate: '2022-09-01', endDate: '2022-09-28', status: 'archived' })
+      expect(await readSettlements(zeroRowArchivedId)).toEqual([])
+      const archivedFrozen = await updateCycle(org, zeroRowArchivedId, { startDate: '2022-09-02', endDate: '2022-09-27' })
+      expect(archivedFrozen.status, archivedFrozen.raw).toBe(409)
+      expect(errorCode(archivedFrozen)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+      const archivedDelete = await deleteCycle(org, zeroRowArchivedId)
+      expect(archivedDelete.status, archivedDelete.raw).toBe(409)
+      expect(errorCode(archivedDelete)).toBe('CYCLE_CLOSED_NOT_DELETABLE')
+      expect(await readCycle(zeroRowArchivedId)).toMatchObject({ status: 'archived', start_date: '2022-09-01', end_date: '2022-09-28' })
+
+      await seedCompTimeLot(org, `r7-t11-user-${randomUUID()}`)
+      const closedId = await createCycle(org, { startDate: '2022-01-01', endDate: '2022-01-28', templateId, status: 'closed' })
+      const closedSettlements = await readSettlements(closedId)
+      expect(closedSettlements.length).toBeGreaterThan(0)
+
+      for (const entry of ['put', 'post-update'] as const) {
+        const rename = await updateCycle(org, closedId, { name: `r7 t11 ${entry}` }, entry)
+        expect(rename.status, `${entry} ${rename.raw}`).toBe(200)
+        expect(await readCycle(closedId)).toMatchObject({ name: `r7 t11 ${entry}`, status: 'closed' })
+        const frozen = await updateCycle(org, closedId, { startDate: '2022-01-02', endDate: '2022-01-27' }, entry)
+        expect(frozen.status, `${entry} ${frozen.raw}`).toBe(409)
+        expect(errorCode(frozen)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+      }
+      for (const entry of ['delete', 'post-override'] as const) {
+        const refused = await deleteCycle(org, closedId, entry)
+        expect(refused.status, `${entry} ${refused.raw}`).toBe(409)
+        expect(errorCode(refused)).toBe('CYCLE_CLOSED_NOT_DELETABLE')
+        const missing = await deleteCycle(org, randomUUID(), entry)
+        expect(missing.status, `${entry} ${missing.raw}`).toBe(404)
+        expect(errorCode(missing)).toBe('NOT_FOUND')
+      }
+      expect(await readCycle(closedId)).toMatchObject({ status: 'closed', start_date: '2022-01-01', end_date: '2022-01-28' })
+      expect(await readSettlements(closedId)).toEqual(closedSettlements)
+
+      const deletedOpenIds: string[] = []
+      for (const [index, entry] of (['delete', 'post-override'] as const).entries()) {
+        const openId = await createCycle(org, { startDate: `2022-0${index + 2}-01`, endDate: `2022-0${index + 2}-28` })
+        const deleted = await deleteCycle(org, openId, entry)
+        expect(deleted.status, `${entry} ${deleted.raw}`).toBe(200)
+        expect((deleted.body as { data?: { id?: string } } | undefined)?.data?.id).toBe(openId)
+        deletedOpenIds.push(openId)
+      }
+      for (const id of deletedOpenIds) expect(await readCycle(id)).toBeNull()
+
+      await seedCompTimeLot(org, `r7-t11-late-user-${randomUUID()}`)
+      const repeatClose = await updateCycle(org, closedId, { status: 'closed' })
+      expect(repeatClose.status, repeatClose.raw).toBe(200)
+      expect(await readSettlements(closedId)).toEqual(closedSettlements)
+
+      const createdClosedId = await createCycle(org, { startDate: '2022-05-01', endDate: '2022-05-28', status: 'closed' })
+      expect((await readSettlements(createdClosedId)).length).toBeGreaterThan(0)
+      const generated = await requestJson(`${requireBaseUrl()}/api/attendance/payroll-cycles/generate`, {
+        method: 'POST',
+        headers: org.headers,
+        body: JSON.stringify({ orgId: org.orgId, templateId, anchorDate: '2022-07-15', count: 1, status: 'closed', namePrefix: 'r7 t11 gen' }),
+      })
+      expect(generated.status, generated.raw).toBe(200)
+      const generatedIds = ((generated.body as { data?: { created?: Array<{ id?: string }> } } | undefined)?.data?.created ?? []).map((item) => item.id)
+      expect(generatedIds).toHaveLength(1)
+      expect((await readSettlements(String(generatedIds[0]))).length).toBeGreaterThan(0)
+    })
+
+    it('T13a [control] invalid UUID, missing cycle, another org and a caller without attendance:admin are refused with zero writes', async () => {
+      const openId = await createCycle(org, { startDate: '2023-01-01', endDate: '2023-01-28' })
+      const closedId = await createCycle(org, { startDate: '2023-02-01', endDate: '2023-02-28', status: 'closed' })
+      const rowsBefore = { open: await readCycle(openId), closed: await readCycle(closedId) }
+
+      for (const res of [
+        await updateCycle(org, 'not-a-uuid', { name: 'r7 t13 invalid' }),
+        await updateCycle(org, 'not-a-uuid', { name: 'r7 t13 invalid' }, 'post-update'),
+        await deleteCycle(org, 'not-a-uuid'),
+        await deleteCycle(org, 'not-a-uuid', 'post-override'),
+      ]) {
+        expect(res.status, res.raw).toBe(400)
+        expect(errorCode(res)).toBe('VALIDATION_ERROR')
+      }
+
+      const missingId = randomUUID()
+      for (const res of [
+        await updateCycle(org, missingId, { name: 'r7 t13 missing' }),
+        await updateCycle(org, missingId, { name: 'r7 t13 missing' }, 'post-update'),
+        await deleteCycle(org, missingId),
+      ]) {
+        expect(res.status, res.raw).toBe(404)
+        expect(errorCode(res)).toBe('NOT_FOUND')
+      }
+      expect(await readCycle(missingId)).toBeNull()
+
+      const otherOrg = await createOrgFixture()
+      for (const cycleId of [openId, closedId]) {
+        const foreignUpdate = await updateCycle(otherOrg, cycleId, { startDate: '2023-03-01', endDate: '2023-03-28' })
+        expect(foreignUpdate.status, foreignUpdate.raw).toBe(404)
+        expect(errorCode(foreignUpdate)).toBe('NOT_FOUND')
+        const foreignDelete = await deleteCycle(otherOrg, cycleId)
+        expect(foreignDelete.status, foreignDelete.raw).toBe(404)
+        expect(errorCode(foreignDelete)).toBe('NOT_FOUND')
+      }
+      expect({ open: await readCycle(openId), closed: await readCycle(closedId) }).toEqual(rowsBefore)
+
+      const previousRbacBypass = process.env.RBAC_BYPASS
+      try {
+        process.env.RBAC_BYPASS = 'false'
+        const readerId = `r7-payroll-reader-${randomUUID()}`
+        const readerTokenRes = await requestNeutralFixtureToken(
+          `${requireBaseUrl()}/api/auth/dev-token?userId=${encodeURIComponent(readerId)}&tenantId=${encodeURIComponent(org.orgId)}&roles=user&perms=attendance:read`,
+        )
+        expect(readerTokenRes.status, readerTokenRes.raw).toBe(200)
+        const readerToken = (readerTokenRes.body as { token?: string } | undefined)?.token
+        if (!readerToken) throw new Error(`payroll-cycle-atomicity: reader dev-token missing: ${readerTokenRes.raw}`)
+        const reader: OrgFixture = {
+          orgId: org.orgId,
+          userId: readerId,
+          token: readerToken,
+          headers: { Authorization: `Bearer ${readerToken}`, 'Content-Type': 'application/json', 'x-org-id': org.orgId },
+        }
+        for (const res of [
+          await updateCycle(reader, openId, { name: 'r7 t13 forbidden' }),
+          await updateCycle(reader, closedId, { status: 'open' }, 'post-update'),
+          await deleteCycle(reader, openId),
+        ]) {
+          expect(res.status, res.raw).toBe(403)
+          expect(errorCode(res)).toBe('FORBIDDEN')
+        }
+      } finally {
+        if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+        else process.env.RBAC_BYPASS = previousRbacBypass
+      }
+      expect({ open: await readCycle(openId), closed: await readCycle(closedId) }).toEqual(rowsBefore)
+    })
+
+    it('T13b [control] missing template, anchorDate without a template and invalid dates answer 404/400 inside the cycle transaction with zero writes', async () => {
+      const cycleId = await createCycle(org, { startDate: '2023-04-01', endDate: '2023-04-28' })
+      const rowBefore = await readCycle(cycleId)
+      const cases: Array<{ body: Record<string, unknown>; status: number; code: string; message: string }> = [
+        { body: { templateId: randomUUID() }, status: 404, code: 'NOT_FOUND', message: 'Payroll template not found' },
+        { body: { anchorDate: '2023-05-15' }, status: 400, code: 'VALIDATION_ERROR', message: 'Payroll template required for anchorDate' },
+        { body: { startDate: 'not-a-date' }, status: 400, code: 'VALIDATION_ERROR', message: 'Invalid date range' },
+        { body: { startDate: '2023-04-20', endDate: '2023-04-10' }, status: 400, code: 'VALIDATION_ERROR', message: 'Invalid date range' },
+      ]
+      for (const testCase of cases) {
+        const res = await updateCycle(org, cycleId, testCase.body)
+        expect(res.status, `${JSON.stringify(testCase.body)} ${res.raw}`).toBe(testCase.status)
+        expect((res.body as { error?: { code?: string; message?: string } } | undefined)?.error).toEqual({ code: testCase.code, message: testCase.message })
+        expect(await readCycle(cycleId)).toEqual(rowBefore)
+      }
+    })
   })
 
   it('④ 加班银行 v1-3b — 满勤 flag surfaces on GET /summary when policy ON; ABSENT when OFF (dormant-clean)', async () => {

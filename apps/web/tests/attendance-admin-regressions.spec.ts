@@ -3310,6 +3310,373 @@ describe('Attendance admin regressions', () => {
     expect(payrollCyclesSection!.textContent).toContain('9600')
   })
 
+  // r7 T12: editing a payroll cycle on the mounted page sends /update only the fields that differ from the
+  // selected cycle, plus orgId. A form loaded earlier must not write its untouched dates/status/template back.
+  describe('payroll cycle edit sends only changed fields', () => {
+    const R7_ORG_ID = 'org-r7'
+    const R7_LIST_URL = `/api/attendance/payroll-cycles?orgId=${R7_ORG_ID}`
+
+    type CycleRow = {
+      id: string
+      orgId: string
+      templateId: string | null
+      name: string | null
+      startDate: string
+      endDate: string
+      status: string
+      metadata: Record<string, unknown>
+    }
+    type CycleUpdate = { url: string; body: Record<string, unknown> }
+
+    const mayCycle = (overrides: Partial<CycleRow> = {}): CycleRow => ({
+      id: 'cycle-a',
+      orgId: R7_ORG_ID,
+      templateId: null,
+      name: 'May payroll',
+      startDate: '2026-05-01',
+      endDate: '2026-05-31',
+      status: 'open',
+      metadata: {},
+      ...overrides,
+    })
+    const juneCycle = (overrides: Partial<CycleRow> = {}): CycleRow => ({
+      id: 'cycle-b',
+      orgId: R7_ORG_ID,
+      templateId: null,
+      name: 'June payroll',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+      status: 'open',
+      metadata: {},
+      ...overrides,
+    })
+
+    let cycleRows: CycleRow[] = []
+    let cycleUpdates: CycleUpdate[] = []
+    let cycleListRequests: string[] = []
+    let unexpectedCycleRequests: string[] = []
+    let cycleListFails = false
+    let cycleUpdateResponder: ((update: CycleUpdate) => Response) | null = null
+
+    // Server-like merge: fields present in the body replace the stored row, the rest keep their values.
+    function applyCycleUpdate(id: string, body: Record<string, unknown>): Response {
+      const row = cycleRows.find(item => item.id === id)
+      if (!row) return jsonResponse(404, { ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+      for (const field of ['templateId', 'name', 'startDate', 'endDate', 'status'] as const) {
+        if (body[field] !== undefined) (row as Record<string, unknown>)[field] = body[field]
+      }
+      return jsonResponse(200, { ok: true, data: { ...row } })
+    }
+
+    beforeEach(() => {
+      cycleRows = [mayCycle(), juneCycle()]
+      cycleUpdates = []
+      cycleListRequests = []
+      unexpectedCycleRequests = []
+      cycleListFails = false
+      cycleUpdateResponder = null
+      vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+        const url = typeof input === 'string' ? input : input.url
+        const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+        const updateMatch = /^\/api\/attendance\/payroll-cycles\/([^/?]+)\/update$/.exec(url)
+        if (updateMatch && method === 'POST') {
+          const update = { url, body: JSON.parse(String((init as { body?: string }).body)) as Record<string, unknown> }
+          cycleUpdates.push(update)
+          return cycleUpdateResponder ? cycleUpdateResponder(update) : applyCycleUpdate(updateMatch[1]!, update.body)
+        }
+        if (url.startsWith('/api/attendance/payroll-cycles?') && method === 'GET') {
+          cycleListRequests.push(url)
+          if (cycleListFails) {
+            return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Payroll cycle list unavailable' } })
+          }
+          return jsonResponse(200, { ok: true, data: { items: cycleRows.map(row => ({ ...row })) } })
+        }
+        if (url.includes('/api/attendance/payroll-cycles')) {
+          unexpectedCycleRequests.push(`${method} ${url}`)
+          return jsonResponse(500, { ok: false, error: { code: 'UNEXPECTED', message: `unexpected ${method} ${url}` } })
+        }
+        if (url.includes('/api/attendance/payroll-templates')) {
+          return jsonResponse(200, { ok: true, data: { items: [] } })
+        }
+        return emptyAttendanceResponse()
+      })
+    })
+
+    // Called as the last step of every test in this group. Kept out of afterEach so a failure here
+    // cannot skip the outer afterEach cleanup (unmount, container removal, global restores).
+    function expectCycleTrafficScoped(): void {
+      expect(unexpectedCycleRequests).toEqual([])
+      // Every cycle list read was scoped to the fixture org.
+      expect(cycleListRequests.length).toBeGreaterThan(0)
+      expect(cycleListRequests.every(url => url === R7_LIST_URL)).toBe(true)
+    }
+
+    async function openPayrollCycles(): Promise<HTMLElement> {
+      window.localStorage.setItem('tenantId', R7_ORG_ID)
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      // Drain the mount-time admin loads so a late cycle list read cannot land mid-test.
+      await flushUi(16)
+
+      const dataPayrollHeader = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-group-header'))
+        .find(button => button.textContent?.includes('Data & Payroll'))
+      expect(dataPayrollHeader).toBeTruthy()
+      if (dataPayrollHeader!.getAttribute('aria-expanded') === 'false') {
+        dataPayrollHeader!.click()
+        await flushUi(2)
+      }
+      const payrollCyclesNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-payroll-cycles"]')
+      expect(payrollCyclesNav).toBeTruthy()
+      payrollCyclesNav!.click()
+      await flushUi(2)
+
+      const section = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-payroll-cycles"]')
+      expect(section).toBeTruthy()
+      expect(cycleListRequests).toContain(R7_LIST_URL)
+      await vi.waitFor(() => expect(section!.querySelectorAll('tbody tr')).toHaveLength(cycleRows.length), { timeout: 1000 })
+      return section!
+    }
+
+    function sectionButton(section: HTMLElement, label: string): HTMLButtonElement {
+      const button = Array.from(section.querySelectorAll<HTMLButtonElement>('button'))
+        .find(candidate => candidate.textContent?.trim() === label)
+      expect(button, `expected payroll cycle button "${label}"`).toBeTruthy()
+      return button!
+    }
+
+    async function editCycle(section: HTMLElement, rowName: string): Promise<void> {
+      const row = Array.from(section.querySelectorAll<HTMLTableRowElement>('tbody tr'))
+        .find(candidate => candidate.querySelector('td')?.textContent?.trim() === rowName)
+      expect(row, `expected payroll cycle row "${rowName}"`).toBeTruthy()
+      const editButton = Array.from(row!.querySelectorAll<HTMLButtonElement>('button'))
+        .find(candidate => candidate.textContent?.trim() === 'Edit')
+      expect(editButton, `expected Edit on payroll cycle row "${rowName}"`).toBeTruthy()
+      editButton!.click()
+      await flushUi(2)
+      expect(sectionButton(section, 'Update cycle')).toBeTruthy()
+    }
+
+    function setCycleStatus(section: HTMLElement, value: string): void {
+      const select = section.querySelector<HTMLSelectElement>('#attendance-payroll-cycle-status')
+      expect(select).toBeTruthy()
+      select!.value = value
+      select!.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+
+    function inputValue(section: HTMLElement, selector: string): string {
+      const input = section.querySelector<HTMLInputElement | HTMLSelectElement>(selector)
+      expect(input, `expected input ${selector}`).toBeTruthy()
+      return input!.value
+    }
+
+    async function clickUpdate(section: HTMLElement): Promise<void> {
+      const button = sectionButton(section, 'Update cycle')
+      expect(button.disabled).toBe(false)
+      button.click()
+      await flushUi(8)
+      await vi.waitFor(() => expect(sectionButton(section, 'Update cycle').disabled).toBe(false), { timeout: 1000 })
+    }
+
+    it('rename only sends name and orgId', async () => {
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      setInput(section, '#attendance-payroll-cycle-name', 'May payroll (revised)')
+      await flushUi(2)
+      await clickUpdate(section)
+
+      // toEqual (not toMatchObject): untouched startDate/endDate/status/templateId must not ride along.
+      expect(cycleUpdates).toEqual([
+        { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { name: 'May payroll (revised)', orgId: R7_ORG_ID } },
+      ])
+      expectCycleTrafficScoped()
+    })
+
+    it('status only sends status and orgId', async () => {
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      setCycleStatus(section, 'closed')
+      await flushUi(2)
+      await clickUpdate(section)
+
+      expect(cycleUpdates).toEqual([
+        { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { status: 'closed', orgId: R7_ORG_ID } },
+      ])
+      expectCycleTrafficScoped()
+    })
+
+    it('date only sends that date and orgId, and the next save diffs against the saved row', async () => {
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      setInput(section, '#attendance-payroll-cycle-end', '2026-05-30')
+      await flushUi(2)
+      await clickUpdate(section)
+      expect(cycleUpdates).toEqual([
+        { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { endDate: '2026-05-30', orgId: R7_ORG_ID } },
+      ])
+
+      setInput(section, '#attendance-payroll-cycle-start', '2026-05-02')
+      await flushUi(2)
+      await clickUpdate(section)
+      expect(cycleUpdates).toHaveLength(2)
+      expect(cycleUpdates[1]).toEqual({
+        url: '/api/attendance/payroll-cycles/cycle-a/update',
+        body: { startDate: '2026-05-02', orgId: R7_ORG_ID },
+      })
+      expectCycleTrafficScoped()
+    })
+
+    it('switching cycles compares against the newly selected cycle', async () => {
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      setInput(section, '#attendance-payroll-cycle-name', 'Unsaved draft name')
+      await flushUi(2)
+
+      await editCycle(section, 'June payroll')
+      expect(inputValue(section, '#attendance-payroll-cycle-name')).toBe('June payroll')
+      setCycleStatus(section, 'closed')
+      await flushUi(2)
+      await clickUpdate(section)
+
+      expect(cycleUpdates).toEqual([
+        { url: '/api/attendance/payroll-cycles/cycle-b/update', body: { status: 'closed', orgId: R7_ORG_ID } },
+      ])
+      expectCycleTrafficScoped()
+    })
+
+    it('cancel and an empty diff make no request and show the not-modified notice', async () => {
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      setInput(section, '#attendance-payroll-cycle-name', 'Discarded name')
+      await flushUi(2)
+      sectionButton(section, 'Cancel edit').click()
+      await flushUi(2)
+      expect(sectionButton(section, 'Create cycle')).toBeTruthy()
+      expect(inputValue(section, '#attendance-payroll-cycle-name')).toBe('')
+
+      // Re-selecting after cancel starts from the stored row, not the discarded input.
+      await editCycle(section, 'May payroll')
+      expect(inputValue(section, '#attendance-payroll-cycle-name')).toBe('May payroll')
+      sectionButton(section, 'Update cycle').click()
+      await flushUi(4)
+      expect(cycleUpdates).toEqual([])
+      expect(container!.textContent).toContain('Payroll cycle not modified.')
+
+      // Changed and changed back, whitespace-only difference, and an emptied input: all net zero.
+      setInput(section, '#attendance-payroll-cycle-name', 'Something else')
+      await flushUi(2)
+      setInput(section, '#attendance-payroll-cycle-name', 'May payroll ')
+      setCycleStatus(section, 'closed')
+      await flushUi(2)
+      setCycleStatus(section, 'open')
+      await flushUi(2)
+      sectionButton(section, 'Update cycle').click()
+      await flushUi(4)
+      setInput(section, '#attendance-payroll-cycle-name', '')
+      await flushUi(2)
+      sectionButton(section, 'Update cycle').click()
+      await flushUi(4)
+      expect(cycleUpdates).toEqual([])
+      expect(container!.textContent).toContain('Payroll cycle not modified.')
+      expectCycleTrafficScoped()
+    })
+
+    it('a failed save keeps the typed input and the original baseline', async () => {
+      cycleRows = [mayCycle({ status: 'closed' }), juneCycle()]
+      cycleUpdateResponder = () => jsonResponse(409, {
+        ok: false,
+        error: { code: 'ATTENDANCE_PERIOD_REOPEN_UNSUPPORTED', message: 'A settled (closed/archived) payroll cycle cannot be reopened.' },
+      })
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      setCycleStatus(section, 'open')
+      await flushUi(2)
+      await clickUpdate(section)
+
+      expect(cycleUpdates).toEqual([
+        { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { status: 'open', orgId: R7_ORG_ID } },
+      ])
+      expect(container!.querySelector('.attendance__status--error')).toBeTruthy()
+      expect(inputValue(section, '#attendance-payroll-cycle-status')).toBe('open')
+      expect(cycleRows[0]!.status).toBe('closed')
+
+      // Saving again without typing sends the same diff: the failure did not move the baseline to the input.
+      await clickUpdate(section)
+      expect(cycleUpdates).toHaveLength(2)
+      expect(cycleUpdates[1]!.body).toEqual({ status: 'open', orgId: R7_ORG_ID })
+
+      // Back to the stored status plus a rename: only the rename differs from the original baseline.
+      cycleUpdateResponder = null
+      setCycleStatus(section, 'closed')
+      setInput(section, '#attendance-payroll-cycle-name', 'May payroll (closed)')
+      await flushUi(2)
+      await clickUpdate(section)
+      expect(cycleUpdates).toHaveLength(3)
+      expect(cycleUpdates[2]).toEqual({
+        url: '/api/attendance/payroll-cycles/cycle-a/update',
+        body: { name: 'May payroll (closed)', orgId: R7_ORG_ID },
+      })
+      expectCycleTrafficScoped()
+    })
+
+    it('a list reload while editing does not resend the stale form fields', async () => {
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      // Another admin moves the end date; this page reloads the list but keeps its open form.
+      cycleRows[0]!.endDate = '2026-05-29'
+      const listReadsBefore = cycleListRequests.length
+      sectionButton(section, 'Reload cycles').click()
+      await flushUi(4)
+      expect(cycleListRequests.length).toBeGreaterThan(listReadsBefore)
+      await vi.waitFor(() => expect(section.querySelector('tbody')?.textContent).toContain('2026-05-29'), { timeout: 1000 })
+      expect(inputValue(section, '#attendance-payroll-cycle-end')).toBe('2026-05-31')
+
+      setInput(section, '#attendance-payroll-cycle-name', 'May payroll (renamed)')
+      await flushUi(2)
+      await clickUpdate(section)
+
+      expect(cycleUpdates).toEqual([
+        { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { name: 'May payroll (renamed)', orgId: R7_ORG_ID } },
+      ])
+      expect(cycleRows[0]!.endDate).toBe('2026-05-29')
+      expectCycleTrafficScoped()
+    })
+
+    it('a successful save with a failing list refresh takes the baseline from the save response', async () => {
+      const section = await openPayrollCycles()
+      await editCycle(section, 'May payroll')
+      setInput(section, '#attendance-payroll-cycle-name', 'May payroll v2')
+      await flushUi(2)
+      cycleListFails = true
+      const listReadsBefore = cycleListRequests.length
+      await clickUpdate(section)
+
+      expect(cycleUpdates).toEqual([
+        { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { name: 'May payroll v2', orgId: R7_ORG_ID } },
+      ])
+      // The refresh after the save ran and failed, so the in-page list still holds the pre-save row.
+      expect(cycleListRequests.length).toBeGreaterThan(listReadsBefore)
+      expect(section.querySelector('tbody')?.textContent).toContain('May payroll')
+      expect(section.querySelector('tbody')?.textContent).not.toContain('May payroll v2')
+      // The form reflects the saved row, not the stale list row.
+      expect(inputValue(section, '#attendance-payroll-cycle-name')).toBe('May payroll v2')
+
+      sectionButton(section, 'Update cycle').click()
+      await flushUi(4)
+      expect(cycleUpdates).toHaveLength(1)
+      expect(container!.textContent).toContain('Payroll cycle not modified.')
+
+      setCycleStatus(section, 'closed')
+      await flushUi(2)
+      await clickUpdate(section)
+      expect(cycleUpdates).toHaveLength(2)
+      expect(cycleUpdates[1]).toEqual({
+        url: '/api/attendance/payroll-cycles/cycle-a/update',
+        body: { status: 'closed', orgId: R7_ORG_ID },
+      })
+      expectCycleTrafficScoped()
+    })
+  })
+
   it('renders attendance groups as a list-detail manager with people inside the selected group', async () => {
     app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
