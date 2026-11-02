@@ -9,8 +9,9 @@
     <p v-if="uncertain" data-testid="sp-yida-init-uncertain">状态未确认，禁止重做或换命令；仅可手动 GET 确认真实提交或回滚结果。</p>
     <fieldset v-if="state?.status !== 'initialized'" :disabled="busy || invalidated || uncertain" class="sp-yida-initialization__inputs">
       <legend>临时材料（不进入预演或导出）</legend>
-      <p>粘贴会保留完整原字符串，不修剪、不截断；输入框可能不显示换行。userId 同时作为人工执行身份，须为最多 128 字符、无首尾空白或控制字符的原值。人工审核不是官方组织认证。</p>
+      <p>appKey、appSecret、systemToken 发送前自动去掉首尾的空白和换行（粘贴常带上输入框里看不见的换行），测试连接与初始化用的是同一个去掉后的值；中间的字符不改动、不截断，含空白或控制字符时不发送。userId 同时作为人工执行身份，须为最多 128 字符、无首尾空白或控制字符的原值。人工审核不是官方组织认证。</p>
       <label v-for="field in materialFields" :key="field">{{ field }}<input type="password" :value="material[field]" :data-testid="`sp-yida-init-${field}`" autocomplete="off" spellcheck="false" @input="setMaterial(field, $event)" @paste="pasteMaterial(field, $event)"></label>
+      <p v-if="blockedFields.length > 0" data-testid="sp-yida-init-material-hint">{{ blockedFields.join('、') }} 去掉首尾空白后仍含空白、换行或控制字符，本页不会发送；请从原处重新复制。</p>
       <label>人工审核编号<input :value="reviewRef" data-testid="sp-yida-init-review" autocomplete="off" @input="setReview('review', $event)"></label>
       <label>人工确认 organizationId<input :value="organizationId" data-testid="sp-yida-init-organization" autocomplete="off" @input="setReview('organization', $event)"></label>
       <section v-if="state?.status === 'ready' && state.connectionTestEnabled === true" class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
@@ -36,13 +37,19 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
-import { createYidaInitializationClient, YidaInitializationClientError, type YidaConnectionTestOutcome, type YidaInitializationMaterial, type YidaInitializationState } from '../../../services/integration/yidaInitialization'
+import { createYidaInitializationClient, YidaInitializationClientError, yidaCredentialHasInnerBlank, type YidaConnectionTestOutcome, type YidaInitializationMaterial, type YidaInitializationState } from '../../../services/integration/yidaInitialization'
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
 
 const props = defineProps<{ draftInput: YidaOwnerDraftInput | null }>()
 const emit = defineEmits<{ 'locked-change': [locked: boolean]; 'send-enabled-change': [enabled: boolean] }>()
 const materialFields = ['appKey', 'appSecret', 'systemToken', 'userId'] as const
 const material = reactive<Record<keyof YidaInitializationMaterial, string>>({ appKey: '', appSecret: '', systemToken: '', userId: '' })
+// appKey/appSecret/systemToken go out without surrounding whitespace: a paste often brings a trailing line
+// break the password box hides, and the server refuses padding (L4 seals the value for good). The inner text
+// is never changed; whitespace or a control character inside blocks sending. userId keeps its exact rule.
+const secretFields = ['appKey', 'appSecret', 'systemToken'] as const
+function sendable(field: typeof secretFields[number]): string { return material[field].trim() }
+const blockedFields = computed(() => secretFields.filter(field => yidaCredentialHasInnerBlank(material[field])))
 const reviewRef = ref(''), organizationId = ref(''), acknowledged = ref(false)
 const state = shallowRef<YidaInitializationState | null>(null)
 const commandId = ref<string | null>(null), selectedRowKey = ref('')
@@ -74,11 +81,13 @@ const connectionOutcome = ref<YidaConnectionTestOutcome | ''>(''), overrideTeste
 let testedPair: { appKey: string; appSecret: string } | null = null
 let outcomePair: { appKey: string; appSecret: string } | null = null
 function forgetTestedPair(): void { testedPair = null; outcomePair = null; testedVersion.value += 1; overrideTested.value = false; connectionOutcome.value = '' }
+// Both compare what would be sent now (edges trimmed) with what was sent, so a trailing line break
+// added or removed later is not an edit of the pair, and any change of the inner text is.
 const testedPairMismatch = computed(() => testedVersion.value >= 0 && testedPair !== null
-  && (testedPair.appKey !== material.appKey || testedPair.appSecret !== material.appSecret))
-// An outcome describes the exact pair that was sent: it is shown only while the inputs equal that pair.
+  && (testedPair.appKey !== sendable('appKey') || testedPair.appSecret !== sendable('appSecret')))
+// An outcome describes the exact pair that was sent: it is shown only while the inputs would send that pair.
 const shownOutcome = computed(() => testedVersion.value >= 0 && outcomePair !== null
-  && outcomePair.appKey === material.appKey && outcomePair.appSecret === material.appSecret ? connectionOutcome.value : '')
+  && outcomePair.appKey === sendable('appKey') && outcomePair.appSecret === sendable('appSecret') ? connectionOutcome.value : '')
 // The two YIDA_INITIALIZATION_* hints above describe the probe request only, so they need its own code.
 const probeErrorCode = ref('')
 const errorHint = computed(() => errorCode.value !== '' && (errorCode.value.startsWith('YIDA_CONNECTION_TEST_')
@@ -94,11 +103,12 @@ watch(locked, value => emit('locked-change', value), { immediate: true, flush: '
 watch(() => state.value?.sendEnabled === true, value => emit('send-enabled-change', value), { immediate: true, flush: 'sync' })
 const mayInitialize = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
   && !!props.draftInput && acknowledged.value && materialFields.every(field => material[field].trim().length > 0)
-  && reviewRef.value.length > 0 && organizationId.value.length > 0
+  && reviewRef.value.length > 0 && organizationId.value.length > 0 && blockedFields.value.length === 0
   && (!testedPairMismatch.value || overrideTested.value))
 const mayTestConnection = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
   && state.value.connectionTestEnabled === true && !!commandId.value
-  && material.appKey.trim().length > 0 && material.appSecret.trim().length > 0)
+  && material.appKey.trim().length > 0 && material.appSecret.trim().length > 0
+  && !blockedFields.value.some(field => field === 'appKey' || field === 'appSecret'))
 function clearPrivate(): void {
   for (const field of materialFields) material[field] = ''
   reviewRef.value = ''; organizationId.value = ''; acknowledged.value = false
@@ -164,8 +174,9 @@ async function refresh(): Promise<void> {
 async function testConnection(): Promise<void> {
   if (!mayTestConnection.value || !commandId.value) return
   const active = generation
-  // The exact bytes sent; inputs keep them (a probe never clears secrets or sets uncertain).
-  const sent = { appKey: material.appKey, appSecret: material.appSecret }
+  // The exact bytes sent (edges trimmed, the same values L4 would seal); the inputs keep their text
+  // (a probe never clears secrets or sets uncertain).
+  const sent = { appKey: sendable('appKey'), appSecret: sendable('appSecret') }
   busy.value = true; errorCode.value = ''; probeErrorCode.value = ''; forgetTestedPair()
   try {
     const tested = await sessionClient().testConnection({ commandId: commandId.value, mode: 'candidate', material: { ...sent } })
@@ -185,7 +196,8 @@ async function initialize(): Promise<void> {
   const active = generation
   busy.value = true; uncertain.value = true; errorCode.value = ''; probeErrorCode.value = ''
   try {
-    const pending = sessionClient().initialize({ commandId: commandId.value, material: { ...material },
+    const pending = sessionClient().initialize({ commandId: commandId.value, material: { appKey: sendable('appKey'),
+      appSecret: sendable('appSecret'), systemToken: sendable('systemToken'), userId: material.userId },
       draft: JSON.parse(JSON.stringify(props.draftInput)) as YidaOwnerDraftInput,
       attestation: { kind: 'owner-reviewed-target', reviewRef: reviewRef.value, organizationId: organizationId.value, executionIdentity: material.userId } })
     // The request owns its detached raw strings. Controls no longer retain them.

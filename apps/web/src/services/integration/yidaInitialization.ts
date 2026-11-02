@@ -73,6 +73,16 @@ function canonical(value: unknown): string {
   return value
 }
 function uuid(value: unknown): string { const result = canonical(value); if (!uuidPattern.test(result)) invalid(); return result }
+// The server refuses appKey/appSecret/systemToken with surrounding whitespace or any control character
+// before any exchange or write (L4 seals them for good). This client sends only what it would accept and
+// never trims or normalizes here; the panel trims a paste before calling it.
+function credential(field: unknown, maximum: number): void {
+  if (typeof field !== 'string' || !field || field.length > maximum || field.trim() !== field
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(field)) invalid()
+}
+/** True when a pasted appKey/appSecret/systemToken still holds whitespace or a control character once its
+ * edges are trimmed: that text is not the credential, so the panel does not send it and shows a hint. */
+export function yidaCredentialHasInnerBlank(value: string): boolean { return /[\s\u0000-\u001f\u007f-\u009f]/u.test(value.trim()) }
 function draft(value: unknown): YidaOwnerDraft {
   const row = object(value, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply', 'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])
   if (row.status !== 'unverified' || row.identityKind !== 'local-unverified' || row.canSend !== false || row.canApply !== false
@@ -117,10 +127,7 @@ function connectionTestInput(value: unknown): YidaConnectionTestRequest {
     const row = object(value, ['commandId', 'mode', 'material'])
     const material = object(row.material, ['appKey', 'appSecret'])
     if (row.mode !== 'candidate') invalid()
-    for (const key of ['appKey', 'appSecret']) {
-      const field = material[key]
-      if (typeof field !== 'string' || !field.trim() || field.length > 4096) invalid()
-    }
+    for (const key of ['appKey', 'appSecret']) credential(material[key], 4096)
     // Detach, never trim or normalize: the server tests exactly these bytes.
     return JSON.parse(JSON.stringify({ commandId: uuid(row.commandId), mode: 'candidate',
       material: { appKey: material.appKey, appSecret: material.appSecret } })) as YidaConnectionTestRequest
@@ -130,10 +137,9 @@ function input(value: unknown): YidaInitializationInput {
   try {
     const row = object(value, ['commandId', 'material', 'draft', 'attestation'])
     const material = object(row.material, ['appKey', 'appSecret', 'systemToken', 'userId'])
-    for (const key of ['appKey', 'appSecret', 'systemToken', 'userId']) {
-      const field = material[key]
-      if (typeof field !== 'string' || !field.trim() || field.length > (key === 'userId' ? 128 : 4096)) invalid()
-    }
+    for (const key of ['appKey', 'appSecret', 'systemToken']) credential(material[key], 4096)
+    // userId keeps its own rule: it must equal executionIdentity, whose canonical() check refuses padding.
+    if (typeof material.userId !== 'string' || !material.userId.trim() || material.userId.length > 128) invalid()
     const reviewed = object(row.attestation, ['kind', 'reviewRef', 'organizationId', 'executionIdentity'])
     if (reviewed.kind !== 'owner-reviewed-target' || reviewed.executionIdentity !== material.userId) invalid()
     const fixedDraft = object(row.draft, ['config', 'rowsText', 'allocation'])

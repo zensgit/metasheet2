@@ -62,6 +62,15 @@ function literalId(value: unknown): string {
     || /[\u0000-\u001f\u007f]/u.test(value)) fail()
   return value
 }
+// Pasted credential text (appKey/appSecret/systemToken/userId). The connection test exchanges it and L4
+// seals it for good, byte for byte, so surrounding whitespace (a pasted line break) or any control
+// character is refused here, before any port, transaction, exchange, crypto or write. Never trimmed: an
+// API caller learns its input was wrong (the panel trims before sending).
+function credential(value: unknown, maximum: number): string {
+  if (typeof value !== 'string' || !value || value.length > maximum || value.trim() !== value
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) fail()
+  return value
+}
 function id(value: unknown): string { const result = literalId(value); if (!UUID.test(result)) fail(); return result }
 function digest(value: unknown): string { if (typeof value !== 'string' || !HEX.test(value)) fail(); return value }
 function integer(value: unknown, minimum: number, maximum: number): number {
@@ -164,9 +173,7 @@ function submission(value: unknown) {
 function initializationInput(value: unknown) {
   const parsed = record(value, ['commandId', 'material', 'draft', 'attestation'])
   const material = record(parsed.material, ['appKey', 'appSecret', 'systemToken', 'userId'])
-  for (const key of Object.keys(material)) {
-    if (typeof material[key] !== 'string' || !material[key].trim() || material[key].length > (key === 'userId' ? 128 : 4096)) fail()
-  }
+  for (const key of Object.keys(material)) credential(material[key], key === 'userId' ? 128 : 4096)
   if (Buffer.byteLength(JSON.stringify(material), 'utf8') > 16 * 1024) fail()
   const candidate = record(parsed.draft, ['config', 'rowsText', 'allocation'])
   if (typeof candidate.rowsText !== 'string' || Buffer.byteLength(candidate.rowsText, 'utf8') > 128 * 1024) fail()
@@ -188,9 +195,7 @@ function connectionTestInput(value: unknown) {
   const parsed = record(value, ['commandId', 'mode', 'material'])
   if (parsed.mode !== 'candidate') fail()
   const material = record(parsed.material, ['appKey', 'appSecret'])
-  for (const key of Object.keys(material)) {
-    if (typeof material[key] !== 'string' || !material[key].trim() || material[key].length > 4096) fail()
-  }
+  for (const key of Object.keys(material)) credential(material[key], 4096)
   if (Buffer.byteLength(JSON.stringify(material), 'utf8') > 16 * 1024) fail()
   return { commandId: id(parsed.commandId), mode: 'candidate' as const,
     material: { appKey: material.appKey as string, appSecret: material.appSecret as string } }

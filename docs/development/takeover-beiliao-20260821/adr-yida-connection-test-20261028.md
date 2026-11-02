@@ -46,7 +46,7 @@
 
 ① **第三个宿主私有运行时** `createYidaConnectionTestRuntime`（新文件 `packages/core-backend/src/integration/yida-connection-test-runtime.ts`）。不改前两个运行时：`yida-initialization-runtime.ts`、`yida-owner-runtime.ts`、`yida-send-approval-service.ts`、令牌客户端、换令牌模块、表单传输模块全部逐字节不动。
 
-② **新路由** `POST /api/integration/yida-owner-send/initialization/connection-test`。PR A 只收 `{commandId, mode: 'candidate', material: {appKey, appSecret}}`；`mode: 'stored'`（PR B）在 PR A 里是 400。appKey/appSecret 与初始化同规则：字符串、1..4096 字符、不能全是空白、**不修剪**、合计 ≤16 KiB。
+② **新路由** `POST /api/integration/yida-owner-send/initialization/connection-test`。PR A 只收 `{commandId, mode: 'candidate', material: {appKey, appSecret}}`；`mode: 'stored'`（PR B）在 PR A 里是 400。appKey/appSecret 与初始化同规则：字符串、1..4096 字符、不能全是空白、**不修剪**、合计 ≤16 KiB。（2026-10-31 补充，onprem-r78 发现 F9：路由与两个宿主运行时对 appKey/appSecret/systemToken/userId 一律拒收首尾空白（含 NBSP、CR、LF、TAB）和任何控制字符，400 `YIDA_OWNER_HTTP_INPUT`，发生在任何事务、换令牌、加密和写入之前；服务器仍不修剪。面板在测试连接和 L4 前去掉这三个密钥的首尾空白，测试的就是封存的；去掉后中间仍有空白或控制字符的不发送并提示。）
 
 ③ **响应**：200 `{commandId, mode: 'candidate', outcome, tokenIssued, tokenRetained: false, externalWriteAttempted: false, canSend: false}`，`outcome ∈ {ok, upstream_rejected, unreachable, timeout}`，`tokenIssued` 当且仅当 `outcome === 'ok'`。路由与前端都用闭合键集校验，多一个键即 503 / RESPONSE_INVALID。
 

@@ -60,7 +60,7 @@ async function dispatch(method: string, body: unknown, value?: YidaInitializatio
 }
 function actualInputBoundary(removeIdentityGuard = false): (value: unknown) => unknown {
   const source = ts.createSourceFile('integration-yida-owner.ts', readFileSync(new URL('../../src/routes/integration-yida-owner.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
-  const names = ['record', 'literalId', 'id', 'initializationInput']
+  const names = ['record', 'literalId', 'credential', 'id', 'initializationInput']
   const functions = names.map(name => {
     const found = source.statements.filter(ts.isFunctionDeclaration).filter(node => node.name?.text === name)
     expect(found).toHaveLength(1); return found[0].getText(source)
@@ -123,6 +123,18 @@ describe('YiDa initialization HTTP contract — no IO fake host port', () => {
       { ...request, draft: { ...request.draft, rowsText: 'x'.repeat(128 * 1024 + 1) } }]) {
       expect((await dispatch('POST', bad, f.value)).status).toBe(400)
     }
+    expect(f.calls).toHaveLength(0)
+  })
+  // L4 seals the material for good: a pasted line break or padding is refused, never trimmed or echoed.
+  it.each([
+    ['appKey', 'a trailing CR/LF', 'synthetic-http-app-key\r\n'], ['appSecret', 'a leading space', ' synthetic-http-app-secret'],
+    ['systemToken', 'a trailing LF', 'synthetic-http-system-token\n'], ['systemToken', 'a leading NBSP', '\u00a0synthetic-http-system-token'],
+    ['systemToken', 'a trailing ideographic space', 'synthetic-http-system-token\u3000'], ['systemToken', 'an inner TAB', 'synthetic-http\tsystem-token'],
+    ['appSecret', 'an inner C1 control', 'synthetic-http\u0085app-secret'],
+  ] as const)('a pasted %s with %s is 400 before host invocation', async (key, _label, value) => {
+    const f = port(), request = input()
+    expect(await dispatch('POST', { ...request, material: { ...request.material, [key]: value } }, f.value))
+      .toEqual({ status: 400, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_INPUT' } } })
     expect(f.calls).toHaveLength(0)
   })
   it('GET refuses body/query/scope headers; JWT context is mandatory, missing private port is 503', async () => {

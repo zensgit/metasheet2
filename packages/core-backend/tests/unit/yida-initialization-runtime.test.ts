@@ -26,7 +26,7 @@ const draft = Object.freeze({ targetRef: draftTargetRef, operationId, status: 'u
   canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false,
   rowCount: 1, rows: Object.freeze([Object.freeze({ rowKey, index: 0 })]), reused: false })
 const input = (): YidaInitializationInput => ({ commandId,
-  material: { appKey: ' synthetic-app ', appSecret: ' synthetic-secret ', systemToken: ' synthetic-token ', userId: 'synthetic-user' },
+  material: { appKey: 'synthetic app', appSecret: 'synthetic secret', systemToken: 'synthetic token', userId: 'synthetic-user' },
   draft: { config: { target: { form: 'synthetic-form' } }, rowsText: '[{"synthetic":true}]', allocation: { mode: 'original' } },
   attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-review', organizationId: 'synthetic-org', executionIdentity: 'synthetic-user' } })
 function deferred<T = void>() {
@@ -174,12 +174,24 @@ describe('initialization host control and exact persistence query contracts', ()
     await rejected(f.runtime.initialize(actor, Object.defineProperty({ ...original }, 'commandId', { get: getter })), 'INPUT')
     expect(getter).not.toHaveBeenCalled(); expect(f.transactions).toBe(0)
   })
+  // L4 seals the material for good: a pasted trailing line break must be refused, never trimmed or sealed.
+  it.each([
+    ['appKey', 'a trailing CR/LF', 'synthetic app\r\n'], ['appSecret', 'a leading space', ' synthetic secret'],
+    ['systemToken', 'a trailing LF', 'synthetic token\n'], ['systemToken', 'a leading NBSP', '\u00a0synthetic token'],
+    ['systemToken', 'a trailing ideographic space', 'synthetic token\u3000'], ['appSecret', 'an inner TAB', 'synthetic\tsecret'],
+    ['appKey', 'an inner C1 control', 'synthetic\u0085app'], ['systemToken', 'an inner NUL', 'synthetic\u0000token'],
+  ] as const)('refuses %s with %s as INPUT before any transaction, producer, crypto or write', async (key, _label, value) => {
+    const { f } = await active(), original = input()
+    await rejected(f.runtime.initialize(actor, { ...original, material: { ...(original.material as Row), [key]: value } }), 'INPUT')
+    expect(f.transactions).toBe(0); expect(f.createProducer).not.toHaveBeenCalled(); expect(f.initialize).not.toHaveBeenCalled()
+    expect(f.security.encrypt).not.toHaveBeenCalled(); expect(f.sql).toEqual([])
+  })
   it('preserves immutable original material and nested plain JSON while caller mutates after invoke', async () => {
     const { f } = await active(), supplied = input(), result = f.runtime.initialize(actor, supplied)
     ;(supplied.material as Row).appKey = 'changed'
     ;((supplied.draft as Row).config as Row).target = { form: 'changed' }
     expect((await result).status).toBe('initialized')
-    expect((f.initialize.mock.calls[0][1].material as Row).appKey).toBe(' synthetic-app ')
+    expect((f.initialize.mock.calls[0][1].material as Row).appKey).toBe('synthetic app')
     expect(((f.initialize.mock.calls[0][1].draft as Row).config as Row).target).toEqual({ form: 'synthetic-form' })
     expect(f.commits).toBe(1)
     expect(Object.keys(f.initialize.mock.calls[0][0])).toEqual(['query'])
