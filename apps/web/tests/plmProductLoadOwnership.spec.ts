@@ -3,12 +3,14 @@ import type { App } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   AuthState,
+  BomLineRecord,
+  PlmBomPanelModel,
   PlmProductPanelModel,
   PlmSearchPanelModel,
   ProductRecord,
   SearchItem,
 } from '../src/views/plm/plmPanelModels'
-import type { PlmItemMetadata } from '../src/services/PlmService'
+import type { PlmItemMetadata, PlmListResponse } from '../src/services/PlmService'
 import PlmProductView from '../src/views/PlmProductView.vue'
 
 const handles = vi.hoisted(() => ({
@@ -19,6 +21,7 @@ const handles = vi.hoisted(() => ({
   },
   productPanel: null as unknown,
   searchPanel: null as unknown,
+  bomPanel: null as unknown,
   handleAuthError: null as null | ReturnType<typeof vi.fn>,
   routerReplace: vi.fn(),
   scheduleQuerySync: vi.fn(),
@@ -61,6 +64,10 @@ vi.mock('../src/components/plm/PlmSearchPanel.vue', () => ({
 vi.mock('../src/components/plm/PlmBomPanel.vue', () => ({
   default: {
     name: 'PlmBomPanel',
+    props: ['panel'],
+    setup(props: { panel: PlmBomPanelModel }) {
+      handles.bomPanel = props.panel
+    },
     render() {
       return null
     },
@@ -219,6 +226,7 @@ beforeEach(() => {
   localStorage.clear()
   handles.productPanel = null
   handles.searchPanel = null
+  handles.bomPanel = null
   handles.getProduct.mockReset()
   handles.getProduct.mockImplementation(() => Promise.reject(new Error('unexpected getProduct')))
   handles.getMetadata.mockReset()
@@ -260,6 +268,7 @@ async function mountOwnedView() {
   localStorage.clear()
   handles.productPanel = null
   handles.searchPanel = null
+  handles.bomPanel = null
   const container = document.createElement('div')
   document.body.appendChild(container)
   const app = createApp(PlmProductView)
@@ -269,9 +278,10 @@ async function mountOwnedView() {
 
   const productPanel = handles.productPanel as PlmProductPanelModel | null
   const searchPanel = handles.searchPanel as PlmSearchPanelModel | null
+  const bomPanel = handles.bomPanel as PlmBomPanelModel | null
   const handleAuthError = handles.handleAuthError
-  if (!productPanel || !searchPanel || !handleAuthError) {
-    throw new Error('PlmProductView mount did not capture product panel, search panel, and handleAuthError')
+  if (!productPanel || !searchPanel || !bomPanel || !handleAuthError) {
+    throw new Error('PlmProductView mount did not capture product panel, search panel, bom panel, and handleAuthError')
   }
 
   expect(handles.getProduct).not.toHaveBeenCalled()
@@ -284,6 +294,7 @@ async function mountOwnedView() {
   return {
     productPanel,
     searchPanel,
+    bomPanel,
     handleAuthError,
     async seedAcceptedC() {
       handles.getProduct.mockImplementation((id: string) => {
@@ -674,6 +685,396 @@ describe('PlmProductView loadProduct completion ownership', () => {
     expect(handles.routerReplace.mock.calls.length).toBeGreaterThanOrEqual(2)
     const lastRouterPatch = handles.routerReplace.mock.calls[handles.routerReplace.mock.calls.length - 1]
     expect(JSON.stringify(lastRouterPatch)).toContain('"B"')
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+    expect(handles.apiFetch).not.toHaveBeenCalled()
+  })
+})
+describe('PlmProductView already-dispatched BOM child-read ownership', () => {
+  const lineC = [{
+    id: 'C-L',
+    parent_item_id: 'C',
+    component_id: 'C-leaf',
+    component_code: 'C-LEAF',
+    quantity: 1,
+  }]
+  const lineA = [{
+    id: 'A-L',
+    parent_item_id: 'A',
+    component_id: 'A-leaf',
+    component_code: 'A-LEAF',
+    quantity: 1,
+  }]
+  const lineB = [{
+    id: 'B-L',
+    parent_item_id: 'B',
+    component_id: 'B-leaf',
+    component_code: 'B-LEAF',
+    quantity: 1,
+  }]
+  const depth1Items = [{
+    id: 'B-S',
+    parent_item_id: 'B',
+    component_id: 'S',
+    component_code: 'S',
+    quantity: 1,
+  }]
+  const depth2Items = [
+    {
+      id: 'B-S',
+      parent_item_id: 'B',
+      component_id: 'S',
+      component_code: 'S',
+      quantity: 1,
+    },
+    {
+      id: 'S-leaf',
+      parent_item_id: 'S',
+      component_id: 'S-leaf',
+      component_code: 'S-LEAF',
+      quantity: 1,
+    },
+  ]
+
+  function searchItemA(): SearchItem {
+    return {
+      id: recordA.id,
+      name: recordA.name,
+      partNumber: recordA.partNumber,
+      itemType: recordA.itemType,
+    }
+  }
+
+  async function drainChildDispatch() {
+    await Promise.resolve()
+    await nextTick()
+  }
+
+  async function seedRetainedC() {
+    handles.getBom.mockImplementation(async (productId: string) => ({
+      productId,
+      items: productId === 'C' ? lineC : [],
+      total: productId === 'C' ? lineC.length : 0,
+    }))
+    const view = await mountOwnedView()
+    await view.seedAcceptedC()
+    expect(view.bomPanel.bomItems.value).toEqual(lineC)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(handles.apiFetch).not.toHaveBeenCalled()
+    return view
+  }
+
+  it('keeps newer B BOM when an already dispatched A BOM resolves afterward', async () => {
+    const view = await mountOwnedView()
+    const productA = deferred<ProductRecord>()
+    const productB = deferred<ProductRecord>()
+    const bomA = deferred<PlmListResponse<BomLineRecord>>()
+    const bomB = deferred<PlmListResponse<BomLineRecord>>()
+    handles.getProduct.mockImplementation((id: string) => {
+      if (id === 'A') return productA.promise
+      if (id === 'B') return productB.promise
+      return Promise.reject(new Error(`unexpected getProduct ${id}`))
+    })
+    handles.getBom.mockImplementation((productId: string) => {
+      if (productId === 'A') return bomA.promise
+      if (productId === 'B') return bomB.promise
+      return Promise.reject(new Error(`unexpected getBom ${productId}`))
+    })
+
+    const pendingA = view.searchPanel.applySearchItem(searchItemA())
+    expect(handles.getProduct).toHaveBeenCalledWith('A', { itemType: 'Part', itemNumber: 'PN-A' })
+    productA.resolve({ ...recordA })
+    await drainChildDispatch()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+    expect(handles.getBom).toHaveBeenCalledWith('A', { depth: 2, effectiveAt: undefined })
+
+    const pendingB = view.searchPanel.applySearchItem({ ...searchItemB })
+    expect(handles.getProduct).toHaveBeenCalledWith('B', { itemType: 'Part', itemNumber: 'PN-B' })
+    productB.resolve({ ...recordB })
+    await drainChildDispatch()
+    expect(handles.getBom).toHaveBeenCalledTimes(2)
+    expect(handles.getBom).toHaveBeenNthCalledWith(1, 'A', { depth: 2, effectiveAt: undefined })
+    expect(handles.getBom).toHaveBeenNthCalledWith(2, 'B', { depth: 2, effectiveAt: undefined })
+
+    bomB.resolve({ productId: 'B', items: lineB, total: lineB.length })
+    await drainChildDispatch()
+    expect(view.bomPanel.bomItems.value).toEqual(lineB)
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+
+    bomA.resolve({ productId: 'A', items: lineA, total: lineA.length })
+    await drainChildDispatch()
+    expect(view.bomPanel.bomItems.value).toEqual(lineB)
+    expect(view.bomPanel.productId.value).toBe('B')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+    expect(handles.apiFetch).not.toHaveBeenCalled()
+    await pendingA
+    await pendingB
+  })
+
+  it('suppresses A BOM success while selected B product is pending, then keeps C after B product failure', async () => {
+    const view = await seedRetainedC()
+    const productA = deferred<ProductRecord>()
+    const productB = deferred<ProductRecord>()
+    const bomA = deferred<PlmListResponse<BomLineRecord>>()
+    handles.getProduct.mockImplementation((id: string) => {
+      if (id === 'A') return productA.promise
+      if (id === 'B') return productB.promise
+      return Promise.reject(new Error(`unexpected getProduct ${id}`))
+    })
+    handles.getBom.mockImplementation((productId: string) => {
+      if (productId === 'A') return bomA.promise
+      return Promise.reject(new Error(`unexpected getBom ${productId}`))
+    })
+
+    const pendingA = view.searchPanel.applySearchItem(searchItemA())
+    productA.resolve({ ...recordA })
+    await drainChildDispatch()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+    expect(handles.getBom).toHaveBeenCalledWith('A', { depth: 2, effectiveAt: undefined })
+    expect(view.productPanel.product.value).toEqual(expect.objectContaining({ id: 'A' }))
+
+    const pendingB = view.searchPanel.applySearchItem({ ...searchItemB })
+    expect(handles.getProduct).toHaveBeenCalledWith('B', { itemType: 'Part', itemNumber: 'PN-B' })
+    expect(view.bomPanel.productId.value).toBe('B')
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+
+    bomA.resolve({ productId: 'A', items: lineA, total: lineA.length })
+    await drainChildDispatch()
+    expect(view.bomPanel.productId.value).toBe('B')
+    expect(view.bomPanel.bomItems.value).toEqual(lineC)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+
+    const productFailure = new Error('current B product failed')
+    productB.reject(productFailure)
+    await pendingB
+    await pendingA
+    await nextTick()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+    expect(handles.getBom).toHaveBeenCalledWith('A', { depth: 2, effectiveAt: undefined })
+    expect(view.productPanel.productId.value).toBe('B')
+    expect(view.productPanel.product.value).toEqual(expect.objectContaining({ id: 'A' }))
+    expect(view.productPanel.productError.value).toBe('current B product failed')
+    expect(view.bomPanel.bomItems.value).toEqual(lineC)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.handleAuthError).toHaveBeenCalledTimes(1)
+    expect(view.handleAuthError).toHaveBeenCalledWith(productFailure)
+    expect(handles.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('keeps newer same-id depth 2 BOM when the older depth 1 response resolves afterward', async () => {
+    const view = await mountOwnedView()
+    const productB1 = deferred<ProductRecord>()
+    const productB2 = deferred<ProductRecord>()
+    const bomDepth1 = deferred<PlmListResponse<BomLineRecord>>()
+    const bomDepth2 = deferred<PlmListResponse<BomLineRecord>>()
+    let productCalls = 0
+    let bomCalls = 0
+    handles.getProduct.mockImplementation((id: string) => {
+      if (id !== 'B') return Promise.reject(new Error(`unexpected getProduct ${id}`))
+      productCalls += 1
+      if (productCalls === 1) return productB1.promise
+      if (productCalls === 2) return productB2.promise
+      return Promise.reject(new Error(`unexpected getProduct ${id}`))
+    })
+    handles.getBom.mockImplementation((productId: string) => {
+      if (productId !== 'B') return Promise.reject(new Error(`unexpected getBom ${productId}`))
+      bomCalls += 1
+      if (bomCalls === 1) return bomDepth1.promise
+      if (bomCalls === 2) return bomDepth2.promise
+      return Promise.reject(new Error(`unexpected getBom ${productId}`))
+    })
+
+    view.bomPanel.bomDepth.value = 1
+    const pendingB1 = view.searchPanel.applySearchItem({ ...searchItemB })
+    productB1.resolve({ ...recordB })
+    await drainChildDispatch()
+    expect(handles.getBom).toHaveBeenNthCalledWith(1, 'B', { depth: 1, effectiveAt: undefined })
+
+    const pendingB2 = view.searchPanel.applySearchItem({ ...searchItemB })
+    view.bomPanel.bomDepth.value = 2
+    productB2.resolve({ ...recordB })
+    await drainChildDispatch()
+    expect(handles.getProduct).toHaveBeenCalledTimes(2)
+    expect(handles.getProduct).toHaveBeenNthCalledWith(1, 'B', { itemType: 'Part', itemNumber: 'PN-B' })
+    expect(handles.getProduct).toHaveBeenNthCalledWith(2, 'B', { itemType: 'Part', itemNumber: 'PN-B' })
+    expect(handles.getBom).toHaveBeenCalledTimes(2)
+    expect(handles.getBom).toHaveBeenNthCalledWith(2, 'B', { depth: 2, effectiveAt: undefined })
+
+    bomDepth2.resolve({ productId: 'B', items: depth2Items, total: depth2Items.length })
+    await drainChildDispatch()
+    expect(view.bomPanel.bomItems.value).toEqual(depth2Items)
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    const visibleAfterNewer = JSON.parse(JSON.stringify(view.bomPanel.bomTreeVisibleRows.value))
+
+    bomDepth1.resolve({ productId: 'B', items: depth1Items, total: depth1Items.length })
+    await drainChildDispatch()
+    expect(view.bomPanel.bomItems.value).toEqual(depth2Items)
+    expect(JSON.parse(JSON.stringify(view.bomPanel.bomTreeVisibleRows.value))).toEqual(visibleAfterNewer)
+    expect(view.bomPanel.productId.value).toBe('B')
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+    expect(handles.apiFetch).not.toHaveBeenCalled()
+    await pendingB1
+    await pendingB2
+  })
+
+  it('drops a stale A BOM rejection while selected B product is pending, then settles B', async () => {
+    const view = await seedRetainedC()
+    const productA = deferred<ProductRecord>()
+    const productB = deferred<ProductRecord>()
+    const bomA = deferred<PlmListResponse<BomLineRecord>>()
+    handles.getProduct.mockImplementation((id: string) => {
+      if (id === 'A') return productA.promise
+      if (id === 'B') return productB.promise
+      return Promise.reject(new Error(`unexpected getProduct ${id}`))
+    })
+    handles.getBom.mockImplementation((productId: string) => {
+      if (productId === 'A') return bomA.promise
+      return Promise.reject(new Error(`unexpected getBom ${productId}`))
+    })
+
+    const pendingA = view.searchPanel.applySearchItem(searchItemA())
+    productA.resolve({ ...recordA })
+    await drainChildDispatch()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+    expect(handles.getBom).toHaveBeenCalledWith('A', { depth: 2, effectiveAt: undefined })
+
+    const pendingB = view.searchPanel.applySearchItem({ ...searchItemB })
+    expect(view.bomPanel.productId.value).toBe('B')
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+
+    const staleBomError = new Error('stale A bom')
+    bomA.reject(staleBomError)
+    await drainChildDispatch()
+    expect(view.bomPanel.bomItems.value).toEqual(lineC)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+
+    const productFailure = new Error('current B product failed')
+    productB.reject(productFailure)
+    await pendingB
+    await pendingA
+    await nextTick()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+    expect(handles.getBom).toHaveBeenCalledWith('A', { depth: 2, effectiveAt: undefined })
+    expect(view.productPanel.productId.value).toBe('B')
+    expect(view.productPanel.product.value).toEqual(expect.objectContaining({ id: 'A' }))
+    expect(view.productPanel.productError.value).toBe('current B product failed')
+    expect(view.bomPanel.bomItems.value).toEqual(lineC)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.handleAuthError).toHaveBeenCalledTimes(1)
+    expect(view.handleAuthError).toHaveBeenCalledWith(productFailure)
+    expect(handles.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('publishes one current B BOM refresh failure and keeps the previous B items', async () => {
+    const view = await mountOwnedView()
+    const productB = deferred<ProductRecord>()
+    const bomOk = deferred<PlmListResponse<BomLineRecord>>()
+    const bomFail = deferred<PlmListResponse<BomLineRecord>>()
+    let bomCalls = 0
+    handles.getProduct.mockImplementation((id: string) => {
+      if (id === 'B') return productB.promise
+      return Promise.reject(new Error(`unexpected getProduct ${id}`))
+    })
+    handles.getBom.mockImplementation((productId: string) => {
+      if (productId !== 'B') return Promise.reject(new Error(`unexpected getBom ${productId}`))
+      bomCalls += 1
+      if (bomCalls === 1) return bomOk.promise
+      if (bomCalls === 2) return bomFail.promise
+      return Promise.reject(new Error(`unexpected getBom ${productId}`))
+    })
+
+    const pendingB = view.searchPanel.applySearchItem({ ...searchItemB })
+    productB.resolve({ ...recordB })
+    await drainChildDispatch()
+    expect(handles.getBom).toHaveBeenCalledTimes(1)
+    expect(handles.getBom).toHaveBeenCalledWith('B', { depth: 2, effectiveAt: undefined })
+    bomOk.resolve({ productId: 'B', items: lineB, total: lineB.length })
+    await drainChildDispatch()
+    await pendingB
+    expect(view.bomPanel.bomItems.value).toEqual(lineB)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+    const visibleBeforeRefresh = JSON.parse(JSON.stringify(view.bomPanel.bomTreeVisibleRows.value))
+
+    const refreshError = new Error('B bom refresh failed')
+    const pendingRefresh = view.bomPanel.loadBom()
+    expect(handles.getBom).toHaveBeenCalledTimes(2)
+    expect(handles.getBom).toHaveBeenNthCalledWith(2, 'B', { depth: 2, effectiveAt: undefined })
+    bomFail.reject(refreshError)
+    await pendingRefresh
+    await nextTick()
+    expect(view.handleAuthError).toHaveBeenCalledTimes(1)
+    expect(view.handleAuthError).toHaveBeenCalledWith(refreshError)
+    expect(view.bomPanel.bomError.value).toBe('B bom refresh failed')
+    expect(view.bomPanel.bomItems.value).toEqual(lineB)
+    expect(JSON.parse(JSON.stringify(view.bomPanel.bomTreeVisibleRows.value))).toEqual(visibleBeforeRefresh)
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.bomPanel.productId.value).toBe('B')
+    expect(handles.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('keeps loading true when the older B BOM rejects while the newer B BOM is still pending', async () => {
+    const view = await seedRetainedC()
+    const productB1 = deferred<ProductRecord>()
+    const productB2 = deferred<ProductRecord>()
+    const bomB1 = deferred<PlmListResponse<BomLineRecord>>()
+    const bomB2 = deferred<PlmListResponse<BomLineRecord>>()
+    let productCalls = 0
+    let bomCalls = 0
+    handles.getProduct.mockImplementation((id: string) => {
+      if (id !== 'B') return Promise.reject(new Error(`unexpected getProduct ${id}`))
+      productCalls += 1
+      if (productCalls === 1) return productB1.promise
+      if (productCalls === 2) return productB2.promise
+      return Promise.reject(new Error(`unexpected getProduct ${id}`))
+    })
+    handles.getBom.mockImplementation((productId: string) => {
+      if (productId !== 'B') return Promise.reject(new Error(`unexpected getBom ${productId}`))
+      bomCalls += 1
+      if (bomCalls === 1) return bomB1.promise
+      if (bomCalls === 2) return bomB2.promise
+      return Promise.reject(new Error(`unexpected getBom ${productId}`))
+    })
+
+    const pendingB1 = view.searchPanel.applySearchItem({ ...searchItemB })
+    productB1.resolve({ ...recordB })
+    await drainChildDispatch()
+    const pendingB2 = view.searchPanel.applySearchItem({ ...searchItemB })
+    productB2.resolve({ ...recordB })
+    await drainChildDispatch()
+
+    const olderBomError = new Error('older B bom failed')
+    bomB1.reject(olderBomError)
+    await drainChildDispatch()
+    expect(view.bomPanel.bomItems.value).toEqual(lineC)
+    expect(view.bomPanel.bomLoading.value).toBe(true)
+    expect(view.bomPanel.bomError.value).toBe('')
+    expect(view.handleAuthError).not.toHaveBeenCalled()
+    expect(handles.getBom).toHaveBeenCalledTimes(2)
+    expect(handles.getBom).toHaveBeenNthCalledWith(1, 'B', { depth: 2, effectiveAt: undefined })
+    expect(handles.getBom).toHaveBeenNthCalledWith(2, 'B', { depth: 2, effectiveAt: undefined })
+
+    bomB2.resolve({ productId: 'B', items: lineB, total: lineB.length })
+    await pendingB1
+    await pendingB2
+    expect(view.bomPanel.bomLoading.value).toBe(false)
+    expect(view.bomPanel.bomItems.value).toEqual(lineB)
+    expect(view.bomPanel.bomError.value).toBe('')
     expect(view.handleAuthError).not.toHaveBeenCalled()
     expect(handles.apiFetch).not.toHaveBeenCalled()
   })
