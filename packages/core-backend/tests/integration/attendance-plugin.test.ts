@@ -7897,6 +7897,42 @@ attendanceIntegrationDescribe(
       }
     })
 
+    it('T2c [control] a closed cycle refuses a change of only its endDate on both update entries: 409 CYCLE_CLOSED_PERIOD_FROZEN and the row unchanged', async () => {
+      const templateId = await createTemplate(org, 'r7 t2c template')
+      await seedCompTimeLot(org, `r7-t2c-user-${randomUUID()}`)
+      const cycleId = await createCycle(org, { startDate: '2012-06-01', endDate: '2012-06-28', templateId, status: 'closed' })
+      const rowBefore = await readCycle(cycleId)
+      expect(rowBefore).toMatchObject({ status: 'closed', start_date: '2012-06-01', end_date: '2012-06-28', template_id: templateId })
+      const settlementsBefore = await readSettlements(cycleId)
+      expect(settlementsBefore.length).toBeGreaterThan(0)
+
+      for (const entry of ['put', 'post-update'] as const) {
+        const frozen = await updateCycle(org, cycleId, { endDate: '2012-06-27' }, entry)
+        expect(frozen.status, `${entry} ${frozen.raw}`).toBe(409)
+        expect(errorCode(frozen)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+        expect(await readCycle(cycleId)).toEqual(rowBefore)
+        expect(await readSettlements(cycleId)).toEqual(settlementsBefore)
+      }
+    })
+
+    it('T2d [control] a closed cycle refuses a change of only its startDate on both update entries: 409 CYCLE_CLOSED_PERIOD_FROZEN and the row unchanged', async () => {
+      const templateId = await createTemplate(org, 'r7 t2d template')
+      await seedCompTimeLot(org, `r7-t2d-user-${randomUUID()}`)
+      const cycleId = await createCycle(org, { startDate: '2012-07-01', endDate: '2012-07-28', templateId, status: 'closed' })
+      const rowBefore = await readCycle(cycleId)
+      expect(rowBefore).toMatchObject({ status: 'closed', start_date: '2012-07-01', end_date: '2012-07-28', template_id: templateId })
+      const settlementsBefore = await readSettlements(cycleId)
+      expect(settlementsBefore.length).toBeGreaterThan(0)
+
+      for (const entry of ['put', 'post-update'] as const) {
+        const frozen = await updateCycle(org, cycleId, { startDate: '2012-07-02' }, entry)
+        expect(frozen.status, `${entry} ${frozen.raw}`).toBe(409)
+        expect(errorCode(frozen)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+        expect(await readCycle(cycleId)).toEqual(rowBefore)
+        expect(await readSettlements(cycleId)).toEqual(settlementsBefore)
+      }
+    })
+
     it('T3 [defect] maintenance commits first, then close takes the lock: close keeps the latest dates/template and the snapshot carries that period', async () => {
       const templateId = await createTemplate(org, 'r7 t3 template')
       const laterTemplateId = await createTemplate(org, 'r7 t3 later template')
