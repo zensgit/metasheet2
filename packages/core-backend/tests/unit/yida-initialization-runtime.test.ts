@@ -2,9 +2,10 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { types } from 'node:util'
 import ts from 'typescript'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as authority from '../../src/integration/automation-live-authority'
 import * as bootstrap from '../../src/integration/yida-initialization-bootstrap'
+import * as encryptedSecrets from '../../src/security/encrypted-secrets'
 import { createYidaInitializationRuntime, yidaInitializationErrorCode,
   type YidaInitializationInput, type YidaInitializationRuntimeBinding } from '../../src/integration/yida-initialization-runtime'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
@@ -42,10 +43,23 @@ function loadMutant(source: string): typeof import('../../src/integration/yida-i
     if (specifier === 'node:util') return { types }
     if (specifier === './automation-live-authority') return authority
     if (specifier === './yida-initialization-bootstrap') return bootstrap
+    if (specifier === '../security/encrypted-secrets') return encryptedSecrets
     throw new Error('Unexpected isolated module import')
   }, exports)
   return exports as typeof import('../../src/integration/yida-initialization-runtime')
 }
+// L4 refuses unless ENCRYPTION_KEY / ENCRYPTION_SALT pass the production checks in EVERY NODE_ENV, and
+// tests/setup.ts configures neither: each case starts from explicit synthetic, non-default material and
+// gets the process environment back afterwards.
+const syntheticEncryption = Object.freeze({ ENCRYPTION_KEY: 'synthetic-unit-encryption-key-0123456789abcdef',
+  ENCRYPTION_SALT: 'synthetic-unit-encryption-salt-0123456789abcdef' })
+function setEnv(key: string, value: string | undefined) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+let savedEnv: Array<[string, string | undefined]> = []
+beforeEach(() => {
+  savedEnv = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]])
+  for (const [key, value] of Object.entries(syntheticEncryption)) setEnv(key, value)
+})
+afterEach(() => { for (const [key, value] of savedEnv) setEnv(key, value) })
 function fixture(options: { missing?: boolean; badXids?: boolean; badIsolation?: boolean;
   beforeQuery?: (sql: string) => Promise<void>; beforeCommit?: () => Promise<void>; lostCommit?: boolean;
   createRuntime?: typeof createYidaInitializationRuntime } = {}) {
@@ -254,6 +268,69 @@ describe('initialization host control and exact persistence query contracts', ()
     release.resolve(); await rejected(pending, 'CANCELLED'); await drain
     expect(stopped).toBe(true); expect(f.commits).toBe(0)
     await rejected(f.runtime.status(actor), 'INACTIVE')
+  })
+})
+
+describe('L4 refuses before any writer unless the encryption material passes the production checks, in every NODE_ENV', () => {
+  const guard = "if (getEncryptionMaterialIssues(process.env).length > 0) fail('ENCRYPTION_NOT_READY')"
+  const nodeEnvs = ['(unset)', 'development', 'test', 'Production', 'production'] as const
+  const materials: Readonly<Record<string, Readonly<Record<'ENCRYPTION_KEY' | 'ENCRYPTION_SALT', string | undefined>>>> = {
+    'both unset': { ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined },
+    'built-in defaults': { ENCRYPTION_KEY: encryptedSecrets.DEFAULT_ENCRYPTION_KEY, ENCRYPTION_SALT: encryptedSecrets.DEFAULT_ENCRYPTION_SALT },
+    'whitespace-only key': { ENCRYPTION_KEY: ' \t ', ENCRYPTION_SALT: syntheticEncryption.ENCRYPTION_SALT },
+    'empty key': { ENCRYPTION_KEY: '', ENCRYPTION_SALT: syntheticEncryption.ENCRYPTION_SALT },
+    'default key only': { ENCRYPTION_KEY: encryptedSecrets.DEFAULT_ENCRYPTION_KEY, ENCRYPTION_SALT: syntheticEncryption.ENCRYPTION_SALT },
+    'salt unset': { ENCRYPTION_KEY: syntheticEncryption.ENCRYPTION_KEY, ENCRYPTION_SALT: undefined },
+    'default salt only': { ENCRYPTION_KEY: syntheticEncryption.ENCRYPTION_KEY, ENCRYPTION_SALT: encryptedSecrets.DEFAULT_ENCRYPTION_SALT },
+  }
+  function useEnvironment(nodeEnv: typeof nodeEnvs[number], material: Readonly<Record<string, string | undefined>>) {
+    setEnv('NODE_ENV', nodeEnv === '(unset)' ? undefined : nodeEnv)
+    for (const [key, value] of Object.entries(material)) setEnv(key, value)
+  }
+  it.each(nodeEnvs.flatMap(nodeEnv => Object.keys(materials).map(name => [nodeEnv, name] as const)))(
+    'NODE_ENV %s, %s: ENCRYPTION_NOT_READY with no producer (so no crypto), write or fetch; the slot stays ready', async (nodeEnv, name) => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      try {
+        const { f } = await active()
+        useEnvironment(nodeEnv, materials[name])
+        await rejected(f.runtime.initialize(actor, input()), 'ENCRYPTION_NOT_READY')
+        // At this layer every seal goes through the producer the binding creates (the runtime itself never calls
+        // dependencies.security), so "no producer was created" is the no-crypto guarantee. The real host security
+        // service is exercised by the real-DB suites.
+        expect(f.createProducer).not.toHaveBeenCalled(); expect(f.initialize).not.toHaveBeenCalled()
+        expect(f.sql.some(sql => /INSERT|UPDATE|DELETE/u.test(sql))).toBe(false)
+        expect(f.commits).toBe(0); expect(f.state.result).toBeUndefined(); expect(f.state.target).toBeUndefined()
+        expect(fetchSpy).not.toHaveBeenCalled()
+        expect(await f.runtime.status(actor)).toEqual({ commandId, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false })
+      } finally { fetchSpy.mockRestore() }
+    })
+  it.each(nodeEnvs)('NODE_ENV %s with valid synthetic material still initializes exactly once', async nodeEnv => {
+    const { f } = await active()
+    useEnvironment(nodeEnv, syntheticEncryption)
+    expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
+    expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
+  })
+  it('the readiness bit is the anchor owner\'s only: DENIED, a wrong command and an initialized slot keep their own codes', async () => {
+    const { f } = await active()
+    await f.runtime.initialize(actor, input())
+    const fresh = await active()
+    useEnvironment('development', materials['both unset'])
+    await rejected(fresh.f.runtime.initialize(secondAdmin, input()), 'DENIED')
+    await rejected(fresh.f.runtime.initialize({ ...actor, tenantId: 'synthetic-other-tenant' }, input()), 'DENIED')
+    await rejected(fresh.f.runtime.initialize(actor, { ...input(), commandId: '00000000-0000-4000-8000-000000000099' }), 'CONFLICT')
+    await rejected(f.runtime.initialize(actor, input()), 'CONFLICT')
+    expect(fresh.f.createProducer).not.toHaveBeenCalled(); expect(fresh.f.commits).toBe(0)
+    // GET is untouched: status needs no encryption material and still decodes the sealed slot.
+    expect((await f.runtime.status(actor)).status).toBe('initialized')
+  })
+  it('removing only the readiness guard lets the same request seal under the public defaults (negative assertion red)', async () => {
+    const source = readFileSync(path.resolve(__dirname, '../../src/integration/yida-initialization-runtime.ts'), 'utf8')
+    expect(source.split(guard)).toHaveLength(2)
+    const { f } = await active({ createRuntime: loadMutant(source.replace(guard, '// mutation: readiness guard removed')).createYidaInitializationRuntime })
+    useEnvironment('development', materials['both unset'])
+    expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
+    expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
+    expect(f.state.result?.command_id).toBe(commandId)
   })
 })
 
