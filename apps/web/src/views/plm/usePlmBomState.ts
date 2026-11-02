@@ -194,11 +194,17 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
     if (!items.length) return []
 
     const parentMap = new Map<string, BomLineRecord[]>()
+    const seenRealLineIds = new Map<string, Set<string>>()
     for (const line of items) {
       const parentId = String(line?.parent_item_id || '')
       if (!parentMap.has(parentId)) {
         parentMap.set(parentId, [])
+        seenRealLineIds.set(parentId, new Set<string>())
       }
+      const realLineId = options.resolveBomLineId(line)
+      const seenForParent = seenRealLineIds.get(parentId)
+      if (realLineId && seenForParent?.has(realLineId)) continue
+      if (realLineId) seenForParent?.add(realLineId)
       parentMap.get(parentId)?.push(line)
     }
 
