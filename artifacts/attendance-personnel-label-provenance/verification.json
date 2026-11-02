@@ -1,0 +1,148 @@
+{
+  "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "status": "local-gates-passed-Draft-only-remote-CI-pending",
+  "first_full_four_specs": {
+    "actualPassed": 211,
+    "failed": 0,
+    "skipped": 0,
+    "sourcePhase": "v4 before test-only host/exposed-input assertions"
+  },
+  "final_affected_cases": {
+    "actualPassed": 3,
+    "excluded": 187,
+    "exit": 0,
+    "remaining_cases": "same production and unchanged case assertions, carried from first full run, not rerun"
+  },
+  "guardMutations": [
+    {
+      "name": "personnel-mutation-manual-epoch",
+      "exit": 1,
+      "actualFailed": 5,
+      "controlsPassed": 1,
+      "excluded": 169
+    },
+    {
+      "name": "personnel-mutation-response-subject",
+      "exit": 1,
+      "actualFailed": 1,
+      "controlsPassed": 1,
+      "excluded": 173
+    },
+    {
+      "name": "personnel-mutation-directory-generation",
+      "exit": 1,
+      "actualFailed": 2,
+      "controlsPassed": 1,
+      "excluded": 6
+    },
+    {
+      "name": "personnel-mutation-preview-epoch",
+      "exit": 1,
+      "actualFailed": 3,
+      "controlsPassed": 1,
+      "excluded": 171
+    },
+    {
+      "name": "personnel-mutation-bulk-clear",
+      "exit": 1,
+      "actualFailed": 4,
+      "controlsPassed": 1,
+      "excluded": 170
+    },
+    {
+      "name": "personnel-mutation-bulk-callback",
+      "exit": 1,
+      "actualFailed": 1,
+      "controlsPassed": 1,
+      "excluded": 173
+    },
+    {
+      "name": "personnel-mutation-retained-trust-v2",
+      "exit": 1,
+      "actualFailed": 1,
+      "controlsPassed": 2,
+      "excluded": 21
+    }
+  ],
+  "initial_surviving_mutation": "retained helper guard: missing visible-input assertion; strengthened and revalidated; initial surviving result retained, not counted as mutation proof",
+  "scope_red_fixture_correction": "invalid readonly computed global assignment excluded; reactive auth input red then green",
+  "independent_source_review": "P2 bulk label lifetime found, matching red, fixed, independent closure, main runtime audit",
+  "globalQualityExit": 0,
+  "webBuildExit": 0,
+  "introducedLintDiagnostics": 0,
+  "inheritedLintDiagnostics": {
+    "AttendanceView": 17,
+    "attendanceLocaleControls": 5,
+    "attendanceUserPickerEndpoint": 2
+  },
+  "productionFence": {
+    "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+    "baseFunctions": 768,
+    "unchangedFunctions": 757,
+    "changedFunctions": [
+      "loadAnnualLeaveBalance",
+      "annualAdjustPersonLabel",
+      "onAnnualAdjustPersonInput",
+      "chooseAnnualAdjustPerson",
+      "searchAnnualAdjustPeople",
+      "previewAnnualAdjust",
+      "requestAnnualAdjust",
+      "rememberAnnualBulkAdjustLabel",
+      "annualBulkAdjustUserLabel",
+      "addAnnualBulkAdjustUser",
+      "requestAnnualBulkAdjust"
+    ],
+    "addedFunctions": [
+      "invalidateAnnualPersonnelReads",
+      "annualBulkAdjustResultUserLabel"
+    ],
+    "writerExact": [
+      "annualOpsPost",
+      "submitAnnualBulkAdjust",
+      "retryAnnualBulkAdjust"
+    ],
+    "stylesExact": true
+  },
+  "browser": {
+    "entry": "index.html to main.ts/App/router/AttendanceExperience/AdminCenter/AttendanceView",
+    "screenshots": [
+      {
+        "path": "artifacts/attendance-personnel-label-provenance/screenshots/2026-10-25T17-48-47-186Z-85579-annual1440zh-captured-A-selected-B.png",
+        "sha256": "1fb011b95be704cb0d7d9d0aa2ff187b0be7d4c630401bab79ada00d4990e56c",
+        "label": "captured-A-selected-B",
+        "scenario": "annual1440zh",
+        "status": "synthetic-label-proof-passed"
+      },
+      {
+        "path": "artifacts/attendance-personnel-label-provenance/screenshots/2026-10-25T17-48-47-186Z-85579-annual768en-neutral-explicit-ID.png",
+        "sha256": "a225909e49b028cab56c075f2bb96310ffb515f718a81306c543596668a97328",
+        "label": "neutral-explicit-ID",
+        "scenario": "annual768en",
+        "status": "synthetic-label-proof-passed"
+      },
+      {
+        "path": "artifacts/attendance-personnel-label-provenance/screenshots/2026-10-25T17-48-47-186Z-85579-annual375zh-original-mobile-admin-gate.png",
+        "sha256": "952ea28b7a11720453e9453a27c952dd6039b981e54f2b13d92a3d3e512fc7f8",
+        "label": "original-mobile-admin-gate",
+        "scenario": "annual375zh",
+        "status": "blocked-by-product-mobile-admin-gate"
+      }
+    ],
+    "applicationWrites": 0,
+    "forwardedExternalRequests": 0,
+    "pageErrors": 0,
+    "bootstrap405PerContext": 1,
+    "ownServerStopped": true,
+    "ownPortClosed": true,
+    "375": "original mobile admin gate; no editor acceptance"
+  },
+  "boundaries": {
+    "Draft": true,
+    "Stream": "OFF",
+    "lifecycle": "OFF",
+    "realUAT": "excluded",
+    "business50004": "excluded",
+    "historical08PUT": "INCONCLUSIVE",
+    "mergeDeployR71TagReleaseConfigChanges": false
+  }
+}

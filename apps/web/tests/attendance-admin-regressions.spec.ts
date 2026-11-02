@@ -1,10 +1,14 @@
+import { personnelAnnualScopeHost } from './fixtures/personnelAnnualScopeHost'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, type App, type Ref } from 'vue'
+import * as authModule from '../src/composables/useAuth'
 import { routerKey } from 'vue-router'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
 import { useLocale } from '../src/composables/useLocale'
+import type { useAttendanceAnnualBalance } from '../src/views/attendance/useAttendanceAnnualBalance'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import {
   canRunBatchAnomalyResolution,
   runBatchAnomalyResolution,
@@ -2054,6 +2058,383 @@ describe('Attendance admin regressions', () => {
     const errorHint = field!.querySelector('.attendance__field-hint--error')
     expect(errorHint).toBeTruthy()
     expect(errorHint!.textContent).toContain('Admin permissions required')
+  })
+
+  // Personnel provenance: real mounted picker -> manual read -> captured result.
+  function personnelDeferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+    return { promise, resolve, reject }
+  }
+  function personnelBalance(userId: string, remainingMinutes = 321) {
+    return { ok: true, data: { userId, summary: { grantedMinutes: 480, remainingMinutes, exhaustedMinutes: 159, expiredMinutes: 0 }, activeLots: [], recentEvents: [], eventLimit: 50 } }
+  }
+  function installPersonnelReads(read: (url: string) => Response | Promise<Response>) {
+    window.localStorage.setItem('tenantId', 'default')
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/leave-balances')) return read(url)
+      if (url.includes('/api/attendance-admin/users/search')) return userSearchResponse([
+        { id: 'person-A', name: 'Alice', email: '' }, { id: 'person-B', name: 'Bob', email: '' },
+        { id: 'neutral-A', name: null, email: '' }, { id: 'neutral-B', name: null, email: '' },
+      ])
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return fallback(input, init)
+    })
+  }
+  async function mountPersonnelView() {
+    const guard = createAttendanceSessionGuard('default', () => 'personnel-session')
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
+    app.provide(attendanceSessionGuardKey, guard)
+    app.mount(container!)
+    await flushUi(8)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
+    const query = section.querySelector<HTMLButtonElement>('.attendance__admin-actions button')!
+    // dispatchEvent also exercises handler ownership while the previous request has disabled the button.
+    return { guard, section, query: () => query.dispatchEvent(new Event('click')), queryButton: query }
+  }
+  const personnelBalanceCalls = () => vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).includes('/api/attendance/leave-balances'))
+  function personnelMutatingCalls() {
+    return vi.mocked(apiFetch).mock.calls.filter(([input, init]) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      if (method === 'POST' && String(input) === '/api/attendance-admin/users/batch/resolve') {
+        const body = JSON.parse(String(init?.body)) as { orgId: string; userIds: string[] }
+        expect(Object.keys(body).sort()).toEqual(['orgId', 'userIds'])
+        expect(body.orgId).toBe('default')
+        expect(Array.isArray(body.userIds) && body.userIds.length > 0).toBe(true)
+        expect(body.userIds.every(id => typeof id === 'string' && id.trim().length > 0)).toBe(true)
+        expect(new Set(body.userIds).size).toBe(body.userIds.length)
+        return false // one exact, payload-checked read-only POST; no path-prefix waiver
+      }
+      return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+    })
+  }
+
+
+  it('personnel: selecting B alone neither reads nor clears queried A, and pending A retains captured Alice', async () => {
+    const pending = personnelDeferred<Response>()
+    installPersonnelReads(() => pending.promise)
+    const { section, query } = await mountPersonnelView()
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-A')
+    query()
+    await flushUi(2)
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-B')
+    expect(personnelBalanceCalls()).toHaveLength(1)
+    pending.resolve(jsonResponse(200, personnelBalance('person-A')))
+    await flushUi(8)
+    expect(section.querySelector('[data-annual-balance-subject]')?.textContent?.trim()).toBe('Balance for Alice（ID: person-A）')
+    expect(section.querySelector('.attendance__annual-balance-summary')?.textContent).toContain('321')
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-A')
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-B')
+    expect(personnelBalanceCalls()).toHaveLength(1)
+    expect(section.querySelector('[data-annual-balance-subject]')?.textContent).toContain('Alice（ID: person-A）')
+  })
+
+  it.each(['success', '403', '500', 'network', 'late-json'] as const)('personnel: old %s cannot own success/error/finally after manual A-B-A queries', async (outcome) => {
+    const old = personnelDeferred<Response>()
+    const oldJson = personnelDeferred<unknown>()
+    const newest = personnelDeferred<Response>()
+    let calls = 0
+    installPersonnelReads(() => {
+      calls += 1
+      if (calls === 1) return outcome === 'late-json'
+        ? { ...jsonResponse(200, {}), json: () => oldJson.promise } as Response
+        : old.promise
+      if (calls === 2) return jsonResponse(200, personnelBalance('person-B', 222))
+      return newest.promise
+    })
+    const { section, query, queryButton } = await mountPersonnelView()
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-A'); query(); await flushUi(3)
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-B'); query(); await flushUi(6)
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-A'); query(); await flushUi(3)
+    if (outcome === 'network') old.reject(new Error('obsolete-network'))
+    else if (outcome === 'late-json') oldJson.resolve(personnelBalance('person-A', 999))
+    else old.resolve(jsonResponse(outcome === 'success' ? 200 : Number(outcome), outcome === 'success' ? personnelBalance('person-A', 999) : { ok: false }))
+    await flushUi(8)
+    expect(queryButton.disabled).toBe(true) // stale finally must not stop the current spinner
+    expect(section.querySelector('.attendance__annual-balance')).toBeNull()
+    expect(container!.textContent).not.toContain('obsolete-network')
+    expect((app!._instance as unknown as { setupState: { adminForbidden: boolean } }).setupState.adminForbidden).toBe(false)
+    newest.resolve(jsonResponse(200, personnelBalance('person-A', 444)))
+    await flushUi(8)
+    expect(queryButton.disabled).toBe(false)
+    expect(section.querySelector('[data-annual-balance-subject]')?.textContent).toContain('Alice（ID: person-A）')
+    expect(section.querySelector('.attendance__annual-balance-summary')?.textContent).toContain('444')
+    expect(personnelBalanceCalls()).toHaveLength(3)
+  })
+
+  it.each(['scope-roundtrip', 'session', 'unmount', 'empty-query', 'mismatched-response'] as const)('personnel: %s invalidates a pending late JSON read', async (cause) => {
+    const body = personnelDeferred<unknown>()
+    installPersonnelReads(() => ({ ...jsonResponse(200, {}), json: () => body.promise }) as Response)
+    const { section, query, guard } = await mountPersonnelView()
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'person-A'); query(); await flushUi(4)
+    const internal = app!._instance as unknown as { setupState: { annualBalanceData: unknown; annualBalanceLoading: boolean; orgId: string; adminForbidden: boolean } }
+    if (cause === 'scope-roundtrip') {
+      const initial = internal.setupState.orgId
+      internal.setupState.orgId = 'different-scope'
+      internal.setupState.orgId = initial // deliberately no tick between A -> B -> A
+    } else if (cause === 'session') guard.invalidate()
+    else if (cause === 'unmount') { app!.unmount(); app = null }
+    else if (cause === 'empty-query') {
+      const select = section.querySelector<HTMLSelectElement>('select')!
+      select.value = ''; select.dispatchEvent(new Event('change')); await flushUi(2); query()
+    }
+    await flushUi(2)
+    body.resolve(personnelBalance(cause === 'mismatched-response' ? 'person-B' : 'person-A'))
+    await flushUi(8)
+    expect(internal.setupState.annualBalanceData).toBeNull()
+    expect(internal.setupState.annualBalanceLoading).toBe(false)
+    expect(internal.setupState.adminForbidden).toBe(false)
+    expect(personnelBalanceCalls()).toHaveLength(1)
+  })
+
+  it('personnel: mounted annual reader records global scope A-B-A even without an intervening render', async () => {
+    const globalScope = ref(false)
+    const body = personnelDeferred<unknown>()
+    const onError = vi.fn()
+    let annual!: ReturnType<typeof useAttendanceAnnualBalance>
+    const send = vi.fn().mockResolvedValue({ ...jsonResponse(200, {}), json: () => body.promise })
+    app = createAttendanceApp(personnelAnnualScopeHost({ orgId: ref('default'), globalScope,
+      sessionGuard: createAttendanceSessionGuard('default', () => 'same-session'),
+      apiFetch: send, adminForbidden: ref(false), tr: (en) => en, onError,
+    }, value => { annual = value }))
+    app.mount(container!)
+    annual.userId.value = 'person-A'; annual.rememberIdentity('Alice')
+    const reading = annual.load(); await flushUi(3)
+    globalScope.value = true; globalScope.value = false
+    body.resolve(personnelBalance('person-A')); await reading; await flushUi(3)
+    expect(annual.data.value).toBeNull()
+    expect(annual.loading.value).toBe(false)
+    expect(onError).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('/api/attendance/leave-balances?orgId=default&userId=person-A&leaveTypeCode=annual')
+  })
+
+  it('personnel: neutral bulk IDs remain distinct, removal is ID-bound and result labels/payload freeze at confirm', async () => {
+    const bodies: Record<string, unknown>[] = []
+    installPersonnelReads(() => jsonResponse(200, personnelBalance('person-A')))
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/attendance/annual-leave-manual-adjustment')) {
+        bodies.push(JSON.parse(String(init?.body)))
+        return jsonResponse(200, { ok: true, data: { id: 'adjusted', delta: 120, applied: true, alreadyApplied: false } })
+      }
+      return fallback(input, init)
+    })
+    await mountPersonnelView()
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    const add = async (id: string) => {
+      await loadUserIntoPicker(card, '#attendance-annual-bulk-adjust-user-picker', id)
+      card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-add-user]')!.click(); await flushUi(2)
+    }
+    await add('neutral-A'); await add('neutral-B')
+    let chips = Array.from(card.querySelectorAll('[data-attendance-annual-bulk-adjust-user-chip]'))
+    expect(chips.map(chip => chip.querySelector('span')?.textContent)).toEqual(['Unnamed employee（ID: neutral-A）', 'Unnamed employee（ID: neutral-B）'])
+    chips[0]!.querySelector('button')!.click(); await flushUi(2)
+    chips = Array.from(card.querySelectorAll('[data-attendance-annual-bulk-adjust-user-chip]'))
+    expect(chips.map(chip => chip.querySelector('span')?.textContent)).toEqual(['Unnamed employee（ID: neutral-B）'])
+    await add('person-A')
+    setAnnualBulkAdjustSharedFields(card, '120', 'frozen reason'); await flushUi(2)
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click(); await flushUi(2)
+    expect(bodies).toEqual([])
+    // Change both selection and labels while the confirm is open.
+    for (const chip of card.querySelectorAll('[data-attendance-annual-bulk-adjust-user-chip]')) chip.querySelector('button')!.click()
+    await flushUi(2)
+    await add('person-B'); setAnnualBulkAdjustSharedFields(card, '999', 'changed'); await flushUi(2)
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click(); await flushUi(10)
+    const org = (app!._instance as unknown as { setupState: { orgId: string } }).setupState.orgId
+    expect(bodies).toEqual([
+      { ...(org ? { orgId: org } : {}), userId: 'neutral-B', deltaMinutes: 120, reason: 'frozen reason', idempotencyKey: expect.any(String) },
+      { ...(org ? { orgId: org } : {}), userId: 'person-A', deltaMinutes: 120, reason: 'frozen reason', idempotencyKey: expect.any(String) },
+    ])
+    expect(new Set(bodies.map(body => body.idempotencyKey)).size).toBe(2)
+    expect(Array.from(card.querySelectorAll('[data-attendance-annual-bulk-adjust-results] tbody tr td:first-child')).map(cell => cell.textContent)).toEqual(['Unnamed employee（ID: neutral-B）', 'Alice（ID: person-A）'])
+  })
+
+  async function preparePersonnelNamedBulk(globalReadScope?: Ref<boolean>) {
+    let restoreScope = () => {}
+    if (globalReadScope) {
+      const actualUseAuth = authModule.useAuth
+      const spy = vi.spyOn(authModule, 'useAuth').mockImplementation(() => {
+        const actual = actualUseAuth()
+        return { ...actual, getAccessSnapshot: () => ({ ...actual.getAccessSnapshot(), isAdmin: globalReadScope.value }) }
+      })
+      restoreScope = () => spy.mockRestore()
+    }
+    const bodies: Record<string, unknown>[] = []
+    installPersonnelReads(() => jsonResponse(200, personnelBalance('person-A')))
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/attendance/annual-leave-manual-adjustment')) {
+        expect(init?.method).toBe('POST')
+        bodies.push(JSON.parse(String(init?.body)))
+        return jsonResponse(200, { ok: true, data: { id: 'scope-label-adjustment', delta: 120, applied: true, alreadyApplied: false } })
+      }
+      return fallback(input, init)
+    })
+    const { guard } = await mountPersonnelView()
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    await loadUserIntoPicker(card, '#attendance-annual-bulk-adjust-user-picker', 'person-A')
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-add-user]')!.click()
+    await flushUi(3)
+    setAnnualBulkAdjustSharedFields(card, '120', 'frozen label reason')
+    await flushUi(3)
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click()
+    await flushUi(3)
+    expect(bodies).toEqual([])
+    const state = (app!._instance as unknown as { setupState: {
+      orgId: string; attendanceAdminGlobalUserScope: boolean
+      annualBulkAdjust: { rows: unknown; results: unknown }
+      annualOpsConfirm: { onConfirm: (() => void) | null }
+    } }).setupState
+    const cells = () => Array.from(card.querySelectorAll('[data-attendance-annual-bulk-adjust-results] tbody tr td:first-child')).map(cell => cell.textContent)
+    return { bodies, guard, section, state, cells, restoreScope }
+  }
+
+  it.each(['org', 'global', 'session', 'scope-roundtrip'] as const)('personnel: confirmed bulk result labels become neutral on %s without changing rows or writes', async (cause) => {
+    const scope = ref(false)
+    const x = await preparePersonnelNamedBulk(cause === 'global' ? scope : undefined)
+    try {
+      x.section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+      await flushUi(12)
+      expect(x.cells()).toEqual(['Alice（ID: person-A）'])
+      expect(x.bodies).toHaveLength(1)
+      const rows = JSON.stringify(x.state.annualBulkAdjust.rows)
+      const results = JSON.stringify(x.state.annualBulkAdjust.results)
+      const bodies = JSON.stringify(x.bodies)
+      const org = x.state.orgId
+      if (cause === 'session') x.guard.invalidate()
+      else if (cause === 'global') scope.value = true // reactive auth snapshot; never assign a readonly computed
+      else {
+        x.state.orgId = 'other-personnel-scope'
+        if (cause === 'scope-roundtrip') x.state.orgId = org
+      }
+      await flushUi(10)
+      expect(JSON.stringify(x.state.annualBulkAdjust.rows)).toBe(rows)
+      expect(JSON.stringify(x.state.annualBulkAdjust.results)).toBe(results)
+      expect(JSON.stringify(x.bodies)).toBe(bodies)
+      expect(x.cells()).toEqual(['Unnamed employee（ID: person-A）'])
+    } finally { x.restoreScope() }
+  })
+
+  it('personnel: stale bulk confirmation cannot republish a friendly name after scope A-B-A', async () => {
+    const x = await preparePersonnelNamedBulk()
+    const confirm = x.state.annualOpsConfirm.onConfirm
+    expect(typeof confirm).toBe('function')
+    const org = x.state.orgId
+    x.state.orgId = 'other-personnel-scope'
+    x.state.orgId = org
+    await flushUi(8)
+    expect(x.bodies).toEqual([]) // invalidation itself never submits
+    confirm!() // queued existing callback: test label ownership, not new writer authority
+    await flushUi(12)
+    expect(x.bodies).toEqual([{ ...(org ? { orgId: org } : {}), userId: 'person-A', deltaMinutes: 120, reason: 'frozen label reason', idempotencyKey: expect.any(String) }])
+    expect(x.cells()).toEqual(['Unnamed employee（ID: person-A）'])
+  })
+
+  it('personnel: selecting a supplied person invalidates late search and manual typing revokes the friendly identity', async () => {
+    const late = personnelDeferred<Response>()
+    installPersonnelReads(() => jsonResponse(200, personnelBalance('person-A')))
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => String(input).includes('q=late-search') ? late.promise : fallback(input, init))
+    await mountPersonnelView()
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+    setInput(card, '[data-annual-ops-adjust-person]', 'person-A'); await flushUi(6)
+    const alice = Array.from(card.querySelectorAll<HTMLButtonElement>('[data-annual-ops-adjust-person-menu] button')).find(button => button.textContent?.includes('Alice'))!
+    expect(alice).toBeTruthy()
+    const state = (app!._instance as unknown as { setupState: { searchAnnualAdjustPeople: (q: string) => Promise<void> } }).setupState
+    const searching = state.searchAnnualAdjustPeople('late-search')
+    alice.click(); await flushUi(2)
+    late.resolve(userSearchResponse([{ id: 'person-B', name: 'Bob', email: '' }]))
+    await searching; await flushUi(6)
+    expect(card.querySelector('[data-annual-ops-adjust-person-menu]')).toBeNull()
+    expect(card.querySelector<HTMLInputElement>('[data-annual-ops-adjust-person]')!.value).toBe('Alice（ID: person-A）')
+    const inputs = card.querySelectorAll<HTMLInputElement>('input')
+    setInput(card, 'input[type="number"]', '120'); inputs[2]!.value = 'reason'; inputs[2]!.dispatchEvent(new Event('input')); await flushUi(2)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.includes('Adjust balance'))!.click(); await flushUi(2)
+    expect(section.querySelector('[data-annual-ops-confirm]')?.textContent).toContain('Alice（ID: person-A）')
+    Array.from(section.querySelectorAll<HTMLButtonElement>('[data-annual-ops-confirm] button')).find(button => button.textContent?.trim() === 'Cancel')!.click(); await flushUi(2)
+    setInput(card, '[data-annual-ops-adjust-person]', 'person-A'); await flushUi(4)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.includes('Adjust balance'))!.click(); await flushUi(2)
+    const confirm = section.querySelector('[data-annual-ops-confirm]')!
+    expect(confirm.textContent).toContain('Unnamed employee（ID: person-A）')
+    expect(confirm.textContent).not.toContain('Alice')
+    expect(personnelMutatingCalls()).toEqual([])
+  })
+
+  it('personnel: current preview is advisory and its captured delta cannot follow a later form edit', async () => {
+    installPersonnelReads(() => jsonResponse(200, personnelBalance('person-A', 800)))
+    await mountPersonnelView()
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+    setInput(card, '[data-annual-ops-adjust-person]', 'person-A')
+    setInput(card, 'input[type="number"]', '120')
+    const inputs = card.querySelectorAll<HTMLInputElement>('input')
+    inputs[2]!.value = 'reason'; inputs[2]!.dispatchEvent(new Event('input')); await flushUi(4)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === 'Preview')!.click(); await flushUi(6)
+    expect(card.textContent).toContain('800 → 920')
+    expect(card.textContent).toContain('advisory; the server is the final authority')
+    setInput(card, 'input[type="number"]', '240'); await flushUi(2)
+    expect(card.textContent).not.toContain('800 → 920')
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.includes('Adjust balance'))!.click(); await flushUi(2)
+    expect(section.querySelector('[data-annual-ops-confirm]')?.textContent).not.toContain('Remaining (preview)')
+    expect(personnelMutatingCalls()).toEqual([])
+  })
+
+  it.each(['target-roundtrip', 'delta-roundtrip', 'scope-roundtrip', 'session', 'unmount'] as const)('personnel: preview late JSON cannot survive %s', async (change) => {
+    const body = personnelDeferred<unknown>()
+    installPersonnelReads(() => ({ ...jsonResponse(200, {}), json: () => body.promise }) as Response)
+    const { guard } = await mountPersonnelView()
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+    setInput(card, '[data-annual-ops-adjust-person]', 'person-A')
+    setInput(card, 'input[type="number"]', '120'); await flushUi(2)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === 'Preview')!.click(); await flushUi(4)
+    const state = (app!._instance as unknown as { setupState: { orgId: string; annualAdjustPreview: unknown; annualAdjustError: unknown; adminForbidden: boolean } }).setupState
+    if (change === 'target-roundtrip') {
+      setInput(card, '[data-annual-ops-adjust-person]', 'person-B'); setInput(card, '[data-annual-ops-adjust-person]', 'person-A')
+    } else if (change === 'delta-roundtrip') {
+      setInput(card, 'input[type="number"]', '240'); setInput(card, 'input[type="number"]', '120')
+    } else if (change === 'scope-roundtrip') {
+      const initial = state.orgId; state.orgId = 'different-scope'; state.orgId = initial
+    } else if (change === 'session') guard.invalidate()
+    else { app!.unmount(); app = null }
+    body.resolve(personnelBalance('person-A', 800)); await flushUi(8)
+    expect(state.annualAdjustPreview).toBeNull()
+    expect(state.annualAdjustError).toBeNull()
+    expect(state.adminForbidden).toBe(false)
+    expect(card.textContent).not.toContain('800 → 920')
+  })
+
+  it.each([403, 404, 500, 'network'] as const)('personnel: failed search/preview %s supplies no friendly/deleted identity or global fallback', async (status) => {
+    installPersonnelReads(() => status === 'network'
+      ? Promise.reject(new Error('read-unavailable'))
+      : jsonResponse(status, { ok: false, error: { code: 'UNAVAILABLE' } }))
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/attendance-admin/users/search')) return status === 'network'
+        ? Promise.reject(new Error('search-unavailable'))
+        : jsonResponse(status, { ok: false, error: { code: 'UNAVAILABLE' } })
+      return fallback(input, init)
+    })
+    await mountPersonnelView()
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
+    setInput(card, '[data-annual-ops-adjust-person]', 'unknown-person'); await flushUi(6)
+    expect(card.querySelectorAll('[data-annual-ops-adjust-person-menu] button')).toHaveLength(0)
+    Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === 'Preview')!.click(); await flushUi(8)
+    const state = (app!._instance as unknown as { setupState: { annualAdjustPreview: unknown; annualAdjustIdentity: unknown } }).setupState
+    expect(state.annualAdjustPreview).toBeNull()
+    expect(state.annualAdjustIdentity).toBeNull()
+    expect(card.textContent).not.toMatch(/deleted|已删除/i)
+    const calls = vi.mocked(apiFetch).mock.calls.map(([url]) => String(url))
+    expect(calls.some(url => url.includes('/api/admin/users') || url.includes('scope=global'))).toBe(false)
+    expect(personnelMutatingCalls()).toEqual([])
   })
 
   it('annual-leave policy: hydrates from first-screen settings; first save (no Reload) keeps the real policy; blocks malformed ladder', async () => {

@@ -14,10 +14,12 @@ async function flush(): Promise<void> {
 }
 
 describe('annual balance subject', () => {
-  it('puts the picker display name beside the short id', () => {
-    expect(formatAnnualBalanceSubject('test-operator-stockprep', '备料一线测试账号')).toBe('备料一线测试账号（test-operator-stockprep）')
-    expect(formatAnnualBalanceSubject('userA', '')).toBe('userA')
-    expect(formatAnnualBalanceSubject('userA', 'userA')).toBe('userA')
+  it('accepts only a trusted name bound to the queried ID, including a real name=id', () => {
+    expect(formatAnnualBalanceSubject('test-operator-stockprep', { id: 'test-operator-stockprep', name: '备料一线测试账号' }, tr)).toBe('备料一线测试账号（ID: test-operator-stockprep）')
+    expect(formatAnnualBalanceSubject('userA', null, tr)).toBe('未命名员工（ID: userA）')
+    expect(formatAnnualBalanceSubject('userA', { id: 'userB', name: 'Bob' }, tr)).toBe('未命名员工（ID: userA）')
+    expect(formatAnnualBalanceSubject('userA', { id: 'userA', name: 'userA' }, tr)).toBe('userA（ID: userA）')
+    expect(formatAnnualBalanceSubject('userA', { id: 'userA', name: '  ' })).toBe('Unnamed employee（ID: userA）')
   })
 })
 
