@@ -194,6 +194,7 @@ import {
   parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
+  isAttendanceCalculationOrgAllowlistedV1,
   type AttendanceW4TransactionClientV1,
 } from './attendance/w4c0-identity'
 import {
@@ -3146,6 +3147,16 @@ export class MetaSheetServer {
                   appendApprovedLeaveCancellationCalculationV1(input),
                 // Timezone source guards also receive query-only, same-transaction
                 // adapters. Do not claim the wider canonical transaction identity.
+                // A negative hint only: no DB/transaction witness or positive admission.
+                // The original same-transaction posture resolver below remains mandatory.
+                mayResolveTimezoneSegmentSelectionPosture: (orgId: string) => {
+                  try {
+                    return isAttendanceCalculationOrgAllowlistedV1(parseCanonicalAttendanceRolloutOrgKeyV1(orgId))
+                  } catch (error) {
+                    if (error instanceof AttendanceW4IdentityError && error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID') return false
+                    throw error
+                  }
+                },
                 resolveTimezoneSegmentReferencePosture: async (
                   trx: Pick<import('./attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1, 'query'>,
                   orgId: string,

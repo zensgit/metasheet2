@@ -26081,6 +26081,15 @@ module.exports = {
         })
       },
       loadPublishedCandidates: loadPublishedCandidatesForWorkDateResolver,
+      mayResolveSegmentSelectionPosture: orgId =>
+        attendanceW4SegmentCalculationPort?.mayResolveTimezoneSegmentSelectionPosture?.(orgId) === true,
+      resolveSegmentSelectionPosture: async (trx,orgId) => {
+        const resolvePosture = attendanceW4SegmentCalculationPort?.resolveTimezoneSegmentReferencePosture
+        if (typeof resolvePosture !== 'function') {
+          throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        return resolvePosture(trx,orgId)
+      },
       resolveLocalWallTime: (...args) => {
         if (typeof attendanceW4SegmentCalculationPort?.resolveLocalWallTime !== 'function') {
           throw new HttpError(503, 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE', 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
