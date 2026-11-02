@@ -3,7 +3,7 @@
     <h3>宜搭静态预演（不发送）</h3>
     <!-- Display only: every marker is derived from state this panel (and the opened initialization panel) already holds; no read. -->
     <ol class="sp-yida-preview__steps" data-testid="sp-yida-steps" aria-label="本地初始化操作步骤">
-      <li v-for="step in stepGuide" :key="step.number" :data-testid="`sp-yida-step-${step.number}`" :data-state="step.state" :aria-current="step.state === 'current' ? 'step' : undefined">{{ step.number }} {{ step.label }}<span v-if="step.state === 'done'">（已完成）</span><span v-else-if="step.state === 'current'">（当前）</span></li>
+      <li v-for="step in stepGuide" :key="step.number" :data-testid="`sp-yida-step-${step.number}`" :data-state="step.state" :aria-current="step.state === 'current' || step.state === 'blocked' ? 'step' : undefined">{{ step.number }} {{ step.label }}<span v-if="step.state === 'done'">（已完成）</span><span v-else-if="step.state === 'current'">（当前）</span><span v-else-if="step.state === 'blocked'">（待开启）</span></li>
     </ol>
     <p data-testid="sp-yida-steps-note">第 4 步「生成规则草稿 JSON」会清空预演结果，并关掉已打开的本地初始化：请在第 5 步之前存档，存档后再点一次「只在本地预演」。</p>
     <p>仅在本页处理粘贴的本地 JSON；请勿填写凭据。目标标识和远端状态均未核验。</p>
@@ -295,12 +295,12 @@ function rowStatus(status: YidaStaticPlan['rows'][number]['status']): string { r
 function displayNumber(value: number | null | undefined): string { return value === null || value === undefined ? '—' : String(value) }
 // Step guide and the L4 entry reason (issue #6687 items 1–3). Display only: they read state this panel
 // already holds plus what the opened initialization panel reports; capturePersistentInput stays the gate.
-type InitializationProgress = { statusRead: boolean; tested: boolean; initialized: boolean }
-const initializationProgress = ref<InitializationProgress>({ statusRead: false, tested: false, initialized: false })
+type InitializationProgress = { statusRead: boolean; tested: boolean; initialized: boolean; connectionTestEnabled: boolean }
+const initializationProgress = ref<InitializationProgress>({ statusRead: false, tested: false, initialized: false, connectionTestEnabled: false })
 const stepLabels = ['选合同（v2）', '填样例或规则', '只在本地预演', '生成并存档规则草稿 JSON', '打开本地初始化', '手动 GET 本地初始化状态', '测试连接', '本地初始化'] as const
 const stepGuide = computed(() => {
   const open = initializationOpen.value && persistentInput.value !== null
-  const progress = open ? initializationProgress.value : { statusRead: false, tested: false, initialized: false }
+  const progress = open ? initializationProgress.value : { statusRead: false, tested: false, initialized: false, connectionTestEnabled: false }
   const done = [
     previewMode.value === 'protocol',
     rowsText.value.trim().length > 0 && fieldMap.some((entry) => entry.source.length > 0 && entry.target.length > 0),
@@ -313,7 +313,9 @@ const stepGuide = computed(() => {
   ]
   // Before opening: the first missing of steps 1–4 (archive before step 5). Once open: the first missing of 6–8.
   const current = progress.initialized ? -1 : open ? done.indexOf(false, 5) : done.slice(0, 5).indexOf(false)
-  return stepLabels.map((label, index) => ({ number: index + 1, label, state: done[index] ? 'done' : index === current ? 'current' : 'todo' }))
+  // Step 7 waiting on the server test switch is shown as blocked (待开启), not as a step the operator can do now.
+  const blocked = current === 6 && progress.statusRead && !progress.connectionTestEnabled
+  return stepLabels.map((label, index) => ({ number: index + 1, label, state: done[index] ? 'done' : index === current ? (blocked ? 'blocked' : 'current') : 'todo' }))
 })
 const initializationBlockedReason = computed(() => {
   if (persistentInput.value) return ownerSendLocked.value ? '单行确认请求进行中，完成后才能打开。' : ''
@@ -322,6 +324,8 @@ const initializationBlockedReason = computed(() => {
   // An allocation rejection leaves no plan at all, so it is checked before the not-run case.
   if ((allocationPreview.value?.issues.length ?? 0) !== 0) return '项目数量分配有拒因（见分配分析）；须先消除。'
   const current = plan.value
+  // A failed rule-draft export/import also leaves an error code with no plan: name that action, not the preview.
+  if (!current && errorCode.value.startsWith('YIDA_RULE_TEMPLATE_')) return '规则草稿 JSON 的生成或导入没有通过（见上方错误代码），本地预演尚未运行；修正后再点「只在本地预演」。'
   if (!current) return errorCode.value ? '本地预演没有通过（见上方错误代码）；修正后再点「只在本地预演」。' : '尚未运行本地预演：请先点「只在本地预演」。'
   // The planner also marks every duplicate-key row invalid, so duplicates are named first.
   const { invalid, duplicateKeyCount } = current.evidence
@@ -341,6 +345,7 @@ const initializationBlockedReason = computed(() => {
 .sp-yida-preview__steps li { padding: 2px 8px; border: 1px solid var(--ms-border-light); border-radius: 6px; color: var(--ms-text-3); }
 .sp-yida-preview__steps li[data-state="done"] { color: var(--ms-text-2); }
 .sp-yida-preview__steps li[data-state="current"] { color: var(--ms-text-1); border-color: var(--ms-color-primary); font-weight: 600; }
+.sp-yida-preview__steps li[data-state="blocked"] { color: var(--ms-text-1); border-color: var(--ms-color-warning); border-style: dashed; font-weight: 600; }
 .sp-yida-preview__examples, .sp-yida-preview__fields, .sp-yida-preview__map-row, .sp-yida-preview__allocation-fields { display: flex; flex-wrap: wrap; gap: var(--ms-space-3); }
 .sp-yida-preview label, .sp-yida-preview__mapping, .sp-yida-preview__catalog, .sp-yida-preview__allocation, .sp-yida-preview__rule-template { display: grid; gap: var(--ms-space-2); }
 .sp-yida-preview input, .sp-yida-preview select, .sp-yida-preview textarea, .sp-yida-preview button { font: inherit; }

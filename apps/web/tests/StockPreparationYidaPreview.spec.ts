@@ -864,6 +864,9 @@ describe('StockPreparationYidaPreviewPanel', () => {
     }
     await importRules('{')
     expect(q('sp-yida-error').textContent).toBe('YIDA_RULE_TEMPLATE_TEXT')
+    // The L4 entry reason names the failed import, not a preview that never ran.
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent).toContain('规则草稿 JSON 的生成或导入没有通过')
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent).not.toContain('本地预演没有通过')
     edit('sp-yida-rule-import-text', '{}'); await flush()
     expect(root?.querySelector('[data-testid="sp-yida-error"]')).toBeNull()
     expectNoIo()

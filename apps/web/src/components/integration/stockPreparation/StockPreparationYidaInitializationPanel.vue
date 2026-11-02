@@ -47,7 +47,7 @@ import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwne
 
 const props = defineProps<{ draftInput: YidaOwnerDraftInput | null }>()
 const emit = defineEmits<{ 'locked-change': [locked: boolean]; 'send-enabled-change': [enabled: boolean]
-  'progress-change': [progress: { statusRead: boolean; tested: boolean; initialized: boolean }] }>()
+  'progress-change': [progress: { statusRead: boolean; tested: boolean; initialized: boolean; connectionTestEnabled: boolean }] }>()
 const materialFields = ['appKey', 'appSecret', 'systemToken', 'userId'] as const
 const material = reactive<Record<keyof YidaInitializationMaterial, string>>({ appKey: '', appSecret: '', systemToken: '', userId: '' })
 const reviewRef = ref(''), organizationId = ref(''), acknowledged = ref(false)
@@ -165,16 +165,20 @@ watch(() => props.draftInput, dropInputResult, { deep: true, flush: 'sync' })
 // outcome shown, which already means the inputs still equal the pair that got it.
 const connectionTestBlockedReason = computed(() => {
   if (state.value?.status === 'initialized') return '本地槽已初始化；测试连接只在初始化之前可用（服务器此时按设计回 409）。'
-  if (invalidated.value) return '服务器拒绝了当前登录，或登录会话已变化；请刷新页面后重新打开本地初始化。'
+  // A server DENIED (not the anchored owner / no permission) is not fixed by a reload; a session change is.
+  if (invalidated.value) return errorCode.value.endsWith('_DENIED') ? '当前登录账号不是宜搭锚点 owner 或没有权限，重新加载不会改变结果；请用锚点 owner 账号登录。'
+    : '登录会话已变化；请刷新页面后重新打开本地初始化。'
   if (busy.value) return '请求进行中，请稍候。'
   if (uncertain.value) return '状态未确认：请先手动 GET 本地初始化状态。'
   if (!state.value || !commandId.value) return '尚未读取状态：请先做第 6 步「手动 GET 本地初始化状态」。'
-  if (state.value.connectionTestEnabled !== true) return '服务器未开启测试连接（开关关闭）；需服务器操作员开启后再手动 GET。'
+  // Switch off: the on-site checklist requires an ok test before 本地初始化, so this names who unblocks it (not a skip).
+  if (state.value.connectionTestEnabled !== true) return '服务器未开启测试连接（上机清单 L2）：请服务器管理员在 docker\\app.env 打开测试开关并用包内脚本重启后端，再回来手动 GET 状态后测试。按上机清单，本地初始化前须测试通过。'
   if (material.appKey.trim().length === 0 || material.appSecret.trim().length === 0) return '请先填写 appKey 和 appSecret。'
   return ''
 })
-watch([() => state.value !== null && !uncertain.value, () => shownOutcome.value === 'ok', () => state.value?.status === 'initialized'],
-  ([statusRead, tested, initialized]) => emit('progress-change', { statusRead, tested, initialized }), { immediate: true, flush: 'sync' })
+watch([() => state.value !== null && !uncertain.value, () => shownOutcome.value === 'ok', () => state.value?.status === 'initialized',
+  () => state.value?.connectionTestEnabled === true],
+  ([statusRead, tested, initialized, connectionTestEnabled]) => emit('progress-change', { statusRead, tested, initialized, connectionTestEnabled }), { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => { generation += 1; client?.dispose(); client = null; clearPrivate(); state.value = null; commandId.value = null })
 async function refresh(): Promise<void> {
   if (busy.value || invalidated.value) return

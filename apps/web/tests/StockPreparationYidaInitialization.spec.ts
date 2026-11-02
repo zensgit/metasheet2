@@ -534,7 +534,10 @@ describe('Yida owner connection test behind the server display bit', () => {
     expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
     expect(blocked()).toContain('尚未读取状态'); expect(blocked()).toContain('第 6 步「手动 GET 本地初始化状态」')
     await observe(false); await fill()
-    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('服务器未开启测试连接')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('服务器未开启测试连接（上机清单 L2）')
+    // Actionable, and never a skip: the on-site checklist requires an ok test before 本地初始化.
+    expect(blocked()).toContain('请服务器管理员在 docker\\app.env 打开测试开关并用包内脚本重启后端'); expect(blocked()).toContain('本地初始化前须测试通过')
+    expect(blocked()).not.toContain('跳过')
     await observe(true)
     expect(q('connection').textContent).toContain('bootstrap-yida-initialization-owner')
     expect(q('connection').textContent).toContain('只证明 appKey/appSecret')
@@ -557,23 +560,31 @@ describe('Yida owner connection test behind the server display bit', () => {
     expect(blocked()).toContain('本地槽已初始化'); expect(blocked()).toContain('409')
     await click('connection-test'); expect(fetchSpy).toHaveBeenCalledTimes(3)
     app?.unmount(); root?.remove(); app = null; root = null
+    // A server DENIED (not the anchored owner / no permission): reloading does not change it.
     mountPanel(); fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_DENIED', 403)); await click('refresh')
-    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('请刷新页面')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('不是宜搭锚点 owner 或没有权限')
+    expect(blocked()).toContain('重新加载不会改变结果'); expect(blocked()).not.toContain('请刷新页面')
+    app?.unmount(); root?.remove(); app = null; root = null
+    // A session change: the reload advice stays.
+    mountPanel(); window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' })); await flush()
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_SESSION_CHANGED'); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    expect(blocked()).toContain('登录会话已变化；请刷新页面'); expect(blocked()).not.toContain('锚点 owner')
   })
 
   it('reports step-guide progress to the parent: status read, an ok test for the current pair, initialized', async () => {
     const progress = vi.fn()
     root = document.createElement('div'); document.body.appendChild(root)
     app = createApp(StockPreparationYidaInitializationPanel, { draftInput: draftInput(), 'onProgress-change': progress }); app.mount(root)
-    expect(progress).toHaveBeenLastCalledWith({ statusRead: false, tested: false, initialized: false })
-    await observe(true); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false })
+    expect(progress).toHaveBeenLastCalledWith({ statusRead: false, tested: false, initialized: false, connectionTestEnabled: false })
+    await observe(false); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: false })
+    await observe(true); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
     await fill(); await probe(json(probeView('upstream_rejected')))
-    expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false })
+    expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
     await vi.waitFor(() => expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false))
-    await probe(json(probeView('ok'))); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false })
+    await probe(json(probeView('ok'))); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false, connectionTestEnabled: true })
     // The tested pair edited: no longer counted as tested (the re-test rule itself is unchanged).
-    await type('appSecret', 'SYN-SECRET-EDITED'); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false })
-    await pasteInto('appSecret', material.appSecret); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false })
+    await type('appSecret', 'SYN-SECRET-EDITED'); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
+    await pasteInto('appSecret', material.appSecret); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false, connectionTestEnabled: true })
     fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
     expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ statusRead: true, initialized: true }))
   })
@@ -592,6 +603,21 @@ describe('Yida owner connection test behind the server display bit', () => {
     fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
     expect(states()).toEqual(Array(8).fill('done')); expect(root.querySelector('[aria-current="step"]')).toBeNull()
     expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('the parent step guide shows step 7 as 待开启 (not current) while the server test switch is off', async () => {
+    root = document.createElement('div'); document.body.appendChild(root); app = createApp(StockPreparationYidaPreviewPanel); app.mount(root)
+    const parentClick = async (id: string) => { const button = root?.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`); if (!button) throw new Error('MISSING_PARENT_NODE'); button.click(); await flush() }
+    const step = (n: number) => root?.querySelector(`[data-testid="sp-yida-step-${n}"]`)
+    const mode = root.querySelector<HTMLSelectElement>('[data-testid="sp-yida-preview-mode"]')!; mode.value = 'protocol'; mode.dispatchEvent(new Event('change')); await flush()
+    await parentClick('sp-yida-protocol-example-primary'); await parentClick('sp-yida-rule-export'); await parentClick('sp-yida-run'); await parentClick('sp-yida-initialization-open')
+    await observe(false)
+    expect(Array.from({ length: 4 }, (_, index) => step(index + 5)?.getAttribute('data-state'))).toEqual(['done', 'done', 'blocked', 'todo'])
+    expect(step(7)?.textContent).toBe('7 测试连接（待开启）'); expect(step(7)?.getAttribute('aria-current')).toBe('step')
+    expect(root.querySelector('[data-state="current"]')).toBeNull(); expect(blocked()).toContain('上机清单 L2')
+    // The switch turned on and a fresh GET: step 7 becomes an ordinary current step.
+    await observe(true); expect(step(7)?.getAttribute('data-state')).toBe('current'); expect(step(7)?.textContent).toBe('7 测试连接（当前）')
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
   it('POSTs exactly commandId, mode and the raw appKey/appSecret with Bearer only; keeps every input byte; never uncertain', async () => {
