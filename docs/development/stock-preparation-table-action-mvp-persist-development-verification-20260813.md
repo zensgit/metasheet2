@@ -18,7 +18,7 @@ BOM 展开结果写入 MetaSheet 内部备料 MVP 快照表。原始数据库行
 - SQL Server/PostgreSQL DDL 或 DML；
 - K3 Material Save、Submit、Audit；
 - 普通 pipeline run/replay 或有效令牌 Apply；
-- 生产授权、192.168.1.222/223 部署、重启、安装依赖或执行迁移；
+- 生产授权、<demo-server-ip>/<demo-server-2-ip> 部署、重启、安装依赖或执行迁移；
 - 凭据、租户/workspace 标识、内部 URL 或业务行的证据发布。
 
 范围关联：
