@@ -590,6 +590,8 @@ describe('business trip real request approval and destination arrangement',() =>
     expect(await f.counts(owner.userId)).toMatchObject({events:0,records:0,requests:0})
   },60000)
   it('revoked actor membership refuses all calendar source-management writes without source or audit changes',async()=>{
+    // The settings writer scans every org's current shifts, including retained DST fixtures.
+    punchClock.setOnlinePunchInstantForTests('2026-08-20T00:00:00Z')
     const owner=await calendarOwner()
     const holiday=await f.request('/api/attendance/holidays',owner.token,{date:'2028-01-02',name:'synthetic membership',isWorkingDay:false})
     expect(holiday.status).toBe(201)
