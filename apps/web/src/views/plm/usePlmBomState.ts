@@ -30,7 +30,7 @@ function normalizeFilterNeedle(value: string): string {
 
 function matchesFilter(needle: string, tokens: unknown[]): boolean {
   if (!needle) return true
-  return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
+  return tokens.some((token) => String(token === 0 ? token : token || '').toLowerCase().includes(needle))
 }
 
 function buildQuickPickLabel(source: string, main: string, name: string, id: string): string {

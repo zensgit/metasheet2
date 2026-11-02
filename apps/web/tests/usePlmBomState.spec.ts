@@ -472,3 +472,98 @@ describe('usePlmBomState applied depth snapshot', () => {
     expect(new Set(capped.map((row) => row.key)).size).toBe(capped.length)
   })
 })
+
+describe('usePlmBomState numeric zero quantity filter', () => {
+  it('selects numeric 0 and 10 for quantity filter 0 and excludes 7', () => {
+    const state = createBomState()
+    state.bomItems.value = [
+      { id: 'RA', parent_item_id: 'ROOT', component_id: 'A', component_code: 'A', component_name: 'Branch A', quantity: 3 },
+      { id: 'Q0', parent_item_id: 'A', component_id: 'zero', component_code: 'ZERO', component_name: 'Zero', quantity: 0 },
+      { id: 'RB', parent_item_id: 'ROOT', component_id: 'B', component_code: 'B', component_name: 'Branch B', quantity: 4 },
+      { id: 'Q10', parent_item_id: 'B', component_id: 'ten', component_code: 'TEN', component_name: 'Ten', quantity: 10 },
+      { id: 'Q7', parent_item_id: 'ROOT', component_id: 'seven', component_code: 'SEVEN', component_name: 'Seven', quantity: 7 },
+    ]
+
+    state.bomFilterField.value = 'quantity'
+    state.bomFilter.value = '0'
+
+    expect(state.bomFilteredItems.value.map((item) => item.id)).toEqual(['Q0', 'Q10'])
+    expect(state.bomFilteredItems.value.map((item) => item.quantity)).toEqual([0, 10])
+    expect(state.bomFilteredItems.value.some((item) => item.id === 'Q7' || item.quantity === 7)).toBe(false)
+    expect(state.bomItems.value.map((item) => item.id)).toEqual(['RA', 'Q0', 'RB', 'Q10', 'Q7'])
+    expect(state.bomItems.value.map((item) => item.quantity)).toEqual([3, 0, 4, 10, 7])
+
+    const rows = state.bomTreeRows.value
+    expect(rows.map((row) => row.key)).toEqual([
+      'ROOT',
+      'ROOT/RA',
+      'ROOT/RA/Q0',
+      'ROOT/RB',
+      'ROOT/RB/Q10',
+      'ROOT/Q7',
+    ])
+    const zeroRow = rows.find((row) => row.key === 'ROOT/RA/Q0')
+    const tenRow = rows.find((row) => row.key === 'ROOT/RB/Q10')
+    const sevenRow = rows.find((row) => row.key === 'ROOT/Q7')
+    expect(zeroRow?.line?.quantity).toBe(0)
+    expect(zeroRow?.pathIds).toEqual(['ROOT', 'A', 'zero'])
+    expect(tenRow?.line?.quantity).toBe(10)
+    expect(tenRow?.pathIds).toEqual(['ROOT', 'B', 'ten'])
+    expect(sevenRow?.line?.quantity).toBe(7)
+    expect(sevenRow?.hasChildren).toBe(false)
+
+    const keys = state.bomTreeFilteredKeys.value
+    expect(keys.size).toBe(5)
+    expect(keys.has('ROOT')).toBe(true)
+    expect(keys.has('ROOT/RA')).toBe(true)
+    expect(keys.has('ROOT/RA/Q0')).toBe(true)
+    expect(keys.has('ROOT/RB')).toBe(true)
+    expect(keys.has('ROOT/RB/Q10')).toBe(true)
+    expect(keys.has('ROOT/Q7')).toBe(false)
+    expect(state.bomAppliedDepth.value).toBe(null)
+    expect(state.bomSelectedCount.value).toBe(0)
+    expect(state.bomCollapsed.value.size).toBe(0)
+    expect(state.bomFilterField.value).toBe('quantity')
+  })
+
+  it('keeps false, null, undefined, NaN, and empty quantity unmatched for 0, false, and nan', () => {
+    const state = createBomState()
+    state.bomItems.value = [
+      { id: 'Q0', parent_item_id: 'ROOT', component_id: 'zero', component_code: 'ZERO', quantity: 0 },
+      { id: 'Q10', parent_item_id: 'ROOT', component_id: 'ten', component_code: 'TEN', quantity: 10 },
+      { id: 'Q7', parent_item_id: 'ROOT', component_id: 'seven', component_code: 'SEVEN', quantity: 7 },
+      { id: 'QF', parent_item_id: 'ROOT', component_id: 'qf', component_code: 'QF', quantity: false as unknown as number },
+      { id: 'QN', parent_item_id: 'ROOT', component_id: 'qn', component_code: 'QN', quantity: null as unknown as number },
+      { id: 'QU', parent_item_id: 'ROOT', component_id: 'qu', component_code: 'QU' },
+      { id: 'QNAN', parent_item_id: 'ROOT', component_id: 'qnan', component_code: 'QNAN', quantity: NaN },
+      { id: 'QE', parent_item_id: 'ROOT', component_id: 'qe', component_code: 'QE', quantity: '' as unknown as number },
+    ]
+
+    state.bomFilterField.value = 'quantity'
+    state.bomFilter.value = '0'
+
+    expect(state.bomFilteredItems.value.map((item) => item.id)).toEqual(['Q0', 'Q10'])
+    expect(state.bomFilteredItems.value.map((item) => item.quantity)).toEqual([0, 10])
+    const zeroKeys = state.bomTreeFilteredKeys.value
+    expect(zeroKeys.size).toBe(3)
+    expect(zeroKeys.has('ROOT')).toBe(true)
+    expect(zeroKeys.has('ROOT/Q0')).toBe(true)
+    expect(zeroKeys.has('ROOT/Q10')).toBe(true)
+    expect(zeroKeys.has('ROOT/Q7')).toBe(false)
+    expect(zeroKeys.has('ROOT/QF')).toBe(false)
+    expect(zeroKeys.has('ROOT/QN')).toBe(false)
+    expect(zeroKeys.has('ROOT/QU')).toBe(false)
+    expect(zeroKeys.has('ROOT/QNAN')).toBe(false)
+    expect(zeroKeys.has('ROOT/QE')).toBe(false)
+
+    state.bomFilter.value = 'false'
+    expect(state.bomFilteredItems.value).toEqual([])
+    expect(state.bomTreeFilteredKeys.value.has('ROOT/QF')).toBe(false)
+    expect(state.bomTreeFilteredKeys.value.size).toBe(0)
+
+    state.bomFilter.value = 'nan'
+    expect(state.bomFilteredItems.value).toEqual([])
+    expect(state.bomTreeFilteredKeys.value.has('ROOT/QNAN')).toBe(false)
+    expect(state.bomTreeFilteredKeys.value.size).toBe(0)
+  })
+})
