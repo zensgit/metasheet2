@@ -278,6 +278,7 @@ const productError = ref('')
 const productMetadata = ref<PlmItemMetadata | null>(null)
 const productMetadataLoading = ref(false)
 const productMetadataError = ref('')
+let productLoadGeneration = 0
 const productView = computed(() => {
   const data = product.value || {}
   const props = data.properties || {}
@@ -1673,6 +1674,7 @@ async function copyProductField(kind: ProductCopyKind) {
 async function loadProduct() {
   const resolvedId = productId.value || productItemNumber.value
   if (!resolvedId) return
+  const generation = ++productLoadGeneration
   syncQueryParams({ productId: productId.value, itemNumber: productItemNumber.value, itemType: itemType.value })
   productLoading.value = true
   productError.value = ''
@@ -1683,6 +1685,7 @@ async function loadProduct() {
       itemType: itemType.value || undefined,
       itemNumber: productItemNumber.value || undefined,
     })
+    if (generation !== productLoadGeneration) return
     product.value = result
     if (productView.value.partNumber && !productItemNumber.value) {
       productItemNumber.value = productView.value.partNumber === '-' ? '' : productView.value.partNumber
@@ -1709,12 +1712,15 @@ async function loadProduct() {
       loadApprovals(),
     ])
   } catch (error: any) {
+    if (generation !== productLoadGeneration) return
     handleAuthError(error)
     productMetadata.value = null
     productMetadataError.value = ''
     productError.value = error?.message || '加载产品失败'
   } finally {
-    productLoading.value = false
+    if (generation === productLoadGeneration) {
+      productLoading.value = false
+    }
   }
 }
 
