@@ -33,6 +33,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
 import { applyDirectoryHandover } from '../../src/directory/controlled-handover'
 import { isUserSessionRevoked } from '../../src/auth/session-revocation'
+import * as pg from '../../src/db/pg'
 import { query, pool } from '../../src/db/pg'
 import {
   verifyDingTalkRepair,
@@ -1656,5 +1657,46 @@ suite('DingTalk controlled login repair', () => {
       code: '23505',
       constraint: 'dingtalk_login_repairs_active',
     })
+  })
+  it('retains non-production unseeded dev sessions but never bypasses a generation fence or production user lookup', async () => {
+    const missing = 'synthetic-missing-' + randomUUID(),
+      prior = process.env.NODE_ENV
+    const options = { expiresAt: new Date(Date.now() + 60000).toISOString() }
+    try {
+      process.env.NODE_ENV = 'test'
+      expect(
+        await sessionRegistry.createUserSession(missing, options),
+      ).not.toBeNull()
+      expect(
+        await sessionRegistry.createUserSession(missing, {
+          ...options,
+          expectedAccessGeneration: 0,
+        }),
+      ).toBeNull()
+      process.env.NODE_ENV = 'production'
+      expect(
+        await sessionRegistry.createUserSession(missing, options),
+      ).toBeNull()
+    } finally {
+      process.env.NODE_ENV = prior
+    }
+  })
+
+  it('a schema error cannot turn a generation-fenced session into a synthetic success', async () => {
+    const f = await fixture(),
+      spy = vi.spyOn(pg, 'query')
+    try {
+      spy.mockRejectedValueOnce(
+        Object.assign(new Error('synthetic missing schema'), { code: '42P01' }),
+      )
+      expect(
+        await sessionRegistry.createUserSession(f.user, {
+          expiresAt: new Date(Date.now() + 60000).toISOString(),
+          expectedAccessGeneration: 0,
+        }),
+      ).toBeNull()
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

@@ -18,7 +18,7 @@ preview、rollback-preview、release-preview 为只读 REPEATABLE READ 事务，
 
 apply 需精确证明摘要及 `confirm=apply`。身份旧值加密保存；写产品审计并记录真实管理员。撤销目标已存在的 JWT 会话、session registry 记录与多维表 API token，递增 generation，不倒退。OAuth／免登认证结果携带在用户锁内取得的 generation，登记 session 时重新锁定并核对；API token 创建／轮换也复核请求认证时的 generation。旧 refresh 不得重新激活已撤销 sid，无 sid 的 refresh 同样复核 generation。
 
-这不禁止修复完成后的有效新登录，也不承诺取消所有已经执行的业务请求。现有无 sid JWT 在应用节点时钟超前于数据库时，仍受既有时间水位机制限制；本轮没有修改全局 JWT 合约。生产必须完成迁移并验证时钟与会话机制，不能把本地结果称为全部凭据系统的安全证明。开发模式 RBAC_TOKEN_TRUST 不提供数据库 generation 时，API token 签发会拒绝。
+这不禁止修复完成后的有效新登录，也不承诺取消所有已经执行的业务请求。现有无 sid JWT 在应用节点时钟超前于数据库时，仍受既有时间水位机制限制；本轮没有修改全局 JWT 合约。生产必须完成迁移并验证时钟与会话机制，不能把本地结果称为全部凭据系统的安全证明。开发模式 RBAC_TOKEN_TRUST 不提供数据库 generation 时，API token 签发会拒绝。未提供 generation、非 production 且用户确实不存在时保留原虚拟用户会话兼容；携带 generation 的 OAuth／refresh 不可走此分支，遇 schema 错误也拒绝。原无版本调用的缺表 synthetic 兼容未改，因此仍要求完整迁移。
 
 ## 防覆盖、回退与 release
 
@@ -52,7 +52,7 @@ verify 输入：userId/password/code/actorId/actorPassword。preview：proof。a
 
 Node 20.20.2、本机 PostgreSQL 15.17、全新合成库；提供方仅测试桩。没有真实扫码、线上连接、真实绑定、部署、候选构建或 Mac mini 使用。
 
-修订验证：十一文件真实 DB 组合 250 项（含原八文件 185、修复文件 55、API 路由／组织准入十项）；八文件重点单测 311 项；另五十文件 auth／DingTalk 回归 870 项，与前者有交集，不累计。CI 合约六项、TypeScript noEmit 通过。十个其他改动运行文件定向 ESLint 通过；AuthService 的 137 行原有 no-extra-semi 在旧 head 上同样失败，本轮未改无关代码。
+修订验证：十一文件真实 DB 组合 252 项（含原八文件 185、修复文件 57、API 路由／组织准入十项）；认证／钉钉联合单测 55 文件 1040 项；独立 todo-center 待办门槛 27 项（EXPECT_DB=1，0 跳过）。CI 合约六项、TypeScript noEmit 通过。十个其他改动运行文件定向 ESLint 通过；AuthService 的 137 行原有 no-extra-semi 在旧 head 上同样失败，本轮未改无关代码。
 
 包含真实 refresh 屏障红转绿、旧 OAuth 认证版本拒绝、API 创建／轮换版本拒绝、RR 默认事务在用户锁等待期间新提交 token 的撤销、首次登录补角色后的恢复、无变化同步后的恢复、缺 OpenID 绑定／解绑、OpenID 轮换后旧目录拒绝、release 前同步成功正对照及其后精确拒绝、隐藏第二人／UnionID 冲突拒绝、加密字段探测及密钥变化后恢复拒绝／原密文恢复。真实行为优于仅检查 generation 值。
 

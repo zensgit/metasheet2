@@ -106,7 +106,9 @@ export async function createUserSession(
          created_at,
          updated_at
        )
-       SELECT $1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW() FROM subject
+       SELECT $1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW()
+       WHERE EXISTS (SELECT 1 FROM subject)
+          OR ($6::bigint IS NULL AND $7::boolean AND NOT EXISTS (SELECT 1 FROM users WHERE id=$2))
        ON CONFLICT (id) DO UPDATE
        SET user_id = EXCLUDED.user_id,
            expires_at = EXCLUDED.expires_at,
@@ -116,12 +118,13 @@ export async function createUserSession(
            updated_at = NOW()
        WHERE user_sessions.revoked_at IS NULL AND user_sessions.user_id=EXCLUDED.user_id
        RETURNING id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at`,
-      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null, options.expectedAccessGeneration ?? null],
+      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null, options.expectedAccessGeneration ?? null, process.env.NODE_ENV !== 'production'],
     )
     const row = result.rows[0]
     return row ? mapRow(row) : null
   } catch (error) {
     if (isDatabaseSchemaError(error)) {
+      if (options.expectedAccessGeneration !== undefined) return null
       return buildSyntheticSession(userId, sessionId, options.expiresAt)
     }
     throw error
