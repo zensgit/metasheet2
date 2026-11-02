@@ -72,7 +72,7 @@ pm2 save
 
 用 systemd 的部署：`systemctl restart metasheet-backend.service`。
 直接用代码仓库里的 Docker Compose 文件部署的环境（on-prem 包里没有 Compose 文件）：重建后端容器，例如 `docker compose -f docker-compose.app.yml up -d backend`。
-Windows 无 Docker 部署（用 `deploy.bat` 安装的环境）（待在 Windows 主机上核对）：在部署目录下打开 PowerShell，运行 on-prem 包里自带的启动脚本。它会先读入 `app.env`，再带 `--update-env` 重启后端，最后执行 `pm2 save`。
+Windows 无 Docker 部署（适用于在 Windows 上不用 Docker 安装的 on-prem 包，两条包线都带同一个启动脚本）（待在 Windows 主机上核对）：在部署目录下打开 PowerShell，运行 on-prem 包里自带的启动脚本。它会先读入 `app.env`，再带 `--update-env` 重启后端，最后执行 `pm2 save`。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ops\attendance-onprem-start-pm2.ps1

@@ -8,6 +8,11 @@
  * `db`, after the org structure lock. One code for every failure: 422
  * `ASSIGNEE_TASK_ACCESS_REQUIRED` names nobody and does not say what is missing. Nothing is ever
  * granted here. Followers, list members and owner transfers are not checked here.
+ *
+ * Ordering dependency: the administrator read below does not test `is_active` or the recycle bin
+ * itself. Both callers (`createTask` in task-records.ts, `addAssignee` in task-structure.ts) run the
+ * active-org-member test (task-org-members.ts) first on the same ids, and that test refuses such
+ * accounts. A new caller must keep that order.
  */
 import { listUserPermissions } from '../rbac/service'
 import { userHasEffectiveNamespaceAccess } from '../rbac/namespace-admission'

@@ -7,6 +7,7 @@ import type supertest from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { tasksRouter } from '../../src/routes/tasks'
+import { TASK_ACCESS_CODES, holdsTaskCode } from '../../src/services/task-member-access'
 import {
   startTasksListener,
   tasksClient,
@@ -854,6 +855,98 @@ describe('tasks auth gate', () => {
       const createAllowed = await server.post('/api/tasks').set('Authorization', bearer)
         .send({ title: '备料复核', assignees: [users.control.userId, M3_TARGET] })
       expect(createAllowed.status, createAllowed.text).toBe(200)
+    })
+
+    // The administrator read of the assignee test (task-member-access.ts), with token trust off: three
+    // active org members, none holding a task code nor task access enabled. Every id carries `stamp`;
+    // the file's sweep removes them (the `admin` row in user_roles goes with `user_id LIKE`; the
+    // `admin` role itself is never touched).
+    // - a member whose only role is a non-admin role with one unrelated code, `users.role` 'user':
+    //   422 on both write points, byte for byte, and nothing written;
+    // - a member holding the `admin` role in user_roles, `users.role` 'user': 200 on both write points;
+    // - a member whose `users.role` is 'admin', with no role rows: 200 on both write points.
+    it('POST /api/tasks/:id/assignees and POST /api/tasks: 422 ASSIGNEE_TASK_ACCESS_REQUIRED for a member whose only role is not admin and carries no task code, nothing written', async () => {
+      const server = app()
+      const db = poolManager.get()
+      const bearer = `Bearer ${users.control.bearer}`
+      const plain = `usr_tasks_m3plainrole_${stamp}`
+      const plainRole = `tasks_m3plainrole_${stamp}`
+      await seedOrgMembers(orgId, [plain], { taskAccess: false })
+      await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [plainRole, plainRole])
+      await db.query(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'attendance:read')`, [plainRole])
+      await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [plain, plainRole])
+      const seeded = await db.query('SELECT role FROM users WHERE id = $1', [plain])
+      expect(seeded.rows[0]?.role).toBe('user')
+      const refusedText = JSON.stringify({ error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } })
+      const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+      const eventsBefore = await db.query('SELECT count(*)::int AS n FROM task_events WHERE task_id = $1', [taskId])
+
+      const addRefused = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: plain })
+      expect(addRefused.status).toBe(422)
+      expect(addRefused.text).toBe(refusedText)
+      const eventsAfter = await db.query('SELECT count(*)::int AS n FROM task_events WHERE task_id = $1', [taskId])
+      expect(eventsAfter.rows[0]?.n).toBe(eventsBefore.rows[0]?.n)
+
+      const tasksBefore = await db.query('SELECT count(*)::int AS n FROM tasks WHERE org_id = $1', [orgId])
+      const createRefused = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, plain] })
+      expect(createRefused.status).toBe(422)
+      expect(createRefused.text).toBe(refusedText)
+      const tasksAfter = await db.query('SELECT count(*)::int AS n FROM tasks WHERE org_id = $1', [orgId])
+      expect(tasksAfter.rows[0]?.n).toBe(tasksBefore.rows[0]?.n)
+      const assigned = await db.query('SELECT count(*)::int AS n FROM task_assignees WHERE user_id = $1', [plain])
+      expect(assigned.rows[0]?.n).toBe(0)
+    })
+
+    it('POST /api/tasks/:id/assignees and POST /api/tasks: 200 for a member holding the admin role in user_roles, with no task code and users.role not admin', async () => {
+      const server = app()
+      const db = poolManager.get()
+      const bearer = `Bearer ${users.control.bearer}`
+      const rbacAdmin = `usr_tasks_m3rbacadmin_${stamp}`
+      await seedOrgMembers(orgId, [rbacAdmin], { taskAccess: false })
+      await db.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')`, [rbacAdmin])
+      const seeded = await db.query('SELECT role FROM users WHERE id = $1', [rbacAdmin])
+      expect(seeded.rows[0]?.role).toBe('user')
+      // Only the administrator read can let this member through: the `admin` role carries no task
+      // code on this database.
+      const adminCodes = await db.query(`SELECT permission_code FROM role_permissions WHERE role_id = 'admin'`)
+      const codes = adminCodes.rows.map((row) => String(row.permission_code))
+      expect(TASK_ACCESS_CODES.some((code) => holdsTaskCode(codes, code)), codes.join(',')).toBe(false)
+      const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+
+      const addAllowed = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: rbacAdmin })
+      expect(addAllowed.status, addAllowed.text).toBe(200)
+      const createAllowed = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, rbacAdmin] })
+      expect(createAllowed.status, createAllowed.text).toBe(200)
+      const assigned = await db.query('SELECT count(*)::int AS n FROM task_assignees WHERE user_id = $1', [rbacAdmin])
+      expect(assigned.rows[0]?.n).toBe(2)
+    })
+
+    it('POST /api/tasks/:id/assignees and POST /api/tasks: 200 for a member whose users.role is admin, with no role rows and no task code', async () => {
+      const server = app()
+      const db = poolManager.get()
+      const bearer = `Bearer ${users.control.bearer}`
+      const columnAdmin = `usr_tasks_m3columnadmin_${stamp}`
+      await seedOrgMembers(orgId, [columnAdmin], { taskAccess: false })
+      await db.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [columnAdmin])
+      const roleRows = await db.query('SELECT count(*)::int AS n FROM user_roles WHERE user_id = $1', [columnAdmin])
+      expect(roleRows.rows[0]?.n).toBe(0)
+      const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+
+      const addAllowed = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: columnAdmin })
+      expect(addAllowed.status, addAllowed.text).toBe(200)
+      const createAllowed = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, columnAdmin] })
+      expect(createAllowed.status, createAllowed.text).toBe(200)
+      const assigned = await db.query('SELECT count(*)::int AS n FROM task_assignees WHERE user_id = $1', [columnAdmin])
+      expect(assigned.rows[0]?.n).toBe(2)
     })
   })
 
