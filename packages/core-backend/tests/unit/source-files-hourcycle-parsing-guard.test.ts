@@ -178,6 +178,12 @@ interface KnownSite {
 // prettier-ignore
 const KNOWN_SITES: KnownSite[] = [
   {
+    // Punch-detail IANA validity probe; the formatted date is discarded and no hour is consumed.
+    file: 'packages/core-backend/src/attendance/w4c3a-punch-detail-input.ts',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: input.timezone }).format(day)",
+    kind: 'display',
+  },
+  {
     // IANA validity probe only; formatted date is discarded, no hour is consumed.
     file: 'plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
     lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date(0))",
@@ -758,7 +764,8 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // 31 = 29 + two hour-free attendance timezone validity probes.
     // 37 = 31 + three hour-free multi-timezone date keys and three validity probes.
     // 38 = 37 + the daily scheduler's hour-free year/month/day key.
-    expect(KNOWN_SITES.length).toBe(38)
+    // 39 = 38 + the punch-detail input's hour-free IANA validity probe.
+    expect(KNOWN_SITES.length).toBe(39)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

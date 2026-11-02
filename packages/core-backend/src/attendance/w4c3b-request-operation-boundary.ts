@@ -14,7 +14,11 @@ import { acquireBusinessTripRequestPrefixV1 } from './attendance-business-trip-l
  * shares one of the four operation kinds. SourceRef is derived only from the
  * closed (kind, routeVariant) pair — never from request body keys.
  */
-import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
+import type {
+  AttendanceW4TransactionClientV1,
+  VerifiedAttendanceOrgIdentityV1,
+  VerifiedAttendanceOperationIdentityV1,
+} from './w4c0-identity'
 import {
   acquireAttendanceCalculationRolloutLock,
   buildAttendanceCalculationRolloutAdvisoryKey,
@@ -251,6 +255,62 @@ export interface AttendanceRequestOperationContextV1 {
   readonly cancelRoundAuthorized?: boolean
   /** Host-validated route family; null is the generic non-create surface. */
   readonly routeVariant: AttendanceRequestOperationRouteVariantV1 | null
+}
+
+/** Core-only authority for calculation work inside one admitted decision execution. */
+export interface AttendanceRequestDecisionCalculationWitnessV1 {
+  readonly trx: AttendanceW4TransactionClientV1
+  readonly org: VerifiedAttendanceOrgIdentityV1
+  readonly identity: VerifiedAttendanceOperationIdentityV1
+  readonly subjectUserId: string
+  readonly actorId: string
+}
+
+const decisionCalculationWitnesses = new WeakMap<
+  AttendanceRequestOperationContextV1,
+  Readonly<{ facade: AttendanceRequestPluginTrxV1; witness: AttendanceRequestDecisionCalculationWitnessV1 }>
+>()
+
+export interface AttendanceRequestDecisionCalculationResultV1 {
+  readonly resolvedRecordId: string | null
+  readonly resolvedCalculationId: string | null
+  readonly resultSemanticFingerprint: string | null
+  readonly resultProvenanceFingerprint: string | null
+}
+
+const decisionCalculationResults = new WeakMap<
+  AttendanceRequestOperationContextV1,
+  Readonly<AttendanceRequestDecisionCalculationResultV1>
+>()
+
+/** Core-only handoff: calculation proof never travels through the plugin response. */
+export function recordAttendanceRequestDecisionCalculationResultV1(
+  facade: AttendanceRequestPluginTrxV1,
+  operation: AttendanceRequestOperationContextV1,
+  result: AttendanceRequestDecisionCalculationResultV1,
+): void {
+  requireAttendanceRequestDecisionCalculationWitnessV1(facade, operation)
+  if (decisionCalculationResults.has(operation)) {
+    fail('W4C3B_REQUEST_CALCULATION_RESULT_ALREADY_RECORDED', 409)
+  }
+  decisionCalculationResults.set(operation, Object.freeze({
+    resolvedRecordId: result.resolvedRecordId,
+    resolvedCalculationId: result.resolvedCalculationId,
+    resultSemanticFingerprint: result.resultSemanticFingerprint,
+    resultProvenanceFingerprint: result.resultProvenanceFingerprint,
+  }))
+}
+
+/** A structural __w4CanonicalTrx flag, copied context or expired execution is not authority. */
+export function requireAttendanceRequestDecisionCalculationWitnessV1(
+  facade: AttendanceRequestPluginTrxV1,
+  operation: AttendanceRequestOperationContextV1,
+): AttendanceRequestDecisionCalculationWitnessV1 {
+  const entry = decisionCalculationWitnesses.get(operation)
+  if (!entry || entry.facade !== facade) {
+    fail('W4C3B_REQUEST_CALCULATION_WITNESS_REQUIRED', 403)
+  }
+  return entry.witness
 }
 
 export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
@@ -924,13 +984,34 @@ async function runRequestOperationProtocolV1(
             fail('W4C3B_REQUEST_IDENTITY_CHANGED', 409)
           }
 
-          const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
+          const executionOperation = Object.freeze({
             ...operation,
             acceptedWritePosture: preflight.org.acceptedWritePosture,
             // From the preflight's own resolve, taken under the rollout SHARED lock at
             // step 2 — the one resolution this transaction performs.
             referenceSegments: preflight.referenceSegments,
-          }))
+          })
+          if (input.kind === 'request_decision' && preflight.kind === 'claimed'
+            && preflight.org.acceptedWritePosture !== 'legacy_projection_only') {
+            const identity = preflight.itemIdentities[0]
+            if (!identity) fail('W4C3B_REQUEST_OPERATION_IDENTITY_MISSING', 500)
+            decisionCalculationWitnesses.set(executionOperation, Object.freeze({
+              facade: shapedTrx,
+              witness: Object.freeze({
+                trx, org: preflight.org, identity,
+                subjectUserId: prepared.subjectUserId, actorId: prepared.actorId,
+              }),
+            }))
+          }
+          let result: AttendanceRequestOperationExecutionResultV1
+          let calculationResult: Readonly<AttendanceRequestDecisionCalculationResultV1> | undefined
+          try {
+            result = await adapter.execute(shapedTrx, prepared, executionOperation)
+            calculationResult = decisionCalculationResults.get(executionOperation)
+          } finally {
+            decisionCalculationResults.delete(executionOperation)
+            decisionCalculationWitnesses.delete(executionOperation)
+          }
           // Before the outbox enqueue and before the seal — a refused attempt must leave neither.
           // On the HTTP entry this throws exactly where the adapter used to throw: the adapter
           // returned immediately at its refusal point, so no statement runs between the old throw
@@ -962,6 +1043,7 @@ async function runRequestOperationProtocolV1(
           await sealAttendanceResultOperationV1(trx, identity, {
             responseSnapshot: jsonValue(result.response),
             resolvedRequestId: result.resolvedRequestId,
+            ...calculationResult,
           })
           return {
             kind: isLegacyCompat ? 'legacy_compat' as const : 'executed' as const,

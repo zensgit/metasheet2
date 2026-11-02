@@ -212,6 +212,14 @@ import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy
 import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
 import { createAttendanceLegacyPlanCommitConnectionV1 } from './attendance/w4c3a-legacy-plan-commit-connection'
 import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
+import { parseAttendancePunchDetailInputV1 } from './attendance/w4c3a-punch-detail-input'
+import { fingerprintAttendancePunchDetailCommandV1 } from './attendance/w4c3a-punch-detail-command'
+import { buildAttendancePunchDetailPreparedPlanV1 } from './attendance/w4c3a-punch-detail-prepare'
+import { createAttendancePunchDetailPreparationHostV1 } from './attendance/w4c3a-punch-detail-preparation-host'
+import { createAttendancePunchDetailReplayHostV1 } from './attendance/w4c3a-punch-detail-replay-host'
+import { createAttendancePunchDetailJobReplayHostV1 } from './attendance/w4c3a-punch-detail-job-replay-host'
+import { createAttendancePunchDetailPreviewHostV1 } from './attendance/w4c3a-punch-detail-preview-host'
+import { createAttendancePunchDetailPreviewJobHostV1 } from './attendance/w4c3a-punch-detail-preview-job-host'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
@@ -251,6 +259,11 @@ import {
   buildUnsupportedRequestAttributionSnapshotV1,
   W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
 } from './attendance/w4c3b-request-snapshots'
+import {
+  prepareApprovedOvertimeCalculationV1,
+  readPreparedApprovedOvertimeContextV1,
+  appendApprovedOvertimeCalculationV1,
+} from './attendance/w4c3b-approved-overtime'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -3456,6 +3469,72 @@ export class MetaSheetServer {
                   })
                   return host.commitSyncImportPlanV1(input)
                 },
+                preparePunchDetailImport: async (input, resolveFrozenTarget) => {
+                  const host = createAttendancePunchDetailPreparationHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  })
+                  return host.preparePunchDetailImport(input, resolveFrozenTarget)
+                },
+                readPunchDetailImportReplay: async (input) => {
+                  const host = createAttendancePunchDetailReplayHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  })
+                  return host.readPunchDetailImportReplay(input)
+                },
+                readPunchDetailImportJobReplay: async (input) => {
+                  const host = createAttendancePunchDetailJobReplayHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  })
+                  return host.readPunchDetailImportJobReplay(input)
+                },
+                readPunchDetailPreviewReplay: async (input, callbacks) => {
+                  const host = createAttendancePunchDetailPreviewHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  })
+                  return host.readPunchDetailPreviewReplay(input, callbacks)
+                },
+                reservePunchDetailPreview: async (input, callbacks) => {
+                  const host = createAttendancePunchDetailPreviewHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  })
+                  return host.reservePunchDetailPreview(input, callbacks)
+                },
+                readPunchDetailPreviewJob: async (input, callbacks) => {
+                  const host = createAttendancePunchDetailPreviewJobHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  })
+                  return host.readPunchDetailPreviewJob(input, callbacks)
+                },
+                processPunchDetailPreviewJob: async (input, callbacks) => {
+                  const host = createAttendancePunchDetailPreviewJobHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  })
+                  return host.processPunchDetailPreviewJob(input, callbacks)
+                },
+                parsePunchDetailInput: parseAttendancePunchDetailInputV1,
+                fingerprintPunchDetailCommand: fingerprintAttendancePunchDetailCommandV1,
+                buildPunchDetailPreparedPlan: buildAttendancePunchDetailPreparedPlanV1,
                 buildImportAttributionFreeze:
                   buildAttendanceImportAttributionFreezeV1,
                 buildImportPolicySourceProof:
@@ -3518,6 +3597,9 @@ export class MetaSheetServer {
                 bindRequestSnapshotOnTerminalDecision: (
                   input: Parameters<typeof bindAttendanceRequestTerminalSnapshotV1>[0],
                 ) => bindAttendanceRequestTerminalSnapshotV1(input),
+                prepareApprovedOvertimeCalculation: prepareApprovedOvertimeCalculationV1,
+                readPreparedApprovedOvertimeContext: readPreparedApprovedOvertimeContextV1,
+                appendApprovedOvertimeCalculation: appendApprovedOvertimeCalculationV1,
                 buildRequestCalculationPayloadFromRequestRow:
                   buildAttendanceRequestCalculationPayloadFromRequestRowV1,
                 computeRequestPayloadFingerprint:

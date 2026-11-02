@@ -1,3 +1,9 @@
+import {
+  parseAttendanceImportJobEnvelopeV1,
+  requireAttendancePunchDetailPlanBindingV1,
+  assertAttendancePunchDetailCanonicalBranchV1,
+  type AttendanceImportJobEnvelopeV1,
+} from './w4c3a-punch-detail-command'
 /**
  * W4C-3a phase 1 (#4556 / OD-W4C-56=(a)) — core-owned atomic P07 enqueue
  * persistence seam for LegacyImportExecutionPlanV1.
@@ -27,7 +33,6 @@ import {
   computeRawImportEvidenceDigestV1,
   computeLegacyImportSourceOrdinalDigestV1,
   parseLegacyImportExecutionPlanManifestV1,
-  parseLegacyImportPublicJobEnvelopeV1,
   reassembleLegacyImportPlanChunksV1,
   sha256HexOfCanonicalJsonV1,
   type AttendanceLegacyOperationalBranchV1,
@@ -36,7 +41,6 @@ import {
   type LegacyImportGroupEffectPlanV1,
   type LegacyImportGroupEffectPlacementV1,
   type LegacyImportItemPlanV1,
-  type LegacyImportPublicJobEnvelopeV1,
   type LegacyImportRecordWritePlanV1,
   AttendanceLegacyExecutionPlanError,
 } from './w4c3a-legacy-execution-plan'
@@ -92,7 +96,7 @@ export type AttendanceLegacyImportJobInsertV1 = {
   readonly createdBy: string
   readonly idempotencyKey: string | null
   readonly total: number
-  readonly payload: LegacyImportPublicJobEnvelopeV1
+  readonly payload: AttendanceImportJobEnvelopeV1
   readonly w4Entrypoint: 'import_batch'
   readonly w4BatchCommandId: string
   readonly w4SourceKind: 'import_batch'
@@ -470,7 +474,7 @@ function validateAttendanceLegacyImportPlanEnqueuePackageV1(
   input: PersistAttendanceLegacyImportPlanEnqueueInputV1,
 ): {
   readonly job: AttendanceLegacyImportJobInsertV1
-  readonly envelope: LegacyImportPublicJobEnvelopeV1
+  readonly envelope: AttendanceImportJobEnvelopeV1
   readonly manifest: LegacyImportExecutionPlanManifestV1
   readonly planDigest: string
   readonly reassembled: ReturnType<typeof reassembleLegacyImportPlanChunksV1>
@@ -486,7 +490,7 @@ function validateAttendanceLegacyImportPlanEnqueuePackageV1(
     fail('W4C3A_ENQUEUE_INJECTION_REJECTED')
   }
   const job = input.job
-  const envelope = parseLegacyImportPublicJobEnvelopeV1(job.payload)
+  const envelope = parseAttendanceImportJobEnvelopeV1(job.payload)
   const manifest = parseLegacyImportExecutionPlanManifestV1(input.manifest)
   if (manifest.jobId !== job.jobId) fail('W4C3A_ENQUEUE_JOB_ID_MISMATCH')
   if (manifest.orgId !== job.orgId) fail('W4C3A_ENQUEUE_ORG_MISMATCH')
@@ -534,6 +538,13 @@ function validateAttendanceLegacyImportPlanEnqueuePackageV1(
     input.chunks,
     manifest.sourceRowCount,
   )
+  const punchDetail = requireAttendancePunchDetailPlanBindingV1({
+    orgId: job.orgId, actorId: job.w4ActorId, actorPosture: job.w4ActorPosture,
+    tokenSubjectUserId: job.w4TokenSubjectUserId, batchId: job.batchId,
+    envelope, batch: manifest.batch, ...reassembled,
+  })
+  assertAttendancePunchDetailCanonicalBranchV1(punchDetail, manifest.acceptedWritePosture, manifest.operationalBranch)
+  if (punchDetail && manifest.legacyInputFingerprint !== punchDetail.requestFingerprint) fail('ATTENDANCE_PUNCH_DETAIL_COMMAND_MISMATCH')
   if (manifest.operationalBranch === 'operational_only_idempotent_replay') {
     if (input.chunks.length !== 0) fail('W4C3A_ENQUEUE_REPLAY_CHUNKS_NONEMPTY')
     if (

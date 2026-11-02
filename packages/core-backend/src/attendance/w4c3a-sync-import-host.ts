@@ -1,3 +1,8 @@
+import {
+  requireAttendancePunchDetailPlanBindingV1,
+  assertAttendancePunchDetailCanonicalBranchV1,
+  type AttendanceImportJobEnvelopeV1,
+} from './w4c3a-punch-detail-command'
 import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a P06 — core-owned modern synchronous import commit host.
@@ -52,7 +57,6 @@ import {
   type LegacyImportArtifactCleanupV1,
   type LegacyImportBatchPlanV1,
   type LegacyImportItemPlanV1,
-  type LegacyImportPublicJobEnvelopeV1,
   type LegacyImportRecordWritePlanV1,
 } from './w4c3a-legacy-execution-plan'
 import {
@@ -102,7 +106,7 @@ export type CommitAttendanceSyncImportPlanFromHostInputV1 = Readonly<{
   tokenSubjectUserId: string | null
   batchId: string
   idempotencyKey: string | null
-  payload: LegacyImportPublicJobEnvelopeV1
+  payload: AttendanceImportJobEnvelopeV1
   legacyRowSourceKind: AttendanceLegacyRowSourceKindV1
   legacySourceRowLimit: number | null
   batch: Extract<LegacyImportBatchPlanV1, { kind: 'normal' }>
@@ -170,7 +174,7 @@ function targetRefForRecordWrite(
   return JSON.stringify([row.orgId, row.userId, row.workDate])
 }
 
-async function loadCommittedLegacyBatch(
+export async function loadCommittedLegacyBatch(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
   idempotencyKey: string,
@@ -377,6 +381,8 @@ export function createAttendanceSyncImportHostV1(
   return Object.freeze({
     async commitSyncImportPlanV1(input) {
       validateHostInput(input)
+      const punchDetail = requireAttendancePunchDetailPlanBindingV1({ ...input, envelope: input.payload })
+      if (punchDetail && input.legacyRowSourceKind !== 'direct_rows') fail('ATTENDANCE_PUNCH_DETAIL_COMMAND_MISMATCH')
       const acquired = await deps.acquireConnection()
       let discard: Error | undefined
       try {
@@ -443,6 +449,7 @@ export function createAttendanceSyncImportHostV1(
                 acceptedWritePosture: org.acceptedWritePosture,
               })
 
+            assertAttendancePunchDetailCanonicalBranchV1(punchDetail, org.acceptedWritePosture, operationalBranch)
             await recheckAttendanceActorLivenessInTransactionV1(
               trx,
               authorization,
@@ -456,7 +463,7 @@ export function createAttendanceSyncImportHostV1(
               recordWrites: input.recordWrites,
               groupEffects: input.groupEffects,
             })
-            const legacyInputFingerprint = sha256HexOfCanonicalJsonV1({
+            const legacyInputFingerprint = punchDetail?.requestFingerprint ?? sha256HexOfCanonicalJsonV1({
               legacyRowSourceKind: input.legacyRowSourceKind,
               legacySourceRowLimit: input.legacySourceRowLimit,
               batch: input.batch,
@@ -545,6 +552,11 @@ export function createAttendanceSyncImportHostV1(
                 input.idempotencyKey,
               )
               if (existing) {
+                const storedPunchDetail = Object.prototype.hasOwnProperty.call(existing.meta, 'punchDetailRequestFingerprint')
+                if ((punchDetail || storedPunchDetail) && (!punchDetail
+                  || existing.meta.punchDetailRequestFingerprint !== punchDetail.requestFingerprint)) {
+                  fail('ATTENDANCE_PUNCH_DETAIL_COMMAND_MISMATCH')
+                }
                 return buildAttendanceSyncImportIdempotentResponseV1({
                   ...existing,
                   elapsedMs: Math.max(0, Date.now() - startedAt),
