@@ -1,7 +1,9 @@
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { up, down } from '../../src/db/migrations/zzzz20260907110000_create_attendance_report_projection_anchors'
 import { refreshAttendanceReportProjectionAnchor, withholdAttendanceReportProjectionAnchors, assertAttendanceCleaningActor, lockAttendanceCleaningProjectionAccess, readAttendanceCleaningSourceSeed, lockAttendanceCleaningSource } from '../../src/attendance/attendance-multitable-cleaning-authority'
 import { getObjectFieldId } from '../../src/multitable/provisioning'
@@ -29,7 +31,7 @@ suite('ACP projection authority real database', () => {
     admin = new Pool({ connectionString: url.toString(), max: 1 })
     await admin.query(`CREATE DATABASE "${name}"`)
     url.pathname = `/${name}`
-    pool = new Pool({ connectionString: url.toString(), max: 2 })
+    pool = new AttendanceManagedPgPool({ connectionString: url.toString(), max: 2 })
     db = new Kysely({ dialect: new PostgresDialect({ pool }) })
     await pool.query(`
       CREATE TABLE meta_sheets (id text PRIMARY KEY, deleted_at timestamptz);
@@ -251,10 +253,10 @@ suite('ACP projection authority real database', () => {
     const client = await pool.connect()
     const writer = await pool.connect()
     const statements: string[] = []
-    const connection = { query: (statement: string, params?: readonly unknown[]) => {
-      statements.push(statement)
-      return client.query(statement, params ? [...params] : [])
-    } }
+    const connection = attendanceOwnedNativeQueryProbeV1(pool, client, ({ text, next }) => {
+      statements.push(text)
+      return next()
+    }).session
     const options = { attendanceCleaningAuthority: true as const, attendanceCleaningSheetIds: ['sheet_acp', 'sheet_catalog'] }
     const keys = (await client.query(`SELECT DISTINCT hashtext(value)::bigint AS key
       FROM unnest($1::text[]) AS value ORDER BY key`, [options.attendanceCleaningSheetIds.map(canonicalSheetFenceKey)])).rows.map(row => String(row.key))
@@ -307,17 +309,17 @@ suite('ACP projection authority real database', () => {
       await pool.query(`INSERT INTO ${table} (id, org_id, name, is_active) VALUES ('existing', 'org-acp', 'before', true)`)
       const client = await pool.connect()
       let changed = false
-      const connection = { query: async (statement: string, params?: readonly unknown[]) => {
+      const connection = attendanceOwnedNativeQueryProbeV1(pool, client, async ({ text: statement, next }) => {
         if (statement.startsWith('LOCK TABLE') && !changed) {
           await pool.query(`UPDATE ${table} SET name = 'after' WHERE id = 'existing'`)
           await pool.query(`INSERT INTO ${table} (id, org_id, name, is_active) VALUES ('new', 'org-acp', 'added', true)`)
           changed = true
         }
-        return client.query(statement, params ? [...params] : [])
-      } }
+        return next()
+      }).session
       try {
-        const definitions = await runAttendanceResultOperationTransactionV1(connection, async () =>
-          (await client.query(`SELECT id, name FROM ${table} WHERE org_id = 'org-acp' AND is_active ORDER BY id`)).rows,
+        const definitions = await runAttendanceResultOperationTransactionV1(connection, async (trx) =>
+          (await trx.query(`SELECT id, name FROM ${table} WHERE org_id = 'org-acp' AND is_active ORDER BY id`)).rows,
         { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })
         expect(definitions).toEqual([{ id: 'existing', name: 'after' }, { id: 'new', name: 'added' }])
         const writer = await pool.connect()
@@ -367,7 +369,7 @@ suite('ACP projection authority real database', () => {
       await client.query('BEGIN')
       const seed = await readAttendanceCleaningSourceSeed(query, input)
       await client.query('COMMIT')
-      const observed = { query: async (statement: string, params?: readonly unknown[]) => {
+      const observed = attendanceOwnedNativeQueryProbeV1(pool, client, async ({ text: statement, next }) => {
         if (statement.startsWith('SELECT pg_try_advisory_lock') && !inserted) {
           const creator = await pool.connect()
           try {
@@ -387,11 +389,11 @@ suite('ACP projection authority real database', () => {
           await pool.query("UPDATE meta_records SET data = '{\"revision\":2}', version = version + 1 WHERE id = 'catalog_existing'")
           edited = true
         }
-        return client.query(statement, params ? [...params] : [])
-      } }
-      const result = await runAttendanceResultOperationTransactionV1(observed, async () => {
+        return next()
+      }).session
+      const result = await runAttendanceResultOperationTransactionV1(observed, async (trx) => {
         bodies += 1
-        return lockAttendanceCleaningSource(observed.query, input, seed)
+        return lockAttendanceCleaningSource(trx.query, input, seed)
       }, { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp', 'sheet_catalog'] })
       expect(inserted && edited).toBe(true)
       expect(bodies).toBe(2)
@@ -401,7 +403,7 @@ suite('ACP projection authority real database', () => {
       ])
       expect(result.record.canonical_record_id).toBe(recordId)
       expect(result.projection.data[requested]).toBe(true)
-      await expect(runAttendanceResultOperationTransactionV1(observed, () => lockAttendanceCleaningSource(observed.query, input,
+      await expect(runAttendanceResultOperationTransactionV1(observed, (trx) => lockAttendanceCleaningSource(trx.query, input,
         { ...seed, canonicalRecordId: randomUUID() }),
       { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp', 'sheet_catalog'] })).rejects.toThrow()
     } finally {
@@ -417,18 +419,18 @@ suite('ACP projection authority real database', () => {
       const client = await pool.connect()
       let injected = false
       let bodyCalls = 0
-      const connection = { query: async (statement: string, params?: readonly unknown[]) => {
+      const connection = attendanceOwnedNativeQueryProbeV1(pool, client, async ({ text: statement, next }) => {
         const matches = fault === 'acquire' ? statement.startsWith('SELECT pg_try_advisory_lock')
           : fault === 'unlock' ? statement.startsWith('SELECT pg_advisory_unlock')
             : statement.startsWith(fault.toUpperCase())
-        const result = await client.query(statement, params ? [...params] : [])
+        const result = await next()
         if (matches && !injected) {
           injected = true
           // Lose the response after the real server action, not before it.
           throw new Error('SYNTHETIC_LOST_RESPONSE')
         }
         return result
-      } }
+      }).session
       try {
         await expect(runAttendanceResultOperationTransactionV1(connection, async () => {
           bodyCalls += 1
@@ -461,15 +463,14 @@ suite('ACP projection authority real database', () => {
     await pool.query('INSERT INTO meta_records (id, sheet_id, data) VALUES ($1, $2, $3)',
       ['rec_acp', 'sheet_acp', JSON.stringify({ [rowKeyField]: 'synthetic-row', [requested]: true, [reason]: 'synthetic reason' })])
     const client = await pool.connect()
-    const connection = { query: (statement: string, params?: readonly unknown[]) => client.query(statement, params ? [...params] : []) }
-    const check = () => runAttendanceResultOperationTransactionV1(connection, async () =>
-      lockAttendanceCleaningProjectionAccess((statement, params) => client.query(statement, params),
+    const check = () => runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), async (trx) =>
+      lockAttendanceCleaningProjectionAccess((statement, params) => trx.query(statement, params),
         { actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', orgId: 'org-acp', projectionRecordId: 'rec_acp' }),
     { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })
     try {
       expect((await check()).fieldIds).toEqual({ requested, reason })
       let duplicateCommitted = false
-      const insertBeforeFence = async (statement: string, params?: readonly unknown[]) => {
+      const insertBeforeFence = attendanceOwnedNativeQueryProbeV1(pool, client, async ({ text: statement, next }) => {
           if ((statement === 'SELECT pg_advisory_xact_lock(hashtext($1))'
             || statement === 'SELECT pg_try_advisory_lock($1::bigint) AS acquired') && !duplicateCommitted) {
             const creator = await pool.connect()
@@ -481,28 +482,30 @@ suite('ACP projection authority real database', () => {
               duplicateCommitted = true
             } finally { creator.release() }
           }
-          return connection.query(statement, params)
-      }
-      await expect(runAttendanceResultOperationTransactionV1({ query: insertBeforeFence }, async () =>
-        lockAttendanceCleaningProjectionAccess(insertBeforeFence,
+          return next()
+      })
+      await expect(runAttendanceResultOperationTransactionV1(insertBeforeFence.session, async (trx) =>
+        lockAttendanceCleaningProjectionAccess(trx.query,
           { actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', orgId: 'org-acp', projectionRecordId: 'rec_acp' }),
       { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })).rejects.toThrow('ATTENDANCE_CLEANING_FORBIDDEN')
+      insertBeforeFence.restore()
       expect(duplicateCommitted).toBe(true)
       await pool.query("DELETE FROM meta_records WHERE id = 'rec_snapshot_duplicate'")
       // The deny commits exactly before the fence. Moving that fence after the
       // wrapper's first SELECT leaves an old snapshot and makes this reject RED.
       let denyCommitted = false
-      const interleaved = { query: async (statement: string, params?: readonly unknown[]) => {
+      const interleaved = attendanceOwnedNativeQueryProbeV1(pool, client, async ({ text: statement, next }) => {
         if (/^LOCK TABLE/.test(statement) && !denyCommitted) {
           await pool.query("INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ('sheet_acp', $1, 'user', 'actor-acp', true, true)", [reason])
           denyCommitted = true
         }
-        return connection.query(statement, params)
-      } }
-      await expect(runAttendanceResultOperationTransactionV1(interleaved, async () =>
-        lockAttendanceCleaningProjectionAccess((statement, params) => client.query(statement, params),
+        return next()
+      })
+      await expect(runAttendanceResultOperationTransactionV1(interleaved.session, async (trx) =>
+        lockAttendanceCleaningProjectionAccess(trx.query,
           { actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', orgId: 'org-acp', projectionRecordId: 'rec_acp' }),
       { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })).rejects.toThrow('ATTENDANCE_CLEANING_FORBIDDEN')
+      interleaved.restore()
       expect(denyCommitted).toBe(true)
       await pool.query('DELETE FROM field_permissions')
       expect((await check()).projection.id).toBe('rec_acp')
@@ -524,16 +527,16 @@ suite('ACP projection authority real database', () => {
       let inserted = false
       try {
         const pid = (await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
-        await runAttendanceResultOperationTransactionV1(connection, async () => {
-        await lockAttendanceCleaningProjectionAccess((statement, params) => client.query(statement, params),
+        await runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), async (trx) => {
+        await lockAttendanceCleaningProjectionAccess((statement, params) => trx.query(statement, params),
           { actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', orgId: 'org-acp', projectionRecordId: 'rec_acp' })
         insertion = writer.query("INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ('sheet_acp', $1, 'user', 'actor-acp', true, true)", [reason])
           .then(() => { inserted = true })
         let waiting = false
         const deadline = Date.now() + 2000
         while (!inserted && !waiting && Date.now() < deadline) {
-          await client.query('SELECT pg_stat_clear_snapshot()')
-          const state = await client.query("SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1", [pid])
+          await trx.query('SELECT pg_stat_clear_snapshot()')
+          const state = await trx.query("SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1", [pid])
           waiting = state.rows[0]?.wait_event_type === 'Lock'
         }
         expect(waiting, 'new deny must wait for the ACP authority transaction').toBe(true)

@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -16,18 +20,17 @@ import { OnlinePunchConnectionUncertainError } from '../online-punch-request'
 import { coordinatedTransactionV1 } from '../coordination/settlement-coordination-port'
 import { ORG, REQUEST, setupFakeCoordination } from '../../../tests/helpers/settlement-coordination-fakes'
 
-/** A caller-supplied connection as the runner sees it: idle on entry (the probe gets 25P01), scripted COMMIT / ROLLBACK. */
-function connection(script: { commit?: () => void; rollback?: () => void } = {}) {
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
+
+/** Unit-only managed checkout: protocol-idle on entry, scripted COMMIT / ROLLBACK. */
+async function connection(script: { commit?: () => void; rollback?: () => void } = {}) {
   const sent: string[] = []
-  const client = {
-    query: async (sql: string) => {
-      sent.push(sql)
-      if (sql === 'SAVEPOINT w4c5_idle_probe') throw { code: '25P01' }
-      if (sql === 'COMMIT') script.commit?.()
-      if (sql === 'ROLLBACK') script.rollback?.()
-      return { rows: [] }
-    },
-  }
+  const { client } = await createAttendanceOwningSessionUnitFixture(async (sql: string) => {
+    sent.push(sql)
+    if (sql === 'COMMIT') script.commit?.()
+    if (sql === 'ROLLBACK') script.rollback?.()
+    return { rows: [] }
+  })
   return { sent, client }
 }
 
@@ -35,11 +38,33 @@ const begins = (sent: readonly string[]) => sent.filter((sql) => sql.startsWith(
 const sqlError = (code: string, message = `test: ${code}`) => Object.assign(new Error(message), { code })
 
 describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义)', () => {
+  it.each(['T', 'E', '?'] as const)('refuses protocol %s without SQL, body, cleanup or uncertainty marking', async initialStatus => {
+    const queryFailure = Object.freeze(sqlError('08006', 'must not reach query'))
+    const query = vi.fn(async () => { throw queryFailure })
+    const body = vi.fn(async () => 'unreachable')
+    const { client } = await createAttendanceOwningSessionUnitFixture(query, { initialStatus })
+    const failure = await runAttendanceResultOperationTransactionV1(client, body).catch(error => error)
+    expect(failure).toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+    expect(isAttendanceW4ConnectionUncertainV1(failure)).toBe(false)
+    expect(isAttendanceW4ConnectionUncertainV1(queryFailure)).toBe(false)
+    expect(query).not.toHaveBeenCalled()
+    expect(body).not.toHaveBeenCalled()
+  })
+
+  it('refuses a raw query-only wrapper even when its script claims idle', async () => {
+    const query = vi.fn(async () => { throw { code: '25P01' } })
+    const body = vi.fn(async () => 'unreachable')
+    await expect(runAttendanceResultOperationTransactionV1({ query } as never, body))
+      .rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+    expect(query).not.toHaveBeenCalled()
+    expect(body).not.toHaveBeenCalled()
+  })
+
   it('a failed ROLLBACK after a retryable body error: no second attempt on this connection, the same error object comes out marked, code and shape unchanged', async () => {
     const error = sqlError('40001')
     const keysBefore = Object.keys(error)
     const jsonBefore = JSON.stringify(error)
-    const { sent, client } = connection({
+    const { sent, client } = await connection({
       rollback: () => {
         throw new Error('test: rollback failed')
       },
@@ -59,7 +84,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
 
   it('a COMMIT that fails with anything but 40001 / 40P01 comes out marked; the cleanup ROLLBACK is still attempted once; no retry', async () => {
     const error = sqlError('57014')
-    const { sent, client } = connection({
+    const { sent, client } = await connection({
       commit: () => {
         throw error
       },
@@ -77,7 +102,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
   it('a COMMIT that fails with 40001 is not marked and is retried as before; the second attempt commits', async () => {
     let commits = 0
     const error = sqlError('40001')
-    const { sent, client } = connection({
+    const { sent, client } = await connection({
       commit: () => {
         commits += 1
         if (commits === 1) throw error
@@ -91,7 +116,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
   it('a body error with a successful ROLLBACK is not marked: a retryable one is retried, any other goes out unchanged after one attempt', async () => {
     const retryable = sqlError('40P01')
     let runs = 0
-    const first = connection()
+    const first = await connection()
     await expect(
       runAttendanceResultOperationTransactionV1(first.client, async () => {
         runs += 1
@@ -103,7 +128,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
     expect(begins(first.sent)).toBe(2)
 
     const business = Object.assign(new Error('test: business'), { code: 'ATTENDANCE_TEST_BUSINESS' })
-    const second = connection()
+    const second = await connection()
     await expect(runAttendanceResultOperationTransactionV1(second.client, async () => Promise.reject(business))).rejects.toBe(business)
     expect(isAttendanceW4ConnectionUncertainV1(business)).toBe(false)
     expect(begins(second.sent)).toBe(1)
@@ -111,7 +136,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
 
   it('a frozen error object is remembered by identity: still recognised, still frozen, no property added', async () => {
     const error = Object.freeze(sqlError('40001', 'test: frozen'))
-    const { client } = connection({
+    const { client } = await connection({
       rollback: () => {
         throw new Error('test: rollback failed')
       },
@@ -123,7 +148,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
   })
 
   it('a thrown primitive cannot carry the mark: it travels as the cause of the registry error', async () => {
-    const { client } = connection({
+    const { client } = await connection({
       rollback: () => {
         throw new Error('test: rollback failed')
       },
@@ -167,7 +192,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
   })
 
   it('the fenced path keeps its own class on a failed ROLLBACK (unchanged behaviour)', async () => {
-    const { client } = connection({
+    const { client } = await connection({
       rollback: () => {
         throw new Error('test: rollback failed')
       },
@@ -182,7 +207,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
 
   it('the fenced path keeps its own class on a COMMIT that fails with anything but 40001 / 40P01, and the COMMIT error itself is not marked (unchanged behaviour)', async () => {
     const commitError = sqlError('57014')
-    const { sent, client } = connection({
+    const { sent, client } = await connection({
       commit: () => {
         throw commitError
       },

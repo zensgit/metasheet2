@@ -1,3 +1,4 @@
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
 /**
  * W4C-5 operator transition tooling — real-PostgreSQL proof.
  *
@@ -20,6 +21,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1, withAttendanceExclusiveIdleSessionV1 } from '../../src/attendance/attendance-owning-session'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import {
   planAttendanceCalculationRolloutTransitionV1,
@@ -32,7 +34,6 @@ import {
   acquireAttendanceCalculationRolloutLockSessionExclusiveV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   releaseAttendanceCalculationRolloutLockSessionExclusiveV1,
-  type AttendanceW4TransactionClientV1,
 } from '../../src/attendance/w4c0-identity'
 import {
   ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
@@ -171,26 +172,17 @@ async function createBase(pool: Pool): Promise<void> {
     )`)
 }
 
-function transactionClient(client: PoolClient): AttendanceW4TransactionClientV1 {
-  return {
-    query: (text, values) =>
-      client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>,
-  }
-}
+
 
 /**
- * Same adapter as `transactionClient`, but also appends every statement TEXT to `log` before
- * delegating — used by the P2-2/F2 ordering proofs (PR #4839 P3 gate, 20260810) to assert that
- * the idle-connection guard's own `SAVEPOINT w4c5_idle_probe` is genuinely the FIRST statement
- * `plan` issues on a caller-supplied connection, never a predicate SELECT that ran before it.
+ * Native recording below the managed lease. Non-idle refusal must record zero
+ * statements; the plan sweep cases below positively exercise this same observer.
  */
-function loggingTransactionClient(client: PoolClient, log: string[]): AttendanceW4TransactionClientV1 {
-  return {
-    query: (text, values) => {
-      log.push(text)
-      return client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>
-    },
-  }
+function loggingTransactionClient(pool: Pool, client: PoolClient, log: string[]) {
+  return attendanceOwnedNativeQueryProbeV1(pool, client, ({ text, next }) => {
+    log.push(text)
+    return next()
+  }).session
 }
 
 function baseManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -371,7 +363,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     await adminPool.query(`CREATE DATABASE ${scratchName}`)
     const scratchUrl = new URL(dbUrl as string)
     scratchUrl.pathname = `/${scratchName}`
-    pool = new Pool({ connectionString: scratchUrl.toString() })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchUrl.toString() })
     await createBase(pool)
     const db = new Kysely<never>({ dialect: new PostgresDialect({ pool }) })
     await w4c0Up(db)
@@ -393,12 +385,10 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       allow(orgId)
       const client = await pool.connect()
       const statements: string[] = []
-      const spy: AttendanceW4TransactionClientV1 = {
-        query: (text, values) => {
-          statements.push(text.trim())
-          return client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>
-        },
-      }
+      const spy = attendanceOwnedNativeQueryProbeV1(pool, client, ({ text, next }) => {
+        statements.push(text.trim())
+        return next()
+      }).session
       try {
         const plan = await planAttendanceCalculationRolloutTransitionV1(spy, { orgId, targetState: 'shadow' })
         expect(plan.rowExists).toBe(false)
@@ -425,7 +415,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         expect(before).toBeNull()
         expect(beforeEvents).toBe(0)
 
-        await planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+        await planAttendanceCalculationRolloutTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'shadow',
         })
@@ -446,7 +436,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       allow(orgId)
       const driveClient = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(driveClient), {
           orgId,
           actorId,
           correlationId: crypto.randomUUID(),
@@ -475,14 +465,10 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
 
       const sweepClient = await pool.connect()
       const statements: string[] = []
-      const spy: AttendanceW4TransactionClientV1 = {
-        query: (text, values) => {
-          statements.push(text.trim())
-          return sweepClient.query(text, values as unknown[]) as unknown as Promise<{
-            rows: Array<Record<string, unknown>>
-          }>
-        },
-      }
+      const spy = attendanceOwnedNativeQueryProbeV1(pool, sweepClient, ({ text, next }) => {
+        statements.push(text.trim())
+        return next()
+      }).session
       let plan: AttendanceRolloutTransitionPlanV1
       try {
         plan = await planAttendanceCalculationRolloutTransitionV1(spy, { orgId, targetState: 'eligible' })
@@ -570,7 +556,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         // actually exercises, so it never masks what this test proves).
         __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
         for (const [targetState, expectedState, expectedVersion] of chain) {
-          await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+          await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(driveClient), {
             orgId,
             actorId,
             correlationId: crypto.randomUUID(),
@@ -601,14 +587,10 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
 
       const sweepClient = await pool.connect()
       const statements: string[] = []
-      const spy: AttendanceW4TransactionClientV1 = {
-        query: (text, values) => {
-          statements.push(text.trim())
-          return sweepClient.query(text, values as unknown[]) as unknown as Promise<{
-            rows: Array<Record<string, unknown>>
-          }>
-        },
-      }
+      const spy = attendanceOwnedNativeQueryProbeV1(pool, sweepClient, ({ text, next }) => {
+        statements.push(text.trim())
+        return next()
+      }).session
       let plan: AttendanceRolloutTransitionPlanV1
       try {
         plan = await planAttendanceCalculationRolloutTransitionV1(spy, { orgId, targetState: 'authoritative' })
@@ -774,7 +756,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expectedState: string,
       expectedVersion: number,
     ): Promise<void> {
-      await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+      await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
         orgId,
         actorId,
         correlationId: crypto.randomUUID(),
@@ -977,7 +959,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       allow(orgId)
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           actorId,
           correlationId: crypto.randomUUID(),
@@ -991,7 +973,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         })
 
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId,
             actorId,
             correlationId: crypto.randomUUID(),
@@ -1016,7 +998,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       allow(orgId)
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           actorId,
           correlationId: crypto.randomUUID(),
@@ -1098,14 +1080,14 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         // Setup only: drives the org to `eligible` (production-default undelivered Gate D
         // values never block this — Gate D is keyed strictly on `targetState === 'authoritative'`
         // and none of these three steps target it).
-        await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(driveClient), {
           orgId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c5-tool-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64(`${orgId}:gate-d-cli:shadow`),
           evidenceReferences: { imageSha: 'x', ownerAuthorizationRef: 'y', syntheticOrgRef: 'z' } as EvidenceReferencesV1,
           reasonCode: 'rollout_transition',
         })
-        await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(driveClient), {
           orgId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c5-tool-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64(`${orgId}:gate-d-cli:eligible`),
@@ -1238,10 +1220,11 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       const contender = await pool.connect()
       try {
         const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
-        await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(transactionClient(holder), orgKey)
-        try {
+        await withAttendanceExclusiveIdleSessionV1(attendanceOwningSessionForClientV1(holder), async holderLease => {
+          await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(holderLease, orgKey)
+          try {
           await expect(
-            transitionAttendanceCalculationRolloutV1(transactionClient(contender), {
+            transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(contender), {
               orgId,
               actorId,
               correlationId: crypto.randomUUID(),
@@ -1254,9 +1237,10 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
               reasonCode: 'rollout_transition',
             }),
           ).rejects.toMatchObject({ code: 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY' })
-        } finally {
-          await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(transactionClient(holder), orgKey)
-        }
+          } finally {
+            await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(holderLease, orgKey)
+          }
+        })
         expect(await rolloutRow(orgId)).toBeNull()
       } finally {
         holder.release()
@@ -1271,7 +1255,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       allow(orgId)
       const client = await pool.connect()
       try {
-        const plan = await planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+        const plan = await planAttendanceCalculationRolloutTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'shadow',
         })
@@ -1306,8 +1290,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     // null` check was zero information (`plan` never issues DML on ANY path — see the dedicated
     // "plan reporter: zero-write proof" suite above — so it is null regardless of whether the
     // guard fired correctly) and has been dropped. The "before any DB read" ordering claim is now
-    // asserted for real via `loggingTransactionClient`, which records every statement `plan`
-    // issues: the FIRST one recorded must be the guard's own `SAVEPOINT`.
+    // asserted via native recording: admission must issue no SQL on the caller's transaction.
     it('rejects a plan called on a connection that already has an open, non-aborted transaction, before any DB read (real query-order proof)', async () => {
       const orgId = crypto.randomUUID()
       allow(orgId)
@@ -1319,18 +1302,14 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         await client.query('INSERT INTO w4c5_p22_probe_marker VALUES (1)')
         const queryLog: string[] = []
         await expect(
-          planAttendanceCalculationRolloutTransitionV1(loggingTransactionClient(client, queryLog), {
+          planAttendanceCalculationRolloutTransitionV1(loggingTransactionClient(pool, client, queryLog), {
             orgId,
             targetState: 'shadow',
           }),
         ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
-        // F1(c): the FIRST statement `plan` issued at all is the idle probe's own SAVEPOINT —
-        // never a predicate SELECT that ran before it.
-        expect(queryLog[0]).toBe('SAVEPOINT w4c5_idle_probe')
-        // F1(a): the caller's own pre-opened transaction — including the row inserted before the
-        // guard ran — is still intact afterward. A bare `ROLLBACK` (destroying the whole
-        // transaction) instead of the correct `ROLLBACK TO SAVEPOINT` would make this SELECT fail
-        // (transaction aborted / temp table gone), not merely return something different.
+        // F1(c): native protocol admission refuses before any callee SQL.
+        expect(queryLog).toEqual([])
+        // The caller's pre-opened transaction and marker row remain intact.
         await expect(client.query('SELECT id FROM w4c5_p22_probe_marker')).resolves.toMatchObject({
           rows: [{ id: 1 }],
         })
@@ -1355,12 +1334,12 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         await expect(client.query('SELECT 1/0')).rejects.toMatchObject({ code: '22012' }) // division_by_zero -> aborts the transaction
         const queryLog: string[] = []
         await expect(
-          planAttendanceCalculationRolloutTransitionV1(loggingTransactionClient(client, queryLog), {
+          planAttendanceCalculationRolloutTransitionV1(loggingTransactionClient(pool, client, queryLog), {
             orgId,
             targetState: 'shadow',
           }),
         ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' }) // never the raw '25P02'
-        expect(queryLog[0]).toBe('SAVEPOINT w4c5_idle_probe')
+        expect(queryLog).toEqual([])
         // The guard must not have tried to "fix" the aborted transaction (no COMMIT/ROLLBACK of
         // its own on this path — there is nothing to clean up, the probe SAVEPOINT never actually
         // ran either). The connection is left EXACTLY as the caller left it: still open, still
@@ -1373,42 +1352,25 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(await rolloutRow(orgId)).toBeNull()
     })
 
-    // P2-C (PR #4839 gate, 20260810): `assertConnectionIsIdleV1`'s cleanup, on the "SAVEPOINT
-    // succeeded" branch (an open, non-aborted transaction already existed), issues BOTH
-    // `ROLLBACK TO SAVEPOINT w4c5_idle_probe` (w4c0-identity.ts:1393) AND, immediately after,
-    // `RELEASE SAVEPOINT w4c5_idle_probe` (:1394) — the function's own doc comment explains why
-    // the first alone is not enough: `ROLLBACK TO SAVEPOINT` undoes work done under the
-    // savepoint but leaves the savepoint itself DEFINED in the connection's subtransaction stack;
-    // only `RELEASE SAVEPOINT` afterward actually removes it. A prior gate round claimed this
-    // `RELEASE` line was "covered by the same F1 mutation proof" above — refuted: F1's assertions
-    // (`queryLog[0]`, the temp-table row surviving) are both satisfied identically whether or not
-    // :1394 ever runs, because F1 never issues a SECOND `RELEASE SAVEPOINT` itself. This test
-    // does, from OUTSIDE the guard, playing the role of a caller checking the guard actually
-    // cleaned up: it must fail, because the guard already released the name. Deleting :1394 alone
-    // leaves every other suite green (verified by the gate round that added this test: mutate,
-    // record red, restore via `cp`) but flips this test's outcome, because a SECOND `RELEASE
-    // SAVEPOINT w4c5_idle_probe` on a savepoint the guard never released SUCCEEDS instead of
-    // failing (verified against real PostgreSQL 15 directly, both shapes, before writing this
-    // assertion).
-    it('P2-C: after a not-idle refusal, the guard has already RELEASEd its own probe savepoint — a caller-issued RELEASE SAVEPOINT afterward must fail with 3B001, proving cleanup rather than merely documenting it', async () => {
+    // P2-C now proves admission creates no savepoint at all. Record native
+    // execution on the actual T-state checkout, then independently ask PostgreSQL
+    // for the old probe name: it must be absent (3B001), leaving caller T aborted.
+    it('P2-C: not-idle admission issues zero native SQL and creates no probe savepoint; caller RELEASE fails with 3B001', async () => {
       const orgId = crypto.randomUUID()
       allow(orgId)
       const client = await pool.connect()
       try {
         await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
         await client.query('SELECT 1') // fixes the SERIALIZABLE snapshot; no write yet, no xid assigned
+        const admissionSql: string[] = []
         await expect(
-          planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+          planAttendanceCalculationRolloutTransitionV1(loggingTransactionClient(pool, client, admissionSql), {
             orgId,
             targetState: 'shadow',
           }),
         ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
-        // The guard's own SAVEPOINT probe ran and hit the "already open, non-aborted transaction"
-        // branch (never the 25P01/25P02 branches — this connection's transaction is neither
-        // absent nor aborted), so `w4c5_idle_probe` was ROLLBACK-TO'd and then RELEASEd. If
-        // `RELEASE SAVEPOINT w4c5_idle_probe` (w4c0-identity.ts:1394) had NOT run, this exact
-        // statement would SUCCEED instead (the savepoint would still be defined) — that is the
-        // load-bearing distinction this assertion is built to catch.
+        expect(admissionSql).toEqual([])
+        // PostgreSQL independently confirms the callee created no such name.
         await expect(client.query('RELEASE SAVEPOINT w4c5_idle_probe')).rejects.toMatchObject({
           code: '3B001', // invalid_savepoint_specification: "savepoint ... does not exist"
         })
@@ -1431,7 +1393,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       allow(orgId)
       const client = await pool.connect()
       try {
-        const plan = await planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+        const plan = await planAttendanceCalculationRolloutTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'shadow',
         })
@@ -1494,7 +1456,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       const client = await pool.connect()
       let plan: AttendanceRolloutTransitionPlanV1
       try {
-        plan = await planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+        plan = await planAttendanceCalculationRolloutTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'shadow',
         })

@@ -32,8 +32,8 @@
  * the dispatcher is idle. This module holds no timer; scheduling is the
  * caller's concern.
  */
-import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
-import { assertConnectionIsIdleV1 } from './w4c0-identity'
+import { assertConnectionIsIdleV1, AttendanceW4IdentityError } from './w4c0-identity'
+import { withAttendanceExclusiveIdleSessionV1, type AttendanceOwningSessionV1, type AttendanceSessionLeaseV1 } from './attendance-owning-session'
 
 export class AttendanceW4OutboxDispatchError extends Error {
   readonly code: string
@@ -83,7 +83,7 @@ interface OutboxRow {
  * Safe to call from any number of processes concurrently.
  */
 export async function dispatchAttendanceResultEventOutboxV1(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   options: AttendanceOutboxDispatchOptionsV1,
 ): Promise<AttendanceOutboxDispatchResultV1> {
   if (typeof options?.emit !== 'function') {
@@ -98,16 +98,25 @@ export async function dispatchAttendanceResultEventOutboxV1(
     throw new AttendanceW4OutboxDispatchError('W4C2_OUTBOX_BACKOFF_INVALID')
   }
 
+  return withAttendanceExclusiveIdleSessionV1(
+    connection,
+    (lease) => dispatchAttendanceResultEventOutboxOnLeaseV1(lease, options, batchLimit, retryBackoffMs),
+    () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'),
+  )
+}
+
+async function dispatchAttendanceResultEventOutboxOnLeaseV1(
+  connection: AttendanceSessionLeaseV1,
+  options: AttendanceOutboxDispatchOptionsV1,
+  batchLimit: number,
+  retryBackoffMs: number,
+): Promise<AttendanceOutboxDispatchResultV1> {
   let claimed = 0
   let delivered = 0
   let failed = 0
 
-  // Gate E (#4844) first batch: `connection` is caller-supplied, same class as the operation-
-  // registry transaction wrapper — a dirty caller connection would let this function's own
-  // unconditional COMMIT durably publish the caller's uncommitted writes (PostgreSQL only WARNs,
-  // never errors, on the nested BEGIN below). Reuses the EXISTING exported probe rather than
-  // building a second one — see its own doc comment (w4c0-identity.ts) for the SAVEPOINT-probe
-  // proof and refusal code (`W4C0_CONNECTION_NOT_IDLE`, never a raw SQLSTATE).
+  // Same-checkout exclusive admission prevents a caller transaction or query
+  // from entering between the nonmutating idle check and this BEGIN.
   await assertConnectionIsIdleV1(connection)
   await connection.query('BEGIN', [])
   try {
