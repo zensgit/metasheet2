@@ -1632,6 +1632,7 @@ exec npx vitest run \
   attendance-selfservice-dashboard \
   attendance-server-clock-view.spec.ts \
   attendance-server-clock.spec.ts \
+  attendance-web-guard-workflow.spec.ts \
   attendanceAdminEndpointCompatibility \
   attendanceAdminGuide.spec.ts \
   attendanceAudienceChipField.spec.ts \
