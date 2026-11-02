@@ -57,8 +57,10 @@ export function usePlmSearchPanel(options: UsePlmSearchPanelOptions) {
   const searchTotal = ref(0)
   const searchLoading = ref(false)
   const searchError = ref('')
+  let searchRequestGeneration = 0
 
   async function searchProducts() {
+    const requestGeneration = ++searchRequestGeneration
     searchLoading.value = true
     searchError.value = ''
     try {
@@ -68,13 +70,21 @@ export function usePlmSearchPanel(options: UsePlmSearchPanelOptions) {
         limit: searchLimit.value || 10,
         offset: 0,
       })
+      if (requestGeneration !== searchRequestGeneration) {
+        return
+      }
       searchResults.value = result.items || []
       searchTotal.value = result.total ?? searchResults.value.length
     } catch (error) {
+      if (requestGeneration !== searchRequestGeneration) {
+        return
+      }
       handleAuthError(error)
       searchError.value = getErrorMessage(error, '搜索失败')
     } finally {
-      searchLoading.value = false
+      if (requestGeneration === searchRequestGeneration) {
+        searchLoading.value = false
+      }
     }
   }
 
