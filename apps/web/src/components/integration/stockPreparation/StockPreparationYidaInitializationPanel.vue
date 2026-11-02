@@ -84,7 +84,7 @@ const probeErrorCode = ref('')
 // Initialization refusals with their own hint. The server answers ENCRYPTION_NOT_READY only before any
 // writer has run (an authorized owner, an empty slot, no crypto yet), so this one may say nothing was written.
 const initializationHints: Readonly<Record<string, string>> = Object.freeze({
-  YIDA_INITIALIZATION_ENCRYPTION_NOT_READY: '本机加密密钥未配置或仍是默认值，初始化未执行，未写入任何内容。请先在 docker\\app.env 配置 ENCRYPTION_KEY / ENCRYPTION_SALT 并重启后端，再手动 GET 刷新状态后重新填写并初始化。',
+  YIDA_INITIALIZATION_ENCRYPTION_NOT_READY: '本机加密密钥未配置或仍是默认值，或仍是文档里的示例占位、两项互相对调或两项相同，初始化未执行，未写入任何内容。请先在 docker\\app.env 配置 ENCRYPTION_KEY / ENCRYPTION_SALT 并重启后端，再手动 GET 刷新状态后重新填写并初始化。',
 })
 const errorHint = computed(() => {
   if (errorCode.value === '') return ''

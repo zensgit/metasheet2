@@ -13,6 +13,8 @@ import * as authority from '../../src/integration/automation-live-authority'
 import * as bootstrap from '../../src/integration/yida-initialization-bootstrap'
 import { createYidaInitializationRuntime, type YidaInitializationRuntimeBinding, type YidaInitializationInput } from '../../src/integration/yida-initialization-runtime'
 import * as encryptedSecrets from '../../src/security/encrypted-secrets'
+import * as requestContext from '../../src/context/request-context'
+import * as coreLogger from '../../src/core/logger'
 import { PluginRuntimeSecurityService } from '../../src/security/plugin-runtime-security-service'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
@@ -190,6 +192,8 @@ realdb('Approved A initialization — actual PG/live ACL/native producer/transac
       if (specifier === './automation-live-authority') return authority
       if (specifier === './yida-initialization-bootstrap') return bootstrap
       if (specifier === '../security/encrypted-secrets') return encryptedSecrets
+      if (specifier === '../context/request-context') return requestContext
+      if (specifier === '../core/logger') return coreLogger
       throw new Error('Unexpected mutated module dependency')
     }, exports)
     const original = await active(); await rejected(original.runtime.status(secondAdmin), 'DENIED')

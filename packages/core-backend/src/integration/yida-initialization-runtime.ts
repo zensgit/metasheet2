@@ -1,6 +1,8 @@
 import { types } from 'node:util'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
-import { getEncryptionMaterialIssues } from '../security/encrypted-secrets'
+import { getRequestContextStorage } from '../context/request-context'
+import { Logger, runWithLogContext } from '../core/logger'
+import { DEFAULT_ENCRYPTION_KEY, DEFAULT_ENCRYPTION_SALT, getEncryptionMaterialIssues } from '../security/encrypted-secrets'
 import { assertAutomationIntegrationActor, AutomationActorAuthorityError } from './automation-live-authority'
 import {
   YidaInitializationError, closeYidaInitializationError, lockYidaInitializationSlot,
@@ -141,6 +143,46 @@ function view(commandId: string, draft: YidaInitializationDraft | null): YidaIni
 type Run = { controller: AbortController; pending: Promise<unknown>; dependencies: Set<Promise<unknown>> }
 type Registration = { closed: boolean; createProducer: YidaInitializationRuntimeBinding['createInitializationProducer']; runs: Set<Run>; draining?: Promise<void> }
 
+// The sample values the docs print for ENCRYPTION_KEY / ENCRYPTION_SALT (the docker/*.template and *.env.example
+// files ship both lines empty): docs/deployment/multitable-windows-onprem-easy-start-20260319.md and
+// docs/CONFIG_SECRET_MANAGEMENT_REPORT.md. Any other value wrapped in <...> is an unfilled placeholder too.
+const SAMPLE_ENCRYPTION_VALUES: readonly string[] = Object.freeze(['<openssl rand -hex 32>',
+  '<openssl rand -hex 32, generated separately>', 'your-32-byte-key-here', 'your-salt-here'])
+const sealValue = (value: unknown) => typeof value === 'string' ? value.trim() : ''
+const placeholder = (value: string) => /^<[\s\S]*>$/u.test(value) || SAMPLE_ENCRYPTION_VALUES.includes(value)
+/**
+ * L4 only; pure and values-free. getEncryptionMaterialIssues (shared with every other feature, unchanged) compares
+ * each variable only with its own default. L4 seals for good (generation 1, no rotation), so it also refuses material
+ * that passes those checks but is public or obviously invalid: a documented placeholder, the two built-in defaults
+ * swapped, or KEY equal to SALT. Empty = no extra issue; unset/blank/default values are left to the shared checks.
+ */
+export function getYidaSealMaterialIssues(env: Readonly<Record<string, string | undefined>>): string[] {
+  const key = sealValue(env.ENCRYPTION_KEY), salt = sealValue(env.ENCRYPTION_SALT), issues: string[] = []
+  if (key && placeholder(key)) issues.push('ENCRYPTION_KEY is an unfilled placeholder')
+  if (salt && placeholder(salt)) issues.push('ENCRYPTION_SALT is an unfilled placeholder')
+  if (key === DEFAULT_ENCRYPTION_SALT) issues.push('ENCRYPTION_KEY is the built-in default salt')
+  if (salt === DEFAULT_ENCRYPTION_KEY) issues.push('ENCRYPTION_SALT is the built-in default key')
+  if (key && key === salt) issues.push('ENCRYPTION_KEY equals ENCRYPTION_SALT')
+  return issues
+}
+/** Short material is sealed (an existing short key may already protect other stores) but warned about once sealed. */
+export function isYidaSealMaterialShort(env: Readonly<Record<string, string | undefined>>): boolean {
+  return sealValue(env.ENCRYPTION_KEY).length < 32 || sealValue(env.ENCRYPTION_SALT).length < 32
+}
+export const YIDA_SHORT_SEAL_MATERIAL_WARNING = 'YiDa initialization sealed under an encryption key or salt shorter than '
+  + '32 characters; plan a key rotation before the first real send.'
+let sealLogger: Logger | undefined
+function warnShortSealMaterial(): void {
+  // Advisory, after COMMIT: it never turns a committed seal into a failure. In the owner HTTP request context the
+  // private observation surface (core/logger.ts) rewrites every message to YIDA_OWNER_HTTP_WARN, which would drop
+  // the advice. It is a server constant (no value, length or caller data), so it is written outside the request and
+  // log contexts and carries no correlation, request, user or tenant field.
+  try {
+    getRequestContextStorage().exit(() => runWithLogContext({}, () =>
+      (sealLogger ??= new Logger('YidaInitialization')).warn(YIDA_SHORT_SEAL_MATERIAL_WARNING)))
+  } catch { /* advisory only */ }
+}
+
 /** Local configuration authority. No enablement read, send authority, grant, token or fetch. */
 export function createYidaInitializationRuntime(dependencies: YidaInitializationRuntimeDependencies) {
   if (!dependencies?.database || typeof dependencies.database.transaction !== 'function'
@@ -173,6 +215,7 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
         finally { run.dependencies.delete(pending) }
       }
       run.pending = Promise.resolve().then(async () => {
+        let shortMaterial = false
         try {
           checkpoint()
           const result = await checked(() => transaction(async raw => {
@@ -245,6 +288,10 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
             // so refuse unless the material passes the production checks, in EVERY NODE_ENV. Only the
             // authorized anchor owner reaches this line; no producer, writer or crypto has run yet.
             if (getEncryptionMaterialIssues(process.env).length > 0) fail('ENCRYPTION_NOT_READY')
+            // Same refusal, still before the producer and in the same synchronous step: public or obviously
+            // invalid material that passes those checks (see getYidaSealMaterialIssues). No reason in the reply.
+            if (getYidaSealMaterialIssues(process.env).length > 0) fail('ENCRYPTION_NOT_READY')
+            shortMaterial = isYidaSealMaterialShort(process.env)
             const { initialize } = producer()
             const produced = record(await checked(() => initialize(trx, input)), ['draft', 'credentialRef', 'credentialGeneration', 'targetRef'])
             const draft = draftView(produced.draft), credentialRef = id(produced.credentialRef), targetRef = id(produced.targetRef)
@@ -263,6 +310,7 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
             checkpoint(); return view(commandId, draft)
           }))
           checkpoint()
+          if (shortMaterial) warnShortSealMaterial()
           return result
         } catch (error) {
           // Including a COMMIT acknowledgement loss or post-COMMIT cancellation:
