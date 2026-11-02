@@ -1,5 +1,6 @@
 import { types } from 'node:util'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
+import { getEncryptionMaterialIssues } from '../security/encrypted-secrets'
 import { assertAutomationIntegrationActor, AutomationActorAuthorityError } from './automation-live-authority'
 import {
   YidaInitializationError, closeYidaInitializationError, lockYidaInitializationSlot,
@@ -239,6 +240,11 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
               return view(commandId, draft)
             }
             if (!input) return view(commandId, null)
+            // L4 seals the materials, target and draft for good (generation 1, no rotation). Outside
+            // NODE_ENV=production resolveEncryptionMaterial falls back to the PUBLIC built-in defaults,
+            // so refuse unless the material passes the production checks, in EVERY NODE_ENV. Only the
+            // authorized anchor owner reaches this line; no producer, writer or crypto has run yet.
+            if (getEncryptionMaterialIssues(process.env).length > 0) fail('ENCRYPTION_NOT_READY')
             const { initialize } = producer()
             const produced = record(await checked(() => initialize(trx, input)), ['draft', 'credentialRef', 'credentialGeneration', 'targetRef'])
             const draft = draftView(produced.draft), credentialRef = id(produced.credentialRef), targetRef = id(produced.targetRef)

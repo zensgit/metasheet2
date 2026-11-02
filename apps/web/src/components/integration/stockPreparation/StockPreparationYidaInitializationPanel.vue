@@ -81,8 +81,16 @@ const shownOutcome = computed(() => testedVersion.value >= 0 && outcomePair !== 
   && outcomePair.appKey === material.appKey && outcomePair.appSecret === material.appSecret ? connectionOutcome.value : '')
 // The two YIDA_INITIALIZATION_* hints above describe the probe request only, so they need its own code.
 const probeErrorCode = ref('')
-const errorHint = computed(() => errorCode.value !== '' && (errorCode.value.startsWith('YIDA_CONNECTION_TEST_')
-  || errorCode.value === probeErrorCode.value) ? refusalHints[errorCode.value] ?? '' : '')
+// Initialization refusals with their own hint. The server answers ENCRYPTION_NOT_READY only before any
+// writer has run (an authorized owner, an empty slot, no crypto yet), so this one may say nothing was written.
+const initializationHints: Readonly<Record<string, string>> = Object.freeze({
+  YIDA_INITIALIZATION_ENCRYPTION_NOT_READY: '本机加密密钥未配置或仍是默认值，初始化未执行，未写入任何内容。请先在 docker\\app.env 配置 ENCRYPTION_KEY / ENCRYPTION_SALT 并重启后端，再手动 GET 刷新状态后重新填写并初始化。',
+})
+const errorHint = computed(() => {
+  if (errorCode.value === '') return ''
+  if (errorCode.value.startsWith('YIDA_CONNECTION_TEST_') || errorCode.value === probeErrorCode.value) return refusalHints[errorCode.value] ?? ''
+  return initializationHints[errorCode.value] ?? ''
+})
 // The owner override answers the exact appKey/appSecret it was ticked for: any later edit to either one
 // spends it, whether back to the tested pair or on to a third value, so a different value needs a fresh tick.
 watch([() => material.appKey, () => material.appSecret], () => { overrideTested.value = false }, { flush: 'sync' })
