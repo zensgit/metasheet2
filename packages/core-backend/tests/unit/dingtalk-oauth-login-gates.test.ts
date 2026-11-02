@@ -168,6 +168,16 @@ describe('dingtalk oauth login gates', () => {
     await __resetDingTalkOAuthStateStoreForTests()
   })
 
+  it.each(['deleted_at', 'purged_at'])('rejects an identity-linked account marked %s before identity writes', async (marker) => {
+    pgMocks.query.mockResolvedValueOnce({ rows: [{
+      id: 'user-recycled', email: 'synthetic@example.test', name: 'Synthetic', role: 'user',
+      is_active: true, activation_status: 'activated', [marker]: '2026-10-01T00:00:00Z',
+    }] })
+    await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 403, code: 'local_user_disabled' })
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+    expect(String(pgMocks.query.mock.calls[0][0])).toContain(marker)
+  })
+
   it('rejects email-linked login when strict grant mode is enabled and no grant exists', async () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
