@@ -2072,46 +2072,65 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     ])
     expect(pendingBefore.every((r) => r.delivery_state === 'pending')).toBe(true)
 
-    const delivered: Array<{ eventKind: string; payload: unknown }> = []
-    const raw = await pool.connect()
+    // This is a shared database: older foreign pending rows can fill the
+    // dispatcher's unchanged 100-row batch. Keep those rows locked, unchanged,
+    // while checking this run's exactly-once deliveries through SKIP LOCKED.
+    const foreignPendingLock = await pool.connect()
     try {
-      const outcome = await dispatchAttendanceResultEventOutboxV1(raw as unknown as AttendanceW4TransactionClientV1, {
-        emit: async (delivery) => {
-          delivered.push({ eventKind: delivery.eventKind, payload: delivery.payload })
-        },
+      await foreignPendingLock.query('BEGIN')
+      await foreignPendingLock.query(
+        `SELECT id FROM attendance_result_event_outbox
+          WHERE org_id <> $1 AND delivery_state = 'pending'
+          FOR UPDATE SKIP LOCKED`,
+        [orgId],
+      )
+      const delivered: Array<{ eventKind: string; payload: unknown }> = []
+      const raw = await pool.connect()
+      try {
+        const outcome = await dispatchAttendanceResultEventOutboxV1(raw as unknown as AttendanceW4TransactionClientV1, {
+          emit: async (delivery) => {
+            delivered.push({ eventKind: delivery.eventKind, payload: delivery.payload })
+          },
+        })
+        expect(outcome.delivered).toBeGreaterThanOrEqual(2)
+      } finally {
+        raw.release()
+      }
+      const ourDeliveries = delivered.filter(
+        (d) => (d.payload as { orgId?: string })?.orgId === orgId,
+      )
+      expect(ourDeliveries.length).toBe(2)
+      const absenceEvent = ourDeliveries.find((d) => d.eventKind === 'attendance.absence.generated')
+      expect(absenceEvent?.payload).toMatchObject({ orgId, workDate, total: 1 })
+      const reviewEvent = ourDeliveries.find((d) => d.eventKind === 'attendance.work_date.review_required')
+      expect(reviewEvent?.payload).toMatchObject({
+        orgId,
+        workDate,
+        total: 1,
+        reasons: [{ userId: reviewUser, reasonCode: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS' }],
       })
-      expect(outcome.delivered).toBeGreaterThanOrEqual(2)
+  
+      // A second drain delivers NOTHING further for this org — the one-way
+      // pending -> delivered state machine, not a re-send.
+      const raw2 = await pool.connect()
+      try {
+        const secondDelivered: unknown[] = []
+        await dispatchAttendanceResultEventOutboxV1(raw2 as unknown as AttendanceW4TransactionClientV1, {
+          emit: async (delivery) => { secondDelivered.push(delivery) },
+        })
+        expect(secondDelivered.filter((d: any) => d.payload?.orgId === orgId).length).toBe(0)
+      } finally {
+        raw2.release()
+      }
+      const pendingAfter = await scheduledRunOutboxRows(orgId)
+      expect(pendingAfter.every((r) => r.delivery_state === 'delivered')).toBe(true)
     } finally {
-      raw.release()
+      try {
+        await foreignPendingLock.query('ROLLBACK')
+      } finally {
+        foreignPendingLock.release()
+      }
     }
-    const ourDeliveries = delivered.filter(
-      (d) => (d.payload as { orgId?: string })?.orgId === orgId,
-    )
-    expect(ourDeliveries.length).toBe(2)
-    const absenceEvent = ourDeliveries.find((d) => d.eventKind === 'attendance.absence.generated')
-    expect(absenceEvent?.payload).toMatchObject({ orgId, workDate, total: 1 })
-    const reviewEvent = ourDeliveries.find((d) => d.eventKind === 'attendance.work_date.review_required')
-    expect(reviewEvent?.payload).toMatchObject({
-      orgId,
-      workDate,
-      total: 1,
-      reasons: [{ userId: reviewUser, reasonCode: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS' }],
-    })
-
-    // A second drain delivers NOTHING further for this org — the one-way
-    // pending -> delivered state machine, not a re-send.
-    const raw2 = await pool.connect()
-    try {
-      const secondDelivered: unknown[] = []
-      await dispatchAttendanceResultEventOutboxV1(raw2 as unknown as AttendanceW4TransactionClientV1, {
-        emit: async (delivery) => { secondDelivered.push(delivery) },
-      })
-      expect(secondDelivered.filter((d: any) => d.payload?.orgId === orgId).length).toBe(0)
-    } finally {
-      raw2.release()
-    }
-    const pendingAfter = await scheduledRunOutboxRows(orgId)
-    expect(pendingAfter.every((r) => r.delivery_state === 'delivered')).toBe(true)
   })
 
   it('leg 9m — gate 8, legacy byte-identity + zero run/outbox (owner red line, 2026-07-28 addendum): a `legacy_projection_only` org\'s real admin_run absence generation returns the EXACT pre-cutover response body, still fires its OWN synchronous best-effort emit (unlike leg 9\'s w4-branch directEmits===[]), and leaves all three durable run tables + the outbox at zero rows', async () => {
