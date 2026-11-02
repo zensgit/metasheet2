@@ -73,16 +73,18 @@ function canonical(value: unknown): string {
   return value
 }
 function uuid(value: unknown): string { const result = canonical(value); if (!uuidPattern.test(result)) invalid(); return result }
-// The server refuses appKey/appSecret/systemToken with surrounding whitespace or any control character
-// before any exchange or write (L4 seals them for good). This client sends only what it would accept and
-// never trims or normalizes here; the panel trims a paste before calling it.
+// The server refuses appKey/appSecret/systemToken with surrounding whitespace or with a control (Cc),
+// invisible format (Cf: zero-width, bidi, BOM) or lone surrogate (Cs) character anywhere, before any
+// exchange or write (L4 seals them for good). This client sends only what it would accept and never trims
+// or normalizes here; the panel trims a paste before calling it.
 function credential(field: unknown, maximum: number): void {
   if (typeof field !== 'string' || !field || field.length > maximum || field.trim() !== field
-    || /[\u0000-\u001f\u007f-\u009f]/u.test(field)) invalid()
+    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(field)) invalid()
 }
-/** True when a pasted appKey/appSecret/systemToken still holds whitespace or a control character once its
- * edges are trimmed: that text is not the credential, so the panel does not send it and shows a hint. */
-export function yidaCredentialHasInnerBlank(value: string): boolean { return /[\s\u0000-\u001f\u007f-\u009f]/u.test(value.trim()) }
+/** True when a pasted appKey/appSecret/systemToken still holds whitespace, a control character, an invisible
+ * format character (zero-width, bidi, BOM) or a lone surrogate once its edges are trimmed: that text is not
+ * the credential, so the panel does not send it and shows a hint. */
+export function yidaCredentialHasInnerBlank(value: string): boolean { return /[\s\p{Cc}\p{Cf}\p{Cs}]/u.test(value.trim()) }
 function draft(value: unknown): YidaOwnerDraft {
   const row = object(value, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply', 'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])
   if (row.status !== 'unverified' || row.identityKind !== 'local-unverified' || row.canSend !== false || row.canApply !== false

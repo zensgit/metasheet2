@@ -12,6 +12,9 @@ import { YidaInitializationError } from '../../src/integration/yida-initializati
 import { draftInput, syntheticMaterial } from '../utils/stock-preparation-yida-owner-http-fixture'
 
 const commandId = '11111111-1111-4111-8111-111111111111'
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
 const operationId = '22222222-2222-4222-8222-222222222222'
 const targetRef = '33333333-3333-4333-8333-333333333333'
 const rowKey = '44444444-4444-4444-8444-444444444444'
@@ -134,6 +137,27 @@ describe('YiDa initialization HTTP contract — no IO fake host port', () => {
   ] as const)('a pasted %s with %s is 400 before host invocation', async (key, _label, value) => {
     const f = port(), request = input()
     expect(await dispatch('POST', { ...request, material: { ...request.material, [key]: value } }, f.value))
+      .toEqual({ status: 400, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_INPUT' } } })
+    expect(f.calls).toHaveLength(0)
+  })
+  // Cf (zero-width, bidi, BOM) and lone surrogates (Cs) survive trim(); L4 would seal them for good (J-F1).
+  it.each([
+    ['systemToken', 'a trailing zero-width space', `synthetic-http-system-token${codeUnit(0x200b)}`],
+    ['appSecret', 'an inner zero-width space', `synthetic-http${codeUnit(0x200b)}app-secret`],
+    ['appKey', 'a leading bidi embedding', `${codeUnit(0x202a)}synthetic-http-app-key`],
+    ['systemToken', 'an inner right-to-left mark', `synthetic-http${codeUnit(0x200f)}system-token`],
+    ['appSecret', 'an inner BOM', `synthetic-http${codeUnit(0xfeff)}app-secret`],
+    ['systemToken', 'a lone surrogate', `synthetic-http${codeUnit(0xd800)}system-token`],
+  ] as const)('a pasted %s with %s is 400 before host invocation (format character or lone surrogate)', async (key, _label, value) => {
+    const f = port(), request = input()
+    expect(await dispatch('POST', { ...request, material: { ...request.material, [key]: value } }, f.value))
+      .toEqual({ status: 400, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_INPUT' } } })
+    expect(f.calls).toHaveLength(0)
+  })
+  it('a userId with a zero-width space is 400 before host invocation even when executionIdentity equals it', async () => {
+    const f = port(), request = input(), userId = `${request.material.userId}${codeUnit(0x200b)}`
+    expect(await dispatch('POST', { ...request, material: { ...request.material, userId },
+      attestation: { ...request.attestation, executionIdentity: userId } }, f.value))
       .toEqual({ status: 400, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_INPUT' } } })
     expect(f.calls).toHaveLength(0)
   })

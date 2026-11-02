@@ -17,6 +17,9 @@ type State = { anchor?: Row; result?: Row; target?: Row; material?: Row; operati
 const actor = Object.freeze({ actorId: 'synthetic-owner', tenantId: 'synthetic-tenant', workspaceId: null })
 const secondAdmin = Object.freeze({ ...actor, actorId: 'synthetic-second-admin' })
 const commandId = '00000000-0000-4000-8000-000000000001'
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
 const targetRef = '00000000-0000-4000-8000-000000000002'
 const operationId = '00000000-0000-4000-8000-000000000003'
 const credentialRef = '00000000-0000-4000-8000-000000000004'
@@ -183,6 +186,27 @@ describe('initialization host control and exact persistence query contracts', ()
   ] as const)('refuses %s with %s as INPUT before any transaction, producer, crypto or write', async (key, _label, value) => {
     const { f } = await active(), original = input()
     await rejected(f.runtime.initialize(actor, { ...original, material: { ...(original.material as Row), [key]: value } }), 'INPUT')
+    expect(f.transactions).toBe(0); expect(f.createProducer).not.toHaveBeenCalled(); expect(f.initialize).not.toHaveBeenCalled()
+    expect(f.security.encrypt).not.toHaveBeenCalled(); expect(f.sql).toEqual([])
+  })
+  // Cf (zero-width, bidi, BOM) and lone surrogates (Cs) survive trim(); L4 would seal them for good (J-F1).
+  it.each([
+    ['systemToken', 'a trailing zero-width space', `synthetic token${codeUnit(0x200b)}`],
+    ['appKey', 'an inner zero-width space', `synthetic${codeUnit(0x200b)}app`],
+    ['appSecret', 'a leading bidi embedding', `${codeUnit(0x202a)}synthetic secret`],
+    ['systemToken', 'an inner pop directional isolate', `synthetic${codeUnit(0x2069)}token`],
+    ['systemToken', 'an inner BOM', `synthetic${codeUnit(0xfeff)}token`],
+    ['appSecret', 'a lone surrogate', `synthetic${codeUnit(0xd800)}secret`],
+  ] as const)('refuses %s with %s as INPUT before any transaction, producer, crypto or write (format character or lone surrogate)', async (key, _label, value) => {
+    const { f } = await active(), original = input()
+    await rejected(f.runtime.initialize(actor, { ...original, material: { ...(original.material as Row), [key]: value } }), 'INPUT')
+    expect(f.transactions).toBe(0); expect(f.createProducer).not.toHaveBeenCalled(); expect(f.initialize).not.toHaveBeenCalled()
+    expect(f.security.encrypt).not.toHaveBeenCalled(); expect(f.sql).toEqual([])
+  })
+  it('refuses a userId with a zero-width space as INPUT even when executionIdentity equals it', async () => {
+    const { f } = await active(), original = input(), userId = `synthetic-user${codeUnit(0x200b)}`
+    await rejected(f.runtime.initialize(actor, { ...original, material: { ...(original.material as Row), userId },
+      attestation: { ...(original.attestation as Row), executionIdentity: userId } }), 'INPUT')
     expect(f.transactions).toBe(0); expect(f.createProducer).not.toHaveBeenCalled(); expect(f.initialize).not.toHaveBeenCalled()
     expect(f.security.encrypt).not.toHaveBeenCalled(); expect(f.sql).toEqual([])
   })

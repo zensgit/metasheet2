@@ -9,9 +9,9 @@
     <p v-if="uncertain" data-testid="sp-yida-init-uncertain">状态未确认，禁止重做或换命令；仅可手动 GET 确认真实提交或回滚结果。</p>
     <fieldset v-if="state?.status !== 'initialized'" :disabled="busy || invalidated || uncertain" class="sp-yida-initialization__inputs">
       <legend>临时材料（不进入预演或导出）</legend>
-      <p>appKey、appSecret、systemToken 发送前自动去掉首尾的空白和换行（粘贴常带上输入框里看不见的换行），测试连接与初始化用的是同一个去掉后的值；中间的字符不改动、不截断，含空白或控制字符时不发送。userId 同时作为人工执行身份，须为最多 128 字符、无首尾空白或控制字符的原值。人工审核不是官方组织认证。</p>
+      <p>appKey、appSecret、systemToken 发送前自动去掉首尾的空白和换行（粘贴常带上输入框里看不见的换行），测试连接与初始化用的是同一个去掉后的值；中间的字符不改动、不截断，含空白、控制字符或零宽、方向等不可见字符时不发送。userId 同时作为人工执行身份，须为最多 128 字符、无首尾空白或控制字符的原值。人工审核不是官方组织认证。</p>
       <label v-for="field in materialFields" :key="field">{{ field }}<input type="password" :value="material[field]" :data-testid="`sp-yida-init-${field}`" autocomplete="off" spellcheck="false" @input="setMaterial(field, $event)" @paste="pasteMaterial(field, $event)"></label>
-      <p v-if="blockedFields.length > 0" data-testid="sp-yida-init-material-hint">{{ blockedFields.join('、') }} 去掉首尾空白后仍含空白、换行或控制字符，本页不会发送；请从原处重新复制。</p>
+      <p v-if="blockedFields.length > 0" data-testid="sp-yida-init-material-hint">{{ blockedFields.join('、') }} 去掉首尾空白后仍含空白、换行、控制字符或零宽、方向等不可见字符，本页不会发送；请从原处重新复制。</p>
       <label>人工审核编号<input :value="reviewRef" data-testid="sp-yida-init-review" autocomplete="off" @input="setReview('review', $event)"></label>
       <label>人工确认 organizationId<input :value="organizationId" data-testid="sp-yida-init-organization" autocomplete="off" @input="setReview('organization', $event)"></label>
       <section v-if="state?.status === 'ready' && state.connectionTestEnabled === true" class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
@@ -46,7 +46,8 @@ const materialFields = ['appKey', 'appSecret', 'systemToken', 'userId'] as const
 const material = reactive<Record<keyof YidaInitializationMaterial, string>>({ appKey: '', appSecret: '', systemToken: '', userId: '' })
 // appKey/appSecret/systemToken go out without surrounding whitespace: a paste often brings a trailing line
 // break the password box hides, and the server refuses padding (L4 seals the value for good). The inner text
-// is never changed; whitespace or a control character inside blocks sending. userId keeps its exact rule.
+// is never changed; whitespace, a control or invisible format character (zero-width, bidi) or a lone
+// surrogate inside blocks sending. userId keeps its exact rule.
 const secretFields = ['appKey', 'appSecret', 'systemToken'] as const
 function sendable(field: typeof secretFields[number]): string { return material[field].trim() }
 const blockedFields = computed(() => secretFields.filter(field => yidaCredentialHasInnerBlank(material[field])))

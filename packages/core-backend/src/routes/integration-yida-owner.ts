@@ -63,12 +63,13 @@ function literalId(value: unknown): string {
   return value
 }
 // Pasted credential text (appKey/appSecret/systemToken/userId). The connection test exchanges it and L4
-// seals it for good, byte for byte, so surrounding whitespace (a pasted line break) or any control
-// character is refused here, before any port, transaction, exchange, crypto or write. Never trimmed: an
-// API caller learns its input was wrong (the panel trims before sending).
+// seals it for good, byte for byte, so it is refused here, before any port, transaction, exchange, crypto
+// or write, when it has surrounding whitespace (a pasted line break) or holds, anywhere, a control character
+// (Cc: C0, DEL, C1), an invisible format character (Cf: zero-width, bidi, BOM, soft hyphen) or a lone
+// surrogate (Cs). Never trimmed: an API caller learns its input was wrong (the panel trims before sending).
 function credential(value: unknown, maximum: number): string {
   if (typeof value !== 'string' || !value || value.length > maximum || value.trim() !== value
-    || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) fail()
+    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value)) fail()
   return value
 }
 function id(value: unknown): string { const result = literalId(value); if (!UUID.test(result)) fail(); return result }

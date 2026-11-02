@@ -18,6 +18,9 @@ import { draftInput, syntheticMaterial } from '../utils/stock-preparation-yida-o
 
 const commandId = '11111111-1111-4111-8111-111111111111'
 const otherCommand = '22222222-2222-4222-8222-222222222222'
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
 const actor = { actorId: 'synthetic-http-owner', tenantId: 'synthetic-http-tenant', workspaceId: null }
 const body = () => ({ commandId, mode: 'candidate', material: { appKey: 'synthetic-probe key', appSecret: 'synthetic-probe secret' } })
 const view = (outcome = 'ok') => ({ commandId, mode: 'candidate', outcome, tokenIssued: outcome === 'ok',
@@ -97,6 +100,25 @@ describe('YiDa connection-test HTTP contract — fake host port, no IO', () => {
     const f = probePort()
     expect(await probe({ ...body(), material: { ...body().material, [key]: value } }, f.value)).toEqual(refusal('YIDA_OWNER_HTTP_INPUT', 400))
     expect(f.calls).toHaveLength(0)
+  })
+  // Invisible format characters (Cf: zero-width, bidi, BOM) and lone surrogates (Cs) are not whitespace, so
+  // trim() keeps them; they are refused anywhere in the value, before the port (judge J-F1 on #6675).
+  it.each([
+    ['appKey', 'a trailing zero-width space', `synthetic-probe key${codeUnit(0x200b)}`],
+    ['appSecret', 'an inner zero-width space', `synthetic-probe${codeUnit(0x200b)}secret`],
+    ['appKey', 'a leading bidi embedding', `${codeUnit(0x202a)}synthetic-probe key`],
+    ['appSecret', 'a trailing right-to-left mark', `synthetic-probe secret${codeUnit(0x200f)}`],
+    ['appSecret', 'an inner BOM', `synthetic-probe${codeUnit(0xfeff)}secret`],
+    ['appKey', 'a lone surrogate', `synthetic-probe${codeUnit(0xd800)}key`],
+  ] as const)('400 before the port: %s with %s (format character or lone surrogate)', async (key, _label, value) => {
+    const f = probePort()
+    expect(await probe({ ...body(), material: { ...body().material, [key]: value } }, f.value)).toEqual(refusal('YIDA_OWNER_HTTP_INPUT', 400))
+    expect(f.calls).toHaveLength(0)
+  })
+  it('CJK text and a valid surrogate pair are not format characters: the pair reaches the port unchanged', async () => {
+    const f = probePort(), appSecret = `synthetic-probe 原字节${codeUnit(0xd83d)}${codeUnit(0xde00)}secret`
+    expect(await probe({ ...body(), material: { ...body().material, appSecret } }, f.value)).toEqual({ status: 200, result: { ok: true, data: view() } })
+    expect(f.calls).toHaveLength(1); expect(f.calls[0].input).toEqual({ ...body(), material: { ...body().material, appSecret } })
   })
   it('scope headers, query keys and a missing principal are refused before the port; no port is 503', async () => {
     const f = probePort()

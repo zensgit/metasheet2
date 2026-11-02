@@ -23,6 +23,9 @@ const DINGTALK_OAUTH_ENDPOINT = 'https://api.dingtalk.com/v1.0/oauth2/accessToke
 const actor = Object.freeze({ actorId: 'synthetic-owner', tenantId: 'synthetic-tenant', workspaceId: null })
 const secondAdmin = Object.freeze({ ...actor, actorId: 'synthetic-second-admin' })
 const commandId = '00000000-0000-4000-8000-000000000001'
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
 const otherCommand = '00000000-0000-4000-8000-000000000009'
 const input = (overrides: Partial<Row> = {}): YidaConnectionTestInput => ({ commandId, mode: 'candidate',
   material: { appKey: 'synthetic app', appSecret: 'synthetic secret' }, ...overrides } as YidaConnectionTestInput)
@@ -412,6 +415,19 @@ describe('YiDa connection test host runtime — receipts, deadline and lifetime'
     ['appSecret', 'a leading TAB', '\tsynthetic secret'], ['appSecret', 'a trailing ideographic space', 'synthetic secret\u3000'],
     ['appSecret', 'an inner C1 control', 'synthetic\u0085secret'],
   ] as const)('refuses %s with %s as INPUT before any transaction or fetch', async (key, _label, value) => {
+    const { f } = await active()
+    await rejected(f.runtime.test(actor, input({ material: { appKey: 'synthetic app', appSecret: 'synthetic secret', [key]: value } })), 'INPUT')
+    expect([f.transactions, f.fetchCalls.length, f.sql.length]).toEqual([0, 0, 0])
+  })
+  // Cf (zero-width, bidi, BOM) and lone surrogates (Cs) survive trim(): refused anywhere, never exchanged (J-F1).
+  it.each([
+    ['appKey', 'a trailing zero-width space', `synthetic app${codeUnit(0x200b)}`],
+    ['appSecret', 'an inner zero-width space', `synthetic${codeUnit(0x200b)}secret`],
+    ['appKey', 'a leading bidi embedding', `${codeUnit(0x202a)}synthetic app`],
+    ['appSecret', 'an inner left-to-right isolate', `synthetic${codeUnit(0x2066)}secret`],
+    ['appKey', 'an inner BOM', `synthetic${codeUnit(0xfeff)}app`],
+    ['appSecret', 'a trailing lone surrogate', `synthetic secret${codeUnit(0xdc00)}`],
+  ] as const)('refuses %s with %s as INPUT before any transaction or fetch (format character or lone surrogate)', async (key, _label, value) => {
     const { f } = await active()
     await rejected(f.runtime.test(actor, input({ material: { appKey: 'synthetic app', appSecret: 'synthetic secret', [key]: value } })), 'INPUT')
     expect([f.transactions, f.fetchCalls.length, f.sql.length]).toEqual([0, 0, 0])

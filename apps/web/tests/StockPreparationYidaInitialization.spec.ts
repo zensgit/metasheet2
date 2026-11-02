@@ -34,6 +34,9 @@ function initialized(sendEnabled = false, connectionTestEnabled = false) { retur
 // sent: the same text with its edges trimmed, inner bytes unchanged. The server refuses the padded form.
 const pasted: YidaInitializationMaterial = { appKey: ' SYN-KEY原字节\r\n', appSecret: '\tSYN-SECRET原字节\n', systemToken: '\u00a0SYN-TOKEN原字节\r\n', userId: 'SYN-EXECUTION' }
 const material: YidaInitializationMaterial = { appKey: 'SYN-KEY原字节', appSecret: 'SYN-SECRET原字节', systemToken: 'SYN-TOKEN原字节', userId: 'SYN-EXECUTION' }
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
 function payload(): YidaInitializationInput { return { commandId: ids.command, material: { ...material }, draft: draftInput(),
   attestation: { kind: 'owner-reviewed-target', reviewRef: 'SYN-REVIEW', organizationId: 'SYN-ORG', executionIdentity: material.userId } } }
 function json(data: unknown, status = 200) { return new Response(JSON.stringify({ ok: true, data }), { status, headers: { 'Content-Type': 'application/json' } }) }
@@ -836,6 +839,10 @@ describe('Yida pasted credentials: edges trimmed before the test and L4, inner b
   it.each([
     ['appKey', 'an inner space', 'SYN-KEY 原字节'], ['appSecret', 'an inner line break', 'SYN-SECRET\n原字节'],
     ['systemToken', 'an inner TAB', 'SYN-TOKEN\t原字节'], ['appSecret', 'a C1 control', 'SYN-SECRET原字节\u0085'],
+    // Invisible format characters (Cf) and lone surrogates (Cs) survive trim(): blocked with the same hint (J-F1).
+    ['systemToken', 'a trailing zero-width space', `SYN-TOKEN原字节${codeUnit(0x200b)}`], ['appKey', 'an inner zero-width space', `SYN-KEY${codeUnit(0x200b)}原字节`],
+    ['appKey', 'a leading bidi embedding', `${codeUnit(0x202a)}SYN-KEY原字节`], ['appSecret', 'a trailing word joiner', `SYN-SECRET原字节${codeUnit(0x2060)}`],
+    ['appSecret', 'a lone surrogate', `SYN-SECRET${codeUnit(0xd800)}原字节`],
   ] as const)('%s with %s: a hint naming only the field, and nothing is sent', async (key, _label, value) => {
     await openWithProbe(); await pasteInto(key, value)
     const hint = q('material-hint').textContent ?? ''
@@ -860,6 +867,23 @@ describe('Yida pasted credentials: edges trimmed before the test and L4, inner b
       await expect(value.testConnection(probeRequest(appKey, appSecret))).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
     }
     for (const patch of [{ systemToken: pasted.systemToken }, { appKey: pasted.appKey }, { appSecret: `\u3000${material.appSecret}` }, { systemToken: 'SYN\u007fTOKEN' }]) {
+      const sample = payload()
+      await expect(value.initialize({ ...sample, material: { ...sample.material, ...patch } })).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    // Refused locally, so the observed ready command is not consumed: the unpadded payload initializes.
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await expect(value.initialize(payload())).resolves.toMatchObject({ status: 'initialized' })
+  })
+  it('the client refuses a zero-width, bidi, BOM or lone-surrogate credential before any request (J-F1)', async () => {
+    const value = createYidaInitializationClient(); clients.push(value)
+    fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await value.observe()
+    const probeRequest = (appKey: string, appSecret: string) => ({ commandId: ids.command, mode: 'candidate' as const, material: { appKey, appSecret } })
+    for (const [appKey, appSecret] of [[`${material.appKey}${codeUnit(0x200b)}`, material.appSecret], [material.appKey, `${codeUnit(0x202a)}${material.appSecret}`],
+      [`SYN${codeUnit(0xfeff)}KEY`, material.appSecret], [material.appKey, `SYN${codeUnit(0xd800)}SECRET`]]) {
+      await expect(value.testConnection(probeRequest(appKey, appSecret))).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    for (const patch of [{ systemToken: `${material.systemToken}${codeUnit(0x200b)}` }, { appKey: `${codeUnit(0x200e)}${material.appKey}` },
+      { appSecret: `SYN${codeUnit(0x2060)}SECRET` }, { systemToken: `SYN${codeUnit(0xdc00)}TOKEN` }]) {
       const sample = payload()
       await expect(value.initialize({ ...sample, material: { ...sample.material, ...patch } })).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
     }

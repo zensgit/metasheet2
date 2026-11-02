@@ -33,6 +33,9 @@ const DINGTALK_OAUTH_ENDPOINT = 'https://api.dingtalk.com/v1.0/oauth2/accessToke
 const owner = Object.freeze({ actorId: 'synthetic-probe-owner', tenantId: 'synthetic-probe-tenant', workspaceId: null })
 const secondAdmin = Object.freeze({ ...owner, actorId: 'synthetic-probe-second-admin' })
 const otherCommand = '99999999-9999-4999-8999-999999999999'
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
 const pair = () => ({ appKey: 'synthetic-probe-app-key', appSecret: 'synthetic-probe-app-secret' })
 const ident = (value: string) => { if (!/^[a-z][a-z0-9_]*$/u.test(value)) throw new Error('OWNED_SCHEMA_REQUIRED'); return `"${value}"` }
 type Row = Record<string, unknown>
@@ -251,7 +254,7 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
       expect(output.includes(value)).toBe(false)
   })
 
-  it('a pasted line break, padding or control character in appKey/appSecret/systemToken is 400 before any transaction, exchange or row', async () => {
+  it('a pasted line break, padding, control or invisible format character in appKey/appSecret/systemToken is 400 before any transaction, exchange or row', async () => {
     const anchor = await provisionYidaInitializationAnchor({ database }, { ownerId: owner.actorId, tenantId: owner.tenantId })
     await start(); enablement = 'true'
     const source = example(), full = { ...pair(), systemToken: 'synthetic-probe-system-token', userId: 'synthetic-probe-user' }
@@ -268,6 +271,11 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
       ['systemToken', '\u3000' + full.systemToken], ['systemToken', 'synthetic-probe\u0000system-token']] as const) {
       denied(await seal({ ...full, [key]: value }), 400, 'YIDA_OWNER_HTTP_INPUT')
     }
+    // Invisible format characters survive trim() (judge J-F1): without this rule a zero-width space after
+    // systemToken was sealed for good and a bidi embedding before appKey was exchanged as sent.
+    denied(await seal({ ...full, systemToken: `${full.systemToken}${codeUnit(0x200b)}` }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    denied(await http('POST', '/initialization/connection-test', { commandId: anchor.commandId, mode: 'candidate',
+      material: { ...pair(), appKey: `${codeUnit(0x202a)}${full.appKey}` } }), 400, 'YIDA_OWNER_HTTP_INPUT')
     // Refused before any transaction, exchange, crypto or write; the slot is still empty and ready.
     expect(sql).toEqual([]); expect(tokenBodies).toEqual([]); expect(await counts()).toEqual(before)
     expect(data(await http('GET', '/initialization'), 200)).toMatchObject({ commandId: anchor.commandId, status: 'ready', draft: null })
