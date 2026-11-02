@@ -251,6 +251,16 @@
             class="meta-record-drawer__menu-reason"
             data-testid="record-inspector-duplicate-blocked-reason"
           >{{ duplicateBlockedReason }}</span></MtMenuItem>
+          <!-- 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.3, §8 B3.3): 「复制为新行」 — offered only when the
+               workbench says so (/context's manual-rows block in state `allowed`, for an actor who can create); any row of
+               the sheet can be the source. The workbench asks first and calls POST /records/:recordId/manual-copy. -->
+          <MtMenuItem
+            v-if="record && manualCopyAvailable"
+            class="meta-record-drawer__btn"
+            data-testid="record-inspector-manual-copy"
+            :title="manualRowLabel('entry.copyTitle', isZh)"
+            @select="emit('manual-copy')"
+          >{{ manualRowLabel('entry.copy', isZh) }}</MtMenuItem>
           <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
                though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
                host — see this class's own style rule below for the current (menu-row) styling. -->
@@ -276,7 +286,12 @@
            graft from P3 §2) — primary-field value sits below it, editable when the primary field is
            an editable `string`. -->
       <div class="meta-record-drawer__titleblock">
-        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}</p>
+        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}<span
+          v-if="rowActions?.manualSupplement === true"
+          class="meta-record-drawer__manual-row-tag"
+          data-testid="record-inspector-manual-supplement-tag"
+          :title="manualRowLabel('tag.manualTitle', isZh)"
+        >{{ manualRowLabel('tag.manual', isZh) }}</span></p>
         <input
           v-if="canEditPrimaryTitle"
           ref="titleInputRef"
@@ -633,6 +648,7 @@ import {
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import { workbenchLabel } from '../utils/workbench-labels'
+import { manualRowLabel } from '../utils/manual-row-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   canEditField,
@@ -657,6 +673,10 @@ const props = withDefaults(defineProps<{
   /** Customer feedback 2026-10-27: set when /context reports `recordDuplicateBlocked` — the duplicate entry is
    *  rendered disabled with this text as its reason. null/absent ⇒ unchanged. */
   duplicateBlockedReason?: string | null
+  /** 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.3): show 「复制为新行」. The workbench decides it from
+   *  /context's `stockPreparationManualRows` block (state `allowed`, an actor who can create) — never from the row's
+   *  `manualSupplement` mark. Default false: no entry. */
+  manualCopyAvailable?: boolean
   canManageAutomation?: boolean
   /** 记录级送审 (阶段二 §5): server-derived `multitable:submit-approval`. Default false — an older
    *  backend, the deprecated MetaRecordDrawer shell's own caller, or any harness that omits it gets NO
@@ -788,12 +808,15 @@ const props = withDefaults(defineProps<{
   fetchRecord: undefined,
   fieldErrors: null,
   canSubmitApproval: false,
+  manualCopyAvailable: false,
 })
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'duplicate'): void
+  /** 人工补充行 B3: 「复制为新行」 of this record (the workbench confirms and calls the manual-copy route). */
+  (e: 'manual-copy'): void
   /** Record inspector v3 (2026-09-05, PR-A §1.2 Row A): copy-link icon. PR-A scope is this emit
    *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
    *  template comment); WB has no listener for it yet. */
@@ -1815,6 +1838,8 @@ function formatCommentTimestamp(iso: string): string {
 }
 .meta-record-drawer__titleblock { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .meta-record-drawer__eyebrow { margin: 0; font-size: 11px; line-height: 1.3; color: var(--ms-text-3, #999); text-transform: uppercase; letter-spacing: 0.02em; }
+/* 人工补充行 (OQ3): the same label the grid shows at the row head. */
+.meta-record-drawer__manual-row-tag { display: inline-block; margin-left: 6px; padding: 0 4px; font-size: 10px; line-height: 14px; color: #8a5a00; background: #fdf6ec; border: 1px solid #f5dab1; border-radius: 3px; text-transform: none; letter-spacing: 0; vertical-align: middle; }
 .meta-record-drawer__title-input, .meta-record-drawer__title-text {
   font-size: 18px; font-weight: 600; line-height: 1.3; min-width: 0; box-sizing: border-box;
 }

@@ -228,12 +228,37 @@
       <span>{{ capabilityOriginNotice.message }}</span>
     </div>
     <div
-      v-if="recordCreateBlockedByLock && caps.canCreateRecord.value"
+      v-if="recordCreateBlockedByLock && caps.canCreateRecord.value && !manualRowsBlock"
       class="mt-workbench__capability-banner mt-workbench__create-locked-note"
       role="status"
       data-testid="record-create-locked-note"
     >
       <span>{{ wb('notice.recordCreateBlockedByLock', isZh) }}</span>
+    </div>
+    <!-- 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.1 / §3.7 / §8 B3.3): on a registered project sheet the
+         R68 note above gives way to this one — 「新增人工补充行」 in state `allowed`, otherwise the state's reason (an
+         unlocked sheet: 「需管理员修复本表」). Every generic create entry is hidden meanwhile (canCreateRecordByHand). -->
+    <div
+      v-if="manualRowsBannerVisible && manualRowsNotice"
+      class="mt-workbench__capability-banner mt-workbench__manual-rows-note"
+      role="status"
+      data-testid="manual-rows-note"
+      :data-manual-rows-state="manualRowsBlock?.state"
+    >
+      <template v-if="manualRowsNotice.kind === 'entry'">
+        <span>{{ manualRowLabel('notice.useManualRow', isZh) }}</span>
+        <MtButton
+          v-if="manualRowsCreateAvailable"
+          variant="primary"
+          size="sm"
+          data-testid="manual-row-create"
+          @click="openManualRowDialog"
+        >{{ manualRowLabel('entry.create', isZh) }}</MtButton>
+      </template>
+      <template v-else>
+        <strong v-if="manualRowsNotice.headlineKey" data-testid="manual-rows-reason-headline">{{ manualRowLabel(manualRowsNotice.headlineKey, isZh) }}</strong>
+        <span data-testid="manual-rows-reason">{{ manualRowLabel(manualRowsNotice.key, isZh) }}</span>
+      </template>
     </div>
     <MetaMentionPopover
       :visible="showMentionPopover"
@@ -421,6 +446,7 @@
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
           :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="canCreateRecordByHand" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
+          :manual-row-record-ids="manualRowRecordIdsInGrid" :manual-row-field-ids="manualRowEditableFieldIds"
           :commit-range="grid.patchRange"
           :range-context-key="JSON.stringify([workbench.activeSheetId.value, workbench.activeViewId.value])"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
@@ -479,9 +505,10 @@
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="canCreateRecordByHand"
         :duplicate-blocked-reason="recordDuplicateBlockedReason"
+        :manual-copy-available="manualRowsCreateAvailable"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
-        :field-permissions="effectiveFieldPermissions"
+        :field-permissions="inspectorFieldPermissions"
         :row-actions="effectiveRowActions"
         :comment-presence="selectedRecordCommentPresence"
         :link-summaries-by-field="selectedRecordLinkSummaries"
@@ -515,6 +542,7 @@
         :comment-composer-initial-mentions="commentComposerInitialMentions"
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
+        @manual-copy="onManualCopyRecord(selectedRecordId)"
         @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -559,6 +587,15 @@
       :result-message="bulkEditDialog.resultMessage"
       @apply="onBulkEditApply"
       @cancel="onBulkEditCancel"
+    />
+    <MetaManualRowDialog
+      :visible="manualRowDialog.visible"
+      :plan="manualRowDialogPlan"
+      :submitting="manualRowDialog.submitting"
+      :error="manualRowDialog.error"
+      :field-errors="manualRowDialog.fieldErrors"
+      @submit="onManualRowDialogSubmit"
+      @cancel="closeManualRowDialog"
     />
     <MetaImportModal
       :visible="showImportModal"
@@ -865,7 +902,19 @@ import type {
   RowDensity,
 } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
-import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
+import type { SortRule, FilterConjunction, ManualCellWrite } from '../composables/useMultitableGrid'
+import { manualRowLabel } from '../utils/manual-row-labels'
+import {
+  isManualSupplementMarked,
+  manualRowsCreateEnabled,
+  manualRowsCreateRefusalKey,
+  manualRowsEditEnabled,
+  manualRowsNoticeOf,
+  readManualRowsBlock,
+  resolveManualRowDialogPlan,
+  resolveManualRowEditableFieldIds,
+} from '../utils/manual-rows'
+import MetaManualRowDialog from '../components/MetaManualRowDialog.vue'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
@@ -1069,14 +1118,26 @@ onBeforeUnmount(() => {
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
+// 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3–OQ8): /context sends `stockPreparationManualRows`
+// ONLY on a registered project sheet (P_reg), to an actor who can create, edit or delete. While it is present — WHATEVER
+// its state — every generic create entry below is hidden (`canCreateRecordByHand`), and the note that replaces them shows
+// 「新增人工补充行」 (state `allowed`) or the state's reason. Every manual-row control is gated on THIS block, never on a
+// row's `manualSupplement` mark (#6664 note N2), which is only the 「人工补充」 label. Read fail-closed
+// (utils/manual-rows.ts): absent ⇒ exactly the old behaviour; present but malformed ⇒ `unavailable`, no manual control.
+const manualRowsBlock = computed(() => readManualRowsBlock(capabilitySource.value))
 // R68 (#6454 judge note): /context sends `recordCreateBlockedByLock: true` when the sheet has a column people may
 // not write (the 备料 project sheet's PLM columns) that its own validation also marks required, so a record a
 // person creates can never pass. Every hand-create entry below (toolbar add / import, grid "+ row", the
 // duplicate action, kanban / gallery / calendar / timeline / gantt / hierarchy create, a new form submission)
 // reads `canCreateRecordByHand`, and the note under the capability banner says why. Same fail-closed read as
-// canDeleteSheet (`=== true` off the /context object): absent ⇒ exactly the old `caps.canCreateRecord`.
+// canDeleteSheet (`=== true` off the /context object): absent ⇒ exactly the old `caps.canCreateRecord`. (Since B3 the
+// new form submission reads `canSubmitNewFormRecord` — this same R68 rule without the manual-rows block, OQ7.)
 const recordCreateBlockedByLock = computed(() => capabilitySource.value?.recordCreateBlockedByLock === true)
-const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value)
+const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value && manualRowsBlock.value === null)
+// 人工补充行 OQ7 「表单不改」: a NEW form-view submission goes through the form route (POST /views/:viewId/submit), which
+// the series leaves exactly as it was — so it keeps the pre-B3 rule (R68 only), not the manual-rows block. (On an
+// unlocked registered sheet the form's create stays usable until the lock is repaired; on a locked one R68 closes it.)
+const canSubmitNewFormRecord = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value)
 // 备料分批拉取第一期 step 3: /context sends `gridExportClosure` ONLY on a sheet the host stamped closed for generic
 // grid export (canExport is then already false). The toolbar keeps its export buttons visible but disabled with
 // this reason, and every client-side export entry below re-checks `canRunGridExport()` before it builds a file.
@@ -1128,6 +1189,9 @@ const grid = useMultitableGrid({
   // mismatch, network) — the reload after it shows the view's stored rules again, so the edit would otherwise just
   // vanish. Shown with the toast the other grid write failures use; values-free copy (no rules, no server prose).
   onSortFilterWriteFailed: () => showError(wb('toast.sortFilterSaveFailed', isZh.value)),
+  // 人工补充行 B3 (ADR §3.4, N12): the six fillable cells of a manual row write through PATCH …/manual-fields — edit,
+  // undo, redo and the conflict retry alike (see `resolveManualCellWrite` below; gated on the /context block).
+  resolveManualCellWrite: (recordId, fieldId) => resolveManualCellWrite(recordId, fieldId),
 })
 
 // W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
@@ -1897,6 +1961,19 @@ function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): vo
 
 function ensureCanCreateRecord(): boolean {
   if (canCreateRecordByHand.value) return true
+  // 人工补充行 B3: on a P_reg sheet a stale generic-create gesture says what the note says (ADR §3.1 by state) — to an
+  // actor who could create; anyone else keeps the plain "no permission" toast.
+  if (caps.canCreateRecord.value && manualRowsBlock.value) {
+    showError(manualRowLabel(manualRowsCreateRefusalKey(manualRowsBlock.value), isZh.value))
+    return false
+  }
+  showError(wb(recordCreateBlockedByLock.value ? 'notice.recordCreateBlockedByLock' : 'toast.recordCreateBlocked', isZh.value))
+  return false
+}
+
+// OQ7: the form view's NEW submission (the form route) keeps its pre-B3 gate — see `canSubmitNewFormRecord`.
+function ensureCanSubmitNewFormRecord(): boolean {
+  if (canSubmitNewFormRecord.value) return true
   showError(wb(recordCreateBlockedByLock.value ? 'notice.recordCreateBlockedByLock' : 'toast.recordCreateBlocked', isZh.value))
   return false
 }
@@ -2160,7 +2237,7 @@ const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() =>
   return resolvers
 })
 const formReadOnly = computed(() => {
-  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !canCreateRecordByHand.value
+  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !canSubmitNewFormRecord.value
 })
 const pageStartIndex = computed(() => grid.page.value.offset)
 // A1 infinite-scroll activation. The FLAT (ungrouped) grid path accumulates rows via scroll (loadMore)
@@ -3219,6 +3296,126 @@ async function onDuplicateRecord(recordId?: string | null) {
   if (grid.error.value) showError(grid.error.value)
 }
 
+// ── 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4, §3.7, §8 B3) ─────────────────────────────────
+//
+// Every gate below reads `manualRowsBlock` (/context), never a row's `manualSupplement` mark alone (#6664 N2): the mark
+// says WHICH row is a manual row; only the block says the sheet is P_reg, its state, and that this actor may act. The
+// block's id lists are sheet-level and are narrowed by the actor's field permissions here (utils/manual-rows.ts, N5).
+// While the active sheet's /context is still on its way (`capabilitiesStale`) no manual-row control is offered.
+
+const manualRowsNotice = computed(() => (manualRowsBlock.value ? manualRowsNoticeOf(manualRowsBlock.value) : null))
+// The note where the generic create entries were: only for an actor who could create (a reader lost nothing).
+const manualRowsBannerVisible = computed(() => manualRowsBlock.value !== null && caps.canCreateRecord.value && !capabilitiesStale.value)
+// 「新增人工补充行」 and 「复制为新行」: state `allowed` only (ADR §3.1).
+const manualRowsCreateAvailable = computed(() => (
+  caps.canCreateRecord.value && !capabilitiesStale.value && manualRowsCreateEnabled(manualRowsBlock.value)
+))
+// Editing the six fillable cells of a manual row: allowed / disabled, or an archived project / the deployment switch.
+const manualRowsEditGate = computed(() => (
+  caps.canEditRecord.value && !capabilitiesStale.value && manualRowsEditEnabled(manualRowsBlock.value)
+))
+const manualRowEditableFieldIds = computed(() => (
+  manualRowsEditGate.value
+    ? resolveManualRowEditableFieldIds(manualRowsBlock.value, grid.fields.value, effectiveFieldPermissions.value)
+    : []
+))
+// The page's manual rows whose fillable cells the grid opens as editors (empty unless the block allows editing).
+const manualRowRecordIdsInGrid = computed(() => {
+  if (!manualRowsEditGate.value || manualRowEditableFieldIds.value.length === 0) return []
+  return Object.entries(grid.rowActionOverrides.value ?? {})
+    .filter(([, actions]) => isManualSupplementMarked(actions))
+    .map(([recordId]) => recordId)
+})
+
+function isManualRowRecord(recordId: string): boolean {
+  if (isManualSupplementMarked(grid.rowActionOverrides.value?.[recordId])) return true
+  return deepLinkedRecord.value?.id === recordId && isManualSupplementMarked(deepLinkedRecordRowActions.value)
+}
+
+/** The grid's route choice (patchCell / undo / redo / conflict retry): PATCH …/manual-fields or null for /patch. */
+function resolveManualCellWrite(recordId: string, fieldId: string): ManualCellWrite | null {
+  const block = manualRowsBlock.value
+  if (!block || !manualRowsEditGate.value) return null
+  if (!manualRowEditableFieldIds.value.includes(fieldId) || !isManualRowRecord(recordId)) return null
+  return { required: block.requiredFieldIds.includes(fieldId) }
+}
+
+// The drawer's field permissions: on a manual row the fillable columns this actor may edit lose the lock's read-only
+// (and only those; the panel's own canEdit / row-action checks still apply). Its patch then routes like the grid's.
+const inspectorFieldPermissions = computed<Record<string, MetaFieldPermission>>(() => {
+  const base = effectiveFieldPermissions.value
+  const recordId = selectedRecordId.value
+  if (!recordId || manualRowEditableFieldIds.value.length === 0 || !isManualRowRecord(recordId)) return base
+  const lifted: Record<string, MetaFieldPermission> = { ...base }
+  for (const fieldId of manualRowEditableFieldIds.value) lifted[fieldId] = { visible: base[fieldId]?.visible ?? true, readOnly: false }
+  return lifted
+})
+
+// 新增人工补充行 (ADR §8 B3.3): the dialog's columns = the block's dialog / required ids ∩ the actor's field permissions;
+// a column the current VIEW hides is still offered (the host folds view-hidden ids into `visible`, utils/manual-rows.ts).
+const manualRowDialogPlan = computed(() => resolveManualRowDialogPlan(
+  manualRowsBlock.value,
+  grid.fields.value.length > 0 ? grid.fields.value : workbench.fields.value,
+  effectiveFieldPermissions.value,
+  new Set([...(grid.hiddenFieldIds.value ?? []), ...(workbench.activeView.value?.hiddenFieldIds ?? [])]),
+))
+const manualRowDialog = ref<{ visible: boolean; submitting: boolean; error: string | null; fieldErrors: Record<string, string> }>({
+  visible: false, submitting: false, error: null, fieldErrors: {},
+})
+
+function manualRowsUnavailableToast(): void {
+  const block = manualRowsBlock.value
+  showError(block ? manualRowLabel(manualRowsCreateRefusalKey(block), isZh.value) : wb('toast.recordCreateBlocked', isZh.value))
+}
+
+function openManualRowDialog(): void {
+  if (!manualRowsCreateAvailable.value) return manualRowsUnavailableToast()
+  manualRowDialog.value = { visible: true, submitting: false, error: null, fieldErrors: {} }
+}
+
+function closeManualRowDialog(): void {
+  if (manualRowDialog.value.submitting) return
+  manualRowDialog.value = { visible: false, submitting: false, error: null, fieldErrors: {} }
+}
+
+async function onManualRowDialogSubmit(data: Record<string, unknown>): Promise<void> {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId || !manualRowsCreateAvailable.value) return manualRowsUnavailableToast()
+  manualRowDialog.value = { ...manualRowDialog.value, submitting: true, error: null, fieldErrors: {} }
+  try {
+    const { record } = await workbench.client.createManualRow(sheetId, data)
+    manualRowDialog.value = { visible: false, submitting: false, error: null, fieldErrors: {} }
+    showSuccess(manualRowLabel('toast.created', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+    // ADR §8 B3.3: open the new row (resolveDeepLink fetches it when it is not on the loaded page).
+    if (record?.id) await resolveDeepLink(record.id)
+  } catch (error: any) {
+    manualRowDialog.value = {
+      ...manualRowDialog.value,
+      submitting: false,
+      error: error?.message ?? manualRowLabel('dialog.failed', isZh.value),
+      fieldErrors: error?.fieldErrors && typeof error.fieldErrors === 'object' ? { ...error.fieldErrors } : {},
+    }
+  }
+}
+
+// 复制为新行 (ADR §3.3): any row of the sheet is a source; the server picks the columns (whitelist) and stamps the new
+// row's own key, 项目号 and 有效. Asks first — like 复制, it adds a row to this sheet.
+async function onManualCopyRecord(recordId?: string | null): Promise<void> {
+  const sourceId = recordId ?? selectedRecordId.value
+  if (!sourceId) return
+  if (!manualRowsCreateAvailable.value) return manualRowsUnavailableToast()
+  if (!window.confirm(manualRowLabel('confirm.copy', isZh.value))) return
+  try {
+    const { record } = await workbench.client.copyAsManualRow(sourceId, { sheetId: workbench.activeSheetId.value || undefined })
+    showSuccess(manualRowLabel('toast.copied', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+    if (record?.id) await resolveDeepLink(record.id)
+  } catch (error: any) {
+    showError(error?.message ?? manualRowLabel('toast.copyFailed', isZh.value))
+  }
+}
+
 async function onToggleRecordLock(payload: { recordId: string; locked: boolean }) {
   try {
     await workbench.client.setRecordLock(payload.recordId, payload.locked, {
@@ -3460,13 +3657,53 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
+  if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
+    await runManualDrawerPatch(record.id, fieldId, value)
+    return
+  }
+  await commitDrawerPatch(record, fieldId, value)
+}
+
+// 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
+// fillable column through PATCH …/manual-fields, every other column through /patch (the grid routes each patch). The two
+// routes are not one transaction, so each step waits for the one before it and carries the version THAT step returned;
+// a conflict surfaces through the conflict banner like on any row (reload / retry), and a failed step does not stop the
+// next one from trying with the version actually stored.
+const manualDrawerWriteTails = new Map<string, Promise<void>>()
+
+function drawerRecordById(recordId: string): MetaRecord | null {
+  if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecord.value
+  return grid.rows.value.find((row) => row.id === recordId) ?? null
+}
+
+async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown): Promise<void> {
+  const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
+  const step = previous.then(async () => {
+    // Re-read AFTER the previous step: its returned version is on the row by now.
+    const current = drawerRecordById(recordId)
+    if (current) await commitDrawerPatch(current, fieldId, value, true)
+  })
+  const tail = step.then(() => undefined, () => undefined)
+  manualDrawerWriteTails.set(recordId, tail)
+  try {
+    await step
+  } finally {
+    if (manualDrawerWriteTails.get(recordId) === tail) manualDrawerWriteTails.delete(recordId)
+  }
+}
+
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false) {
   const patchOwner = {}
   inspectorPatchOwners.set(fieldId, patchOwner)
+  // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
+  const committed: { version: number | null } = { version: null }
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
   // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
   // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
   // toast the second's message and lose its own alert when both rejections landed in one flush.
-  const failure = await grid.patchCell(record.id, fieldId, value, record.version)
+  const failure = manualRow
+    ? await grid.patchCell(record.id, fieldId, value, record.version, { onCommitted: (version) => { committed.version = version } })
+    : await grid.patchCell(record.id, fieldId, value, record.version)
   const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
   if (failure) {
     // Route by the failure the composable returned for THIS patch — still guarded on record + field
@@ -3518,7 +3755,7 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
-      version: deepLinkedRecord.value.version + 1,
+      version: committed.version ?? deepLinkedRecord.value.version + 1,
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
   }
@@ -3543,7 +3780,7 @@ async function onCopyRecordLink() {
 async function onFormSubmit(data: Record<string, unknown>) {
   const viewId = workbench.activeViewId.value
   if (viewId && activeViewType.value === 'form') {
-    if (!(selectedRecordResolved.value ? ensureCanEditRecord(selectedRecordResolved.value.id) : ensureCanCreateRecord())) return
+    if (!(selectedRecordResolved.value ? ensureCanEditRecord(selectedRecordResolved.value.id) : ensureCanSubmitNewFormRecord())) return
     try {
       formSubmitting.value = true
       formSuccessMessage.value = null
