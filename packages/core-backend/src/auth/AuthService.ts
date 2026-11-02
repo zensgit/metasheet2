@@ -582,7 +582,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1`,
+          `SELECT ${USER_AUTH_SELECT}, (to_jsonb(users) ->> 'deleted_at') AS deleted_at, (to_jsonb(users) ->> 'purged_at') AS purged_at FROM users WHERE id = $1`,
           [userId]
         )
 
@@ -602,6 +602,8 @@ export class AuthService {
             activation_status: row.activation_status,
             local_password_set: row.local_password_set,
             password_hash: row.password_hash,
+            deleted_at: (row as UserRow & { deleted_at?: string | null }).deleted_at ?? null,
+            purged_at: (row as UserRow & { purged_at?: string | null }).purged_at ?? null,
             created_at: row.created_at,
             updated_at: row.updated_at
           }
@@ -657,7 +659,7 @@ export class AuthService {
           const userId = await findUserIdByLoginAlias(trimmedIdentifier)
           if (!userId) return null
           const byId = await pool.query(
-            `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1 LIMIT 1`,
+            `SELECT ${USER_AUTH_SELECT}, (to_jsonb(users) ->> 'deleted_at') AS deleted_at, (to_jsonb(users) ->> 'purged_at') AS purged_at FROM users WHERE id = $1 LIMIT 1`,
             [userId],
           )
           if (!byId.rows[0]) return null
@@ -669,7 +671,7 @@ export class AuthService {
         const normalizedUsername = trimmedIdentifier.toLowerCase()
         const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
         const result = await pool.query(
-          `SELECT ${USER_AUTH_SELECT}
+          `SELECT ${USER_AUTH_SELECT}, (to_jsonb(users) ->> 'deleted_at') AS deleted_at, (to_jsonb(users) ->> 'purged_at') AS purged_at
            FROM users
            WHERE lower(email) = $1
               OR lower(username) = $2
@@ -729,6 +731,8 @@ export class AuthService {
       activation_status: row.activation_status,
       local_password_set: row.local_password_set,
       password_hash: row.password_hash,
+      deleted_at: (row as UserRow & { deleted_at?: string | null }).deleted_at ?? null,
+      purged_at: (row as UserRow & { purged_at?: string | null }).purged_at ?? null,
       created_at: row.created_at,
       updated_at: row.updated_at,
     }

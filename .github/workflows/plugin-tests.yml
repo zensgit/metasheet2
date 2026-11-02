@@ -1024,6 +1024,11 @@ jobs:
         run: |
           pnpm lint
 
+      - name: Run DingTalk directory client lint
+        if: matrix.node-version == '20.x'
+        working-directory: packages/core-backend
+        run: pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts
+
       - name: Run type checking
         if: matrix.node-version == '20.x'
         env:
@@ -2610,6 +2615,7 @@ jobs:
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/directory-org-transfer-source-freeze.db.test.ts \
+            tests/integration/directory-controlled-handover.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
