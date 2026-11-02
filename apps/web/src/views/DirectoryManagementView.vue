@@ -6166,20 +6166,27 @@ async function batchUnbindReviewItems() {
     const message = failedCount > 0
       ? `已停权处理 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已完成 ${batchIds.length} 个目录成员的批量停权处理`
-    setStatus(message, failedCount > 0 ? 'error' : 'info')
     await Promise.all([
       loadIntegrations(),
       loadReviewItems(selectedIntegration.value.id),
       loadAccounts(selectedIntegration.value.id),
     ])
-    // Re-select the failed rows still in the queue so they can be retried; the reload resets selection.
+    // Re-select failed rows that are still in the reloaded queue and still eligible, so they can be
+    // retried. Committed rows come back as pending_binding and are never re-selected.
     const failedIds = new Set(failedItems.map((entry) => (
       entry && typeof entry === 'object' ? (entry as Record<string, unknown>).accountId : undefined
     )))
-    const reviewIds = new Set(reviewItems.value.map((item) => item.account.id))
-    for (const accountId of batchIds) {
-      if (failedIds.has(accountId) && reviewIds.has(accountId)) selectedReviewIds[accountId] = true
+    const retryableIds = new Set(reviewItems.value
+      .filter((item) => item.actionable.canBatchUnbind)
+      .map((item) => item.account.id))
+    const retryIds = batchIds.filter((accountId) => failedIds.has(accountId) && retryableIds.has(accountId))
+    if (retryIds.length > 0) {
+      clearReviewSelection()
+      for (const accountId of retryIds) selectedReviewIds[accountId] = true
+      // The reload may switch to a pending-binding view that hides these rows; show them instead.
+      if (selectedReviewBatchIds.value.length < retryIds.length) reviewFilter.value = 'inactive_linked'
     }
+    setStatus(message, failedCount > 0 ? 'error' : 'info')
     setReviewBatchProgress({
       kind: 'unbind',
       phase: 'completed',
