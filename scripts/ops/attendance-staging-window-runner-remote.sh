@@ -104,6 +104,21 @@
 #                    w7-compare-window-status.ts) via psql, read-only; exits nonzero when a
 #                    mechanical alert condition fires (critical diffs / unresolved reviews /
 #                    orphans / selector-less corruption).
+#   org-membership-inspect — owner ruling 2026-10-12: READ-ONLY locate of the population
+#                    action=migrate's prechecks count as zero_membership_no_row_count (an active
+#                    user with no user_orgs row at all). Every query runs in one READ ONLY
+#                    transaction that is rolled back (plus PGOPTIONS default_transaction_read_only).
+#                    Values-free: a user is named only by fp = left(md5(id),16) plus counts,
+#                    yes/no facts, a synthetic class name and created_at (UTC); org ids with
+#                    active members are listed with their member counts.
+#   org-membership-repair — owner ruling 2026-10-12: ONE owner-named repair of ONE such user,
+#                    driven by REPAIR_SPEC ("deactivate:<fp16>:<CONFIRM>" or
+#                    "add-membership:<fp16>:<org_id>:<CONFIRM>", validated here and in the
+#                    workflow; exit 2 when malformed, before any container access). Read-only
+#                    preconditions first (exactly one match, org already has active members),
+#                    then a full pg_dump to a host file (metadata only in the artifact), then a
+#                    single transaction that re-checks, writes exactly one row and requires the
+#                    full expected counter delta vector before COMMIT.
 #
 # HARD SAFETY RAILS:
 #   * Operates exclusively on the staging compose file docker-compose.app.staging.yml
@@ -135,7 +150,7 @@ hash_value() {
   fi
 }
 
-ACTION="${ACTION:?ACTION is required (deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status)}"
+ACTION="${ACTION:?ACTION is required (deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status|org-membership-inspect|org-membership-repair)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
 SMOKE_ID="${SMOKE_ID:-}"
 SET_WINDOW_ENV="${SET_WINDOW_ENV:-none}"
@@ -144,6 +159,7 @@ TASKS_WINDOW_ENABLED="${TASKS_WINDOW_ENABLED:-false}"
 STAMPS="${STAMPS:-}"
 SOAK_ORGS="${SOAK_ORGS:-}"
 SOAK_OPTS="${SOAK_OPTS:-}"
+REPAIR_SPEC="${REPAIR_SPEC:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
@@ -168,6 +184,19 @@ case "$TASKS_WINDOW_ENABLED" in
 esac
 if [[ "$ACTION" != "deploy" && "$TASKS_WINDOW_ENABLED" == "true" ]]; then
   fail "TASKS_WINDOW_ENABLED=true is only allowed for action=deploy (env flips happen together with the deploy, never mid-smoke — same rule as SET_WINDOW_ENV/FORCE_RECREATE)"
+fi
+
+# Owner ruling 2026-10-12. REPAIR_SPEC is re-validated here (the workflow validates it first) and
+# BEFORE any container access: a malformed spec, or any spec on another action, exits 2. The value
+# is never echoed back (a malformed spec could be a pasted raw id); only the rule is named.
+if [[ "$ACTION" == "org-membership-repair" ]]; then
+  if ! org_membership_repair_spec_parse "$REPAIR_SPEC" >/dev/null; then
+    echo "[window-runner][error] REPAIR_SPEC is malformed: it must be exactly deactivate:<fp16>:${ORG_MEMBERSHIP_REPAIR_CONFIRM} or add-membership:<fp16>:<org_id>:${ORG_MEMBERSHIP_REPAIR_CONFIRM} (fp16 = 16 lower-case hex from action=org-membership-inspect; org_id = [A-Za-z0-9][A-Za-z0-9._-]{0,127}); value withheld" >&2
+    exit 2
+  fi
+elif [[ -n "$REPAIR_SPEC" ]]; then
+  echo "[window-runner][error] REPAIR_SPEC is only accepted for action=org-membership-repair (got action=${ACTION}); value withheld" >&2
+  exit 2
 fi
 
 BACKEND_CONTAINER="metasheet-staging-backend"
@@ -1825,86 +1854,13 @@ action_migrate_read_only_prechecks() {
     || fail "could not determine whether approval_instances.org_id exists"
   [[ "$has_org_id" == "t" ]] && org_null_predicate='AND i.org_id IS NULL'
 
-  docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 <<SQL \
+  # The counter SQL lives in the pipeline lib (target_precheck_counters_sql) so the
+  # org-membership inspect/repair actions measure exactly these counters too.
+  local precheck_sql
+  precheck_sql="$(target_precheck_counters_sql "$org_null_predicate")" \
+    || fail "could not build the target precheck counter SQL"
+  docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 <<< "$precheck_sql" \
     | tee "${OUTPUT_DIR}/target-read-only-prechecks.txt"
-SELECT 'approval_action_histogram=' || COALESCE(jsonb_object_agg(action, n ORDER BY action), '{}'::jsonb)::text
-  FROM (SELECT action, count(*) AS n FROM approval_records GROUP BY action) h;
-SELECT 'invalid_approval_action_count=' || count(*)::text
-  FROM approval_records
- WHERE action NOT IN ('created','approve','reject','return','revoke','transfer','sign','comment','cc','remind','jump','add_sign','reduce_sign','reassign','handle','policy_denied');
-SELECT 'attachment_org_conflict_count=' || count(*)::text FROM (
-  SELECT a.instance_id
-    FROM approval_attachments a
-    JOIN approval_instances i ON i.id = a.instance_id
-   WHERE a.instance_id IS NOT NULL
-     ${org_null_predicate}
-   GROUP BY a.instance_id
-  HAVING count(DISTINCT a.org_id) > 1
-) c;
-SELECT 'zero_membership_active_user_count=' || count(*)::text
-  FROM users u
- WHERE u.is_active = TRUE
-   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE);
-SELECT 'zero_membership_no_row_count=' || count(*)::text
-  FROM users u
- WHERE u.is_active = TRUE
-   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id);
-SELECT 'zero_membership_only_deactivated_count=' || count(*)::text
-  FROM users u
- WHERE u.is_active = TRUE
-   AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
-   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE);
-SELECT 'recovery09_repairable_user_count=' || count(*)::text
-  FROM users u
- WHERE u.is_active = TRUE
-   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
-   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default');
-SELECT 'distinct_active_org_count=' || count(*)::text
-  FROM (SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE) o;
-SELECT 'directory_integration_distinct_org_count=' || count(*)::text
-  FROM (SELECT DISTINCT org_id FROM directory_integrations WHERE org_id IS NOT NULL AND btrim(org_id) <> '') o;
-SELECT 'directory_integration_non_default_count=' || count(*)::text
-  FROM directory_integrations WHERE org_id <> 'default';
-SELECT 'legacy_anchor_active_membership_witness_count=' || count(*)::text
-  FROM user_orgs WHERE org_id = 'default' AND is_active = TRUE;
-SELECT 'class6_candidate_count=' || count(*)::text
-  FROM approval_instances i
- WHERE i.id NOT LIKE 'plm:%'
-   AND i.id NOT LIKE 'afs:%'
-   AND COALESCE(i.source_system, 'platform') = 'platform'
-   AND i.template_id IS NULL
-   ${org_null_predicate}
-   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
-   AND NOT EXISTS (
-     SELECT 1 FROM user_orgs uo
-      WHERE uo.user_id = i.requester_snapshot->>'id'
-        AND uo.is_active = TRUE
-      GROUP BY uo.user_id
-     HAVING count(*) = 1
-   );
-SELECT 'recovery09_unsupported_class6_count=' || count(*)::text
-  FROM approval_instances i
- WHERE i.id NOT LIKE 'plm:%'
-   AND i.id NOT LIKE 'afs:%'
-   AND COALESCE(i.source_system, 'platform') = 'platform'
-   AND i.template_id IS NULL
-   ${org_null_predicate}
-   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
-   AND NOT EXISTS (
-     SELECT 1 FROM user_orgs uo
-      WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
-      GROUP BY uo.user_id HAVING count(*) = 1
-   )
-   AND NOT (
-     NOT EXISTS (SELECT 1 FROM users u WHERE u.id = i.requester_snapshot->>'id')
-     OR EXISTS (
-       SELECT 1 FROM users u
-        WHERE u.id = i.requester_snapshot->>'id' AND u.is_active = TRUE
-          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
-          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
-     )
-   );
-SQL
 
   local invalid conflicts zero_membership zero_no_row zero_deactivated repairable_users active_orgs directory_orgs non_default_integrations anchor_witness class6 unsupported_class6 value
   local recovery09_ledger="" recovery09_ready recovery09_will_run
@@ -1982,6 +1938,21 @@ SQL
   log "target read-only prechecks OK"
 }
 
+# staging_db_dump <dump_path> <pg_user> <pg_db> <display_name>
+#   The ONE pg_dump of the real staging DB, shared by action=migrate's backup and
+#   action=org-membership-repair's pre-write backup: custom-format dump to a HOST file (never
+#   uploaded), fail closed on a failed or empty dump, then STAGING_DUMP_SHA256 / STAGING_DUMP_BYTES.
+#   <display_name> is what a failure names (migrate passes its full path, the repair the file name).
+#   Must not be called in an `||`/`if` context: errexit is what stops a failed pg_dump here.
+staging_db_dump() {
+  local dump_path="$1" pg_user="$2" pg_db="$3" display_name="$4"
+  docker exec "$POSTGRES_CONTAINER" pg_dump -Fc -U "$pg_user" "$pg_db" > "$dump_path"
+  [[ -s "$dump_path" ]] \
+    || fail "backup file is empty: ${display_name}; refusing to proceed without a working backup (runbook: pg_dump first is non-negotiable)"
+  STAGING_DUMP_SHA256="$(hash_value "$dump_path")"
+  STAGING_DUMP_BYTES="$(wc -c < "$dump_path" | tr -d '[:space:]')"
+}
+
 action_migrate_backup() {
   # Step 2 of the runbook-compliant sequence: pg_dump the REAL staging DB to a HOST file
   # (never the staging repo dir — not writable by this SSH user; never uploaded as a CI
@@ -1999,12 +1970,10 @@ action_migrate_backup() {
   MIGRATE_BACKUP_PATH="${BACKUP_DIR}/staging-${ts}-pre-migrate.dump"
 
   log "backup: pg_dump -Fc -U ${pg_user} ${pg_db} -> ${MIGRATE_BACKUP_PATH}"
-  docker exec "$POSTGRES_CONTAINER" pg_dump -Fc -U "$pg_user" "$pg_db" > "$MIGRATE_BACKUP_PATH"
-  [[ -s "$MIGRATE_BACKUP_PATH" ]] \
-    || fail "backup file is empty: ${MIGRATE_BACKUP_PATH}; refusing to proceed without a working backup (runbook: pg_dump first is non-negotiable)"
+  staging_db_dump "$MIGRATE_BACKUP_PATH" "$pg_user" "$pg_db" "$MIGRATE_BACKUP_PATH"
 
-  MIGRATE_BACKUP_SHA256="$(hash_value "$MIGRATE_BACKUP_PATH")"
-  MIGRATE_BACKUP_BYTES="$(wc -c < "$MIGRATE_BACKUP_PATH" | tr -d '[:space:]')"
+  MIGRATE_BACKUP_SHA256="$STAGING_DUMP_SHA256"
+  MIGRATE_BACKUP_BYTES="$STAGING_DUMP_BYTES"
   MIGRATE_BACKUP_PG_USER="$pg_user"
   MIGRATE_BACKUP_PG_DB="$pg_db"
 
@@ -2310,6 +2279,231 @@ action_migrate() {
   cleanup_target_migration_runtime
   trap - EXIT HUP INT TERM
   log "migrate OK: backup=${MIGRATE_BACKUP_PATH} rehearsal=ok apply=ok"
+}
+
+# --- staging org-membership inspect / repair (owner ruling 2026-10-12) ---------------------
+#
+# Population: users u WHERE u.is_active = TRUE AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE
+# uo.user_id = u.id) — what action=migrate's read-only prechecks count as
+# zero_membership_no_row_count. Both actions talk ONLY to ${POSTGRES_CONTAINER} (the staging
+# postgres the staging compose file defines), never through compose, never to the backend, web or
+# any prod-track container. The SQL text comes from the pipeline lib (org_membership_* and
+# target_precheck_counters_*). Artifacts are values-free: fingerprints, counts, yes/no facts,
+# class names, timestamps and org ids only; the dump stays on the host (file name, size, sha256
+# recorded).
+
+orgfix_assert_staging_postgres() {
+  [[ "$POSTGRES_CONTAINER" == "metasheet-staging-postgres" ]] \
+    || fail "org-membership actions only run against metasheet-staging-postgres"
+  grep -q "container_name: ${POSTGRES_CONTAINER}" "$STAGING_COMPOSE_FILE" \
+    || fail "staging compose file does not define ${POSTGRES_CONTAINER}; refusing (wrong file?)"
+  docker inspect -f '{{.State.Running}}' "$POSTGRES_CONTAINER" 2>/dev/null | grep -qx 'true' \
+    || fail "${POSTGRES_CONTAINER} is not running; refusing"
+}
+
+# orgfix_psql_ro <pg_user> <pg_db> [psql -v args...] < sql
+#   Runs stdin inside ONE read-only transaction that is rolled back, with the session also
+#   defaulting to read-only (PGOPTIONS), terse errors (on the command line AND first in stdin, so
+#   no DETAIL line can print a row value), and no psqlrc.
+orgfix_psql_ro() {
+  local pg_user="$1" pg_db="$2"
+  shift 2
+  org_membership_read_only_wrap \
+    | docker exec -i -e 'PGOPTIONS=-c default_transaction_read_only=on' "$POSTGRES_CONTAINER" \
+        psql -X -q -tA -v ON_ERROR_STOP=1 -v VERBOSITY=terse -U "$pg_user" -d "$pg_db" "$@"
+}
+
+# orgfix_org_null_predicate <pg_user> <pg_db>
+#   '' or 'AND i.org_id IS NULL' — the same approval_instances.org_id probe the migrate
+#   prechecks make.
+orgfix_org_null_predicate() {
+  local has_org_id
+  has_org_id="$(orgfix_psql_ro "$1" "$2" <<< "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='approval_instances' AND column_name='org_id');" | tr -d '[:space:]')"
+  case "$has_org_id" in
+    t) printf '%s' 'AND i.org_id IS NULL' ;;
+    f) printf '' ;;
+    *) fail "could not determine whether approval_instances.org_id exists" ;;
+  esac
+}
+
+# orgfix_counters <pg_user> <pg_db> <org_null_predicate> <out_file>
+#   The migrate precheck counter vector, read-only; every line must be label=value with a
+#   numeric value (the histogram excepted).
+orgfix_counters() {
+  local pg_user="$1" pg_db="$2" predicate="$3" out_file="$4" sql line
+  sql="$(target_precheck_counters_sql "$predicate")" || fail "could not build the counter SQL"
+  orgfix_psql_ro "$pg_user" "$pg_db" <<< "$sql" > "$out_file"
+  [[ -s "$out_file" ]] || fail "counter query returned nothing"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      approval_action_histogram=*) ;;
+      *) [[ "$line" =~ ^[a-z0-9_]+=[0-9]+$ ]] || fail "counter query returned a malformed line" ;;
+    esac
+  done < "$out_file"
+}
+
+# orgfix_counter <file> <label>
+orgfix_counter() {
+  sed -n "s/^${2}=//p" "$1" | tail -n 1
+}
+
+action_org_membership_inspect() {
+  orgfix_assert_staging_postgres
+  local pg_user pg_db predicate users_sql n_users n_orgs
+  read -r pg_user pg_db <<< "$(resolve_postgres_creds)"
+  predicate="$(orgfix_org_null_predicate "$pg_user" "$pg_db")"
+
+  orgfix_counters "$pg_user" "$pg_db" "$predicate" "${OUTPUT_DIR}/org-membership-counters.txt"
+  org_membership_probe_sql | orgfix_psql_ro "$pg_user" "$pg_db" > "${OUTPUT_DIR}/org-membership-probe.txt"
+  users_sql="$(org_membership_inspect_users_sql "${OUTPUT_DIR}/org-membership-probe.txt" "$predicate")" \
+    || fail "could not build the inspect SQL"
+  orgfix_psql_ro "$pg_user" "$pg_db" <<< "$users_sql" > "${OUTPUT_DIR}/org-membership-users-raw.txt"
+  # Per user, action=migrate's precheck verdict projected for each repair mode (assuming the
+  # Recovery09 migrations are already applied): add-membership moves recovery09_repairable_user_count
+  # by -1 and class6_candidate_count by -k; deactivate moves only the former.
+  local line k
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    k="$(sed -n 's/.* class6_shaped_requested=\([^ ]*\).*/\1/p' <<< "$line")"
+    printf '%s migrate_gate_after_add=%s migrate_gate_after_deactivate=%s\n' "$line" \
+      "$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters.txt" -1 "-${k}")" \
+      "$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters.txt" -1 0)"
+  done < "${OUTPUT_DIR}/org-membership-users-raw.txt" > "${OUTPUT_DIR}/org-membership-users.txt"
+  rm -f "${OUTPUT_DIR}/org-membership-users-raw.txt"
+  org_membership_inspect_orgs_sql | orgfix_psql_ro "$pg_user" "$pg_db" > "${OUTPUT_DIR}/org-membership-orgs.txt"
+
+  n_users="$(grep -c '^user fp=' "${OUTPUT_DIR}/org-membership-users.txt" || true)"
+  n_orgs="$(grep -c '^org ' "${OUTPUT_DIR}/org-membership-orgs.txt" || true)"
+  [[ "$n_users" == "$(orgfix_counter "${OUTPUT_DIR}/org-membership-counters.txt" zero_membership_no_row_count)" ]] \
+    || fail "inspect listed ${n_users} user line(s) but zero_membership_no_row_count disagrees (concurrent change? re-run)"
+
+  {
+    echo "action=org-membership-inspect"
+    echo "read_only=yes (one READ ONLY transaction per query, rolled back; default_transaction_read_only=on)"
+    echo "predicate=active user with no user_orgs row"
+    echo "matched_users=${n_users}"
+    echo "orgs_with_active_members=${n_orgs}"
+    echo "migrate_gate_now=$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters.txt" 0 0) (assumes the Recovery09 migrations are already applied)"
+    echo "--- counters (same SQL as the migrate prechecks)"
+    cat "${OUTPUT_DIR}/org-membership-counters.txt"
+    echo "--- users (fp = left(md5(id),16); class6_shaped_requested = class6_candidate_count delta on add-membership, recovery09_unsupported_class6_count delta on deactivate; applied_deprovision_evidence > 0 = the repair refuses this user)"
+    cat "${OUTPUT_DIR}/org-membership-users.txt"
+    echo "--- orgs with active members"
+    cat "${OUTPUT_DIR}/org-membership-orgs.txt"
+    echo "result=ok"
+  } > "${OUTPUT_DIR}/summary.txt"
+  cat "${OUTPUT_DIR}/summary.txt"
+  log "org-membership-inspect OK: ${n_users} user(s) match the predicate (read-only; nothing written)"
+}
+
+action_org_membership_repair() {
+  local parsed mode fp org
+  parsed="$(org_membership_repair_spec_parse "$REPAIR_SPEC")" \
+    || { echo "[window-runner][error] REPAIR_SPEC is malformed; value withheld" >&2; exit 2; }
+  read -r mode fp org <<< "$parsed"
+  [[ "$org" == "-" ]] && org=""
+
+  orgfix_assert_staging_postgres
+  local pg_user pg_db predicate write_sql
+  read -r pg_user pg_db <<< "$(resolve_postgres_creds)"
+  predicate="$(orgfix_org_null_predicate "$pg_user" "$pg_db")"
+
+  # 1. Counters BEFORE + read-only preconditions. Any refusal here happens before the backup and
+  #    before any write.
+  local precheck_sql
+  orgfix_counters "$pg_user" "$pg_db" "$predicate" "${OUTPUT_DIR}/org-membership-counters-before.txt"
+  org_membership_probe_sql | orgfix_psql_ro "$pg_user" "$pg_db" > "${OUTPUT_DIR}/org-membership-probe.txt"
+  precheck_sql="$(org_membership_repair_precheck_sql "${OUTPUT_DIR}/org-membership-probe.txt")" \
+    || fail "could not build the repair precheck SQL"
+  orgfix_psql_ro "$pg_user" "$pg_db" -v "fp=${fp}" -v "org=${org}" <<< "$precheck_sql" \
+    > "${OUTPUT_DIR}/org-membership-repair-precheck.txt"
+  local match_count predicate_count org_members evidence
+  match_count="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" match_count)"
+  predicate_count="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" predicate_count)"
+  org_members="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" org_active_member_count)"
+  evidence="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" applied_deprovision_evidence)"
+  [[ "$match_count" =~ ^[0-9]+$ && "$predicate_count" =~ ^[0-9]+$ && "$org_members" =~ ^[0-9]+$ ]] \
+    || fail "repair precheck returned a non-numeric count"
+  [[ "$match_count" == "1" ]] \
+    || fail "repair refused: ${match_count} active no-row user(s) match fp=${fp} (exactly 1 required); no backup taken, nothing written"
+  [[ "$evidence" == "0" || "$evidence" == "n/a" ]] \
+    || fail "repair refused: the user with fp=${fp} has applied directory deprovision evidence (count ${evidence//[^0-9]/}); this runner does not supersede it — owner call; no backup taken, nothing written"
+  if [[ "$mode" == "add-membership" ]]; then
+    # The org value is not echoed: one that did not resolve to an org with active members may be a
+    # pasted identifier rather than an org id.
+    [[ "$org_members" -gt 0 ]] \
+      || fail "repair refused: the named org has no active members (add-membership only joins an org that already has active members; copy the org id from action=org-membership-inspect); no backup taken, nothing written"
+  fi
+
+  # 2. Full DB backup (the migrate backup's own pg_dump), BEFORE the write.
+  local dump_path dump_name
+  mkdir -p "$BACKUP_DIR"
+  dump_name="staging-$(date -u +%Y%m%dT%H%M%SZ)-pre-org-membership-repair.dump"
+  dump_path="${BACKUP_DIR}/${dump_name}"
+  log "backup: pg_dump of the staging DB -> ${dump_name} (stays on the deploy host)"
+  staging_db_dump "$dump_path" "$pg_user" "$pg_db" "$dump_name"
+  {
+    echo "file=${dump_name}"
+    echo "bytes=${STAGING_DUMP_BYTES}"
+    echo "sha256=${STAGING_DUMP_SHA256}"
+    echo "note=dump stays on the deploy host in the runner backup directory; NOT uploaded"
+  } > "${OUTPUT_DIR}/org-membership-repair-backup.txt"
+
+  # 3. The single write transaction (re-checks, writes one row, asserts the delta vector).
+  write_sql="$(org_membership_repair_write_sql "$predicate")" || fail "could not build the repair SQL"
+  if ! docker exec -i "$POSTGRES_CONTAINER" \
+      psql -X -q -tA -v ON_ERROR_STOP=1 -v VERBOSITY=terse -U "$pg_user" -d "$pg_db" \
+      -v "mode=${mode}" -v "fp=${fp}" -v "org=${org}" \
+      <<< "$write_sql" > "${OUTPUT_DIR}/org-membership-repair-write.txt"; then
+    {
+      echo "action=org-membership-repair"
+      echo "mode=${mode}"
+      echo "fp=${fp}"
+      echo "backup_file=${dump_name}"
+      echo "result=commit_unconfirmed"
+    } > "${OUTPUT_DIR}/summary.txt"
+    fail "repair transaction did not report a commit (normally an abort, which rolls everything back; the terse error in ssh.log is ORGFIX_ABORT ..., METASHEET_RECOVERY_AUTHORITY_BUSY, or a lock/deadlock/statement timeout). Re-run action=org-membership-inspect before retrying; backup ${dump_name} is untouched"
+  fi
+  if ! grep -qx 'write_committed=yes' "${OUTPUT_DIR}/org-membership-repair-write.txt"; then
+    {
+      echo "action=org-membership-repair"
+      echo "mode=${mode}"
+      echo "fp=${fp}"
+      echo "backup_file=${dump_name}"
+      echo "result=commit_unconfirmed"
+    } > "${OUTPUT_DIR}/summary.txt"
+    fail "repair transaction did not report a commit; re-run action=org-membership-inspect before retrying (backup ${dump_name})"
+  fi
+
+  # 4. Counters AFTER (read-only, after COMMIT).
+  orgfix_counters "$pg_user" "$pg_db" "$predicate" "${OUTPUT_DIR}/org-membership-counters-after.txt"
+  local no_row_before no_row_after
+  no_row_before="$(orgfix_counter "${OUTPUT_DIR}/org-membership-counters-before.txt" zero_membership_no_row_count)"
+  no_row_after="$(orgfix_counter "${OUTPUT_DIR}/org-membership-counters-after.txt" zero_membership_no_row_count)"
+  {
+    echo "action=org-membership-repair"
+    echo "mode=${mode}"
+    echo "fp=${fp}"
+    [[ "$mode" == "add-membership" ]] && echo "org=${org}"
+    echo "backup_file=${dump_name}"
+    echo "backup_bytes=${STAGING_DUMP_BYTES}"
+    echo "backup_sha256=${STAGING_DUMP_SHA256}"
+    echo "zero_membership_no_row_count_before=${no_row_before}"
+    echo "zero_membership_no_row_count_after=${no_row_after}"
+    echo "migrate_gate_after=$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters-after.txt" 0 0) (assumes the Recovery09 migrations are already applied)"
+    echo "--- in-transaction counters (delta vector asserted before COMMIT)"
+    grep -E '^(in_txn_before|in_txn_after) |^class6_shaped_requested=' "${OUTPUT_DIR}/org-membership-repair-write.txt"
+    echo "--- counters after COMMIT (read-only)"
+    cat "${OUTPUT_DIR}/org-membership-counters-after.txt"
+  } > "${OUTPUT_DIR}/summary.txt"
+  if [[ "$no_row_after" != "$((no_row_before - 1))" ]]; then
+    echo "result=post_commit_mismatch" >> "${OUTPUT_DIR}/summary.txt"
+    fail "post-commit zero_membership_no_row_count is ${no_row_after}, expected $((no_row_before - 1)) (the in-transaction check passed; a concurrent change landed in between — inspect; restore from ${dump_name} only on an owner call)"
+  fi
+  echo "result=ok" >> "${OUTPUT_DIR}/summary.txt"
+  cat "${OUTPUT_DIR}/summary.txt"
+  log "org-membership-repair OK: ${mode} fp=${fp}; zero_membership_no_row_count ${no_row_before} -> ${no_row_after}"
 }
 
 # --- W4+W7 combined-soak (#4556) helpers + actions -------------------------------------
@@ -4062,5 +4256,7 @@ case "$ACTION" in
   soak-flags) action_soak_flags ;;
   soak-run) action_soak_run ;;
   soak-status) action_soak_status ;;
-  *) fail "unknown action: ${ACTION} (expected deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status)" ;;
+  org-membership-inspect) action_org_membership_inspect ;;
+  org-membership-repair) action_org_membership_repair ;;
+  *) fail "unknown action: ${ACTION} (expected deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status|org-membership-inspect|org-membership-repair)" ;;
 esac
