@@ -12,6 +12,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as authority from '../../src/integration/automation-live-authority'
 import * as bootstrap from '../../src/integration/yida-initialization-bootstrap'
 import { createYidaInitializationRuntime, type YidaInitializationRuntimeBinding, type YidaInitializationInput } from '../../src/integration/yida-initialization-runtime'
+import * as encryptedSecrets from '../../src/security/encrypted-secrets'
 import { PluginRuntimeSecurityService } from '../../src/security/plugin-runtime-security-service'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
@@ -188,12 +189,42 @@ realdb('Approved A initialization — actual PG/live ACL/native producer/transac
       if (specifier === 'node:util') return { types }
       if (specifier === './automation-live-authority') return authority
       if (specifier === './yida-initialization-bootstrap') return bootstrap
+      if (specifier === '../security/encrypted-secrets') return encryptedSecrets
       throw new Error('Unexpected mutated module dependency')
     }, exports)
     const original = await active(); await rejected(original.runtime.status(secondAdmin), 'DENIED')
     const mutant = await active({}, security, exports.createYidaInitializationRuntime!)
     expect((await mutant.runtime.status(secondAdmin)).status).toBe('ready')
     expect(await counts()).toEqual(Array(9).fill(0))
+  })
+  it('encryption material failing the production checks refuses L4 in every NODE_ENV before the actual producer: zero rows, zero fetch', async () => {
+    const anchor = await provision(), { runtime } = await active()
+    const valid = { ENCRYPTION_KEY: process.env.ENCRYPTION_KEY, ENCRYPTION_SALT: process.env.ENCRYPTION_SALT }
+    const set = (key: string, value: string | undefined) => { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    const variants = [{ ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined },
+      { ENCRYPTION_KEY: encryptedSecrets.DEFAULT_ENCRYPTION_KEY, ENCRYPTION_SALT: encryptedSecrets.DEFAULT_ENCRYPTION_SALT },
+      { ENCRYPTION_KEY: ' \t ', ENCRYPTION_SALT: valid.ENCRYPTION_SALT }, { ENCRYPTION_KEY: valid.ENCRYPTION_KEY, ENCRYPTION_SALT: undefined }]
+    try {
+      for (const nodeEnv of [undefined, 'development', 'test', 'Production', 'production']) {
+        for (const variant of variants) {
+          set('NODE_ENV', nodeEnv); for (const [key, value] of Object.entries(variant)) set(key, value)
+          sql.length = 0; commits.length = 0
+          await rejected(runtime.initialize(actor, input(anchor.commandId)), 'ENCRYPTION_NOT_READY')
+          // The live ACL and slot reads ran (the bit is the anchor owner's only); no writer statement did.
+          expect(sql.some(text => text.includes('FROM integration_yida_initialization_anchor'))).toBe(true)
+          expect(sql.some(text => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(text))).toBe(false)
+          expect(commits).toEqual([])
+        }
+      }
+      expect(await counts()).toEqual(Array(9).fill(0)); await noSend()
+      expect((await runtime.status(actor)).status).toBe('ready')
+      // Positive control: the same runtime and anchor with valid material outside production seals once.
+      set('NODE_ENV', 'development'); set('ENCRYPTION_KEY', valid.ENCRYPTION_KEY); set('ENCRYPTION_SALT', valid.ENCRYPTION_SALT)
+      expect((await runtime.initialize(actor, input(anchor.commandId))).status).toBe('initialized')
+      expect(await counts()).toEqual([1, 1, 1, 1, 2, 1, 1, 1, 1]); await noSend()
+    } finally { set('NODE_ENV', 'production'); set('ENCRYPTION_KEY', valid.ENCRYPTION_KEY); set('ENCRYPTION_SALT', valid.ENCRYPTION_SALT) }
+    const persisted = (await admin.query('SELECT material_encrypted FROM integration_yida_credential_materials')).rows[0]
+    expect(JSON.parse(await security.decrypt(persisted.material_encrypted)) as Row).toMatchObject({ material: material() })
   })
   it('missing anchor, missing membership and revoked actual admin all refuse before writers', async () => {
     const { runtime } = await active()

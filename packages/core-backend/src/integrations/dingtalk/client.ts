@@ -1,4 +1,5 @@
 import { assertDingTalkCorpAllowed } from './runtime-policy'
+import { parseDingTalkDepartmentIds } from './directory-response-ids'
 import {
   DingTalkBusinessError,
   DingTalkIncompleteResponseError,
@@ -528,21 +529,43 @@ export async function listDingTalkDepartments(
     ? nestedResult
     : nestedResult && typeof nestedResult === 'object' && Array.isArray((nestedResult as Record<string, unknown>).list)
       ? (nestedResult as Record<string, unknown>).list as unknown[]
-      : []
+      : null
+  if (!rawList) {
+    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+  }
   return rawList
-    .map((entry) => (entry && typeof entry === 'object' ? entry as Record<string, unknown> : null))
-    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
-    .map((entry) => ({
-      id: String(entry.dept_id ?? entry.id ?? '').trim(),
-      parentId:
-        entry.parent_id === null || entry.parent_id === undefined
-          ? null
-          : String(entry.parent_id).trim() || null,
-      name: String(entry.name ?? '').trim(),
-      order: readNumericField(entry, 'order', 'order_index') ?? 0,
-      source: entry,
-    }))
-    .filter((entry) => entry.id.length > 0 && entry.name.length > 0)
+    .map((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+      }
+      const entry = value as Record<string, unknown>
+      const rawId = entry.dept_id ?? entry.id
+      const id = typeof rawId === 'string'
+        ? rawId.trim()
+        : typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId >= 0 ? String(rawId) : ''
+      const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+      if (!id || !name) {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+      }
+      const rawParent = entry.parent_id
+      let parentId: string | null
+      if (rawParent === null || rawParent === undefined) {
+        parentId = null
+      } else if (typeof rawParent === 'string') {
+        parentId = rawParent.trim() || null
+      } else if (typeof rawParent === 'number' && Number.isSafeInteger(rawParent) && rawParent >= 0) {
+        parentId = String(rawParent)
+      } else {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+      }
+      return {
+        id,
+        parentId,
+        name,
+        order: readNumericField(entry, 'order', 'order_index') ?? 0,
+        source: entry,
+      }
+    })
 }
 
 export async function getDingTalkDepartmentDetail(
@@ -550,13 +573,14 @@ export async function getDingTalkDepartmentDetail(
   departmentId: string,
   config?: { baseUrl?: string },
 ): Promise<{ deptManagerUserIdList: string[] }> {
+  const requestedDepartmentId = Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId)
   const payload = await requestDingTalkDirectoryJson(
     `/topapi/v2/department/get?access_token=${encodeURIComponent(accessToken)}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        dept_id: Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId),
+        dept_id: requestedDepartmentId,
       }),
     },
     'Failed to read DingTalk department detail',
@@ -565,6 +589,17 @@ export async function getDingTalkDepartmentDetail(
   )
 
   const result = readNestedPayload(payload)
+  const returnedIds = parseDingTalkDepartmentIds(
+    [result.dept_id, result.id].filter((id) => id !== undefined && id !== null),
+    [],
+  )
+  if (
+    (typeof requestedDepartmentId === 'number' && !Number.isFinite(requestedDepartmentId))
+    || returnedIds === null
+    || returnedIds.some((id) => id !== String(requestedDepartmentId).trim())
+  ) {
+    throw new DingTalkIncompleteResponseError('Failed to read DingTalk department detail', {})
+  }
   // DingTalk `/topapi/v2/department/get` returns `dept_manager_userid_list` as a
   // comma-separated string of userids; tolerate an array too for forward-compat.
   const rawManagers = result.dept_manager_userid_list ?? result.deptManagerUseridList
@@ -619,38 +654,50 @@ export async function listDingTalkDepartmentUsers(
   )
 
   const result = readNestedPayload(payload)
-  const rawList = Array.isArray(result.list) ? result.list : []
-  const users = rawList
-    .map((entry) => (entry && typeof entry === 'object' ? entry as Record<string, unknown> : null))
-    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
-    .map((entry) => {
-      const departmentIds = Array.isArray(entry.dept_id_list)
-        ? entry.dept_id_list.map((item) => String(item ?? '').trim()).filter(Boolean)
-        : [departmentId]
+  const hasMore = result.has_more
+  if (!Array.isArray(result.list) || typeof hasMore !== 'boolean') {
+    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+  }
+  const users = result.list.map((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+    }
+    const entry = value as Record<string, unknown>
+    const rawUserId = entry.userid ?? entry.userId
+    const userId = typeof rawUserId === 'string'
+      ? rawUserId.trim()
+      : typeof rawUserId === 'number' && Number.isSafeInteger(rawUserId) && rawUserId >= 0 ? String(rawUserId) : ''
+    const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+    if (!userId || !name) {
+      throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+    }
+    const departmentIds = parseDingTalkDepartmentIds(entry.dept_id_list, [departmentId])
+    if (departmentIds === null) {
+      throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+    }
 
-      return {
-        userId: String(entry.userid ?? entry.userId ?? '').trim(),
-        name: String(entry.name ?? '').trim(),
-        unionId: typeof entry.unionid === 'string' ? entry.unionid : typeof entry.unionId === 'string' ? entry.unionId : undefined,
-        mobile: typeof entry.mobile === 'string' ? entry.mobile : undefined,
-        email: pickDingTalkUserEmail(entry),
-        title: typeof entry.title === 'string' ? entry.title : undefined,
-        avatarUrl:
-          typeof entry.avatar === 'string'
-            ? entry.avatar
-            : typeof entry.avatarUrl === 'string'
-              ? entry.avatarUrl
-              : undefined,
-        departmentIds,
-        source: entry,
-      }
-    })
-    .filter((entry) => entry.userId.length > 0 && entry.name.length > 0)
+    return {
+      userId,
+      name,
+      unionId: typeof entry.unionid === 'string' ? entry.unionid : typeof entry.unionId === 'string' ? entry.unionId : undefined,
+      mobile: typeof entry.mobile === 'string' ? entry.mobile : undefined,
+      email: pickDingTalkUserEmail(entry),
+      title: typeof entry.title === 'string' ? entry.title : undefined,
+      avatarUrl:
+        typeof entry.avatar === 'string'
+          ? entry.avatar
+          : typeof entry.avatarUrl === 'string'
+            ? entry.avatarUrl
+            : undefined,
+      departmentIds,
+      source: entry,
+    }
+  })
 
   return {
     users,
     nextCursor: readNumericField(result, 'next_cursor', 'nextCursor'),
-    hasMore: Boolean(result.has_more),
+    hasMore,
   }
 }
 
@@ -675,14 +722,18 @@ export async function getDingTalkUserDetail(
   )
 
   const result = readNestedPayload(payload)
-  const departmentIds = Array.isArray(result.dept_id_list)
-    ? result.dept_id_list.map((item) => String(item ?? '').trim()).filter(Boolean)
-    : []
+  const departmentIds = parseDingTalkDepartmentIds(result.dept_id_list, [])
+  if (departmentIds === null) {
+    throw new DingTalkIncompleteResponseError('Failed to resolve DingTalk user detail', payload)
+  }
 
-  const resolvedUserId = String(result.userid ?? result.userId ?? userId).trim()
-  const name = String(result.name ?? '').trim()
-  if (!resolvedUserId || !name) {
-    throw new Error('Failed to resolve DingTalk user detail')
+  const rawUserId = result.userid ?? result.userId ?? userId
+  const resolvedUserId = typeof rawUserId === 'string'
+    ? rawUserId.trim()
+    : typeof rawUserId === 'number' && Number.isSafeInteger(rawUserId) && rawUserId >= 0 ? String(rawUserId) : ''
+  const name = typeof result.name === 'string' ? result.name.trim() : ''
+  if (!resolvedUserId || resolvedUserId !== userId.trim() || !name) {
+    throw new DingTalkIncompleteResponseError('Failed to resolve DingTalk user detail', payload)
   }
 
   return {

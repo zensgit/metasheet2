@@ -691,6 +691,10 @@ const CURATED_DEBT_ENTRIES = [
     // (finding_p26_census_nearest_symbol_collision in project memory: "same-name local closure
     // folds into an already-reviewed entry"). This migration's relPath is unique in the tree, so
     // relPath alone is a precise, non-generalizing discriminator.
+    //
+    // 2026-10-28: the same file also UPDATEs approval_instances.workflow_key for the narrow
+    // attendance-linked NULL-key backfill (shared_hook bucket). That site stays under this
+    // relPath claim; it is not a new writer outside the migration.
     claims: (site) =>
       site.relPath ===
       'packages/core-backend/src/db/migrations/zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts',
