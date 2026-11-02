@@ -6166,6 +6166,8 @@ async function batchUnbindReviewItems() {
     const message = failedCount > 0
       ? `已停权处理 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已完成 ${batchIds.length} 个目录成员的批量停权处理`
+    // Set before the reload so a failed reload's own error status is not overwritten.
+    setStatus(message, failedCount > 0 ? 'error' : 'info')
     await Promise.all([
       loadIntegrations(),
       loadReviewItems(selectedIntegration.value.id),
@@ -6186,7 +6188,6 @@ async function batchUnbindReviewItems() {
       // The reload may switch to a pending-binding view that hides these rows; show them instead.
       if (selectedReviewBatchIds.value.length < retryIds.length) reviewFilter.value = 'inactive_linked'
     }
-    setStatus(message, failedCount > 0 ? 'error' : 'info')
     setReviewBatchProgress({
       kind: 'unbind',
       phase: 'completed',
