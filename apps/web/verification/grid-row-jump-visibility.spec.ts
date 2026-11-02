@@ -118,3 +118,77 @@ test('paged with the sticky aggregation footer: a jump down on the page clears t
   expectInBand(await placement(page), '3', 'paged + footer jump 3 (up)')
   expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
 })
+
+// R78 known limitation e: a keyboard move that changes the focused row must leave it in the same band as the jump.
+// A click on the row's first cell focuses it (DOM focus goes to the grid root); then each key press selects the next
+// record. Waits until the expected record is the latest select, then lets the scroll settle.
+async function clickRow(page: Page, ri: number, recordId: string): Promise<void> {
+  const before = await page.evaluate(() => (window as W).__GRID_ROW_JUMP__!.selects.length)
+  await page.locator(`td[data-ri="${ri}"][data-ci="0"]`).click()
+  await page.waitForFunction(([n, id]) => {
+    const s = (window as W).__GRID_ROW_JUMP__!.selects
+    return s.length > n && s[s.length - 1] === id
+  }, [before, recordId] as const, { timeout: 10_000 })
+}
+
+async function keys(page: Page, key: string, times: number, recordId: string): Promise<void> {
+  for (let i = 0; i < times; i++) await page.keyboard.press(key)
+  await page.waitForFunction((id) => {
+    const s = (window as W).__GRID_ROW_JUMP__!.selects
+    return s[s.length - 1] === id
+  }, recordId, { timeout: 10_000 })
+  await page.waitForTimeout(250)
+}
+
+test('keyboard, windowed (2000 rows held): ArrowDown past the viewport and ArrowUp back under the header stay inside the visible band', async ({ page }) => {
+  const errs: string[] = []
+  await open(page, 'mode=all&total=2000&size=50', errs)
+  await clickRow(page, 0, 'r0')
+  await keys(page, 'ArrowDown', 40, 'r40')
+  const down = await placement(page)
+  expect(down.windowed, 'the 2000-row set is windowed').toBe(true)
+  expectInBand(down, '41', 'keyboard windowed ArrowDown x40 (row 41)')
+  await keys(page, 'ArrowUp', 30, 'r10')
+  expectInBand(await placement(page), '11', 'keyboard windowed ArrowUp x30 (row 11)')
+  expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
+})
+
+test('keyboard, windowed with the sticky aggregation footer: ArrowDown clears the footer, ArrowUp clears the header', async ({ page }) => {
+  const errs: string[] = []
+  await open(page, 'mode=all&total=2000&size=50&agg=1', errs)
+  await clickRow(page, 0, 'r0')
+  await keys(page, 'ArrowDown', 30, 'r30')
+  expectInBand(await placement(page), '31', 'keyboard windowed + footer ArrowDown x30 (row 31)')
+  await keys(page, 'ArrowUp', 25, 'r5')
+  expectInBand(await placement(page), '6', 'keyboard windowed + footer ArrowUp x25 (row 6)')
+  expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
+})
+
+test('keyboard, paged, 50 rows per page (not windowed): ArrowDown past the viewport, ArrowRight wrapping to the next row, and ArrowUp back under the header', async ({ page }) => {
+  mkdirSync(OUT, { recursive: true })
+  const errs: string[] = []
+  await open(page, 'mode=paged&total=1000&size=50', errs)
+  await clickRow(page, 0, 'r0')
+  await keys(page, 'ArrowDown', 30, 'r30')
+  const down = await placement(page)
+  expect(down.windowed, '50 rows are not windowed').toBe(false)
+  expectInBand(down, '31', 'keyboard paged ArrowDown x30 (row 31)')
+  await page.screenshot({ path: `${OUT}/grid-row-keyboard-paged-31.png` })
+  // Three fields: two presses walk to the last column, the third wraps to row 32.
+  await keys(page, 'ArrowRight', 3, 'r31')
+  expectInBand(await placement(page), '32', 'keyboard paged ArrowRight wrap (row 32)')
+  await keys(page, 'ArrowUp', 26, 'r5')
+  expectInBand(await placement(page), '6', 'keyboard paged ArrowUp x26 (row 6)')
+  expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
+})
+
+test('keyboard, paged with the sticky aggregation footer: ArrowDown to the last row clears the footer, ArrowUp clears the header', async ({ page }) => {
+  const errs: string[] = []
+  await open(page, 'mode=paged&total=1000&size=50&agg=1', errs)
+  await clickRow(page, 0, 'r0')
+  await keys(page, 'ArrowDown', 49, 'r49')
+  expectInBand(await placement(page), '50', 'keyboard paged + footer ArrowDown x49 (row 50, last on the page)')
+  await keys(page, 'ArrowUp', 44, 'r5')
+  expectInBand(await placement(page), '6', 'keyboard paged + footer ArrowUp x44 (row 6)')
+  expect(errs, `console/page errors:\n${errs.join('\n')}`).toEqual([])
+})
