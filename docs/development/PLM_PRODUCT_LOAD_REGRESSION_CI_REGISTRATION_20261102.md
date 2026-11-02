@@ -1,0 +1,13 @@
+# Product/BOM load regression CI registration — 2026-11-02
+
+Parent: `b22d1c0ebedb22b6b432bf2a070d856e1fbaf43a`. Source: `0a47afb13c5512b93710ed929f7a12269d2e6697`.
+
+The focused `apps/web/tests/plmProductLoadOwnership.spec.ts` contains five original Product loader and six BOM child-read definitions. Source changes already matched the existing workflow source glob, but this exact new test filename was absent from its two explicit test-path lists and enumerated UI Vitest command. Triggering a workflow alone did not provide the intended whole-file entry.
+
+This existing workflow gains only three added lines, zero deletions: one exact test path in each original event path list and one `tests/plmProductLoadOwnership.spec.ts` argument in the existing Personal binding settings UI command. All original bytes otherwise remain, including events, branch filters, commands/reporters, jobs, runners, install/PG setup, environment, timeouts, retry, permissions, policies, browser guards and gates. No new framework, job, dependency, threshold or redundant source pattern.
+
+Deleting only the three inserted lines restores the full original11902B/SHA256 `7da658d6b353bff6716c354649c83d5093a7e386613b4e266dabe127bc03c867`. Candidate12064B/SHA256 `1b4aecf8046d9d2e0c8cac8631570bd678e3dffa3db5e276afb56dee6209fdca`. Final five-file capsule SHA256 `4e4102f8454479cfa7337b5a877013df626c59ce23caedcf37307f04880c423e` (8210 bytes), readonly3 exact, Root delta NONE. Independent static review SHA256 `e61bf162ebac46cc87e3224e2bcb59a96231b255e187f2f644312249c2619028`, blockers `[]`.
+
+Grok requested `grok-4.7` / `medium`; Root observed literal CLI `Grok 4.7` / `xhigh`. Author actual profile and backend deployment ID remain UNKNOWN. The new explicit owner one-shot hook repair was executed once before this named task, confirmed14 events and consumed; it does not authorize another persistent repair or any product execution. No View/spec body was needed by this author. Source16's separate earlier tool-scope incident remains in its records and is not erased by this registration.
+
+All product checks remain NOT_RUN: YAML parsing, tests, types, imports, lint, builds, dependency installation, service/HTTP/PG/browser and CI. This is an execution entry, not an executed result. Earlier exact-b581 Draft6694 CI does not qualify the new source stack. All seven packages remain OPEN; N2 and all HOLDs remain. Source plus this one document is local only, with no push, new PR, dispatch, merge, deployment, production enablement, real notification or issue closure. Later results belong in records/state/PR body; do not repeat source/doc commits for results.
