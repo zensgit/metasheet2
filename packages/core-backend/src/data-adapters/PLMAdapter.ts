@@ -2527,7 +2527,26 @@ export class PLMAdapter extends HTTPAdapter {
         ...(method === 'POST' ? { body: JSON.stringify(operation === 'verify' ? { connection_id: connectionId } : data) } : {}),
       })
       if (!response.ok) throw new PlmPersonalApprovalError(response.status, response.status === 401 ? 'PLM_CARD_UNAUTHORIZED' : response.status === 403 ? 'PLM_PROVIDER_FORBIDDEN' : response.status === 404 ? 'PLM_SOURCE_NOT_FOUND' : response.status === 409 ? 'PLM_SOURCE_CONFLICT' : 'PLM_PROVIDER_UNAVAILABLE')
-      const body = await response.text()
+      if (!response.body) throw new Error('missing_response_body')
+      const reader = response.body.getReader()
+      const chunks: Uint8Array[] = []
+      let size = 0
+      try {
+        for (;;) {
+          const read = await reader.read()
+          if (read.done) break
+          size += read.value.byteLength
+          // Raw +3 preserves the single initial UTF-8 BOM removed before the unchanged decoded 2_000_000 check.
+          if (size > 2_000_003) {
+            await reader.cancel()
+            throw new Error('response_too_large')
+          }
+          chunks.push(read.value)
+        }
+      } finally {
+        reader.releaseLock()
+      }
+      const body = new TextDecoder().decode(Buffer.concat(chunks))
       if (Buffer.byteLength(body) > 2_000_000) throw new Error('response_too_large')
       return JSON.parse(body)
     } catch (error) {
@@ -2591,7 +2610,38 @@ export class PLMAdapter extends HTTPAdapter {
         headers,
         ...(prepared.body !== undefined ? { body: JSON.stringify(prepared.body) } : {}),
       })
-      const body = await response.text()
+      let body = ''
+      if (response.body) {
+        const reader = response.body.getReader()
+        const chunks: Uint8Array[] = []
+        let retained = 0
+        try {
+          let step = await reader.read()
+          while (!step.done) {
+            const value = step.value
+            if (value && value.byteLength > 0) {
+              // 8192 raw bytes plus one leading 3-byte UTF-8 BOM. Overflow is confirmed only after cancel resolves.
+              if (retained + value.byteLength > 8192 + 3) {
+                await reader.cancel()
+                if (!response.ok) throw personalBomWriteHttpError(response.status)
+                throw new PlmPersonalBomWriteError(503, 'PLM_BOM_WRITE_UNAVAILABLE', undefined, true)
+              }
+              chunks.push(value)
+              retained += value.byteLength
+            }
+            step = await reader.read()
+          }
+        } finally {
+          reader.releaseLock()
+        }
+        const merged = new Uint8Array(retained)
+        let offset = 0
+        for (const chunk of chunks) {
+          merged.set(chunk, offset)
+          offset += chunk.byteLength
+        }
+        body = new TextDecoder().decode(merged)
+      }
       if (!response.ok) throw personalBomWriteHttpError(response.status, body)
       return parsePersonalBomWriteSuccess(operation, response.status, body)
     } catch (error) {

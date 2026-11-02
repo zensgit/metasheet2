@@ -8,7 +8,7 @@ import { PostgresAdapter } from './PostgresAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
 import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
-import { PLMAdapter } from './PLMAdapter'
+import { PLMAdapter, type IntegrationCapabilitiesResult } from './PLMAdapter'
 import {
   EncryptionMaterialError,
   encryptStoredSecretValue,
@@ -297,9 +297,190 @@ function sourceUnavailableError(
   })
 }
 
+// Fixed refusal for an explicit managed yuantus source whose persisted declaration does not
+// match the env provider PLMAdapter.connect would actually apply (empty config service).
+// One code and one sentence: no URL, tenant, org, or credential is interpolated.
+export const MANAGED_PLM_SOURCE_PROVIDER_MISMATCH_CODE = 'PLM_SOURCE_PROVIDER_MISMATCH'
+export const MANAGED_PLM_SOURCE_PROVIDER_MISMATCH_MESSAGE =
+  '托管 PLM 源与当前全局提供者不匹配，已拒绝连接 / The managed PLM source does not match the active global provider'
+
+interface NarrowPlmSourceDeclaration {
+  apiMode: unknown
+  url: unknown
+  baseURL: unknown
+  headers: Record<string, unknown> | null | undefined
+  optionTenant: unknown
+  optionOrg: unknown
+}
+
+function isExplicitYuantusMode(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const normalized = value.toLowerCase()
+  return normalized === 'yuantus' || normalized === 'v1'
+}
+
+function copyHeaders(headers: unknown): Record<string, unknown> | null | undefined {
+  if (headers === undefined) return undefined
+  if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) return null
+  const copy: Record<string, unknown> = {}
+  for (const key of Object.keys(headers)) {
+    copy[key] = (headers as Record<string, unknown>)[key]
+  }
+  return copy
+}
+
+function captureNarrowPlmSource(config: DataSourceConfig): NarrowPlmSourceDeclaration {
+  return {
+    apiMode: config.options?.apiMode,
+    url: config.connection?.url,
+    baseURL: config.connection?.baseURL,
+    headers: copyHeaders(config.connection?.headers),
+    optionTenant: config.options?.tenantId,
+    optionOrg: config.options?.orgId,
+  }
+}
+
+// U+0000..U+001F and DEL. Trim does not remove every one of these.
+const ASCII_CONTROL = /[\u0000-\u001F\u007F]/
+
+function isExactScopeToken(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.trim() === value
+    && !ASCII_CONTROL.test(value)
+}
+
+// Case-insensitive aliases plus the option must be one exact raw token. No trim and no
+// Unicode normalization: a padded, empty, or control-bearing alias fails the whole scope.
+function agreedScope(
+  headers: Record<string, unknown> | null | undefined,
+  name: string,
+  option: unknown,
+): string | undefined {
+  if (headers === null) return undefined
+  const values: unknown[] = []
+  if (headers) {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === name) values.push(headers[key])
+    }
+  }
+  if (option !== undefined) values.push(option)
+  if (values.length === 0) return undefined
+  if (values.some((value) => !isExactScopeToken(value))) return undefined
+  if (new Set(values).size !== 1) return undefined
+  return values[0] as string
+}
+
+// Full base href, path included. Reject the raw string before URL parsing when it has
+// edge whitespace, an ASCII control, or a literal ? or #. The login fetch concatenates
+// that raw string with /api, and an empty delimiter has an empty URL search/hash.
+// Encoded %3F and %23 remain part of the path. http and https only.
+function canonicalReadBase(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  if (value.trim() !== value || ASCII_CONTROL.test(value)) return undefined
+  if (value.includes('?') || value.includes('#')) return undefined
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return undefined
+  }
+  if (url.username || url.password || url.search || url.hash) return undefined
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+  return url.href
+}
+
+function presentEnv(value: string | undefined): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+// Mirrors PLMAdapter.resolveApiMode, including unknown values: legacy/v0 win immediately;
+// any other string falls through to tenant, org, then the exact x-tenant-id / x-org-id keys.
+function resolveEnvApiMode(
+  value: string | undefined,
+  headers: Record<string, unknown> | null | undefined,
+  tenantId: string | undefined,
+  orgId: string | undefined,
+): 'yuantus' | 'legacy' {
+  const normalized = (value || '').toLowerCase()
+  if (normalized === 'yuantus' || normalized === 'v1') return 'yuantus'
+  if (normalized === 'legacy' || normalized === 'v0') return 'legacy'
+  if (tenantId || orgId) return 'yuantus'
+  if (headers && (headers['x-tenant-id'] || headers['x-org-id'])) return 'yuantus'
+  return 'legacy'
+}
+
+function boundYuantusSourceMatches(declaration: NarrowPlmSourceDeclaration): boolean {
+  const tenant = agreedScope(declaration.headers, 'x-tenant-id', declaration.optionTenant)
+  const org = agreedScope(declaration.headers, 'x-org-id', declaration.optionOrg)
+  if (!tenant || !org) return false
+
+  // Only undefined is omitted. null and '' stay present and must themselves be valid.
+  const urlOmitted = declaration.url === undefined
+  const baseOmitted = declaration.baseURL === undefined
+  if (urlOmitted && baseOmitted) return false
+  const canonicalUrl = urlOmitted ? undefined : canonicalReadBase(declaration.url)
+  const canonicalBase = baseOmitted ? undefined : canonicalReadBase(declaration.baseURL)
+  if (!urlOmitted && canonicalUrl === undefined) return false
+  if (!baseOmitted && canonicalBase === undefined) return false
+  if (canonicalUrl !== undefined && canonicalBase !== undefined && canonicalUrl !== canonicalBase) return false
+  const sourceBase = canonicalUrl ?? canonicalBase
+  const envBase = canonicalReadBase(process.env.PLM_BASE_URL || process.env.PLM_URL)
+  if (!sourceBase || !envBase || sourceBase !== envBase) return false
+
+  const sourceMode = typeof declaration.apiMode === 'string' ? declaration.apiMode : undefined
+  const optionTenant = typeof declaration.optionTenant === 'string' ? declaration.optionTenant : undefined
+  const optionOrg = typeof declaration.optionOrg === 'string' ? declaration.optionOrg : undefined
+  const mode = resolveEnvApiMode(
+    process.env.PLM_API_MODE || sourceMode,
+    declaration.headers,
+    process.env.PLM_TENANT_ID || optionTenant,
+    process.env.PLM_ORG_ID || optionOrg,
+  )
+  if (mode !== 'yuantus') return false
+
+  const globalTenant = presentEnv(process.env.PLM_TENANT_ID)
+  const globalOrg = presentEnv(process.env.PLM_ORG_ID)
+  if (globalTenant !== undefined && globalTenant !== tenant) return false
+  if (globalOrg !== undefined && globalOrg !== org) return false
+
+  const username = presentEnv(process.env.PLM_USERNAME)
+  const password = presentEnv(process.env.PLM_PASSWORD)
+  if (username !== undefined && password !== undefined) {
+    if (process.env.PLM_TENANT_ID !== tenant || process.env.PLM_ORG_ID !== org) return false
+  }
+  return true
+}
+
+function managedPlmSourceProviderMismatch(): Error {
+  return Object.assign(new Error(MANAGED_PLM_SOURCE_PROVIDER_MISMATCH_MESSAGE), {
+    status: 503,
+    code: MANAGED_PLM_SOURCE_PROVIDER_MISMATCH_CODE,
+  })
+}
+
 class ManagedPLMAdapter extends PLMAdapter {
+  // Persisted declaration. super.connect() overwrites url, baseURL, and headers on this.config.
+  private readonly boundSourceDeclaration: NarrowPlmSourceDeclaration
+
   constructor(config: DataSourceConfig) {
     super(emptyConfigService, consoleLogger, config)
+    this.boundSourceDeclaration = captureNarrowPlmSource(config)
+  }
+
+  private boundSourceRefused(): boolean {
+    return isExplicitYuantusMode(this.boundSourceDeclaration.apiMode)
+      && !boundYuantusSourceMatches(this.boundSourceDeclaration)
+  }
+
+  async connect(): Promise<void> {
+    if (this.boundSourceRefused()) throw managedPlmSourceProviderMismatch()
+    await super.connect()
+  }
+
+  async getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult> {
+    if (this.boundSourceRefused()) return { available: false, reason: 'unavailable' }
+    return super.getIntegrationCapabilities()
   }
 }
 

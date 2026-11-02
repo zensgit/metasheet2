@@ -617,6 +617,7 @@ describe('personal BOM write intent dispatch', () => {
     ['deleted source', (state: State) => { state.sources.get(SOURCE)!.deleted_at = new Date() }, 403, 'PLM_BOM_WRITE_FORBIDDEN'],
     ['rebind person', (state: State) => { state.bindings[0].subject_id = '99' }, 403, 'PLM_BOM_WRITE_FORBIDDEN'],
     ['origin', (state: State) => { state.sources.get(SOURCE)!.config.connection.url = 'https://other.invalid' }, 403, 'PLM_BOM_WRITE_FORBIDDEN'],
+    ['source pathname', (state: State) => { state.sources.get(SOURCE)!.config.connection.url = 'https://synthetic.invalid/prefix' }, 403, 'PLM_BOM_WRITE_FORBIDDEN'],
     ['membership revocation', (state: State) => { state.memberships[0].is_active = false }, 403, 'PLM_BOM_WRITE_FORBIDDEN'],
     ['inactive user', (state: State) => { state.users.get(OWNER)!.is_active = false }, 401, 'PLM_BOM_WRITE_UNAUTHORIZED'],
   ] as const)('sends nothing when %s changes after the intent commits', async (_name, mutate, status, code) => {

@@ -119,12 +119,7 @@ export class PlmPersonalApprovalBindingService {
     )
       throw new Failure(403, 'PLM_PROVIDER_FORBIDDEN')
   }
-  private async bound(
-    c: PoolClient,
-    id: string,
-    owner: string,
-    credential = true,
-  ): Promise<Binding> {
+  private async ownedBinding(c: PoolClient, id: string, owner: string): Promise<Binding> {
     requirePlmApprovalCard()
     await this.activeOwner(c, owner)
     const b = (
@@ -134,13 +129,17 @@ export class PlmPersonalApprovalBindingService {
       )
     ).rows[0]
     if (!b) throw new Failure(404, 'PLM_BINDING_REQUIRED')
+    return b
+  }
+  private async bound(c: PoolClient, id: string, owner: string): Promise<Binding> {
+    const b = await this.ownedBinding(c, id, owner)
     this.checkScope(b, {
       connection_id: b.connection_id,
       tenant_id: b.tenant_id,
       org_id: b.org_id,
       auth_user_id: b.subject_id,
     })
-    if (credential && (!b.encrypted_grant || new Date(b.expires_at).getTime() <= Date.now()))
+    if (!b.encrypted_grant || new Date(b.expires_at).getTime() <= Date.now())
       throw new Failure(409, 'PLM_BINDING_REQUIRED')
     return b
   }
@@ -158,16 +157,55 @@ export class PlmPersonalApprovalBindingService {
     return this.tx(async (c) => {
       await this.activeOwner(c, owner)
       const r = await c.query<Binding & { unresolved: string }>(
-        `SELECT b.*,(SELECT count(*) FROM plm_personal_approval_commands x WHERE x.binding_id=b.id AND x.state='pending') AS unresolved FROM plm_personal_approval_bindings b WHERE b.owner_id=$1 AND connection_id=$2 ORDER BY id`,
-        [owner, requirePlmApprovalCard()],
+        `SELECT b.*,(SELECT count(*) FROM plm_personal_approval_commands x WHERE x.binding_id=b.id AND x.state='pending') AS unresolved FROM plm_personal_approval_bindings b WHERE b.owner_id=$1 ORDER BY id`,
+        [owner],
       )
+      const connectionId = requirePlmApprovalCard()
+      let grantManagementUrl: string | null = null
+      let tenantId: string | undefined
+      let orgId: string | undefined
+      try {
+        const transport = this.provider()
+        const managementUrl = transport.personalApprovalManagementUrl()
+        const effectiveTenantId = transport.getEffectiveTenantId()
+        const effectiveOrgId = transport.getEffectiveOrgId()
+        if (
+          typeof managementUrl === 'string' &&
+          managementUrl &&
+          typeof effectiveTenantId === 'string' &&
+          effectiveTenantId &&
+          typeof effectiveOrgId === 'string' &&
+          effectiveOrgId
+        ) {
+          grantManagementUrl = managementUrl
+          tenantId = effectiveTenantId
+          orgId = effectiveOrgId
+        }
+      } catch {
+        grantManagementUrl = null
+        tenantId = undefined
+        orgId = undefined
+      }
       return {
         connection: {
-          id: requirePlmApprovalCard(),
+          id: connectionId,
           label: 'Yuantus',
-          grantManagementUrl: this.provider().personalApprovalManagementUrl(),
+          grantManagementUrl,
         },
-        bindings: r.rows.map((b) => this.metadata(b, Number(b.unresolved))),
+        bindings: r.rows.map((b) => ({
+          ...this.metadata(b, Number(b.unresolved)),
+          // Advisory local eligibility only. Operation guards stay authoritative.
+          canUse: !!(
+            grantManagementUrl &&
+            tenantId &&
+            orgId &&
+            b.connection_id === connectionId &&
+            b.tenant_id === tenantId &&
+            b.org_id === orgId &&
+            b.encrypted_grant &&
+            new Date(b.expires_at).getTime() > Date.now()
+          ),
+        })),
       }
     })
   }
@@ -245,7 +283,7 @@ export class PlmPersonalApprovalBindingService {
   }
   async unbind(owner: string, id: string) {
     return this.tx(async (c) => {
-      const b = await this.bound(c, id, owner, false)
+      const b = await this.ownedBinding(c, id, owner)
       await c.query(
         'UPDATE plm_personal_approval_bindings SET encrypted_grant=NULL,generation=generation+1,updated_at=now() WHERE id=$1',
         [b.id],

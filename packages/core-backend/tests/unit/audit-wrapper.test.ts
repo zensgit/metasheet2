@@ -54,6 +54,8 @@ describe('auditLog', () => {
         resourceType: 'permission',
         resourceId: 'user-1:attendance:read',
         actionDetails: { permission: 'attendance:read' },
+        actorId: '42',
+        actorType: 'user',
       },
     )
     expect(warnMock).not.toHaveBeenCalled()
@@ -118,5 +120,66 @@ describe('auditLog', () => {
     const message = errorMock.mock.calls[0][0] as string
     expect(message).toContain('error_code=UNKNOWN')
     expect(message).not.toContain('12345')
+  })
+
+  const UUID = '26979f88-e7cc-4b40-a975-a0353d19aec0'
+
+  it.each([
+    ['uuid', UUID, undefined, UUID],
+    ['untrimmed', `  ${UUID}  `, undefined, `  ${UUID}  `],
+    ['042', '042', 42, '042'],
+    ['0', '0', 0, '0'],
+  ] as const)('forwards typed user %s and leaves meta untouched', async (_label, actorId, userId, typedId) => {
+    logEventMock.mockResolvedValueOnce(undefined)
+    const meta = { actorId: 'spoof-user', actorType: 'system', permission: 'attendance:read' }
+    await auditLog({
+      actorId,
+      actorType: 'user',
+      action: 'grant',
+      resourceType: 'user-role',
+      resourceId: 'user-1',
+      meta,
+    })
+    expect(logEventMock).toHaveBeenCalledWith('GRANT', 'grant', {
+      userId,
+      resourceType: 'user-role',
+      resourceId: 'user-1',
+      actionDetails: meta,
+      actorId: typedId,
+      actorType: 'user',
+    })
+    expect(logEventMock.mock.calls[0][2].actionDetails).toBe(meta)
+    expect(logEventMock.mock.calls[0][2].actorId).not.toBe(meta.actorId)
+    expect(meta).toEqual({ actorId: 'spoof-user', actorType: 'system', permission: 'attendance:read' })
+  })
+
+  it.each([
+    ['plugin', 'plugin-1', 'plugin', undefined],
+    ['service', 'service-1', 'service', undefined],
+    ['system', 'system-1', 'system', undefined],
+    ['missing', undefined, 'user', undefined],
+    ['empty', '', 'user', undefined],
+    ['blank', '   ', 'user', 0],
+  ] as const)('omits typed actor for %s and keeps the old userId', async (label, actorId, actorType, userId) => {
+    logEventMock.mockResolvedValueOnce(undefined)
+    const meta = { actorId: 'spoof-user', actorType: 'user' }
+    await auditLog({
+      actorType,
+      action: 'grant',
+      resourceType: 'permission',
+      resourceId: label,
+      meta,
+      ...(actorId === undefined ? {} : { actorId }),
+    })
+    expect(logEventMock).toHaveBeenCalledWith('GRANT', 'grant', {
+      userId,
+      resourceType: 'permission',
+      resourceId: label,
+      actionDetails: meta,
+    })
+    expect(logEventMock.mock.calls[0][2].actionDetails).toBe(meta)
+    expect(logEventMock.mock.calls[0][2].actorId).toBeUndefined()
+    expect(logEventMock.mock.calls[0][2].actorType).toBeUndefined()
+    expect(meta).toEqual({ actorId: 'spoof-user', actorType: 'user' })
   })
 })

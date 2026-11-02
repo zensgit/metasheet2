@@ -5,6 +5,10 @@ on:
   pull_request:
     paths:
       - 'packages/core-backend/src/**'
+      - 'packages/core-backend/tests/unit/audit-actor-envelope.test.ts'
+      - 'packages/core-backend/tests/unit/audit-wrapper.test.ts'
+      - 'packages/core-backend/tests/unit/data-source-visibility-authority-matrix.test.ts'
+      - 'packages/core-backend/tests/unit/plm-managed-source-provider-binding.test.ts'
       - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
       - 'packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts'
       - 'packages/core-backend/tests/integration/plm-personal-bom-intent-pg.realdb.ts'
@@ -44,6 +48,10 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/src/**'
+      - 'packages/core-backend/tests/unit/audit-actor-envelope.test.ts'
+      - 'packages/core-backend/tests/unit/audit-wrapper.test.ts'
+      - 'packages/core-backend/tests/unit/data-source-visibility-authority-matrix.test.ts'
+      - 'packages/core-backend/tests/unit/plm-managed-source-provider-binding.test.ts'
       - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
       - 'packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts'
       - 'packages/core-backend/tests/integration/plm-personal-bom-intent-pg.realdb.ts'
@@ -116,6 +124,10 @@ jobs:
       - name: Personal grant contract, transport, routes and worker
         run: >-
           pnpm --filter @metasheet/core-backend exec vitest run
+          tests/unit/audit-actor-envelope.test.ts
+          tests/unit/audit-wrapper.test.ts
+          tests/unit/data-source-visibility-authority-matrix.test.ts
+          tests/unit/plm-managed-source-provider-binding.test.ts
           tests/unit/plm-personal-approval-contract.test.ts
           tests/unit/plm-personal-approval-transport.test.ts
           tests/unit/plm-personal-approval-routes.test.ts

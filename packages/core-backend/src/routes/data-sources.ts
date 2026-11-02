@@ -426,6 +426,8 @@ function isCrossOwnerAdminAction(actor: DataSourceActorContext, ownerId: string 
  * Audit a platform admin's action on ANOTHER owner's source (actor + owner,
  * values-free). Owner self-service paths intentionally emit nothing extra
  * here — their audit behavior is unchanged.
+ * Data-source audit metadata retains the authenticated actor string because
+ * the shared audit user_id integer cannot represent UUID users.
  */
 async function auditCrossOwnerAdminAction(
   req: Request,
@@ -435,12 +437,12 @@ async function auditCrossOwnerAdminAction(
   extraMeta?: Record<string, unknown>
 ): Promise<void> {
   await auditLog({
-    actorId: req.user?.id?.toString(),
+    actorId: resolveUserId(req),
     actorType: 'user',
     action,
     resourceType: 'data_source',
     resourceId,
-    meta: { ownerId, crossOwnerAdmin: true, ...extraMeta }
+    meta: { ownerId, crossOwnerAdmin: true, ...extraMeta, actorId: resolveUserId(req) }
   })
 }
 
@@ -702,12 +704,12 @@ export function dataSourcesRouter(): Router {
       })
 
       await auditLog({
-        actorId: req.user?.id?.toString(),
+        actorId: resolveUserId(req),
         actorType: 'user',
         action: 'create',
         resourceType: 'data_source',
         resourceId: config.id,
-        meta: { name: config.name, type: config.type }
+        meta: { name: config.name, type: config.type, actorId: resolveUserId(req) }
       })
 
       return res.status(201).json({
@@ -776,12 +778,12 @@ export function dataSourcesRouter(): Router {
       // Audit the dial-out attempt (values-free: id/name/type + outcome only — never connection/creds).
       // This is a write-tier capability that connects to an arbitrary host, so it leaves a probe trail.
       await auditLog({
-        actorId: req.user?.id?.toString(),
+        actorId: resolveUserId(req),
         actorType: 'user',
         action: 'test',
         resourceType: 'data_source',
         resourceId: config.id,
-        meta: { name: config.name, type: config.type, success: result.success },
+        meta: { name: config.name, type: config.type, success: result.success, actorId: resolveUserId(req) },
       })
       // RESULT-ONLY surface (design-lock 钉子②): success / latency / redacted error — NEVER echo the
       // submitted config, connection, or credentials back to the caller.
@@ -875,7 +877,7 @@ export function dataSourcesRouter(): Router {
       })
 
       await auditLog({
-        actorId: req.user?.id?.toString(),
+        actorId: resolveUserId(req),
         actorType: 'user',
         action: 'update',
         resourceType: 'data_source',
@@ -884,7 +886,8 @@ export function dataSourcesRouter(): Router {
           ownerId: scope?.ownerId,
           ...(isCrossOwnerAdminAction(actor, scope?.ownerId) ? { crossOwnerAdmin: true } : {}),
           before: sanitizeConfig(oldConfig),
-          after: sanitizeConfig(newConfig)
+          after: sanitizeConfig(newConfig),
+          actorId: resolveUserId(req)
         }
       })
 
@@ -965,7 +968,7 @@ export function dataSourcesRouter(): Router {
       if (target === 'load_failed') {
         const resealed = await manager.resealLoadFailedDataSource(id, parse.data.credentials, actor)
         await auditLog({
-          actorId: req.user?.id?.toString(),
+          actorId: resolveUserId(req),
           actorType: 'user',
           action: 'update_credentials',
           resourceType: 'data_source',
@@ -976,7 +979,8 @@ export function dataSourcesRouter(): Router {
             restartRequired: resealed.restartRequired,
             changedCredentialKeys,
             ownerId: resealed.ownerId,
-            ...(isCrossOwnerAdminAction(actor, resealed.ownerId ?? undefined) ? { crossOwnerAdmin: true } : {})
+            ...(isCrossOwnerAdminAction(actor, resealed.ownerId ?? undefined) ? { crossOwnerAdmin: true } : {}),
+            actorId: resolveUserId(req)
           }
         })
         return res.json({
@@ -1014,7 +1018,7 @@ export function dataSourcesRouter(): Router {
       })
 
       await auditLog({
-        actorId: req.user?.id?.toString(),
+        actorId: resolveUserId(req),
         actorType: 'user',
         action: 'update_credentials',
         resourceType: 'data_source',
@@ -1024,7 +1028,8 @@ export function dataSourcesRouter(): Router {
           ...(isCrossOwnerAdminAction(actor, scope?.ownerId) ? { crossOwnerAdmin: true } : {}),
           changedCredentialKeys,
           before: sanitizeConfig(oldConfig),
-          after: sanitizeConfig(newConfig)
+          after: sanitizeConfig(newConfig),
+          actorId: resolveUserId(req)
         }
       })
 
@@ -1118,7 +1123,7 @@ export function dataSourcesRouter(): Router {
       await manager.removeDataSource(id, { actor })
 
       await auditLog({
-        actorId: req.user?.id?.toString(),
+        actorId: resolveUserId(req),
         actorType: 'user',
         action: 'delete',
         resourceType: 'data_source',
@@ -1126,7 +1131,8 @@ export function dataSourcesRouter(): Router {
         meta: {
           ...sanitizeConfig(config),
           ownerId,
-          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {})
+          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {}),
+          actorId: resolveUserId(req)
         }
       })
 
@@ -1379,12 +1385,12 @@ export function dataSourcesRouter(): Router {
         : undefined
 
       await auditLog({
-        actorId: req.user?.id?.toString(),
+        actorId: resolveUserId(req),
         actorType: 'user',
         action: 'query',
         resourceType: 'data_source',
         resourceId: req.params.id,
-        meta: { sql: sql.substring(0, 200), rowCount: result.data.length, ...(unbounded ? { unbounded: true } : {}) }
+        meta: { sql: sql.substring(0, 200), rowCount: result.data.length, ...(unbounded ? { unbounded: true } : {}), actorId: resolveUserId(req) }
       })
 
       return res.json({

@@ -12,9 +12,13 @@ export interface PlmApprovalBinding {
   unresolvedCount: number
 }
 
+export interface PlmApprovalListedBinding extends PlmApprovalBinding {
+  canUse: boolean
+}
+
 export interface PlmApprovalBindings {
-  connection: { id: string; label: string; grantManagementUrl: string }
-  bindings: PlmApprovalBinding[]
+  connection: { id: string; label: string; grantManagementUrl: string | null }
+  bindings: PlmApprovalListedBinding[]
 }
 
 const BASE = '/api/me/plm-approval-bindings'
@@ -49,7 +53,8 @@ function count(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new PlmApprovalBindingError('INVALID_RESPONSE')
   return value
 }
-function managementUrl(value: unknown): string {
+function managementUrl(value: unknown): string | null {
+  if (value === null) return null
   let url: URL
   try { url = new URL(text(value)) } catch { throw new PlmApprovalBindingError('INVALID_RESPONSE') }
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash
@@ -67,6 +72,11 @@ function binding(value: unknown): PlmApprovalBinding {
     tenantId: text(row.tenantId), orgId: text(row.orgId), grantId: text(row.grantId),
     expiresAt: row.expiresAt, bound: row.bound, unresolvedCount: count(row.unresolvedCount),
   }
+}
+function listedBinding(value: unknown): PlmApprovalListedBinding {
+  const row = object(value)
+  if (typeof row.canUse !== 'boolean') throw new PlmApprovalBindingError('INVALID_RESPONSE')
+  return { ...binding(row), canUse: row.canUse }
 }
 
 async function call(path: string, method: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
@@ -92,12 +102,14 @@ export async function getPlmApprovalBindings(signal?: AbortSignal): Promise<PlmA
   const data = object(await call(BASE, 'GET', undefined, signal))
   const connection = object(data.connection)
   if (!Array.isArray(data.bindings)) throw new PlmApprovalBindingError('INVALID_RESPONSE')
-  const result = {
-    connection: { id: text(connection.id), label: text(connection.label), grantManagementUrl: managementUrl(connection.grantManagementUrl) },
-    bindings: data.bindings.map(binding),
+  const grantManagementUrl = managementUrl(connection.grantManagementUrl)
+  const id = text(connection.id)
+  const bindings = data.bindings.map(listedBinding)
+  // canUse true cannot describe a stale connection, an unbound row, or a missing management URL.
+  if (bindings.some((row) => row.canUse && (row.connectionId !== id || row.bound === false || grantManagementUrl === null))) {
+    throw new PlmApprovalBindingError('INVALID_RESPONSE')
   }
-  if (result.bindings.some((row) => row.connectionId !== result.connection.id)) throw new PlmApprovalBindingError('INVALID_RESPONSE')
-  return result
+  return { connection: { id, label: text(connection.label), grantManagementUrl }, bindings }
 }
 export async function bindPlmApprovalGrant(connectionId: string, grant: string, signal?: AbortSignal): Promise<PlmApprovalBinding> {
   return binding(await call(BASE, 'POST', { connectionId, grant }, signal))

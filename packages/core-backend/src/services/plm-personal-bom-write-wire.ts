@@ -239,8 +239,13 @@ export function resolvePersistedPlmSource(config: unknown): ResolvedPersistedPlm
     process.env.NODE_ENV === 'test' &&
     origin.protocol === 'http:' &&
     ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
+  // Root only. Personal transport keeps URL.origin and would drop a prefix that
+  // global READ of this Source still uses. Parsed `https://host` and `https://host/`
+  // are both pathname '/'. Any other parsed pathname is rejected. This tightens
+  // persisted sources that previously carried an ignored prefix.
   if (
     (origin.protocol !== 'https:' && !loopback) ||
+    origin.pathname !== '/' ||
     origin.username ||
     origin.password ||
     origin.search ||
@@ -410,8 +415,8 @@ export function sanitizeNativeConflict(body: string): SanitizedNativeConflict | 
   return Object.keys(detail).length ? detail : undefined
 }
 
-export function personalBomWriteHttpError(status: number, body: string): PlmPersonalBomWriteError {
-  const detail = sanitizeNativeConflict(body)
+export function personalBomWriteHttpError(status: number, body?: string): PlmPersonalBomWriteError {
+  const detail = body === undefined ? undefined : sanitizeNativeConflict(body)
   const code =
     status === 401
       ? 'PLM_BOM_WRITE_UNAUTHORIZED'
