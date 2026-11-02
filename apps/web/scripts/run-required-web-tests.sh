@@ -2011,6 +2011,7 @@ exec npx vitest run \
   tasks-detail-m3.spec.ts \
   tasks-detail-m4.spec.ts \
   tasks-detail-view.spec.ts \
+  tasks-dispatch-key.spec.ts \
   tasks-groups.spec.ts \
   tasks-labels.spec.ts \
   tasks-list-detail.spec.ts \
