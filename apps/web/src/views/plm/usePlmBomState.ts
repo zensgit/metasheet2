@@ -46,6 +46,7 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
   const bomLoading = ref(false)
   const bomError = ref('')
   const bomDepth = ref(options.defaultBomDepth)
+  const bomAppliedDepth = ref<number | null>(null)
   const bomEffectiveAt = ref('')
   const bomView = ref<'table' | 'tree'>('table')
   const bomCollapsed = ref<Set<string>>(new Set())
@@ -280,7 +281,7 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
       if (componentId && !hasCycle) {
         nextPath.add(componentId)
       }
-      const children = componentId && !hasCycle ? parentMap.get(componentId) || [] : []
+      const children = componentId && !hasCycle && (bomAppliedDepth.value === null || depth < bomAppliedDepth.value) ? parentMap.get(componentId) || [] : []
       rows.push({
         key,
         parentKey,
@@ -522,6 +523,7 @@ export function usePlmBomState(options: UsePlmBomStateOptions) {
     bomLoading,
     bomError,
     bomDepth,
+    bomAppliedDepth,
     bomEffectiveAt,
     bomView,
     bomCollapsed,
