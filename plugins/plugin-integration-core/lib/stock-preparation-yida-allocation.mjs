@@ -76,9 +76,25 @@ function normalizeMode(mode) {
   return mode
 }
 
+// v3 names key parts by target, so both roles must be the column of a direct entry and the
+// project one must be a key target. Copies and concat parts then read the allocated values.
+function normalizeTransformRuleFields(projectField, quantityField, config, mode) {
+  const direct = (source) => config.fieldMap.find((entry) => entry.transform === 'direct' && entry.source === source)
+  const projectEntry = direct(projectField)
+  const quantityEntry = direct(quantityField)
+  if (typeof projectField !== 'string' || typeof quantityField !== 'string'
+    || projectField === quantityField || config.businessKey.length < 2
+    || !projectEntry || !quantityEntry || !config.businessKey.includes(projectEntry.target)
+    || projectEntry.type !== 'string' || quantityEntry.type !== 'number') {
+    throw new YidaAllocationError('YIDA_ALLOCATION_FIELDS_INVALID')
+  }
+  return { mode, projectField, quantityField }
+}
+
 function normalizeRuleFields(descriptors, config, mode) {
   const projectField = descriptors.projectField.value
   const quantityField = descriptors.quantityField.value
+  if (config.version === 3) return normalizeTransformRuleFields(projectField, quantityField, config, mode)
   if (typeof projectField !== 'string' || typeof quantityField !== 'string'
     || projectField === quantityField || !config.businessKey.includes(projectField)
     || config.businessKey.length < 2) {

@@ -8,6 +8,7 @@ const MAX_DEPTH = 10
 const KIND = 'stock-preparation-yida-rule-template'
 const ENVELOPE_KEYS = ['formatVersion', 'kind', 'status', 'rules', 'allocation']
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+const NUMBER_TOKEN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/
 const CODES = new Set(['INPUT', 'TEXT', 'LIMIT', 'CONFIG', 'ALLOCATION'])
 const ownErrors = new WeakSet()
 const encoder = new TextEncoder()
@@ -112,17 +113,22 @@ function normalize(rules, allocation) {
   } else {
     try { normalizedAllocation = validateYidaProjectAllocationRules(validated.normalized, allocation) } catch { fail('ALLOCATION') }
   }
+  // v1/v2 rules keep formatVersion 1 byte for byte; v3 rules (which may hold numeric
+  // constants and the version literal 3) are formatVersion 2.
   return ownedClone({
-    formatVersion: 1, kind: KIND, status: 'local-unverified',
+    formatVersion: normalizedRules.version === 3 ? 2 : 1, kind: KIND, status: 'local-unverified',
     rules: normalizedRules, allocation: normalizedAllocation,
   })
 }
 
-// Linear, bounded JSON scanner. Only version literals 1/2 are supported; using
-// JSON.parse on document numbers first could silently accept rounded versions.
+// Linear, bounded JSON scanner. A number is read only in its exact JavaScript spelling
+// (String(Number(token)) === token), so a rounded or re-spelled value never parses; using
+// JSON.parse on document numbers first could silently accept rounded versions. A number
+// other than 1/2 marks the document as extended: only a formatVersion 2 envelope may be.
 function parseText(text) {
   let at = 0
   let nodes = 0
+  let extended = false
   const whitespace = () => { while (text[at] === ' ' || text[at] === '\t' || text[at] === '\r' || text[at] === '\n') at += 1 }
   const isHex = (char) => (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')
   function quoted() {
@@ -148,7 +154,15 @@ function parseText(text) {
     whitespace()
     const char = text[at]
     if (char === '"') return quoted()
-    if (char === '1' || char === '2') { at += 1; return Number(char) }
+    if (char === '-' || (char >= '0' && char <= '9')) {
+      const start = at
+      while (at < text.length && '+-.0123456789eE'.includes(text[at])) at += 1
+      const token = text.slice(start, at)
+      const parsed = Number(token)
+      if (!NUMBER_TOKEN.test(token) || !Number.isFinite(parsed) || String(parsed) !== token) fail('TEXT')
+      if (token !== '1' && token !== '2') extended = true
+      return parsed
+    }
     for (const [literal, parsed] of [['true', true], ['false', false], ['null', null]]) {
       if (text.startsWith(literal, at)) { at += literal.length; return parsed }
     }
@@ -184,6 +198,8 @@ function parseText(text) {
   const output = value(0)
   whitespace()
   if (at !== text.length) fail('TEXT')
+  // Same refusal as before for any formatVersion 1 (or malformed) document with another number.
+  if (extended && (!output || typeof output !== 'object' || Array.isArray(output) || output.formatVersion !== 2)) fail('TEXT')
   return output
 }
 
@@ -205,8 +221,12 @@ export function parseYidaRuleTemplate(text) {
     if (typeof text !== 'string') fail('TEXT')
     textBudget(text)
     const envelope = record(ownedClone(parseText(text)), ENVELOPE_KEYS)
-    if (envelope.formatVersion !== 1 || envelope.kind !== KIND || envelope.status !== 'local-unverified') fail('INPUT')
-    return normalize(envelope.rules, envelope.allocation)
+    if ((envelope.formatVersion !== 1 && envelope.formatVersion !== 2) || envelope.kind !== KIND
+      || envelope.status !== 'local-unverified') fail('INPUT')
+    const normalized = normalize(envelope.rules, envelope.allocation)
+    // One canonical envelope per rules version: v1/v2 in formatVersion 1, v3 in formatVersion 2.
+    if (normalized.formatVersion !== envelope.formatVersion) fail('INPUT')
+    return normalized
   } catch (error) {
     if (ownErrors.has(error)) throw error
     fail('TEXT')
