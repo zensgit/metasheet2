@@ -1,12 +1,16 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { types } from 'node:util'
 import ts from 'typescript'
+import winston from 'winston'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as authority from '../../src/integration/automation-live-authority'
 import * as bootstrap from '../../src/integration/yida-initialization-bootstrap'
 import * as encryptedSecrets from '../../src/security/encrypted-secrets'
-import { createYidaInitializationRuntime, yidaInitializationErrorCode,
+import * as requestContext from '../../src/context/request-context'
+import * as coreLogger from '../../src/core/logger'
+import { createYidaInitializationRuntime, getYidaSealMaterialIssues, YIDA_SHORT_SEAL_MATERIAL_WARNING, yidaInitializationErrorCode,
   type YidaInitializationInput, type YidaInitializationRuntimeBinding } from '../../src/integration/yida-initialization-runtime'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
@@ -39,17 +43,23 @@ function deferred<T = void>() {
   return { promise, resolve }
 }
 const emptyAnchor = (): Row => ({ slot: 1, command_id: commandId, owner_id: actor.actorId, tenant_id: actor.tenantId, workspace_id: null })
-function loadMutant(source: string): typeof import('../../src/integration/yida-initialization-runtime') {
-  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+function loadTestModule<T>(source: string, resolve: (name: string) => unknown): T {
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText
   const exports = {}
-  new Function('require', 'exports', compiled)((specifier: string) => {
+  new Function('require', 'exports', compiled)(resolve, exports)
+  return exports as T
+}
+function loadMutant(source: string, logger = coreLogger): typeof import('../../src/integration/yida-initialization-runtime') {
+  return loadTestModule(source, (specifier: string) => {
     if (specifier === 'node:util') return { types }
     if (specifier === './automation-live-authority') return authority
     if (specifier === './yida-initialization-bootstrap') return bootstrap
     if (specifier === '../security/encrypted-secrets') return encryptedSecrets
+    if (specifier === '../context/request-context') return requestContext
+    if (specifier === '../core/logger') return logger
     throw new Error('Unexpected isolated module import')
-  }, exports)
-  return exports as typeof import('../../src/integration/yida-initialization-runtime')
+  })
 }
 // L4 refuses unless ENCRYPTION_KEY / ENCRYPTION_SALT pass the production checks in EVERY NODE_ENV, and
 // tests/setup.ts configures neither: each case starts from explicit synthetic, non-default material and
@@ -346,16 +356,34 @@ describe('L4 refuses before any writer unless the encryption material passes the
     expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
     expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
   })
-  it('the readiness bit is the anchor owner\'s only: DENIED, a wrong command and an initialized slot keep their own codes', async () => {
+  // One material per refusal rule: the production checks (this describe) and each L4 seal-material rule
+  // (getYidaSealMaterialIssues). Whichever check refuses, it runs behind the live ACL, anchor owner, command and slot
+  // checks, so only the authorized anchor owner with an empty slot learns that the material is not ready.
+  const ownerOnly: Readonly<Record<string, readonly [typeof materials[string], 'production checks' | 'seal material']>> = {
+    'both unset': [materials['both unset'], 'production checks'],
+    'a doc placeholder key': [{ ENCRYPTION_KEY: '<openssl rand -hex 32>', ENCRYPTION_SALT: syntheticEncryption.ENCRYPTION_SALT }, 'seal material'],
+    'the documented sample values': [{ ENCRYPTION_KEY: 'your-32-byte-key-here', ENCRYPTION_SALT: 'your-salt-here' }, 'seal material'],
+    'the built-in defaults swapped': [{ ENCRYPTION_KEY: encryptedSecrets.DEFAULT_ENCRYPTION_SALT, ENCRYPTION_SALT: encryptedSecrets.DEFAULT_ENCRYPTION_KEY }, 'seal material'],
+    'KEY equal to SALT': [{ ENCRYPTION_KEY: syntheticEncryption.ENCRYPTION_KEY, ENCRYPTION_SALT: syntheticEncryption.ENCRYPTION_KEY }, 'seal material'],
+  }
+  it.each(Object.keys(ownerOnly))('%s: the readiness bit is the anchor owner\'s only: DENIED, a revoked ACL, a wrong command and an initialized slot keep their own codes', async name => {
+    const [material, check] = ownerOnly[name]
     const { f } = await active()
     await f.runtime.initialize(actor, input())
     const fresh = await active()
-    useEnvironment('development', materials['both unset'])
+    useEnvironment('development', material)
+    expect(encryptedSecrets.getEncryptionMaterialIssues(process.env).length > 0).toBe(check === 'production checks')
+    expect(getYidaSealMaterialIssues(process.env).length > 0).toBe(check === 'seal material')
     await rejected(fresh.f.runtime.initialize(secondAdmin, input()), 'DENIED')
     await rejected(fresh.f.runtime.initialize({ ...actor, tenantId: 'synthetic-other-tenant' }, input()), 'DENIED')
     await rejected(fresh.f.runtime.initialize(actor, { ...input(), commandId: '00000000-0000-4000-8000-000000000099' }), 'CONFLICT')
     await rejected(f.runtime.initialize(actor, input()), 'CONFLICT')
-    expect(fresh.f.createProducer).not.toHaveBeenCalled(); expect(fresh.f.commits).toBe(0)
+    fresh.f.allowed = false
+    await rejected(fresh.f.runtime.initialize(actor, input()), 'DENIED')
+    fresh.f.allowed = true
+    // Positive control: the same material does refuse the anchor owner with an empty slot.
+    await rejected(fresh.f.runtime.initialize(actor, input()), 'ENCRYPTION_NOT_READY')
+    expect(fresh.f.createProducer).not.toHaveBeenCalled(); expect(fresh.f.commits).toBe(0); expect(f.initialize).toHaveBeenCalledTimes(1)
     // GET is untouched: status needs no encryption material and still decodes the sealed slot.
     expect((await f.runtime.status(actor)).status).toBe('initialized')
   })
@@ -364,6 +392,186 @@ describe('L4 refuses before any writer unless the encryption material passes the
     expect(source.split(guard)).toHaveLength(2)
     const { f } = await active({ createRuntime: loadMutant(source.replace(guard, '// mutation: readiness guard removed')).createYidaInitializationRuntime })
     useEnvironment('development', materials['both unset'])
+    expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
+    expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
+    expect(f.state.result?.command_id).toBe(commandId)
+  })
+})
+
+describe('L4 also refuses public or obviously invalid material that passes the production checks; short material only warns', () => {
+  const sealGuard = "if (getYidaSealMaterialIssues(process.env).length > 0) fail('ENCRYPTION_NOT_READY')"
+  const nodeEnvs = ['(unset)', 'development', 'production'] as const
+  const tab = String.fromCharCode(9), long = syntheticEncryption
+  const { DEFAULT_ENCRYPTION_KEY: defaultKey, DEFAULT_ENCRYPTION_SALT: defaultSalt } = encryptedSecrets
+  type Material = Readonly<{ ENCRYPTION_KEY: string; ENCRYPTION_SALT: string }>
+  // Every entry passes getEncryptionMaterialIssues (asserted per case), so only the L4 check can refuse it.
+  const refused: Readonly<Record<string, Material>> = {
+    '(a) both easy-start doc placeholders': { ENCRYPTION_KEY: '<openssl rand -hex 32>', ENCRYPTION_SALT: '<openssl rand -hex 32, generated separately>' },
+    '(a) a padded angle-bracket key': { ENCRYPTION_KEY: `  <paste the generated key here>${tab}`, ENCRYPTION_SALT: long.ENCRYPTION_SALT },
+    '(a) a placeholder salt only': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: '<openssl rand -hex 32, generated separately>' },
+    '(a) the secret-management report samples': { ENCRYPTION_KEY: 'your-32-byte-key-here', ENCRYPTION_SALT: 'your-salt-here' },
+    '(a) the report samples in another case': { ENCRYPTION_KEY: 'YOUR-32-BYTE-KEY-HERE', ENCRYPTION_SALT: 'Your-Salt-Here' },
+    '(a) the dev-doc 32-hex sample pair': { ENCRYPTION_KEY: 'abcdef0123456789abcdef0123456789', ENCRYPTION_SALT: '0123456789abcdef0123456789abcdef' },
+    '(a) the dev-doc 32-hex sample key in upper case': { ENCRYPTION_KEY: 'ABCDEF0123456789ABCDEF0123456789', ENCRYPTION_SALT: long.ENCRYPTION_SALT },
+    '(b) both built-in defaults swapped': { ENCRYPTION_KEY: defaultSalt, ENCRYPTION_SALT: defaultKey },
+    '(b) the default salt as the key': { ENCRYPTION_KEY: defaultSalt, ENCRYPTION_SALT: long.ENCRYPTION_SALT },
+    '(b) the default key as the salt': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: defaultKey },
+    '(c) KEY equal to SALT': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: long.ENCRYPTION_KEY },
+    '(c) KEY equal to SALT after trimming': { ENCRYPTION_KEY: ` ${long.ENCRYPTION_SALT}`, ENCRYPTION_SALT: `${long.ENCRYPTION_SALT}${tab}` },
+  }
+  const short: Readonly<Record<string, Material>> = {
+    'a 1-character key and salt': { ENCRYPTION_KEY: 'k', ENCRYPTION_SALT: 's' },
+    'a 31-character key': { ENCRYPTION_KEY: 'k'.repeat(31), ENCRYPTION_SALT: long.ENCRYPTION_SALT },
+    'a key of 31 Unicode code points': { ENCRYPTION_KEY: '\u{1F512}'.repeat(31), ENCRYPTION_SALT: long.ENCRYPTION_SALT },
+    'a padded salt of 31 Unicode code points': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: ` ${'\u{20000}'.repeat(31)} ` },
+    'a salt 31 characters after trimming': { ENCRYPTION_KEY: long.ENCRYPTION_KEY, ENCRYPTION_SALT: ` ${'s'.repeat(31)} ` },
+  }
+  const sealed: Readonly<Record<string, Material>> = {
+    '32-character key and salt': { ENCRYPTION_KEY: 'k'.repeat(32), ENCRYPTION_SALT: 's'.repeat(32) },
+    '32 Unicode code points in each value': { ENCRYPTION_KEY: '\u{1F512}'.repeat(32), ENCRYPTION_SALT: '\u{20000}'.repeat(32) },
+    'the long synthetic material': long,
+  }
+  function useEnvironment(nodeEnv: typeof nodeEnvs[number], material: Material) {
+    setEnv('NODE_ENV', nodeEnv === '(unset)' ? undefined : nodeEnv)
+    for (const [key, value] of Object.entries(material)) setEnv(key, value)
+  }
+  // Records each warning with the request and log contexts it is written in (the owner HTTP route runs L4 inside the
+  // private observation surface, which would rewrite any message there). Nothing reaches the console.
+  function recordWarnings() {
+    const seen: Array<{ args: unknown[]; request: unknown; log: unknown }> = []
+    const spy = vi.spyOn(coreLogger.Logger.prototype, 'warn').mockImplementation((...args: unknown[]) => {
+      seen.push({ args, request: requestContext.getRequestContext(), log: coreLogger.getLogContext() })
+    })
+    return { seen, spy }
+  }
+  const insideOwnerRequest = <T>(work: () => Promise<T>) => requestContext.runWithRequestContext({ correlationId: 'synthetic-correlation',
+    privateObservationSurface: 'yida-owner-http', userId: 'synthetic-request-user', tenantId: 'synthetic-request-tenant' },
+  () => coreLogger.runWithLogContext({ requestId: 'synthetic-request-id' }, work))
+
+  it('omits the active OpenTelemetry span only from the short-material warning', async () => {
+    // The container hoists the telemetry plugin's dependencies. Load the same optional API explicitly
+    // here so a strict pnpm layout also exercises the traced path.
+    const requireTelemetry = createRequire(path.resolve(__dirname, '../../../../plugins/plugin-telemetry-otel/package.json'))
+    const api = requireTelemetry('@opentelemetry/api')
+    const { NodeTracerProvider } = requireTelemetry('@opentelemetry/sdk-node').node
+    const provider = new NodeTracerProvider()
+    const fromTest = createRequire(__filename)
+    const logger = loadTestModule<typeof coreLogger>(readFileSync(path.resolve(__dirname, '../../src/core/logger.ts'), 'utf8'), name => {
+      if (name === '@opentelemetry/api') return api
+      if (name === '../context/request-context') return requestContext
+      return fromTest(name)
+    })
+    const source = readFileSync(path.resolve(__dirname, '../../src/integration/yida-initialization-runtime.ts'), 'utf8')
+    const { f } = await active({ createRuntime: loadMutant(source, logger).createYidaInitializationRuntime })
+    useEnvironment('production', short['a 1-character key and salt'])
+    const entries: Row[] = []
+    const capture = vi.spyOn(winston.transports.Console.prototype, 'log').mockImplementation((info, done) => {
+      entries.push({ ...info }); done()
+    })
+    const traceId = '1'.repeat(32), spanId = '2'.repeat(16)
+    const priorLevel = process.env.LOG_LEVEL
+    try {
+      setEnv('LOG_LEVEL', 'warn')
+      provider.register({ propagator: null })
+      const traced = api.trace.setSpanContext(api.ROOT_CONTEXT, { traceId, spanId, traceFlags: 1 })
+      await api.context.with(traced, async () => {
+        const control = new logger.Logger('TraceControl')
+        control.warn('before')
+        const result = await requestContext.runWithRequestContext({ correlationId: 'synthetic-owner',
+          privateObservationSurface: 'yida-owner-http' }, () => logger.runWithLogContext({ requestId: 'synthetic-request' },
+          () => f.runtime.initialize(actor, input())))
+        expect(result.status).toBe('initialized')
+        control.warn('after')
+      })
+      await new Promise(resolve => setImmediate(resolve))
+      const controls = entries.filter(entry => entry.context === 'TraceControl')
+      expect(controls).toMatchObject([{ message: 'before', traceId, spanId }, { message: 'after', traceId, spanId }])
+      const warned = entries.filter(entry => entry.message === YIDA_SHORT_SEAL_MATERIAL_WARNING)
+      expect(warned).toHaveLength(1)
+      expect(Object.keys(warned[0]).sort()).toEqual(['context', 'level', 'message', 'service', 'timestamp'])
+    } finally {
+      setEnv('LOG_LEVEL', priorLevel)
+      capture.mockRestore()
+      api.context.disable(); api.trace.disable()
+      await provider.shutdown()
+    }
+  })
+
+  it.each(nodeEnvs.flatMap(nodeEnv => Object.keys(refused).map(name => [nodeEnv, name] as const)))(
+    'NODE_ENV %s, %s: ENCRYPTION_NOT_READY with no producer, write, fetch or warning; the slot stays ready', async (nodeEnv, name) => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch'), warnings = recordWarnings()
+      try {
+        const { f } = await active()
+        useEnvironment(nodeEnv, refused[name])
+        expect(encryptedSecrets.getEncryptionMaterialIssues(process.env)).toEqual([])
+        const failure = await insideOwnerRequest(() => f.runtime.initialize(actor, input())).then(() => undefined, (error: unknown) => error)
+        expect(failure).toMatchObject({ code: 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', message: 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY' })
+        expect(f.createProducer).not.toHaveBeenCalled(); expect(f.initialize).not.toHaveBeenCalled()
+        expect(f.sql.some(sql => /INSERT|UPDATE|DELETE/u.test(sql))).toBe(false)
+        expect(f.commits).toBe(0); expect(f.state.result).toBeUndefined(); expect(f.state.target).toBeUndefined()
+        expect(fetchSpy).not.toHaveBeenCalled(); expect(warnings.seen).toEqual([])
+        expect(await f.runtime.status(actor)).toEqual({ commandId, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false })
+      } finally { fetchSpy.mockRestore(); warnings.spy.mockRestore() }
+    })
+  it.each(nodeEnvs.flatMap(nodeEnv => Object.keys(short).map(name => [nodeEnv, name] as const)))(
+    'NODE_ENV %s, %s: seals once, then logs the one fixed warning outside the owner request and log contexts', async (nodeEnv, name) => {
+      const warnings = recordWarnings()
+      try {
+        const { f } = await active()
+        useEnvironment(nodeEnv, short[name])
+        expect(getYidaSealMaterialIssues(process.env)).toEqual([])
+        expect((await insideOwnerRequest(() => f.runtime.initialize(actor, input()))).status).toBe('initialized')
+        expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
+        // One argument, no meta; written with no request context (so no correlation, user or tenant field and no
+        // private-surface rewrite) and an empty log context (no request id).
+        expect(warnings.seen).toEqual([{ args: [YIDA_SHORT_SEAL_MATERIAL_WARNING], request: undefined, log: {} }])
+        await f.runtime.status(actor); expect(warnings.seen).toHaveLength(1)
+      } finally { warnings.spy.mockRestore() }
+    })
+  it.each(nodeEnvs.flatMap(nodeEnv => Object.keys(sealed).map(name => [nodeEnv, name] as const)))(
+    'NODE_ENV %s, %s: seals once with no warning', async (nodeEnv, name) => {
+      const warnings = recordWarnings()
+      try {
+        const { f } = await active()
+        useEnvironment(nodeEnv, sealed[name])
+        expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
+        expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1); expect(warnings.seen).toEqual([])
+      } finally { warnings.spy.mockRestore() }
+    })
+  it('short material whose initialization does not succeed logs no warning', async () => {
+    const warnings = recordWarnings()
+    try {
+      const { f } = await active({ lostCommit: true })
+      useEnvironment('production', short['a 1-character key and salt'])
+      await rejected(f.runtime.initialize(actor, input()), 'UNAVAILABLE')
+      expect(f.initialize).toHaveBeenCalledTimes(1); expect(warnings.seen).toEqual([])
+    } finally { warnings.spy.mockRestore() }
+  })
+  it('the warning text is a fixed constant: no value, no number but the 32-character threshold, and no re-key advice', () => {
+    // The seal cannot be re-keyed (a changed ENCRYPTION_KEY / ENCRYPTION_SALT leaves the slot unreadable), so the
+    // advice is to keep the exact material, never to rotate it.
+    expect(YIDA_SHORT_SEAL_MATERIAL_WARNING).toBe('YiDa initialization sealed credentials under an encryption key or salt shorter than 32 characters. '
+      + 'This seal cannot be re-keyed. Securely back up the effective ENCRYPTION_KEY and ENCRYPTION_SALT from the configuration '
+      + 'sources used by the running service. Keep those exact values for the life of the deployment.')
+    expect(YIDA_SHORT_SEAL_MATERIAL_WARNING.match(/\d+/gu)).toEqual(['32'])
+    expect(/rotat/iu.test(YIDA_SHORT_SEAL_MATERIAL_WARNING)).toBe(false)
+  })
+  it('the helper is pure and values-free, and leaves unset, blank and default material to the shared checks', () => {
+    for (const env of [{}, { ENCRYPTION_KEY: '', ENCRYPTION_SALT: ' ' }, { ENCRYPTION_KEY: defaultKey, ENCRYPTION_SALT: defaultSalt },
+      { ENCRYPTION_KEY: defaultKey }, { ENCRYPTION_SALT: defaultSalt }, ...Object.values(short), ...Object.values(sealed)]) {
+      expect(getYidaSealMaterialIssues(env)).toEqual([])
+    }
+    for (const material of Object.values(refused)) {
+      const env = { ...material }, before = JSON.stringify(env), issues = getYidaSealMaterialIssues(env)
+      expect(issues.length).toBeGreaterThan(0); expect(JSON.stringify(env)).toBe(before)
+      for (const issue of issues) for (const value of Object.values(material)) expect(issue.includes(value.trim())).toBe(false)
+    }
+  })
+  it('removing only the seal-material guard lets a doc placeholder seal for good (negative assertion red)', async () => {
+    const source = readFileSync(path.resolve(__dirname, '../../src/integration/yida-initialization-runtime.ts'), 'utf8')
+    expect(source.split(sealGuard)).toHaveLength(2)
+    const { f } = await active({ createRuntime: loadMutant(source.replace(sealGuard, '// mutation: seal-material guard removed')).createYidaInitializationRuntime })
+    useEnvironment('production', refused['(a) both easy-start doc placeholders'])
     expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
     expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
     expect(f.state.result?.command_id).toBe(commandId)
