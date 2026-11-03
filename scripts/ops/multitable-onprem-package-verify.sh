@@ -16,6 +16,8 @@ archive_type="unknown"
 # successful run; stays "SKIPPED" if that function's call site is ever removed from
 # the main flow below, so write_optional_report cannot report a check that never ran.
 loopback_status="SKIPPED"
+# Same pattern: set to PASS only by verify_stock_preparation_manual_rows_contract() itself.
+manual_rows_status="SKIPPED"
 # The range-fill provenance check runs the probe that sits beside this verifier (shipped in the
 # package next to it, see multitable-onprem-package-build.sh REQUIRED_PATHS).
 VERIFY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -476,18 +478,23 @@ function verify_stock_preparation_mvp_contract() {
 # #6671 B3, #6672 B4). The new runtime modules are in the required list; these markers prove that files which
 # existed before the feature carry it. Route paths and identifiers only, no UI copy. The host markers matter
 # because tsc never cleans dist: a dist rebuilt from an older tree can keep a stale manual-rows .js beside an
-# older univer-meta.js, which the required list alone would accept.
+# older univer-meta.js, which the required list alone would accept. Each search is bound to the one file (or the
+# built JS chunks) that carries the code: the same strings also sit in comments, in the gate's own definitions,
+# in sibling plugin files and could sit in non-JS files under dist, and none of those prove the feature.
 function verify_stock_preparation_manual_rows_contract() {
   local root="$1"
   local plugin_routes="${root}/plugins/plugin-integration-core/lib/http-routes.cjs"
   local host_routes="${root}/packages/core-backend/dist/src/routes/univer-meta.js"
-  local web_dist="${root}/apps/web/dist"
+  local web_chunks=("${root}"/apps/web/dist/assets/*.js)
 
   search_fixed_string "'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'" "$plugin_routes" || die "plugin http-routes.cjs must register the stock-prep manual-rows switch route (manual rows B4)"
   search_fixed_string "'/sheets/:sheetId/manual-rows'" "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must register the manual-row create route (manual rows B2)"
   search_fixed_string 'resolveGenericCreateRefusal' "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must refuse generic create on stock-prep project sheets (manual rows B3)"
-  search_fixed_string '/manual-fields' "$web_dist" || die "web dist must call the manual-row edit route (manual rows B3)"
-  search_fixed_string '/target/manual-rows' "$web_dist" || die "web dist must call the stock-prep manual-rows switch route (manual rows B4)"
+  [[ -f "${web_chunks[0]}" ]] || die "web dist has no built JS chunks under apps/web/dist/assets"
+  search_fixed_string '/manual-fields' "${web_chunks[@]}" || die "web dist JS chunks must call the manual-row edit route (manual rows B3)"
+  search_fixed_string '/target/manual-rows' "${web_chunks[@]}" || die "web dist JS chunks must call the stock-prep manual-rows switch route (manual rows B4)"
+
+  manual_rows_status="PASS"
 }
 
 function verify_sealed_export_package_provenance() {
@@ -802,6 +809,10 @@ function write_optional_report() {
       '    {' \
       '      "name": "loopback",' \
       "      \"status\": \"${loopback_status}\"" \
+      '    },' \
+      '    {' \
+      '      "name": "stock-prep-manual-rows",' \
+      "      \"status\": \"${manual_rows_status}\"" \
       '    }' \
       '  ],' \
       "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
@@ -836,6 +847,7 @@ function write_optional_report() {
       else
         echo "- Loopback frontend config: \`${loopback_status}\`"
       fi
+      echo "- Stock-prep manual rows (人工补充行) runtime markers: \`${manual_rows_status}\`"
     } > "$report_md_tmp"
     mv "$report_md_tmp" "$VERIFY_REPORT_MD"
   fi

@@ -94,13 +94,24 @@ test('compiled YiDa bootstrap CLI smoke runs after a core-backend build in the r
 })
 
 // 人工补充行 content markers: files that existed before the feature must carry it. Listed here independently of
-// verify.sh, so deleting or loosening a check there turns its case below red.
+// verify.sh, so deleting a check there turns its case below red. The decoys are what real output also holds: the same
+// strings in comments, in the gate module's own definitions, in a sibling plugin file, and in non-JS files under the
+// web dist. None of them proves the feature, so a check that is loosened (quotes dropped) or widened (a directory
+// instead of the one file, any file under dist instead of the JS chunks) matches a decoy and its case turns red too.
 const manualRowsMarkers = [
   ['plugins/plugin-integration-core/lib/http-routes.cjs', "'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'", 'http-routes.cjs must register the stock-prep manual-rows switch route'],
   ['packages/core-backend/dist/src/routes/univer-meta.js', "'/sheets/:sheetId/manual-rows'", 'manual-row create route (manual rows B2)'],
   ['packages/core-backend/dist/src/routes/univer-meta.js', 'resolveGenericCreateRefusal', 'generic create on stock-prep project sheets (manual rows B3)'],
   ['apps/web/dist/assets/manual-fields.js', '/manual-fields', 'manual-row edit route (manual rows B3)'],
   ['apps/web/dist/assets/target-manual-rows.js', '/target/manual-rows', 'manual-rows switch route (manual rows B4)'],
+]
+const manualRowsDecoys = [
+  ['plugins/plugin-integration-core/lib/http-routes.cjs', '//   GET  /api/integration/stock-preparation/projects/:projectNo/target/manual-rows   PULL tier'],
+  ['plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs', "    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',"],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', '// Three session-only routes: POST /sheets/:sheetId/manual-rows (新增), POST /records/:recordId/manual-copy'],
+  ['packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js', 'async function resolveGenericCreateRefusal(query, sheetId, fields) {'],
+  ['apps/web/dist/stray.txt', 'PATCH /manual-fields and GET /target/manual-rows'],
+  ['apps/web/dist/assets/index.js.map', '{"sourcesContent":["// GET /target/manual-rows, PATCH /manual-fields"]}'],
 ]
 const multitableVerifier = fs.readFileSync(path.join(repo, 'scripts/ops/multitable-onprem-package-verify.sh'), 'utf8')
 const manualRowsCheck = [
@@ -112,35 +123,46 @@ function runManualRowsCheck(omitted) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'onprem-manual-rows-markers-'))
   try {
     const contents = new Map()
-    for (const [file, needle] of manualRowsMarkers) {
+    const add = (file, line) => {
       if (!contents.has(file)) contents.set(file, ['fixture'])
-      if (needle !== omitted) contents.get(file).push(needle)
+      contents.get(file).push(line)
     }
+    for (const [file, needle] of manualRowsMarkers) if (needle !== omitted) add(file, needle)
+    for (const [file, line] of manualRowsDecoys) add(file, line)
     for (const [file, lines] of contents) {
       fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true })
       fs.writeFileSync(path.join(root, file), lines.join('\n') + '\n')
     }
-    return spawnSync('bash', ['-c', 'set -eu\ndie() { echo "$*" >&2; exit 1; }\n' + manualRowsCheck + 'verify_stock_preparation_manual_rows_contract "$pkg_root"\n'], {
-      env: { ...process.env, pkg_root: root }, encoding: 'utf8',
-    })
+    const script = 'set -eu\ndie() { echo "$*" >&2; exit 1; }\nmanual_rows_status=SKIPPED\n' + manualRowsCheck
+      + 'verify_stock_preparation_manual_rows_contract "$pkg_root"\necho "manual_rows_status=$manual_rows_status"\n'
+    return spawnSync('bash', ['-c', script], { env: { ...process.env, pkg_root: root }, encoding: 'utf8' })
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
 }
 
-test('multitable verifier runs the manual-rows marker check in its main flow', () => {
-  assert.match(multitableVerifier, /\nverify_stock_preparation_manual_rows_contract "\$pkg_root"\n/)
+test('multitable verifier defines the manual-rows marker check once and runs it before the report', () => {
+  // Any definition form counts (with or without `function`, one-line bodies too), so a later shadowing one is caught.
+  const definitions = multitableVerifier.match(/^[ \t]*(?:function[ \t]+)?verify_stock_preparation_manual_rows_contract[ \t]*\(\)/gm) || []
+  assert.equal(definitions.length, 1, 'exactly one definition')
+  const calls = multitableVerifier.split('\nverify_stock_preparation_manual_rows_contract "$pkg_root"\n')
+  assert.equal(calls.length, 2, 'exactly one main-flow call')
+  assert.ok(calls[1].includes('\nwrite_optional_report\n'), 'the report is written after the check ran')
+  assert.match(multitableVerifier, /\nmanual_rows_status="SKIPPED"\n/)
+  assert.ok(multitableVerifier.includes('"      \\"status\\": \\"${manual_rows_status}\\""'), 'the JSON report carries the derived status')
 })
 
-test('multitable verifier manual-rows markers accept complete contents', () => {
+test('multitable verifier manual-rows markers accept complete contents and report PASS', () => {
   const result = runManualRowsCheck()
   assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout.trim(), 'manual_rows_status=PASS')
 })
 
 for (const [file, needle, what] of manualRowsMarkers) {
-  test(`multitable verifier rejects ${file} without ${needle}`, () => {
+  test(`multitable verifier rejects ${file} without ${needle}, decoys present`, () => {
     const result = runManualRowsCheck(needle)
     assert.notEqual(result.status, 0, `verifier accepted ${file} without ${needle}`)
     assert.ok(result.stderr.includes(what), result.stderr)
+    assert.doesNotMatch(result.stdout, /manual_rows_status=PASS/)
   })
 }
