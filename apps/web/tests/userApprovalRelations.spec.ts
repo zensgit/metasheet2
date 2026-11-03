@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref } from 'vue'
 import type { App } from 'vue'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import UserApprovalRelations from '../src/components/UserApprovalRelations.vue'
 import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
@@ -19,16 +20,26 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 async function flush() { for (let i = 0; i < 12; i++) { await Promise.resolve(); await nextTick() } }
 let app: App | null
 let host: HTMLDivElement
+let router: Router | null
 const target = ref('person-a')
-function mount() {
+function mount(base = '/') {
   host = document.createElement('div'); document.body.appendChild(host)
-  app = createApp({ render: () => h(UserApprovalRelations, { userId: target.value }) }); app.mount(host)
+  router = createRouter({
+    history: createMemoryHistory(base),
+    routes: [
+      { path: '/', component: { render: () => null } },
+      { path: '/admin/organization', component: { render: () => null } },
+    ],
+  })
+  app = createApp({ render: () => h(UserApprovalRelations, { userId: target.value }) })
+  app.use(router)
+  app.mount(host)
 }
 beforeEach(() => {
   localStorage.clear(); localStorage.setItem('auth_token', 'session-a')
-  state.admin = true; state.fetch.mockReset(); state.fetch.mockResolvedValue(response()); target.value = 'person-a'; app = null
+  state.admin = true; state.fetch.mockReset(); state.fetch.mockResolvedValue(response()); target.value = 'person-a'; app = null; router = null
 })
-afterEach(() => { app?.unmount(); host?.remove(); localStorage.clear() })
+afterEach(() => { app?.unmount(); host?.remove(); localStorage.clear(); router = null })
 
 describe('user approval relationship summary', () => {
   it('shows independent local manager/head and a maintenance link using GET only', async () => {
@@ -115,6 +126,38 @@ describe('user approval relationship summary', () => {
   it('keeps unknown409 codes generic rather than trusting provider error text', async () => {
     state.fetch.mockResolvedValue({ ok: false, status: 409, json: async () => ({ ok: false, error: { code: 'OTHER', message: 'private-detail' } }) })
     mount(); await flush(); expect(host.textContent).toContain('暂不可用'); expect(host.textContent).not.toContain('private-detail')
+  })
+
+  it('navigates to the organization workspace on a root base', async () => {
+    mount('/')
+    await router!.isReady()
+    await flush()
+    const link = host.querySelector('a')
+    expect(link?.textContent).toContain('维护组织审批关系')
+    expect(link?.getAttribute('href')).toBe('/admin/organization')
+    expect(router!.resolve('/admin/organization').href).toBe('/admin/organization')
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })
+    link!.dispatchEvent(click)
+    expect(click.defaultPrevented).toBe(true)
+    await vi.waitFor(() => {
+      expect(router!.currentRoute.value.path).toBe('/admin/organization')
+    })
+  })
+
+  it('navigates to the organization workspace under a sub-path base', async () => {
+    mount('/metasheet/')
+    await router!.isReady()
+    await flush()
+    const link = host.querySelector('a')
+    expect(link?.textContent).toContain('维护组织审批关系')
+    expect(link?.getAttribute('href')).toBe('/metasheet/admin/organization')
+    expect(router!.resolve('/admin/organization').href).toBe('/metasheet/admin/organization')
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })
+    link!.dispatchEvent(click)
+    expect(click.defaultPrevented).toBe(true)
+    await vi.waitFor(() => {
+      expect(router!.currentRoute.value.path).toBe('/admin/organization')
+    })
   })
 
 })

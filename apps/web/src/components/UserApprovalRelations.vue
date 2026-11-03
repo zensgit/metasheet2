@@ -71,7 +71,7 @@ onBeforeUnmount(() => { alive = false; clear(); unsubscribe(); window.removeEven
       <p v-if="!result.manager || !result.departmentHead">部分关系尚未配置，对应审批节点可能无法找到审批人。</p>
     </template>
     <p>这是当前关系参考，不是某张流程的最终审批人预览；既有申请保留创建时的审批人快照。</p>
-    <a v-if="allowed" href="/admin/organization">维护组织审批关系</a>
+    <router-link v-if="allowed" to="/admin/organization">维护组织审批关系</router-link>
     <button v-if="allowed && !loading" type="button" @click="load">刷新审批关系</button>
   </section>
 </template>
