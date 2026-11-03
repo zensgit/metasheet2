@@ -8416,6 +8416,140 @@ attendanceIntegrationDescribe(
         expect(await readCycle(cycleId)).toEqual(rowBefore)
       }
     })
+
+    // T15a-T15c run real requests under a non-UTC zone on purpose: CI runs with TZ=UTC, where a DATE column and a
+    // 'YYYY-MM-DD' string happen to land on the same instant. The integration server runs inside this test process
+    // (MetaSheetServer is imported and listens in the top-level beforeAll) and vitest.integration.config.ts uses
+    // pool 'forks', so assigning process.env.TZ here changes the zone that the route handler and pg's DATE parser
+    // use on the next request. Same pattern as tests/unit/scheduler-service.test.ts and task-p0a.db.test.ts.
+    // Cycles are created and closed before the switch; only the maintenance requests run inside it.
+    async function underTimeZone<T>(tz: string, run: () => Promise<T>): Promise<T> {
+      const previousTz = process.env.TZ
+      process.env.TZ = tz
+      try {
+        return await run()
+      } finally {
+        if (previousTz === undefined) delete process.env.TZ
+        else process.env.TZ = previousTz
+      }
+    }
+
+    // Positive control for the switch: in this process a DATE now comes back from pg at local midnight of the zone.
+    async function expectDateParsedAtLocalMidnight(offsetMinutes: number, isoOfDate20150201: string): Promise<void> {
+      expect(new Date(2015, 1, 1).getTimezoneOffset()).toBe(offsetMinutes)
+      const probe = await requirePool().query<{ d: Date }>(`SELECT DATE '2015-02-01' AS d`)
+      expect(probe.rows[0]?.d?.toISOString()).toBe(isoOfDate20150201)
+    }
+
+    const nonUtcZones = [
+      { tz: 'Asia/Taipei', offsetMinutes: -480, isoOfDate20150201: '2015-01-31T16:00:00.000Z' },
+      { tz: 'America/New_York', offsetMinutes: 300, isoOfDate20150201: '2015-02-01T05:00:00.000Z' },
+    ] as const
+
+    it('T15a [control] under TZ=Asia/Taipei and America/New_York a closed and an archived cycle accept same-value full payloads and an anchorDate of the same window: 200 with period, template and settlement unchanged', async () => {
+      const templateId = await createTemplate(org, 'r7 t15a template')
+      await seedCompTimeLot(org, `r7-t15a-user-${randomUUID()}`)
+      const periods = {
+        'Asia/Taipei': { closed: ['2015-02-01', '2015-02-28'], archived: ['2015-03-01', '2015-03-28'], anchorDate: '2015-02-15' },
+        'America/New_York': { closed: ['2015-04-01', '2015-04-28'], archived: ['2015-05-01', '2015-05-28'], anchorDate: '2015-04-15' },
+      } as const
+      for (const zone of nonUtcZones) {
+        const period = periods[zone.tz]
+        const closedId = await createCycle(org, { startDate: period.closed[0], endDate: period.closed[1], templateId, status: 'closed' })
+        const archivedId = await createCycle(org, { startDate: period.archived[0], endDate: period.archived[1], templateId, status: 'archived' })
+        const closedSettlements = await readSettlements(closedId)
+        expect(closedSettlements.length).toBeGreaterThan(0)
+        const archivedSettlements = await readSettlements(archivedId)
+
+        await underTimeZone(zone.tz, async () => {
+          await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+          const closedName = `r7 t15a closed ${zone.tz}`
+          const closedBodies: Array<{ entry: 'put' | 'post-update'; body: Record<string, unknown> }> = [
+            { entry: 'put', body: { templateId, name: closedName, startDate: period.closed[0], endDate: period.closed[1], status: 'closed' } },
+            { entry: 'post-update', body: { templateId, name: closedName, startDate: period.closed[0], endDate: period.closed[1], status: 'closed' } },
+            { entry: 'put', body: { startDate: period.closed[0] } },
+            { entry: 'put', body: { endDate: period.closed[1] } },
+            { entry: 'put', body: { anchorDate: period.anchorDate } },
+          ]
+          for (const { entry, body } of closedBodies) {
+            const res = await updateCycle(org, closedId, body, entry)
+            expect(res.status, `${zone.tz} ${entry} ${JSON.stringify(body)} ${res.raw}`).toBe(200)
+          }
+          const archivedName = `r7 t15a archived ${zone.tz}`
+          const archivedRes = await updateCycle(org, archivedId, { templateId, name: archivedName, startDate: period.archived[0], endDate: period.archived[1], status: 'archived' })
+          expect(archivedRes.status, `${zone.tz} ${archivedRes.raw}`).toBe(200)
+
+          expect(await readCycle(closedId)).toMatchObject({
+            name: closedName, status: 'closed', start_date: period.closed[0], end_date: period.closed[1], template_id: templateId,
+          })
+          expect(await readSettlements(closedId)).toEqual(closedSettlements)
+          expect(await readCycle(archivedId)).toMatchObject({
+            name: archivedName, status: 'archived', start_date: period.archived[0], end_date: period.archived[1], template_id: templateId,
+          })
+          expect(await readSettlements(archivedId)).toEqual(archivedSettlements)
+        })
+      }
+    })
+
+    it('T15b [control] under TZ=Asia/Taipei and America/New_York a closed and an archived cycle still refuse a start or end date one day earlier or later: 409 CYCLE_CLOSED_PERIOD_FROZEN and the row unchanged', async () => {
+      const templateId = await createTemplate(org, 'r7 t15b template')
+      await seedCompTimeLot(org, `r7-t15b-user-${randomUUID()}`)
+      const cases = {
+        'Asia/Taipei': [
+          { status: 'closed', period: ['2016-02-01', '2016-02-28'], changes: [{ startDate: '2016-01-31' }, { startDate: '2016-02-02' }, { endDate: '2016-02-27' }, { endDate: '2016-02-29' }] },
+          { status: 'archived', period: ['2016-03-01', '2016-03-28'], changes: [{ startDate: '2016-02-29' }, { startDate: '2016-03-02' }, { endDate: '2016-03-27' }, { endDate: '2016-03-29' }] },
+        ],
+        'America/New_York': [
+          { status: 'closed', period: ['2016-04-01', '2016-04-28'], changes: [{ startDate: '2016-03-31' }, { startDate: '2016-04-02' }, { endDate: '2016-04-27' }, { endDate: '2016-04-29' }] },
+          { status: 'archived', period: ['2016-05-01', '2016-05-28'], changes: [{ startDate: '2016-04-30' }, { startDate: '2016-05-02' }, { endDate: '2016-05-27' }, { endDate: '2016-05-29' }] },
+        ],
+      } as const
+      for (const zone of nonUtcZones) {
+        const cycles: Array<{ id: string; changes: ReadonlyArray<Record<string, string>> }> = []
+        for (const testCase of cases[zone.tz]) {
+          const id = await createCycle(org, { startDate: testCase.period[0], endDate: testCase.period[1], templateId, status: testCase.status })
+          cycles.push({ id, changes: testCase.changes })
+        }
+        await underTimeZone(zone.tz, async () => {
+          await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+          for (const cycle of cycles) {
+            const rowBefore = await readCycle(cycle.id)
+            const settlementsBefore = await readSettlements(cycle.id)
+            for (const change of cycle.changes) {
+              const res = await updateCycle(org, cycle.id, change)
+              expect(res.status, `${zone.tz} ${JSON.stringify(change)} ${res.raw}`).toBe(409)
+              expect(errorCode(res)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+              expect(await readCycle(cycle.id)).toEqual(rowBefore)
+              expect(await readSettlements(cycle.id)).toEqual(settlementsBefore)
+            }
+          }
+        })
+      }
+    })
+
+    it('T15c [control] under TZ=Asia/Taipei and America/New_York moving one end of an open cycle onto the other end (a single-day cycle) succeeds; a real inversion is still 400 with zero writes', async () => {
+      const cases = [
+        { tz: 'Asia/Taipei', period: ['2017-04-01', '2017-04-05'], single: { startDate: '2017-04-05' }, day: '2017-04-05', inverted: { startDate: '2017-04-06' } },
+        { tz: 'America/New_York', period: ['2017-05-01', '2017-05-05'], single: { endDate: '2017-05-01' }, day: '2017-05-01', inverted: { endDate: '2017-04-30' } },
+      ] as const
+      for (const testCase of cases) {
+        const zone = nonUtcZones.find((candidate) => candidate.tz === testCase.tz)
+        if (!zone) throw new Error(`payroll-cycle-atomicity: unknown zone ${testCase.tz}`)
+        const cycleId = await createCycle(org, { startDate: testCase.period[0], endDate: testCase.period[1] })
+        await underTimeZone(zone.tz, async () => {
+          await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+          const single = await updateCycle(org, cycleId, testCase.single)
+          expect(single.status, `${zone.tz} ${JSON.stringify(testCase.single)} ${single.raw}`).toBe(200)
+          const rowAfter = await readCycle(cycleId)
+          expect(rowAfter).toMatchObject({ status: 'open', start_date: testCase.day, end_date: testCase.day })
+
+          const inverted = await updateCycle(org, cycleId, testCase.inverted)
+          expect(inverted.status, `${zone.tz} ${JSON.stringify(testCase.inverted)} ${inverted.raw}`).toBe(400)
+          expect((inverted.body as { error?: { code?: string; message?: string } } | undefined)?.error).toEqual({ code: 'VALIDATION_ERROR', message: 'Invalid date range' })
+          expect(await readCycle(cycleId)).toEqual(rowAfter)
+        })
+      }
+    })
   })
 
   it('④ 加班银行 v1-3b — 满勤 flag surfaces on GET /summary when policy ON; ABSENT when OFF (dormant-clean)', async () => {
