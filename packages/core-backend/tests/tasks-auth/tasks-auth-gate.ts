@@ -231,7 +231,8 @@ describe('tasks auth gate', () => {
   ]
 
   // The 30 M4 (PR-3a) routes, design §3 and §10.7: PATCH /api/tasks/:id (S4), task settings (S3),
-  // lists (S5), list members (S6), list items (S7), groups in both scopes (S8). Writes take
+  // lists (S5), list members (S6), list items (S7), groups in both scopes (S8); and the two people
+  // reads of task usability package 1b, which share the table's no-org and 2/16 cells. Writes take
   // tasks:write and answer 422 ORG_MISSING without an org; reads take tasks:read and answer 404
   // without an org, except the three collections marked `collection`, which answer the degraded
   // body without `total` (design §3, RULED(2026-10-07): [R18] no route here takes tasks:admin).
@@ -291,6 +292,11 @@ describe('tasks auth gate', () => {
     { label: 'PUT /api/task-groups/items/:taskId', code: 'write', method: 'put', path: (c) => `/api/task-groups/items/${c.taskId}`, body: () => ({ groupId: null, position: 0 }), needs: ['task'] },
     { label: 'PATCH /api/task-groups/:groupId', code: 'write', method: 'patch', path: (c) => `/api/task-groups/${c.userGroupId}`, body: () => ({ name: '改名' }), needs: ['userGroup'] },
     { label: 'DELETE /api/task-groups/:groupId', code: 'write', method: 'delete', path: (c) => `/api/task-groups/${c.userGroupId}`, needs: ['userGroup'] },
+    // Task usability package 1b: the people directory (a write-code read: it feeds the assignee and
+    // follower writes, so a missing org answers as they do) and the people on one task. No query
+    // string: without a term the directory answers its 200 "type a name" marker.
+    { label: 'GET /api/tasks/people', code: 'write', method: 'get', path: () => '/api/tasks/people' },
+    { label: 'GET /api/tasks/:id/people', code: 'read', method: 'get', path: (c) => `/api/tasks/${c.taskId}/people`, needs: ['task'] },
   ]
 
   /** The no-org answer of an M4 route, as the exact response text (design §3, [own-19]). */
@@ -952,6 +958,34 @@ describe('tasks auth gate', () => {
       const assigned = await db.query('SELECT count(*)::int AS n FROM task_assignees WHERE user_id = $1', [columnAdmin])
       expect(assigned.rows[0]?.n).toBe(2)
     })
+
+    // Package 1b, with token trust off: the people directory gives the picker the answer the assignee
+    // write gives (the cell above). Exact-id terms, so other people of the org do not matter.
+    it('GET /api/tasks/people: a member without task access is offered and marked, M3_TARGET is offered as usable, an inactive member and a member of another org are not offered', async () => {
+      const server = app()
+      const bearer = `Bearer ${users.control.bearer}`
+      const without = `usr_tasks_m3pickbare_${stamp}`
+      const inactive = `usr_tasks_m3pickoff_${stamp}`
+      const foreign = `usr_tasks_m3pickfrn_${stamp}`
+      await seedOrgMembers(orgId, [without], { taskAccess: false })
+      await seedOrgMembers(orgId, [inactive], { active: false })
+      await seedOrgMembers(`org_tasks_auth_pickfrn_${stamp}`, [foreign])
+      type Item = { id: string; canUseTasks: boolean }
+      const search = async (term: string): Promise<Array<[string, boolean]>> => {
+        const response = await server.get(`/api/tasks/people?q=${encodeURIComponent(term)}`).set('Authorization', bearer)
+        expect(response.status, response.text).toBe(200)
+        return (response.body.items as Item[]).map((item): [string, boolean] => [item.id, item.canUseTasks])
+      }
+      expect(await search(without)).toEqual([[without, false]])
+      expect(await search(M3_TARGET)).toEqual([[M3_TARGET, true]])
+      expect(await search(inactive)).toEqual([])
+      expect(await search(foreign)).toEqual([])
+      const ids = [without, M3_TARGET, inactive, foreign].map(encodeURIComponent).join(',')
+      const resolved = await server.get(`/api/tasks/people?ids=${ids}`).set('Authorization', bearer)
+      expect(resolved.status, resolved.text).toBe(200)
+      expect((resolved.body.items as Item[]).map((item): [string, boolean] => [item.id, item.canUseTasks]))
+        .toEqual([[without, false], [M3_TARGET, true]])
+    })
   })
 
   // Gate 1 cross-org write. §12.0: a 适用; b 刻意取反 (user_orgs is home, tenantId is other); c, d, f–i 适用; e 适用.
@@ -1354,7 +1388,7 @@ describe('tasks auth gate', () => {
 
   // Gates 1 / 2 / 16, route population (design §10.7). The routes `tasksRouter()` registers, as
   // "METHOD path", equal the union of P0A_ROUTES, M3_ROUTES and M4_ROUTES: 8 + 13 + 30 = 51 at the
-  // end of PR-3a. Every route is registered directly on the factory's router, so each stack layer
+  // end of PR-3a, 8 + 13 + 32 = 53 with the two people reads of package 1b. Every route is registered directly on the factory's router, so each stack layer
   // carries one route; any other layer (a nested router, a middleware) fails the comparison.
   // Each M3 and M4 row is also bound to its label through the request the per-route cells send:
   // the row's method and its path with the placeholder ids are resolved the way Express
@@ -1377,7 +1411,7 @@ describe('tasks auth gate', () => {
     const tables = [...P0A_ROUTES, ...M3_ROUTES.map((route) => route.label), ...M4_ROUTES.map((route) => route.label)]
     expect(new Set(tables).size, 'a route appears twice in the tables').toBe(tables.length)
     expect(new Set(registered).size, 'the router registers a route twice').toBe(registered.length)
-    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length]).toEqual([8, 13, 30])
+    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length]).toEqual([8, 13, 32])
     expect([...registered].sort()).toEqual([...tables].sort())
     const dispatchedTo = (method: string, url: string): string => {
       const layer = stack.find((candidate) => candidate.route?.methods[method] === true && candidate.match(url))
