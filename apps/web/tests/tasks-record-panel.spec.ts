@@ -494,8 +494,9 @@ describe('MetaRecordTasksPanel — in the inspector', () => {
 })
 
 describe('MultitableApiClient.listRecordTasks', () => {
+  // A fresh Response per call: a body can be read once.
   function respond(status: number, body: unknown) {
-    return vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
+    return vi.fn().mockImplementation(async () => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
   }
 
   it('reads the record route with the page size and no retry key; unwraps data; drops rows without an id', async () => {
