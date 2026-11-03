@@ -1,11 +1,16 @@
 import '../helpers/assert-rbac-optional-off'
 import { randomUUID } from 'node:crypto'
+import { Router } from 'express'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { createTask } from '../../src/services/task-records'
+import { createMultitableRecordTaskRoutes } from '../../src/routes/multitable-record-tasks'
+import { tasksRouter } from '../../src/routes/tasks'
+import { createTask, listRecordTasks } from '../../src/services/task-records'
+import { addFollower } from '../../src/services/task-structure'
 import {
   dropTaskM4Fixtures,
+  runSourceMutant,
   seedOrgMembers,
   seedTaskActor,
   signTaskToken,
@@ -24,7 +29,11 @@ import { rawRequest, startTasksListener, type TasksListener } from '../helpers/t
  * Each cell uses its own org and its own users. The multitable rows (one base, sheets, a view and
  * records) are shared by the file and removed in `afterAll`; a dispatcher who may read them holds
  * `multitable:read` from before their first request (the permission read is memoised per user).
- * The record's own list of tasks is a separate route and is not exercised here.
+ *
+ * The record's list of tasks (GET /api/multitable/sheets/:sheetId/records/:recordId/tasks, its own
+ * router, mounted on the same listener): the task read door, then the record read gate, then the
+ * tasks linked to the record that the viewer could open from the task centre, in the viewer's org;
+ * with `dispatchKey`, only the viewer's own dispatch made with that key from that record.
  */
 
 if (process.env.EXPECT_DB !== '1') {
@@ -90,7 +99,14 @@ beforeAll(async () => {
     [REC_1, SHEET, REC_2, REC_OTHER, OTHER_SHEET, REC_DELETED, DELETED_SHEET],
   )
   await db.query('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1', [DELETED_SHEET])
-  listener = await startTasksListener()
+  // The task routes and the record's list of tasks on one listener, mounted as index.ts mounts them.
+  const tasks = tasksRouter()
+  const recordTasks = createMultitableRecordTaskRoutes()
+  if (!tasks || !recordTasks) throw new Error('the task routes must mount when the feature flag is true')
+  const router = Router()
+  router.use(tasks)
+  router.use('/api/multitable', recordTasks)
+  listener = await startTasksListener(router)
 })
 
 afterAll(async () => {
@@ -622,5 +638,232 @@ describe('the link and the record', () => {
     const done = await post(`/api/tasks/${idOf(created)}/complete`, me.bearer, {})
     expect(done.status, done.text).toBe(200)
     expect(await records()).toBe(before)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// The record's list of tasks.
+// ---------------------------------------------------------------------------------------------
+
+const RECORDS_FILE = new URL('../../src/services/task-records.ts', import.meta.url).pathname
+
+type RecordTaskItem = Record<string, unknown> & { id: string; isMine: boolean }
+type RecordTaskPage = { items: RecordTaskItem[]; hasMore: boolean }
+
+function recordTasksPath(recordId: string, query = '', sheetId = SHEET): string {
+  return `/api/multitable/sheets/${sheetId}/records/${recordId}/tasks${query}`
+}
+
+function pageOf(reply: Reply): RecordTaskPage {
+  expect(reply.status, reply.text).toBe(200)
+  const body = reply.body as { ok?: unknown; data?: RecordTaskPage }
+  expect(body.ok).toBe(true)
+  expect(Object.keys(body.data ?? {}).sort()).toEqual(['hasMore', 'items'])
+  // No item carries a retry key, whoever reads it.
+  for (const item of body.data!.items) expect(Object.prototype.hasOwnProperty.call(item, 'dispatchKey'), reply.text).toBe(false)
+  expect(reply.text).not.toContain('dispatch_key')
+  return body.data!
+}
+
+function idsOfPage(page: RecordTaskPage): string[] {
+  return page.items.map((item) => item.id).sort()
+}
+
+/** A dispatch from `recordId` by `by`, with `extra` body keys; returns the task id. */
+async function dispatched(by: SeededTaskActor, recordId: string, key: string | undefined, extra: Record<string, unknown> = {}): Promise<string> {
+  const reply = await post('/api/tasks', by.bearer, sourced({ sheetId: SHEET, recordId }, key, extra))
+  expect(reply.status, reply.text).toBe(200)
+  return idOf(reply)
+}
+
+describe('the record list of tasks: who sees what', () => {
+  it('P4: the dispatcher, an assignee and a follower see the task; another dispatcher on the same record sees only their own; a record reader with no role sees nothing', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('p4', stamp)
+    const me = await dispatcher('p4me', stamp, orgId)
+    const assignee = await dispatcher('p4as', stamp, orgId)
+    const follower = await dispatcher('p4fo', stamp, orgId)
+    const other = await dispatcher('p4ot', stamp, orgId)
+    const reader = await dispatcher('p4rd', stamp, orgId)
+
+    const mine = await dispatched(me, REC_1, newKey(), { assignees: [me.userId, assignee.userId] })
+    await addFollower({ orgId, actorId: me.userId, taskId: mine, body: { userId: follower.userId } })
+    const elsewhere = await dispatched(me, REC_2, newKey())
+    const theirs = await dispatched(other, REC_1, newKey())
+
+    const forMe = pageOf(await get(recordTasksPath(REC_1), me.bearer))
+    expect(idsOfPage(forMe)).toEqual([mine])
+    expect(forMe.items[0]).toMatchObject({ id: mine, title: TITLE, status: 'open', createdBy: me.userId, isMine: true })
+    expect(forMe.hasMore).toBe(false)
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_2), me.bearer)))).toEqual([elsewhere])
+
+    const forAssignee = pageOf(await get(recordTasksPath(REC_1), assignee.bearer))
+    expect(idsOfPage(forAssignee)).toEqual([mine])
+    expect(forAssignee.items[0]?.isMine).toBe(false)
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), follower.bearer)))).toEqual([mine])
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), other.bearer)))).toEqual([theirs])
+
+    // N4: a reader of the record with no role on either task: nothing, and nothing counted.
+    const none = await get(recordTasksPath(REC_1), reader.bearer)
+    expect(pageOf(none)).toEqual({ items: [], hasMore: false })
+    expect(none.text).toBe(JSON.stringify({ ok: true, data: { items: [], hasMore: false } }))
+  })
+
+  it('N5: a viewer in another org sees none of this org’s tasks on the record, and the tasks of that org only', async () => {
+    const stamp = stampOf()
+    const orgA = orgOf('n5a', stamp)
+    const orgB = orgOf('n5b', stamp)
+    const me = await dispatcher('n5me', stamp, orgA)
+    const inA = await dispatched(me, REC_1, newKey())
+    await pool().query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [me.userId, orgB])
+    const bearerB = signTaskToken(me.userId, me.roleId, orgB)
+    expect(pageOf(await get(recordTasksPath(REC_1), bearerB))).toEqual({ items: [], hasMore: false })
+    const inB = idOf(await post('/api/tasks', bearerB, sourced({ sheetId: SHEET, recordId: REC_1 }, newKey())))
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), bearerB)))).toEqual([inB])
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), me.bearer)))).toEqual([inA])
+  })
+
+  it('N9: a soft-deleted task stays linked but leaves the list', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('n9l', stamp)
+    const me = await dispatcher('n9l', stamp, orgId)
+    const kept = await dispatched(me, REC_1, newKey())
+    const removed = await dispatched(me, REC_1, newKey())
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), me.bearer)))).toEqual([kept, removed].sort())
+    const gone = await del(`/api/tasks/${removed}`, me.bearer)
+    expect(gone.status, gone.text).toBe(200)
+    expect((await linksOf(orgId)).map((row) => row.task_id).sort()).toEqual([kept, removed].sort())
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), me.bearer)))).toEqual([kept])
+  })
+
+  it('a page: limit + 1 decides hasMore; no total', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('pgl', stamp)
+    const me = await dispatcher('pgl', stamp, orgId)
+    const ids = [
+      await dispatched(me, REC_1, newKey()),
+      await dispatched(me, REC_1, newKey()),
+      await dispatched(me, REC_1, newKey()),
+    ]
+    const two = pageOf(await get(recordTasksPath(REC_1, '?limit=2'), me.bearer))
+    expect(two.items).toHaveLength(2)
+    expect(two.hasMore).toBe(true)
+    expect(ids).toEqual(expect.arrayContaining(idsOfPage(two)))
+    const three = pageOf(await get(recordTasksPath(REC_1, '?limit=3'), me.bearer))
+    expect(idsOfPage(three)).toEqual([...ids].sort())
+    expect(three.hasMore).toBe(false)
+  })
+})
+
+describe('the record list of tasks: refusals', () => {
+  it('N6: without tasks:read the door refuses before the handler and the record is never read; with it, the record is read', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('n6', stamp)
+    const noTasks = await seedTaskActor({ label: 'n6nt', stamp, orgId, codes: [], admission: false, direct: ['multitable:read'] })
+    seededUsers.push(noTasks.userId)
+    seededRoles.push(noTasks.roleId)
+    const reader = await dispatcher('n6rd', stamp, orgId)
+    const refused = await readsTable('meta_records', () => get(recordTasksPath(REC_1), noTasks.bearer))
+    expect(refused.result.status, refused.result.text).toBe(403)
+    expect(refused.result.text).not.toContain('"ok":true')
+    expect(refused.read).toBe(false)
+    const passed = await readsTable('meta_records', () => get(recordTasksPath(REC_1), reader.bearer))
+    expect(passed.read).toBe(true)
+    expect(passed.result.status, passed.result.text).toBe(200)
+  })
+
+  it('the record gate: a record the viewer may not read is 403 and no link is read; a missing record and a deleted sheet are 404', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('rg', stamp)
+    const me = await dispatcher('rgme', stamp, orgId)
+    await dispatched(me, REC_1, newKey())
+    const cannot = await dispatcher('rgno', stamp, orgId, { read: false })
+    const refused = await readsTable('task_source_links', () => get(recordTasksPath(REC_1), cannot.bearer))
+    expect(refused.result.status).toBe(403)
+    expect(refused.result.text).toBe(JSON.stringify({ ok: false, error: { code: 'PERMISSION_DENIED', message: 'Insufficient permissions' } }))
+    expect(refused.read).toBe(false)
+    const notFound = JSON.stringify({ ok: false, error: { code: 'RECORD_NOT_FOUND', message: 'Record not found' } })
+    const missing = await get(recordTasksPath(REC_MISSING), me.bearer)
+    expect([missing.status, missing.text]).toEqual([404, notFound])
+    const otherSheet = await get(recordTasksPath(REC_OTHER), me.bearer)
+    expect([otherSheet.status, otherSheet.text]).toEqual([404, notFound])
+    const deleted = await get(recordTasksPath(REC_DELETED, '', DELETED_SHEET), me.bearer)
+    expect(deleted.status).toBe(404)
+  })
+
+  it('a malformed dispatchKey is 422 INVALID_DISPATCH_KEY and reads no link', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('bk', stamp)
+    const me = await dispatcher('bk', stamp, orgId)
+    const invalid = JSON.stringify({ ok: false, error: { code: 'INVALID_DISPATCH_KEY', message: 'Invalid dispatch key' } })
+    for (const query of ['?dispatchKey=short', `?dispatchKey=${'k'.repeat(65)}`, '?dispatchKey=', `?dispatchKey=${newKey()}&dispatchKey=${newKey()}`]) {
+      const reply = await get(recordTasksPath(REC_1, query), me.bearer)
+      expect([reply.status, reply.text], query).toEqual([422, invalid])
+    }
+    const watched = await readsTable('task_source_links', () => get(recordTasksPath(REC_1, '?dispatchKey=short'), me.bearer))
+    expect(watched.read).toBe(false)
+  })
+})
+
+describe('the record list of tasks: the dispatchKey query', () => {
+  it('S1: the dispatcher’s own key finds its row; an assignee, a follower and another org with the same key text find none; no item carries a key', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('s1', stamp)
+    const orgB = orgOf('s1b', stamp)
+    const me = await dispatcher('s1me', stamp, orgId)
+    const assignee = await dispatcher('s1as', stamp, orgId)
+    const follower = await dispatcher('s1fo', stamp, orgId)
+    const outsider = await dispatcher('s1ob', stamp, orgB)
+    const key = newKey()
+    const taskId = await dispatched(me, REC_1, key, { assignees: [me.userId, assignee.userId] })
+    await addFollower({ orgId, actorId: me.userId, taskId, body: { userId: follower.userId } })
+    // Another org's dispatcher, the same key text on the same record: their own task.
+    const outsiderTask = await dispatched(outsider, REC_1, key)
+    const keyed = `?dispatchKey=${key}`
+
+    const own = pageOf(await get(recordTasksPath(REC_1, keyed), me.bearer))
+    expect(own.items.map((item) => item.id)).toEqual([taskId])
+    expect(own.items[0]).toMatchObject({ id: taskId, isMine: true, createdBy: me.userId })
+    expect(own.hasMore).toBe(false)
+
+    // The assignee and the follower can open the task (their unkeyed list shows it), so their empty
+    // keyed answer comes from the creator condition, not from the gates.
+    for (const viewer of [assignee, follower]) {
+      expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), viewer.bearer)))).toEqual([taskId])
+      expect(pageOf(await get(recordTasksPath(REC_1, keyed), viewer.bearer))).toEqual({ items: [], hasMore: false })
+    }
+    // Another org: the same user in org B with the key finds nothing of org A; org B's dispatcher
+    // finds only their own.
+    await pool().query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [me.userId, orgB])
+    expect(pageOf(await get(recordTasksPath(REC_1, keyed), signTaskToken(me.userId, me.roleId, orgB)))).toEqual({ items: [], hasMore: false })
+    expect(pageOf(await get(recordTasksPath(REC_1, keyed), outsider.bearer)).items.map((item) => item.id)).toEqual([outsiderTask])
+    // The same key on another record of the sheet is not this dispatch.
+    expect(pageOf(await get(recordTasksPath(REC_2, keyed), me.bearer))).toEqual({ items: [], hasMore: false })
+    // A key never used finds nothing; the unkeyed list is unchanged by the key queries.
+    expect(pageOf(await get(recordTasksPath(REC_1, `?dispatchKey=${newKey()}`), me.bearer))).toEqual({ items: [], hasMore: false })
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_1), me.bearer)))).toEqual([taskId])
+
+    // Negative control: without the link creator condition the assignee's keyed query finds the
+    // dispatcher's row, so the empty answer above turns red.
+    expect((await listRecordTasks({ orgId, actorId: assignee.userId, sheetId: SHEET, recordId: REC_1, limit: 20, dispatchKey: key })).items).toEqual([])
+    runSourceMutant(RECORDS_FILE, 'AND l.created_by = $1 AND l.dispatch_key', 'AND l.dispatch_key', `
+      const { listRecordTasks } = await import(${JSON.stringify(RECORDS_FILE)})
+      const page = await listRecordTasks({ orgId: ${JSON.stringify(orgId)}, actorId: ${JSON.stringify(assignee.userId)}, sheetId: ${JSON.stringify(SHEET)}, recordId: ${JSON.stringify(REC_1)}, limit: 20, dispatchKey: ${JSON.stringify(key)} })
+      const ids = page.items.map((item) => item.id)
+      console.log(JSON.stringify({ s1: 'red', ids }))
+      process.exit(ids.length === 1 && ids[0] === ${JSON.stringify(taskId)} ? 0 : 1)
+    `, {}, { unique: true })
+  }, 180000)
+
+  it('a soft-deleted dispatch is not found by its key', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('s1d', stamp)
+    const me = await dispatcher('s1d', stamp, orgId)
+    const key = newKey()
+    const taskId = await dispatched(me, REC_1, key)
+    expect(pageOf(await get(recordTasksPath(REC_1, `?dispatchKey=${key}`), me.bearer)).items.map((item) => item.id)).toEqual([taskId])
+    const gone = await del(`/api/tasks/${taskId}`, me.bearer)
+    expect(gone.status, gone.text).toBe(200)
+    expect(pageOf(await get(recordTasksPath(REC_1, `?dispatchKey=${key}`), me.bearer))).toEqual({ items: [], hasMore: false })
   })
 })

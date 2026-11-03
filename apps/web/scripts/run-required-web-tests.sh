@@ -2022,6 +2022,7 @@ exec npx vitest run \
   tasks-nav-feature-gate.spec.ts \
   tasks-nav-relogin.spec.ts \
   tasks-record-dispatch.spec.ts \
+  tasks-record-panel.spec.ts \
   tasks-routes.spec.ts \
   tasks-settings-view.spec.ts \
   tasks-status-filter.spec.ts \
