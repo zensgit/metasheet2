@@ -66,6 +66,7 @@ import {
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString, redactValue } from './automation-log-redact'
 import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
+import { pinnedAddressFamily, pinnedHttpsFetch, type PinnedSendFn } from './webhook-pinned-fetch'
 import {
   classifyWebhookFailure,
   classifyWebhookRefusal,
@@ -1691,6 +1692,15 @@ export interface AutomationDeps {
    * every returned address, and a seam that returns an internal address is refused like any other.
    */
   ssrfLookupFn?: SsrfLookupFn
+  /**
+   * S0-a transport seam for `send_webhook`. OMITTED (production) ⇒ `pinnedHttpsFetch`: the request goes
+   * to the address the SSRF check approved for THIS attempt, never to a fresh resolution of the name, and
+   * a 3xx is returned as a status (no second request). A test passes a wrapper to observe the chosen pin
+   * or to point the real helper at a loopback server. When neither this nor `fetchFn` is injected the
+   * pinned helper is used; `fetchFn`, when injected, is the older fetch-shaped TEST seam (it still gets
+   * `redirect: 'manual'`, but a fetch-shaped call cannot be pinned — production wiring passes neither).
+   */
+  pinnedWebhookSendFn?: PinnedSendFn
   notificationService?: Pick<NotificationService, 'send'>
   /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
   crossBaseWriteQuota?: CrossBaseWriteQuotaConfig
@@ -4633,34 +4643,11 @@ export class AutomationExecutor {
     if (!ssrf.ok) {
       // `strict: false` in this package disables discriminated-union narrowing (same reason as the
       // button route); read `reason` off the rejection variant explicitly.
-      const guardReason = (ssrf as { reason?: string }).reason
-      // VALUES-FREE: the guard's `reason` is NOT logged — it is only mapped to a closed-set label. The
-      // URL (which may carry userinfo/query credentials) and every header value stay out of the log and
-      // out of the persisted step result; only the code + host SHAPE are recorded.
-      const refusal = classifyWebhookRefusal(url, guardReason)
-      logger.warn('[automation.send_webhook.refused]', {
-        code: refusal.code,
-        refusalClass: refusal.refusalClass,
-        hostFamily: refusal.hostFamily,
-        // IDENTIFIERS, not values — `sheetId` alone does not locate the rule when a sheet carries many
-        // (it only narrows to the sheet), so carry the two the context already holds. Same identifier
-        // discipline as the sibling button route (`routes/multitable-button.ts:311-314`).
-        sheetId: context.sheetId,
-        ruleId: context.ruleId,
-        executionId: context.executionId,
-      })
-      return {
-        actionType: 'send_webhook',
-        status: 'failed',
-        error: `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`,
-        output: {
-          code: refusal.code,
-          refusalClass: refusal.refusalClass,
-          hostFamily: refusal.hostFamily,
-          dispatched: false,
-        },
-      }
+      return this.refusedWebhookTargetResult(url, (ssrf as { reason?: string }).reason, context, false)
     }
+    // S0-a: the addresses THIS check approved. Every dispatch below connects to one of them (pinned), so a
+    // name that re-resolves somewhere else between the check and the connect cannot move the request.
+    const approvedAddresses = (ssrf as { addresses: string[] }).addresses
 
     const method = (config.method as string) ?? 'POST'
     const headers = { ...((config.headers as Record<string, string>) ?? {}) }
@@ -4688,7 +4675,6 @@ export class AutomationExecutor {
       }
     }
 
-    const fetchFn = this.deps.fetchFn ?? globalThis.fetch
     const timeoutMs = webhookTimeoutMs()
 
     // #4196 Class-B two-phase (flag ON + identity present). Intent (Tx A) commits BEFORE the send; a prior
@@ -4697,7 +4683,7 @@ export class AutomationExecutor {
     // runs BYTE-IDENTICAL to pre-slice.
     const outboundId = this.classBOutboundIdentity(identity, 'send_webhook', config)
     if (outboundId) {
-      return this.executeSendWebhookTwoPhase(outboundId, { url, method, headers, bodyStr, fetchFn, timeoutMs })
+      return this.executeSendWebhookTwoPhase(outboundId, { url, method, headers, bodyStr, approvedAddresses, timeoutMs })
     }
 
     const retries = maxWebhookRetries()
@@ -4706,20 +4692,31 @@ export class AutomationExecutor {
     // #5619 review: the LOG below gets this structured view of the last attempt, never `lastError`. Two
     // separate variables on purpose — the log line physically cannot be handed the free text.
     let lastFailure: WebhookFailureInput = { kind: 'none' }
+    let attemptAddresses = approvedAddresses
     for (let attempt = 0; attempt <= retries; attempt++) {
+      if (attempt > 0) {
+        // S0-a: a retry is a NEW send, so it is checked again — the first check covered the first attempt
+        // only. A target that now resolves internally is refused here, before anything is dispatched, with
+        // the same closed-set shape as the pre-dispatch refusal (`dispatched: true`: earlier attempts went out).
+        const recheck = await checkWebhookTargetUrl(url, this.deps.ssrfLookupFn)
+        if (!recheck.ok) {
+          return this.refusedWebhookTargetResult(url, (recheck as { reason?: string }).reason, context, true)
+        }
+        attemptAddresses = (recheck as { addresses: string[] }).addresses
+      }
       try {
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
-        const response = await fetchFn(url, {
+        // G05: never follow — following would replay this exact method/body/headers (incl. the signature
+        // headers) at a target the gate never judged. The pinned transport does not follow; the fetch-shaped
+        // test seam gets `redirect: 'manual'`. Either way a 3xx resolves as itself, with no second request.
+        const response = await this.dispatchWebhookAttempt(url, attemptAddresses, {
           method,
           headers,
           body: bodyStr,
           signal: controller.signal,
-          // G05: do NOT let the platform follow. See the gate comment above — following would replay
-          // this exact method/body/headers (incl. the signature headers) at a target the gate never
-          // judged. `manual` resolves with the 3xx itself and issues no second request.
-          redirect: 'manual',
+          timeoutMs,
         })
         clearTimeout(timeout)
 
@@ -4806,6 +4803,75 @@ export class AutomationExecutor {
    * the FIRST hop did go out — the gate allowed that url. The `Location` is never read, logged or
    * followed: it is a value chosen by whoever answered, and it is the one input the gate never judged.
    */
+  private refusedWebhookTargetResult(
+    url: string,
+    guardReason: string | undefined,
+    context: ExecutionContext,
+    dispatched: boolean,
+  ): AutomationStepResult {
+    // VALUES-FREE: the guard's `reason` is NOT logged — it is only mapped to a closed-set label. The URL
+    // (which may carry userinfo/query credentials) and every header value stay out of the log and out of
+    // the persisted step result; only the code + host SHAPE are recorded.
+    const refusal = classifyWebhookRefusal(url, guardReason)
+    logger.warn('[automation.send_webhook.refused]', {
+      code: refusal.code,
+      refusalClass: refusal.refusalClass,
+      hostFamily: refusal.hostFamily,
+      // IDENTIFIERS, not values — `sheetId` alone does not locate the rule when a sheet carries many
+      // (it only narrows to the sheet), so carry the two the context already holds. Same identifier
+      // discipline as the sibling button route (`routes/multitable-button.ts:311-314`).
+      sheetId: context.sheetId,
+      ruleId: context.ruleId,
+      executionId: context.executionId,
+    })
+    return {
+      actionType: 'send_webhook',
+      status: 'failed',
+      error: `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`,
+      output: {
+        code: refusal.code,
+        refusalClass: refusal.refusalClass,
+        hostFamily: refusal.hostFamily,
+        dispatched,
+      },
+    }
+  }
+
+  /**
+   * S0-a: ONE webhook send to an address the SSRF check approved. Production (no seam) uses
+   * `pinnedHttpsFetch`: it connects to `approvedAddresses[0]` — TLS SNI and `Host` stay the URL's host —
+   * and returns a 3xx as a plain status without a second request. The returned object carries only what
+   * the callers read (`status`, `ok`, and `type` from a fetch-shaped seam).
+   */
+  private async dispatchWebhookAttempt(
+    url: string,
+    approvedAddresses: string[],
+    init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal; timeoutMs: number },
+  ): Promise<{ status: number; ok: boolean; type?: string }> {
+    if (this.deps.fetchFn && !this.deps.pinnedWebhookSendFn) {
+      // Fetch-shaped TEST seam (see `AutomationDeps.pinnedWebhookSendFn`).
+      return this.deps.fetchFn(url, {
+        method: init.method,
+        headers: init.headers,
+        body: init.body,
+        signal: init.signal,
+        redirect: 'manual',
+      })
+    }
+    const pinned = approvedAddresses[0]
+    if (typeof pinned !== 'string' || pinned.length === 0) {
+      // Unreachable for an `ok` check (the guard always returns at least one address); fail closed anyway.
+      throw new TypeError('webhook target has no approved address')
+    }
+    const send: PinnedSendFn = this.deps.pinnedWebhookSendFn ?? pinnedHttpsFetch
+    return send(url, pinned, pinnedAddressFamily(pinned), {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      timeoutMs: init.timeoutMs,
+    })
+  }
+
   private refusedRedirectResult(
     url: string,
     ids: Record<string, string | undefined>,
@@ -4866,7 +4932,7 @@ export class AutomationExecutor {
       method: string
       headers: Record<string, string>
       bodyStr: string
-      fetchFn: typeof fetch
+      approvedAddresses: string[]
       timeoutMs: number
     },
   ): Promise<AutomationStepResult> {
@@ -4883,13 +4949,14 @@ export class AutomationExecutor {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), req.timeoutMs)
     try {
-      const response = await req.fetchFn(req.url, {
+      // G05 / S0-a: same posture as the legacy loop — connect to the approved (pinned) address and never
+      // follow a `Location` the gate did not judge.
+      const response = await this.dispatchWebhookAttempt(req.url, req.approvedAddresses, {
         method: req.method,
         headers: req.headers,
         body: req.bodyStr,
         signal: controller.signal,
-        // G05: same posture as the legacy loop — never follow a `Location` the gate did not judge.
-        redirect: 'manual',
+        timeoutMs: req.timeoutMs,
       })
       attempt = { kind: 'response', status: response.status }
       redirected = isRefusedRedirectStatus(response)
