@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Kysely } from 'kysely'
 import type { Database } from '../../src/db/types'
 import { DingTalkGroupDestinationService } from '../../src/multitable/dingtalk-group-destination-service'
@@ -675,5 +675,91 @@ describe('DingTalkGroupDestinationService', () => {
     const goodResponse = responses.find((r) => r.id === 'dt_good')
     expect(goodResponse?.webhookUrl).toContain('access_token=***')
     expect(goodResponse?.credentialUnreadable).toBeUndefined()
+  })
+
+  // The 5s request budget must cover the response BODY, not just the headers: a robot endpoint (or
+  // a proxy in front of it) that sends headers and then stalls used to leave `response.json()`
+  // pending forever, hanging the test-send route and every later destination in a server fan-out.
+  // Headers arriving means the message may already be in the group, so a body that never completes
+  // lands on the existing unreadable-body path (failed delivery, http_status kept) and is never
+  // re-sent: exactly one fetch.
+  describe('response body read is bounded by the request timeout', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    function stalledBodyResponse(): Response {
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: () => new Promise(() => {}),
+      } as unknown as Response
+    }
+
+    test('testSend fails once the timeout elapses while the body is still pending', async () => {
+      vi.useFakeTimers()
+      const { db, roots } = createMockDb()
+      const fetchFn = vi.fn(async () => stalledBodyResponse())
+      const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+      executeTakeFirstQueue.push(destinationRow())
+      const outcome = service.testSend('dt_1', 'user_1', {}).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      )
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      const settled = await outcome
+      expect(settled).toBeInstanceOf(Error)
+      expect((settled as Error).message).toContain('not a valid JSON object')
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+      const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+      expect(deliveryValues?.success).toBe(false)
+      expect(deliveryValues?.http_status).toBe(200)
+      const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
+      const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+      expect(setArg?.last_test_status).toBe('failed')
+    })
+
+    test('sendToDestination fails once the timeout elapses while the body is still pending', async () => {
+      vi.useFakeTimers()
+      const { db, roots } = createMockDb()
+      const fetchFn = vi.fn(async () => stalledBodyResponse())
+      const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+      executeTakeFirstQueue.push(destinationRow({ org_id: 'org_1' }))
+      const outcome = service.sendToDestination('dt_1', { subject: 'Next step' }).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      )
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      const settled = await outcome
+      expect(settled).toBeInstanceOf(Error)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+      const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+      expect(deliveryValues?.source_type).toBe('automation')
+      expect(deliveryValues?.success).toBe(false)
+      expect(deliveryValues?.http_status).toBe(200)
+    })
+
+    test('a prompt response still succeeds and the timeout is disarmed afterwards', async () => {
+      vi.useFakeTimers()
+      const { db } = createMockDb()
+      const fetchFn = vi.fn(async () => new Response(
+        JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ))
+      const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+      executeTakeFirstQueue.push(destinationRow())
+      await expect(service.testSend('dt_1', 'user_1', {})).resolves.toEqual({ ok: true })
+      const signal = (fetchFn.mock.calls[0]?.[1] as RequestInit | undefined)?.signal
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(signal?.aborted).toBe(false)
+    })
   })
 })
