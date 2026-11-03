@@ -91,6 +91,18 @@ describe('gate 2 and gate 13 under token trust', () => {
     return { userId, roleId, bearer: token(userId, roleId) }
   }
 
+  /**
+   * An assignee row written before the task access test existed: a person with the read code only
+   * can no longer be named as an assignee (task-member-access.ts), but such rows remain, and these
+   * cells read them with the read code alone. Written with SQL, as the notenant cell does.
+   */
+  async function assignedEarlier(taskId: string, userId: string, assignedBy: string): Promise<void> {
+    await poolManager.get().query(
+      'INSERT INTO task_assignees (task_id, user_id, assigned_by) VALUES ($1, $2, $3)',
+      [taskId, userId, assignedBy],
+    )
+  }
+
   function app(): express.Express {
     const router = tasksRouter()
     if (!router) throw new Error('tasks router must mount')
@@ -201,8 +213,9 @@ describe('gate 2 and gate 13 under token trust', () => {
       orgId, creatorId: actor.userId, title: '备料复核', assignees: [other], completionMode: 'all',
     })
     const assignedOnly = await createTask({
-      orgId, creatorId: other, title: '备料复核', assignees: [actor.userId], completionMode: 'all',
+      orgId, creatorId: other, title: '备料复核', assignees: [], completionMode: 'all',
     })
+    await assignedEarlier(assignedOnly.id, actor.userId, other)
     const server = app()
     const assigned = await request(server)
       .get('/api/tasks')
@@ -285,8 +298,9 @@ describe('gate 2 and gate 13 under token trust', () => {
     const actor = await userWith({ label: 'g8', codes: ['tasks:read'], admission: true })
     const picked = zoneThatDisagreesWithUtc(new Date())
     const created = await createTask({
-      orgId, creatorId: `usr_g8c_${stamp}`, title: '备料复核', assignees: [actor.userId], completionMode: 'all',
+      orgId, creatorId: `usr_g8c_${stamp}`, title: '备料复核', assignees: [], completionMode: 'all',
     })
+    await assignedEarlier(created.id, actor.userId, `usr_g8c_${stamp}`)
     await poolManager.get().query(
       `UPDATE tasks SET due_date = $2, due_time = NULL, due_at = NULL, time_zone = $3 WHERE id = $1`,
       [created.id, picked.dueDate, picked.timeZone],
@@ -307,8 +321,9 @@ describe('gate 2 and gate 13 under token trust', () => {
     const actor = await userWith({ label: 'g8neg', codes: ['tasks:read'], admission: true })
     const picked = zoneThatDisagreesWithUtc(new Date())
     const created = await createTask({
-      orgId, creatorId: `usr_g8n_${stamp}`, title: '备料复核', assignees: [actor.userId], completionMode: 'all',
+      orgId, creatorId: `usr_g8n_${stamp}`, title: '备料复核', assignees: [], completionMode: 'all',
     })
+    await assignedEarlier(created.id, actor.userId, `usr_g8n_${stamp}`)
     await poolManager.get().query(
       `UPDATE tasks SET due_date = $2, due_time = NULL, due_at = NULL, time_zone = $3 WHERE id = $1`,
       [created.id, picked.dueDate, picked.timeZone],
