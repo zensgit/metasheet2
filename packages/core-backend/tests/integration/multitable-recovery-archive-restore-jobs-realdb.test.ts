@@ -133,12 +133,43 @@ const future = (milliseconds: number): string => new Date(Date.now() + milliseco
 // One worker tick drains at most 32 derived effects and ends at the first attempt that does not complete;
 // that effect stays pending and is retried after the never-attempted ones (recovery-archive-restore-worker.ts).
 const DERIVED_TICK_BATCH = 32
-// The only refusals a drain may see: the derived processor's NOWAIT try-locks (authority lease busy, scope
-// row prelock) losing to any concurrent lock holder on the shared database, e.g. autovacuum truncating an
-// authority table. Both are retried by design; anything else is a real failure.
-const DERIVED_CONTENTION_REFUSALS = ['RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE', 'pg:55P03']
+// The only refusals a drain may see carry a lock-not-available code: SQLSTATE 55P03 raised by one of the
+// derived processor's NOWAIT locks (the authority lease, which the product reports as AUTHORITY_UNAVAILABLE,
+// or the scope row prelock), observed by the fixture underneath the attempt. A concurrent lock holder on the
+// shared database, e.g. autovacuum truncating an authority table, causes them; they are retried by design.
+// AUTHORITY_UNAVAILABLE without 55P03 underneath (non-canonical authority substrate, a busy advisory
+// try-lock, a permission-taint refusal) is a real failure.
+const DERIVED_CONTENTION_REFUSALS = ['RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE<-pg:55P03', 'pg:55P03']
 // Inside the sixth tick, where both observed CI attempts-5002 runs cut their batch.
 const DERIVED_CONTENDED_ATTEMPT = 170
+// Natural (not injected) contention refusals tolerated in one drain. A refusal ends its tick, so k of them
+// need the conflicting lock held across k consecutive ticks; a held lock refused one tick per 5-11 ms in
+// local runs (100 ms -> 10 and 20, 400 ms -> 36 and 79). CI showed exactly 1 per affected run. 16 is 16x
+// that, tolerates roughly 80-170 ms of continuous holding, and stays inside the 42 spare ticks of the
+// 200-tick budget. More is a red that names the codes and the tick shape.
+const DERIVED_NATURAL_REFUSAL_LIMIT = 16
+
+function runLength(values: readonly number[]): string {
+  const runs: string[] = []
+  for (let index = 0; index < values.length;) {
+    let end = index
+    while (end + 1 < values.length && values[end + 1] === values[index]) end += 1
+    runs.push(end > index ? `${values[index]}x${end - index + 1}` : String(values[index]))
+    index = end + 1
+  }
+  return runs.join(',')
+}
+
+/** Values-free summary of a drain for assertion messages: counts, codes and the run-length tick shape. */
+function describeDerivedDrain(drained: ArchiveProcessDrained): string {
+  const codes: Record<string, number> = {}
+  for (const code of drained.refusals) codes[code] = (codes[code] ?? 0) + 1
+  return JSON.stringify({
+    ticks: drained.batches.length, idle: drained.idle, pending: drained.pending,
+    attempts: drained.attempts, completed: drained.completed, refusals: codes,
+    batches: runLength(drained.batches), tickAttempts: runLength(drained.tickAttempts),
+  })
+}
 
 type ArchiveProcessDrained = Extract<ArchiveProcessWorkerMessage, { kind: 'drained' }>
 
@@ -167,14 +198,19 @@ function replayDerivedDrain(total: number, refused: ReadonlySet<number>): { batc
 
 /**
  * A drain-until-idle run is exact once its refusals are known: every effect completes exactly once, every
- * refused attempt is lock contention and ends its tick, and the per-tick shape is the product loop's replay.
- * With no contention this is the uncontended shape (156 x 32, 9, 0 for 5001 effects, 5001 attempts).
+ * refused attempt carries a lock-contention code and ends its tick, natural refusals stay within the
+ * limit, and the per-tick shape is the product loop's replay. With no contention this is the uncontended
+ * shape (156 x 32, 9, 0 for 5001 effects, 5001 attempts). Every failure message carries the drain summary.
  */
 function expectExactDerivedDrain(drained: ArchiveProcessDrained, total: number, contendedAttempt?: number): void {
   const { attempts, completed, batches, tickAttempts, refusals, ticks } = drained
-  expect(completed).toBe(total)
-  expect(attempts).toBe(completed + refusals.length)
-  expect(refusals.filter((code) => !DERIVED_CONTENTION_REFUSALS.includes(code))).toEqual([])
+  const summary = describeDerivedDrain(drained)
+  expect({ idle: drained.idle, pending: drained.pending }, `derived drain did not reach idle: ${summary}`)
+    .toEqual({ idle: true, pending: 0 })
+  expect(completed, summary).toBe(total)
+  expect(attempts, summary).toBe(completed + refusals.length)
+  expect(refusals.filter((code) => !DERIVED_CONTENTION_REFUSALS.includes(code)),
+    `derived refusals without a lock-contention code: ${summary}`).toEqual([])
   expect(tickAttempts).toHaveLength(batches.length)
   expect(ticks).toEqual(batches.map(() => ({ kind: 'idle', swept: 0, chunks: 0 })))
   const refusedOrdinals: number[] = []
@@ -185,7 +221,10 @@ function expectExactDerivedDrain(drained: ArchiveProcessDrained, total: number, 
   })
   expect(ordinal).toBe(attempts)
   expect(refusedOrdinals).toHaveLength(refusals.length)
-  expect({ batches, tickAttempts }).toEqual(replayDerivedDrain(total, new Set(refusedOrdinals)))
+  const natural = refusedOrdinals.filter((refused) => refused !== contendedAttempt)
+  expect(natural.length, `natural contention refusals exceed ${DERIVED_NATURAL_REFUSAL_LIMIT}: ${summary}`)
+    .toBeLessThanOrEqual(DERIVED_NATURAL_REFUSAL_LIMIT)
+  expect({ batches, tickAttempts }, summary).toEqual(replayDerivedDrain(total, new Set(refusedOrdinals)))
   if (refusals.length === 0) {
     expect(attempts).toBe(total)
     expect(batches).toEqual([
@@ -195,8 +234,8 @@ function expectExactDerivedDrain(drained: ArchiveProcessDrained, total: number, 
     ])
   }
   if (contendedAttempt !== undefined) {
-    expect(refusedOrdinals).toContain(contendedAttempt)
-    expect(refusals[refusedOrdinals.indexOf(contendedAttempt)]).toBe('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+    expect(refusedOrdinals, summary).toContain(contendedAttempt)
+    expect(refusals[refusedOrdinals.indexOf(contendedAttempt)]).toBe('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE<-pg:55P03')
   }
 }
 
@@ -218,7 +257,7 @@ async function countMounts(): Promise<number> {
  * and filesystem error to it. Re-read each admission input it checks (transaction depth, both roots' type,
  * owner, mode, identity and filesystem, mount isolation) so a red run names what moved. Values-free.
  */
-async function diagnoseLocalCustodyRefusal(
+async function readLocalCustodyAdmissionInputs(
   roots: readonly LocalCustodyRoot[],
   mountsAtSetup: number,
 ): Promise<Record<string, string | number>> {
@@ -256,19 +295,24 @@ async function diagnoseLocalCustodyRefusal(
   return diagnosis
 }
 
-/** Runs one custody store call; a refusal is still a failure, now carrying the re-read admission inputs. */
+/**
+ * Runs one custody store call; a refusal is still a failure, now carrying the admission inputs read just
+ * before the call and again after the refusal. All "ok" in both means a product refusal or a transient cause
+ * that appeared and cleared during the call itself; a difference names the input that moved.
+ */
 async function withLocalCustodyDiagnosis<T>(
   stage: string,
   roots: readonly LocalCustodyRoot[],
   mountsAtSetup: number,
   work: () => Promise<T>,
 ): Promise<T> {
+  const before = await readLocalCustodyAdmissionInputs(roots, mountsAtSetup)
   try {
     return await work()
   } catch (error) {
     if (!(error instanceof Error) || error.message !== LOCAL_CUSTODY_STORE_REFUSED) throw error
-    const diagnosis = await diagnoseLocalCustodyRefusal(roots, mountsAtSetup)
-    throw new Error(`${LOCAL_CUSTODY_STORE_REFUSED} at ${stage} ${JSON.stringify(diagnosis)}`)
+    const after = await readLocalCustodyAdmissionInputs(roots, mountsAtSetup)
+    throw new Error(`${LOCAL_CUSTODY_STORE_REFUSED} at ${stage} ${JSON.stringify({ before, after })}`)
   }
 }
 
@@ -2664,7 +2708,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           phase: 'drain', drainTicks: 200, drainUntilIdle: true, contendAuthorityAtAttempt: contendAt,
           keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
         }, provider)
-        expect(drained).toMatchObject({ kind: 'drained', completed: 5001, lifecycle: ['started', 'drained'] })
+        expect(drained).toMatchObject({ kind: 'drained', lifecycle: ['started', 'drained'] })
         if (drained.kind !== 'drained') throw new Error('archive_process_drain_missing')
         expectExactDerivedDrain(drained, 5001, contendAt)
         await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')

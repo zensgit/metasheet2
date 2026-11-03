@@ -69,6 +69,10 @@ export type ArchiveProcessWorkerMessage =
       tickAttempts: number[]
       /** One values-free code per refused attempt: 'declined' (returned false), `pg:<SQLSTATE>` or a RECOVERY_* code. */
       refusals: string[]
+      /** The last tick attempted nothing: the queue was empty when the drain stopped. */
+      idle: boolean
+      /** Derived effects of this job still pending when the drain stopped. */
+      pending: number
       ticks: RecoveryArchiveRestoreWorkerRunResult[]
       lifecycle: RecoveryArchiveWorkerLifecycle[]
     }
@@ -83,12 +87,20 @@ export type ArchiveProcessWorkerMessage =
     }
   | { kind: 'error'; code: string }
 
-function refusalCode(error: unknown): string {
+/**
+ * Values-free code for a refused derived attempt. A RECOVERY_* code is suffixed with the SQLSTATEs the
+ * attempt's own queries raised underneath, e.g. `RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE<-pg:55P03` for
+ * a NOWAIT authority lease that lost to a concurrent lock, which the product maps to that code.
+ */
+function refusalCode(error: unknown, underneath: readonly string[]): string {
   if (typeof error === 'object' && error !== null) {
     const code = (error as { code?: unknown }).code
     if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return `pg:${code}`
     const message = (error as { message?: unknown }).message
-    if (typeof message === 'string' && /^RECOVERY_[A-Z0-9_]+$/.test(message)) return message
+    if (typeof message === 'string' && /^RECOVERY_[A-Z0-9_]+$/.test(message)) {
+      const states = [...new Set(underneath)].sort()
+      return states.length ? `${message}<-${states.map((state) => `pg:${state}`).join('+')}` : message
+    }
   }
   return 'unclassified'
 }
@@ -136,6 +148,8 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     max: input.phase === 'drain' || input.phase === 'finish' ? 2 : 1,
   })
   let depth = 0
+  // SQLSTATEs raised underneath the derived attempt in flight, even when product code catches them.
+  let attemptSqlStates: string[] | undefined
   let executingChunk = false
   let claimSnapshot: ArchiveProcessClaimSnapshot
   const query: RecoveryArchiveRestoreJobQuery = async (text, values) => pool.query(text, values)
@@ -149,7 +163,15 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     try {
       await client.query('BEGIN')
       depth += 1
-      const result = await work(async (text, values) => client.query(text, values))
+      const result = await work(async (text, values) => {
+        try {
+          return await client.query(text, values)
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code
+          if (attemptSqlStates && typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) attemptSqlStates.push(code)
+          throw error
+        }
+      })
       const chunkResult = result as { kind?: unknown; chunkIndex?: unknown } | null
       const isFirstChunk = executingChunk && chunkResult?.kind === 'committed' && chunkResult.chunkIndex === 0
       if (isFirstChunk && input.phase === 'before_commit') await park('before_commit')
@@ -220,7 +242,6 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     if (ticks !== stoppedTicks || ticks !== finishedAt || lifecycle.join(',') !== 'started,drained') {
       throw new Error('archive_process_application_lifecycle_invalid')
     }
-    if (finishedEarly && finishedEarly() !== true) throw new Error('archive_process_drain_not_idle')
     return lifecycle
   }
   const localSession = input.local ? createLocalCustodySession(runtime.transactionDepth) : undefined
@@ -279,13 +300,16 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
         attempts += 1
         if (work.identity.jobId !== input.jobId) throw new Error('archive_process_derived_job_mismatch')
         const release = attempts === contendAt ? await holdAuthorityTable() : undefined
+        const underneath: string[] = []
+        attemptSqlStates = underneath
         let result: boolean
         try {
           result = await processDerived(work)
         } catch (error) {
-          refusals.push(refusalCode(error))
+          refusals.push(refusalCode(error, underneath))
           throw error
         } finally {
+          attemptSqlStates = undefined
           await release?.()
         }
         if (result) completed += 1
@@ -298,7 +322,12 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
         previousCompleted = completed
         previousAttempts = attempts
       }, untilIdle ? () => tickAttempts.length > 0 && tickAttempts[tickAttempts.length - 1] === 0 : undefined)
-      await send({ kind: 'drained', pid: process.pid, attempts, completed, batches, tickAttempts, refusals, ticks, lifecycle })
+      // Report, never throw, when the budget ran out first: the caller's assertion names the shape.
+      const idle = tickAttempts.length > 0 && tickAttempts[tickAttempts.length - 1] === 0
+      const left = await query(`SELECT count(*)::int AS pending FROM public.meta_recovery_archive_derived_effects
+        WHERE job_id=$1::uuid AND completed_at IS NULL`, [input.jobId])
+      const pending = (left.rows[0] as { pending: number }).pending
+      await send({ kind: 'drained', pid: process.pid, attempts, completed, batches, tickAttempts, refusals, idle, pending, ticks, lifecycle })
       return
     }
     if (input.priorClaim) {
