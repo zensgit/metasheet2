@@ -8595,6 +8595,8 @@ attendanceIntegrationDescribe(
     // but PG stores only its written day, so a range that looked ordered could be stored inverted and closed. The
     // instant each case gives is written next to it. Cycles are created before the zone switch, as in T15a-T15d.
     const invalidRange = { code: 'VALIDATION_ERROR', message: 'Invalid date range' } as const
+    // The 400 after the freeze, for a date that is not 'YYYY-MM-DD' (index.cjs, just before the UPDATE).
+    const invalidDateForm = { code: 'VALIDATION_ERROR', message: 'Invalid date: startDate and endDate must be YYYY-MM-DD' } as const
     const zoneProbe = {
       UTC: { offsetMinutes: 0, isoOfDate20150201: '2015-02-01T00:00:00.000Z' },
       'Asia/Taipei': { offsetMinutes: -480, isoOfDate20150201: '2015-01-31T16:00:00.000Z' },
@@ -8639,7 +8641,7 @@ attendanceIntegrationDescribe(
           await expectDateParsedAtLocalMidnight(zoneProbe['Asia/Taipei'].offsetMinutes, zoneProbe['Asia/Taipei'].isoOfDate20150201)
           for (const [index, testCase] of cases.entries()) {
             for (const body of [{ endDate: testCase.endDate, status: 'closed' }, { endDate: testCase.endDate }]) {
-              await expectRefusedWithoutWrites(org, ids[index], body, testCase.entry, events, { status: 400, ...invalidRange }, 'Asia/Taipei')
+              await expectRefusedWithoutWrites(org, ids[index], body, testCase.entry, events, { status: 400, ...invalidDateForm }, 'Asia/Taipei')
             }
             expect(await readCycle(ids[index])).toMatchObject({ status: 'open', start_date: testCase.period[0], end_date: testCase.period[1] })
             expect(await readSettlements(ids[index])).toEqual([])
@@ -8684,7 +8686,7 @@ attendanceIntegrationDescribe(
               { id: ids[index].post, entry: 'post-update', body: { ...testCase.both, status: 'closed' } },
             ]
             for (const attempt of attempts) {
-              await expectRefusedWithoutWrites(org, attempt.id, attempt.body, attempt.entry, events, { status: 400, ...invalidRange }, testCase.tz)
+              await expectRefusedWithoutWrites(org, attempt.id, attempt.body, attempt.entry, events, { status: 400, ...invalidDateForm }, testCase.tz)
             }
             expect(await readCycle(ids[index].put)).toMatchObject({ status: 'open', start_date: testCase.put[0], end_date: testCase.put[1] })
             expect(await readCycle(ids[index].post)).toMatchObject({ status: 'open', start_date: testCase.post[0], end_date: testCase.post[1] })
@@ -8697,10 +8699,13 @@ attendanceIntegrationDescribe(
       }
     })
 
-    it('T16c [defect] under TZ=Asia/Taipei and America/New_York an open cycle refuses a single start or end date that is not YYYY-MM-DD even when its range is in order, on both update entries and also when closing: 400 with row, settlement rows and success events unchanged', async () => {
+    it('T16c [contract] under TZ=Asia/Taipei and America/New_York an open cycle refuses a single start or end date that is not YYYY-MM-DD, or not a real day, even when its range is in order, on both update entries and also when closing: 400 with row, settlement rows and success events unchanged', async () => {
       await seedCompTimeLot(org, `r7-t16c-user-${randomUUID()}`)
       // In order by instant and by written day (end '..-12T00:00:00.000Z' after the start; start '..-06T00:00:00.000Z'
-      // before the stored end), so only the format is wrong: the old code stored them.
+      // before the stored end), so only the format is wrong: the old code stored them, on the right day. A red here
+      // shows the stricter contract, not an inverted write (T16a and T16b reproduce that).
+      // '2017-09-31' does not exist. Only status and code are checked for it: whether new Date() reads it as
+      // 2017-10-01 or as invalid decides which of the two 400s answers.
       const cases = [
         { tz: 'Asia/Taipei', put: ['2017-08-05', '2017-08-10'], post: ['2017-08-15', '2017-08-20'], bodies: { put: [{ endDate: '2017-08-12T00:00:00.000Z', status: 'closed' }, { startDate: '2017-08-06T00:00:00.000Z' }], post: [{ endDate: '2017-08-22T00:00:00.000Z', status: 'closed' }, { startDate: '2017-08-16T00:00:00.000Z' }] } },
         { tz: 'America/New_York', put: ['2017-09-05', '2017-09-10'], post: ['2017-09-15', '2017-09-20'], bodies: { put: [{ endDate: '2017-09-12T00:00:00.000Z', status: 'closed' }, { startDate: '2017-09-06T00:00:00.000Z' }], post: [{ endDate: '2017-09-22T00:00:00.000Z', status: 'closed' }, { startDate: '2017-09-16T00:00:00.000Z' }] } },
@@ -8719,11 +8724,13 @@ attendanceIntegrationDescribe(
           await underTimeZone(testCase.tz, async () => {
             await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
             for (const body of testCase.bodies.put) {
-              await expectRefusedWithoutWrites(org, ids[index].put, body, 'put', events, { status: 400, ...invalidRange }, testCase.tz)
+              await expectRefusedWithoutWrites(org, ids[index].put, body, 'put', events, { status: 400, ...invalidDateForm }, testCase.tz)
             }
             for (const body of testCase.bodies.post) {
-              await expectRefusedWithoutWrites(org, ids[index].post, body, 'post-update', events, { status: 400, ...invalidRange }, testCase.tz)
+              await expectRefusedWithoutWrites(org, ids[index].post, body, 'post-update', events, { status: 400, ...invalidDateForm }, testCase.tz)
             }
+            await expectRefusedWithoutWrites(org, ids[index].put, { endDate: '2017-09-31', status: 'closed' }, 'put', events, { status: 400, code: 'VALIDATION_ERROR' }, testCase.tz)
+            await expectRefusedWithoutWrites(org, ids[index].post, { endDate: '2017-09-31', status: 'closed' }, 'post-update', events, { status: 400, code: 'VALIDATION_ERROR' }, testCase.tz)
             expect(await readCycle(ids[index].put)).toMatchObject({ status: 'open', start_date: testCase.put[0], end_date: testCase.put[1] })
             expect(await readCycle(ids[index].post)).toMatchObject({ status: 'open', start_date: testCase.post[0], end_date: testCase.post[1] })
             expect(await readSettlements(ids[index].put)).toEqual([])
@@ -8779,7 +8786,7 @@ attendanceIntegrationDescribe(
       }
     })
 
-    it('T16e [control] under TZ=Asia/Taipei a closed cycle and an open cycle with settlement rows keep 409 CYCLE_CLOSED_PERIOD_FROZEN for the T16a/T16b date strings on both update entries, also with close, and keep 400 for a YYYY-MM-DD inversion or an unparseable date, which are checked before the freeze: nothing changes', async () => {
+    it('T16e [control] under TZ=Asia/Taipei a closed cycle and an open cycle with settlement rows keep 409 CYCLE_CLOSED_PERIOD_FROZEN for the T16a/T16b date strings on both update entries, also with close, and keep 400 for a YYYY-MM-DD inversion, an inversion given as a UTC instant, or an unparseable date, which are checked before the freeze: nothing changes', async () => {
       const templateId = await createTemplate(org, 'r7 t16e template')
       await seedCompTimeLot(org, `r7-t16e-user-${randomUUID()}`)
       const closedId = await createCycle(org, { startDate: '2017-03-05', endDate: '2017-03-10', templateId, status: 'closed' })
@@ -8809,6 +8816,10 @@ attendanceIntegrationDescribe(
               { body: { endDate: `${cycle.dayBeforeStart}T23:30:00-05:00`, status: 'closed' }, expected: { status: 409, code: 'CYCLE_CLOSED_PERIOD_FROZEN' } },
               { body: { endDate: cycle.dayBeforeStart, status: 'closed' }, expected: { status: 400, ...invalidRange } },
               { body: { startDate: 'not-a-date' }, expected: { status: 400, ...invalidRange } },
+              // '<day before start>T15:00:00.000Z' is one hour before the stored start (<day before start>T16:00Z in
+              // Taipei): inverted as an instant, so the range check answers 400 before the freeze.
+              { body: { endDate: `${cycle.dayBeforeStart}T15:00:00.000Z` }, expected: { status: 400, ...invalidRange } },
+              { body: { endDate: `${cycle.dayBeforeStart}T15:00:00.000Z`, status: 'closed' }, expected: { status: 400, ...invalidRange } },
             ]
             for (const entry of ['put', 'post-update'] as const) {
               for (const attempt of attempts) {
