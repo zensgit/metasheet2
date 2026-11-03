@@ -5,9 +5,13 @@ import {
   applyRecycleMove,
   applyRecyclePurge,
   applyRecycleRestore,
+  auditRowMatchesSubject,
   listDueRecycleUserIds,
+  redactAuditRow,
   resolveUserRecycleRetentionDays,
+  scrubPurgedUserIdentity,
   USER_TOMBSTONE_NAME,
+  type PurgeAuditRow,
   type RecycleClient,
 } from '../../src/admin/user-recycle'
 
@@ -171,9 +175,11 @@ describe('user recycle bin', () => {
     expect(db.sql.some((statement) => statement.includes('cumulative_service_start_date = NULL'))).toBe(true)
     expect(db.sql.some((statement) => statement.includes('last_login_at = NULL'))).toBe(true)
     expect(db.sql.some((statement) => statement.includes('UPDATE directory_accounts'))).toBe(true)
-    expect(db.sql.some((statement) => statement.includes("link_status = 'unlinked'"))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes("THEN 'unlinked'"))).toBe(true)
     expect(db.sql.some((statement) => statement.includes('user_login_alias_collision_report'))).toBe(true)
-    expect(db.sql.some((statement) => statement.includes('UPDATE audit_logs'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('FROM audit_logs') && statement.includes('split_part(resource_id'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('position('))).toBe(false)
+    expect(db.sql.some((statement) => statement.includes("link_status = 'linked'"))).toBe(true)
   })
 
   it('declares recycle columns in the migration', () => {
@@ -196,5 +202,169 @@ describe('user recycle bin', () => {
     expect(moved.ok).toBe(true)
     const blocked = await applyRecycleMove(db, { userId: 'admin-live', actorId: 'admin-inactive', retentionDays: 30, index: 1 })
     expect(blocked.code).toBe('LAST_PLATFORM_ADMIN')
+  })
+
+  it('redacts audit fields by subject id and leaves colliding keys and other users unchanged', async () => {
+    const subjectId = 'user-admin'
+    const unrelated: PurgeAuditRow = {
+      id: 9,
+      created_at: '2026-10-01T00:00:00.000Z',
+      resource_id: 'user-other',
+      resource_name: '其他同事',
+      user_id: 77,
+      user_email: 'other@example.com',
+      user_name: '其他同事',
+      action_details: {
+        adminUserId: 'operator-1',
+        outcome: 'updated',
+        email: 'other@example.com',
+        name: '其他同事',
+      },
+      request_body: { name: '其他同事', department: '仓储' },
+    }
+    const unrelatedSnapshot = JSON.stringify(unrelated)
+    const subject: PurgeAuditRow = {
+      id: 10,
+      created_at: '2026-10-02T00:00:00.000Z',
+      resource_id: subjectId,
+      resource_name: '管理员账号',
+      user_id: 3,
+      user_email: 'admin@example.com',
+      user_name: '管理员账号',
+      action_details: {
+        adminUserId: 'operator-1',
+        email: 'admin@example.com',
+        username: 'admin',
+        name: '管理员账号',
+        colleague: { id: 'user-other', email: 'other@example.com', name: '其他同事' },
+      },
+      request_body: { email: 'admin@example.com', note: 'keep-me' },
+    }
+    const actorOnly: PurgeAuditRow = {
+      id: 11,
+      created_at: '2026-10-03T00:00:00.000Z',
+      resource_id: 'user-other',
+      resource_name: '其他同事',
+      user_id: subjectId,
+      user_email: 'admin@example.com',
+      user_name: '管理员账号',
+      action_details: {
+        adminUserId: 'operator-1',
+        email: 'other@example.com',
+        name: '其他同事',
+      },
+      request_body: { email: 'other@example.com' },
+    }
+    const actorDetails = JSON.stringify(actorOnly.action_details)
+    const actorBody = JSON.stringify(actorOnly.request_body)
+    const rows = [unrelated, subject, actorOnly]
+    expect(auditRowMatchesSubject(unrelated, subjectId)).toBe(false)
+    expect(auditRowMatchesSubject(subject, subjectId)).toBe(true)
+    expect(auditRowMatchesSubject(actorOnly, subjectId)).toBe(true)
+
+    const client: RecycleClient = {
+      query: async (statement, params = []) => {
+        if (statement.includes('to_regclass')) {
+          const name = String(params[0] ?? '')
+          return { rows: [{ rel: name === 'audit_logs' ? 'audit_logs' : null }] }
+        }
+        if (statement.includes('FROM audit_logs') && statement.includes('split_part(resource_id')) {
+          return { rows: rows.filter((row) => auditRowMatchesSubject(row, String(params[0]))).map((row) => ({ ...row })) }
+        }
+        if (statement.includes('UPDATE audit_logs')) {
+          const id = params[0]
+          const found = rows.find((row) => row.id === id)
+          if (!found) return { rows: [] }
+          found.action_details = JSON.parse(String(params[2]))
+          found.request_body = JSON.parse(String(params[3]))
+          found.user_email = params[4] == null ? null : String(params[4])
+          found.user_name = params[5] == null ? null : String(params[5])
+          found.resource_name = params[6] == null ? null : String(params[6])
+          return { rows: [] }
+        }
+        return { rows: [] }
+      },
+    }
+    await scrubPurgedUserIdentity(client, {
+      userId: subjectId,
+      email: 'admin@example.com',
+      username: 'admin',
+      mobile: null,
+      at: '2026-11-01T00:00:00.000Z',
+    })
+
+    expect(JSON.stringify(unrelated)).toBe(unrelatedSnapshot)
+    expect(redactAuditRow(subject, subjectId).action_details).toMatchObject({
+      adminUserId: 'operator-1',
+      email: null,
+      username: null,
+      name: USER_TOMBSTONE_NAME,
+      colleague: { id: 'user-other', email: 'other@example.com', name: '其他同事' },
+    })
+    expect(subject.action_details).toMatchObject({
+      adminUserId: 'operator-1',
+      colleague: { id: 'user-other', email: 'other@example.com', name: '其他同事' },
+    })
+    expect(JSON.stringify(actorOnly.action_details)).toBe(actorDetails)
+    expect(JSON.stringify(actorOnly.request_body)).toBe(actorBody)
+    expect(actorOnly.user_email).toBeNull()
+    expect(actorOnly.user_name).toBeNull()
+    expect(actorOnly.resource_name).toBe('其他同事')
+  })
+
+  it('anonymizes confirmed directory links and only detaches pending guesses', async () => {
+    const accounts = [
+      { id: 'acct-linked', org: 'org-a', name: '林岚', email: 'lin@example.com', mobile: '13800000000' },
+      { id: 'acct-pending', org: 'org-b', name: '林岚', email: 'lin@example.com', mobile: '13800000000' },
+    ]
+    const pendingSnapshot = JSON.stringify(accounts[1])
+    const links = [
+      { accountId: 'acct-linked', localUserId: 'user-lin' as string | null, status: 'linked' },
+      { accountId: 'acct-pending', localUserId: 'user-lin' as string | null, status: 'pending' },
+    ]
+    const client: RecycleClient = {
+      query: async (statement, params = []) => {
+        const userId = String(params[0] ?? '')
+        if (statement.includes('to_regclass')) {
+          const name = String(params[0] ?? '')
+          return { rows: [{ rel: name.startsWith('directory_') ? name : null }] }
+        }
+        if (statement.includes('UPDATE directory_accounts')) {
+          if (!statement.includes("link_status = 'linked'")) throw new Error('directory anonymization must require a confirmed link')
+          for (const link of links) {
+            if (link.localUserId === userId && link.status === 'linked') {
+              const account = accounts.find((item) => item.id === link.accountId)
+              if (!account) continue
+              account.name = USER_TOMBSTONE_NAME
+              account.email = null
+              account.mobile = null
+            }
+          }
+          return { rows: [] }
+        }
+        if (statement.includes('UPDATE directory_account_links')) {
+          for (const link of links) {
+            if (link.localUserId !== userId) continue
+            if (link.status === 'linked') link.status = 'unlinked'
+            link.localUserId = null
+          }
+          return { rows: [] }
+        }
+        return { rows: [] }
+      },
+    }
+    await scrubPurgedUserIdentity(client, {
+      userId: 'user-lin',
+      email: 'lin@example.com',
+      username: null,
+      mobile: '13800000000',
+      at: '2026-11-01T00:00:00.000Z',
+    })
+    expect(accounts[0]).toMatchObject({ name: USER_TOMBSTONE_NAME, email: null, mobile: null })
+    expect(JSON.stringify(accounts[1])).toBe(pendingSnapshot)
+    expect(links).toEqual([
+      { accountId: 'acct-linked', localUserId: null, status: 'unlinked' },
+      { accountId: 'acct-pending', localUserId: null, status: 'pending' },
+    ])
   })
 })

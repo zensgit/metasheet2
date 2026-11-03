@@ -4116,24 +4116,44 @@ async function changeRecyclePage(pageNumber: number): Promise<void> {
   await loadRecycleBin()
 }
 
+async function fetchRecyclePage(pageNumber: number): Promise<{ items: RecycleBinUser[]; total: number; retentionDays?: number }> {
+  const params = new URLSearchParams()
+  if (recycleSearch.value) params.set('q', recycleSearch.value)
+  params.set('page', String(pageNumber))
+  params.set('pageSize', String(recyclePageSize))
+  const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+  }
+  const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
+  const items = Array.isArray(data?.items) ? data.items : []
+  return {
+    items,
+    total: Number(data?.total || items.length),
+    retentionDays: data?.retentionDays,
+  }
+}
+
+function applyRecyclePage(loaded: { items: RecycleBinUser[]; total: number; retentionDays?: number }): void {
+  recycleUsers.value = loaded.items
+  recycleTotal.value = loaded.total
+  if (typeof loaded.retentionDays === 'number' && loaded.retentionDays > 0) recycleRetentionDays.value = loaded.retentionDays
+  const visible = new Set(loaded.items.map((user) => user.id))
+  recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+}
+
 async function loadRecycleBin(): Promise<void> {
   loadingRecycle.value = true
   try {
-    const params = new URLSearchParams()
-    if (recycleSearch.value) params.set('q', recycleSearch.value)
-    params.set('page', String(recyclePage.value))
-    params.set('pageSize', String(recyclePageSize))
-    const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+    const loaded = await fetchRecyclePage(recyclePage.value)
+    const pageCount = Math.max(1, Math.ceil(loaded.total / recyclePageSize))
+    if (recyclePage.value > pageCount) {
+      recyclePage.value = pageCount
+      applyRecyclePage(await fetchRecyclePage(recyclePage.value))
+      return
     }
-    const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
-    recycleUsers.value = Array.isArray(data?.items) ? data.items : []
-    recycleTotal.value = Number(data?.total || recycleUsers.value.length)
-    if (typeof data?.retentionDays === 'number' && data.retentionDays > 0) recycleRetentionDays.value = data.retentionDays
-    const visible = new Set(recycleUsers.value.map((user) => user.id))
-    recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+    applyRecyclePage(loaded)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : recycleText('loading'), 'error')
   } finally {

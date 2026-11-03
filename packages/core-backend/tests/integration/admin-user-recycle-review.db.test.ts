@@ -98,6 +98,13 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     expect((await transaction(client => applyRecycleRestore(client, { userId, actorId: 'synthetic-operator', index: 0 }))).ok).toBe(true)
     expect((await query('SELECT access_generation::int, is_active FROM users WHERE id = $1', [userId])).rows).toEqual([{ access_generation: 2, is_active: true }])
     expect((await move(userId)).ok).toBe(true)
+    const linkedAccountIds = (await query<{ id: string }>(
+      `SELECT directory_account_id::text AS id
+       FROM directory_account_links
+       WHERE local_user_id = $1 AND link_status = 'linked'`,
+      [userId],
+    )).rows.map((row) => row.id)
+    expect(linkedAccountIds.length).toBeGreaterThan(0)
     expect((await transaction(client => applyRecyclePurge(client, { userId, actorId: 'synthetic-operator', index: 0, passwordHash: 'synthetic-unusable' }))).ok).toBe(true)
     expect((await query('SELECT access_generation::int, is_active, email, hire_date, last_login_at, cumulative_service_start_date FROM users WHERE id = $1', [userId])).rows).toEqual([{
       access_generation: 4,
@@ -112,7 +119,8 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
       `SELECT a.name, a.email, a.mobile, a.is_active, l.link_status, l.local_user_id
        FROM directory_accounts a
        JOIN directory_account_links l ON l.directory_account_id = a.id
-       WHERE a.external_user_id LIKE 'purged:' || a.id::text`,
+       WHERE a.id = ANY($1::uuid[])`,
+      [linkedAccountIds],
     )
     expect(scrubbed.rows).toEqual([{
       name: '已清除用户',

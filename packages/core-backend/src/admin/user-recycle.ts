@@ -355,9 +355,125 @@ async function relationExists(client: RecycleClient, name: string): Promise<bool
   return rel !== null && rel !== undefined && String(rel).length > 0
 }
 
-function distinctiveIdentifier(value: string | null, minLength: number): string {
-  if (!value || value.trim().length < minLength) return ''
-  return value.trim()
+const AUDIT_IDENTITY_KEYS = new Set([
+  'email',
+  'user_email',
+  'userEmail',
+  'name',
+  'user_name',
+  'userName',
+  'mobile',
+  'username',
+  'department',
+  'employee_no',
+  'employeeNo',
+  'avatar_url',
+  'avatarUrl',
+  'nick',
+  'org_email',
+  'orgEmail',
+])
+
+const AUDIT_NAME_KEYS = new Set(['name', 'user_name', 'userName'])
+
+/**
+ * Structured subject match. resource_id is the user id, or the known
+ * `userId:roleId` shape. user_id is the actor column. No substring search.
+ */
+export function auditSubjectMatchSql(): string {
+  return `(
+    resource_id = $1
+    OR (strpos(resource_id, ':') > 0 AND split_part(resource_id, ':', 1) = $1)
+    OR user_id::text = $1
+  )`
+}
+
+export function auditRowMatchesSubject(
+  row: { resource_id?: string | null; user_id?: string | number | null },
+  userId: string,
+): boolean {
+  const resourceId = row.resource_id ?? null
+  if (resourceId === userId) return true
+  if (resourceId && resourceId.includes(':') && resourceId.split(':')[0] === userId) return true
+  return row.user_id != null && String(row.user_id) === userId
+}
+
+export type PurgeAuditRow = {
+  id: string | number
+  created_at: string
+  resource_id: string | null
+  resource_type?: string | null
+  resource_name: string | null
+  user_id: string | number | null
+  user_email: string | null
+  user_name: string | null
+  action_details: unknown
+  request_body: unknown
+}
+
+function isAuditObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function nestedOwnerId(node: Record<string, unknown>): string {
+  if (typeof node.id === 'string' && node.id.trim()) return node.id
+  if (typeof node.userId === 'string' && node.userId.trim()) return node.userId
+  return ''
+}
+
+function redactOwnedAuditValue(value: unknown, subjectId: string, owned: boolean): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (owned && isAuditObject(item) && typeof item.field === 'string' && AUDIT_IDENTITY_KEYS.has(item.field)) {
+        const tombstone = AUDIT_NAME_KEYS.has(item.field) ? USER_TOMBSTONE_NAME : null
+        return { ...item, before: tombstone, after: tombstone }
+      }
+      return redactOwnedAuditValue(item, subjectId, owned)
+    })
+  }
+  if (!isAuditObject(value)) return value
+  const ownerId = nestedOwnerId(value)
+  if (ownerId && ownerId !== subjectId) {
+    const kept: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value)) {
+      kept[key] = isAuditObject(child) || Array.isArray(child)
+        ? redactOwnedAuditValue(child, subjectId, false)
+        : child
+    }
+    return kept
+  }
+  const next: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value)) {
+    if (owned && AUDIT_IDENTITY_KEYS.has(key)) {
+      next[key] = AUDIT_NAME_KEYS.has(key) ? USER_TOMBSTONE_NAME : null
+      continue
+    }
+    next[key] = redactOwnedAuditValue(child, subjectId, owned)
+  }
+  return next
+}
+
+/**
+ * Subject rows lose their own identity fields. Nested objects that name a
+ * different user id are left in place. Actor-only rows clear the actor
+ * columns and do not rewrite another person's event body.
+ */
+export function redactAuditRow(row: PurgeAuditRow, userId: string): PurgeAuditRow {
+  const aboutSubject = row.resource_id === userId
+    || Boolean(row.resource_id && row.resource_id.includes(':') && row.resource_id.split(':')[0] === userId)
+  const actor = row.user_id != null && String(row.user_id) === userId
+  if (!aboutSubject && !actor) return row
+  if (!aboutSubject) {
+    return { ...row, user_email: null, user_name: null }
+  }
+  return {
+    ...row,
+    action_details: redactOwnedAuditValue(row.action_details, userId, true),
+    request_body: redactOwnedAuditValue(row.request_body, userId, true),
+    user_email: null,
+    user_name: USER_TOMBSTONE_NAME,
+    resource_name: USER_TOMBSTONE_NAME,
+  }
 }
 
 /**
@@ -395,14 +511,15 @@ export async function scrubPurgedUserIdentity(
            SELECT directory_account_id
            FROM directory_account_links
            WHERE local_user_id = $1
+             AND link_status = 'linked'
          )`,
         [input.userId, USER_TOMBSTONE_NAME, input.at],
       )
     }
     await client.query(
       `UPDATE directory_account_links
-       SET link_status = 'unlinked',
-           local_user_id = NULL,
+       SET local_user_id = NULL,
+           link_status = CASE WHEN link_status = 'linked' THEN 'unlinked' ELSE link_status END,
            updated_at = $2::timestamptz
        WHERE local_user_id = $1`,
       [input.userId, input.at],
@@ -417,25 +534,49 @@ export async function scrubPurgedUserIdentity(
       [input.userId, aliases],
     )
   }
-  const email = distinctiveIdentifier(input.email, 3)
-  const mobile = distinctiveIdentifier(input.mobile, 6)
-  const username = distinctiveIdentifier(input.username, 3)
   for (const table of ['audit_logs', 'audit_logs_archive']) {
     if (!(await relationExists(client, table))) continue
-    await client.query(
-      `UPDATE ${table}
-       SET action_details = jsonb_build_object('redacted', true, 'reason', 'user-purged'),
-           user_email = NULL,
-           user_name = NULL,
-           request_body = NULL,
-           resource_name = CASE WHEN resource_id = $1 THEN $5 ELSE resource_name END
-       WHERE resource_id = $1
-          OR ($2 <> '' AND user_email = $2)
-          OR ($2 <> '' AND position($2 in COALESCE(action_details::text, '')) > 0)
-          OR ($3 <> '' AND position($3 in COALESCE(action_details::text, '')) > 0)
-          OR ($4 <> '' AND position($4 in COALESCE(action_details::text, '')) > 0)`,
-      [input.userId, email, mobile, username, USER_TOMBSTONE_NAME],
+    const selected = await client.query(
+      `SELECT id, created_at, resource_type, resource_id, resource_name,
+              user_id::text AS user_id, user_name, user_email, action_details, request_body
+       FROM ${table}
+       WHERE ${auditSubjectMatchSql()}`,
+      [input.userId],
     )
+    for (const raw of selected.rows) {
+      const current: PurgeAuditRow = {
+        id: raw.id as string | number,
+        created_at: String(raw.created_at),
+        resource_id: raw.resource_id == null ? null : String(raw.resource_id),
+        resource_type: raw.resource_type == null ? null : String(raw.resource_type),
+        resource_name: raw.resource_name == null ? null : String(raw.resource_name),
+        user_id: raw.user_id == null ? null : String(raw.user_id),
+        user_email: raw.user_email == null ? null : String(raw.user_email),
+        user_name: raw.user_name == null ? null : String(raw.user_name),
+        action_details: raw.action_details ?? null,
+        request_body: raw.request_body ?? null,
+      }
+      const redacted = redactAuditRow(current, input.userId)
+      if (JSON.stringify(redacted) === JSON.stringify(current)) continue
+      await client.query(
+        `UPDATE ${table}
+         SET action_details = $3::jsonb,
+             request_body = $4::jsonb,
+             user_email = $5,
+             user_name = $6,
+             resource_name = $7
+         WHERE id = $1 AND created_at = $2::timestamptz`,
+        [
+          redacted.id,
+          redacted.created_at,
+          JSON.stringify(redacted.action_details ?? null),
+          JSON.stringify(redacted.request_body ?? null),
+          redacted.user_email,
+          redacted.user_name,
+          redacted.resource_name,
+        ],
+      )
+    }
   }
 }
 
