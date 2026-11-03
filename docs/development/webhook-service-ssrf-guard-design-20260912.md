@@ -4,6 +4,14 @@ Branch: `fix/webhook-service-ssrf-guard` (stacked on `fix/automation-webhook-ssr
 Written 2026-09-11 18:58 +0800; the filename carries this wave's `20260912` stamp, as the two #5619
 documents do for theirs.
 
+> **2026-11-03 update (S0-a).** FS-1 and FS-2 are done. Every delivery attempt is checked and then sent to
+> the address that check approved (`pinnedHttpsFetch`, via `dispatchAttempt`), after the access re-check,
+> re-mask and signature that main added; a 3xx makes no second request and stays terminal. The receiver's
+> body is now read up to 64 KiB (it was unbounded). `createWebhook` refuses http in every environment (not
+> only production) and `updateWebhook` applies the same DNS-free target check (early errors only). The
+> injected `fetchFn` stays a test seam and is not pinned; production constructions pass none. Tests:
+> `webhook-service-pinned-dispatch.test.ts`, `webhook-service-target-save.test.ts`.
+
 Scope: `packages/core-backend/src/multitable/webhook-service.ts` only. No route, schema, migration,
 redactor (`automation-log-redact.ts`), i18n (`errorCodeLabels.ts`) or pinned file is touched.
 

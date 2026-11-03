@@ -31,7 +31,8 @@ import {
   WEBHOOK_DEFAULT_BASE_RETRY_DELAY_MS,
   WEBHOOK_DEFAULT_MAX_RETRIES,
 } from './webhooks'
-import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
+import { checkWebhookTargetUrl, checkWebhookTargetUrlShape, type SsrfLookupFn } from './webhook-ssrf-guard'
+import { pinnedAddressFamily, pinnedHttpsFetch, type PinnedSendFn } from './webhook-pinned-fetch'
 import {
   classifyWebhookFailure,
   classifyWebhookRefusal,
@@ -45,6 +46,10 @@ import { WEBHOOK_CHECK_FAILED, authorizeWebhookDelivery } from './webhook-delive
 const logger = new Logger('WebhookService')
 
 const DELIVERY_TIMEOUT_MS = 5_000
+/** S0-a: the receiver's answer is recorded into `response_body` up to this many bytes (was unbounded). */
+const DELIVERY_RESPONSE_BODY_LIMIT = 64 * 1024
+/** What `executeDelivery` reads from one attempt, whichever transport made it. */
+type DeliveryAttemptResponse = { status: number; ok: boolean; type?: string; text: () => Promise<string> }
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 10
 const BASE_RETRY_DELAY_MS = WEBHOOK_DEFAULT_BASE_RETRY_DELAY_MS
 // Lease window a retry tick holds a claimed delivery for (review MINOR-1):
@@ -222,8 +227,18 @@ function rowToDelivery(row: {
 
 export class WebhookService {
   private db: Kysely<Database>
-  /** Pluggable fetch for testing */
-  private fetchFn: typeof fetch
+  /**
+   * Fetch-shaped TEST seam (the constructor's 2nd argument). Production constructions pass none, and then
+   * delivery goes through the pinned transport below. When injected (and no pinned seam is), it is called
+   * with `redirect: 'manual'`, but a fetch-shaped call cannot be pinned to the checked address.
+   */
+  private fetchFn?: typeof fetch
+  /**
+   * S0-a transport seam. OMITTED (production) ⇒ `pinnedHttpsFetch`: the request goes to the address the SSRF
+   * check approved for THIS attempt (never a fresh resolution of the name), certificate checks unchanged, and
+   * a 3xx comes back as a status with no second request. A test passes a wrapper to observe the chosen pin.
+   */
+  private pinnedSendFn?: PinnedSendFn
   /**
    * DNS seam for the SSRF gate, same shape as `AutomationDeps.ssrfLookupFn`. OMITTED (every production
    * construction: `routes/api-tokens.ts:26`, `webhook-event-bridge.ts:79`, `WebhookRetryScheduler.ts:81`,
@@ -233,10 +248,27 @@ export class WebhookService {
    */
   private ssrfLookupFn?: SsrfLookupFn
 
-  constructor(db: Kysely<Database>, fetchFn?: typeof fetch, ssrfLookupFn?: SsrfLookupFn) {
+  constructor(db: Kysely<Database>, fetchFn?: typeof fetch, ssrfLookupFn?: SsrfLookupFn, pinnedSendFn?: PinnedSendFn) {
     this.db = db
-    this.fetchFn = fetchFn ?? globalThis.fetch
+    this.fetchFn = fetchFn
     this.ssrfLookupFn = ssrfLookupFn
+    this.pinnedSendFn = pinnedSendFn
+  }
+
+  /**
+   * S0-a — EARLY error for a subscription target, at create AND update, in every environment (create used
+   * to require https only when NODE_ENV=production; update checked URL syntax only). Decided from the URL
+   * alone, no DNS: https, not an internal name, not an internal IP literal. NOT the boundary — every delivery
+   * attempt is checked again and pinned in `executeDelivery`; a public name that resolves internally is
+   * refused there. Messages are values-free (no URL); the route maps them to 400.
+   */
+  private static assertTargetShape(url: string): void {
+    const shape = checkWebhookTargetUrlShape(url)
+    if (shape.ok) return
+    const reason = (shape as { reason?: string }).reason ?? ''
+    if (reason === 'URL is malformed' || reason === 'URL is required') throw new Error('Webhook URL is not a valid URL')
+    if (reason.startsWith('scheme not allowed')) throw new Error('Webhook URL must use HTTPS')
+    throw new Error(`${WEBHOOK_TARGET_REJECTED}:${classifyWebhookRefusal(url, reason).refusalClass}`)
   }
 
   // ─── CRUD ────────────────────────────────────────────────────────────
@@ -255,18 +287,7 @@ export class WebhookService {
     if (!sheetId) {
       throw new Error('Webhook sheetId is required')
     }
-    try {
-      const parsed = new URL(input.url)
-      if (
-        process.env.NODE_ENV === 'production' &&
-        parsed.protocol !== 'https:'
-      ) {
-        throw new Error('Webhook URL must use HTTPS in production')
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('HTTPS')) throw err
-      throw new Error('Webhook URL is not a valid URL')
-    }
+    WebhookService.assertTargetShape(input.url.trim())
     if (!input.events || input.events.length === 0) {
       throw new Error('At least one event type is required')
     }
@@ -361,11 +382,7 @@ export class WebhookService {
 
     if (input.name !== undefined) updates.name = input.name.trim()
     if (input.url !== undefined) {
-      try {
-        new URL(input.url)
-      } catch {
-        throw new Error('Webhook URL is not a valid URL')
-      }
+      WebhookService.assertTargetShape(input.url.trim())
       updates.url = input.url.trim()
     }
     if (input.secret !== undefined) updates.secret = input.secret
@@ -608,6 +625,9 @@ export class WebhookService {
       return
     }
 
+    // S0-a: the addresses THIS attempt's check approved; the dispatch below connects to one of them.
+    const approvedAddresses = (ssrf as { addresses: string[] }).addresses
+
     const bodyStr = JSON.stringify(decision.payload)
     const timestamp = new Date().toISOString()
 
@@ -633,19 +653,13 @@ export class WebhookService {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS)
 
-      const response = await this.fetchFn(wh.url, {
-        method: 'POST',
-        headers,
-        body: bodyStr,
-        signal: controller.signal,
-        // F-3: do NOT let the platform follow. The gate above judged exactly ONE url; `fetch`'s default
-        // `redirect: 'follow'` would replay this method, this body, and the signature headers at a
-        // `Location` chosen by whoever answers the first hop - a target the gate never saw. `manual`
-        // resolves with the 3xx itself and issues no second request. Same posture as the button route
-        // (`webhook-pinned-fetch.ts` uses `https.request`, which does not follow) and the rule-driven
-        // path (automation-executor.ts:4249).
-        redirect: 'manual',
-      })
+      // F-3 / S0-a: connect to the address the gate approved for this attempt (pinned) and do NOT follow:
+      // the gate judged exactly ONE url, and following would replay this method, this body and the
+      // signature headers at a `Location` chosen by whoever answers the first hop. The pinned transport
+      // (`https.request`) does not follow; the fetch-shaped test seam gets `redirect: 'manual'`. Either way
+      // a 3xx resolves as itself with no second request — same posture as the button route and the
+      // rule-driven path.
+      const response = await this.dispatchAttempt(wh.url, approvedAddresses, headers, bodyStr, controller.signal)
 
       clearTimeout(timer)
 
@@ -723,6 +737,36 @@ export class WebhookService {
       delivery.responseBody = `${DELIVERY_FAILURE_MARKER}:${failureClass}`
       await this.handleDeliveryFailure(delivery, wh)
     }
+  }
+
+  /**
+   * S0-a: ONE delivery attempt to an address the SSRF check approved. Production (no seam) uses
+   * `pinnedHttpsFetch` with a bounded body read; the result carries only what `executeDelivery` reads.
+   */
+  private async dispatchAttempt(
+    url: string,
+    approvedAddresses: string[],
+    headers: Record<string, string>,
+    body: string,
+    signal: AbortSignal,
+  ): Promise<DeliveryAttemptResponse> {
+    if (this.fetchFn && !this.pinnedSendFn) {
+      return this.fetchFn(url, { method: 'POST', headers, body, signal, redirect: 'manual' })
+    }
+    const pinned = approvedAddresses[0]
+    if (typeof pinned !== 'string' || pinned.length === 0) {
+      // Unreachable for an `ok` check (the guard always returns at least one address); fail closed anyway.
+      throw new TypeError('webhook target has no approved address')
+    }
+    const send: PinnedSendFn = this.pinnedSendFn ?? pinnedHttpsFetch
+    const result = await send(url, pinned, pinnedAddressFamily(pinned), {
+      method: 'POST',
+      headers,
+      body,
+      timeoutMs: DELIVERY_TIMEOUT_MS,
+      responseBodyLimit: DELIVERY_RESPONSE_BODY_LIMIT,
+    })
+    return { status: result.status, ok: result.ok, text: async () => result.body ?? '' }
   }
 
   /**

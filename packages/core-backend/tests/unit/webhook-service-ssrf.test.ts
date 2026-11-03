@@ -20,6 +20,17 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { Kysely } from 'kysely'
 
+// The delivery-access re-check (main, after this suite was written) reads sheet access from the DB. This suite
+// is about the SSRF gate and the transport, so the re-check is held open: it re-delivers the stored payload.
+// Its own behaviour is covered by webhook-scoping-service / webhook-delivery-authority suites.
+vi.mock('../../src/multitable/webhook-delivery-authority', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/multitable/webhook-delivery-authority')>()
+  return {
+    ...actual,
+    authorizeWebhookDelivery: vi.fn(async (_db: unknown, _wh: unknown, _event: unknown, payload: unknown) => ({ deliver: true, payload })),
+  }
+})
+
 import { WebhookService } from '../../src/multitable/webhook-service'
 import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
 import type { Database } from '../../src/db/types'
@@ -76,6 +87,8 @@ function webhookRow(url: string, over: Record<string, unknown> = {}): Record<str
     created_at: '2026-01-01T00:00:00.000Z',
     failure_count: 0,
     max_retries: 3,
+    // main: subscriptions are bound to a sheet and the fan-out only considers the event's sheet.
+    sheet_id: 'sheet_1',
     ...over,
   }
 }
@@ -406,7 +419,7 @@ describe('subscription delivery — every entry point is gated', () => {
   test('deliverEvent fan-out: an internal subscription is persisted but never dispatched to', async () => {
     const h = makeHarness({ url: 'https://127.0.0.1/hook' })
 
-    const deliveries = await h.svc.deliverEvent('record.created', { recordId: 'rec_1' })
+    const deliveries = await h.svc.deliverEvent('record.created', { sheetId: 'sheet_1', recordId: 'rec_1' })
     await new Promise((r) => setTimeout(r, 20)) // the send is fire-and-forget
 
     expect(deliveries).toHaveLength(1) // the durable row still exists, so the refusal is visible

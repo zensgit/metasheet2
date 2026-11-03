@@ -76,7 +76,7 @@ describeIfDatabase('subscription webhook ops switch on (real DB)', () => {
     test(`M21.entry [${path}] an event with values writes no row and sends nothing`, async () => {
       const c = await switchCase('m21e')
       const sink = createSink()
-      const result = await new WebhookService(db, sink.fetchFn).deliverEvent(
+      const result = await new WebhookService(db, sink.fetchFn, sink.lookup).deliverEvent(
         'record.updated',
         { sheetId: c.sheetId, recordId: c.recordId, changes: { [c.fieldId]: 'b' } },
         eventIdFor(path, c.n),
@@ -90,7 +90,7 @@ describeIfDatabase('subscription webhook ops switch on (real DB)', () => {
     test(`F1.entry [${path}] an id-only event writes no row and sends nothing`, async () => {
       const c = await switchCase('f1e')
       const sink = createSink()
-      await new WebhookService(db, sink.fetchFn).deliverEvent(
+      await new WebhookService(db, sink.fetchFn, sink.lookup).deliverEvent(
         'record.updated',
         { sheetId: c.sheetId, recordId: c.recordId },
         eventIdFor(path, c.n),
@@ -109,7 +109,7 @@ describeIfDatabase('subscription webhook ops switch on (real DB)', () => {
         await insertDuePending(deliveryId, c.webhookId, 'record.updated', { sheetId: c.sheetId, recordId: c.recordId }, pendingEventIdFor(shape, c.n))
         const before = (await q('SELECT status, attempt_count, next_retry_at::text AS nra FROM multitable_webhook_deliveries WHERE id = $1', [deliveryId])).rows[0]
         const sink = createSink()
-        const claimed = await new WebhookService(db, sink.fetchFn).retryFailedDeliveries()
+        const claimed = await new WebhookService(db, sink.fetchFn, sink.lookup).retryFailedDeliveries()
         await settle(100)
         const after = (await q('SELECT status, attempt_count, next_retry_at::text AS nra FROM multitable_webhook_deliveries WHERE id = $1', [deliveryId])).rows[0]
         expect(after.nra, `${tid}.nextRetryUnchanged`).toBe(before.nra)
@@ -135,7 +135,7 @@ describeIfDatabase('subscription webhook ops switch on (real DB)', () => {
       attemptCount: 0,
       createdAt: new Date().toISOString(),
     }
-    await new WebhookService(db, sink.fetchFn).executeDelivery(delivery)
+    await new WebhookService(db, sink.fetchFn, sink.lookup).executeDelivery(delivery)
     await settle(100)
     expect(sink.to(c.url).length, 'F1.execute.sends').toBe(0)
     const row = await deliveryRow(deliveryId)

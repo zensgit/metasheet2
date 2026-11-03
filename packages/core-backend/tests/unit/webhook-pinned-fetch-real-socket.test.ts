@@ -99,6 +99,20 @@ describe('pinnedHttpsFetch — real https.request, real lookup contract', () => 
     expect(hits.map((h) => h.path)).toEqual(['/text-ok'])
   })
 
+  it('responseBodyLimit: a 2xx body is read up to the limit; without it the body is not read', async () => {
+    const limited = await pinnedHttpsFetch(url('/text-ok'), '127.0.0.1', 4, { body: '{}', timeoutMs: 5000, ca, responseBodyLimit: 5 })
+    expect(limited).toEqual({ status: 200, ok: true, body: 'ok, n' })
+    const full = await pinnedHttpsFetch(url('/text-ok'), '127.0.0.1', 4, { body: '{}', timeoutMs: 5000, ca, responseBodyLimit: 1024 })
+    expect(full).toEqual({ status: 200, ok: true, body: 'ok, not json' })
+    const unread = await pinnedHttpsFetch(url('/text-ok'), '127.0.0.1', 4, { body: '{}', timeoutMs: 5000, ca })
+    expect(unread).toEqual({ status: 200, ok: true })
+  })
+
+  it('responseBodyLimit never reads a 3xx body', async () => {
+    const r = await pinnedHttpsFetch(url('/redirect'), '127.0.0.1', 4, { body: '{}', timeoutMs: 5000, ca, responseBodyLimit: 1024 })
+    expect(r).toEqual({ status: 307, ok: false })
+  })
+
   it('a 3xx is returned as-is: the second hop receives ZERO requests', async () => {
     hits.length = 0
     const r = await pinnedHttpsFetch(url('/redirect'), '127.0.0.1', 4, { body: '{"x":1}', timeoutMs: 5000, ca })
