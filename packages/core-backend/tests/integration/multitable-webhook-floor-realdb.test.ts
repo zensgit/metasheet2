@@ -239,6 +239,55 @@ describeIfDatabase('subscription webhook floor rules (real DB)', () => {
     expect((await deliveryRow(deliveryId))?.status, 'F0.execute.status').toBe('success')
   })
 
+  for (const variant of ['roleColumn', 'userRoles'] as const) {
+    const owner: OwnerOptions = variant === 'roleColumn'
+      ? { role: 'admin', permissions: [] }
+      : { role: 'user', adminRoleRow: true, permissions: [] }
+    for (const path of ENTRY_PATHS) {
+      test(`F0.admin.${variant}.entry [${path}] admin without permission codes passes the floor`, async () => {
+        refusals = captureRefusals()
+        const c = await floorCase('f0admin', owner)
+        const { sink } = await entry(c, path, idOnly(c.sheetId))
+        expect((await deliveryRows(c.webhookId)).length, 'F0.admin.entry.rows').toBe(1)
+        expect(await waitFor(() => sink.to(c.url).length, 1), 'F0.admin.entry.sends').toBe(1)
+        expect(refusals.reasons(), 'F0.admin.entry.noRefusal').toEqual([])
+      })
+    }
+    for (const shape of TICK_SHAPES) {
+      test(`F0.admin.${variant}.tick [${shape}] admin without permission codes passes the send floor`, async () => {
+        const c = await floorCase('f0admint', owner)
+        const { sink, deliveryId } = await tick(c, shape, idOnly(c.sheetId))
+        expect(sink.to(c.url).length, 'F0.admin.tick.sends').toBe(1)
+        expect((await deliveryRow(deliveryId))?.status, 'F0.admin.tick.status').toBe('success')
+      })
+    }
+  }
+
+  for (const order of ['readerFirst', 'deniedFirst'] as const) {
+    test(`TO.read [${order}] an owner who cannot read the sheet gets nothing while another owner's webhook delivers`, async () => {
+      const n = `tor_${order}_${seq++}`
+      const reader = id(`to_reader_${n}`)
+      const denied = id(`to_denied_${n}`)
+      const baseId = id(`to_base_${n}`)
+      const sheetId = id(`to_sheet_${n}`)
+      await createOwner(reader)
+      await createOwner(denied, { permissions: ['workflow:write'] })
+      await createBase(baseId)
+      await createSheet(sheetId, baseId)
+      const a = { id: id(`to_wh_reader_${n}`), url: `https://sink.test/to/reader/${n}` }
+      const b = { id: id(`to_wh_denied_${n}`), url: `https://sink.test/to/denied/${n}` }
+      const ordered = order === 'readerFirst' ? [[a, reader], [b, denied]] as const : [[b, denied], [a, reader]] as const
+      for (const [h, owner] of ordered) await insertWebhook(h.id, owner, sheetId, h.url, { events: ['record.created'] })
+      const sink = createSink()
+      await new WebhookService(db, sink.fetchFn).deliverEvent('record.created', { sheetId, recordId: 'rec_to' })
+      expect(await waitFor(() => sink.to(a.url).length, 1), 'TO.read.reader.sends').toBe(1)
+      await settle(200)
+      expect((await deliveryRows(a.id)).length, 'TO.read.reader.rows').toBe(1)
+      expect((await deliveryRows(b.id)).length, 'TO.read.denied.rows').toBe(0)
+      expect(sink.to(b.url).length, 'TO.read.denied.sends').toBe(0)
+    })
+  }
+
   // ── Refusals: entry half (no row, no request) and send half (due pending row → not sent, failed) ──
   type Refusal = {
     id: string
@@ -292,6 +341,15 @@ describeIfDatabase('subscription webhook floor rules (real DB)', () => {
       build: async () => {
         const c = await floorCase('f5')
         await revokePermission(c.ownerId, 'multitable:read')
+        return { c, payload: idOnly(c.sheetId) }
+      },
+    },
+    {
+      id: 'F10.manageRevoked',
+      reason: 'automation_not_manageable',
+      build: async () => {
+        const c = await floorCase('f10')
+        await revokePermission(c.ownerId, 'workflow:write')
         return { c, payload: idOnly(c.sheetId) }
       },
     },

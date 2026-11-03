@@ -495,8 +495,6 @@ export class WebhookService {
       'X-Webhook-Id': wh.id,
       'X-Webhook-Event': delivery.event,
       'X-Webhook-Timestamp': timestamp,
-      // Stable per delivery row: the same value on the first attempt and on every retry.
-      'X-Webhook-Delivery': delivery.id,
     }
 
     if (wh.secret) {

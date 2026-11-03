@@ -5207,7 +5207,7 @@ function filterVisiblePropertyFields(fields: UniverMetaField[]): UniverMetaField
   return fields.filter((field) => !isFieldPermissionHidden(field))
 }
 
-export function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
+function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
   return Object.fromEntries(
     Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
@@ -5393,24 +5393,6 @@ export async function loadReadableRecordFieldIds(
 ): Promise<Set<string>> {
   const baseAllowed = await loadAllowedFieldIds(query, sheetId, userId, capabilities)
   return maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed)
-}
-
-/**
- * The same read-path field mask as {@link loadReadableRecordFieldIds}, for a caller that has no request: the
- * access snapshot (read from the database by the caller) stands in for the request on every step, including
- * the formula-taint chokepoint's foreign-sheet readability. Used by subscription webhook delivery, which
- * filters each delivered value map with `filterRecordDataByFieldIds` over this set.
- *
- * FAIL CLOSED: no user / no sheet → EMPTY set.
- */
-export async function loadReadableRecordFieldIdsForAccess(
-  query: QueryFn,
-  sheetId: string,
-  access: ResolvedRequestAccess,
-  capabilities: MultitableCapabilities,
-): Promise<Set<string>> {
-  const baseAllowed = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
-  return maskStoredRecordFieldIds(undefined, query, sheetId, undefined, baseAllowed, access)
 }
 
 /**
