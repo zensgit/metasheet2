@@ -13,7 +13,7 @@ import {
  * Preview values belong only to this authorized no-store response, not logs. */
 export type YidaOwnerHttpPort = Pick<ReturnType<typeof createYidaOwnerRuntime>,
   'prepareDraft' | 'preview' | 'approve' | 'revoke' | 'observe' | 'submit' | 'sendEnabled'>
-  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled'>>
+  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'proveDraftOwner'>>
 export type YidaInitializationHttpPort = Readonly<{
   status(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
   initialize(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
@@ -339,8 +339,13 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
       if (!sheetSource) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
       // Drafts need the send switch anyway: while it is off, do not read the sheet at all.
       if (!sendEnabled()) fail('YIDA_OWNER_RUNTIME_DISABLED')
+      const source = parseYidaSheetSourceInput(input.source) // pure shape check, no read
+      // Owner/target proof BEFORE any sheet or view read: a non-owner (or an unknown target) gets prepareDraft's
+      // own refusal and the sheet is never touched. prepareDraft below proves it all again.
+      if (!port.proveDraftOwner) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+      await port.proveDraftOwner(owner, targetRef === undefined ? {} : { targetRef })
       // The owner's own multitable read (this request's actor), never an elevated or plugin read.
-      rowsText = (await readYidaSheetSourceRows(req, parseYidaSheetSourceInput(input.source), sheetSource)).rowsText
+      rowsText = (await readYidaSheetSourceRows(req, source, sheetSource)).rowsText
     }
     const result = await port.prepareDraft(owner, { config: input.config, rowsText, allocation: input.allocation,
       ...(targetRef === undefined ? {} : { targetRef }) })

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { inspect } from 'node:util'
 import winston from 'winston'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createYidaOwnerHttpRealdbFixture, draftInput, principals, sheetColumns, syntheticMaterial, tenant,
+import { createYidaOwnerHttpRealdbFixture, draftInput, otherTenant, principals, sheetColumns, syntheticMaterial, tenant,
   type Data, type YidaOwnerHttpRealdbFixture } from '../utils/stock-preparation-yida-owner-http-fixture'
 
 it('sentinel: initialization HTTP proof requires EXPECT_DB=1 and a dedicated DATABASE_URL', () => {
@@ -353,5 +353,36 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     await new Promise(resolve => setImmediate(resolve))
     const output = inspect(logs, { depth: null, colors: false, getters: false })
     for (const value of ['SYN-L1', 'synthetic HTTP part', 'sheet_synthetic']) expect(output.includes(value)).toBe(false)
+  })
+
+  it('Y2 sheet source: the owner/target proof precedes the sheet read; a non-owner gets the pasted-rows refusal with zero sheet reads', async () => {
+    const first = await initialized()
+    f.setMultiTarget('true'); f.setEnablement('true')
+    const config = draftInput().config, allocation = { mode: 'original' }
+    const equivalent = JSON.stringify([{ projectNo: 'SYN-P1', lineId: 'SYN-L1', quantity: 6, description: 'synthetic HTTP part' }])
+    const before = await f.initializationProof()
+    const otherTenantToken = await f.tokenFor(principals.owner, otherTenant)
+    for (const token of [f.tokens.otherOwner, f.tokens.reader, f.tokens.fakeRole, otherTenantToken]) {
+      for (const target of [{ targetRef: first }, { targetRef: randomUUID() }, {}]) {
+        const pasted = await f.http('POST', '/drafts', { config, allocation, rowsText: equivalent, ...target }, { token })
+        const fromSheet = await f.http('POST', '/drafts', { config, allocation, source: sheetSource, ...target }, { token })
+        expect(pasted.status).toBeGreaterThanOrEqual(400)
+        expect({ status: fromSheet.status, body: fromSheet.body }).toEqual({ status: pasted.status, body: pasted.body })
+      }
+    }
+    // Not one call on the sheet read path (access, fields, view, records, record permissions) for any of them.
+    expect(f.sheetReads).toBe(0)
+    // The owner's own unknown target is refused the same way, also before any read.
+    const unknown = { config, allocation, targetRef: randomUUID() }
+    const pastedUnknown = await f.http('POST', '/drafts', { ...unknown, rowsText: equivalent })
+    const sheetUnknown = await f.http('POST', '/drafts', { ...unknown, source: sheetSource })
+    expect(pastedUnknown.status).toBeGreaterThanOrEqual(400)
+    expect({ status: sheetUnknown.status, body: sheetUnknown.body }).toEqual({ status: pastedUnknown.status, body: pastedUnknown.body })
+    expect(f.sheetReads).toBe(0)
+    expect(await f.initializationProof()).toEqual(before)
+    // Control: the proven owner on a known target does read the sheet (the counter is live).
+    body(await f.http('POST', '/drafts', { config, allocation, source: sheetSource, targetRef: first }), 201)
+    expect(f.sheetReads).toBeGreaterThan(0)
+    await noExternalWrite()
   })
 })

@@ -30,6 +30,7 @@ export type YidaOwnerRuntimeDependencies = {
   readMultiTargetEnablement?: () => unknown
 }
 export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string }>
+export type YidaOwnerProveDraftOwnerInput = Readonly<{ targetRef?: string }>
 export type YidaOwnerPreviewInput = Readonly<{ operationId: string; rowKey: string; targetRef?: string }>
 export type YidaOwnerApproveInput = YidaOwnerPreviewInput & Readonly<{ confirmationId: string; ttlMs?: number }>
 export type YidaOwnerGrantInput = Readonly<{ grantId: string }>
@@ -338,6 +339,15 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
         if (Object.hasOwn(parsed, 'targetRef')) { if (!multiTargetOn()) fail('INPUT'); id(parsed.targetRef) }
         return parsed
       }, parsed => execute(context, {}, true, authority => authority.prepareDraft(parsed)))
+    },
+    // Y2 sheet source: prove the live owner (and the named target) with prepareDraft's own refusals before
+    // the route reads any sheet row. Switch ON only; no data out, nothing written.
+    proveDraftOwner(context: YidaOwnerActor, supplied: YidaOwnerProveDraftOwnerInput) {
+      return input(() => {
+        if (!multiTargetOn()) fail('INPUT')
+        const parsed = record(supplied, ['targetRef'], [])
+        return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}
+      }, parsed => execute(context, {}, true, authority => authority.proveDraftTarget(parsed)))
     },
     preview(context: YidaOwnerActor, supplied: YidaOwnerPreviewInput) {
       return input(() => {

@@ -517,6 +517,15 @@ function createApprovalInternals({ database, security, context, primitives, mult
       return result
     }, noCheckpoint, selector)
   }
+  // Y2 sheet source: the same live-actor + owner/target proof prepareDraft runs first (same transaction
+  // path, same refusals), done BEFORE the host reads any sheet row. It writes nothing and returns no data;
+  // prepareDraft still proves everything again in its own transaction.
+  async function proveDraftTarget(input: unknown): Promise<Readonly<{ proven: true }>> {
+    const supplied = record(input, multi ? ['targetRef'] : [], [])
+    const selector = Object.hasOwn(supplied, 'targetRef') ? Object.freeze({ targetRef: id(supplied.targetRef) }) : undefined
+    if (!executionPrimitives?.prepareDraftInTransaction) fail('UNAVAILABLE')
+    return transaction(async () => Object.freeze({ proven: true as const }), noCheckpoint, selector)
+  }
   async function preview(input: unknown): Promise<Readonly<Row>> {
     const parsed = record(input, multi ? ['operationId', 'rowKey', 'targetRef'] : ['operationId', 'rowKey'], ['operationId', 'rowKey'])
     const operationId = id(parsed.operationId), rowKey = id(parsed.rowKey)
@@ -636,7 +645,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
     return Object.freeze({ context: executionContext, operation, credentialBinding, resolveExecutionSnapshot, loadCredential, close })
   }
   const approvals = Object.freeze({ approve, inspect, revoke, admit })
-  return Object.freeze({ approvals, admitForExecution, takeExecution, observe, prepareDraft, preview })
+  return Object.freeze({ approvals, admitForExecution, takeExecution, observe, prepareDraft, proveDraftTarget, preview })
 }
 
 export function createYidaSendApprovalService(dependencies: Dependencies) {

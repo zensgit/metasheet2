@@ -105,18 +105,21 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   const sessions: Record<string, string> = {}, tokens: Record<string, string> = {}
   let enablement: unknown = 'false', tokenCommitted = false, validRequests = true, formOutcome = 'ack'
   let multiTargetEnablement: unknown = 'false', multiTargetUp = '', sheet = defaultSheet()
+  // Every call on the sheet read path (access, fields, view, records, record permissions) counts.
+  let sheetReads = 0
   const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string' }, { id: 'fld_parent', type: 'string' },
     { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
   const sheetSource = {
     async resolveAccess() {
+      sheetReads++
       return { userId: principals.owner, isAdminRole: false, canRead: true, canExport: true, live: true, bounded: false,
         capabilities: {}, ...sheet.access }
     },
-    async loadFields() { return sheetFields },
-    async readableFieldIds(_sheet: string, _user: string, fields: Array<{ id: string }>) { return new Set(fields.map(field => field.id)) },
-    async loadView() { return null },
-    async loadRecords(_sheet: string, limit: number) { return sheet.records.slice(0, limit) },
-    async readableRecordIds(_sheet: string, _user: string, _admin: boolean, ids: readonly string[]) { return new Set(ids) },
+    async loadFields() { sheetReads++; return sheetFields },
+    async readableFieldIds(_sheet: string, _user: string, fields: Array<{ id: string }>) { sheetReads++; return new Set(fields.map(field => field.id)) },
+    async loadView() { sheetReads++; return null },
+    async loadRecords(_sheet: string, limit: number) { sheetReads++; return sheet.records.slice(0, limit) },
+    async readableRecordIds(_sheet: string, _user: string, _admin: boolean, ids: readonly string[]) { sheetReads++; return new Set(ids) },
     filter: { parse: () => null, prune: () => null, leaves: () => [], evaluate: () => true, leafMatches: () => true,
       effectiveType: (field: { type: string }) => field.type },
   }
@@ -313,6 +316,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown') { formOutcome = value },
     setMultiTarget(value: unknown) { multiTargetEnablement = value },
     setSheet(patch: Partial<SheetState>) { sheet = { ...defaultSheet(), ...patch } },
+    get sheetReads() { return sheetReads },
     get tokenCommitted() { return tokenCommitted }, get validRequests() { return validRequests },
     get seedDraft() { return seedDraft }, get runtime() { return runtime! },
     get initializationRuntime() { return initializationRuntime! },
@@ -394,7 +398,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       if (current.rows[0]?.schema !== schema) throw new Error('SYNTHETIC_NATIVE_AUTH_POOL_SCHEMA_REQUIRED')
       tokenPayloads.length = 0; formPayloads.length = 0; sql.length = 0
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
-      multiTargetEnablement = 'false'; sheet = defaultSheet()
+      multiTargetEnablement = 'false'; sheet = defaultSheet(); sheetReads = 0
       await startRuntime()
     },
   }
