@@ -1580,10 +1580,17 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
   let assigneeRows: Array<{ user_id: string; completed_at: Date | null }> = []
   let taskStatus = 'open'
 
+  /** The member read (`AS member_kind`) answer: one assignee usr-1 and the follower usr-9 unless a
+   * cell sets its own. */
+  let memberRows: Array<{ member_kind: string; user_id: string }> = []
+  /** Who is an active member of the org and can use tasks, for the create and a non-self add. */
+  let usable: string[] = []
+
   /** One answer for both the pool (`query`, the reads before a comment's transaction) and the
    * transaction client: a live `all` task created by usr-0 with `taskStatus` and `assigneeRows`, one
-   * follower, no children; an active integration; one follower as the member read. */
-  function answer(sql: string): { rows: Record<string, unknown>[] } | undefined {
+   * follower, no children; an active integration; `memberRows` as the member read; for the
+   * create, usr-1 is an active member who can use tasks (package 1's reads, `answerTaskAccess`). */
+  function answer(sql: string, params?: unknown[]): { rows: Record<string, unknown>[] } | undefined {
     if (sql.includes('INSERT INTO task_comments')) return { rows: [{ created_at: new Date(0) }] }
     if (sql.includes('INSERT INTO task_notification_deliveries')) return { rows: [{ id: 'row-0' }, { id: 'row-1' }] }
     if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
@@ -1593,7 +1600,14 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
       return { rows: [{ id: 'tlst_1', name: 'n', created_by: 'usr-0', archived_at: null, created_at: new Date(0), updated_at: new Date(0), owner_id: 'usr-1', my_role: 'owner' }] }
     }
     if (sql.includes('FROM directory_integrations')) return { rows: [{ dingtalk_active: true }] }
-    if (sql.includes('UNION ALL')) return { rows: [{ member_kind: 'follower', user_id: 'usr-9' }] }
+    // The member read before package 1's task access reads, which also use UNION ALL.
+    if (sql.includes('AS member_kind')) return { rows: memberRows }
+    if (sql.includes('FROM user_orgs')) {
+      const asked = (params?.[1] ?? []) as string[]
+      return { rows: usable.filter((user_id) => asked.includes(user_id)).map((user_id) => ({ user_id })) }
+    }
+    const access = answerTaskAccess(sql, params, { usable })
+    if (access) return access
     if (sql.includes('FROM tasks WHERE') || sql.includes('FROM tasks t WHERE')) {
       return { rows: [{ created_by: 'usr-0', completion_mode: 'all', status: taskStatus, parent_id: null, depth: 0, version: 1 }] }
     }
@@ -1616,9 +1630,11 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
     saved = Object.fromEntries(SWITCHES.map((key) => [key, process.env[key]]))
     state.calls.length = 0
     state.transactions = 0
-    state.respond = (sql) => answer(sql)
+    memberRows = [{ member_kind: 'assignee', user_id: 'usr-1' }, { member_kind: 'follower', user_id: 'usr-9' }]
+    usable = ['usr-1']
+    state.respond = (sql, params) => answer(sql, params)
     vi.mocked(query).mockReset()
-    vi.mocked(query).mockImplementation(async (sql: string) => (answer(sql) ?? { rows: [] }) as never)
+    vi.mocked(query).mockImplementation(async (sql: string, params?: unknown[]) => (answer(sql, params) ?? { rows: [] }) as never)
   })
 
   afterEach(() => {
@@ -1637,6 +1653,8 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
     return run()
   }
   const writes: Array<[string, () => Promise<unknown>]> = [
+    // Package 2: a create naming usr-1 notifies them of `created`.
+    ['createTask', write([], () => createTask({ orgId: 'org-1', creatorId: 'usr-0', title: '备料复核', assignees: ['usr-1'] }))],
     ['completeTask', write([open('usr-1')], () => completeTask({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1' }))],
     ['reopenTask', write([done('usr-1')], () => reopenTask({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1', scope: 'all' }))],
     // S3, RULED(2026-10-07): [N1]: the creator adding themselves to a done task reopens it (no org
@@ -1664,6 +1682,7 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
   it('with the pipeline on, each touchpoint runs the check, the member read and the outbox INSERT on its transaction client, after its event, never on the pool', async () => {
     setPipeline(true)
     const eventTable: Record<string, string> = {
+      createTask: 'INSERT INTO task_events',
       completeTask: 'INSERT INTO task_events',
       reopenTask: 'INSERT INTO task_events',
       addAssignee: 'INSERT INTO task_events',
@@ -1697,6 +1716,7 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
     // in the same callback, placed before or after the write whose ids the producer reads, repeats
     // the list and fails here in either order.
     const eventsWritten: Record<string, string[]> = {
+      createTask: ['created'],
       completeTask: ['completed'],
       reopenTask: ['reopened'],
       addAssignee: ['assignee_added', 'reopened'],
@@ -1721,6 +1741,33 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
       expect(payloads.length, name).toBeGreaterThan(0)
       for (const payload of payloads) expect(payload.eventId, name).toBe(eventId)
     }
+  })
+
+  it('package 2 (2-D1, 2-D9): the creator adding usr-2 to a done task writes assignee_added then reopened; the added person gets a row under each id, the others only reopened', async () => {
+    setPipeline(true)
+    assigneeRows = [done('usr-1')]
+    taskStatus = 'done'
+    memberRows = [
+      { member_kind: 'assignee', user_id: 'usr-1' },
+      { member_kind: 'assignee', user_id: 'usr-2' },
+      { member_kind: 'follower', user_id: 'usr-9' },
+    ]
+    usable = ['usr-2']
+    await addAssignee({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1', body: { userId: 'usr-2' } })
+    const eventInserts = state.calls.filter((call) => /^\s*INSERT INTO task_events/.test(call.sql))
+    expect(eventInserts.map((call) => call.params?.[3])).toEqual(['assignee_added', 'reopened'])
+    expect(JSON.parse(String(eventInserts[0]?.params?.[4]))).toEqual({ targetUserId: 'usr-2' })
+    const [addedId, reopenedId] = eventInserts.map((call) => call.params?.[0])
+    const outboxes = state.calls.filter((call) => call.sql.includes('INSERT INTO task_notification_deliveries'))
+    expect(outboxes).toHaveLength(1)
+    const recipients = (outboxes[0]?.params?.[4] ?? []) as string[]
+    const payloads = ((outboxes[0]?.params?.[7] ?? []) as string[]).map((text) => JSON.parse(text) as { event: string; eventId: string })
+    expect(recipients.map((userId, i) => [userId, payloads[i]?.event, payloads[i]?.eventId])).toEqual([
+      ['usr-2', 'assignee_added', addedId],
+      ['usr-1', 'reopened', reopenedId],
+      ['usr-2', 'reopened', reopenedId],
+      ['usr-9', 'reopened', reopenedId],
+    ])
   })
 })
 

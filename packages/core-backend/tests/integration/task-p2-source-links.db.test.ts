@@ -11,6 +11,7 @@ import { addFollower } from '../../src/services/task-structure'
 import {
   dropTaskM4Fixtures,
   runSourceMutant,
+  seedOrgDingTalkIntegration,
   seedOrgMembers,
   seedTaskActor,
   signTaskToken,
@@ -25,6 +26,9 @@ import { rawRequest, startTasksListener, type TasksListener } from '../helpers/t
  * view and base checks, the dispatch key (a resend answers with the task the first send made, in the
  * same org and for the same dispatcher only), the order of the key lookup against the member and task
  * access tests, and the link in the task detail.
+ *
+ * With the three delivery switches on (set per cell, restored after), a dispatch writes one
+ * `created` outbox row per assignee other than the dispatcher, in the create's transaction (P8, N7).
  *
  * Each cell uses its own org and its own users. The multitable rows (one base, sheets, a view and
  * records) are shared by the file and removed in `afterAll`; a dispatcher who may read them holds
@@ -160,6 +164,46 @@ function sourced(source: Record<string, unknown>, dispatchKey?: string, extra: R
 }
 
 const newKey = (): string => randomUUID()
+
+/** The three delivery switches; the producer writes outbox rows only while all are exactly 'true'. */
+const DELIVERY_SWITCHES = [
+  'TASKS_SCHEDULER_ENABLED',
+  'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+  'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+] as const
+
+/** Runs `run` with the three switches on in this process, then puts them back as they were. */
+async function withDeliverySwitchesOn<T>(run: () => Promise<T>): Promise<T> {
+  const saved = DELIVERY_SWITCHES.map((key) => [key, process.env[key]] as const)
+  for (const key of DELIVERY_SWITCHES) process.env[key] = 'true'
+  try {
+    return await run()
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+/** The org's outbox rows as `[recipient, role, source id, event, event id]`. */
+async function outboxOf(orgId: string): Promise<Array<[string, string, string, unknown, unknown]>> {
+  const result = await pool().query(
+    `SELECT recipient_user_id, recipient_role, source_id, payload FROM task_notification_deliveries
+     WHERE org_id = $1 ORDER BY recipient_user_id COLLATE "C", source_key COLLATE "C"`,
+    [orgId],
+  )
+  return result.rows.map((row) => [
+    String(row.recipient_user_id), String(row.recipient_role), String(row.source_id),
+    (row.payload as { event?: unknown }).event, (row.payload as { eventId?: unknown }).eventId,
+  ])
+}
+
+async function createdEventId(taskId: string): Promise<string> {
+  const result = await pool().query(`SELECT id FROM task_events WHERE task_id = $1 AND event_type = 'created'`, [taskId])
+  expect(result.rows).toHaveLength(1)
+  return String(result.rows[0].id)
+}
 
 function idOf(reply: Reply): string {
   return String((reply.body as { id: string }).id)
@@ -301,6 +345,32 @@ describe('a create with a source stores the link and answers sourceLinked', () =
     expect((detail.body as { source?: unknown }).source).toEqual({
       kind: 'multitable_record', sheetId: SHEET, recordId: REC_1, viewId: VIEW, baseId: BASE,
     })
+  })
+})
+
+describe('a dispatched task notifies its assignee', () => {
+  it('P8: through the router, a create with a source and one assignee writes one created row for the assignee, none for the dispatcher; a resend of the key writes no further row', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('p8', stamp)
+    const me = await dispatcher('p8', stamp, orgId)
+    const assignee = await assignable(`usrA_p8_${stamp}`, orgId)
+    await seedOrgDingTalkIntegration(orgId)
+    const body = sourced({ sheetId: SHEET, recordId: REC_1 }, newKey(), { assignees: [assignee, me.userId] })
+    await withDeliverySwitchesOn(async () => {
+      const created = await post('/api/tasks', me.bearer, body)
+      expect(created.status, created.text).toBe(200)
+      const taskId = idOf(created)
+      expect(await outboxOf(orgId)).toEqual([[assignee, 'assignee', taskId, 'created', await createdEventId(taskId)]])
+      const before = await orgState(orgId)
+      const again = await post('/api/tasks', me.bearer, body)
+      expect(again.status, again.text).toBe(200)
+      expect((again.body as { reused?: unknown }).reused).toBe(true)
+      expect(await orgState(orgId)).toBe(before)
+    })
+    // With the switches off, the same create writes no row.
+    const quiet = await post('/api/tasks', me.bearer, sourced({ sheetId: SHEET, recordId: REC_2 }, newKey(), { assignees: [assignee] }))
+    expect(quiet.status, quiet.text).toBe(200)
+    expect((await outboxOf(orgId)).filter(([, , taskId]) => taskId === idOf(quiet))).toEqual([])
   })
 })
 
@@ -592,6 +662,10 @@ describe('the link and the record', () => {
     const stamp = stampOf()
     const orgId = orgOf('n7', stamp)
     const me = await dispatcher('n7', stamp, orgId)
+    // With the switches on, an active integration and an assignee, the create writes a created row
+    // before the commit fails, so "no outbox row" is not vacuous.
+    const assignee = await assignable(`usrA_n7_${stamp}`, orgId)
+    await seedOrgDingTalkIntegration(orgId)
     const name = `tasks_p2src_fail_${stampOf()}`
     const db = pool()
     // Fires at COMMIT, after the link was written; reports how many links the failing transaction
@@ -599,7 +673,9 @@ describe('the link and the record', () => {
     await db.query(`
       CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $fn$
       BEGIN
-        RAISE EXCEPTION 'links at commit: %', (SELECT count(*) FROM task_source_links WHERE org_id = NEW.org_id);
+        RAISE EXCEPTION 'links and outbox rows at commit: % %',
+          (SELECT count(*) FROM task_source_links WHERE org_id = NEW.org_id),
+          (SELECT count(*) FROM task_notification_deliveries WHERE org_id = NEW.org_id);
       END
       $fn$`)
     const source = { sheetId: SHEET, recordId: REC_1, viewId: null, baseId: null }
@@ -609,8 +685,8 @@ describe('the link and the record', () => {
           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
           WHEN (NEW.org_id = '${orgId}')
           EXECUTE FUNCTION ${name}()`)
-      await expect(createTask({ orgId, creatorId: me.userId, title: TITLE, assignees: undefined, source, dispatchKey: newKey() }))
-        .rejects.toThrow('links at commit: 1')
+      await withDeliverySwitchesOn(() => expect(createTask({ orgId, creatorId: me.userId, title: TITLE, assignees: [assignee], source, dispatchKey: newKey() }))
+        .rejects.toThrow('links and outbox rows at commit: 1 1'))
     } finally {
       await db.query(`DROP TRIGGER IF EXISTS ${name} ON task_source_links`)
       await db.query(`DROP FUNCTION IF EXISTS ${name}()`)
@@ -619,9 +695,10 @@ describe('the link and the record', () => {
     expect(await taskCount(orgId)).toBe(0)
     const outbox = await db.query('SELECT count(*)::int AS n FROM task_notification_deliveries WHERE org_id = $1', [orgId])
     expect(outbox.rows[0]?.n).toBe(0)
-    // The same create without the trigger writes its link.
-    await createTask({ orgId, creatorId: me.userId, title: TITLE, assignees: undefined, source, dispatchKey: newKey() })
+    // The same create without the trigger writes its link and its row.
+    const kept = await withDeliverySwitchesOn(() => createTask({ orgId, creatorId: me.userId, title: TITLE, assignees: [assignee], source, dispatchKey: newKey() }))
     expect(await linksOf(orgId)).toHaveLength(1)
+    expect(await outboxOf(orgId)).toEqual([[assignee, 'assignee', kept.id, 'created', await createdEventId(kept.id)]])
   })
 
   it('N10: creating and completing a linked task leaves the record rows as they were', async () => {

@@ -243,7 +243,9 @@ export async function createTask(input: {
       `INSERT INTO task_events (id, task_id, actor_id, event_type) VALUES ($1, $2, $3, 'created')`,
       [createdEventId, id, input.creatorId],
     )
-    // Outbox rows for the `created` event, in this transaction; none while the event does not notify.
+    // Outbox rows for the `created` event, in this transaction, after the writes: one per assignee
+    // other than the creator (2-D1); none while the delivery switches are off. A resend answered above
+    // writes no event and so no row.
     await enqueueTaskEventNotifications(db, {
       orgId: input.orgId,
       taskId: id,
